@@ -13,12 +13,22 @@
 #      request returns before the site is up, so every path out of the job has to leave the
 #      row saying something true — and `built` must never mean "built but not serving".
 #
-# WHY REACT AND ONLY REACT flips today: an adapter-cloudflare artifact (ripple, dynamic
-# svelte) has pages rendered by a `_worker.js` whose imports sit outside the tarred
-# directory, so the artifact cannot serve. That is the same fact `truth_lane` refuses to
-# preview on. react emits a prerendered assets-only `dist`, so its tar IS the whole site.
+# WHICH SITES FLIP, and why it is a property of the SITE rather than of the engine name:
+# an adapter-cloudflare artifact (ripple, DYNAMIC svelte) has pages rendered by a
+# `_worker.js` whose imports sit outside the tarred directory, so the artifact cannot
+# serve. That is the same fact `truth_lane` refuses to preview on. react emits a
+# prerendered assets-only `dist`, so its tar IS the whole site.
 #
-# Mutations in tests/mutations/sl3_publish_flip.json, run and caught.
+# Edited 2026-08-11 (SL-4): STATIC svelte flips too, so the file now drives ONE engine down
+# BOTH lanes — see TestTheSvelteTrackForksOnTheSite. SL-3 excluded it on the stated grounds
+# that "which adapter ran is not knowable at enqueue time"; the dynamic fork sitting three
+# lines above the async fork already disproved that, so the tests that encoded it are gone
+# and the dynamic-svelte exclusion is now asserted on its real reason. The
+# dynamic-stays-out half is the regression guarantee and is the more important of the two:
+# queueing one trades a publish that works for one nothing can deploy.
+#
+# Mutations in tests/mutations/sl3_publish_flip.json and sl4_svelte_async.json, run and
+# caught.
 
 from __future__ import annotations
 
@@ -105,32 +115,72 @@ async def _publish(*, engine: str, pocket_id: str, gen: _FakeGenerator, **over: 
 # ---------------------------------------------------------------------------
 
 
+def _flips(engine: str | None, *, pattern: str | None = None, spec: Any = None) -> bool:
+    return sites_service.build_runs_async(engine, pattern=pattern, ripple_spec=spec)
+
+
 class TestOnlyTheDeployableEngineFlips:
     def test_react_builds_asynchronously(self) -> None:
-        assert sites_service.build_runs_async("react") is True
+        assert _flips("react") is True
 
-    @pytest.mark.parametrize("engine", ["ripple", "svelte", "html"])
+    def test_static_svelte_builds_asynchronously(self) -> None:
+        """SL-4. adapter-static emits ``build`` with no server entry, so a static svelte
+        tar IS the whole deployable site — the same property that qualified react."""
+        assert _flips("svelte", pattern="landing") is True
+
+    @pytest.mark.parametrize("engine", ["ripple", "html"])
     def test_every_other_engine_stays_inline(self, engine: str) -> None:
-        """Not an arbitrary allowlist. html runs no build at all; ripple and dynamic
-        svelte produce an artifact that cannot serve; static svelte is self-sufficient but
-        indistinguishable from the dynamic shape until AFTER the build, and a gate has to
-        decide before it spends the queue."""
-        assert sites_service.build_runs_async(engine) is False
+        """Not an arbitrary allowlist. html runs no build at all; ripple builds on
+        adapter-cloudflare and produces an artifact that cannot serve."""
+        assert _flips(engine) is False
 
     def test_an_unknown_engine_stays_inline(self) -> None:
         """Unknown normalises to ripple everywhere in this codebase, and ripple is inline.
         The fallback must not flip a site whose engine we failed to recognise."""
         for value in (None, "", "nope"):
-            assert sites_service.build_runs_async(value) is False
+            assert _flips(value) is False
 
     def test_no_flipped_engine_needs_a_worker_to_serve_its_pages(self) -> None:
         """The property behind the allowlist, checked against engines.py rather than
         restated. An engine whose output is worker-rendered cannot be deployed from a tar
-        of its static dir, so it must not be in the async set."""
+        of its static dir, so it must not be in the async set.
+
+        ``expects_server_worker`` is TRI-STATE and svelte's answer is ``None`` — either
+        shape is legitimate from the name alone — so the assertion is "not True" rather
+        than "is False". Narrowing it back to ``is False`` would fail on the very site this
+        slice added, and would be asserting the engine name can answer a question SL-1
+        established it cannot."""
         for engine in ("ripple", "svelte", "html", "react"):
-            if sites_service.build_runs_async(engine):
-                assert engines_mod.expects_server_worker(engine) is False, engine
+            if _flips(engine, pattern="landing"):
+                assert engines_mod.expects_server_worker(engine) is not True, engine
                 assert engines_mod.needs_node_build(engine) is True, engine
+
+
+class TestDynamicSvelteStaysInline:
+    """THE REGRESSION GUARANTEE OF SL-4, and the half that matters more than the flip.
+
+    A dynamic svelte site builds on adapter-cloudflare, whose pages are rendered by a
+    ``_worker.js`` importing two files from OUTSIDE the tarred directory — the same fact
+    ``truth_lane`` refuses to preview one on. Queueing it would trade a publish that works
+    for one nothing can deploy, and the deploy-side unpack would silently DROP the worker
+    on the way to the edge. So every route by which a site can be dynamic must keep it out.
+    """
+
+    def test_the_stamped_pattern_keeps_it_inline(self) -> None:
+        assert _flips("svelte", pattern="dynamic") is False
+
+    @pytest.mark.parametrize("key", ["sources", "actions", "auth"])
+    def test_an_unstamped_spec_carrying_live_bindings_keeps_it_inline(self, key: str) -> None:
+        """The safety net, not a formality: a pocket can carry dynamic bindings without
+        having been stamped, and ``_is_dynamic`` is authoritative on both routes."""
+        assert _flips("svelte", spec={key: [{"name": "x"}]}) is False
+
+    def test_the_predicate_has_no_default_for_the_site(self) -> None:
+        """``pattern`` / ``ripple_spec`` are REQUIRED keyword args. A default would mean
+        "assume static", and assuming static about a dynamic svelte site is exactly the
+        broken publish above — so there is deliberately no default to get wrong."""
+        with pytest.raises(TypeError):
+            sites_service.build_runs_async("svelte")  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +362,126 @@ class TestAReactPublishEnqueues:
 
 
 # ---------------------------------------------------------------------------
+# SL-4 — the svelte track, BOTH WAYS through one publish
+# ---------------------------------------------------------------------------
+
+
+SVELTE_SOURCE = {"src/routes/+page.svelte": "<h1>hi</h1>"}
+
+
+def _svelte_static_artifact() -> bytes:
+    """An adapter-STATIC ``build`` tree, as the include-list tar would pack it.
+
+    Shaped from what adapter-static actually emits — a prerendered ``index.html`` per
+    route, ``_app/immutable`` for the JS/CSS payload, and whatever the project's
+    ``static/`` dir held — and deliberately NOT carrying a ``_worker.js`` or a
+    ``_routes.json``, because that is the whole difference from the dynamic shape and the
+    reason this tree can be deployed from a tar at all.
+    """
+    return tar_bytes(
+        {
+            "./index.html": b"<!doctype html><title>hi</title>",
+            "./about/index.html": b"<!doctype html><title>about</title>",
+            "./favicon.png": b"\x89PNG\r\n\x1a\n",
+            "./_app/immutable/e.js": b"export const x=1",
+            "./_app/immutable/assets/style.css": b"body{margin:0}",
+            "./_app/version.json": b'{"version":"1"}',
+        }
+    )
+
+
+class TestTheSvelteTrackForksOnTheSite:
+    """One engine, two publishes, two different lanes — driven end-to-end through
+    ``publish`` rather than through the predicate, because the predicate agreeing with
+    itself is not the property that matters. What matters is which lane a real publish
+    lands in, and the two tests below are deliberately symmetric so a change that flattens
+    the fork fails one of them.
+    """
+
+    async def test_a_static_svelte_publish_enqueues_and_returns(
+        self, beanie_test_db, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pool = _install_pool(monkeypatch, _FakePool())
+        pocket_id = await _seed_pocket()
+        gen = _FakeGenerator()
+
+        doc = await _publish(engine="svelte", pocket_id=pocket_id, gen=gen, source=SVELTE_SOURCE)
+
+        assert gen.build_calls == [], "the request still ran a build"
+        assert len(pool.calls) == 1
+        assert doc.build_status == "queued"
+        assert doc.build_job_id
+        # The engine reaches the worker as the normalised positional payload, which is
+        # how the lane knows to probe for adapter-static's ``build`` instead of the
+        # dynamic output dir.
+        assert pool.calls[0]["args"][3] == "svelte"
+
+    async def test_a_dynamic_svelte_publish_never_enters_the_build_lane(
+        self, beanie_test_db, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE ONE THAT MATTERS MOST. Its artifact's pages come from a ``_worker.js`` whose
+        imports sit outside the tar, and the deploy-side unpack DROPS that worker — so
+        enqueueing it would replace a working publish with one nothing can deploy. It keeps
+        the durable provision job (which owns standing up its D1) and never queues a build.
+        """
+        dispatched: list[dict[str, Any]] = []
+
+        async def _dispatch(**kw: Any) -> dict[str, Any]:
+            dispatched.append(kw)
+            return {"job_id": "job-1"}
+
+        from pocketpaw_ee.cloud.jobs import service as jobs_service
+
+        monkeypatch.setattr(jobs_service, "dispatch_job", _dispatch)
+        pool = _install_pool(monkeypatch, _FakePool())
+        pocket_id = await _seed_pocket(pattern="dynamic")
+        gen = _FakeGenerator()
+
+        await _publish(
+            engine="svelte",
+            pocket_id=pocket_id,
+            gen=gen,
+            source=SVELTE_SOURCE,
+            pattern="dynamic",
+        )
+
+        assert pool.calls == [], "a dynamic svelte publish queued a build"
+        assert len(dispatched) == 1
+        assert dispatched[0]["job_name"] == "provision_site"
+        assert gen.build_calls == []
+
+    async def test_an_unstamped_dynamic_svelte_publish_also_stays_out(
+        self, beanie_test_db, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same guarantee via the OTHER route into ``_is_dynamic``: a spec carrying live
+        bindings that was never stamped ``pattern="dynamic"``. Checked through publish
+        because the stamp is what a caller controls and the spec is what a pocket can drift
+        into."""
+        dispatched: list[dict[str, Any]] = []
+
+        async def _dispatch(**kw: Any) -> dict[str, Any]:
+            dispatched.append(kw)
+            return {"job_id": "job-1"}
+
+        from pocketpaw_ee.cloud.jobs import service as jobs_service
+
+        monkeypatch.setattr(jobs_service, "dispatch_job", _dispatch)
+        pool = _install_pool(monkeypatch, _FakePool())
+        pocket_id = await _seed_pocket()
+
+        await _publish(
+            engine="svelte",
+            pocket_id=pocket_id,
+            gen=_FakeGenerator(),
+            source=SVELTE_SOURCE,
+            ripple_spec={"actions": [{"name": "signup"}]},
+        )
+
+        assert pool.calls == [], "an unstamped dynamic svelte publish queued a build"
+        assert len(dispatched) == 1
+
+
+# ---------------------------------------------------------------------------
 # The worker finishes the publish
 # ---------------------------------------------------------------------------
 
@@ -414,6 +584,76 @@ class TestTheWorkerFinishesThePublish:
 
         assert captured["index"] is True
         assert captured["nested"] is True
+
+    async def test_a_static_svelte_artifact_lands_where_the_resolver_looks(
+        self, beanie_test_db
+    ) -> None:
+        """SL-4, and the failure it prevents is a BLANK site replacing a working one.
+
+        The nominal ``static_output_rel("svelte")`` is the DYNAMIC shape
+        (``.svelte-kit/cloudflare``), which a static build never produces. Extracting there
+        and then letting ``resolve_static_output_rel`` probe would happen to agree — but it
+        would agree on a lie about which adapter ran, and the honest dir is what the deploy
+        target must find. So the extract uses the first PROBE CANDIDATE, and this asserts
+        the resolver then lands on the tree that was actually written."""
+        from pathlib import Path
+
+        from pocketpaw_ee.sites.engines import resolve_static_output_rel
+
+        site = await self._site()
+        captured: dict[str, Any] = {}
+
+        async def _deploy(*, project_dir: str, deploy_inputs: dict[str, Any]) -> Any:
+            captured["rel"] = resolve_static_output_rel(project_dir, "svelte")
+            captured["index"] = Path(project_dir, "build", "index.html").is_file()
+            captured["app"] = Path(project_dir, "build", "_app", "immutable", "e.js").is_file()
+            return None
+
+        await bj.run_site_build(
+            {},
+            "ws1",
+            str(site.id),
+            {"engine": "svelte", "siteConfig": {}},
+            "svelte",
+            600,
+            deploy_inputs=_deploy_inputs(str(site.id)),
+            _runner=_FakeRunner(),
+            _client=FaultyDaytonaClient(artifact=_svelte_static_artifact()),
+            _deployer=_deploy,
+        )
+
+        assert captured["rel"] == "build", "the deploy resolved a dir the unpack never wrote"
+        assert captured["index"] is True
+        assert captured["app"] is True, "svelte's whole JS payload was dropped"
+
+    async def test_the_preview_shaped_skip_list_drops_nothing_a_static_svelte_site_needs(
+        self, beanie_test_db
+    ) -> None:
+        """The trap SL-3 flagged for exactly this moment. ``unpack_artifact``'s skip list is
+        written for a PREVIEW and was safe only because the lane was react-only, so it is
+        re-checked here against an adapter-static tree rather than assumed still safe.
+
+        The finding: nothing deployable is dropped. adapter-static emits no ``_worker.js``
+        and none of adapter-cloudflare's deploy metadata, and ``_app`` — where svelte's
+        entire JS/CSS payload lives — matches no skip rule, because the lists key on exact
+        segment names and ``_app`` is not one of them."""
+        from pathlib import Path
+
+        from pocketpaw_ee.sites import artifact_preview
+
+        with tempfile.TemporaryDirectory() as dest:
+            unpacked = artifact_preview.unpack_artifact(_svelte_static_artifact(), Path(dest))
+            assert unpacked.server_entries == ()
+            assert unpacked.metadata_entries == ()
+            assert unpacked.rejected == ()
+            for rel in (
+                "index.html",
+                "about/index.html",
+                "favicon.png",
+                "_app/immutable/e.js",
+                "_app/immutable/assets/style.css",
+            ):
+                assert Path(dest, rel).is_file(), rel
 
     async def test_a_hostile_member_is_refused_rather_than_written(self, beanie_test_db) -> None:
         """The artifact is customer content, so the deploy path unpacks through the SAME

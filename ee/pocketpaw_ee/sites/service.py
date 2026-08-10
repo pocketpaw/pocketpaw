@@ -2219,10 +2219,19 @@ async def _deploy_site_doc(
             builder_origin=builder_origin,
         )
 
-    # SL-3: fork to the EPHEMERAL BUILD LANE for the engines whose artifact can
-    # actually be deployed from it. A prebuilt dir means the worker already ran this
-    # build and is calling back in to finish the publish, so it must NOT re-fork.
-    if prebuilt_project_dir is None and build_runs_async(engine):
+    # SL-3: fork to the EPHEMERAL BUILD LANE for the sites whose artifact can actually be
+    # deployed from it. A prebuilt dir means the worker already ran this build and is
+    # calling back in to finish the publish, so it must NOT re-fork.
+    #
+    # SL-4: the predicate reads the SITE, not just the engine name, so it also flips
+    # static svelte. It is safe to pass ``pattern`` / ``ripple_spec`` a second time here
+    # even though the dynamic fork above has already consumed them: this call is reached
+    # only when ``_is_dynamic`` was False, so the predicate re-deriving the same answer is
+    # a check that agrees rather than a second source of truth. Asking again is what keeps
+    # the predicate correct for a caller that has NOT forked first.
+    if prebuilt_project_dir is None and build_runs_async(
+        engine, pattern=pattern, ripple_spec=ripple_spec
+    ):
         return await _enqueue_static_build(
             workspace_id=workspace_id,
             user_id=user_id,
@@ -2918,12 +2927,17 @@ async def _provision_dynamic_site(
 # ---------------------------------------------------------------------------
 
 
-def build_runs_async(engine: str | None) -> bool:
-    """Does publishing this engine ENQUEUE its build instead of running it inline?
+def build_runs_async(
+    engine: str | None,
+    *,
+    pattern: str | None,
+    ripple_spec: dict[str, Any] | None,
+) -> bool:
+    """Does publishing this site ENQUEUE its build instead of running it inline?
 
-    True for exactly the engines whose ephemeral-lane artifact can actually be
-    DEPLOYED, which today is react alone. This is a narrow answer to a broad-sounding
-    question, and the narrowness is the whole content of the predicate:
+    True for exactly the sites whose ephemeral-lane artifact can actually be DEPLOYED.
+    This is a narrow answer to a broad-sounding question, and the narrowness is the whole
+    content of the predicate:
 
     * ``html`` runs no build at all (``needs_node_build`` is False), so there is
       nothing to enqueue. Flipping it would add a queue wait to the one engine that
@@ -2933,19 +2947,36 @@ def build_runs_async(engine: str | None) -> bool:
       directory. The artifact therefore cannot serve — which is not a guess: it is why
       ``truth_lane`` refuses to even PREVIEW one (``REASON_WORKER_RENDERED``). Queueing
       those builds would replace a working publish with one nothing can deploy.
-    * STATIC ``svelte`` (adapter-static) IS self-sufficient, and is still excluded,
-      because which adapter ran is a property of the built SITE and is not knowable at
-      enqueue time — only after the build. A gate has to decide before it spends the
-      queue, so svelte stays inline until the artifact question is settled for the
-      whole track.
+    * STATIC ``svelte`` (adapter-static) emits ``build`` with NO server entry, so like
+      react its tar IS the whole deployable site. **This is why the predicate takes a
+      site and not just an engine name.**
     * ``react`` emits a prerendered, assets-only ``dist`` with no server entry, so the
       tar is the whole deployable site.
 
-    Widen this ONLY together with the artifact: the moment an adapter-cloudflare
-    artifact can serve, ripple and svelte belong here too, and this predicate is the
-    one place that changes.
+    A SITE, NOT AN ENGINE — corrected 2026-08-11 (SL-4). This docstring used to exclude
+    static svelte on the grounds that "which adapter ran is a property of the built SITE
+    and is not knowable at enqueue time". That was wrong, and the code sitting above it
+    already proved it wrong: ``_deploy_site_doc`` forks on ``_is_dynamic(pattern,
+    ripple_spec)`` BEFORE any build, from data the caller already holds. The adapter is
+    not knowable from the engine STRING, which is a different claim — and the fix is to
+    stop asking the string. Static svelte matters more than its size: svelte is the only
+    engine with a real edit lane (``edit_svelte_component`` + the REPL), so before this
+    the engine you could edit was the slow one and the fast one could not be edited.
+
+    ``pattern`` / ``ripple_spec`` are REQUIRED keyword arguments with no defaults, which
+    is deliberate and mirrors SL-1's ``deploy_workers(project_dir=...)``. A default would
+    mean "assume static", and assuming static about a DYNAMIC svelte site queues a build
+    whose artifact nothing can deploy — a working publish traded for a broken one. There
+    is no safe default, so there is no default.
+
+    Widen the adapter-cloudflare exclusions ONLY together with the artifact: the moment
+    such an artifact can serve, ripple and dynamic svelte belong here too, and this
+    predicate is the one place that changes.
     """
-    return normalize_engine(engine) == "react"
+    normalized = normalize_engine(engine)
+    if normalized == "react":
+        return True
+    return normalized == "svelte" and not _is_dynamic(pattern, ripple_spec)
 
 
 async def _enqueue_static_build(

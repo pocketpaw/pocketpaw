@@ -24,11 +24,23 @@
 # nothing. That is not dead code — a build queued to verify an artifact is a real use of
 # this lane, and it is what the fault-ladder tests drive.
 #
-# WHICH ENGINES ARRIVE HERE IS DECIDED IN ``service.build_runs_async``, not here, and it is
-# react-only today. The reason is the artifact, not the queue: an adapter-cloudflare build
-# (ripple, dynamic svelte) emits pages rendered by a ``_worker.js`` whose imports sit
-# outside the tarred directory, so the artifact cannot serve — which is why ``truth_lane``
-# refuses to preview one. Widen that predicate only together with the artifact.
+# Edited 2026-08-11 (SL-4): STATIC SVELTE NOW ARRIVES HERE TOO, which mattered out of all
+# proportion to its size — svelte is the only engine with a real edit lane
+# (``edit_svelte_component`` + the REPL), so until this the editable engine was the slow one
+# and the fast one could not be edited. Two things had to move for it: the in-sandbox tar
+# packed the NOMINAL per-engine output dir, which for svelte names the dynamic
+# ``.svelte-kit/cloudflare`` a static build never creates (so every static svelte build
+# would have tarred nothing and classified as a failure), and the deploy-side unpack chose
+# its extract dir the same wrong way. Both now read
+# ``engines.static_output_rel_candidates``; see ``_deploy_built_artifact`` for the
+# re-check of the preview-shaped skip list against an adapter-static tree.
+#
+# WHICH SITES ARRIVE HERE IS DECIDED IN ``service.build_runs_async``, not here, and it now
+# reads the SITE rather than the engine name — react plus static svelte. The reason for the
+# exclusions is the artifact, not the queue: an adapter-cloudflare build (ripple, DYNAMIC
+# svelte) emits pages rendered by a ``_worker.js`` whose imports sit outside the tarred
+# directory, so the artifact cannot serve — which is why ``truth_lane`` refuses to preview
+# one. Widen that predicate past those only together with the artifact.
 #
 # ┌───────────────────────────────────────────────────────────────────────────────────┐
 # │ WHY A DEDICATED ARQ FUNCTION AND NOT THE WORKSPACE-JOBS REGISTRY.                  │
@@ -572,14 +584,35 @@ async def _deploy_built_artifact(
     path would mean the deploy got the unproven copy.
 
     Its skip list is written for a PREVIEW (``_worker.js`` and deploy metadata are
-    dropped), which is harmless here only because this path is react-only: react emits no
-    server entry, and ``deploy_workers`` writes its own ``.assetsignore``. Widening
-    ``service.build_runs_async`` past react means revisiting this — an engine whose worker
-    IS the site cannot have it dropped on the way to the edge.
+    dropped), and SL-4 widened this lane to static svelte, so the list was re-checked
+    against what ``adapter-static`` emits rather than assumed still harmless:
 
-    The tree is extracted UNDER the engine's static-output rel, because the deploy targets
-    resolve their source as ``<project_dir>/<static_output_rel>`` while the tar is rooted
-    AT that directory's contents. Extracting flat would deploy an empty dir.
+    * ``_worker.js`` — adapter-static emits NONE, so nothing is dropped. That is the whole
+      reason static svelte can ride this lane at all, and it is why ``build_runs_async``
+      must keep DYNAMIC svelte out: an adapter-cloudflare tree's worker IS the renderer,
+      and this unpack would silently drop it on the way to the edge.
+    * ``_routes.json`` / ``.assetsignore`` — adapter-CLOUDFLARE artifacts, absent from a
+      ``build`` tree. And ``deploy_workers`` writes its own ``.assetsignore`` regardless,
+      so carrying the build's copy would be the thing that broke, not dropping it.
+    * ``_headers`` / ``_redirects`` — Pages-format config. adapter-static does not emit
+      them; it WOULD copy them verbatim if a site authored them into ``static/``. Dropping
+      them is still correct here, because the deploy target is a Worker with an assets
+      binding and consumes neither file — carrying them would upload two files that
+      nothing reads and that ``resolve`` would then have to refuse as pages.
+    * ``_app/`` — svelte's entire JS/CSS payload, matched by NO skip rule. The lists key
+      on exact segment names, and ``_app`` is not one of them.
+
+    So a static svelte artifact loses nothing deployable. The react finding is unchanged:
+    it emits no server entry either.
+
+    The tree is extracted UNDER the FIRST of the engine's ``static_output_rel_candidates``,
+    not under the nominal ``static_output_rel``. The deploy targets resolve their source as
+    ``<project_dir>/<resolve_static_output_rel(...)>`` while the tar is rooted AT that
+    directory's contents, so extracting flat would deploy an empty dir — and for svelte the
+    NOMINAL rel names the dynamic shape (``.svelte-kit/cloudflare``), which is not where a
+    static build's output belongs. The first candidate is the resolver's first probe, so
+    the two agree by construction for every engine: ``dist`` for react,
+    ``.svelte-kit/cloudflare`` for ripple (both unchanged), ``build`` for svelte.
     """
     if not artifact:
         # ``settle`` only reaches ``built`` via ``BuildRunResult.ok``, which requires
@@ -589,13 +622,13 @@ async def _deploy_built_artifact(
 
     from pocketpaw_ee.sites import artifact_preview
     from pocketpaw_ee.sites import service as _service
-    from pocketpaw_ee.sites.engines import static_output_rel
+    from pocketpaw_ee.sites.engines import static_output_rel_candidates
 
     deploy = deployer or _service.deploy_prebuilt_site
     project_dir = tempfile.mkdtemp(prefix="paw-deploy-")
     try:
         unpacked = artifact_preview.unpack_artifact(
-            artifact, Path(project_dir, static_output_rel(engine))
+            artifact, Path(project_dir, static_output_rel_candidates(engine)[0])
         )
         logger.info(
             "sites.build: materialised %d entries (%d bytes) for the deploy of site %s",

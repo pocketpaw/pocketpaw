@@ -38,6 +38,17 @@
 # narrow — see :func:`resolve_static_output_rel` for why reading the artifact beats
 # threading a static/dynamic flag through six call sites, two of which have no
 # generate in scope to thread it from.
+#
+# Edited 2026-08-11 (SL-4 — static svelte joined the ephemeral build lane): added
+# :func:`static_output_rel_candidates`, and :func:`resolve_static_output_rel` now reads
+# its probe order from it instead of carrying its own copy. SL-1 left the probe order in
+# one function, which was correct while every caller that needed it had a project dir to
+# probe. The async build lane has two callers that do NOT: the in-sandbox tar (rendered
+# before the build it packs, so it has to resolve at runtime IN the sandbox) and the
+# deploy-side unpack (which chooses the dir name it extracts INTO). Both previously used
+# the nominal :func:`static_output_rel`, whose svelte row names the DYNAMIC shape — so the
+# tar would have packed a directory a static build never creates, and every static svelte
+# publish through that lane would have failed with an empty artifact.
 """Engine capability predicates for Paw Sites.
 
 Four site-generation engines are modeled:
@@ -282,6 +293,35 @@ def static_output_rel(engine: str | None) -> str:
     return _STATIC_OUTPUT_REL[normalize_engine(engine)]
 
 
+def static_output_rel_candidates(engine: str | None) -> tuple[str, ...]:
+    """Every dir this engine's build might write its deployable output to, in
+    :func:`resolve_static_output_rel`'s PROBE ORDER.
+
+    One entry for ripple / html / react — each has exactly one output shape. TWO for
+    svelte (``build`` then ``.svelte-kit/cloudflare``), because the track spans two
+    adapters chosen by a property of the SITE.
+
+    ADDED 2026-08-11 (SL-4 — static svelte joined the async build lane) for the callers
+    that must agree with :func:`resolve_static_output_rel` while holding NO filesystem
+    it can probe. There are two, and they sit on either side of the ephemeral lane:
+
+    * the in-sandbox tar, which must pick the output dir AFTER the build has run, in a
+      bash script rendered before it — so it renders this list as a shell probe and
+      resolves at runtime, on the sandbox's disk;
+    * the deploy-side unpack, which extracts the tar under a dir name the resolver will
+      then find, so it uses the FIRST candidate.
+
+    Both previously used the nominal :func:`static_output_rel`, which for svelte names
+    the DYNAMIC shape — the tar would have packed a directory a static build never
+    creates. Naming the order once is what keeps those two and the resolver from
+    drifting; the probe order itself is load-bearing (see the resolver).
+    """
+    normalized = normalize_engine(engine)
+    if normalized == "svelte":
+        return (_SVELTE_STATIC_OUTPUT_REL, _STATIC_OUTPUT_REL["svelte"])
+    return (_STATIC_OUTPUT_REL[normalized],)
+
+
 def resolve_static_output_rel(project_dir: str | os.PathLike[str], engine: str | None) -> str:
     """Where THIS build's deployable output actually landed, relative to ``project_dir``.
 
@@ -314,7 +354,7 @@ def resolve_static_output_rel(project_dir: str | os.PathLike[str], engine: str |
     if normalized != "svelte":
         return _STATIC_OUTPUT_REL[normalized]
     root = Path(project_dir)
-    for candidate in (_SVELTE_STATIC_OUTPUT_REL, _STATIC_OUTPUT_REL["svelte"]):
+    for candidate in static_output_rel_candidates(normalized):
         if (root / candidate).is_dir():
             return candidate
     return _STATIC_OUTPUT_REL["svelte"]
