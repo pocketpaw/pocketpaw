@@ -651,11 +651,27 @@ def test_a_static_svelte_artifact_is_not_reported_as_incomplete(caplog):
 
 
 def test_a_dynamic_svelte_artifact_is_not_reported_either(caplog):
-    """The same engine with the OTHER adapter's output. Both shapes are legitimate, so
-    neither may warn — and a check that warned on this one would fire on every dynamic
-    site instead of every static one."""
+    """The same engine with the OTHER adapter's output. Both shapes are legitimate to
+    BUILD, so neither may warn — a check that warned on this one would fire on every
+    dynamic site instead of every static one.
+
+    Two separate properties are at play and this pins both, because they pull in
+    opposite directions and it would be easy to mistake one for the other:
+
+    * the GATE refuses this artifact outright, since its pages come from a ``_worker.js``
+      nothing here can execute;
+    * the server-entry CROSS-CHECK still says nothing about it, because the engine name
+      cannot tell which adapter ran and "svelte carried a worker" is not an anomaly.
+
+    A refusal is not a warning, and the absence of the warning has to be observable on a
+    tree that actually reached disk — hence the seam, which exists for precisely this:
+    a test needing to construct the tree ``resolve`` refuses.
+    """
+    with pytest.raises(ap.ArtifactNotPreviewable):
+        ap.store_artifact("svelte-dyn-gated", _tar(_SVELTE_ARTIFACT), engine="svelte")
+
     with caplog.at_level("WARNING"):
-        snap = ap.store_artifact("svelte-dyn1", _tar(_SVELTE_ARTIFACT), engine="svelte")
+        snap = ap.store_unvouched_artifact("svelte-dyn1", _tar(_SVELTE_ARTIFACT), engine="svelte")
 
     assert snap.unpacked.server_entries == ("_worker.js",)
     assert "even though this engine emits none" not in caplog.text

@@ -209,10 +209,10 @@
     ]
   },
   {
-    "label": "the caller's resolved worker expectation is ignored, so every healthy static svelte preview logs that the artifact may be incomplete and the warning stops meaning anything",
+    "label": "the caller's resolved worker expectation is discarded, so the one track the engine name cannot judge (static vs dynamic svelte) loses its cross-check entirely and a static artifact carrying a server entry is never flagged",
     "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
-    "find": "    expected_worker = (\n        emits_server_worker(engine) if expect_server_worker is None else expect_server_worker\n    )",
-    "replace": "    expected_worker = emits_server_worker(engine)",
+    "find": "    expected = (\n        expects_server_worker(engine) if expect_server_worker is None else expect_server_worker\n    )",
+    "replace": "    expected = expects_server_worker(engine)",
     "tests": [
       "tests/ee/sites/test_truth_lane.py"
     ]
