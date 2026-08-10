@@ -6,11 +6,16 @@
 # ContextVars + the shared publish_pocket service and inspect the MCP envelope
 # the SDK returns to the agent.
 #
-# Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — the registration test now
-# pins the EIGHTH tool id on this server, ``edit_react_component``. The count
-# assertion did its job here: adding the tool failed this test before anything else,
-# which is exactly the decision point it exists to force (SITES_TOOL_IDS feeds the
-# /sites surface allow-list, so a new id widens what the agent can reach).
+# Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3 + RX-4) — the registration test
+# now pins the EIGHTH and NINTH tool ids on this server, ``edit_react_component`` and
+# the read-only ``get_site_build_status``. The count assertion did its job both times:
+# each new tool failed this test before anything else, which is exactly the decision
+# point it exists to force (SITES_TOOL_IDS feeds the /sites surface allow-list, so a new
+# id widens what the agent can reach).
+#
+# The publish handler's own response is no longer covered only here — RX-4 widened it
+# with the build-lane fields, and those live in test_build_status_tool.py beside the
+# status tool that shares their derivation.
 """MCP server registration + handler tests for the Paw Sites publish tool."""
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ class TestSitesMcpServerRegistration:
             CREATE_SVELTE_SITE_TOOL_ID,
             EDIT_REACT_COMPONENT_TOOL_ID,
             EDIT_SVELTE_COMPONENT_TOOL_ID,
+            GET_SITE_BUILD_STATUS_TOOL_ID,
             PUBLISH_TOOL_ID,
             SERVER_NAME,
             SITES_TOOL_IDS,
@@ -72,10 +78,17 @@ class TestSitesMcpServerRegistration:
         assert CREATE_HTML_SITE_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_REACT_SITE_TOOL_ID in SITES_TOOL_IDS
         assert EDIT_REACT_COMPONENT_TOOL_ID in SITES_TOOL_IDS
+        # RX-4 — the READ-ONLY build-status tool, the 9th id. It is the only way the
+        # agent can learn how an ASYNC build ended, since publish returns before the
+        # build starts.
+        assert (
+            GET_SITE_BUILD_STATUS_TOOL_ID == "mcp__pocketpaw_sites_manager__get_site_build_status"
+        )
+        assert GET_SITE_BUILD_STATUS_TOOL_ID in SITES_TOOL_IDS
         # The count is deliberate: adding a tool here widens the /sites surface
         # allow-list (SITES_TOOL_IDS feeds it), so a new id must be a decision,
         # not a side effect. Bump it WITH an id assertion above — never alone.
-        assert len(SITES_TOOL_IDS) == 8
+        assert len(SITES_TOOL_IDS) == 9
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk
