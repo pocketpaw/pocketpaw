@@ -47,10 +47,10 @@
     ]
   },
   {
-    "label": "the row is never stamped queued, so single-flight is off (a second publish opens a second sandbox and two artifacts race to deploy) and a client that reloads has no job id to poll",
+    "label": "the row is never stamped queued, so single-flight is off (a second publish opens a second sandbox and two artifacts race to deploy) and a client that reloads has no job id to poll [anchor repointed 2026-08-11: mark_build_queued became the conditional claim_build_queued]",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "    job_id = _mint_job_id(site_id)\n    await sites_service.mark_build_queued(site, job_id=job_id)",
-    "replace": "    job_id = _mint_job_id(site_id)",
+    "find": "    job_id = _mint_job_id(site_id)\n    claimed = await sites_service.claim_build_queued(site, job_id=job_id, timeout_seconds=timeout)",
+    "replace": "    job_id = _mint_job_id(site_id)\n    claimed = True",
     "tests": [
       "tests/ee/sites/test_build_job.py::TestEnqueueingABuild"
     ]
@@ -75,9 +75,9 @@
     ]
   },
   {
-    "label": "the single-flight gate is dropped, so two publishes of one site open two sandboxes — two bills, and two artifacts racing to be the one that deploys",
+    "label": "the single-flight gate is dropped, so two publishes of one site open two sandboxes — two bills, and two artifacts racing to be the one that deploys [anchor repointed 2026-08-11: the gate moved into the conditional write, so the caller's branch is now the claim's result]",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "    if not should_enqueue(site, timeout):",
+    "find": "    if not claimed:",
     "replace": "    if False:",
     "tests": [
       "tests/ee/sites/test_build_job.py::TestEnqueueingABuild::test_a_live_build_is_not_enqueued_twice"
@@ -194,10 +194,10 @@
     ]
   },
   {
-    "label": "a new attempt no longer clears the previous rung, so a queued build displays the last attempt's failure reason — a row that lies to whoever is watching it",
+    "label": "a new attempt no longer clears the previous rung, so a queued build displays the last attempt's failure reason — a row that lies to whoever is watching it [anchor re-indented 2026-08-11: the values dict moved out of the set() call into the claim]",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "            \"build_job_id\": job_id,\n            \"build_reason\": None,",
-    "replace": "            \"build_job_id\": job_id,",
+    "find": "        \"build_job_id\": job_id,\n        \"build_reason\": None,",
+    "replace": "        \"build_job_id\": job_id,",
     "tests": [
       "tests/ee/sites/test_build_job.py::TestEnqueueingABuild::test_a_new_attempt_clears_the_previous_rung"
     ]

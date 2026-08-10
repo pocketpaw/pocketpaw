@@ -169,5 +169,122 @@
     "tests": [
       "tests/ee/sites/test_fault_ladder_build.py"
     ]
+  },
+  {
+    "label": "a transfer that delivered nothing is called permanent, so a network blip burns the publish instead of retrying",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    if got == 0:\n        return ArtifactRejection(\"artifact_empty\", retryable=True)",
+    "replace": "    if got == 0:\n        return ArtifactRejection(\"artifact_empty\", retryable=False)",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a half-arrived artifact is called permanent, so a dropped connection costs the user their publish",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        return ArtifactRejection(\"artifact_truncated\", retryable=True)",
+    "replace": "        return ArtifactRejection(\"artifact_truncated\", retryable=False)",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a truncated transfer is misread as a complete one, so half a site is accepted as whole",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    if promised is not None and got < promised:",
+    "replace": "    if promised is not None and got > promised:",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a build that produced garbage is retried, spending a fresh sandbox to reproduce the identical failure",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        return ArtifactRejection(\"artifact_unreadable\", retryable=promised is None)",
+    "replace": "        return ArtifactRejection(\"artifact_unreadable\", retryable=True)",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a leaked node_modules is retried, so every attempt re-packs the same 500 MB artifact and bills for it",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "            return ArtifactRejection(\"artifact_contains_node_modules\", retryable=False)",
+    "replace": "            return ArtifactRejection(\"artifact_contains_node_modules\", retryable=True)",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "an empty artifact download counts as one byte, so nothing-arrived is misread as a short transfer and the empty rung never fires",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    got = len(payload) if payload else 0",
+    "replace": "    got = len(payload) if payload else 1",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the substring check comes back, so a site with a legitimately-named node_modules_report.html is rejected as if it shipped the dependency tree",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        if _FORBIDDEN_SEGMENT in name.replace(\"\\\\\", \"/\").split(\"/\"):",
+    "replace": "        if _FORBIDDEN_SEGMENT in name.replace(\"\\\\\", \"/\"):",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "our own transfer or packaging failure is reported to the user as their build being broken",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "                        reason=rejection.reason,\n                        retryable=rejection.retryable,\n                        blames_user=False,",
+    "replace": "                        reason=rejection.reason,\n                        retryable=rejection.retryable,\n                        blames_user=True,",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the retryable split is discarded at the wiring, so a truncated transfer becomes a permanent failure anyway",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "                        retryable=rejection.retryable,",
+    "replace": "                        retryable=False,",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the artifact is never checked, so whatever the build produced deploys unverified",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "                rejection = verify_artifact(\n                    artifact, expected_bytes=promised_artifact_bytes(sentinel)\n                )",
+    "replace": "                rejection = None",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the promised size never reaches the check, so a truncated transfer is indistinguishable from a bad build",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "                    artifact, expected_bytes=promised_artifact_bytes(sentinel)",
+    "replace": "                    artifact, expected_bytes=None",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a rejected artifact is still handed back, so a caller can deploy bytes the gate refused",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "                    artifact = None\n        t_extracted = time.monotonic()",
+    "replace": "        t_extracted = time.monotonic()",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a boolean promised size is coerced instead of rejected, so artifact_bytes=True reads as a one-byte promise and every real artifact looks oversized rather than short",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    if isinstance(value, bool) or not isinstance(value, int):\n        return None\n    return value if value > 0 else None",
+    "replace": "    if not isinstance(value, int):\n        return None\n    return value if value > 0 else None",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
   }
 ]

@@ -597,12 +597,19 @@ class TestTheJobRecordsWhatHappened:
         self, beanie_test_db
     ) -> None:
         """The end-to-end form of wiring contract #1: the sandbox reports success and the
-        download delivers nothing."""
+        download delivers nothing.
+
+        The RUNG CHANGED on 2026-08-11 and the property did not. ``run_build`` now verifies
+        the downloaded bytes and demotes the classification itself, so this arrives already
+        named ``infra_lost:artifact_empty`` rather than reaching
+        ``resolve_build_settlement``'s ``artifact_missing`` fallback. Both are terminal,
+        retryable and not the user's fault; the new one is more precise, since it comes from
+        the code that looked at the bytes."""
         site = await _insert_site()
         await _run_job(site, client=FaultyDaytonaClient(artifact=b""))
         fresh = await _reread(site)
         assert fresh.build_status == "failed"
-        assert fresh.build_reason == "artifact_missing:download_delivered_no_bytes"
+        assert fresh.build_reason == "infra_lost:artifact_empty"
 
     async def test_an_unbuildable_engine_is_refused_before_any_sandbox_exists(
         self, beanie_test_db

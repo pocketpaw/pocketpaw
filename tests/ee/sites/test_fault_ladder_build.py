@@ -51,32 +51,33 @@
 # node_modules tree tested the construction instead, and turned up the gap the gate would
 # have masked: ``-C dist .`` packs ``dist/node_modules/``. Draft two recorded that gap as a
 # passing characterisation test, which documented a 500 MB-artifact path without closing it.
-# The resolution is neither: ``--exclude=./node_modules`` on the existing command removes the
+# The resolution is neither: ``--exclude=node_modules`` on the existing command removes the
 # path BY CONSTRUCTION, so there is nothing to detect at runtime and nothing left open.
 #
-# WIRING CONTRACTS THIS TASK OWES THE NEXT ONE, recorded here because the code cannot hold
-# them yet:
+# ── UPDATED 2026-08-11. BOTH WIRING CONTRACTS THIS FILE RECORDED ARE NOW DISCHARGED. ──
+#
+# This header used to carry two contracts "the code cannot hold yet", because the lane had
+# no callers and 170 lines of unreachable gate logic would have been a feature build. It has
+# callers now, so both are code:
 #
 #   1. GATE A DEPLOY ON ``BuildRunResult.ok``, NEVER ON ``classification.deployable``.
-#      ``deployable`` is derived from the sentinel alone and stays True when the download
-#      returns zero bytes — see its docstring. Nothing verifies delivered bytes today.
-#   2. WHEN DOWNLOAD VERIFICATION IS ADDED, SPLIT ITS FAILURES ON ``retryable``. A payload
-#      SHORTER than the sentinel's ``artifact_bytes`` is a property of the TRANSFER and is
-#      worth another attempt; one that arrives at full size and still will not open as a gzip
-#      tar is a property of what the BUILD produced, and retrying only spends a second
-#      sandbox reproducing it. The sentinel already carries ``artifact_bytes``, which is what
-#      makes the two distinguishable. Collapsing them into one non-retryable failure turns a
-#      network blip into a permanently burned publish. Keep "nothing arrived" and "half
-#      arrived" as SEPARATE reasons — they send an operator to different places.
+#      ``build_job.resolve_build_settlement`` does, and says so in its docstring.
+#   2. SPLIT DOWNLOAD-VERIFICATION FAILURES ON ``retryable``. ``daytona_build``'s
+#      ``verify_artifact`` does: four reasons (``artifact_empty`` / ``artifact_truncated`` /
+#      ``artifact_unreadable`` / ``artifact_contains_node_modules``), an
+#      ``ArtifactRejection`` carrying its own ``retryable``, and ``promised_artifact_bytes``
+#      reading the size off the sentinel rather than widening ``BuildClassification``.
+#      ``daytona_runner.run_build`` calls it and demotes the classification, which is what
+#      turned ``test_an_empty_download_is_reported_as_not_ok`` from a characterisation test
+#      into the five real rungs in ``TestF5VerificationFailsSoNothingDeploys``.
 #
-#      This is not just a requirement list: it was BUILT and mutation-tested, then held back
-#      because 170 lines of new production logic in a lane with zero callers is a feature
-#      build, and the gate's correct shape depends on how the wiring ends up consuming it.
-#      The implementation lives on ``spike/sites-artifact-verification`` — a four-way
-#      classification (``artifact_empty`` / ``artifact_truncated`` / ``artifact_unreadable`` /
-#      ``artifact_contains_node_modules``), an ``ArtifactRejection`` carrying its own
-#      ``retryable``, and ``promised_artifact_bytes`` reading the size off the sentinel rather
-#      than widening ``BuildClassification``. Start there rather than from scratch.
+# THE ONE THING THAT DID NOT SURVIVE THE WAIT is worth naming, because it is the argument
+# for building the tests first: the banked gate assumed the tar command had NO exclusion and
+# justified itself as "construction cannot cover this". By the time it landed the command
+# carried ``--exclude=node_modules``, so that justification was gone and the real one is
+# narrower — the exclusion is a flag on a tar binary this process never runs, and GNU and
+# bsdtar already disagreed about it once in CI. Same code, different reason, and only the
+# reason tells you what the gate is allowed to stop protecting.
 
 from __future__ import annotations
 
@@ -96,13 +97,17 @@ from tests.ee.sites.faults import (
     NODE_MODULES_PROJECT,
     DaytonaUnavailable,
     FaultyDaytonaClient,
+    artifact_with_node_modules,
     clean_artifact,
     daytona_unconfigured,
+    garbage_artifact,
     ok_sentinel,
     pack_with_real_tar,
     sandbox_create_fails,
     sandbox_dies_mid_build,
+    tar_bytes,
     tar_is_available,
+    truncated_artifact,
     write_project_tree,
 )
 
@@ -468,35 +473,88 @@ class TestF5VerificationFailsSoNothingDeploys:
         assert got.classification.reason == "artifact_size_unknown"
         assert got.classification.deployable is False
 
-    async def test_an_empty_download_is_reported_as_not_ok(self) -> None:
-        """A CHARACTERISATION test, recording a discrepancy rather than a fix.
+    async def test_an_empty_download_is_not_deployable_and_is_worth_retrying(self) -> None:
+        """WHAT THIS TEST USED TO SAY, because the change is the point. It was a
+        CHARACTERISATION test asserting ``deployable is True`` here — the sentinel promised
+        bytes, the download delivered none, and nothing in the lane had looked at the
+        artifact — with a message telling whoever closed the discrepancy to come and delete
+        the assertion. 2026-08-11 closed it, so this is that deletion.
 
-        The sentinel is the build's claim; the download is the fact. When the sentinel
-        promises bytes and the download delivers none, ``BuildRunResult.ok`` correctly
-        reads False — but ``classification.deployable`` still reads True, and that flag's
-        docstring promises "there is a verified artifact to deploy". So a caller gating on
-        ``deployable`` rather than ``ok`` would deploy nothing over something working.
+        The sentinel is the build's claim; the download is the fact. When they disagree,
+        ``deployable`` — whose contract is "there is a verified artifact to deploy" — must
+        follow the fact.
 
-        Left as-is deliberately: this is the proving phase, no caller exists yet, and
-        adding production code to close it is the wiring phase's call. The contract for
-        whoever wires this lane is "gate on ``.ok``", and this test fails if the
-        discrepancy is closed — at which point the contract can be relaxed.
-
-        UPDATED 2026-08-10 (SL-2 slice 2): the contract now has a live consumer.
-        ``build_job.resolve_build_settlement`` gates on ``.ok`` and gives this exact case
-        its own retryable rung (``artifact_missing``) instead of the classifier's
-        ``completed_ok``. The discrepancy itself is UNCHANGED — ``deployable`` still reads
-        True here — so this test's assertion stands as written, and it is still the thing
-        that would tell you if someone closed it upstream.
+        RETRYABLE, because the sentinel reported a size: the bytes existed in the sandbox,
+        so it is the transfer that failed, and a transfer failure is exactly what another
+        attempt fixes.
         """
         client = FaultyDaytonaClient(artifact=b"")
         got = await dr.run_build(REACT_FILES, engine="react", timeout_seconds=600, client=client)
         assert got.ok is False, "ok must not be True for a zero-byte artifact"
         assert got.artifact_bytes == 0
-        assert got.classification.deployable is True, (
-            "deployable now disagrees with ok — if it was fixed, drop the 'gate on .ok' "
-            "contract from the SG-7 findings"
+        assert got.classification.deployable is False
+        assert got.classification.reason == "artifact_empty"
+        assert got.classification.retryable is True
+        assert got.classification.blames_user is False
+        assert got.artifact is None
+
+    async def test_a_truncated_transfer_is_worth_retrying(self) -> None:
+        """Fewer bytes than the sentinel promised. The rung a single ``retryable=False``
+        would have got wrong: a network blip would become a permanently burned publish.
+
+        Also the case that used to settle as ``built``, since nothing compared the promise
+        against what arrived — a half-transferred site replacing a working one."""
+        client = FaultyDaytonaClient(artifact=truncated_artifact())
+        got = await dr.run_build(REACT_FILES, engine="react", timeout_seconds=600, client=client)
+        assert got.classification.deployable is False
+        assert got.classification.reason == "artifact_truncated"
+        assert got.classification.retryable is True
+        assert got.classification.blames_user is False
+        assert got.artifact is None
+
+    async def test_a_full_size_unreadable_artifact_is_NOT_worth_retrying(self) -> None:
+        """The other side of the split, and the reason the split has to exist. Every
+        promised byte arrived and it still will not open, so the transfer did its job and
+        the content is what is wrong — a second sandbox would reproduce it exactly."""
+        payload = garbage_artifact(512)
+        client = FaultyDaytonaClient(
+            artifact=payload, sentinel=ok_sentinel(artifact_bytes=len(payload))
         )
+        got = await dr.run_build(REACT_FILES, engine="react", timeout_seconds=600, client=client)
+        assert got.classification.reason == "artifact_unreadable"
+        assert got.classification.retryable is False
+        assert got.classification.blames_user is False
+
+    async def test_an_artifact_carrying_node_modules_is_not_deployable(self) -> None:
+        """The 500 MB-on-the-wire failure, caught at the bytes.
+
+        The include-list plus ``--exclude=node_modules`` is what PREVENTS this shape, and
+        the class below proves that with the real tar. This asserts the backstop still
+        works when the prevention does not — which is not hypothetical: the exclusion's
+        behaviour belongs to whichever tar the image ships, and GNU and bsdtar already
+        disagreed about it once."""
+        payload = artifact_with_node_modules()
+        client = FaultyDaytonaClient(
+            artifact=payload, sentinel=ok_sentinel(artifact_bytes=len(payload))
+        )
+        got = await dr.run_build(REACT_FILES, engine="react", timeout_seconds=600, client=client)
+        assert got.classification.deployable is False
+        assert got.classification.reason == "artifact_contains_node_modules"
+        assert got.artifact is None
+        assert got.ok is False
+
+    async def test_a_leaked_node_modules_is_ours_and_not_retried(self) -> None:
+        """Whose bug it is decides what the user is told, and a leaked exclusion is ours —
+        reporting "your build is broken" would send them to debug their own code for our
+        packaging mistake. Not retried either: it is deterministic."""
+        payload = artifact_with_node_modules()
+        client = FaultyDaytonaClient(
+            artifact=payload, sentinel=ok_sentinel(artifact_bytes=len(payload))
+        )
+        got = await dr.run_build(REACT_FILES, engine="react", timeout_seconds=600, client=client)
+        assert got.classification.blames_user is False
+        assert got.classification.outcome == "infra_lost"
+        assert got.classification.retryable is False
 
     async def test_a_download_failure_is_transport_loss_not_a_build_failure(self) -> None:
         """The sentinel proved the artifact existed and was non-empty, so failing to fetch
@@ -516,6 +574,82 @@ class TestF5VerificationFailsSoNothingDeploys:
         assert got.classification.deployable is True
         assert got.ok is True
         assert got.artifact_bytes > 0
+
+
+class TestVerifyArtifactAndTheRetryableSplit:
+    """The gate as a unit. The split is the part worth testing directly: whether a
+    rejection is retryable depends on comparing the promised size against what arrived,
+    and that comparison has three outcomes a runner-level test cannot isolate."""
+
+    def test_no_bytes_is_empty_and_retryable(self) -> None:
+        for payload in (b"", None):
+            got = db.verify_artifact(payload, expected_bytes=4096)
+            assert got is not None
+            assert got.reason == "artifact_empty"
+            assert got.retryable is True
+
+    def test_short_of_the_promise_is_truncated_and_retryable(self) -> None:
+        got = db.verify_artifact(clean_artifact()[:40], expected_bytes=len(clean_artifact()))
+        assert got is not None
+        assert got.reason == "artifact_truncated"
+        assert got.retryable is True
+
+    def test_full_size_garbage_is_unreadable_and_not_retryable(self) -> None:
+        payload = garbage_artifact(300)
+        got = db.verify_artifact(payload, expected_bytes=len(payload))
+        assert got is not None
+        assert got.reason == "artifact_unreadable"
+        assert got.retryable is False
+
+    def test_unreadable_with_no_promised_size_defaults_to_retryable(self) -> None:
+        """With nothing to compare against, "garbage" and "truncated" are the same
+        observation. Retryable is the safe direction: one wasted sandbox against a publish
+        the user can never complete. Same asymmetry ``build_is_stale`` uses."""
+        got = db.verify_artifact(b"not a tar at all")
+        assert got is not None
+        assert got.reason == "artifact_unreadable"
+        assert got.retryable is True
+
+    def test_a_clean_artifact_passes(self) -> None:
+        assert db.verify_artifact(clean_artifact(), expected_bytes=len(clean_artifact())) is None
+
+    def test_a_bigger_than_promised_artifact_is_not_treated_as_truncated(self) -> None:
+        """Only SHORT counts. A payload at or over the promise arrived intact, and treating
+        a size mismatch in that direction as a failure would reject healthy builds."""
+        assert db.verify_artifact(clean_artifact(), expected_bytes=8) is None
+
+    @pytest.mark.parametrize("member", ["node_modules/react/index.js", "./node_modules/a.js"])
+    def test_node_modules_is_caught_whatever_the_prefix(self, member: str) -> None:
+        payload = tar_bytes({"./index.html": b"<!doctype html>", member: b"x"})
+        got = db.verify_artifact(payload, expected_bytes=len(payload))
+        assert got is not None
+        assert got.reason == "artifact_contains_node_modules"
+        assert got.retryable is False
+
+    def test_a_name_that_merely_contains_the_word_is_not_rejected(self) -> None:
+        """Segment-wise, not substring: a legitimate ``node_modules_report.html`` must not
+        fail a healthy build. A substring check would fire on innocent sites, which is how
+        a safety gate gets switched off. The same property the tar command's own exclusion
+        has to hold, checked here for the backstop that could disagree with it."""
+        payload = tar_bytes(
+            {
+                "./index.html": b"<!doctype html>",
+                "./docs/node_modules_report.html": b"<p>size audit</p>",
+            }
+        )
+        assert db.verify_artifact(payload, expected_bytes=len(payload)) is None
+
+    def test_a_promised_size_that_is_nonsense_is_ignored(self) -> None:
+        """``True`` is an int subclass and would otherwise read as a one-byte promise,
+        which would make every real artifact look oversized rather than short."""
+        assert db.verify_artifact(clean_artifact(), expected_bytes=True) is None
+        assert db.promised_artifact_bytes(ok_sentinel(artifact_bytes=True)) is None
+
+    def test_the_promised_size_comes_off_the_sentinel(self) -> None:
+        assert db.promised_artifact_bytes(ok_sentinel(artifact_bytes=1234)) == 1234
+        assert db.promised_artifact_bytes(None) is None
+        assert db.promised_artifact_bytes(b"{not json") is None
+        assert db.promised_artifact_bytes(ok_sentinel(artifact_bytes=0)) is None
 
 
 @pytest.mark.skipif(not tar_is_available(), reason="needs a real tar binary")
@@ -718,13 +852,43 @@ class TestF7EveryDegradedPathNamesItsRung:
         got = await dr.run_build(REACT_FILES, engine="react", timeout_seconds=600, client=client)
         assert got.classification.reason == f"build_killed_by_signal_{EXIT_SIGKILL}"
 
-    async def test_the_runner_only_reason_is_named_too(self) -> None:
-        """One condition exists only in the runner and the classifier never sees it, which
-        makes it the one most likely to ship nameless."""
+    async def test_the_runner_only_reasons_are_named_too(self) -> None:
+        """These conditions exist only in the runner and the classifier never sees them,
+        which makes them the ones most likely to ship nameless. Asserted as a SET so two of
+        them cannot quietly collapse onto one reason — an operator reading a shared reason
+        still cannot tell which happened."""
         download = FaultyDaytonaClient(fail_at="artifact")
         got = await dr.run_build(REACT_FILES, engine="react", timeout_seconds=600, client=download)
+        reasons = {got.classification.reason}
         assert got.classification.reason == "artifact_download_failed"
-        assert got.classification.blames_user is False
+
+        nm = artifact_with_node_modules()
+        garbage = garbage_artifact(300)
+        # Paired explicitly: the first two need the DEFAULT sentinel (which promises a full
+        # clean artifact) so the payload reads as short, while the last two must promise
+        # their own length so the payload reads as complete-but-wrong.
+        cases = [
+            (b"", ok_sentinel()),
+            (truncated_artifact(), ok_sentinel()),
+            (garbage, ok_sentinel(artifact_bytes=len(garbage))),
+            (nm, ok_sentinel(artifact_bytes=len(nm))),
+        ]
+        for payload, sentinel in cases:
+            client = FaultyDaytonaClient(artifact=payload, sentinel=sentinel)
+            res = await dr.run_build(
+                REACT_FILES, engine="react", timeout_seconds=600, client=client
+            )
+            assert res.classification.reason, "a runner rejection shipped with no reason"
+            assert res.classification.blames_user is False
+            reasons.add(res.classification.reason)
+
+        assert reasons == {
+            "artifact_download_failed",
+            "artifact_empty",
+            "artifact_truncated",
+            "artifact_unreadable",
+            "artifact_contains_node_modules",
+        }
 
 
 # ---------------------------------------------------------------------------

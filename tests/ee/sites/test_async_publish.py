@@ -42,7 +42,7 @@ from pocketpaw_ee.sites import build_state as bs
 from pocketpaw_ee.sites import engines as engines_mod
 from pocketpaw_ee.sites import service as sites_service
 
-from tests.ee.sites.faults import FaultyDaytonaClient, clean_artifact, tar_bytes
+from tests.ee.sites.faults import FaultyDaytonaClient, clean_artifact, ok_sentinel, tar_bytes
 
 REACT_SOURCE = {"src/App.tsx": "export default function App() { return <p>hi</p>; }"}
 
@@ -686,7 +686,15 @@ class TestTheWorkerFinishesThePublish:
             600,
             deploy_inputs=_deploy_inputs(str(site.id)),
             _runner=_FakeRunner(),
-            _client=FaultyDaytonaClient(artifact=evil),
+            # The sentinel must promise THIS artifact's length, not the default clean
+            # one's. ``run_build`` compares the promise against what arrived (2026-08-11),
+            # and ``evil`` is a few bytes shorter than ``clean_artifact()`` — so on the
+            # default sentinel it would be rejected as a TRUNCATED transfer and never reach
+            # the extraction this test is about. The escape has to be the reason it fails,
+            # not a byte count that happens to differ.
+            _client=FaultyDaytonaClient(
+                artifact=evil, sentinel=ok_sentinel(artifact_bytes=len(evil))
+            ),
             _deployer=_deploy,
         )
 
@@ -732,8 +740,6 @@ class TestTheWorkerFinishesThePublish:
         async def _deploy(*, project_dir: str, deploy_inputs: dict[str, Any]) -> Any:
             deploys.append(project_dir)
             return None
-
-        from tests.ee.sites.faults import ok_sentinel
 
         await bj.run_site_build(
             {},

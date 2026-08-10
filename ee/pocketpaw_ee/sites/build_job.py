@@ -163,7 +163,7 @@ from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
 
 from pocketpaw_ee.sites import service as sites_service
-from pocketpaw_ee.sites.build_state import BuildStatus, settle, should_enqueue
+from pocketpaw_ee.sites.build_state import BuildStatus, settle
 from pocketpaw_ee.sites.daytona_build import resolve_build_timeout_seconds
 from pocketpaw_ee.sites.daytona_runner import (
     EXEC_TIMEOUT_SLACK_SECONDS,
@@ -229,8 +229,13 @@ RUNG_SCAFFOLD_EMPTY = "scaffold_empty"
 #: sandbox could not be created. Nothing ran, so it is ours and retryable.
 RUNG_SANDBOX_UNAVAILABLE = "sandbox_unavailable"
 #: The classification cleared the build and the download delivered no bytes. Distinct
-#: from ``artifact_empty`` (which the sentinel catches) because this one is a property of
-#: the TRANSFER, so it is worth another attempt.
+#: from the sentinel's ``artifact_empty`` because this one is a property of the TRANSFER,
+#: so it is worth another attempt.
+#:
+#: Updated 2026-08-11: ``run_build`` now verifies the bytes and reports that same
+#: condition as ``infra_lost:artifact_empty``, so this rung is no longer reached from that
+#: path. It remains the guard for any OTHER result carrying ``deployable`` with no bytes —
+#: see :func:`resolve_build_settlement` for why that is kept rather than removed.
 RUNG_ARTIFACT_MISSING = "artifact_missing"
 #: The enqueue itself failed after the row was already stamped ``queued``. Written by the
 #: enqueue helper so the row lands TERMINAL instead of pinned in flight.
@@ -285,11 +290,20 @@ def resolve_build_settlement(result: BuildRunResult, *, attempts_left: int = 0) 
     is not — and a rung that lies about retryability either burns a publish that a second
     attempt would have fixed, or retries something no attempt can fix.
 
-    Truncation — a payload that arrives SHORTER than the sentinel's ``artifact_bytes`` —
-    is NOT distinguished here. That needs the promised size threaded off the sentinel,
-    which is banked on ``spike/sites-artifact-verification`` along with the rest of the
-    four-way artifact classification. Until it lands, a truncated download settles as
-    ``built``; the gap is real, is not new, and is recorded rather than papered over.
+    Updated 2026-08-11: THE ``deployable``-BUT-NOT-``ok`` CASE NO LONGER ARRIVES FROM
+    ``run_build``. That runner verifies the downloaded bytes itself and demotes the
+    classification, so an empty download now reaches here already named
+    ``infra_lost:artifact_empty`` — and a TRUNCATED one, which used to settle as ``built``
+    because nothing compared the promise against what arrived, reaches here as
+    ``infra_lost:artifact_truncated``. Both are more precise than this rung could be, so
+    the first branch handles them.
+
+    THE ``artifact_missing`` BRANCH STAYS ANYWAY, and not as decoration: this function's
+    contract is over a ``BuildRunResult``, not over "a result that came from ``run_build``".
+    A result assembled anywhere else — a future caller, a partial re-implementation, a test
+    — can still carry ``deployable`` with no bytes, and the branch is what stops that being
+    settled as ``built``. Deleting it would make the safe reading depend on an invariant
+    held one module away.
     """
     classification = result.classification
     if result.ok:
@@ -759,17 +773,22 @@ async def enqueue_site_build(
 
     Order, and why each step is where it is:
 
-      1. GATE on ``should_enqueue``. A build genuinely in flight must not get a second
-         sandbox; a stale one must not block forever. Both live in ``build_state``.
-      2. STAMP ``queued`` + the clock + the job id, in ONE write, BEFORE the enqueue.
-         Before, because a worker that claimed the job first would write a terminal
-         status and then have this stamp land on top of it, pinning a finished build in
-         ``queued`` forever. One write, because the job id is minted here rather than
-         read back off the enqueue, so there is no second write to race with the job.
-      3. ENQUEUE. On ANY failure — a dead Redis, or arq refusing the id — roll the row to
+      1. CLAIM the slot: stamp ``queued`` + the clock + the job id in ONE CONDITIONAL
+         write, BEFORE the enqueue. Conditional because the gate and the stamp used to be
+         two steps — read ``should_enqueue``, then write — and every publish arriving
+         between them read the same pre-stamp row, passed the gate correctly, and opened
+         its own sandbox: 8 concurrent publishes of one site produced 8 sandboxes. The
+         precondition (``build_state.claim_precondition``) puts the decision inside the
+         write so the database picks one winner; the losers return ``None`` having written
+         nothing. Before the enqueue, because a worker that claimed the job first would
+         write a terminal status and then have this stamp land on top of it, pinning a
+         finished build in ``queued`` forever. One write, because the job id is minted here
+         rather than read back off the enqueue, so there is no second write to race with
+         the job.
+      2. ENQUEUE. On ANY failure — a dead Redis, or arq refusing the id — roll the row to
          a terminal status and re-raise. Skipping the rollback is what pins a row in
-         ``queued`` behind an enqueue that never happened, and ``should_enqueue`` would
-         then no-op every publish of this site until the staleness window lapsed.
+         ``queued`` behind an enqueue that never happened, and the claim would then refuse
+         every publish of this site until the staleness window lapsed.
 
     ``timeout_seconds`` defaults to the engine's resolved budget and is passed on to the
     job, so the window the guard measures and the budget the sandbox is held to are one
@@ -781,16 +800,19 @@ async def enqueue_site_build(
         timeout_seconds if timeout_seconds is not None else resolve_build_timeout_seconds(engine)
     )
 
-    if not should_enqueue(site, timeout):
+    # The claim IS the gate. There is deliberately no ``should_enqueue`` pre-check in
+    # front of it: a second reader of the same rule would be free but would also invite
+    # the next reader of this code to believe the read is what protects the site, which is
+    # the belief that cost 8 sandboxes. One gate, and it is the conditional write.
+    job_id = _mint_job_id(site_id)
+    claimed = await sites_service.claim_build_queued(site, job_id=job_id, timeout_seconds=timeout)
+    if not claimed:
         logger.info(
             "sites.build: site %s already has a build in flight (%s) — not enqueueing",
             site_id,
             getattr(site, "build_status", None),
         )
         return None
-
-    job_id = _mint_job_id(site_id)
-    await sites_service.mark_build_queued(site, job_id=job_id)
 
     try:
         pool = _pool_override or await _get_pool()
