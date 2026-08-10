@@ -153,7 +153,7 @@
     ]
   },
   {
-    "label": "the exclusion pattern stops matching what tar actually records, so it silently protects nothing",
+    "label": "the exclusion pattern stops matching what tar actually records, so it silently protects nothing [re-anchored 2026-08-10: the constant lost its './' prefix when GNU tar's anchoring was fixed, and mutate.py aborts the WHOLE plan on one stale anchor — so these two had silently disabled all 19 entries]",
     "file": "ee/pocketpaw_ee/sites/daytona_build.py",
     "find": "_EXCLUDED_MEMBER = \"node_modules\"",
     "replace": "_EXCLUDED_MEMBER = \"nodemodules\"",
