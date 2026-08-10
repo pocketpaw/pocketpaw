@@ -11,6 +11,11 @@ import pytest
 from pocketpaw.browser.driver import BrowserDriver
 from pocketpaw.browser.snapshot import RefMap
 
+# BrowserDriver requires the optional `playwright` extra (pip install
+# 'pocketpaw[browser]'); skip this whole module instead of failing every
+# test with ImportError when it's not installed (#715).
+playwright = pytest.importorskip("playwright")
+
 
 class TestBrowserDriverInit:
     """Tests for BrowserDriver initialization."""

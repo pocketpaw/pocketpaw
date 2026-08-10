@@ -177,6 +177,10 @@ class TestContextHub:
     @pytest.mark.asyncio
     async def test_gather_system_status(self, hub):
         """Test gathering system status context."""
+        # gather() degrades gracefully without psutil (returns an "error"
+        # key instead of the metrics below); this test exercises the full
+        # metrics path, so it needs psutil itself (#715).
+        pytest.importorskip("psutil")
         context = await hub.gather(["system_status"])
 
         assert "system_status" in context
