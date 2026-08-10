@@ -16,6 +16,15 @@
 # `artifact_preview.resolve`, which answers from a tree unpacked out of the
 # ephemeral build lane's artifact tarball.
 #
+# Updated 2026-08-10 (SG-10 wiring): the preview branch now has a gated caller in front
+# of it — `truth_lane.open_preview`, which refuses an artifact whose pages are rendered by
+# a `_worker.js` this server cannot execute, so such a tree is never stored. Nothing in
+# this file's request handling changed. `serve_artifact_preview` is deliberately still
+# UNGATED (see its docstring): `resolve`'s own `_worker.js` refusal has to stay reachable
+# over real HTTP, which means something must be able to store a worker-bearing tree.
+# `truth_lane` also reaches back here for the loopback base URL, which is why its import
+# of this module is inside a function.
+#
 # ONE SERVER, TWO BRANCHES, on purpose. The established in-app preview pattern in
 # this codebase is already "a localhost HTTP server, iframed by the builder"
 # (`dev_server.py` does exactly that with Vite), so the artifact preview rides the
@@ -311,22 +320,39 @@ def preview_url_for(site_id: str) -> str:
 def serve_artifact_preview(site_id: str, artifact: bytes | None, *, engine: str) -> str | None:
     """Store a build artifact as this site's preview and return its URL, or ``None``.
 
-    The artifact-lane peer of :func:`deploy_local`, and the one call a publish tail
-    would make. NEVER RAISES — a preview that could not be unpacked, or a server that
-    could not start, returns ``None`` and is logged. That is the whole difference
-    between the two functions: ``deploy_local`` is the publish itself and must report
-    its failures, while a preview is a convenience and must not be able to fail a
-    publish that already succeeded.
+    The artifact-lane peer of :func:`deploy_local`. NEVER RAISES — a preview that could
+    not be unpacked, or a server that could not start, returns ``None`` and is logged.
+    That is the whole difference between the two functions: ``deploy_local`` is the
+    publish itself and must report its failures, while a preview is a convenience and
+    must not be able to fail a publish that already succeeded.
 
     ``engine`` selects nothing about the LAYOUT — the lane tars from the resolved
     static-output dir, so every artifact already arrives rooted at its deployable root.
     It is passed through for the ``emits_server_worker`` cross-check in
     ``store_artifact``.
 
-    SL-1 caveat for whoever wires the lane: that cross-check still asks the ENGINE
-    whether a worker is expected, and a static svelte site emits none. Once the lane
-    has a caller, it should ask ``resolve_emits_server_worker`` against the build dir
-    instead — the answer is a property of the artifact, not of the engine name."""
+    ┌─────────────────────────────────────────────────────────────────────────────────┐
+    │ NOT THE TRUTH LANE. ``truth_lane.open_preview`` is the wired entry point (SG-10  │
+    │ wiring) and it is the one a preview surface must call.                            │
+    └─────────────────────────────────────────────────────────────────────────────────┘
+
+    This function stores whatever unpacks and hands back an address. It asks no question
+    about whether the artifact can be RENDERED faithfully, so an ``adapter-cloudflare``
+    artifact — whose pages come from a ``_worker.js`` nothing here can execute — stores
+    its static leftovers and serves them as though they were the site. That is the
+    failure mode a verification preview must not have, and it is why the gate lives in
+    ``truth_lane`` rather than being assumed here.
+
+    It is kept UNGATED on purpose rather than delegating: ``resolve``'s own ``_worker.js``
+    refusal is the last line of defence and has to stay reachable over real HTTP, which
+    means something has to be able to store a worker-bearing tree. That is this function,
+    and ``tests/ee/sites/test_artifact_preview_server.py`` is what exercises it.
+    ``tests/ee/sites/test_truth_lane.py::test_the_gate_refuses_what_the_ungated_store_serves``
+    pins the difference between the two so it cannot drift into a surprise.
+
+    The SL-1 caveat this docstring used to carry is discharged in ``truth_lane``: the
+    previewability question there is resolved off the ARTIFACT
+    (``resolve_emits_server_worker`` / a tar scan), never from the engine name."""
     try:
         snapshot = artifact_preview.safe_store_artifact(site_id, artifact, engine=engine)
         if snapshot is None:
