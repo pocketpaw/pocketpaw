@@ -299,13 +299,26 @@ the published site. Do not describe it as the live URL, and do not say
 mcp__pocketpaw_sites_manager__publish(pocket_id = "<the site pocket's id>")
 ```
 
-**A react publish returns before the build has finished** — it queues a build
-and comes back. The `url` / `deployed` in that immediate response describe the
-enqueue, not a finished deploy, so an empty or unchanged `url` there is not a
-failure. **Do not tell the user the change is live on the strength of that
-response.** Say the publish is building and point them at the site's build
-status under **/sites**, which is what says whether the change actually
-shipped. Relay any `ok: false` — never claim a phantom publish.
+⚠️ **"I've published it, here's your link" is the sentence that will be wrong.**
+React is the only engine whose build runs **off-request**: `publish` queues the
+build and returns immediately, and a worker deploys it later. On an edit you are
+almost always on the second failure below, which is the dangerous one:
+
+- **The site was never published before** — the response carries
+  `deployed: false` and `url: ""`. There is no link. Do not show an empty url
+  and do not invent one.
+- **The site is already live** (the normal case for an edit) — `url` and
+  `deployed` keep the **previous** deploy's values, so a rebuild never reports a
+  working site as down. That url still serves the site **without your edit**.
+  Handing it over as proof the change is live is wrong in the way that looks
+  most convincing: the link works, it just shows the old page.
+
+So report the build as **queued**, say the change goes live once it finishes,
+and point the user at the site's build status under **/sites** — that status,
+not the publish response, is what says whether the edit shipped. If they come
+back with "is it up yet?", check the build status again rather than asserting
+from the earlier response. Relay any `ok: false` — never claim a phantom
+publish.
 
 ## Reading the response
 

@@ -325,9 +325,28 @@ mcp__pocketpaw_sites_manager__publish(pocket_id = <the id from STEP 3>)
 ```
 
 The generator materializes your `source` onto the React skeleton, runs the Vite
-build, prerenders `<App />` into the HTML, and deploys the static output. Show
-the user the returned `url` plus a pointer to **/sites**. Relay any `ok: false`
-error — never claim a phantom publish.
+build, prerenders `<App />` into the HTML, and deploys the static output. Relay
+any `ok: false` error — never claim a phantom publish.
+
+⚠️ **A react publish does NOT return a live site, and its `url` is not one.**
+React is the only engine whose build runs **off-request**: `publish` queues the
+build in an ephemeral sandbox, returns immediately, and a worker deploys it
+later. The response's `url` / `deployed` describe the site as it stands *before*
+the new build lands, and they lie in both directions:
+
+- **First publish** — `deployed: false` and `url: ""`, because nothing is
+  serving yet. There is no link to give. Do **not** show an empty url, and do
+  **not** invent one.
+- **Re-publish** — `url` and `deployed` keep the **previous** deploy's values, so
+  the live site is never reported as down mid-rebuild. That url serves the
+  **old** content. Presenting it as the new page is the more damaging mistake,
+  because it looks like it worked.
+
+So report the build as **queued**, say that react builds finish after the
+publish call returns, and point the user at **/sites**, where the build status
+and the final url appear. Never present a url from a publish response as live
+without a build status that says it is. ("Your site's build is queued — it'll
+appear under /sites once it finishes, usually a minute or two.")
 
 **If the build fails on the prerender pass**, the message names the cause. The
 common ones are a `window`/`document` touched during render (guard it) and a
