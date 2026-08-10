@@ -15,23 +15,30 @@
 # take ``now=`` — so a burst is a loop over an injected clock rather than a wait. That is
 # deliberate on both sides: a harness that takes minutes is a harness nobody runs.
 #
-# THE TWO CONCURRENCY MODELS, and why both are here. The guard is a READ-then-WRITE, not
-# a compare-and-swap, so what it guarantees depends entirely on whether the stamp lands
-# before a sibling reads:
+# THE TWO CONCURRENCY MODELS, and why both are here. What a guard guarantees depends on
+# whether a sibling can read the row before the stamp lands:
 #
 #   * SHARED-DOC (``burst_on_one_doc``) — N publishes racing on ONE in-memory row, which
-#     is what a single process re-entering publish looks like. The stamp is visible to
-#     every later reader as soon as it lands.
+#     is what a single process re-entering publish looks like.
 #   * SEPARATE-DOC (``burst_on_reloaded_docs``) — N publishes that each LOAD their own
 #     copy of the row first, which is what N concurrent HTTP requests actually look like.
 #     Each reader has its own snapshot, so a stamp written by one is invisible to a
 #     sibling that read before it.
 #
 # The second is the honest model of production and the harder case. Keeping both is the
-# point: the difference between them is the size of the guard's race window, and a
-# harness that only ran the friendly model would report a guarantee the lane does not
-# have. See docs/runbooks/2026-08-11-site-build-burst-harness.md for what this can and
-# cannot tell us.
+# point: an in-process lock would satisfy the first and leave the second racing across
+# workers, and only a decision taken AT THE ROW satisfies both.
+#
+# Edited 2026-08-11 (fix/atomic-queued-stamp): added ``_ROWS`` + ``FakeCollection``, so the
+# fake can stand in for the collection and not only the document. The lane's gate is now a
+# CONDITIONAL WRITE (``service.claim_build_queued`` on ``build_state.claim_precondition``)
+# rather than a read followed by a write, and a conditional write cannot be exercised
+# against a fake that only models a doc. ``FakeCollection.find_one_and_update`` reproduces
+# the one property the fix rests on and nothing more: it yields before it runs, and once
+# running it matches and applies without yielding again.
+#
+# See docs/runbooks/2026-08-11-site-build-burst-harness.md for what this can and cannot
+# tell us.
 
 from __future__ import annotations
 
@@ -99,17 +106,34 @@ class YieldingPool(RecordingPool):
 # ---------------------------------------------------------------------------
 
 
+_ROWS: dict[str, FakeSite] = {}
+"""The stand-in for the sites collection: one canonical row per id.
+
+The registry is what makes the fake capable of modelling a conditional write at all. A
+publish holds its own ``FakeSite`` (its own snapshot, as a request does), but the CLAIM is
+decided against the one row registered here — which is exactly the split between a local
+copy and the database that lets a read-then-write guard lose a race."""
+
+
 @dataclass
 class FakeSite:
-    """A Site-shaped row whose writes yield to the loop, like a DB round trip does.
+    """A Site-shaped row whose blind writes yield to the loop, like a DB round trip does.
 
     ``set`` is the load-bearing detail. A fake that applied a write synchronously would
     make every burst pass, because no sibling could ever observe the pre-write state —
-    the harness would be measuring its own fake instead of the guard. Yielding first
-    reproduces the real gap between a gate's read and its stamp.
+    the harness would be measuring its own fake instead of the lane. Yielding first
+    reproduces the real gap between a read and a write. Mongomock does NOT do this: its
+    write resolves without yielding, which is why the burst against real Beanie + mongomock
+    reported one sandbox while the lane was opening eight.
 
-    Every write is appended to ``transitions``, which is what lets a test assert that
-    ``queued`` and ``building`` stayed DISTINGUISHABLE under load rather than merely
+    ``get_pymongo_collection`` is the other half, added 2026-08-11 with the atomic claim: the
+    conditional write goes through the collection, not the doc, so the fake has to stand in
+    for the collection too. Its ``find_one_and_update`` yields FIRST and then matches and
+    applies WITHOUT yielding, which is the one property a single-document Mongo update
+    guarantees and the one the fix depends on.
+
+    Every status write is appended to ``transitions``, which is what lets a test assert
+    that ``queued`` and ``building`` stayed DISTINGUISHABLE under load rather than merely
     that the row ended up somewhere plausible.
     """
 
@@ -120,11 +144,22 @@ class FakeSite:
     build_job_id: str | None = None
     build_reason: str | None = None
     transitions: list[tuple[str, str | None]] = field(default_factory=list)
+    register: bool = True
+
+    def __post_init__(self) -> None:
+        # A freshly constructed row is the canonical one for its id — a new test starts
+        # from a clean row. A snapshot passes register=False so it does not displace the
+        # row its siblings are racing against.
+        if self.register:
+            _ROWS[self.id] = self
 
     async def set(self, values: dict[str, Any]) -> None:
         await asyncio.sleep(0)  # a real write is a round trip; a sibling may run here
+        row = _ROWS.get(self.id, self)
         for key, value in values.items():
             setattr(self, key, value)
+            if row is not self:
+                setattr(row, key, value)
         if "build_status" in values:
             self.transitions.append((values["build_status"], values.get("build_reason")))
 
@@ -142,7 +177,85 @@ class FakeSite:
             build_job_id=self.build_job_id,
             build_reason=self.build_reason,
             transitions=self.transitions,  # shared on purpose: one row, one history
+            register=False,
         )
+
+    @classmethod
+    def get_pymongo_collection(cls) -> FakeCollection:
+        return FakeCollection()
+
+
+class FakeCollection:
+    """The sites collection, in memory, supporting exactly one operation.
+
+    Deliberately minimal. It exists so the atomic claim can be exercised without Mongo,
+    and it implements the two properties the fix rests on and nothing else: the update
+    yields before it runs (a real one is a round trip), and once running it matches the
+    precondition and applies the change as ONE indivisible step.
+    """
+
+    async def find_one_and_update(
+        self, filter_: dict[str, Any], update: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        await asyncio.sleep(0)
+        # --- no await past this point: this is the atomic section ---
+        row = _ROWS.get(str(filter_.get("_id")))
+        if row is None or not _matches(row, filter_):
+            return None
+        values = update["$set"]
+        for key, value in values.items():
+            setattr(row, key, value)
+        if "build_status" in values:
+            row.transitions.append((values["build_status"], values.get("build_reason")))
+        return {"_id": row.id, **values}
+
+
+def _matches(row: FakeSite, filter_: dict[str, Any]) -> bool:
+    """Evaluate the claim precondition against a row.
+
+    Interprets the real filter dict rather than re-deciding the rule in Python, so a
+    precondition that says the wrong thing fails the burst tests too. Supports only the
+    operators ``claim_precondition`` emits — anything else raises, so a filter that grows
+    an operator this cannot evaluate fails loudly instead of matching everything.
+    """
+    for key, condition in filter_.items():
+        if key == "_id":
+            continue
+        if key == "$or":
+            if not any(_matches(row, clause) for clause in condition):
+                return False
+            continue
+        value = getattr(row, key, None)
+        if not _field_matches(value, condition):
+            return False
+    return True
+
+
+def _field_matches(value: Any, condition: Any) -> bool:
+    if not isinstance(condition, dict):
+        return bool(value == condition)
+    for op, operand in condition.items():
+        if op == "$nin":
+            if value in operand:
+                return False
+        elif op == "$lt":
+            if not isinstance(value, datetime):
+                return False
+            # BSON stores every date as UTC, so Mongo never sees a naive/aware mismatch.
+            # The fake holds Python objects and would raise on the comparison, so it
+            # normalises the same way ``_read_stamp`` does.
+            stamp = value if value.tzinfo else value.replace(tzinfo=UTC)
+            if not stamp < operand:
+                return False
+        elif op == "$not":
+            if _field_matches(value, operand):
+                return False
+        elif op == "$type":
+            if operand != "date" or not isinstance(value, datetime):
+                return False
+        else:  # pragma: no cover - a new operator must be taught to the fake
+            raise AssertionError(f"the fake collection cannot evaluate {op!r}")
+    return True
 
 
 def aged_site(status: str, *, age_seconds: float | None, **kwargs: Any) -> FakeSite:
