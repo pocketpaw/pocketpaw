@@ -131,9 +131,7 @@ class TestResolveStaticOutputRel:
 
     def test_dynamic_svelte_resolves_to_the_adapter_cloudflare_tree(self, tmp_path) -> None:
         (tmp_path / ".svelte-kit" / "cloudflare").mkdir(parents=True)
-        assert (
-            engines.resolve_static_output_rel(tmp_path, "svelte") == ".svelte-kit/cloudflare"
-        )
+        assert engines.resolve_static_output_rel(tmp_path, "svelte") == ".svelte-kit/cloudflare"
 
     def test_build_wins_when_both_exist(self, tmp_path) -> None:
         # THE ORDER TEST. A project dir that has been built before AND after SL-1
@@ -147,9 +145,7 @@ class TestResolveStaticOutputRel:
     def test_neither_present_falls_back_to_the_nominal_value(self, tmp_path) -> None:
         # Total, never raising — the caller then reports a missing build against a
         # concrete path, which is a truer error than the predicate refusing to decide.
-        assert (
-            engines.resolve_static_output_rel(tmp_path, "svelte") == ".svelte-kit/cloudflare"
-        )
+        assert engines.resolve_static_output_rel(tmp_path, "svelte") == ".svelte-kit/cloudflare"
 
     @pytest.mark.parametrize(
         ("engine", "expected"),

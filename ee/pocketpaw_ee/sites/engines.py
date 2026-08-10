@@ -279,9 +279,7 @@ def resolve_static_output_rel(project_dir: str | os.PathLike[str], engine: str |
     return _STATIC_OUTPUT_REL["svelte"]
 
 
-def resolve_emits_server_worker(
-    project_dir: str | os.PathLike[str], engine: str | None
-) -> bool:
+def resolve_emits_server_worker(project_dir: str | os.PathLike[str], engine: str | None) -> bool:
     """Whether THIS build actually emitted a ``_worker.js`` server entry.
 
     The deploy-shape half of the same SL-1 problem, and the half with teeth. A static
