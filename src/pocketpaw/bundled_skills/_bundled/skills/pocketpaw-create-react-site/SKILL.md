@@ -333,6 +333,42 @@ error — never claim a phantom publish.
 common ones are a `window`/`document` touched during render (guard it) and a
 component that returns nothing at rest. Both are the prerender rule above.
 
+### If the user then asks for a CHANGE — edit, never re-create
+
+"Shorten the headline", "make the nav sticky", "add a testimonials section" is
+an **edit of the site you just made**, not a new one. `create_react_site` has no
+update mode: calling it again mints a **second** site pocket and leaves the one
+the user is looking at untouched. Edit the existing pocket instead:
+
+```
+mcp__pocketpaw_sites_manager__edit_react_component(
+  pocket_id      = <the id from STEP 3>,
+  component_path = "src/components/Hero.tsx",
+  edits          = [{"old_string": "<copied verbatim, must match exactly once>",
+                     "new_string": "<the replacement>"}]
+)
+```
+
+- Send a targeted **`edits`** diff, not the whole file. Pass `new_source`
+  instead only for a genuine rewrite — **exactly one** of the two per call.
+- Each `old_string` must match that file **exactly once**; include surrounding
+  context so it is unique.
+- **Adding a section is TWO calls**: `create=True` + `new_source` to write
+  `src/components/Testimonials.tsx`, then a second call with `edits` on
+  `src/App.tsx` to import and render it. Stop after the first and you have
+  shipped a component nothing renders.
+- The generator-owned paths above stay refused, so an edit **cannot** add a
+  dependency.
+- Every rule in this skill still binds — above all the **prerender rule**: an
+  edit that swaps a static value for a `useState(0)` + count-up effect bakes
+  "0" into the shipped HTML.
+- **The edit stages a DRAFT**; it does not publish. Point the user at the
+  Preview under **/sites** and publish only when they ask.
+
+The full edit brain is `pocketpaw-edit-react-site` — load it when the user is on
+the site's own refine chat. The essentials are inlined here because this create
+surface loads only the skill you are reading.
+
 ## Quality bar — done right when
 
 - The Design Read and direction came from `pocketpaw-design-taste`, and the page
@@ -352,6 +388,9 @@ component that returns nothing at rest. Both are the prerender rule above.
 ## Related tools (via MCP)
 
 - `mcp__pocketpaw_sites_manager__create_react_site` — persist the source map (STEP 3)
+- `mcp__pocketpaw_sites_manager__edit_react_component` — CHANGE a component of an
+  existing react site (STEP 4). The tool for every follow-up edit; never
+  re-create.
 - `mcp__pocketpaw_sites_manager__publish` — deploy, on explicit request (STEP 4)
 - `mcp__pocketpaw_design_systems__list_design_systems` / `get_design_system` — the token starting point
 - `mcp__pocketpaw_palette__scale_from_color` / `extract_palette` — brand colour
