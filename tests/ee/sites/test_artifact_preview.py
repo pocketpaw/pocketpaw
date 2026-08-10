@@ -15,6 +15,15 @@
 # has carried a per-site signed key), a tarball member cannot write outside the preview
 # root, and a request path cannot read outside it.
 #
+# Updated 2026-08-10 (`store_artifact` is gated): the six calls here that store a
+# WORKER-BEARING artifact now go through `store_unvouched_artifact`, the explicitly-named
+# seam past the gate. That is not a workaround — those six are precisely the tests of the
+# un-vouched primitive's behaviour (the worker is skipped at unpack, its whole subtree
+# goes with it, deploy metadata is skipped, the shape mismatch is logged), and they need a
+# tree containing the thing being skipped. Every assertion is unchanged; only the door
+# they come in through moved. `store_artifact` refusing such an artifact outright is
+# asserted separately, in test_truth_lane.py.
+#
 # Updated 2026-08-10: path traversal covered end to end after the lead flagged it as
 # missing from the brief. Both surfaces, since a static server over an extracted archive
 # has two: MEMBER names at extract time (`..`, absolute, drive letter, backslash, NUL,
@@ -116,7 +125,7 @@ def test_react_artifact_previews_from_its_own_root():
 def test_svelte_artifact_previews_and_its_deeper_tree_resolves():
     """The engines emit 4 vs 24 entries; nothing here knows which. The lane tars from
     ``static_output_rel(engine)``, so both arrive rooted at their deployable root."""
-    ap.store_artifact("svelte1", _tar(_SVELTE_ARTIFACT), engine="svelte")
+    ap.store_unvouched_artifact("svelte1", _tar(_SVELTE_ARTIFACT), engine="svelte")
 
     index = ap.resolve("svelte1", "/")
     assert index.status == 200
@@ -131,7 +140,7 @@ def test_svelte_artifact_previews_and_its_deeper_tree_resolves():
 
 
 def test_worker_entry_is_never_written_and_never_served(_preview_home):
-    snap = ap.store_artifact("svelte2", _tar(_SVELTE_ARTIFACT), engine="svelte")
+    snap = ap.store_unvouched_artifact("svelte2", _tar(_SVELTE_ARTIFACT), engine="svelte")
 
     assert snap.unpacked.server_entries == ("_worker.js",)
     assert not (snap.root / "_worker.js").exists()
@@ -144,7 +153,7 @@ def test_worker_entry_is_never_written_and_never_served(_preview_home):
 
 def test_the_worker_does_not_break_the_rest_of_the_preview():
     """The stated risk: its presence must neither be executed nor 404 everything else."""
-    ap.store_artifact("svelte3", _tar(_SVELTE_ARTIFACT), engine="svelte")
+    ap.store_unvouched_artifact("svelte3", _tar(_SVELTE_ARTIFACT), engine="svelte")
 
     assert ap.resolve("svelte3", "/").status == 200
     assert ap.resolve("svelte3", "/_app/version.json").status == 200
@@ -153,7 +162,7 @@ def test_the_worker_does_not_break_the_rest_of_the_preview():
 def test_a_worker_directory_is_refused_wholesale():
     """adapter-cloudflare emits `_worker.js` as a DIRECTORY of chunks for larger apps,
     so matching the leaf filename alone would let the chunks through."""
-    snap = ap.store_artifact(
+    snap = ap.store_unvouched_artifact(
         "svelte4",
         _tar(
             {
@@ -192,7 +201,7 @@ def test_worker_source_is_refused_even_when_it_is_on_disk():
 
 
 def test_deploy_metadata_is_not_served_as_content():
-    snap = ap.store_artifact("svelte6", _tar(_SVELTE_ARTIFACT), engine="svelte")
+    snap = ap.store_unvouched_artifact("svelte6", _tar(_SVELTE_ARTIFACT), engine="svelte")
 
     assert sorted(snap.unpacked.metadata_entries) == [".assetsignore", "_routes.json"]
     assert ap.resolve("svelte6", "/_routes.json").reason == "metadata_refused"
@@ -604,7 +613,7 @@ def test_an_unexpected_server_entry_is_reported(caplog):
     """react emits no server entry. One turning up means the lane changed shape, which
     is worth saying out loud — but not worth refusing to preview over."""
     with caplog.at_level("WARNING"):
-        snap = ap.store_artifact("mix1", _tar(_SVELTE_ARTIFACT), engine="react")
+        snap = ap.store_unvouched_artifact("mix1", _tar(_SVELTE_ARTIFACT), engine="react")
 
     assert snap.unpacked.server_entries == ("_worker.js",)
     assert "even though this engine emits none" in caplog.text
@@ -642,11 +651,27 @@ def test_a_static_svelte_artifact_is_not_reported_as_incomplete(caplog):
 
 
 def test_a_dynamic_svelte_artifact_is_not_reported_either(caplog):
-    """The same engine with the OTHER adapter's output. Both shapes are legitimate, so
-    neither may warn — and a check that warned on this one would fire on every dynamic
-    site instead of every static one."""
+    """The same engine with the OTHER adapter's output. Both shapes are legitimate to
+    BUILD, so neither may warn — a check that warned on this one would fire on every
+    dynamic site instead of every static one.
+
+    Two separate properties are at play and this pins both, because they pull in
+    opposite directions and it would be easy to mistake one for the other:
+
+    * the GATE refuses this artifact outright, since its pages come from a ``_worker.js``
+      nothing here can execute;
+    * the server-entry CROSS-CHECK still says nothing about it, because the engine name
+      cannot tell which adapter ran and "svelte carried a worker" is not an anomaly.
+
+    A refusal is not a warning, and the absence of the warning has to be observable on a
+    tree that actually reached disk — hence the seam, which exists for precisely this:
+    a test needing to construct the tree ``resolve`` refuses.
+    """
+    with pytest.raises(ap.ArtifactNotPreviewable):
+        ap.store_artifact("svelte-dyn-gated", _tar(_SVELTE_ARTIFACT), engine="svelte")
+
     with caplog.at_level("WARNING"):
-        snap = ap.store_artifact("svelte-dyn1", _tar(_SVELTE_ARTIFACT), engine="svelte")
+        snap = ap.store_unvouched_artifact("svelte-dyn1", _tar(_SVELTE_ARTIFACT), engine="svelte")
 
     assert snap.unpacked.server_entries == ("_worker.js",)
     assert "even though this engine emits none" not in caplog.text

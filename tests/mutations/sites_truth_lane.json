@@ -10,25 +10,27 @@
   },
   {
     "label": "an artifact carrying a worker reports itself as renderer-free, so the one fact the gate exists to notice is invisible to it",
-    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
-    "find": "    def is_server_rendered(self) -> bool:\n        return bool(self.server_entries)",
-    "replace": "    def is_server_rendered(self) -> bool:\n        return False",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    def is_server_rendered(self) -> bool:\n        \"\"\"THE gate.",
+    "replace": "    def is_server_rendered(self) -> bool:\n        return False  # mutated\n        \"\"\"THE gate.",
     "tests": [
-      "tests/ee/sites/test_truth_lane.py"
+      "tests/ee/sites/test_truth_lane.py",
+      "tests/ee/sites/test_artifact_preview.py"
     ]
   },
   {
     "label": "the scan stops recording worker members, so the gate sees a clean artifact and only the post-store cross-check stands between a worker-rendered tree and being served",
-    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
-    "find": "            if any(seg in SERVER_ENTRY_NAMES for seg in segments):\n                server.append(\"/\".join(segments))",
-    "replace": "            if False:\n                server.append(\"/\".join(segments))",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "            if any(seg in _SERVER_ENTRY_NAMES for seg in segments):\n                server.append(\"/\".join(segments))\n            if segments[-1] == ROUTING_TABLE_NAME:",
+    "replace": "            if False:\n                server.append(\"/\".join(segments))\n            if segments[-1] == ROUTING_TABLE_NAME:",
     "tests": [
-      "tests/ee/sites/test_truth_lane.py"
+      "tests/ee/sites/test_truth_lane.py",
+      "tests/ee/sites/test_artifact_preview.py"
     ]
   },
   {
     "label": "a worker member written with a backslash separator is not seen as a worker, so the same artifact is refused on one host and served on the other",
-    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
     "find": "    return tuple(part for part in name.replace(\"\\\\\", \"/\").split(\"/\") if part not in (\"\", \".\"))",
     "replace": "    return tuple(part for part in name.split(\"/\") if part not in (\"\", \".\"))",
     "tests": [
@@ -37,7 +39,7 @@
   },
   {
     "label": "the routing table is no longer recorded, so an artifact that names a renderer it does not contain passes the gate as if it were complete",
-    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
     "find": "            if segments[-1] == ROUTING_TABLE_NAME:\n                routes.append(\"/\".join(segments))",
     "replace": "            if False:\n                routes.append(\"/\".join(segments))",
     "tests": [
@@ -55,7 +57,7 @@
   },
   {
     "label": "incompleteness stops requiring a routing table, so every self-contained static build is refused as incomplete and no site can be previewed at all",
-    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
     "find": "        return bool(self.routing_tables) and not self.server_entries",
     "replace": "        return bool(self.routing_tables) or not self.server_entries",
     "tests": [
@@ -64,7 +66,7 @@
   },
   {
     "label": "an index.html anywhere in the tree counts as the home page, so a build with only docs/index.html is admitted and the preview opens onto its own 404",
-    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
     "find": "            if segments == (ENTRY_DOCUMENT_NAME,):\n                entry_document = True",
     "replace": "            if segments[-1] == ENTRY_DOCUMENT_NAME:\n                entry_document = True",
     "tests": [
@@ -211,6 +213,35 @@
     "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
     "find": "    expected = (\n        expects_server_worker(engine) if expect_server_worker is None else expect_server_worker\n    )",
     "replace": "    expected = expects_server_worker(engine)",
+    "tests": [
+      "tests/ee/sites/test_truth_lane.py"
+    ]
+  },
+  {
+    "label": "the gate at the disk boundary is gone, so every ungated caller of the store — present or future — puts a worker-rendered tree on disk and serves it as the site",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    shape = scan_artifact(artifact)\n    if shape.is_server_rendered:",
+    "replace": "    shape = scan_artifact(artifact)\n    if False:",
+    "tests": [
+      "tests/ee/sites/test_truth_lane.py",
+      "tests/ee/sites/test_artifact_preview_server.py"
+    ]
+  },
+  {
+    "label": "the front door goes back to storing whatever unpacks, which is the hole this change closed: the obvious-looking entry point serves a worker-rendered build's leftovers as the customer's site",
+    "file": "ee/pocketpaw_ee/sites/local_server.py",
+    "find": "        return truth_lane.open_preview(site_id, artifact, engine=engine).url",
+    "replace": "        artifact_preview.store_unvouched_artifact(site_id, artifact or b\"\", engine=engine)\n        return preview_url_for(site_id)",
+    "tests": [
+      "tests/ee/sites/test_truth_lane.py",
+      "tests/ee/sites/test_artifact_preview_server.py"
+    ]
+  },
+  {
+    "label": "the previewability refusal stops being a kind of ArtifactRejected, so every caller that already handles a rejected artifact silently stops handling this one",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "class ArtifactNotPreviewable(ArtifactRejected):",
+    "replace": "class ArtifactNotPreviewable(ValueError):",
     "tests": [
       "tests/ee/sites/test_truth_lane.py"
     ]

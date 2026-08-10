@@ -2,8 +2,8 @@
   {
     "label": "svelte's server bundle is written into the preview tree, so the file that has carried a per-site signed key sits inside a directory we serve",
     "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
-    "find": "            if any(seg in _SERVER_ENTRY_NAMES for seg in segments):\n                server.append(\"/\".join(segments))",
-    "replace": "            if False:\n                server.append(\"/\".join(segments))",
+    "find": "            if any(seg in _SERVER_ENTRY_NAMES for seg in segments):\n                server.append(\"/\".join(segments))\n                continue",
+    "replace": "            if False:\n                server.append(\"/\".join(segments))\n                continue",
     "tests": [
       "tests/ee/sites/test_artifact_preview.py"
     ]

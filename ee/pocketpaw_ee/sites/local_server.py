@@ -19,11 +19,18 @@
 # Updated 2026-08-10 (SG-10 wiring): the preview branch now has a gated caller in front
 # of it — `truth_lane.open_preview`, which refuses an artifact whose pages are rendered by
 # a `_worker.js` this server cannot execute, so such a tree is never stored. Nothing in
-# this file's request handling changed. `serve_artifact_preview` is deliberately still
-# UNGATED (see its docstring): `resolve`'s own `_worker.js` refusal has to stay reachable
-# over real HTTP, which means something must be able to store a worker-bearing tree.
-# `truth_lane` also reaches back here for the loopback base URL, which is why its import
-# of this module is inside a function.
+# this file's request handling changed.
+#
+# Updated 2026-08-10 (`serve_artifact_preview` is gated too). It shipped ungated for one
+# turn, on the reasoning that `resolve`'s own `_worker.js` refusal has to stay reachable
+# over real HTTP and therefore something must be able to store a worker-bearing tree. That
+# reasoning was right about the requirement and wrong about which function should satisfy
+# it: this one is the obvious front door, and an ungated front door acquires a caller.
+# `artifact_preview.store_unvouched_artifact` satisfies the requirement instead, under a
+# name that says what it is and with a test asserting no production module calls it.
+#
+# `truth_lane` reaches back here for the loopback base URL, which is why its import of
+# this module — and this module's import of it — are both inside functions.
 #
 # ONE SERVER, TWO BRANCHES, on purpose. The established in-app preview pattern in
 # this codebase is already "a localhost HTTP server, iframed by the builder"
@@ -320,34 +327,28 @@ def preview_url_for(site_id: str) -> str:
 def serve_artifact_preview(site_id: str, artifact: bytes | None, *, engine: str) -> str | None:
     """Store a build artifact as this site's preview and return its URL, or ``None``.
 
-    The artifact-lane peer of :func:`deploy_local`. NEVER RAISES — a preview that could
-    not be unpacked, or a server that could not start, returns ``None`` and is logged.
-    That is the whole difference between the two functions: ``deploy_local`` is the
-    publish itself and must report its failures, while a preview is a convenience and
-    must not be able to fail a publish that already succeeded.
+    The artifact-lane peer of :func:`deploy_local`. NEVER RAISES — an artifact that
+    cannot be previewed faithfully, one that could not be unpacked, or a server that
+    could not start, all return ``None`` and are logged. That is the whole difference
+    between the two functions: ``deploy_local`` is the publish itself and must report its
+    failures, while a preview is a convenience and must not be able to fail a publish
+    that already succeeded.
 
     ``engine`` selects nothing about the LAYOUT — the lane tars from the resolved
     static-output dir, so every artifact already arrives rooted at its deployable root.
     It is passed through for the server-entry cross-check in ``store_artifact``.
 
-    ┌─────────────────────────────────────────────────────────────────────────────────┐
-    │ NOT THE TRUTH LANE. ``truth_lane.open_preview`` is the wired entry point (SG-10  │
-    │ wiring) and it is the one a preview surface must call.                            │
-    └─────────────────────────────────────────────────────────────────────────────────┘
+    GATED, via ``truth_lane.open_preview``. It used to store whatever unpacked, which
+    meant an ``adapter-cloudflare`` artifact — whose pages come from a ``_worker.js``
+    nothing here can execute — had its static leftovers served as though they were the
+    site. That is the failure mode a verification preview must not have. The function had
+    no production caller when the gate landed, and closing it then rather than later is
+    the point: whoever eventually wires the obvious-looking "serve an artifact preview"
+    front door has no reason to suspect a gate exists elsewhere that they are skipping.
 
-    This function stores whatever unpacks and hands back an address. It asks no question
-    about whether the artifact can be RENDERED faithfully, so an ``adapter-cloudflare``
-    artifact — whose pages come from a ``_worker.js`` nothing here can execute — stores
-    its static leftovers and serves them as though they were the site. That is the
-    failure mode a verification preview must not have, and it is why the gate lives in
-    ``truth_lane`` rather than being assumed here.
-
-    It is kept UNGATED on purpose rather than delegating: ``resolve``'s own ``_worker.js``
-    refusal is the last line of defence and has to stay reachable over real HTTP, which
-    means something has to be able to store a worker-bearing tree. That is this function,
-    and ``tests/ee/sites/test_artifact_preview_server.py`` is what exercises it.
-    ``tests/ee/sites/test_truth_lane.py::test_the_gate_refuses_what_the_ungated_store_serves``
-    pins the difference between the two so it cannot drift into a surprise.
+    A caller that wants the REASON for a refusal should call ``truth_lane.open_preview``
+    directly — this signature returns ``str | None`` and cannot carry one. ``None`` has
+    always meant "no preview", which is why gating changed no contract here.
 
     SL-1's caveat here said the server-entry cross-check should ask
     ``resolve_emits_server_worker`` against the build dir once the lane had a caller. IT
@@ -356,19 +357,20 @@ def serve_artifact_preview(site_id: str, artifact: bytes | None, *, engine: str)
     sandbox that deletes itself, so no local process ever holds the built project dir to
     resolve against. All that comes back is the artifact.
 
-    So the two halves answer it from different evidence, and both are resolved off the
-    ARTIFACT rather than from an engine name. ``truth_lane`` scans the tar's member names.
-    ``store_artifact`` asks ``engines.expects_server_worker``, a tri-state returning
-    ``None`` for svelte because the name genuinely cannot say which adapter ran — "either
-    shape is legitimate" being the honest answer rather than a warning on every healthy
-    static build. The ``resolve_*`` form stays right for the LOCAL builder path, which
-    does hold a project dir (see ``workers_deploy``)."""
+    So the two halves answer it from different evidence, and neither consults an engine
+    name. ``truth_lane`` scans the tar's member names to decide previewability.
+    ``store_artifact`` asks ``engines.expects_server_worker`` for its cross-check, a
+    tri-state returning ``None`` for svelte because the name genuinely cannot say which
+    adapter ran — "either shape is legitimate" being the honest answer rather than a
+    warning on every healthy static build. The ``resolve_*`` form stays right for the
+    LOCAL builder path, which does hold a project dir (see ``workers_deploy``)."""
+    # Imported inside the function: ``truth_lane`` reaches back here for the loopback base
+    # URL, so a module-level import would close the cycle.
+    from pocketpaw_ee.sites import truth_lane
+
     try:
-        snapshot = artifact_preview.safe_store_artifact(site_id, artifact, engine=engine)
-        if snapshot is None:
-            return None
-        return preview_url_for(site_id)
-    except Exception:  # noqa: BLE001 — ensure_server() is the remaining raiser
+        return truth_lane.open_preview(site_id, artifact, engine=engine).url
+    except Exception:  # noqa: BLE001 — open_preview is total, so this is belt-and-braces
         logger.warning(
             "sites: could not serve an artifact preview for site %s", site_id, exc_info=True
         )

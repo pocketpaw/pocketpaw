@@ -64,6 +64,17 @@
 # two readings of the same bytes that disagree mean one of them is wrong, and the safe
 # response to not knowing which is to serve neither.
 #
+# WHERE THE GATE ACTUALLY LIVES, since 2026-08-10, AND WHY IT IS IN TWO PLACES.
+# ``artifact_preview.store_artifact`` ENFORCES it, because that is the one function every
+# path to disk goes through and a check anywhere else is bypassable by picking a different
+# caller. This module EXPLAINS it: the enforcement can only raise, and a preview surface
+# needs a reason it can show and a decision about what to do with the previous preview.
+# So the scan here is not redundant with the door — it produces the reason, the detail, and
+# the two questions the door does not ask (an absent renderer, a missing entry document) —
+# and the door is what makes the rule impossible to route around. Neither half is
+# sufficient alone, and the rule itself has ONE definition either way:
+# ``ArtifactShape.is_server_rendered``.
+#
 # A REFUSAL ALSO DISCARDS ANY PREVIOUS PREVIEW, which is the non-obvious half. Leaving
 # the last good tree in place would keep answering 200 at the same address for a build
 # that was refused — the truth lane asserting correctness about the wrong build. That is
@@ -78,10 +89,8 @@
 # to be decided. Choosing later is one environment variable, not a rewrite.
 from __future__ import annotations
 
-import io
 import logging
 import os
-import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -89,15 +98,25 @@ from pocketpaw_ee.sites import artifact_preview
 
 # ``_SERVER_ENTRY_NAMES`` is IMPORTED rather than mirrored, private name and all. A local
 # copy plus a drift test is the other option and it is strictly worse here: the two sets
-# have to agree by construction, because a name this gate does not recognise as a server
+# have to agree by construction, because a name this module does not recognise as a server
 # entry is a name ``unpack_artifact`` would happily write into a served tree.
 from pocketpaw_ee.sites.artifact_preview import (
     _SERVER_ENTRY_NAMES as SERVER_ENTRY_NAMES,
 )
+
+# ``ArtifactShape`` / ``scan_artifact`` / the two member names live in
+# ``artifact_preview`` because reading a tarball is that module's job and because
+# ``store_artifact`` needs the same shape to refuse on. Re-exported here so this module
+# still reads as the one place the previewability VOCABULARY is defined.
 from pocketpaw_ee.sites.artifact_preview import (
+    ENTRY_DOCUMENT_NAME,
+    ROUTING_TABLE_NAME,
+    ArtifactNotPreviewable,
     ArtifactRejected,
+    ArtifactShape,
     PreviewSnapshot,
     UnpackedArtifact,
+    scan_artifact,
 )
 from pocketpaw_ee.sites.engines import (
     normalize_engine,
@@ -107,16 +126,6 @@ from pocketpaw_ee.sites.engines import (
 )
 
 logger = logging.getLogger(__name__)
-
-#: ``adapter-cloudflare``'s routing table. Its presence means the build expected a
-#: worker to answer requests. Skipped at unpack by ``artifact_preview`` (it is deploy
-#: configuration, not content) — this module reads it as EVIDENCE, which is a different
-#: job from deciding whether to serve it.
-ROUTING_TABLE_NAME = "_routes.json"
-
-#: The document a preview opens at. An artifact without one has nothing to show, and
-#: saying so beats opening the preview onto its own 404 page.
-ENTRY_DOCUMENT_NAME = "index.html"
 
 # ---------------------------------------------------------------------------
 # Refusal reasons
@@ -303,34 +312,6 @@ def preview_address(site_id: str) -> str | None:
 
 
 @dataclass(frozen=True)
-class ArtifactShape:
-    """What a NAME-LEVEL scan of an artifact found. Nothing is extracted or read.
-
-    Names only, deliberately. The gate's questions ("is there a renderer we cannot
-    run", "is there an entry document") are all answerable from the member list, and
-    the one file whose contents might tempt a reader — the worker bundle, which has
-    carried a substituted per-site signed key — is therefore never opened.
-    """
-
-    entries: int
-    server_entries: tuple[str, ...]
-    routing_tables: tuple[str, ...]
-    has_entry_document: bool
-
-    @property
-    def is_server_rendered(self) -> bool:
-        return bool(self.server_entries)
-
-    @property
-    def declares_absent_renderer(self) -> bool:
-        """A routing table with no worker beside it: the artifact names a renderer it
-        does not contain. Distinct from :attr:`is_server_rendered` because the harm is
-        different — that one is a tree we cannot run, this one is a tree that is not all
-        there — and because a single combined check would report both as one cause."""
-        return bool(self.routing_tables) and not self.server_entries
-
-
-@dataclass(frozen=True)
 class TruthLaneVerdict:
     """Whether an artifact can be previewed faithfully, and why not when it cannot."""
 
@@ -364,61 +345,16 @@ class TruthLanePreview:
         return self.verdict.previewable and self.url is not None
 
 
-def _segments(name: str) -> tuple[str, ...]:
-    """Member name split into path segments, ``.`` and empties dropped.
-
-    ``tar -C <dir> .`` names members ``./x/y``. Backslash is treated as a separator too:
-    a member named ``_app\\_worker.js`` is a single filename on POSIX and a path on
-    Windows, and a gate that read it as a filename would not see the worker at all.
-    ``unpack_artifact`` REFUSES such a member outright, which is the right answer there;
-    here the job is to notice it, so it is split rather than dropped.
-    """
-    return tuple(part for part in name.replace("\\", "/").split("/") if part not in ("", "."))
-
-
-def scan_artifact(artifact: bytes) -> ArtifactShape:
-    """Name-level scan of an artifact tarball.
-
-    Raises :class:`artifact_preview.ArtifactUnreadable` when the bytes are not a
-    readable gzipped tar, so the caller reports the same cause ``unpack_artifact``
-    would.
-    """
-    try:
-        tar = tarfile.open(fileobj=io.BytesIO(artifact), mode="r:gz")
-    except (tarfile.TarError, OSError, EOFError) as exc:
-        raise artifact_preview.ArtifactUnreadable(
-            f"artifact is not a readable gzipped tar: {exc}"
-        ) from exc
-
-    entries = 0
-    server: list[str] = []
-    routes: list[str] = []
-    entry_document = False
-    with tar:
-        for member in tar:
-            segments = _segments(member.name)
-            if not segments:
-                continue
-            entries += 1
-            if any(seg in SERVER_ENTRY_NAMES for seg in segments):
-                server.append("/".join(segments))
-            if segments[-1] == ROUTING_TABLE_NAME:
-                routes.append("/".join(segments))
-            if segments == (ENTRY_DOCUMENT_NAME,):
-                entry_document = True
-    return ArtifactShape(
-        entries=entries,
-        server_entries=tuple(server),
-        routing_tables=tuple(routes),
-        has_entry_document=entry_document,
-    )
-
-
 _SERVER_RENDERED_DETAIL = (
     "This build's pages are produced by a Cloudflare Worker, which a preview cannot "
     "run — it serves files, and it has no database binding or sign-in gate. The static "
     "files packaged beside that worker are not the pages your visitors would see, so "
     "showing them would misrepresent the site. Publish it to see the real thing."
+)
+
+_DISAGREED_DETAIL = (
+    "The build output could not be checked consistently, so it is not being previewed. "
+    "This is a packaging problem on our side."
 )
 
 _INCOMPLETE_DETAIL = (
@@ -580,6 +516,19 @@ def open_preview(site_id: str, artifact: bytes | None, *, engine: str) -> TruthL
         snapshot: PreviewSnapshot = artifact_preview.store_artifact(
             site_id, artifact, engine=normalized, expect_server_worker=False
         )
+    except ArtifactNotPreviewable as exc:
+        # THE DOOR refused what THIS module's scan admitted. Both read the same bytes with
+        # the same scan, so they can only disagree if one of them has been broken — which
+        # makes this the same fact as the post-store cross-check below, and it gets the
+        # same reason. Listed before ``ArtifactRejected`` because it is a subclass of it.
+        logger.error(
+            "sites.truth_lane: site %s's artifact passed this module's scan and was then "
+            "refused at the door (%s) — refusing rather than serving a tree we cannot "
+            "vouch for",
+            site_id,
+            exc,
+        )
+        return _refused(site_id, normalized, _refuse(REASON_GATE_DISAGREED, _DISAGREED_DETAIL))
     except ArtifactRejected as exc:
         # The store REFUSED the artifact — a typed, expected outcome (too large, unsafe
         # member, bad site id). Reported separately from the clause below because they
@@ -621,14 +570,7 @@ def open_preview(site_id: str, artifact: bytes | None, *, engine: str) -> TruthL
             ", ".join(snapshot.unpacked.server_entries),
         )
         return _refused(
-            site_id,
-            normalized,
-            _refuse(
-                REASON_GATE_DISAGREED,
-                "The build output could not be checked consistently, so it is not being "
-                "previewed. This is a packaging problem on our side.",
-                verdict.shape,
-            ),
+            site_id, normalized, _refuse(REASON_GATE_DISAGREED, _DISAGREED_DETAIL, verdict.shape)
         )
 
     return TruthLanePreview(
@@ -662,6 +604,7 @@ __all__ = [
     "REASON_STORE_FAILED",
     "ROUTING_TABLE_NAME",
     "SERVER_ENTRY_NAMES",
+    "ArtifactNotPreviewable",
     "ArtifactShape",
     "PreviewExposureNotConfigured",
     "TruthLanePreview",
