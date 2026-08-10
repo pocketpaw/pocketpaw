@@ -1,9 +1,9 @@
 [
   {
-    "label": "the react engine stops being selectable (create falls back to html and the skill is unreachable)",
+    "label": "the react engine stops being selectable (create falls back to html, the skill is unreachable, and a react refine loses its own branch)",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "    if engine not in (\"html\", \"svelte\", \"ripple\", \"react\"):",
-    "replace": "    if engine not in (\"html\", \"svelte\", \"ripple\"):",
+    "find": "_SITE_ENGINES: tuple[str, ...] = (\"html\", \"svelte\", \"ripple\", \"react\")",
+    "replace": "_SITE_ENGINES: tuple[str, ...] = (\"html\", \"svelte\", \"ripple\")",
     "tests": [
       "tests/cloud/surface/test_sites_handler.py::test_create_mode_engine_react_prefers_create_react_site_skill"
     ]

@@ -185,10 +185,10 @@
     ]
   },
   {
-    "label": "the react refine preamble is dropped, so a react site's chat is told to merge a rippleSpec it does not have",
+    "label": "the react refine branch is dropped, so a react site's chat cannot name its edit tool and falls back to the engine-unknown routing table",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "    if (meta.engine or \"\").lower() == \"react\":",
-    "replace": "    if False:",
+    "find": "    elif engine == \"react\":  # RX-3's `_react_refine_preamble`, folded in here",
+    "replace": "    elif False:  # RX-3's `_react_refine_preamble`, folded in here",
     "tests": [
       "tests/cloud/surface/test_sites_handler.py::test_react_refine_names_the_edit_tool_and_not_the_ripple_merge",
       "tests/cloud/surface/test_sites_handler.py::test_react_refine_carries_the_prerender_and_write_scope_rules"
