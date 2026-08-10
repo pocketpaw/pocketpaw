@@ -138,6 +138,28 @@
 # site correctly leaves it still. The sub-builders keep returning ``str``; only
 # the entry point answers the key.
 
+# Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — the react track finally
+# has an EDIT tool, and two preambles were telling the agent the wrong thing about
+# changing a react site:
+#   * `_create_preamble`'s react `build_step` now says that any change after the
+#     create goes through `mcp__pocketpaw_sites_manager__edit_react_component` with
+#     the same pocket_id, NOT a second `create_react_site`. That is the reported
+#     bug: with no edit tool registered, a follow-up "shorten the hero headline"
+#     had one available move, and it minted a SECOND site pocket while the site the
+#     user was looking at stayed unchanged.
+#   * `_refine_preamble` now routes a react site to the new
+#     `_react_refine_preamble`. The existing refine preamble names
+#     `mcp__pocketpaw_pocket_specialist__edit` and then enumerates five rules about
+#     ripple WIDGETS; a react pocket has no rippleSpec, so on that engine the
+#     instruction is not merely useless, it points at a merge with nothing to merge
+#     into. Per pocketpaw/CLAUDE.md, naming an existing-but-WRONG tool is the same
+#     defect as naming an absent one. The react preamble replaces the widget rules
+#     with the prerender rule (the same hazard in React spelling) and the
+#     src/+public/ write scope the tool actually enforces.
+# The refine fork reads `meta.engine`, which is documented as the CREATE hint, so it
+# only fires when the per-site chat client stamps it — see
+# `_react_refine_preamble`'s docstring. Absent it, refine behaves exactly as before.
+
 from __future__ import annotations
 
 import functools
@@ -395,7 +417,19 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "rippleSpec and NO widget catalog on this track — do not draft a "
             "rippleSpec or call the pocket specialist, and there is no "
             "`/api/submit` route (no server runtime), so a lead form is a native "
-            "`<form>` with flat named fields."
+            "`<form>` with flat named fields.\n"
+            "CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further "
+            "change the user asks for in this conversation — 'shorten the hero "
+            "headline', 'darker pricing cards', 'add a testimonials section' — is "
+            "`mcp__pocketpaw_sites_manager__edit_react_component` with the SAME "
+            "pocket_id, NOT a second `create_react_site` call. Calling create again "
+            "mints a SECOND site and leaves the one the user is looking at "
+            "unchanged. Send a targeted `edits` diff for a small change; to add a "
+            "section, call it with `create=true` for the new "
+            "`src/components/<Name>.tsx` and then again with `edits` on "
+            "`src/App.tsx` to render it. The edit saves to the DRAFT — it does not "
+            "publish, so keep offering the Preview rather than announcing a live "
+            "change."
         )
     elif engine == "ripple":
         engine_note = " The page is rendered STATICALLY (no JavaScript runs for the visitor)."
@@ -585,13 +619,106 @@ def _create_preamble(meta: SurfaceMeta) -> str:
     )
 
 
+def _react_refine_preamble(meta: SurfaceMeta) -> str:
+    """The /sites/[siteId] refine preamble for a REACT site (RX-3).
+
+    Its own function rather than a branch inside ``_refine_preamble`` because
+    almost nothing in that preamble is true here. That one tells the agent to
+    apply the change via ``mcp__pocketpaw_pocket_specialist__edit`` and then
+    enumerates five rules about ripple WIDGETS (``pricing-table`` uses ``tiers``,
+    never the ``accordion`` widget, Tier-0 animation names). A react site has no
+    rippleSpec at all, so on this engine every one of those is either inert or
+    actively wrong: the specialist edit path would try to merge a spec the pocket
+    does not have. Per pocketpaw/CLAUDE.md, naming an existing-but-WRONG tool is
+    the same defect as naming an absent one — the model does not error, it
+    improvises.
+
+    The prerender rule replaces the SSR widget rules, because it is the react
+    spelling of the same hazard: ``useEffect`` does not run at prerender time, so
+    a resting state set only in an effect bakes as the initial value.
+
+    REACHABILITY CAVEAT, worth knowing before trusting this in production:
+    ``SurfaceMeta.engine`` is documented as the /sites CREATE hint (the engine
+    toggle), and ``resolve_profile`` deliberately ignores it once ``pocket_id`` is
+    set. So this branch only renders when the per-site chat client actually stamps
+    ``engine="react"`` on the surface meta. When it does not, refine falls through
+    to the ripple preamble below exactly as it does today — no regression, but the
+    react-correct instructions do not arrive either. Sending the engine from the
+    /sites/[siteId] client is the follow-up that finishes this.
+    """
+    route = meta.route_path or "/sites"
+    pocket_id = meta.pocket_id or ""
+    return (
+        f'<surface kind="sites" route="{route}" pocket="{pocket_id}" '
+        'engine="react" mode="refine" />\n'
+        "<sites-orientation>\n"
+        f"The user is REFINING an EXISTING React Paw Site (source pocket "
+        f"`{pocket_id}`) — a real standalone marketing website whose pages are "
+        "hand-written React components PRERENDERED to static HTML at build time. "
+        "They are on its per-site chat asking for a CHANGE to that page. Do NOT "
+        "rebuild the site from scratch, do NOT create a new site or a new pocket, "
+        "and do NOT treat it as an in-app dashboard pocket. Talk about it as a "
+        "'site' or 'page' — never a 'pocket'.\n"
+        "</sites-orientation>\n"
+        "<sites-procedure>\n"
+        "ASK, DON'T ASSUME: if the requested edit is ambiguous, or applying it "
+        "needs a real fact you don't have (new copy, a price, a section's "
+        "content, or which of several interpretations the user means), call "
+        "`mcp__pocketpaw_ask__ask_user` with a one-line question and 3–5 short "
+        "options (include a 'you decide' option) instead of guessing — and NEVER "
+        "fabricate real-world facts (testimonials, stats, prices, addresses, "
+        "contact details).\n"
+        "APPLY THE CHANGE with "
+        "`mcp__pocketpaw_sites_manager__edit_react_component`, passing pocket_id "
+        f"`{pocket_id}`. That is the ONLY way to change this site. Do NOT call "
+        "`create_react_site` (it mints a SECOND site and leaves this one "
+        "untouched), and do NOT call `mcp__pocketpaw_pocket_specialist__edit` or "
+        "any rippleSpec merge — a React site has no rippleSpec, so there is "
+        "nothing for those to edit.\n"
+        "Send a targeted `edits` diff — a list of {old_string, new_string} blocks "
+        "where each old_string is copied VERBATIM from the current file and "
+        "matches exactly once — rather than the whole file, and read the file "
+        "first if you have not this turn. To ADD a section, call the tool twice: "
+        "once with `create=true` and `new_source` for the new "
+        "`src/components/<Name>.tsx`, then once with `edits` on `src/App.tsx` to "
+        "import and render it.\n"
+        "YOU MAY ONLY WRITE under `src/` (outside `src/paw/`) and `public/`. "
+        "`index.html`, `package.json`, `vite.config.ts`, `paw-prerender.mjs` and "
+        "`src/paw/` are GENERATED and will be rejected — they carry the prerender "
+        "contract and the dependency list. The project has react, react-dom and "
+        "vite and NOTHING else: no router, no CSS framework, no state or "
+        "animation library, and no way to add a dependency, so build the change "
+        "with what is there.\n"
+        "PRERENDER RULE: every component must render its resting/final state in "
+        "its RETURNED MARKUP. `useEffect` does not run at prerender time, so a "
+        "count-up initialized to 0 bakes '0' — initialize it to the final value. "
+        "Keep any motion CSS-only unless the site already ships client "
+        "JavaScript.\n"
+        "THE EDIT IS A DRAFT. It does NOT publish and does NOT start a build, so "
+        "never tell the user the change is live. Point them at the in-app Preview "
+        "under /sites and offer to publish; call "
+        "`mcp__pocketpaw_sites_manager__publish` only when they ask to go live, "
+        "and then relay the real result — no phantom URLs. Keep talking 'site' / "
+        "'page', never 'pocket'.\n"
+        "</sites-procedure>\n"
+        f"{_CONCIERGE_NOTE}"
+    )
+
+
 def _refine_preamble(meta: SurfaceMeta) -> str:
     """The /sites/[siteId] refine preamble — edit an EXISTING published site.
 
     Landing-aware: mirrors the create-paw-site brain's structure + 5 SSR rules
     so an edit can't reintroduce a static-site trap. Carries the source
     ``pocket_id`` so the agent edits the right pocket in place.
+
+    RX-3: a react site routes to ``_react_refine_preamble`` instead, because this
+    preamble's edit instruction (``mcp__pocketpaw_pocket_specialist__edit``) and
+    its five ripple-widget rules are all about a rippleSpec a react pocket does
+    not have. See that function for the ``meta.engine`` reachability caveat.
     """
+    if (meta.engine or "").lower() == "react":
+        return _react_refine_preamble(meta)
     route = meta.route_path or "/sites"
     pocket_id = meta.pocket_id or ""
     return (
@@ -862,4 +989,10 @@ def _chat_preamble(meta: SurfaceMeta) -> str:
     )
 
 
-__all__ = ["build_preamble", "_create_preamble", "_frontend_preamble", "_chat_preamble"]
+__all__ = [
+    "build_preamble",
+    "_create_preamble",
+    "_frontend_preamble",
+    "_chat_preamble",
+    "_react_refine_preamble",
+]

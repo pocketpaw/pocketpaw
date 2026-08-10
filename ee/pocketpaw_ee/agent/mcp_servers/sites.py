@@ -30,6 +30,17 @@
 # automatically. Opt-in — the default marketing brain stays create_landing_site
 # (ripple); the default flip to html is HE-12.
 #
+# Updated 2026-08-11 (RX-3 — the react track gets an EDIT lane): the
+# ``edit_react_component`` tool also registers on this SAME server (built via the
+# factory in sites_create.py), so create → publish → edit sit together for react
+# exactly as they do for svelte. Before it, ``edit_svelte_component`` was the ONLY
+# edit tool on the server: a react site could be created and published but never
+# changed, so the agent answered "shorten the hero headline" by calling
+# ``create_react_site`` again and minting a SECOND site pocket. It writes ONE file
+# of the pocket's react source map as a reviewable DRAFT — no republish, no build
+# enqueued (a react publish is async, so there is no synchronous outcome to gate
+# on). Its id rides ``SITES_TOOL_IDS``, so the per-surface allowlist picks it up.
+#
 # Updated 2026-08-07 (RX-2 — the agent can select the react engine): the
 # ``create_react_site`` tool also registers on this SAME server. A react site is a
 # {path: contents} map of hand-written React files; publish runs a Vite SSG build
@@ -100,6 +111,10 @@ CREATE_HTML_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_html_site"
 # sites_create.py). A react site is a {path: contents} map of hand-written React
 # files; publish runs a Vite SSG build that prerenders it to a static dist/.
 CREATE_REACT_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_react_site"
+# The targeted react-component edit tool (RX-3) — also registers on this SAME
+# server (see sites_create.py). It writes ONE file of a react site's source map as a
+# reviewable DRAFT; it does NOT publish and does NOT enqueue a build.
+EDIT_REACT_COMPONENT_TOOL_ID = f"mcp__{SERVER_NAME}__edit_react_component"
 
 SITES_TOOL_IDS = (
     PUBLISH_TOOL_ID,
@@ -109,6 +124,7 @@ SITES_TOOL_IDS = (
     CREATE_DYNAMIC_SITE_TOOL_ID,
     CREATE_HTML_SITE_TOOL_ID,
     CREATE_REACT_SITE_TOOL_ID,
+    EDIT_REACT_COMPONENT_TOOL_ID,
 )
 
 
@@ -279,6 +295,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
         make_create_landing_site_tool,
         make_create_react_site_tool,
         make_create_svelte_site_tool,
+        make_edit_react_component_tool,
         make_edit_svelte_component_tool,
     )
 
@@ -302,6 +319,11 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     # html: the tool steers the agent to it only on an explicit React request or a
     # genuine interactivity need.
     create_react_site = make_create_react_site_tool(tool)
+    # The react-track EDIT tool (RX-3) — same server, so create → publish → edit
+    # sit together for react exactly as they do for svelte. Registering it is what
+    # stops the agent answering "shorten the hero headline" with a second
+    # create_react_site call and a second site pocket.
+    edit_react_component = make_edit_react_component_tool(tool)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
@@ -314,6 +336,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             create_dynamic_site,
             create_html_site,
             create_react_site,
+            edit_react_component,
         ],
     )
     return SERVER_NAME, server
@@ -325,6 +348,7 @@ __all__ = [
     "CREATE_LANDING_SITE_TOOL_ID",
     "CREATE_REACT_SITE_TOOL_ID",
     "CREATE_SVELTE_SITE_TOOL_ID",
+    "EDIT_REACT_COMPONENT_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "PUBLISH_TOOL_ID",
     "SERVER_NAME",

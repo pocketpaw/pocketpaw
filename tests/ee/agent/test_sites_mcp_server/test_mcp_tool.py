@@ -5,6 +5,12 @@
 # allowlist publication) plus per-handler tests that mock the identity
 # ContextVars + the shared publish_pocket service and inspect the MCP envelope
 # the SDK returns to the agent.
+#
+# Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — the registration test now
+# pins the EIGHTH tool id on this server, ``edit_react_component``. The count
+# assertion did its job here: adding the tool failed this test before anything else,
+# which is exactly the decision point it exists to force (SITES_TOOL_IDS feeds the
+# /sites surface allow-list, so a new id widens what the agent can reach).
 """MCP server registration + handler tests for the Paw Sites publish tool."""
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ class TestSitesMcpServerRegistration:
             CREATE_LANDING_SITE_TOOL_ID,
             CREATE_REACT_SITE_TOOL_ID,
             CREATE_SVELTE_SITE_TOOL_ID,
+            EDIT_REACT_COMPONENT_TOOL_ID,
             EDIT_SVELTE_COMPONENT_TOOL_ID,
             PUBLISH_TOOL_ID,
             SERVER_NAME,
@@ -53,6 +60,10 @@ class TestSitesMcpServerRegistration:
         assert CREATE_HTML_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_html_site"
         # RX-2 — the react-track create tool, the 5th create tool on this server.
         assert CREATE_REACT_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_react_site"
+        # RX-3 — the react-track EDIT tool, the SECOND edit tool on this server.
+        # Its absence was the whole react-edit hole: with only the svelte edit tool
+        # registered, a react site could be created and published but never changed.
+        assert EDIT_REACT_COMPONENT_TOOL_ID == "mcp__pocketpaw_sites_manager__edit_react_component"
         assert PUBLISH_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_LANDING_SITE_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_SVELTE_SITE_TOOL_ID in SITES_TOOL_IDS
@@ -60,10 +71,11 @@ class TestSitesMcpServerRegistration:
         assert CREATE_DYNAMIC_SITE_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_HTML_SITE_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_REACT_SITE_TOOL_ID in SITES_TOOL_IDS
+        assert EDIT_REACT_COMPONENT_TOOL_ID in SITES_TOOL_IDS
         # The count is deliberate: adding a tool here widens the /sites surface
         # allow-list (SITES_TOOL_IDS feeds it), so a new id must be a decision,
         # not a side effect. Bump it WITH an id assertion above — never alone.
-        assert len(SITES_TOOL_IDS) == 7
+        assert len(SITES_TOOL_IDS) == 8
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk

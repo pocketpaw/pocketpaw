@@ -55,16 +55,16 @@
   },
   {
     "label": "the reserved-path guard stops normalizing, so ./index.html overwrites the prerender template",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
-    "find": "        norm = posixpath.normpath(key.replace(\"\\\\\", \"/\"))",
-    "replace": "        norm = key",
+    "file": "ee/pocketpaw_ee/sites/react_paths.py",
+    "find": "    return posixpath.normpath(path.replace(\"\\\\\", \"/\"))",
+    "replace": "    return path",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_create_react_site.py::TestReservedPathRejection"
     ]
   },
   {
     "label": "the reserved guard matches by prefix, locking the author out of src/pawprint.ts",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "file": "ee/pocketpaw_ee/sites/react_paths.py",
     "find": "REACT_RESERVED_PREFIX = \"src/paw/\"",
     "replace": "REACT_RESERVED_PREFIX = \"src/paw\"",
     "tests": [

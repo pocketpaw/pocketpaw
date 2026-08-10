@@ -229,6 +229,20 @@ run-tool route can read the allowlist off the credential row.
 ``get_pocket_backend_for_executor`` APPENDS ``allowed_tools`` as the 9th tuple
 element (back-compatible — every existing positional destructure uses ``*_``).
 
+Changes: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — added
+``set_react_source_file``, the react peer of ``set_svelte_source_file`` and the
+only place a react ``source`` map is written after create. Until this existed the
+react track had NO edit path at all — ``set_svelte_source_file`` rejects a react
+pocket with ``pocket.not_svelte_site``, so the chat agent's only response to
+"shorten the hero headline" was a second ``create_react_site``, which minted a
+SECOND site pocket. It mirrors the svelte peer on access
+(``_check_domain_edit_access``), the fresh-dict reassignment for ODM dirty
+tracking, ``emit(PocketUpdated(...))`` and the best-effort draft
+``ArtifactVersion`` snapshot, and diverges in exactly two ways: a ``create`` flag
+(a new component FILE is needed to add a section, and it INVERTS the path check
+rather than relaxing it — ``create=False`` demands the path exist, ``create=True``
+demands it not), and it returns only the wire dict, because the react lane has no
+republish to roll back from.
 Changes: 2026-06-17 (feat/sites-svelte-component-edit, SE-2) — added
 ``set_svelte_source_file``: rewrite ONE file in a svelte-engine pocket's
 ``source`` map (the {path: contents} hand-written SvelteKit files) and persist
@@ -2179,6 +2193,83 @@ async def set_svelte_source_file(
     # versioning is an additive history layer, never a gate on the edit.
     await _record_pocket_svelte_draft_version(doc, author=user_id)
     return await _resolved_wire_dict(doc, user_id), previous_source
+
+
+async def set_react_source_file(
+    pocket_id: str,
+    user_id: str,
+    *,
+    component_path: str,
+    new_source: str,
+    create: bool = False,
+) -> dict:
+    """Write ONE file in a react-engine pocket's ``source`` map and persist it.
+
+    The react peer of ``set_svelte_source_file``, and the only place a react
+    ``source`` map is written after create — the Pocket Beanie write stays inside
+    the pockets service (entity isolation: the sites service resolves the edit and
+    orchestrates, but never touches the Pocket model).
+
+    Access mirrors ``update`` / ``set_svelte_source_file``: explicit
+    ``(pocket_id, user_id)`` with ``_check_domain_edit_access`` (owner /
+    shared_with / workspace-visible). A missing pocket raises ``NotFound``.
+
+    ``create`` is the one place this DIVERGES from the svelte peer, and it exists
+    because "add a testimonials section" needs a new component FILE plus an edit to
+    ``src/App.tsx`` — with an existence-only contract the agent could not add a
+    section at all. It flips the path check rather than relaxing it, so exactly one
+    of the two mistakes is impossible in each mode:
+
+      * ``create=False`` (default) — ``component_path`` MUST already exist, else
+        ``NotFound`` (404) on the component. A typo'd path is never a silent create.
+      * ``create=True`` — ``component_path`` must NOT already exist, else
+        ``ValidationError`` (422). Silently overwriting a real component the agent
+        thought it was adding is worse than a rejected call it can retry.
+
+    A non-react pocket (``engine != "react"`` or no ``source`` map) is a
+    ``ValidationError`` (422, ``pocket.not_react_site``) rather than a write against
+    the wrong content model.
+
+    Returns the resolved wire dict every other write returns. Unlike the svelte peer
+    it does NOT also return the file's prior contents: that value exists there only
+    so the caller can roll back a failed republish, and the react edit lane has no
+    republish to fail (``build_runs_async("react")`` is True — a react publish
+    enqueues a Daytona build and returns before any outcome exists). Persisting the
+    draft IS the whole job.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    if getattr(doc, "engine", "ripple") != "react" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_react_site",
+            "This pocket is not a react Paw Site — it has no component source map to edit.",
+        )
+    exists = component_path in doc.source
+    if create and exists:
+        raise ValidationError(
+            "pocket.react_component_exists",
+            f"`{component_path}` already exists in this site's source map. Edit it "
+            "without `create` instead of overwriting it.",
+        )
+    if not create and not exists:
+        raise NotFound("site_component", component_path)
+
+    # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a
+    # dict field is not always detected as dirty by the ODM) — same note as
+    # ``set_svelte_source_file``.
+    updated = dict(doc.source)
+    updated[component_path] = new_source
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    # Branch primitive (BP-3): a source-map edit ALSO writes a draft
+    # ArtifactVersion snapshotting the FULL map, so the edit is a reviewable draft
+    # a later publish promotes. The helper is engine-agnostic (it snapshots
+    # ``doc.source`` whatever engine wrote it); same best-effort contract — an
+    # additive history layer, never a gate on the edit.
+    await _record_pocket_svelte_draft_version(doc, author=user_id)
+    return await _resolved_wire_dict(doc, user_id)
 
 
 async def set_imported_source(
@@ -5742,6 +5833,7 @@ __all__ = [
     "set_pocket_backend",
     "set_pocket_connector_permissions",
     "set_pocket_write_policy",
+    "set_react_source_file",
     "set_svelte_source_file",
     "unassign_project_on_pockets",
     "update",
