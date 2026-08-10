@@ -6,6 +6,14 @@
 # where a build got to, and a guard that stops two publishes of the same site racing
 # into two sandboxes.
 #
+# Edited 2026-08-10 (SL-2 — the captain ruled Daytona is ALWAYS the build host, which
+# supersedes the SG-12 verdict's "do not wire it yet"): added :func:`settle`, the
+# missing half of this module. It could say whether to START a build and not what to
+# write when one ENDED, so every classification ``daytona_build.classify_build``
+# computed died at the boundary. The paired field is ``Site.build_reason``, which
+# carries the rung name — a terminal ``failed`` with no reason cannot distinguish "the
+# user's code broke" from "we lost the container", and those need opposite handling.
+#
 # MODELLED ON DP0-4 (``sites/service.py:_provisioning_is_stale``) because that pattern
 # already solved the hard half correctly: status alone is a ONE-WAY DOOR. A job that no
 # worker ever consumed, or that died before writing a terminal status, pins the row in
@@ -147,6 +155,43 @@ def is_in_flight(doc: Any) -> bool:
     return getattr(doc, "build_status", None) in IN_FLIGHT_STATUSES
 
 
+def settle(
+    outcome: str,
+    *,
+    retryable: bool,
+    attempts_left: int,
+) -> BuildStatus | None:
+    """The status one attempt's verdict should leave on the row — or ``None`` to retry.
+
+    SL-2. The missing half of this module: it could already say whether to START a build
+    and never what to write when one ENDS, so every classification the lane computed
+    died at the boundary.
+
+    ``None`` MEANS "STAY IN FLIGHT", and it is the whole reason this returns an optional
+    rather than a status. A retryable outcome with attempts left must NOT be written as
+    ``failed`` even briefly: ``should_enqueue`` treats a terminal status as free to
+    re-publish, so a transient ``failed`` between attempts is an invitation for a second
+    sandbox to start on top of the retry — two bills, two artifacts racing to deploy,
+    the exact case the single-flight guard exists to prevent.
+
+    THE ASYMMETRY IS DELIBERATE AND OPPOSITE TO ``build_is_stale``'s. There, an unknown
+    reads as stale (act) because a stuck guard is worse than a redundant build. Here, an
+    unrecognised outcome reads as ``failed`` (stop) because the alternative is retrying
+    something we cannot classify, forever, at one sandbox per attempt. Both pick the
+    direction whose worst case is bounded; they just point different ways.
+
+    ``attempts_left`` is what the caller has, not what it wishes it had: retry/backoff
+    does not exist in the lane yet, so today every caller passes 0 and a retryable
+    failure settles immediately. That is honest rather than aspirational — when an
+    attempt loop lands it passes a real number and this function needs no change.
+    """
+    if outcome == "completed_ok":
+        return "built"
+    if retryable and attempts_left > 0:
+        return None
+    return "failed"
+
+
 __all__ = [
     "IN_FLIGHT_STATUSES",
     "STALE_MARGIN",
@@ -154,6 +199,7 @@ __all__ = [
     "BuildStatus",
     "build_is_stale",
     "is_in_flight",
+    "settle",
     "should_enqueue",
     "stale_after",
 ]

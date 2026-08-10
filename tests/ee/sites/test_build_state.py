@@ -213,3 +213,60 @@ class TestTheWireCarriesTheState:
             "built",
             "failed",
         }
+
+
+class TestSettle:
+    """SL-2 — what one attempt's verdict writes to the row.
+
+    The load-bearing case is ``None``, not the happy path: a retryable failure with
+    attempts left must stay IN FLIGHT, because ``should_enqueue`` reads any terminal
+    status as free to re-publish. Writing ``failed`` between attempts invites a second
+    sandbox on top of the retry.
+    """
+
+    def test_success_settles_as_built(self) -> None:
+        assert bs.settle("completed_ok", retryable=False, attempts_left=0) == "built"
+
+    def test_a_user_build_failure_settles_as_failed(self) -> None:
+        assert bs.settle("build_failed", retryable=False, attempts_left=0) == "failed"
+
+    def test_a_retryable_failure_with_attempts_left_stays_in_flight(self) -> None:
+        # None, NOT "failed" — see the class docstring for why a transient terminal
+        # status is worse than staying in flight.
+        assert bs.settle("infra_lost", retryable=True, attempts_left=2) is None
+        assert bs.settle("timed_out", retryable=True, attempts_left=1) is None
+
+    def test_a_retryable_failure_with_no_attempts_left_settles_as_failed(self) -> None:
+        # Today's real path: no attempt loop exists, so every caller passes 0.
+        assert bs.settle("infra_lost", retryable=True, attempts_left=0) == "failed"
+        assert bs.settle("timed_out", retryable=True, attempts_left=0) == "failed"
+
+    def test_success_settles_even_with_attempts_left(self) -> None:
+        """A success must never be held open by a retry budget it does not need."""
+        assert bs.settle("completed_ok", retryable=True, attempts_left=5) == "built"
+
+    def test_an_unrecognised_outcome_settles_as_failed_rather_than_retrying(self) -> None:
+        """The opposite asymmetry to ``build_is_stale``, and deliberately so: an
+        unknown status there reads as stale (act), because a stuck guard costs every
+        future publish. Here an unknown outcome stops, because retrying something we
+        cannot classify costs one sandbox per attempt without bound."""
+        assert bs.settle("who_knows", retryable=False, attempts_left=0) == "failed"
+        assert bs.settle("", retryable=False, attempts_left=3) == "failed"
+
+    def test_every_settled_status_is_terminal(self) -> None:
+        """The invariant tying this to the rest of the module: settle must never leave a
+        row in an IN_FLIGHT status, or the build is finished and the guard still blocks."""
+        for outcome in ("completed_ok", "build_failed", "timed_out", "infra_lost", "??"):
+            for retryable in (True, False):
+                got = bs.settle(outcome, retryable=retryable, attempts_left=0)
+                assert got is not None
+                assert got in bs.TERMINAL_STATUSES, (outcome, retryable, got)
+
+    def test_the_reason_field_exists_to_carry_the_rung(self) -> None:
+        """``settle`` names the status; the rung name rides ``build_reason``. Without
+        that field a terminal failure cannot say whether the user's code broke or we
+        lost the container — the two need opposite handling."""
+        from pocketpaw_ee.cloud.models.site import Site
+
+        assert "build_reason" in Site.model_fields
+        assert Site.model_fields["build_reason"].default is None

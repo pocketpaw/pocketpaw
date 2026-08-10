@@ -269,6 +269,24 @@ class Site(TimestampedDocument):
     # on reload a transient id is gone, so the client loses its polling handle at the
     # precise moment the wait is longest.
     build_job_id: str | None = None
+    # SL-2: WHY the build reached ``build_status``. The rung name from
+    # ``daytona_build.classify_build`` — ``build_failed`` / ``timed_out`` /
+    # ``infra_lost`` / ``completed_ok`` — plus, for a user-blamed failure, the short
+    # cause the classifier extracted.
+    #
+    # THIS FIELD IS WHAT MAKES A TERMINAL FAILURE HONEST. Without it every
+    # classification the lane computes dies at the boundary: the row can say ``failed``
+    # and nothing can say whether the user's code broke or we lost the container. Those
+    # two need OPPOSITE handling — one is the user's to fix, the other is ours to retry
+    # — so a ``failed`` with no reason is not a smaller error, it is an unactionable
+    # one, and the fallback ("your build failed") is exactly the mis-report the whole
+    # sentinel design exists to prevent.
+    #
+    # SAFE TO SURFACE. It carries a fixed rung name, never raw stderr: a build's error
+    # text is the user's own code and can contain anything, including a token pasted
+    # into a config. The stderr tail stays in logs. Same reasoning as
+    # ``jobs/worker.py``'s ``_safe_failure_message``.
+    build_reason: str | None = None
     # BC-9: per-site annual plan (the Webflow model — each published site has its
     # OWN recurring annual plan on a tier, distinct from the workspace plan).
     # ``plan_tier`` is the site-plan catalog key (basic | pro | business — see
