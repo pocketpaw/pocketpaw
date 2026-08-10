@@ -348,26 +348,45 @@ def test_a_refused_artifact_leaves_no_bytes_of_its_worker_on_disk(previews):
     assert found == []
 
 
-def test_the_gate_and_the_unpack_must_agree(monkeypatch):
-    """Two readings of the same bytes that disagree mean one of them is wrong, and
-    nothing here can tell which — so serve neither."""
-    real_scan = tl.scan_artifact
+def _lying_scan(real):
+    """A scan that reports every artifact as a clean, self-contained static tree."""
 
-    def lying_scan(artifact: bytes) -> tl.ArtifactShape:
-        shape = real_scan(artifact)
-        return tl.ArtifactShape(
+    def scan(artifact: bytes) -> ap.ArtifactShape:
+        shape = real(artifact)
+        return ap.ArtifactShape(
             entries=shape.entries,
             server_entries=(),
             routing_tables=(),
             has_entry_document=True,
         )
 
-    monkeypatch.setattr(tl, "scan_artifact", lying_scan)
+    return scan
+
+
+def test_a_reason_layer_that_disagrees_with_the_door_refuses(monkeypatch):
+    """Two readings of the same bytes that disagree mean one of them is wrong, and nothing
+    here can tell which — so serve neither. This is the DOOR catching it: only the
+    reason-layer scan is broken, and ``store_artifact`` refuses on its own reading."""
+    monkeypatch.setattr(tl, "scan_artifact", _lying_scan(tl.scan_artifact))
 
     result = tl.open_preview("disagree1", _tar(_SVELTE_DYNAMIC_CLOUDFLARE), engine="svelte")
 
     assert result.verdict.reason == tl.REASON_GATE_DISAGREED
     assert not ap.has_preview("disagree1")
+
+
+def test_a_scan_that_disagrees_with_the_unpack_refuses(monkeypatch):
+    """And this is the POST-STORE cross-check catching it, which is the layer that
+    survives when the scan itself is what is broken. ``_member_segments`` and
+    ``_normalized_member_path`` are genuinely different readers of the same names, so this
+    is not a tautology: with the scan blinded, the unpack is what still sees the worker."""
+    monkeypatch.setattr(ap, "scan_artifact", _lying_scan(ap.scan_artifact))
+    monkeypatch.setattr(tl, "scan_artifact", ap.scan_artifact)
+
+    result = tl.open_preview("disagree2", _tar(_SVELTE_DYNAMIC_CLOUDFLARE), engine="svelte")
+
+    assert result.verdict.reason == tl.REASON_GATE_DISAGREED
+    assert not ap.has_preview("disagree2")
 
 
 # ---------------------------------------------------------------------------
@@ -399,17 +418,179 @@ def test_a_missing_page_is_a_404_not_the_home_page():
     assert b"<title>Acme</title>" not in missing.body
 
 
-def test_the_gate_refuses_what_the_ungated_store_serves(previews, monkeypatch):
-    """Pins the difference ``local_server.serve_artifact_preview``'s docstring names.
+# ---------------------------------------------------------------------------
+# The gate is at the DISK BOUNDARY, so no call path routes around it
+# ---------------------------------------------------------------------------
 
-    The ungated store exists so ``resolve``'s own ``_worker.js`` refusal stays reachable
-    over HTTP, which needs something able to store a worker-bearing tree. That is a
-    deliberate seam, not an oversight, and this is what keeps it from drifting into a
-    surprise: the same artifact, stored by one path and refused by the other.
+
+def test_the_store_itself_refuses_a_worker_bearing_artifact():
+    """The gate is enforced in ``store_artifact`` — the one function every path to disk
+    goes through — rather than only in the surface above, because a check anywhere else is
+    bypassable by picking a different caller."""
+    with pytest.raises(ap.ArtifactNotPreviewable):
+        ap.store_artifact("door1", _tar(_SVELTE_DYNAMIC_CLOUDFLARE), engine="svelte")
+
+    assert not ap.has_preview("door1")
+
+
+def test_the_store_refuses_before_it_writes_anything(previews):
+    """A refusal that unpacked first and cleaned up afterwards would leave a window where
+    the tree is live at the preview address, and would touch the disk on every hostile
+    artifact. Nothing is written at all — not even the hidden incoming sibling."""
+    root = previews / "site-previews"
+    with pytest.raises(ap.ArtifactNotPreviewable):
+        ap.store_artifact("door2", _tar(_SVELTE_DYNAMIC_CLOUDFLARE), engine="svelte")
+
+    # Stronger than "no tree for door2": the refusal happens before ``previews_home()`` is
+    # consulted, so it does not even create the previews root.
+    assert not root.exists() or list(root.iterdir()) == []
+
+
+def test_the_refusal_is_a_kind_of_artifact_rejected():
+    """So a caller that already handles ``ArtifactRejected`` — ``safe_store_artifact``, and
+    ``truth_lane``'s store clause — cannot miss it by not knowing the new name."""
+    assert issubclass(ap.ArtifactNotPreviewable, ap.ArtifactRejected)
+
+
+def test_the_swallowing_store_inherits_the_gate():
+    """``safe_store_artifact`` has an inviting name and swallows everything, so an ungated
+    version of it is exactly the footgun a future caller reaches for. It returns ``None``,
+    which is what it has always returned for "no preview", so gating changed no contract."""
+    assert (
+        ap.safe_store_artifact("safe1", _tar(_SVELTE_DYNAMIC_CLOUDFLARE), engine="svelte") is None
+    )
+    assert not ap.has_preview("safe1")
+
+    assert ap.safe_store_artifact("safe2", _tar(_REACT_DIST), engine="react") is not None
+
+
+def test_the_front_door_inherits_the_gate(loopback):
+    """``local_server.serve_artifact_preview`` is the obvious-looking entry point, and the
+    one whose ungated version this change closed."""
+    from pocketpaw_ee.sites import local_server
+
+    assert (
+        local_server.serve_artifact_preview(
+            "front1", _tar(_SVELTE_DYNAMIC_CLOUDFLARE), engine="svelte"
+        )
+        is None
+    )
+    assert not ap.has_preview("front1")
+
+    assert local_server.serve_artifact_preview("front2", _tar(_REACT_DIST), engine="react")
+    assert ap.has_preview("front2")
+
+
+def test_the_named_seam_is_the_only_way_past_the_gate():
+    """The seam exists so ``resolve``'s own ``_worker.js`` refusal keeps something to
+    refuse. Deleting it to close the hole would trade a proven guard for an unproven one,
+    so it is kept — and named so that using it is a visible act at the call site."""
+    snapshot = ap.store_unvouched_artifact(
+        "seam1", _tar(_SVELTE_DYNAMIC_CLOUDFLARE), engine="svelte"
+    )
+
+    assert snapshot.unpacked.server_entries == ("_worker.js",)
+    assert ap.has_preview("seam1")
+    # Still not SERVED — the seam gets a tree onto disk, it does not weaken `resolve`.
+    assert ap.resolve("seam1", "/_worker.js").reason == "server_entry_refused"
+
+
+def test_no_production_module_stores_an_unvouched_artifact():
+    """THE CONTROL ON THE SEAM, and the reason its name is load-bearing rather than
+    decorative. A comment saying "never call this from production" is enforced by whoever
+    happens to read it; this is enforced by CI. Scans every module under ``src/`` and
+    ``ee/`` — the shipped code — and fails if any of them names the function.
+
+    ``artifact_preview`` itself is excluded because that is where it is defined.
+
+    The scan is AST-based, not a substring search. Prose ABOUT the seam is exactly what a
+    module should carry — ``local_server``'s header explains why its own front door is
+    gated and names the seam while doing so — and a grep would fail on the documentation
+    that makes the design legible. The AST sees calls, imports and attribute access and
+    never sees a comment or a docstring, which is the distinction that matters.
     """
+    import ast
+    from pathlib import Path
+
+    import pocketpaw_ee
+
+    import pocketpaw
+
+    symbol = "store_unvouched_artifact"
+    definer = Path(ap.__file__).resolve()
+    roots = [Path(pocketpaw.__file__).parent, Path(pocketpaw_ee.__file__).parent]
+
+    def references(path: Path) -> bool:
+        try:
+            tree = ast.parse(path.read_text("utf-8"))
+        except (SyntaxError, UnicodeDecodeError):  # pragma: no cover - vendored forks
+            return False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == symbol:
+                return True
+            if isinstance(node, ast.Name) and node.id == symbol:
+                return True
+            if isinstance(node, ast.ImportFrom) and any(a.name == symbol for a in node.names):
+                return True
+        return False
+
+    offenders = sorted(
+        str(path)
+        for root in roots
+        for path in root.rglob("*.py")
+        if path.resolve() != definer and references(path)
+    )
+
+    assert offenders == [], (
+        f"{symbol} bypasses the previewability gate and must never be reachable from "
+        f"production. Referenced by: {offenders}"
+    )
+
+
+def test_the_guard_on_the_seam_would_actually_fire(tmp_path):
+    """A guard nobody has watched fail is not a guard. Proves the scan above detects a
+    real call — otherwise a typo in the symbol name would leave it passing forever while
+    checking nothing."""
+    import ast
+
+    module = tmp_path / "offender.py"
+    module.write_text(
+        "from pocketpaw_ee.sites import artifact_preview\n"
+        "def wire(site_id, artifact):\n"
+        "    return artifact_preview.store_unvouched_artifact(\n"
+        "        site_id, artifact, engine='svelte'\n"
+        "    )\n",
+        encoding="utf-8",
+    )
+
+    tree = ast.parse(module.read_text("utf-8"))
+    hits = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "store_unvouched_artifact"
+    ]
+    assert len(hits) == 1
+
+    # And prose about it does not count, which is the whole reason the scan is AST-based.
+    commented = tmp_path / "documented.py"
+    commented.write_text(
+        "# never call store_unvouched_artifact from here\nx = 1\n", encoding="utf-8"
+    )
+    prose_tree = ast.parse(commented.read_text("utf-8"))
+    assert not [
+        node
+        for node in ast.walk(prose_tree)
+        if isinstance(node, ast.Attribute) and node.attr == "store_unvouched_artifact"
+    ]
+
+
+def test_the_gate_and_the_seam_disagree_by_design(previews):
+    """Pins the two paths against each other, so the difference stays deliberate rather
+    than becoming a surprise: the same artifact, refused by the door and stored by the
+    seam."""
     artifact = _tar(_SVELTE_DYNAMIC_CLOUDFLARE)
 
-    assert ap.safe_store_artifact("both1", artifact, engine="svelte") is not None
+    assert ap.store_unvouched_artifact("both1", artifact, engine="svelte") is not None
     assert ap.has_preview("both1")
 
     assert tl.open_preview("both2", artifact, engine="svelte").ok is False
@@ -676,7 +857,13 @@ def test_a_react_artifact_carrying_a_worker_still_warns(caplog):
     shape contradicts its engine is evidence the build lane changed underneath us. The
     truth lane refuses it, and the warning is what says why the shape was unexpected."""
     with caplog.at_level("WARNING"):
-        result = ap.store_artifact("shape1", _tar(_SVELTE_DYNAMIC_CLOUDFLARE), engine="react")
+        # Through the seam: the gated door refuses a worker-bearing artifact outright, so
+        # the shape-mismatch WARNING is only reachable on the un-vouched path now. That is
+        # the right place for it — the mismatch is evidence for whoever is looking at a
+        # tree that exists, and on the gated path there is no tree to look at.
+        result = ap.store_unvouched_artifact(
+            "shape1", _tar(_SVELTE_DYNAMIC_CLOUDFLARE), engine="react"
+        )
 
     assert result.unpacked.server_entries
     assert "emits none" in caplog.text

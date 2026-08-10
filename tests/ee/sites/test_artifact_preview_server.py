@@ -15,6 +15,15 @@
 # The deploy and preview roots being disjoint is checked here too: it is what stops the
 # static branch serving a preview tree without passing `resolve`'s guards, which would
 # give the `_worker.js` refusal a bypass.
+#
+# Updated 2026-08-10 (`serve_artifact_preview` is gated). The fixture used to be a single
+# worker-bearing tree, because `resolve`'s `_worker.js` refusal needs one to refuse. Now
+# that the front door refuses a worker-bearing artifact, that fixture is SPLIT rather than
+# weakened: `_ARTIFACT` (no worker) goes through the front door and every assertion below
+# is unchanged, and `_ARTIFACT_WITH_WORKER` goes through
+# `artifact_preview.store_unvouched_artifact` in the one test that needs the file present.
+# Both refusals stay under test, and the gate itself gained one — the front door turning a
+# worker-bearing artifact away is now asserted here rather than only in the unit file.
 
 from __future__ import annotations
 
@@ -29,9 +38,19 @@ pytest.importorskip("pocketpaw_ee")
 
 from pocketpaw_ee.sites import artifact_preview as ap  # noqa: E402
 
+#: A previewable artifact: self-contained, no server entry. What `serve_artifact_preview`
+#: is allowed to store now that it is gated (SG-10 wiring).
 _ARTIFACT = {
     "./index.html": b"<!doctype html><title>Acme</title><script src=./assets/app.js></script>ok",
     "./assets/app.js": b"console.log('bundle')",
+}
+
+#: The same tree WITH the server entry. `serve_artifact_preview` refuses this now, so a
+#: test that needs it on disk — `resolve`'s `_worker.js` refusal needs the file to be in
+#: the artifact to be refusing anything — goes through
+#: `artifact_preview.store_unvouched_artifact`, the explicitly-named seam past the gate.
+_ARTIFACT_WITH_WORKER = {
+    **_ARTIFACT,
     "./_worker.js": b"export default {fetch(){}} // SIGNED_KEY_WOULD_BE_HERE",
 }
 
@@ -120,11 +139,37 @@ def test_the_slashless_preview_url_still_lands_on_the_page(server):
 
 
 def test_the_worker_is_not_reachable_over_http(server):
-    url = server.serve_artifact_preview("site3", _tar(_ARTIFACT), engine="svelte")
+    """`resolve`'s `_worker.js` refusal, over the wire, against a tree that actually
+    contains one. The gated front door refuses such an artifact before it lands (see the
+    test below), so this goes through the named seam past the gate — otherwise the last
+    line of defence would have nothing left to defend against and would stop being tested.
+    """
+    ap.store_unvouched_artifact("site3", _tar(_ARTIFACT_WITH_WORKER), engine="svelte")
+    url = server.preview_url_for("site3")
 
     status, body, _ = _get(url + "_worker.js")
     assert status == 404
     assert b"SIGNED_KEY_WOULD_BE_HERE" not in body
+
+    # And the rest of the tree still serves, which is what makes the refusal a refusal of
+    # one file rather than of the preview.
+    assert _get(url)[0] == 200
+
+
+def test_the_front_door_refuses_a_worker_bearing_artifact(server):
+    """The hole this closes. `serve_artifact_preview` is the obvious-looking entry point;
+    before it was gated it stored the static leftovers of a worker-rendered build and
+    handed back a URL, so the page a customer opened was one their site never serves."""
+    assert server.serve_artifact_preview(
+        "site10", _tar(_ARTIFACT_WITH_WORKER), engine="svelte"
+    ) is (None)
+    assert not ap.has_preview("site10")
+
+    base = server.ensure_server()
+    status, body, _ = _get(f"{base}/_preview/site10/")
+    assert status == 404
+    assert b"SIGNED_KEY_WOULD_BE_HERE" not in body
+    assert b"<title>Acme</title>" not in body
 
 
 def test_a_form_post_in_preview_is_refused_visibly(server):

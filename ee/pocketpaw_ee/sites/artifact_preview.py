@@ -23,18 +23,32 @@
 #      such.
 #
 # Updated 2026-08-10 (SG-10 wiring — this module now has a caller). ``truth_lane.py``
-# is it, and it sits IN FRONT of everything here: it refuses an artifact whose pages are
-# rendered by a ``_worker.js`` we cannot execute, so such an artifact is never stored and
-# never served. Nothing in this module changed shape as a result — the guards, the skip
-# and the refusals are the same — except ``store_artifact``/``safe_store_artifact``,
-# which grew an optional ``expect_server_worker``. That exists because the
+# is it. It owns the REASONS a build is refused, the discard-on-refusal, the project-dir
+# probe and the exposure seam; this module owns tar-reading and disk. ``store_artifact``
+# also grew an optional ``expect_server_worker``, because the
 # ``emits_server_worker(engine)`` cross-check below asks the ENGINE NAME a question the
 # name stopped being able to answer at SL-1: engine ``"svelte"`` now covers a static
 # landing build with no worker and a dynamic one with a load-bearing worker, so the
 # check warned "the artifact may be incomplete" on every healthy static svelte preview.
 # A caller that resolved the answer off the artifact passes it in; ``None`` keeps the old
-# behaviour for every other caller. No signal is lost — the missing-worker case
-# ``truth_lane`` suppresses here, it refuses outright, which is louder than a log line.
+# behaviour for every other caller.
+#
+# Updated 2026-08-10 (the gate moved TO THE DISK BOUNDARY). The previewability check
+# first shipped one layer up, in ``truth_lane`` only. That left ``store_artifact`` and
+# ``safe_store_artifact`` as un-gated public functions with inviting names: a future
+# caller wiring either of them would have stored and served a worker-rendered tree with
+# nothing to suggest a gate had been skipped. So the check is HERE now, in the one
+# function every path to disk goes through — a check anywhere else is bypassable by
+# picking a different caller. ``scan_artifact`` and ``ArtifactShape`` moved in with it,
+# which is where they belonged anyway: reading a tarball is this module's job, and the
+# rule now has a single definition (``ArtifactShape.is_server_rendered``) that both the
+# refusal and ``truth_lane``'s naming of it read.
+#
+# ``store_unvouched_artifact`` is the ONE deliberate way past the gate, and the tests
+# that need a tree containing what ``resolve`` refuses are its only caller. Its name is
+# the control, and the name is CHECKED — a test scans every module under ``src/`` and
+# ``ee/`` and fails if any of them mentions it. See that function for why the seam is
+# kept rather than the coverage deleted.
 #
 # Choosing static REMOVES constraints. The in-tab runtime needs cross-origin
 # isolation, and COEP ``require-corp`` blocks presigned-S3 images — exactly what the
@@ -138,6 +152,17 @@ _DEPLOY_METADATA_NAMES: frozenset[str] = frozenset(
     {"_routes.json", ".assetsignore", "_headers", "_redirects"}
 )
 
+#: ``adapter-cloudflare``'s routing table. Deploy configuration when the question is what
+#: to SERVE (hence its membership in the set above, which is skipped at unpack), and
+#: EVIDENCE when the question is what the build expected to render it — see
+#: :attr:`ArtifactShape.declares_absent_renderer`. Both readings are legitimate; naming it
+#: once keeps them from drifting apart.
+ROUTING_TABLE_NAME = "_routes.json"
+
+#: The document a preview opens at. An artifact without one at its ROOT has nothing to
+#: show, and saying so beats opening the preview onto its own 404 page.
+ENTRY_DOCUMENT_NAME = "index.html"
+
 #: Zip-bomb ceilings. The measured artifacts are 4 and 24 entries at tens of KB, so
 #: these are orders of magnitude clear of anything real; they exist because the tarball
 #: is built from customer content and a preview must not be a way to fill the disk.
@@ -195,6 +220,16 @@ class ArtifactTooLarge(ArtifactRejected):
 
 class BadSiteId(ArtifactRejected):
     """The site id is not a safe single path segment."""
+
+
+class ArtifactNotPreviewable(ArtifactRejected):
+    """The artifact's pages are rendered by a server entry this module cannot execute.
+
+    Raised by :func:`store_artifact` before anything is written. Its own subclass rather
+    than a bare :class:`ArtifactRejected` because the caller acts on it differently: an
+    ``ArtifactTooLarge`` is a fault to log, while this is a NORMAL, expected outcome for
+    a whole track of sites and the surface above has a specific thing to say about it.
+    """
 
 
 @dataclass(frozen=True)
@@ -410,6 +445,93 @@ def unpack_artifact(artifact: bytes, dest: Path) -> UnpackedArtifact:
     )
 
 
+# ---------------------------------------------------------------------------
+# Reading an artifact's SHAPE without extracting it
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ArtifactShape:
+    """What a NAME-LEVEL scan of an artifact tarball found. Nothing is extracted.
+
+    Names only, deliberately. Every question the gate below asks is answerable from the
+    member list, and the one file whose contents might tempt a reader — the worker
+    bundle, which has carried a substituted per-site signed key — is therefore never
+    opened.
+    """
+
+    entries: int
+    server_entries: tuple[str, ...]
+    routing_tables: tuple[str, ...]
+    has_entry_document: bool
+
+    @property
+    def is_server_rendered(self) -> bool:
+        """THE gate. A worker in the artifact means the worker is the renderer, and this
+        module cannot execute one. Read by :func:`store_artifact` to refuse and by
+        ``truth_lane`` to name the refusal, so the rule has one definition."""
+        return bool(self.server_entries)
+
+    @property
+    def declares_absent_renderer(self) -> bool:
+        """A routing table with no worker beside it: the artifact names a renderer it
+        does not contain. Distinct from :attr:`is_server_rendered` because the harm is
+        different — that one is a tree we cannot run, this one is a tree that is not all
+        there — and because a single combined check would report both as one cause."""
+        return bool(self.routing_tables) and not self.server_entries
+
+
+def _member_segments(name: str) -> tuple[str, ...]:
+    """A member name split into path segments, ``.`` and empties dropped.
+
+    Distinct from :func:`_normalized_member_path`, which REFUSES a hostile name because
+    it is about to write it. This one only has to SEE the name, so it normalizes instead
+    of refusing: a member called ``_app\\_worker.js`` is one filename on POSIX and a path
+    on Windows, and a scan that read it as a filename would not notice the worker at all.
+    """
+    return tuple(part for part in name.replace("\\", "/").split("/") if part not in ("", "."))
+
+
+def scan_artifact(artifact: bytes) -> ArtifactShape:
+    """Name-level scan of an artifact tarball. Reads no member's contents.
+
+    Raises :class:`ArtifactUnreadable` for bytes that are not a readable gzipped tar, so
+    a caller reports the same cause :func:`unpack_artifact` would.
+    """
+    try:
+        tar = tarfile.open(fileobj=io.BytesIO(artifact), mode="r:gz")
+    except (tarfile.TarError, OSError, EOFError) as exc:
+        raise ArtifactUnreadable(f"artifact is not a readable gzipped tar: {exc}") from exc
+
+    entries = 0
+    server: list[str] = []
+    routes: list[str] = []
+    entry_document = False
+    with tar:
+        for member in tar:
+            segments = _member_segments(member.name)
+            if not segments:
+                continue
+            entries += 1
+            if any(seg in _SERVER_ENTRY_NAMES for seg in segments):
+                server.append("/".join(segments))
+            if segments[-1] == ROUTING_TABLE_NAME:
+                routes.append("/".join(segments))
+            if segments == (ENTRY_DOCUMENT_NAME,):
+                entry_document = True
+    return ArtifactShape(
+        entries=entries,
+        server_entries=tuple(server),
+        routing_tables=tuple(routes),
+        has_entry_document=entry_document,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Storing
+# ---------------------------------------------------------------------------
+
+
 def store_artifact(
     site_id: str,
     artifact: bytes,
@@ -418,6 +540,18 @@ def store_artifact(
     expect_server_worker: bool | None = None,
 ) -> PreviewSnapshot:
     """Unpack ``artifact`` as this site's preview, replacing any previous one.
+
+    THE GATED DOOR TO DISK, and the reason it is gated here rather than only in the
+    surface above: every path that puts a preview tree on disk goes through this
+    function, so a check anywhere else can be bypassed by picking a different caller.
+    :class:`ArtifactNotPreviewable` is raised — before anything is written — for an
+    artifact whose pages come from a ``_worker.js`` this module cannot execute. Serving
+    the static files packaged beside such a worker would show a page the site never
+    serves, which is the one failure mode a verification preview must not have.
+
+    :func:`store_unvouched_artifact` is the deliberate, explicitly-named way past this,
+    and it exists for exactly one caller: the tests that have to construct a tree
+    containing the thing :func:`resolve` refuses.
 
     Refuses an engine whose static output is the project ROOT (``html``, whose
     ``static_output_rel`` is ``"."``), mirroring the guard in
@@ -449,6 +583,44 @@ def store_artifact(
     Unpacks into a temporary sibling and swaps it in, so a failure part-way through
     leaves the PREVIOUS preview intact rather than a half-written tree serving a
     mixture of two builds.
+    """
+    shape = scan_artifact(artifact)
+    if shape.is_server_rendered:
+        raise ArtifactNotPreviewable(
+            "this artifact's pages are rendered by a server entry "
+            f"({', '.join(shape.server_entries)}) that a static preview cannot execute, "
+            "so the files packaged beside it are not the pages the site serves"
+        )
+    return store_unvouched_artifact(
+        site_id, artifact, engine=engine, expect_server_worker=expect_server_worker
+    )
+
+
+def store_unvouched_artifact(
+    site_id: str,
+    artifact: bytes,
+    *,
+    engine: str,
+    expect_server_worker: bool | None = None,
+) -> PreviewSnapshot:
+    """UNSAFE. Store an artifact WITHOUT asking whether it can be previewed faithfully.
+
+    ┌─────────────────────────────────────────────────────────────────────────────────┐
+    │ NEVER CALL THIS FROM A PRODUCTION PATH. Use :func:`store_artifact`.              │
+    └─────────────────────────────────────────────────────────────────────────────────┘
+
+    It exists for one reason. :func:`resolve` refuses ``_worker.js`` — the file that has
+    historically carried a substituted per-site signed key — and that refusal has to stay
+    under test, over real HTTP, which needs a stored tree that CONTAINS a worker. Once
+    :func:`store_artifact` refuses such an artifact before it lands, no gated path can
+    build one, and the refusal would quietly become unreachable and stop being tested.
+    Deleting that coverage to close the hole would trade a proven guard for an unproven
+    one, so the seam is kept and named instead.
+
+    THE NAME IS THE CONTROL, and it is checked rather than trusted:
+    ``tests/ee/sites/test_truth_lane.py::test_no_production_module_stores_an_unvouched_artifact``
+    scans every module under ``src/`` and ``ee/`` and fails if any of them mentions this
+    function. A reviewer does not have to notice the call — CI does.
     """
     site_id = _check_site_id(site_id)
     engine = normalize_engine(engine)
@@ -529,10 +701,13 @@ def safe_store_artifact(
     way ``screenshot.safe_take_*`` does for card images. The strict form stays
     available for a caller that is asking for a preview and is entitled to the error.
 
-    NOT THE TRUTH LANE. This stores whatever unpacks; it asks no question about whether
-    the artifact can be RENDERED faithfully, so a worker-rendered artifact stores its
-    static leftovers here and serves them. ``truth_lane.open_preview`` is the gated
-    entry point, and it is the one a preview surface should call.
+    GATED, because it delegates to :func:`store_artifact`: a worker-rendered artifact
+    returns ``None`` here rather than storing its static leftovers. That needed no change
+    to this function's contract — ``None`` has always meant "no preview" — which is why
+    the gate could go in at the door instead of at each caller.
+
+    A caller that wants the REASON rather than just ``None`` should call
+    ``truth_lane.open_preview``; this signature cannot carry one.
     """
     if not artifact:
         return None
@@ -782,10 +957,14 @@ def resolve(site_id: str, subpath: str, *, method: str = "GET") -> PreviewRespon
 
 
 __all__ = [
+    "ENTRY_DOCUMENT_NAME",
     "MAX_ENTRIES",
     "MAX_TOTAL_BYTES",
     "PREVIEW_URL_PREFIX",
+    "ROUTING_TABLE_NAME",
+    "ArtifactNotPreviewable",
     "ArtifactRejected",
+    "ArtifactShape",
     "ArtifactTooLarge",
     "ArtifactUnreadable",
     "BadSiteId",
@@ -799,6 +978,8 @@ __all__ = [
     "previews_home",
     "resolve",
     "safe_store_artifact",
+    "scan_artifact",
     "store_artifact",
+    "store_unvouched_artifact",
     "unpack_artifact",
 ]
