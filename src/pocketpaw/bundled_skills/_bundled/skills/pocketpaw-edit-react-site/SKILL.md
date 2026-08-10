@@ -285,9 +285,17 @@ Every edit is held to the bar the page was built to. Briefly:
 **`edit_react_component` stages a draft. It does not publish and does not
 rebuild.** Nothing the user's visitors see has changed yet.
 
-So tell the user exactly that, point them at the preview, and offer to take it
-live — e.g. *"Shortened the hero headline. It's staged as a draft — preview it
-under **/sites**, and say **publish** when you want it live."* Then stop.
+⚠️ **And on the react track the draft shows its SOURCE, not the page.** The
+in-app view has a client-side render lane for svelte and for html, and none for
+react — a react draft falls through to the code viewer, so /sites shows your
+`.tsx`, not the edited section. Rendering it needs the Vite build, which only a
+publish runs. **Do not tell the user to go and look at the change.** They cannot
+see it yet, and inviting them to look is how a working edit reads as broken.
+
+So say what changed, be specific that seeing it needs a build, and offer to run
+one — e.g. *"Shortened the hero headline. It's staged as a draft; React sites
+only render once they're built, so say **publish** when you want me to build it
+and put it live."* Then stop.
 
 If the response carries a `preview_url`, it is a **preview** of the draft, not
 the published site. Do not describe it as the live URL, and do not say
@@ -323,7 +331,8 @@ publish.
 ## Reading the response
 
 - **`ok: true`** — the draft is updated. Give a **one-line** summary of what
-  changed; the preview shows the rest. If the payload carries a `message`,
+  changed — and be concrete, because the user cannot see it until a build runs.
+  If the payload carries a `message`,
   relay it rather than paraphrasing the publish state.
 - **`ok: false`** — **nothing was applied.** Say what happened and fix it; do
   not report a successful edit. The usual causes, each with its own fix:
@@ -362,7 +371,8 @@ Never fall back to another engine's tool, and never fall back to
 - With **all JavaScript disabled**, the edited section still looks finished.
 - A new section was **both** written and rendered from `src/App.tsx`.
 - No claim was made about a package being added, or about the change being live.
-- The user was told it is a draft, and shown where to preview it.
+- The user was told it is a draft, and was not invited to go and look at a
+  rendered page that does not exist until a build runs.
 
 ## Related tools (via MCP)
 

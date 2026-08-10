@@ -307,15 +307,22 @@ fall back to another engine. The tool fails closed when the map is missing
 ## STEP 4 — Stop at the draft (publish only when asked)
 
 **Default: create the draft, do NOT publish.** After `create_react_site`
-returns, the pocket exists as a reviewable **draft** the user can preview in-app
-right now (open **/sites** → the site's **Preview** tab). Publishing deploys it
-to the public edge (and, on a paid tier, can open a checkout), so taking it live
-is the user's call.
+returns, the pocket exists as a reviewable **draft** under **/sites**.
+Publishing deploys it to the public edge (and, on a paid tier, can open a
+checkout), so taking it live is the user's call.
 
-So **do NOT call `publish` by default.** Tell the user the draft is ready, point
-them at the Preview, and offer to take it live — e.g. *"Your Bright Smile site
-is ready as a draft. Preview it under /sites, and say **publish** when you're
-happy with it."* Then stop.
+⚠️ **On the react track the draft shows its SOURCE, not the page.** The in-app
+Preview has a client-side render lane for svelte and for html, and none for
+react — a react draft falls through to the code viewer, so what the user sees
+under /sites is your `.tsx` files. The rendered page needs the Vite build, which
+only a publish runs. **Do not tell the user they can look at their page.** Say
+the draft is ready, be specific that /sites shows the source until it is built,
+and offer to build and publish it.
+
+So **do NOT call `publish` by default.** e.g. *"Your Bright Smile site is ready
+as a draft — you'll find its code under /sites; React sites render once they're
+built, so say **publish** when you want me to build it and put it live."* Then
+stop.
 
 **Publish in this same turn ONLY if the user's request already asked to go
 live** — "publish it", "make it live", "ship it", "put it online":
@@ -381,8 +388,9 @@ mcp__pocketpaw_sites_manager__edit_react_component(
 - Every rule in this skill still binds — above all the **prerender rule**: an
   edit that swaps a static value for a `useState(0)` + count-up effect bakes
   "0" into the shipped HTML.
-- **The edit stages a DRAFT**; it does not publish. Point the user at the
-  Preview under **/sites** and publish only when they ask.
+- **The edit stages a DRAFT**; it does not publish. Do not send the user to look
+  at the change — /sites shows a react draft's source, not the rendered page.
+  Say what changed, and publish only when they ask.
 
 The full edit brain is `pocketpaw-edit-react-site` — load it when the user is on
 the site's own refine chat. The essentials are inlined here because this create
