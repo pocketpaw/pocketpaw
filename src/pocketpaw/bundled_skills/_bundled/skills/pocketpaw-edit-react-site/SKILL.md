@@ -171,6 +171,11 @@ build tree-shakes it), so prefer that over a delete you cannot undo.
 reservation is what guarantees the page cannot silently become a
 blank-without-JavaScript SPA shell.
 
+The path is **normalized before it is checked**, and the resolved result must sit
+under `src/` or `public/`. So `./package.json` and `src/paw/../paw/thing.tsx` are
+refused too — a relative dodge is not a way around the reservation, it is just a
+rejected call.
+
 **So you cannot add a dependency.** The manifest is allowlisted and owned by
 the generator; there is no call that installs a package. The project has
 **react**, **react-dom**, **vite** and **@vitejs/plugin-react**, and that is
@@ -297,9 +302,10 @@ one — e.g. *"Shortened the hero headline. It's staged as a draft; React sites
 only render once they're built, so say **publish** when you want me to build it
 and put it live."* Then stop.
 
-If the response carries a `preview_url`, it is a **preview** of the draft, not
-the published site. Do not describe it as the live URL, and do not say
-"published", "republished" or "live at".
+**The response carries no URL of any kind** — no `site` object, no `preview_url`.
+That is not an omission: nothing was built, so there is no artifact to link. Do
+not go looking for a url to hand over, and never say "published", "republished"
+or "live at" about an edit.
 
 **Publish only when the user asks** — "publish it", "make it live", "ship it":
 
@@ -330,10 +336,13 @@ publish.
 
 ## Reading the response
 
+A success is `{ok, status:"draft", is_live:false, pocket_id, component_path,
+created, message}` — no `site` object and no url, because nothing was built.
+
 - **`ok: true`** — the draft is updated. Give a **one-line** summary of what
-  changed — and be concrete, because the user cannot see it until a build runs.
-  If the payload carries a `message`,
-  relay it rather than paraphrasing the publish state.
+  changed, and be concrete, because the user cannot see it until a build runs.
+  Relay `message` rather than paraphrasing the state, and note that `is_live` is
+  `false` on every edit: it is telling you what not to claim.
 - **`ok: false`** — **nothing was applied.** Say what happened and fix it; do
   not report a successful edit. The usual causes, each with its own fix:
   an `old_string` that matched 0 or >1 times (widen it, or re-read the file);
