@@ -1,0 +1,56 @@
+[
+  {
+    "label": "D5: the single-flight gate is removed from the enqueue, so every publish of a site opens its own sandbox unconditionally — the guard stops guarding and nothing else in the lane notices",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if not should_enqueue(site, timeout):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_burst_harness.py::TestTheGuardHoldsWhenPublishesAreSerialised"
+    ]
+  },
+  {
+    "label": "D5: the job id becomes deterministic per site, so arq refuses the second concurrent enqueue and the lane rolls the row to failed — a race that overspends turns into a publish that reports broken",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    return f\"site-build-{site_id}-{uuid.uuid4().hex}\"",
+    "replace": "    return f\"site-build-{site_id}\"",
+    "tests": [
+      "tests/ee/sites/test_burst_harness.py::TestSingleFlightUnderContention"
+    ]
+  },
+  {
+    "label": "D5: the staleness boundary is inclusive, so a build at exactly its window is declared dead and re-enqueued on top of itself one tick early",
+    "file": "ee/pocketpaw_ee/sites/build_state.py",
+    "find": "    return reference - stamp > stale_after(timeout_seconds)",
+    "replace": "    return reference - stamp >= stale_after(timeout_seconds)",
+    "tests": [
+      "tests/ee/sites/test_burst_harness.py::TestTheStalenessWindowUnderBurst"
+    ]
+  },
+  {
+    "label": "D5: a stay-in-flight settlement writes a status anyway, so a retryable failure lands 'failed' between attempts — should_enqueue reads that as free to re-publish and a second sandbox starts on top of the retry",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "            settlement.reason,\n        )\n        return\n    await sites_service.record_build_outcome(",
+    "replace": "            settlement.reason,\n        )\n    await sites_service.record_build_outcome(",
+    "tests": [
+      "tests/ee/sites/test_burst_harness.py::TestARetryStaysInFlightAndWritesNothing"
+    ]
+  },
+  {
+    "label": "D5: a worker pickup stops re-stamping the clock, so the staleness window is spent on queue wait and a build that waited behind the cap is declared stale while still running",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    await site.set({\"build_status\": \"building\", \"build_started_at\": datetime.now(UTC)})",
+    "replace": "    await site.set({\"build_status\": \"building\"})",
+    "tests": [
+      "tests/ee/sites/test_burst_harness.py::TestQueuedAndBuildingStayDistinguishable"
+    ]
+  },
+  {
+    "label": "D5: the queued stamp is dropped from the enqueue write, so the row reads as stale the instant it is written and the very next publish opens a second sandbox",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            \"build_status\": \"queued\",\n            \"build_started_at\": datetime.now(UTC),",
+    "replace": "            \"build_status\": \"queued\",",
+    "tests": [
+      "tests/ee/sites/test_burst_harness.py::TestTheGuardHoldsWhenPublishesAreSerialised"
+    ]
+  }
+]
