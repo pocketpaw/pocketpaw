@@ -1,0 +1,223 @@
+[
+  {
+    "label": "the deploy gate reads classification.deployable instead of BuildRunResult.ok, so a build whose artifact download delivered ZERO bytes is recorded as 'built' — the deploy then replaces a working site with a blank one (SG-7 wiring contract #1)",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if result.ok:",
+    "replace": "    if result.classification.deployable:",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestSettlingAFinishedAttempt",
+      "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_a_cleared_build_with_no_bytes_is_not_recorded_as_built"
+    ]
+  },
+  {
+    "label": "the recorded reason carries the build's STDERR TAIL instead of the fixed rung, so a token pasted into a config file, an absolute path, or customer source is persisted on the Site row and surfaced to whoever reads the build status",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    return _settlement(\n        classification.outcome,\n        classification.reason,\n        retryable=classification.retryable,\n        attempts_left=attempts_left,\n    )",
+    "replace": "    return _settlement(\n        classification.outcome,\n        classification.stderr_tail or classification.reason,\n        retryable=classification.retryable,\n        attempts_left=attempts_left,\n    )",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestSettlingAFinishedAttempt::test_the_reason_never_carries_build_stderr",
+      "tests/ee/sites/test_fault_ladder_build.py::TestF2AndF7TheRecordedRowNamesItsRung"
+    ]
+  },
+  {
+    "label": "the artifact-missing rung carries stderr as its cause, leaking the user's build output on the one rung whose reason is composed rather than copied",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "            RUNG_ARTIFACT_MISSING,\n            \"download_delivered_no_bytes\",",
+    "replace": "            RUNG_ARTIFACT_MISSING,\n            classification.stderr_tail or \"download_delivered_no_bytes\",",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py::TestF2AndF7TheRecordedRowNamesItsRung::test_no_recorded_reason_can_carry_build_stderr"
+    ]
+  },
+  {
+    "label": "the enqueue stops scrubbing the per-site capture key, so a real secret is written into the Redis job payload and uploaded into a third-party sandbox — the exposure the ephemeral-sandbox decision rests on NOT being durable",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "            scrub_build_input(generator_input),",
+    "replace": "            generator_input,",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestTheCaptureSecretNeverLeavesThisProcess::test_the_key_never_enters_the_arq_payload"
+    ]
+  },
+  {
+    "label": "the job stops scrubbing, so a caller that reaches the job directly (a re-drive of a stored payload) puts the capture key into the sandbox even though the enqueue helper would have stripped it",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    generated = await runner.generate(scrub_build_input(generator_input), out_dir)",
+    "replace": "    generated = await runner.generate(generator_input, out_dir)",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestTheCaptureSecretNeverLeavesThisProcess::test_the_job_scrubs_too_not_only_the_enqueue"
+    ]
+  },
+  {
+    "label": "the row is never stamped queued, so single-flight is off (a second publish opens a second sandbox and two artifacts race to deploy) and a client that reloads has no job id to poll",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    job_id = _mint_job_id(site_id)\n    await sites_service.mark_build_queued(site, job_id=job_id)",
+    "replace": "    job_id = _mint_job_id(site_id)",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestEnqueueingABuild"
+    ]
+  },
+  {
+    "label": "a failed enqueue leaves the row pinned in 'queued' with nothing coming to consume it, so should_enqueue no-ops EVERY later publish of that site until the staleness window lapses — the site is unpublishable and the only error was the 5xx the user already dismissed",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        with contextlib.suppress(Exception):\n            await sites_service.record_build_outcome(\n                site,\n                status=\"failed\",\n                reason=f\"{RUNG_ENQUEUE_FAILED}:pool_or_enqueue_raised\",\n            )",
+    "replace": "        with contextlib.suppress(Exception):\n            pass",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestEnqueueingABuild::test_a_failed_enqueue_does_not_pin_the_row_in_queued",
+      "tests/ee/sites/test_fault_ladder_build.py::TestF3AnUnconsumableBuildRow::test_a_failed_enqueue_leaves_a_row_that_can_still_be_republished"
+    ]
+  },
+  {
+    "label": "arq's None return (the id already exists) is read as a successful enqueue, so the row sits queued for a job no worker will ever run — the failure is invisible because the refusal is a return value, not an error",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "            raise RuntimeError(f\"arq refused job id {job_id!r} — a job with that id exists\")",
+    "replace": "            pass",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestEnqueueingABuild::test_an_arq_refusal_is_treated_as_a_failed_enqueue"
+    ]
+  },
+  {
+    "label": "the single-flight gate is dropped, so two publishes of one site open two sandboxes — two bills, and two artifacts racing to be the one that deploys",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if not should_enqueue(site, timeout):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestEnqueueingABuild::test_a_live_build_is_not_enqueued_twice"
+    ]
+  },
+  {
+    "label": "each enqueue reuses a deterministic per-site job id, so arq silently REFUSES every rebuild for as long as the previous job's result lives in Redis (an hour by default) — a single-flight guard nobody asked for, in the wrong layer",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    return f\"site-build-{site_id}-{uuid.uuid4().hex}\"",
+    "replace": "    return f\"site-build-{site_id}\"",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestEnqueueingABuild::test_each_enqueue_mints_a_fresh_job_id"
+    ]
+  },
+  {
+    "label": "a settlement of 'stay in flight' writes a status anyway, so a retryable failure lands terminal between attempts — should_enqueue reads that as free to re-publish and a second sandbox starts on top of the retry",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if settlement.status is None:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_staying_in_flight_writes_no_status"
+    ]
+  },
+  {
+    "label": "the engine gate accepts anything, so html (whose output IS the project root) reaches a sandbox: the include-list tar cannot exclude node_modules from it, and the build is billed before artifact_tar_command refuses it",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    return needs_node_build(engine) and static_output_rel(engine) != \".\"",
+    "replace": "    return True",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestOnlyABuildableEngineReachesASandbox",
+      "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_an_unbuildable_engine_is_refused_before_any_sandbox_exists"
+    ]
+  },
+  {
+    "label": "an empty scaffold is no longer detected, so a sandbox is created, installed and billed to build nothing — and the empty-deploy failure is caught (if at all) only after the money is spent",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        if not files:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_an_empty_scaffold_costs_no_sandbox"
+    ]
+  },
+  {
+    "label": "node_modules stops being pruned from the uploaded tree, so a scaffold that shares a directory with a previous install puts ~500 MB on the wire per build",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "SKIPPED_TREE_DIRS: frozenset[str] = frozenset({\"node_modules\", \".git\"})",
+    "replace": "SKIPPED_TREE_DIRS: frozenset[str] = frozenset({\".git\"})",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestReadingTheScaffold"
+    ]
+  },
+  {
+    "label": "the wrong directory is uploaded (the generator's out dir instead of the projectDir it returns), so every source file lands one level deeper than the build config expects and the build fails for a reason nothing in the lane can explain",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    return str(generated[\"projectDir\"])",
+    "replace": "    return out_dir",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_the_scaffolded_tree_is_what_gets_uploaded"
+    ]
+  },
+  {
+    "label": "the arq function timeout is hard-coded to the shared workspace-jobs budget, so arq cancels a long build BEFORE the in-sandbox timeout(1) fires: no sentinel is written and a healthy-but-slow build is recorded as lost infrastructure",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    return widest + EXEC_TIMEOUT_SLACK_SECONDS + OUT_OF_SANDBOX_MARGIN_SECONDS",
+    "replace": "    return 900",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestTheJobCarriesItsOwnTimeout"
+    ]
+  },
+  {
+    "label": "the sandbox is held to a budget re-derived from the environment instead of the one the enqueue measured its staleness window against, so a config change mid-flight leaves a live build outside its own window and it gets re-enqueued on top of itself",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "                timeout_seconds=timeout_seconds,",
+    "replace": "                timeout_seconds=resolve_build_timeout_seconds(engine),",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_the_sandbox_is_held_to_the_budget_it_was_enqueued_with"
+    ]
+  },
+  {
+    "label": "an unreachable Daytona re-raises WITHOUT recording anything, so the row stays in 'building' until the staleness window lapses and every publish in between is a silent no-op",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "            await _record(\n                site,\n                _settlement(\n                    RUNG_SANDBOX_UNAVAILABLE,\n                    \"run_build_raised\",\n                    retryable=True,\n                    attempts_left=attempts_left,\n                ),\n            )\n            raise",
+    "replace": "            raise",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_an_unreachable_daytona_is_recorded_and_re_raised",
+      "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_a_sandbox_that_cannot_be_created_leaves_a_republishable_row"
+    ]
+  },
+  {
+    "label": "the row never flips to 'building', so a queued build and a running one are indistinguishable — which is the exact distinction 'queued' was added for, and what turns a concurrency cap into support tickets",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    await sites_service.mark_build_running(site)",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_the_row_says_building_while_the_build_runs"
+    ]
+  },
+  {
+    "label": "the queued->building flip stops re-stamping the clock, so the attempt's staleness window is spent on queue wait: a build that waited behind the cap is declared stale while it is still running, and re-enqueued on top of itself",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    await site.set({\"build_status\": \"building\", \"build_started_at\": datetime.now(UTC)})",
+    "replace": "    await site.set({\"build_status\": \"building\"})",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_the_build_clock_is_restamped_when_the_job_starts"
+    ]
+  },
+  {
+    "label": "the outcome write becomes a full save() instead of a targeted set, so a minutes-long build finishing writes its whole stale snapshot back and silently reverts a publish that landed while it ran — a live site pointed at its old URL, with nothing in any log",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    await site.set({\"build_status\": status, \"build_reason\": reason})",
+    "replace": "    site.build_status = status\n    site.build_reason = reason\n    await site.save()",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestTheBuildLaneCannotRollBackAConcurrentPublish"
+    ]
+  },
+  {
+    "label": "a new attempt no longer clears the previous rung, so a queued build displays the last attempt's failure reason — a row that lies to whoever is watching it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            \"build_job_id\": job_id,\n            \"build_reason\": None,",
+    "replace": "            \"build_job_id\": job_id,",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestEnqueueingABuild::test_a_new_attempt_clears_the_previous_rung"
+    ]
+  },
+  {
+    "label": "an unset POCKETPAW_REDIS_URL silently falls back to localhost, so a typoed production config enqueues every build into a Redis no worker is reading — the exact split-brain the worker's own RedisSettings review finding #4 was about",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "                if not url:\n                    raise RuntimeError(\n                        \"POCKETPAW_REDIS_URL is not set — the site-build lane needs Redis.\"\n                    )",
+    "replace": "                if not url:\n                    url = \"redis://localhost:6379\"",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestTheEnqueueNeedsRedisConfigured"
+    ]
+  },
+  {
+    "label": "the build-lane load drops its workspace filter, so a job payload naming another tenant's site id reads — and then writes — that tenant's row",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return await _SiteDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})",
+    "replace": "    return await _SiteDoc.find_one({\"_id\": oid})",
+    "tests": [
+      "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_another_workspaces_id_is_not_touched"
+    ]
+  }
+]
