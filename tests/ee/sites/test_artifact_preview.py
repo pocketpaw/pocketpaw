@@ -174,11 +174,16 @@ def test_worker_source_is_refused_even_when_it_is_on_disk():
     """Defence in depth: the unpack skip is the primary guard, but a tree unpacked some
     other way must still not hand back the server bundle's source."""
     snap = ap.store_artifact("svelte5", _tar(_REACT_ARTIFACT), engine="svelte")
-    (snap.root / "_worker.js").write_bytes(b"const KEY='paw_sk_live_deadbeef'")
+    # The canary must be SECRET-SHAPED (so the assertion means something) without
+    # matching a real credential pattern. It used to read `paw_sk_live_deadbeef`, which
+    # tripped the pr-quality-gate secret scan on `sk_live_[a-zA-Z0-9]+` and failed CI on
+    # a test whose entire point is that the string is NOT served. Renamed rather than
+    # allow-listed: a scanner exemption on a sites test would outlive the reason for it.
+    (snap.root / "_worker.js").write_bytes(b"const KEY='paw_canary_notacredential_deadbeef'")
 
     got = ap.resolve("svelte5", "/_worker.js")
     assert got.status == 404
-    assert b"paw_sk_live_deadbeef" not in got.body
+    assert b"paw_canary_notacredential_deadbeef" not in got.body
 
 
 def test_deploy_metadata_is_not_served_as_content():
