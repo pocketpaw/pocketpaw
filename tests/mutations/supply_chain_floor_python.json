@@ -1,0 +1,23 @@
+[
+  {
+    "label": "D2: the OSS core's release-age floor is pushed into the future, so uv resolves anything the index published today and a compromised fresh publish of an already-vetted package installs",
+    "file": "pyproject.toml",
+    "find": "exclude-newer = \"2026-08-10T00:00:00Z\"",
+    "replace": "exclude-newer = \"2099-01-01T00:00:00Z\"",
+    "tests": ["tests/test_supply_chain_floor.py::TestThePythonSupplyChainFloor"]
+  },
+  {
+    "label": "D2: the enterprise layer's floor is pushed into the future, so ee/uv.lock — which resolves independently of the root — loses its gate while the root still looks protected",
+    "file": "ee/pyproject.toml",
+    "find": "exclude-newer = \"2026-08-10T00:00:00Z\"",
+    "replace": "exclude-newer = \"2099-01-01T00:00:00Z\"",
+    "tests": ["tests/test_supply_chain_floor.py::TestThePythonSupplyChainFloor"]
+  },
+  {
+    "label": "D2: the cutoff uv actually resolved under is erased from the lock, so the declared floor governs nothing that `uv sync` installs",
+    "file": "uv.lock",
+    "find": "[options]\nexclude-newer = \"2026-08-10T00:00:00Z\"",
+    "replace": "[options]",
+    "tests": ["tests/test_supply_chain_floor.py::TestThePythonSupplyChainFloor"]
+  }
+]
