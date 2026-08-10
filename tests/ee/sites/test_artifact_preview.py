@@ -453,24 +453,52 @@ def test_containment_resolves_both_sides(tmp_path):
     assert ap._contained(linked_root, tmp_path / "elsewhere.txt") is None
 
 
-def test_a_drive_qualified_request_path_cannot_read_outside_the_root(_preview_home):
+def test_a_drive_qualified_request_path_is_refused_at_the_parser():
     """pathlib treats ``C:`` as an anchor, so joining it onto the root RESETS the path
-    and the read lands wherever the segment points. Refused at the parser."""
+    and the read lands wherever the segment points. Refused at the parser.
+
+    LITERALS ONLY, and that is the fix for a portability bug rather than a style choice.
+    This case used to be checked with ``"/" + secret.as_posix()`` for a real file in a
+    tmp dir, which is drive-qualified on Windows and NOT on POSIX — there it becomes
+    ``//tmp/...``, whose segments are all benign names, so the parser correctly declines
+    to flag it and a later layer refuses it instead. The assertion then failed on Linux
+    reading ``not_found`` where it wanted ``unsafe_path``. A drive anchor is a
+    platform-independent property of the STRING, so it is tested with strings.
+    """
     ap.store_artifact("eve5", _tar(_REACT_ARTIFACT), engine="react")
+
+    for path in ("/C:/Windows/win.ini", "/c:", "/D:/x", "/c:/"):
+        got = ap.resolve("eve5", path)
+        assert got.status == 404, path
+        # Refused by the parser, not merely contained after the join — same reason as
+        # in the `..` case above. Asserting the specific reason is what makes each
+        # layer independently provable (see the module header).
+        assert got.reason == "unsafe_path", path
+
+
+def test_an_absolute_path_to_a_real_file_outside_the_root_cannot_read_it(_preview_home):
+    """The security property, checked against a file that genuinely exists outside.
+
+    Kept SEPARATE from the drive-anchor case above because WHICH layer refuses this is
+    legitimately platform-dependent: on Windows the string is drive-qualified and the
+    parser rejects it; on POSIX every segment is a benign name, the join lands inside
+    the root, and it is refused as missing. Both are correct refusals, so this asserts
+    the property that must hold on every platform — status 404 and NOT ONE BYTE of the
+    outside file — and deliberately does not pin the reason.
+
+    Pinning it here is what broke on Linux, and loosening it in the shared loop would
+    have weakened the drive-anchor assertion too. Splitting keeps both strict about the
+    thing each can actually promise.
+    """
+    ap.store_artifact("eve6", _tar(_REACT_ARTIFACT), engine="react")
     secret = _preview_home.parent / "outside.txt"
     secret.write_bytes(b"tenant secret")
 
-    for path in (
-        "/" + secret.as_posix(),
-        "/C:/Windows/win.ini",
-        "/c:",
-    ):
-        got = ap.resolve("eve5", path)
-        assert got.status == 404, path
-        assert b"tenant secret" not in got.body, path
-        # Refused by the parser, not merely contained after the join — same reason as
-        # in the `..` case above.
-        assert got.reason == "unsafe_path", path
+    got = ap.resolve("eve6", "/" + secret.as_posix())
+    assert got.status == 404
+    assert b"tenant secret" not in got.body
+    # Refused, by whichever guard owns it on this platform — never served.
+    assert got.reason in {"unsafe_path", "escaped_root", "not_found"}
 
 
 def test_an_unsafe_site_id_cannot_climb_out_of_the_preview_root():
