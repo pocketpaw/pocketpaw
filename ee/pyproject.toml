@@ -329,6 +329,18 @@ annotation_typing = false
 # ee/pyproject.toml (workspace-local source). See
 # ee/pocketpaw_ee/foresight/substrate/oasis/README-FORK.md for the
 # vendoring rationale and the openai/psutil cap audit.
+[tool.uv]
+# The same install-time supply-chain floor as the root pyproject.toml, repeated
+# here because ee/ carries its OWN uv.lock and therefore resolves on its own
+# whenever `uv lock` runs against this file. Settings do not inherit from the
+# parent directory, so without this line the enterprise layer's resolution is
+# the bare one the root's floor was added to fix.
+#
+# Read the root pyproject.toml's `[tool.uv]` comment before touching this: the
+# value is an absolute DATE, not a rolling duration, and the two must be
+# bumped together or the two locks drift to different floors.
+exclude-newer = "2026-08-10T00:00:00Z"
+
 [tool.uv.sources]
 camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d0a38277e421ea9aca34904b4dc37" }
 
