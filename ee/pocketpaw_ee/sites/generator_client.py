@@ -8,6 +8,14 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-08-10 (SL-3 — the async publish needs the payload without the build):
+# extracted ``build_generator_input`` out of ``_build_one`` as a module-level function.
+# ``_build_one`` now calls it and passes the result straight through, so every existing
+# payload is byte-identical; the point is that the ASYNC publish path can assemble the
+# same input in the web process while ``generate`` runs in a worker. Two copies of that
+# assembly would drift on the next generator key that lands, and the failure would be
+# silent — a site that builds differently depending on which path published it.
+#
 # Updated 2026-07-30 (fix/sites-d1-svelte-audit): corrected the build-timeout
 # comments. They claimed "a legit build is ~45-60s", which is true for a static site
 # and false for a dynamic one — a measured 1-table dynamic ripple build takes 4m47s,
@@ -891,6 +899,101 @@ def _rewrite_ripple_dep(project_dir: str, source: str) -> None:
         pkg_path.write_text(json.dumps(pkg, indent=2))
 
 
+def build_generator_input(
+    *,
+    engine: str,
+    theme: dict[str, Any],
+    site_id: str,
+    title: str,
+    capture_api_base: str,
+    capture_signed_key: str,
+    ripple_spec: dict[str, Any] | None = None,
+    source: dict[str, Any] | None = None,
+    assets: dict[str, str] | None = None,
+    builder_origin: str | None = None,
+    d1_database_id: str = "",
+    keeps_client_bundle: bool = False,
+) -> dict[str, Any]:
+    """The generator's STAGE-1/2 input payload — the exact dict handed to ``generate``.
+
+    Extracted from ``_build_one`` 2026-08-10 (SL-3) so the ASYNC publish path can build
+    the same payload without a second implementation. That mattered enough to justify a
+    refactor of a well-covered function: the ephemeral build lane runs ``generate`` in a
+    worker, so the payload has to be assembled at enqueue time in the web process. Two
+    copies of this assembly would drift on the next generator key that lands, and the
+    failure would be silent — a site that builds differently depending on which path
+    published it.
+
+    Behaviour-preserving by construction: ``_build_one`` now calls this and passes the
+    result straight through, so every existing payload is byte-identical.
+    """
+    site_config: dict[str, Any] = {
+        "siteId": site_id,
+        "title": title,
+        "captureApiBase": capture_api_base,
+        "captureSignedKey": capture_signed_key,
+        # DP0-1: the per-tenant D1 id the generator threads into the emitted
+        # wrangler.toml ``database_id``. ALWAYS present (default "" for a static
+        # site — the prior empty value), so a caller CAN bind a dynamic site's
+        # data plane by supplying it. The real id comes from the provision job
+        # at the caller in a later task (DP0-3/DP0-4).
+        "d1DatabaseId": d1_database_id,
+    }
+    # SE-2b: only present when the site is being published as editable, so a
+    # non-editable publish's payload is byte-identical to before this change.
+    if builder_origin:
+        site_config["builderOrigin"] = builder_origin
+    # MT-1: only present when the site DECLARES that its own client JS is
+    # load-bearing. The generator then emits ``csr = true`` (the page stays
+    # prerendered) and marks the route manifest, so the hand-written onMount /
+    # ``use:`` action / IntersectionObserver / WebGL code actually runs and the
+    # ripple build's prune step leaves the hydration bundle alone. Omitted when
+    # False so a plain static site's payload is byte-identical to before.
+    if keeps_client_bundle:
+        site_config["keepsClientBundle"] = True
+    input_json: dict[str, Any] = {
+        "engine": engine,
+        "theme": theme,
+        "siteConfig": site_config,
+    }
+    if engine == "svelte":
+        # DSV-5: a DYNAMIC svelte pocket carries its live-data bindings
+        # (objects/sources/actions/auth) as SIBLING keys on the same ``source``
+        # envelope that holds the {path: contents} files. Peel them out: the
+        # file map goes on ``input.source`` (materializeSource writes each key
+        # as a file, so a binding key mixed in would break the build), and the
+        # bindings are spread as FLAT siblings on GenerateInput — the exact
+        # shape DSV-1's parseBindings reads (``input.objects`` / ``input.sources``
+        # / ``input.actions`` / ``input.auth``), NOT nested under ``source``. A
+        # STATIC svelte pocket has no binding keys → ``bindings`` is empty and
+        # ``input.source`` is the unchanged file map (pre-DSV-5 wire bytes).
+        files, bindings = _split_svelte_source(source)
+        input_json["source"] = files
+        input_json.update(bindings)
+    elif is_source_engine(engine):
+        # HE-3/HE-1: html is a source-map engine too — it sends its raw
+        # ``{path: contents}`` static tree on ``input.source`` and OMITS
+        # ``rippleSpec`` (a hand-authored html site has no rippleSpec). Unlike
+        # svelte there is NO binding split: dynamic (live-data) html is a
+        # non-goal, so an html source map carries only files. ripple (not a
+        # source engine) is untouched by this branch and still sends rippleSpec
+        # below, so its wire bytes — and svelte's — are unchanged.
+        input_json["source"] = source or {}
+        # SI-4 CROSS-REPO SEAM: an html IMPORT also carries binary files, which
+        # cannot ride the text-only ``source`` map — they ride ``input.assets``
+        # ({path: base64}). The paw-sites generator's ``assets`` handling
+        # (decode + write each entry verbatim into the emitted static tree) is
+        # being added in a PARALLEL paw-sites slice; this codes to that
+        # contract. Sent ONLY when non-empty, so a plain html publish's payload
+        # stays byte-identical, and a generator predating the key ignores it
+        # (the import report warns that assets then don't deploy).
+        if assets:
+            input_json["assets"] = assets
+    else:
+        input_json["rippleSpec"] = ripple_spec
+    return input_json
+
+
 class _Runner(Protocol):
     async def generate(self, input_json: dict[str, Any], out_dir: str) -> dict[str, Any]: ...
     async def install(self, project_dir: str) -> tuple[bool, str]: ...
@@ -1368,70 +1471,20 @@ class GeneratorClient:
         # §4.2: ``engine`` is always present; the STAGE-2 payload key forks on
         # it. svelte → ``source`` (no rippleSpec); ripple → ``rippleSpec`` (no
         # source). siteConfig + theme ride both tracks unchanged.
-        site_config: dict[str, Any] = {
-            "siteId": site_id,
-            "title": title,
-            "captureApiBase": capture_api_base,
-            "captureSignedKey": capture_signed_key,
-            # DP0-1: the per-tenant D1 id the generator threads into the emitted
-            # wrangler.toml ``database_id``. ALWAYS present (default "" for a static
-            # site — the prior empty value), so a caller CAN bind a dynamic site's
-            # data plane by supplying it. The real id comes from the provision job
-            # at the caller in a later task (DP0-3/DP0-4).
-            "d1DatabaseId": d1_database_id,
-        }
-        # SE-2b: only present when the site is being published as editable, so a
-        # non-editable publish's payload is byte-identical to before this change.
-        if builder_origin:
-            site_config["builderOrigin"] = builder_origin
-        # MT-1: only present when the site DECLARES that its own client JS is
-        # load-bearing. The generator then emits ``csr = true`` (the page stays
-        # prerendered) and marks the route manifest, so the hand-written onMount /
-        # ``use:`` action / IntersectionObserver / WebGL code actually runs and the
-        # ripple build's prune step leaves the hydration bundle alone. Omitted when
-        # False so a plain static site's payload is byte-identical to before.
-        if keeps_client_bundle:
-            site_config["keepsClientBundle"] = True
-        input_json: dict[str, Any] = {
-            "engine": engine,
-            "theme": theme,
-            "siteConfig": site_config,
-        }
-        if engine == "svelte":
-            # DSV-5: a DYNAMIC svelte pocket carries its live-data bindings
-            # (objects/sources/actions/auth) as SIBLING keys on the same ``source``
-            # envelope that holds the {path: contents} files. Peel them out: the
-            # file map goes on ``input.source`` (materializeSource writes each key
-            # as a file, so a binding key mixed in would break the build), and the
-            # bindings are spread as FLAT siblings on GenerateInput — the exact
-            # shape DSV-1's parseBindings reads (``input.objects`` / ``input.sources``
-            # / ``input.actions`` / ``input.auth``), NOT nested under ``source``. A
-            # STATIC svelte pocket has no binding keys → ``bindings`` is empty and
-            # ``input.source`` is the unchanged file map (pre-DSV-5 wire bytes).
-            files, bindings = _split_svelte_source(source)
-            input_json["source"] = files
-            input_json.update(bindings)
-        elif is_source_engine(engine):
-            # HE-3/HE-1: html is a source-map engine too — it sends its raw
-            # ``{path: contents}`` static tree on ``input.source`` and OMITS
-            # ``rippleSpec`` (a hand-authored html site has no rippleSpec). Unlike
-            # svelte there is NO binding split: dynamic (live-data) html is a
-            # non-goal, so an html source map carries only files. ripple (not a
-            # source engine) is untouched by this branch and still sends rippleSpec
-            # below, so its wire bytes — and svelte's — are unchanged.
-            input_json["source"] = source or {}
-            # SI-4 CROSS-REPO SEAM: an html IMPORT also carries binary files, which
-            # cannot ride the text-only ``source`` map — they ride ``input.assets``
-            # ({path: base64}). The paw-sites generator's ``assets`` handling
-            # (decode + write each entry verbatim into the emitted static tree) is
-            # being added in a PARALLEL paw-sites slice; this codes to that
-            # contract. Sent ONLY when non-empty, so a plain html publish's payload
-            # stays byte-identical, and a generator predating the key ignores it
-            # (the import report warns that assets then don't deploy).
-            if assets:
-                input_json["assets"] = assets
-        else:
-            input_json["rippleSpec"] = ripple_spec
+        input_json = build_generator_input(
+            engine=engine,
+            theme=theme,
+            site_id=site_id,
+            title=title,
+            capture_api_base=capture_api_base,
+            capture_signed_key=capture_signed_key,
+            ripple_spec=ripple_spec,
+            source=source,
+            assets=assets,
+            builder_origin=builder_origin,
+            d1_database_id=d1_database_id,
+            keeps_client_bundle=keeps_client_bundle,
+        )
         gen = await self._runner.generate(input_json, out_dir)
         project_dir = gen["projectDir"]
         # HE-3: an html publish's last-mile output IS the authored source (HE-1 makes

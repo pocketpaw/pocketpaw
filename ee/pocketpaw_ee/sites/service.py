@@ -813,8 +813,8 @@ from pocketpaw_ee.sites.dto import (
     SiteResponse,
     SiteStatusResponse,
 )
-from pocketpaw_ee.sites.engines import content_key, is_source_engine
-from pocketpaw_ee.sites.generator_client import GeneratorClient
+from pocketpaw_ee.sites.engines import content_key, is_source_engine, normalize_engine
+from pocketpaw_ee.sites.generator_client import BuildResult, GeneratorClient
 
 logger = logging.getLogger(__name__)
 
@@ -2157,6 +2157,13 @@ async def _deploy_site_doc(
     # HE-4: the workers deployer is engine-aware (``deploy_workers(site_id,
     # project_dir, *, engine=..., d1_database_id=...)``), so the seam takes kwargs.
     workers_deploy: Callable[..., Any] | None = None,
+    # SL-3: an ALREADY-BUILT project dir. When given, the inline build is SKIPPED and
+    # everything after it (concierge embed → deploy → upsert → sync/screenshot) runs
+    # verbatim. This is how the ephemeral build lane finishes a publish: the worker
+    # built in a sandbox, materialised the artifact, and calls back in here rather than
+    # growing a second copy of the deploy tail. One deploy path, two places the build
+    # can have happened.
+    prebuilt_project_dir: str | None = None,
 ) -> _SiteDoc:
     """Generate, smoke-gate, deploy, and UPSERT the LIVE canonical Site doc.
 
@@ -2212,6 +2219,27 @@ async def _deploy_site_doc(
             builder_origin=builder_origin,
         )
 
+    # SL-3: fork to the EPHEMERAL BUILD LANE for the engines whose artifact can
+    # actually be deployed from it. A prebuilt dir means the worker already ran this
+    # build and is calling back in to finish the publish, so it must NOT re-fork.
+    if prebuilt_project_dir is None and build_runs_async(engine):
+        return await _enqueue_static_build(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            site_id=site_id,
+            signed_key=signed_key,
+            site_name=site_name,
+            ripple_spec=ripple_spec,
+            theme=theme,
+            engine=engine,
+            source=source,
+            assets=assets,
+            pattern=pattern,
+            builder_origin=builder_origin,
+            keeps_client_bundle=keeps_client_bundle,
+        )
+
     gen = generator or GeneratorClient()
     # DEP-3: map a generator/install/smoke failure (missing toolchain, non-zero
     # build, SSR fail-gate) to a clean CloudError (sites.generator_failed → 5xx)
@@ -2222,28 +2250,36 @@ async def _deploy_site_doc(
     # non-import publish's build call (and every injected fake's expected kwargs)
     # stays byte-identical to before the assets seam existed.
     _asset_kwargs: dict[str, Any] = {"assets": assets} if assets else {}
-    build = await _build_or_cloud_error(
-        gen,
-        ripple_spec=ripple_spec,
-        theme=theme,
-        site_id=site_id,
-        title=site_name,
-        capture_api_base=_capture_base(),
-        capture_signed_key=signed_key,
-        engine=engine,
-        source=source,
-        builder_origin=builder_origin,
-        keeps_client_bundle=keeps_client_bundle,
-        **_asset_kwargs,
-        # PERF-3: build into the STABLE per-pocket working dir so node_modules
-        # persists and `bun install` is cached across builds, cutting the dominant
-        # per-edit cost.
-        pocket_id=pocket_id,
-        # A live deploy keeps the SSR fail-gate (smoke=True) so the gate + the
-        # rollback in edit_svelte_component are unchanged — a broken edit never
-        # reaches the live deploy.
-        smoke=True,
-    )
+    if prebuilt_project_dir is not None:
+        # SL-3: the worker already built this site in a sandbox and materialised the
+        # artifact on disk. Skip the build and reuse everything below it verbatim —
+        # ``BuildResult`` carries only what the tail reads (``project_dir``), and the
+        # SSR smoke gate does not apply because this artifact came back from a build
+        # that already ran the engine's own gate inside the sandbox.
+        build = BuildResult(project_dir=prebuilt_project_dir, ripple_version=None)
+    else:
+        build = await _build_or_cloud_error(
+            gen,
+            ripple_spec=ripple_spec,
+            theme=theme,
+            site_id=site_id,
+            title=site_name,
+            capture_api_base=_capture_base(),
+            capture_signed_key=signed_key,
+            engine=engine,
+            source=source,
+            builder_origin=builder_origin,
+            keeps_client_bundle=keeps_client_bundle,
+            **_asset_kwargs,
+            # PERF-3: build into the STABLE per-pocket working dir so node_modules
+            # persists and `bun install` is cached across builds, cutting the dominant
+            # per-edit cost.
+            pocket_id=pocket_id,
+            # A live deploy keeps the SSR fail-gate (smoke=True) so the gate + the
+            # rollback in edit_svelte_component are unchanged — a broken edit never
+            # reaches the live deploy.
+            smoke=True,
+        )
 
     # Grow the concierge onto the built pages BEFORE they deploy, so the artifact
     # that goes live already carries the bar. This is a LIVE-publish-only step: a
@@ -2875,6 +2911,200 @@ async def _provision_dynamic_site(
     )
     doc._provision_job_id = result.get("job_id")
     return doc
+
+
+# ---------------------------------------------------------------------------
+# SL-3 — the async static publish.
+# ---------------------------------------------------------------------------
+
+
+def build_runs_async(engine: str | None) -> bool:
+    """Does publishing this engine ENQUEUE its build instead of running it inline?
+
+    True for exactly the engines whose ephemeral-lane artifact can actually be
+    DEPLOYED, which today is react alone. This is a narrow answer to a broad-sounding
+    question, and the narrowness is the whole content of the predicate:
+
+    * ``html`` runs no build at all (``needs_node_build`` is False), so there is
+      nothing to enqueue. Flipping it would add a queue wait to the one engine that
+      never needed one.
+    * ``ripple`` and DYNAMIC ``svelte`` build on adapter-cloudflare, whose output's
+      pages are rendered by a ``_worker.js`` whose imports sit OUTSIDE the tarred
+      directory. The artifact therefore cannot serve — which is not a guess: it is why
+      ``truth_lane`` refuses to even PREVIEW one (``REASON_WORKER_RENDERED``). Queueing
+      those builds would replace a working publish with one nothing can deploy.
+    * STATIC ``svelte`` (adapter-static) IS self-sufficient, and is still excluded,
+      because which adapter ran is a property of the built SITE and is not knowable at
+      enqueue time — only after the build. A gate has to decide before it spends the
+      queue, so svelte stays inline until the artifact question is settled for the
+      whole track.
+    * ``react`` emits a prerendered, assets-only ``dist`` with no server entry, so the
+      tar is the whole deployable site.
+
+    Widen this ONLY together with the artifact: the moment an adapter-cloudflare
+    artifact can serve, ripple and svelte belong here too, and this predicate is the
+    one place that changes.
+    """
+    return normalize_engine(engine) == "react"
+
+
+async def _enqueue_static_build(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    site_id: str,
+    signed_key: str,
+    site_name: str,
+    ripple_spec: dict[str, Any] | None,
+    theme: dict[str, Any],
+    engine: str,
+    source: dict[str, str] | None,
+    assets: dict[str, str] | None,
+    pattern: str | None,
+    builder_origin: str | None,
+    keeps_client_bundle: bool,
+) -> _SiteDoc:
+    """Enqueue a static site's build and return immediately (SL-3).
+
+    The async half of ``_deploy_site_doc``. It ensures the ONE canonical Site doc for
+    ``(workspace, pocket_id)`` exists, stamps the build lifecycle onto it, and hands the
+    build to the ephemeral lane. The worker calls back into
+    :func:`deploy_prebuilt_site` when the artifact is ready, so the deploy, the upsert
+    and the post-deploy scheduling all still happen exactly once, in one place.
+
+    A RE-PUBLISH DOES NOT TAKE THE LIVE SITE DOWN, and that is the important difference
+    from ``_provision_dynamic_site``, which sets ``deployed=False`` / ``url=""`` while
+    its job runs. Here the previous deploy is still serving the moment a rebuild is
+    queued, so clearing those fields would report a working site as not-live for the
+    length of a build. ``build_status`` carries the in-flight state instead — the wire
+    contract the frontend already codes to ("a site can be live and simultaneously
+    mid-rebuild").
+
+    Returns the doc carrying ``build_status`` / ``build_started_at`` / ``build_job_id``,
+    which ``_to_response`` surfaces so the client has something to poll. On a
+    single-flight no-op (a build is genuinely already in flight) the doc comes back
+    unchanged, still carrying the in-flight build's own job id — the caller is watching
+    the right build, just not a new one.
+    """
+    # Lazy import: keeps the sites service free of an eager arq/Redis dependency at
+    # module load, and breaks the cycle (``build_job`` imports this module).
+    from pocketpaw_ee.sites import build_job
+    from pocketpaw_ee.sites.generator_client import build_generator_input
+
+    oid = ObjectId(site_id)
+    doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        doc = _SiteDoc(
+            id=oid,
+            workspace=workspace_id,
+            pocket_id=pocket_id,
+            owner=user_id,
+            name=site_name,
+            script_name=site_id,
+            # A first publish has nothing serving yet, so this is honest rather than
+            # pessimistic: the worker flips both when the deploy succeeds.
+            deployed=False,
+            url="",
+            signed_key=signed_key,
+            builder_origin=builder_origin or "",
+            allowed_origins=_default_allowed_origins(),
+            event_mapping=_DEFAULT_EVENT_MAPPING,
+        )
+        await doc.insert()
+    else:
+        # Refresh only the identity fields a re-publish legitimately changes. NOT
+        # ``deployed`` / ``url`` (the prior deploy is still live), NOT
+        # ``allowed_origins`` / ``domains`` / ``signed_key`` (a connected domain and the
+        # capture key must survive a rebuild).
+        doc.pocket_id = pocket_id
+        doc.owner = user_id
+        doc.name = site_name
+        doc.script_name = site_id
+        await doc.save()
+
+    generator_input = build_generator_input(
+        engine=engine,
+        theme=theme,
+        site_id=site_id,
+        title=site_name,
+        capture_api_base=_capture_base(),
+        capture_signed_key=signed_key,
+        ripple_spec=ripple_spec,
+        source=source,
+        assets=assets,
+        builder_origin=builder_origin,
+        keeps_client_bundle=keeps_client_bundle,
+    )
+    # The inputs the worker hands back to ``deploy_prebuilt_site`` so the deploy tail
+    # runs with exactly what this publish captured, not with whatever the pocket's
+    # draft has become by the time the build finishes.
+    deploy_inputs = {
+        "workspace_id": workspace_id,
+        "user_id": user_id,
+        "pocket_id": pocket_id,
+        "site_id": site_id,
+        "signed_key": signed_key,
+        "site_name": site_name,
+        "engine": engine,
+        "pattern": pattern,
+        "builder_origin": builder_origin,
+    }
+
+    # An enqueue failure PROPAGATES. The helper rolls the row to a terminal status
+    # first, so the site stays republishable, and the raise becomes the 5xx the user
+    # sees. Returning success for a build that was never queued is the one outcome
+    # worse than a failed publish: the row would read in-progress forever and the UI
+    # would poll a job that does not exist.
+    job_id = await build_job.enqueue_site_build(
+        doc,
+        engine=engine,
+        generator_input=generator_input,
+        deploy_inputs=deploy_inputs,
+    )
+    logger.info(
+        "sites: queued the build for site %s (pocket %s, engine %s) as job %s",
+        site_id,
+        pocket_id,
+        engine,
+        job_id,
+    )
+    # Re-read so the response carries what the enqueue just wrote (the helper stamps
+    # through a targeted ``set``, so the in-memory doc this function holds is stale).
+    fresh = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+    return fresh if fresh is not None else doc
+
+
+async def deploy_prebuilt_site(
+    *,
+    project_dir: str,
+    deploy_inputs: dict[str, Any],
+    _local_deploy: Callable[[str, str], str] | None = None,
+    _workers_deploy: Callable[..., Any] | None = None,
+) -> _SiteDoc:
+    """Finish a publish whose build already happened elsewhere (SL-3).
+
+    The seam the build worker calls once it has materialised the artifact. It runs
+    ``_deploy_site_doc``'s tail — concierge embed → deploy → canonical upsert →
+    knowledge sync + screenshot — against the prebuilt tree, so there is exactly ONE
+    implementation of "what happens after a site is built" and the async path cannot
+    drift from the inline one.
+
+    ``deploy_inputs`` is the dict ``_enqueue_static_build`` put in the job payload, so
+    the deploy uses what the PUBLISH captured. The worker passes no injection seams, so
+    ``PAW_CF_DEPLOY_MODE`` selects the target exactly as it does inline (local mode still
+    serves from ``local_server.deploy_local``); the two underscore-prefixed parameters
+    exist only so a test can drive this seam without a real deploy target, mirroring
+    ``publish``'s own ``_local_deploy`` / ``_workers_deploy``.
+    """
+    return await _deploy_site_doc(
+        ripple_spec=None,
+        theme={},
+        prebuilt_project_dir=project_dir,
+        local_deploy=_local_deploy,
+        workers_deploy=_workers_deploy,
+        **deploy_inputs,
+    )
 
 
 async def _load(workspace_id: str, site_id: str) -> _SiteDoc:
