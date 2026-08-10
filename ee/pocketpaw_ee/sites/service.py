@@ -1,6 +1,31 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-08-10 (SL-3 — the build lane reaches the wire): ``_to_response`` and
+# ``pocket_status`` now populate ``build_status`` / ``build_reason`` / ``build_job_id``
+# from the Site row. They were declared on the DTOs by SG-9i and never passed here, so
+# every response carried the defaults — ``build_status`` frozen at "none" regardless of
+# the row — and the shipped build-status UI was polling a field that could not change.
+# Read via ``getattr`` defaults like every other field, so a pre-SG-9i row reads as "no
+# build" instead of raising, and a pocket with no Site doc reads "none" rather than null
+# (a draft that was never published has no build, which is not the same as a failed one).
+#
+# ``build_status`` is passed through VERBATIM, never normalised against a known set: the
+# wire's contract is that a client treats an unrecognised status as IN-PROGRESS, and
+# folding an unknown value into "none" here would break that from the server side.
+#
+# THE PUBLISH PATH IS UNCHANGED BY SL-3. ``_deploy_site_doc`` still builds and deploys
+# inline for a static site. Flipping it to enqueue-and-return is blocked on a
+# prerequisite that does not exist yet: the ephemeral lane's artifact is a tar of the
+# static output only, ``sites/build_job.py`` never persists it, and no deploy target
+# accepts one — ``local_server.deploy_local`` and ``workers_deploy.deploy_workers`` both
+# want a project DIR, and the wfp path wants a worker bundle read out of one. Worse, for
+# ripple and dynamic svelte the artifact cannot serve at all: its pages come from a
+# ``_worker.js`` whose imports sit OUTSIDE the tarred directory, which is precisely why
+# ``truth_lane`` refuses to even preview one (``REASON_WORKER_RENDERED``). Flipping today
+# would take those sites from "publishes and works" to "queues a build nothing can
+# deploy".
+#
 # Updated 2026-08-10 (SL-2 slice 2 — the ephemeral-build lane gets a job): added the
 # four seams the site-build arq job (``sites/build_job.py``) writes its lifecycle
 # through — ``load_build_site``, ``mark_build_queued``, ``mark_build_running``,
@@ -1618,6 +1643,23 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # None until a capture lands (empty string on the doc, and every pre-SC-1
         # row via the getattr default, read as None on the wire).
         preview_image_url=getattr(doc, "preview_image_url", "") or None,
+        # SL-3: the build lane's state, straight off the persisted row. These three
+        # were declared on the DTO by SG-9i and never populated here, so every
+        # response carried the DEFAULTS — ``build_status`` frozen at "none" no matter
+        # what the row said. A client polling a build therefore watched a field that
+        # could not change, which is indistinguishable from a build that never starts.
+        #
+        # Read with ``getattr`` defaults like every field above, so a pre-SG-9i row
+        # reads as "no build" rather than raising.
+        #
+        # ``build_status`` is passed through VERBATIM — never normalised against a
+        # known set. The wire's contract is that a client treats an unrecognised status
+        # as in-progress, and mapping an unknown value to "none" here would break that
+        # from the server side: it would tell a client "nothing is building" about a
+        # build that is running under a status this deploy predates.
+        build_status=getattr(doc, "build_status", "none"),
+        build_reason=getattr(doc, "build_reason", None),
+        build_job_id=getattr(doc, "build_job_id", None),
     )
 
 
@@ -4968,6 +5010,17 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         preview_image_url=(getattr(doc, "preview_image_url", "") or None)
         if doc is not None
         else None,
+        # SL-3: the build lane's state on the read a builder polls BY POCKET. This is
+        # the only GET keyed on a pocket id, so a client watching a build it just
+        # triggered has nowhere else to look — without these it would have to fetch the
+        # whole gallery list to find one site's build state.
+        #
+        # A pocket with NO Site doc reads the "no build" defaults rather than null: a
+        # draft that has never been published has not got a failed build, it has got no
+        # build, and those must not look the same to a badge.
+        build_status=getattr(doc, "build_status", "none") if doc is not None else "none",
+        build_reason=getattr(doc, "build_reason", None) if doc is not None else None,
+        build_job_id=getattr(doc, "build_job_id", None) if doc is not None else None,
     )
 
 

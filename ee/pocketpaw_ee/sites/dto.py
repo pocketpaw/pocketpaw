@@ -2,6 +2,20 @@
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
 #
+# Updated 2026-08-10 (SL-3 — the build lane reaches the wire): added
+# ``SiteResponse.build_reason`` and put all three build fields
+# (``build_status`` / ``build_reason`` / ``build_job_id``) on ``SiteStatusResponse``
+# too.
+#
+# SG-9i DECLARED ``build_status`` AND ``build_job_id`` ON ``SiteResponse`` AND NOTHING
+# EVER POPULATED THEM. ``service._to_response`` builds the DTO field by field and never
+# passed either, so every response carried the field DEFAULTS: ``build_status`` was
+# frozen at "none" for every site, no matter what the row said, and there was no
+# ``build_reason`` field at all. The frontend build-status UI reads all three — so it was
+# polling a value that could not change, which looks exactly like a build that never
+# starts. The populating half is in ``service.py``; this file only ever declared the
+# shape, which is why the gap survived a review: both halves looked complete alone.
+#
 # Updated 2026-06-01 (Phase 3 — local fake-deploy): SiteResponse carries ``url``,
 # the deployed site's openable address. LOCAL mode returns the localhost URL the
 # per-site static server serves so the caller (and the cmux smoke) can open the
@@ -223,6 +237,23 @@ class SiteResponse(BaseModel):
     # build still gets it. That matters precisely because a queued build is the case
     # where the user reloads.
     build_job_id: str | None = None
+    # SL-3: WHY the build reached ``build_status`` — a fixed ``"<rung>:<cause>"``
+    # identifier from ``sites/build_job.py`` (e.g. ``build_failed:install_failed``,
+    # ``infra_lost:build_killed_by_signal_137``), read from the persisted
+    # ``Site.build_reason``. None when no build has settled.
+    #
+    # WITHOUT THIS ON THE WIRE, ``build_status="failed"`` IS UNACTIONABLE, which is the
+    # exact failure the field was added to prevent: the row can say a build failed and
+    # nothing can say whether the user's code broke or we lost the container — and those
+    # two need opposite responses from whoever is looking at it.
+    #
+    # SAFE TO SURFACE, and that is a property of the WRITER, not of this field: the
+    # vocabulary is closed on both halves and the build's stderr never enters it (a
+    # build's error text is the user's own code and can carry a token pasted into a
+    # config). A client may split on the colon to group by rung; it must not assume the
+    # set of rungs is closed forever, for the same reason it must not error on an
+    # unrecognised ``build_status``.
+    build_reason: str | None = None
     # SI-4: the persisted import summary for an IMPORTED site — {pages: [{path,
     # title}], asset_count, asset_bytes, forms: [{page, original_action, rewired}],
     # scripts, warnings} (from-url adds status/source_url). None for every
@@ -334,6 +365,20 @@ class SiteStatusResponse(BaseModel):
     # republish updates it), plus POST /sites/{site_id}/preview-refresh on demand,
     # and the value is a different uploads link every capture.
     preview_image_url: str | None = None
+    # ── SL-3: the build lane's state on the BY-POCKET read too ──────────────────
+    # The same three fields ``SiteResponse`` carries (see there for the full write-up
+    # of each). They are duplicated onto this DTO for the same reason ``deployed_at`` /
+    # ``pattern`` / ``engine`` / ``preview_image_url`` already are: this is the read a
+    # builder polls BY POCKET, and it is the only GET keyed on a pocket id, so a client
+    # watching a build it just triggered has nowhere else to look. Without them a badge
+    # would have to fetch the whole gallery list to find one site's build state.
+    #
+    # All three default to the "no build has happened" values, so a pocket with no Site
+    # doc, and every row that predates the fields, reads as "nothing building" rather
+    # than as an error.
+    build_status: str = "none"
+    build_reason: str | None = None
+    build_job_id: str | None = None
 
 
 class SiteVersionResponse(BaseModel):
