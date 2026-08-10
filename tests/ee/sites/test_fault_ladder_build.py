@@ -837,6 +837,137 @@ class TestF2AndF7TheRecordedRowNamesItsRung:
 
 
 # ---------------------------------------------------------------------------
+# F1 + F3 at the PUBLISH boundary — what the third pin demanded when it fired
+# ---------------------------------------------------------------------------
+
+
+class TestF1AndF3AtThePublishBoundary:
+    """The publish half of F1 and F3, provable now that publish reaches the lane (SL-3).
+
+    F1 above proves ``run_build`` refuses loudly when Daytona is unconfigured. The pin that
+    fired asked for the PUBLISH half of that rung, and answering it honestly means saying
+    that the flip CHANGED it: Daytona is no longer touched inside the request, so an
+    unconfigured sandbox can no longer fail a publish. The failure moves to the row, which
+    is the whole point of ``build_reason`` — and the property that still has to hold is that
+    it lands there rather than nowhere, and that the site stays republishable.
+    """
+
+    async def test_an_unconfigured_daytona_no_longer_fails_the_publish_itself(
+        self, beanie_test_db, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The publish is ACCEPTED and the sandbox failure surfaces later on the row.
+
+        This is a deliberate behaviour change, not a regression: a queue exists precisely so
+        the request does not depend on the build host being up. What must not happen is a
+        publish that reports success and leaves nothing to look at — hence the queued status
+        and the job id on the way out.
+        """
+        from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+        from pocketpaw_ee.sites import build_job, service
+
+        daytona_unconfigured(monkeypatch)
+
+        pool_calls: list[tuple] = []
+
+        class _Pool:
+            async def enqueue_job(self, function, *args, _job_id=None, **kw):
+                pool_calls.append((function, _job_id))
+                return object()
+
+        async def _get_pool():
+            return _Pool()
+
+        monkeypatch.setattr(build_job, "_get_pool", _get_pool)
+
+        pocket = _PocketDoc(workspace="ws-f1", name="P", owner="u1", type="site")
+        await pocket.insert()
+
+        doc = await service.publish(
+            workspace_id="ws-f1",
+            user_id="u1",
+            pocket_id=str(pocket.id),
+            theme={},
+            name="x",
+            engine="react",
+            source={"src/App.tsx": "x"},
+        )
+
+        assert doc.build_status == "queued"
+        assert doc.build_job_id
+        assert pool_calls, "the publish did not reach the queue"
+
+    async def test_the_worker_records_the_unavailable_sandbox_on_the_row(
+        self, beanie_test_db, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F1's rung, at the place a user can now see it. ``sandbox_unavailable`` must not
+        read as the user's build being broken, and the row must not be left mid-flight."""
+        from pocketpaw_ee.cloud.models.site import Site
+        from pocketpaw_ee.sites import build_job
+
+        daytona_unconfigured(monkeypatch)
+
+        site = Site(workspace="ws-f1b", pocket_id="pk", owner="u1", build_status="queued")
+        await site.insert()
+
+        class _Runner:
+            async def generate(self, input_json, out_dir):
+                from pathlib import Path as _P
+
+                project = _P(out_dir, "project")
+                project.mkdir(parents=True, exist_ok=True)
+                (project / "package.json").write_bytes(b"{}")
+                return {"projectDir": str(project)}
+
+        with pytest.raises(RuntimeError, match="not configured"):
+            await build_job.run_site_build(
+                {}, "ws-f1b", str(site.id), {"engine": "react"}, "react", 600, _runner=_Runner()
+            )
+
+        fresh = await Site.get(site.id)
+        assert fresh is not None
+        assert fresh.build_reason == "sandbox_unavailable:run_build_raised"
+        assert bs.should_enqueue(fresh, 600) is True
+
+    async def test_a_publish_whose_enqueue_fails_returns_an_error_the_user_can_see(
+        self, beanie_test_db, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The other half the pin named. A publish that swallowed a failed enqueue would
+        leave the row reading in-progress forever with nothing coming to consume it — F3's
+        harm, arriving through the front door instead of the worker."""
+        from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+        from pocketpaw_ee.cloud.models.site import Site
+        from pocketpaw_ee.sites import build_job, service
+
+        class _DeadPool:
+            async def enqueue_job(self, *_a, **_kw):
+                raise RuntimeError("redis is down")
+
+        async def _get_pool():
+            return _DeadPool()
+
+        monkeypatch.setattr(build_job, "_get_pool", _get_pool)
+
+        pocket = _PocketDoc(workspace="ws-f3p", name="P", owner="u1", type="site")
+        await pocket.insert()
+
+        with pytest.raises(RuntimeError, match="redis is down"):
+            await service.publish(
+                workspace_id="ws-f3p",
+                user_id="u1",
+                pocket_id=str(pocket.id),
+                theme={},
+                name="x",
+                engine="react",
+                source={"src/App.tsx": "x"},
+            )
+
+        doc = await Site.find_one({"pocket_id": str(pocket.id), "workspace": "ws-f3p"})
+        assert doc is not None
+        assert bs.should_enqueue(doc, 600) is True
+        assert bs.is_in_flight(doc) is False
+
+
+# ---------------------------------------------------------------------------
 # The gap — pinned so it cannot close silently
 # ---------------------------------------------------------------------------
 
@@ -849,43 +980,23 @@ class TestTheWiringGapIsRealAndTemporary:
     becomes injectable and must be proven for real. Deleting a failing test here instead of
     proving its rung is the one wrong response.
 
-    UPDATED 2026-08-10 (SL-2 slice 2). Two of these fired and were replaced by the proofs
-    they demanded, not removed: the lifecycle fields ARE written now and there IS an
-    enqueue, so see ``TestF2AndF7TheRecordedRowNamesItsRung`` and
-    ``TestF3AnUnconsumableBuildRow``'s last test. The two below are still true statements
-    about this branch and stay armed.
+    UPDATED 2026-08-10, twice. SL-2 slice 2 fired two of these — the lifecycle fields ARE
+    written and there IS an enqueue — and they became
+    ``TestF2AndF7TheRecordedRowNamesItsRung`` and ``TestF3AnUnconsumableBuildRow``'s last
+    test. SL-3 fired the third: publish now reaches the lane, and its proofs are in
+    ``TestF1AndF3AtThePublishBoundary``.
+
+    ONE PIN IS LEFT, and it is still a true statement about this branch: nothing retries.
+    Every enqueue passes ``attempts_left=0``, so ``settle``'s stay-in-flight branch is
+    reachable only by a forced test. When a retry loop lands, this fires and F2's
+    backoff half becomes provable.
     """
 
-    def test_publish_does_not_consult_the_daytona_lane_yet(self) -> None:
-        """When this fails: F1's publish half is now provable — a publish with Daytona
-        unconfigured must report unavailable and leave the site's row untouched.
-
-        FOUR markers now, not one. SL-2 slice 2 built the job and the enqueue helper and
-        deliberately did NOT call either from publish, so "does publish reach the lane" can
-        no longer be answered by looking for the runner alone: a publish that flips to
-        async will call ``enqueue_site_build`` and may never name ``daytona_runner`` at all.
-        The two import forms are matched as well, because a wiring could route through a
-        local alias and name neither.
-
-        Deliberately matched on IMPORT FORMS rather than on the bare module name: this
-        module's own header refers to ``sites/build_job.py`` in prose (it documents which
-        module writes through its seams), and a marker that a comment can trip is a marker
-        that gets deleted rather than investigated.
-        """
-        from pocketpaw_ee.sites import service
-
-        source = Path(service.__file__).read_text(encoding="utf-8")
-        for marker in (
-            "daytona_runner",
-            "enqueue_site_build",
-            "import build_job",
-            "build_job import",
-        ):
-            assert marker not in source, (
-                f"publish now reaches the build lane ({marker!r}) — prove F1's publish "
-                "half (unavailable + site unchanged) and that a publish whose enqueue "
-                "fails still returns an error the user can see"
-            )
+    # ``test_publish_does_not_consult_the_daytona_lane_yet`` FIRED on 2026-08-10 (SL-3) and
+    # was replaced by the two proofs its failure message demanded, in
+    # ``TestF1AndF3AtThePublishBoundary`` below. Publish now reaches the lane for the
+    # engines whose artifact can be deployed from it, so the statement the pin made is no
+    # longer true and re-asserting it would only pin the wiring shut.
 
     def test_the_lane_still_classifies_one_attempt_at_a_time(self) -> None:
         """When this fails: F2's retry-with-backoff becomes provable. ``FaultyDaytonaClient``

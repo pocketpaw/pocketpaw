@@ -7,12 +7,28 @@
 # it, ``build_state`` could decide what to write and nothing called it. This is the
 # module that joins them, and it is the FIRST caller ``run_build`` has ever had.
 #
-# WHAT THIS DELIBERATELY DOES NOT DO: change the publish path. ``service.publish`` still
-# builds synchronously through the local generator. Flipping it to enqueue-and-return is
-# a separate slice gated on a frontend that can render a queued build — and shipping the
-# flip before that frontend exists would show every publisher a finished-looking page
-# for a site that has not built yet. So this module is complete and callable, and the
-# only thing that calls it today is its tests.
+# Edited 2026-08-10 (SL-3): THIS MODULE NOW HAS A PRODUCTION CALLER, and it finishes the
+# publish rather than only recording a verdict. ``service._enqueue_static_build`` queues a
+# build for the engines whose artifact can be deployed from this lane, and on a clean
+# build the job materialises the artifact and calls ``service.deploy_prebuilt_site`` — the
+# SAME deploy tail the inline path runs (concierge embed → deploy → canonical upsert →
+# knowledge sync + screenshot). One deploy implementation, two places the build can have
+# happened.
+#
+# THE DEPLOY RUNS BEFORE THE ROW SETTLES. ``built`` must never mean "built but not
+# serving": a client reads that as done. So a deploy failure after a clean build settles
+# as :data:`RUNG_DEPLOY_FAILED` instead — its own rung, because nothing about the user's
+# build was wrong and blaming it would send them to debug a site that compiles.
+#
+# ``deploy_inputs=None`` KEEPS THE SLICE-2 SHAPE REACHABLE: build, classify, record, deploy
+# nothing. That is not dead code — a build queued to verify an artifact is a real use of
+# this lane, and it is what the fault-ladder tests drive.
+#
+# WHICH ENGINES ARRIVE HERE IS DECIDED IN ``service.build_runs_async``, not here, and it is
+# react-only today. The reason is the artifact, not the queue: an adapter-cloudflare build
+# (ripple, dynamic svelte) emits pages rendered by a ``_worker.js`` whose imports sit
+# outside the tarred directory, so the artifact cannot serve — which is why ``truth_lane``
+# refuses to preview one. Widen that predicate only together with the artifact.
 #
 # ┌───────────────────────────────────────────────────────────────────────────────────┐
 # │ WHY A DEDICATED ARQ FUNCTION AND NOT THE WORKSPACE-JOBS REGISTRY.                  │
@@ -207,6 +223,11 @@ RUNG_ARTIFACT_MISSING = "artifact_missing"
 #: The enqueue itself failed after the row was already stamped ``queued``. Written by the
 #: enqueue helper so the row lands TERMINAL instead of pinned in flight.
 RUNG_ENQUEUE_FAILED = "enqueue_failed"
+#: SL-3. The build produced a deployable artifact and the DEPLOY failed. Deliberately its
+#: own rung rather than folded into ``build_failed``: nothing about the user's build was
+#: wrong, so blaming it would send them to debug a site that compiles. Retryable — a
+#: failed wrangler run or an unreachable Cloudflare is worth another publish.
+RUNG_DEPLOY_FAILED = "deploy_failed"
 
 
 @dataclass(frozen=True)
@@ -373,9 +394,11 @@ async def run_site_build(
     engine: str,
     timeout_seconds: int,
     *,
+    deploy_inputs: dict[str, Any] | None = None,
     attempts_left: int = 0,
     _runner: Any = None,
     _client: Any = None,
+    _deployer: Any = None,
 ) -> None:
     """arq job: scaffold, build in an ephemeral sandbox, and record the outcome.
 
@@ -390,9 +413,15 @@ async def run_site_build(
     immediately. It is a parameter rather than a literal so ``settle``'s stay-in-flight
     branch is reachable the day an attempt loop lands, and testable before then.
 
-    ``_runner`` / ``_client`` are the test-injection seams (the convention the rest of
-    ``sites`` uses): a generator runner exposing ``generate``, and a Daytona client.
-    None means the real thing.
+    ``deploy_inputs`` is what the publish captured, carried through so the DEPLOY runs
+    with the inputs of the publish that queued it rather than with whatever the pocket's
+    draft has become since. When it is None the job builds and records the outcome and
+    deploys nothing — the shape slice 2 shipped, still reachable and still tested,
+    because a build whose result is only being verified is a real use of this lane.
+
+    ``_runner`` / ``_client`` / ``_deployer`` are the test-injection seams (the convention
+    the rest of ``sites`` uses): a generator runner exposing ``generate``, a Daytona
+    client, and the deploy callback. None means the real thing.
 
     NEVER RAISES FOR A BUILD OUTCOME — a failed build, a timeout and a lost sandbox are
     all results, and the row is where they get recorded. It DOES re-raise when the sandbox
@@ -493,7 +522,90 @@ async def run_site_build(
 
     settlement = resolve_build_settlement(result, attempts_left=attempts_left)
     _log_outcome(site_id, result, settlement)
+
+    # SL-3: a build that produced a deployable artifact still has to become a LIVE site.
+    # The deploy runs BEFORE the row settles, so ``built`` never means "built but not
+    # serving" — a status a client would reasonably read as done.
+    if settlement.status == "built" and deploy_inputs is not None:
+        try:
+            await _deploy_built_artifact(
+                result.artifact,
+                engine=engine,
+                deploy_inputs=deploy_inputs,
+                deployer=_deployer,
+            )
+        except Exception:
+            # The build worked and the deploy did not, so this is NOT a build failure —
+            # but from the publisher's side nothing went live, and the row is the only
+            # place that can say so. A terminal status is also what keeps the site
+            # republishable; leaving ``built`` on a site that never deployed would read
+            # as success forever.
+            logger.exception("sites.build: deploy failed for site %s after a clean build", site_id)
+            await _record(
+                site,
+                _settlement(
+                    RUNG_DEPLOY_FAILED,
+                    "deploy_raised",
+                    retryable=True,
+                    attempts_left=attempts_left,
+                ),
+            )
+            raise
+
     await _record(site, settlement)
+
+
+async def _deploy_built_artifact(
+    artifact: bytes | None,
+    *,
+    engine: str,
+    deploy_inputs: dict[str, Any],
+    deployer: Any = None,
+) -> None:
+    """Materialise the artifact into a project-dir shape and run the deploy tail.
+
+    THE ARTIFACT IS UNPACKED THROUGH ``artifact_preview.unpack_artifact``, not through a
+    second extractor written here. That function is hardened against the two things a tar
+    from customer content will eventually contain — a member that escapes its root
+    (``../``, absolute, drive-qualified, a symlink) and a zip bomb — and every one of
+    those guards has a mutation proving it fires. Hand-rolling an extractor for the deploy
+    path would mean the deploy got the unproven copy.
+
+    Its skip list is written for a PREVIEW (``_worker.js`` and deploy metadata are
+    dropped), which is harmless here only because this path is react-only: react emits no
+    server entry, and ``deploy_workers`` writes its own ``.assetsignore``. Widening
+    ``service.build_runs_async`` past react means revisiting this — an engine whose worker
+    IS the site cannot have it dropped on the way to the edge.
+
+    The tree is extracted UNDER the engine's static-output rel, because the deploy targets
+    resolve their source as ``<project_dir>/<static_output_rel>`` while the tar is rooted
+    AT that directory's contents. Extracting flat would deploy an empty dir.
+    """
+    if not artifact:
+        # ``settle`` only reaches ``built`` via ``BuildRunResult.ok``, which requires
+        # bytes, so this is unreachable rather than tolerated — and it is checked anyway,
+        # because "deploy whatever arrived" is how an empty deploy happens.
+        raise RuntimeError("refusing to deploy an empty artifact")
+
+    from pocketpaw_ee.sites import artifact_preview
+    from pocketpaw_ee.sites import service as _service
+    from pocketpaw_ee.sites.engines import static_output_rel
+
+    deploy = deployer or _service.deploy_prebuilt_site
+    project_dir = tempfile.mkdtemp(prefix="paw-deploy-")
+    try:
+        unpacked = artifact_preview.unpack_artifact(
+            artifact, Path(project_dir, static_output_rel(engine))
+        )
+        logger.info(
+            "sites.build: materialised %d entries (%d bytes) for the deploy of site %s",
+            unpacked.entries,
+            unpacked.bytes_written,
+            deploy_inputs.get("site_id"),
+        )
+        await deploy(project_dir=project_dir, deploy_inputs=deploy_inputs)
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
 
 
 async def _scaffold(generator_input: dict[str, Any], out_dir: str, *, runner: Any = None) -> str:
@@ -601,6 +713,7 @@ async def enqueue_site_build(
     *,
     engine: str,
     generator_input: dict[str, Any],
+    deploy_inputs: dict[str, Any] | None = None,
     timeout_seconds: int | None = None,
     _pool_override: Any = None,
 ) -> str | None:
@@ -656,6 +769,10 @@ async def enqueue_site_build(
             normalize_engine(engine),
             timeout,
             _job_id=job_id,
+            # Rides as a kwarg so the positional payload stays exactly what slice 2
+            # shipped, and a build queued for verification alone (no deploy) simply omits
+            # it. arq forwards any non-underscore kwarg to the function.
+            deploy_inputs=deploy_inputs,
         )
         if job is None:
             # arq returns None when the id already exists. With a uuid-tailed id that
@@ -685,6 +802,7 @@ __all__ = [
     "OUT_OF_SANDBOX_MARGIN_SECONDS",
     "RUNG_ARTIFACT_MISSING",
     "RUNG_ENGINE_NOT_BUILDABLE",
+    "RUNG_DEPLOY_FAILED",
     "RUNG_ENQUEUE_FAILED",
     "RUNG_SANDBOX_UNAVAILABLE",
     "RUNG_SCAFFOLD_EMPTY",
