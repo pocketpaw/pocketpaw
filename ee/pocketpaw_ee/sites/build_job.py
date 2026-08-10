@@ -151,7 +151,7 @@ from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
 
 from pocketpaw_ee.sites import service as sites_service
-from pocketpaw_ee.sites.build_state import BuildStatus, settle, should_enqueue
+from pocketpaw_ee.sites.build_state import BuildStatus, settle
 from pocketpaw_ee.sites.daytona_build import resolve_build_timeout_seconds
 from pocketpaw_ee.sites.daytona_runner import (
     EXEC_TIMEOUT_SLACK_SECONDS,
@@ -740,17 +740,22 @@ async def enqueue_site_build(
 
     Order, and why each step is where it is:
 
-      1. GATE on ``should_enqueue``. A build genuinely in flight must not get a second
-         sandbox; a stale one must not block forever. Both live in ``build_state``.
-      2. STAMP ``queued`` + the clock + the job id, in ONE write, BEFORE the enqueue.
-         Before, because a worker that claimed the job first would write a terminal
-         status and then have this stamp land on top of it, pinning a finished build in
-         ``queued`` forever. One write, because the job id is minted here rather than
-         read back off the enqueue, so there is no second write to race with the job.
-      3. ENQUEUE. On ANY failure — a dead Redis, or arq refusing the id — roll the row to
+      1. CLAIM the slot: stamp ``queued`` + the clock + the job id in ONE CONDITIONAL
+         write, BEFORE the enqueue. Conditional because the gate and the stamp used to be
+         two steps — read ``should_enqueue``, then write — and every publish arriving
+         between them read the same pre-stamp row, passed the gate correctly, and opened
+         its own sandbox: 8 concurrent publishes of one site produced 8 sandboxes. The
+         precondition (``build_state.claim_precondition``) puts the decision inside the
+         write so the database picks one winner; the losers return ``None`` having written
+         nothing. Before the enqueue, because a worker that claimed the job first would
+         write a terminal status and then have this stamp land on top of it, pinning a
+         finished build in ``queued`` forever. One write, because the job id is minted here
+         rather than read back off the enqueue, so there is no second write to race with
+         the job.
+      2. ENQUEUE. On ANY failure — a dead Redis, or arq refusing the id — roll the row to
          a terminal status and re-raise. Skipping the rollback is what pins a row in
-         ``queued`` behind an enqueue that never happened, and ``should_enqueue`` would
-         then no-op every publish of this site until the staleness window lapsed.
+         ``queued`` behind an enqueue that never happened, and the claim would then refuse
+         every publish of this site until the staleness window lapsed.
 
     ``timeout_seconds`` defaults to the engine's resolved budget and is passed on to the
     job, so the window the guard measures and the budget the sandbox is held to are one
@@ -762,16 +767,19 @@ async def enqueue_site_build(
         timeout_seconds if timeout_seconds is not None else resolve_build_timeout_seconds(engine)
     )
 
-    if not should_enqueue(site, timeout):
+    # The claim IS the gate. There is deliberately no ``should_enqueue`` pre-check in
+    # front of it: a second reader of the same rule would be free but would also invite
+    # the next reader of this code to believe the read is what protects the site, which is
+    # the belief that cost 8 sandboxes. One gate, and it is the conditional write.
+    job_id = _mint_job_id(site_id)
+    claimed = await sites_service.claim_build_queued(site, job_id=job_id, timeout_seconds=timeout)
+    if not claimed:
         logger.info(
             "sites.build: site %s already has a build in flight (%s) — not enqueueing",
             site_id,
             getattr(site, "build_status", None),
         )
         return None
-
-    job_id = _mint_job_id(site_id)
-    await sites_service.mark_build_queued(site, job_id=job_id)
 
     try:
         pool = _pool_override or await _get_pool()

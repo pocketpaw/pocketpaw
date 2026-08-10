@@ -1,14 +1,5 @@
 [
   {
-    "label": "D5: the single-flight gate is removed from the enqueue, so every publish of a site opens its own sandbox unconditionally — the guard stops guarding and nothing else in the lane notices",
-    "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "    if not should_enqueue(site, timeout):",
-    "replace": "    if False:",
-    "tests": [
-      "tests/ee/sites/test_burst_harness.py::TestTheGuardHoldsWhenPublishesAreSerialised"
-    ]
-  },
-  {
     "label": "D5: the job id becomes deterministic per site, so arq refuses the second concurrent enqueue and the lane rolls the row to failed — a race that overspends turns into a publish that reports broken",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
     "find": "    return f\"site-build-{site_id}-{uuid.uuid4().hex}\"",
@@ -47,10 +38,55 @@
   {
     "label": "D5: the queued stamp is dropped from the enqueue write, so the row reads as stale the instant it is written and the very next publish opens a second sandbox",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "            \"build_status\": \"queued\",\n            \"build_started_at\": datetime.now(UTC),",
-    "replace": "            \"build_status\": \"queued\",",
+    "find": "        \"build_status\": \"queued\",\n        \"build_started_at\": stamp,",
+    "replace": "        \"build_status\": \"queued\",",
     "tests": [
       "tests/ee/sites/test_burst_harness.py::TestTheGuardHoldsWhenPublishesAreSerialised"
+    ]
+  },
+  {
+    "label": "D5/atomic: the precondition is dropped from the queued claim, so the stamping write is unconditional again and every concurrent publish of one site opens its own sandbox — the exact leak this fix closes, measured at 8 sandboxes for 8 publishes",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        {\"_id\": site.id, **claim_precondition(timeout_seconds, now=stamp)},",
+    "replace": "        {\"_id\": site.id},",
+    "tests": [
+      "tests/ee/sites/test_burst_harness.py::TestSingleFlightUnderContention"
+    ]
+  },
+  {
+    "label": "D5/atomic: the claim ignores the write's outcome and always reports a win, so every loser of the race enqueues anyway and the precondition becomes decoration",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if won is None:\n        return False",
+    "replace": "    if won is None:\n        pass",
+    "tests": [
+      "tests/ee/sites/test_burst_harness.py::TestSingleFlightUnderContention"
+    ]
+  },
+  {
+    "label": "D5/atomic: the precondition drops its staleness clauses and gates on status alone, so a STALE in-flight row can never be claimed and the site is permanently unpublishable with no error to see — the worse direction of the same bug",
+    "file": "ee/pocketpaw_ee/sites/build_state.py",
+    "find": "            {\"build_started_at\": {\"$not\": {\"$type\": \"date\"}}},\n            {\"build_started_at\": {\"$lt\": reference - stale_after(timeout_seconds)}},",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_burst_harness.py::TestTheClaimPreconditionMatchesTheGuard"
+    ]
+  },
+  {
+    "label": "D5/atomic: the precondition treats an unreadable stamp as blocking rather than stale, so a row written by an older writer (or with no stamp at all) can never be claimed again",
+    "file": "ee/pocketpaw_ee/sites/build_state.py",
+    "find": "            {\"build_started_at\": {\"$not\": {\"$type\": \"date\"}}},",
+    "replace": "            {\"build_started_at\": {\"$type\": \"date\"}},",
+    "tests": [
+      "tests/ee/sites/test_burst_harness.py::TestTheClaimPreconditionMatchesTheGuard"
+    ]
+  },
+  {
+    "label": "D5/atomic: the claim tests the window against a different clock than it stamps with, so the row is judged against a window it was not written with",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "claim_precondition(timeout_seconds, now=stamp)",
+    "replace": "claim_precondition(timeout_seconds)",
+    "tests": [
+      "tests/ee/sites/test_burst_harness.py::TestTheClaimPreconditionMatchesTheGuard"
     ]
   }
 ]

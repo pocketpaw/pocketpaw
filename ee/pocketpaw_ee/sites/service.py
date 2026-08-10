@@ -28,7 +28,7 @@
 #
 # Updated 2026-08-10 (SL-2 slice 2 — the ephemeral-build lane gets a job): added the
 # four seams the site-build arq job (``sites/build_job.py``) writes its lifecycle
-# through — ``load_build_site``, ``mark_build_queued``, ``mark_build_running``,
+# through — ``load_build_site``, ``claim_build_queued``, ``mark_build_running``,
 # ``record_build_outcome`` — at the bottom of the DP0-3 seam block, which they are
 # modelled on. This module stays the sole owner of Site writes; the build lane never
 # touches the Beanie doc.
@@ -799,6 +799,7 @@ from pocketpaw_ee.cloud._core.errors import (
 )
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
+from pocketpaw_ee.sites.build_state import claim_precondition
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
     AuditFinding,
@@ -3409,23 +3410,60 @@ async def load_build_site(workspace_id: str, site_id: str) -> _SiteDoc | None:
     return await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
 
 
-async def mark_build_queued(site: _SiteDoc, *, job_id: str) -> None:
-    """Stamp a site as having a build ENQUEUED: status, clock, and polling handle.
+async def claim_build_queued(
+    site: _SiteDoc,
+    *,
+    job_id: str,
+    timeout_seconds: int,
+    now: datetime | None = None,
+) -> bool:
+    """CLAIM the build slot for ``site`` and stamp it ``queued``. False means lost.
 
-    One write, all four fields. ``build_started_at`` is what bounds the single-flight
-    guard — without it the row reads as stale immediately and a second publish opens a
-    second sandbox. ``build_job_id`` is persisted (not a transient PrivateAttr like
-    DP0-4's) because a queued build is exactly when a user reloads. ``build_reason`` is
-    cleared so a new attempt never shows the previous attempt's rung.
+    One write, all four fields, CONDITIONAL on the row still being claimable.
+    ``build_started_at`` is what bounds the single-flight guard — without it the row reads
+    as stale immediately and a second publish opens a second sandbox. ``build_job_id`` is
+    persisted (not a transient PrivateAttr like DP0-4's) because a queued build is exactly
+    when a user reloads. ``build_reason`` is cleared so a new attempt never shows the
+    previous attempt's rung.
+
+    Rewritten 2026-08-11 from ``mark_build_queued``, which wrote unconditionally. Reading
+    ``should_enqueue`` and then stamping is two steps with an await between them, and every
+    publish arriving inside that window read the same pre-stamp row, passed the gate
+    correctly, and opened its own sandbox: 8 concurrent publishes of one site produced 8
+    sandboxes. The precondition moves the decision into the write, so the DATABASE picks
+    one winner. Unlike the other three build seams this is the one write that must NOT be
+    a blind ``set``.
+
+    THE PRECONDITION IS ``build_state.claim_precondition`` AND NOT A LOCAL REPHRASING.
+    It has to permit exactly what ``should_enqueue`` permits, staleness included: a
+    precondition that refused a stale in-flight row would recreate the one-way door and
+    leave the site permanently unpublishable. The same ``now`` is used for the window test
+    and the stamp, so the row is never tested against a window it was not written with.
+
+    Returns True when this caller owns the build and False when another publish claimed it
+    first. False is not an error — it is the same "a build is already in flight" answer the
+    caller returned before, and it is the losing publish's cue to write nothing at all.
     """
-    await site.set(
-        {
-            "build_status": "queued",
-            "build_started_at": datetime.now(UTC),
-            "build_job_id": job_id,
-            "build_reason": None,
-        }
+    stamp = now or datetime.now(UTC)
+    values: dict[str, Any] = {
+        "build_status": "queued",
+        "build_started_at": stamp,
+        "build_job_id": job_id,
+        "build_reason": None,
+    }
+    collection = type(site).get_pymongo_collection()
+    won = await collection.find_one_and_update(
+        {"_id": site.id, **claim_precondition(timeout_seconds, now=stamp)},
+        {"$set": values},
     )
+    if won is None:
+        return False
+    # The write went to the DB, so the in-memory doc is now behind it. Every later step
+    # of the enqueue reads this object (the log line, the rollback), and a caller that
+    # won the claim but still saw a stale local row would report the pre-claim status.
+    for field, value in values.items():
+        setattr(site, field, value)
+    return True
 
 
 async def mark_build_running(site: _SiteDoc) -> None:

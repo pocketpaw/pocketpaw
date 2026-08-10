@@ -14,6 +14,16 @@
 # carries the rung name — a terminal ``failed`` with no reason cannot distinguish "the
 # user's code broke" from "we lost the container", and those need opposite handling.
 #
+# Edited 2026-08-11 (fix/atomic-queued-stamp): added :func:`claim_precondition`, because
+# ``should_enqueue`` could answer the single-flight question but could not ENFORCE its
+# answer. Every caller read it and then stamped in a second step, and a burst harness
+# (tests/ee/sites/test_burst_harness.py) measured what that costs: 8 concurrent publishes
+# of one site opened 8 sandboxes, because each read the same pre-stamp row and each passed
+# the gate correctly. The logic here was never wrong — the write was not conditional. The
+# new function is the same rule expressed as a precondition on the stamping write, so the
+# database picks one winner and the losers write nothing. Any future guard added here has
+# to be expressible BOTH ways or the two halves drift apart.
+#
 # MODELLED ON DP0-4 (``sites/service.py:_provisioning_is_stale``) because that pattern
 # already solved the hard half correctly: status alone is a ONE-WAY DOOR. A job that no
 # worker ever consumed, or that died before writing a terminal status, pins the row in
@@ -144,6 +154,48 @@ def should_enqueue(doc: Any, timeout_seconds: int, *, now: datetime | None = Non
     return build_is_stale(doc, timeout_seconds, now=now)
 
 
+def claim_precondition(timeout_seconds: int, *, now: datetime | None = None) -> dict[str, Any]:
+    """The Mongo filter that lets a publish CLAIM the build slot, as a query fragment.
+
+    Added 2026-08-11: ``should_enqueue`` answers the question correctly but cannot enforce
+    the answer, because a caller reads it and then writes in a second step. Between those
+    two, every concurrent publish sees the same pre-stamp row, passes the gate, and opens
+    its own sandbox — measured at 8 sandboxes for 8 concurrent publishes of one site. This
+    is the same rule expressed as a PRECONDITION on the stamping write, so the database
+    decides the winner and the losers write nothing.
+
+    IT MUST ENCODE ``should_enqueue`` EXACTLY, STALENESS INCLUDED. A simpler precondition
+    of "status is not queued or building" would refuse a STALE in-flight row — the one
+    case ``should_enqueue`` deliberately lets through — and that is how a site becomes
+    permanently unpublishable, the failure this module's window exists to prevent. So the
+    filter is a disjunction of the four ways a row is claimable, mirroring the branches of
+    ``should_enqueue`` and ``build_is_stale`` in order:
+
+      1. the status is not in flight (terminal, or unrecognised — which reads as terminal
+         here, deliberately, for the reason in the module header);
+      2. the stamp is missing or not a date, i.e. unreadable, which reads as STALE;
+      3. the stamp is older than the row's own derived window.
+
+    ``$not: {$type: "date"}`` covers a null stamp, an absent field, and a garbage value
+    (a string from an older writer, say) in one clause, which keeps the asymmetric call
+    intact: an unusable stamp is claimable rather than blocking. Getting that backwards
+    trades one redundant idempotent build for a site that can never publish again.
+
+    The caller must pass the SAME ``now`` it stamps with, or the window it tests against
+    is not the window it writes.
+    """
+    reference = now or datetime.now(UTC)
+    if reference.tzinfo is None:  # pragma: no cover - defensive
+        reference = reference.replace(tzinfo=UTC)
+    return {
+        "$or": [
+            {"build_status": {"$nin": sorted(IN_FLIGHT_STATUSES)}},
+            {"build_started_at": {"$not": {"$type": "date"}}},
+            {"build_started_at": {"$lt": reference - stale_after(timeout_seconds)}},
+        ]
+    }
+
+
 def is_in_flight(doc: Any) -> bool:
     """True when the row CLAIMS a build is running, ignoring staleness.
 
@@ -198,6 +250,7 @@ __all__ = [
     "TERMINAL_STATUSES",
     "BuildStatus",
     "build_is_stale",
+    "claim_precondition",
     "is_in_flight",
     "settle",
     "should_enqueue",

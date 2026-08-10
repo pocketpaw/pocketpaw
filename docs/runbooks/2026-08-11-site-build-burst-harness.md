@@ -26,35 +26,40 @@ The mutation plan that proves the assertions bite:
 uv run python scripts/mutate.py --plan tests/mutations/sites_burst_harness.json
 ```
 
-## What it found
+## What it found, and what the fix was
 
-**A concurrent burst defeats the single-flight guard.** `enqueue_site_build` gates on a
-READ (`should_enqueue`) and then stamps with a WRITE (`mark_build_queued`), and it awaits
-between the two. Any publish arriving inside that window reads a row with no build in
-flight, passes the gate correctly, and opens its own sandbox. Measured: **8 concurrent
-publishes of one site produce 8 sandboxes.** Two are enough to reproduce it — two clicks
-inside one round trip.
+**A concurrent burst defeated the single-flight guard.** `enqueue_site_build` gated on a
+READ (`should_enqueue`) and then stamped with a WRITE (`mark_build_queued`), awaiting
+between the two. Any publish arriving inside that window read a row with no build in
+flight, passed the gate correctly, and opened its own sandbox. Measured: **8 concurrent
+publishes of one site produced 8 sandboxes.** Two were enough — two clicks inside one round
+trip.
 
-The state machine itself is sound, which is what localises the defect:
+The state machine itself was sound, which is what localised the defect:
 
-| Burst shape | Sandboxes for one site | Reading |
-|---|---|---|
-| Publishes serialised (await each) | 1, second returns `None` | The guard works |
-| Burst arriving after the stamp landed | 0, all refused | `should_enqueue` is correct |
-| 8 concurrent, one shared row object | 8 | The read-write window is open |
-| 8 concurrent, each having loaded its own row | 8 | Same window, across workers |
-| 8 concurrent across 8 different sites | 8 | Correct — the guard is per-site, not global |
+| Burst shape | Before | After | Reading |
+|---|---|---|---|
+| Publishes serialised (await each) | 1 | 1 | The rule was never wrong |
+| Burst arriving after the stamp landed | 0, all refused | 0, all refused | `should_enqueue` is correct |
+| 8 concurrent, one shared row object | 8 | 1 | The read-write window is closed |
+| 8 concurrent, each having loaded its own row | 8 | 1 | Closed across workers too |
+| 8 concurrent across 8 different sites | 8 | 8 | Correct — the guard is per-site, not global |
 
-So this is missing atomicity at the row, not a bug in `build_state`. The fix is a
-conditional write: stamp `queued` only if the row is still observed non-in-flight
-(Mongo `find_one_and_update` with a status precondition), and have the loser of the race
-get nothing back and return `None`. When that lands, the assertions in
-`TestSingleFlightUnderContention` flip from `sandboxes == BURST` to `sandboxes == 1` and
-`refused == BURST - 1`. Those numbers are asserted exactly so that flip is the fix's
-acceptance test.
+The fix (`fix/atomic-queued-stamp`) moves the decision into the write.
+`service.claim_build_queued` stamps `queued` through `find_one_and_update` with
+`build_state.claim_precondition` as its filter, so the database picks one winner; the losers
+write nothing and return `None`, which is the same answer a refused publish gave before.
+There is no `should_enqueue` pre-check in front of it any more — one gate, and it is the
+conditional write.
 
-The harness leaves the current behaviour pinned rather than fixed, because the fix is a
-change to the write path and belongs in its own reviewed PR.
+**The precondition has to encode staleness, not just status.** A filter of "status is not
+queued or building" would refuse a STALE in-flight row, which is the one case the window
+deliberately lets through, and that is how a site becomes permanently unpublishable. So it
+is a disjunction mirroring `should_enqueue`'s branches: status not in flight, OR the stamp
+is not a date (missing, null, or garbage — which reads as stale), OR the stamp is older
+than the row's derived window. `TestTheClaimPreconditionMatchesTheGuard` asserts the filter
+and `should_enqueue` reach the same verdict on every state, because the rule now lives in
+two languages and drift in the strict direction is the expensive one.
 
 A second, smaller observation while sizing anything: `STALE_MARGIN` is 10 minutes, so for
 any engine budget well under that the margin dominates the derived window and deriving it
@@ -87,7 +92,14 @@ Read this before quoting a green run as evidence for a concurrency cap.
   (`Document.update` → `merge_models(self, result)`), so against real Mongo that case
   races too. This is why the harness's own `FakeSite.set` yields before applying: it is
   the faithful model, and a fake that applied writes synchronously would report a
-  guarantee the lane does not have.
+  guarantee the lane does not have. The corollary matters for reviewing the fix: a green
+  mongomock run proves nothing about atomicity, so the flipped assertions are verified on
+  the yielding fake and mongomock is used only where its lack of yielding is irrelevant —
+  asserting what the precondition MEANS to a query engine.
+- **It does not prove Mongo's atomicity, it assumes it.** `FakeCollection` reproduces the
+  one guarantee the fix rests on (a single-document update matches and applies without
+  yielding). That guarantee is Mongo's to keep; the harness verifies the lane depends on
+  nothing more than it.
 
 Sizing the cap still needs a live run.
 
