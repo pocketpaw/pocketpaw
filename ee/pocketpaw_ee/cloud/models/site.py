@@ -113,6 +113,14 @@
 # for any DB-loaded doc (the PrivateAttr defaults to None). Private so it never
 # round-trips through the DB.
 #
+# Updated 2026-08-10 (SL-2 slice 2 — the build lane got its first caller): pinned the
+# FORMAT of ``build_reason`` to ``"<rung>:<cause>"``. It was described as "the rung name,
+# plus the cause for a user-blamed failure", which is two shapes and would have had every
+# consumer branch on blame before it could read a rung. One shape, both halves from closed
+# sets, colon-separated — see the field. The writer is ``sites/build_job.py``; the fields
+# themselves are written only through the ``sites.service`` seams, and only with a
+# targeted ``set`` so a minutes-long build can never roll back a concurrent publish.
+#
 # Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): added ``import_report`` —
 # the per-import summary an IMPORTED site carries ({pages, asset_count, asset_bytes,
 # forms, scripts, warnings}), persisted by the import service after the html deploy
@@ -269,10 +277,18 @@ class Site(TimestampedDocument):
     # on reload a transient id is gone, so the client loses its polling handle at the
     # precise moment the wait is longest.
     build_job_id: str | None = None
-    # SL-2: WHY the build reached ``build_status``. The rung name from
-    # ``daytona_build.classify_build`` — ``build_failed`` / ``timed_out`` /
-    # ``infra_lost`` / ``completed_ok`` — plus, for a user-blamed failure, the short
-    # cause the classifier extracted.
+    # SL-2: WHY the build reached ``build_status``.
+    #
+    # FORMAT, fixed by ``sites/build_job.py`` when the lane got its first caller:
+    # ``"<rung>:<cause>"``, both halves from closed sets. The rung is a
+    # ``daytona_build.BuildOutcome`` (``completed_ok`` / ``build_failed`` / ``timed_out``
+    # / ``infra_lost``) or one of the job's own pre-sandbox rungs (``engine_not_buildable``
+    # / ``scaffold_failed`` / ``scaffold_empty`` / ``sandbox_unavailable`` /
+    # ``artifact_missing`` / ``enqueue_failed``); the cause is the classifier's own
+    # machine-readable ``reason``, e.g. ``build_failed:install_failed`` or
+    # ``infra_lost:build_killed_by_signal_137``. ONE shape for every rung rather than
+    # "the outcome, plus a cause when the user is to blame", so a consumer parses once and
+    # can always split on the colon to group by rung.
     #
     # THIS FIELD IS WHAT MAKES A TERMINAL FAILURE HONEST. Without it every
     # classification the lane computes dies at the boundary: the row can say ``failed``
