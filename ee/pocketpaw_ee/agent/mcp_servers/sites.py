@@ -30,6 +30,36 @@
 # automatically. Opt-in — the default marketing brain stays create_landing_site
 # (ripple); the default flip to html is HE-12.
 #
+# Updated 2026-08-11 (RX-4 — the publish response tells the agent whether the site is
+# actually live): ``_publish_handler``'s success body hand-built five keys (id /
+# pocket_id / name / url / deployed) while ``_to_response`` — the wire the FRONTEND
+# polls — also carries ``build_status`` / ``build_reason`` / ``build_job_id``. The
+# agent got none of the three, and react is the one engine where that breaks the happy
+# path, because it is the only engine with ``build_runs_async(engine) is True``:
+#
+#   * FIRST publish — ``_enqueue_static_build`` creates the Site doc with ``url=""``
+#     and ``deployed=False``, honestly (nothing is serving yet; the worker flips both
+#     on success). Meanwhile ``pocketpaw-create-react-site`` STEP 4 tells the agent to
+#     "show the user the returned url". So it showed an empty string, or invented one.
+#   * RE-publish — ``url`` / ``deployed`` deliberately KEEP the previous deploy's
+#     values so a rebuild never reports a working site as down. Right for the
+#     frontend, which reads ``build_status`` beside them; for the agent it meant
+#     reporting the OLD url as though the edit were already live.
+#
+# So the body now carries the three raw fields VERBATIM (never normalised — see
+# ``_to_response``), plus ``build_in_progress`` and ``is_live``, plus a ``message``
+# stating the conclusion in prose. The derivation lives in
+# ``sites.service.build_wire_state`` and is SHARED with the new status tool, because
+# the two surfaces disagreeing about whether a site is live would be worse than either
+# being wrong alone. A boolean is not enough on its own here: the original defect was
+# narration, not data, so the message exists to be relayed.
+#
+# Also added the READ-ONLY ``get_site_build_status`` tool. Without it the queued state
+# is a dead end — an async publish returns before the build starts, so the agent could
+# learn a build was enqueued and never find out how it ended. It rides
+# ``SITES_TOOL_IDS`` like every other tool here; the /sites allow-list is a hard
+# whitelist that filters an absent id out silently.
+#
 # Updated 2026-08-11 (RX-3 — the react track gets an EDIT lane): the
 # ``edit_react_component`` tool also registers on this SAME server (built via the
 # factory in sites_create.py), so create → publish → edit sit together for react
@@ -115,6 +145,12 @@ CREATE_REACT_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_react_site"
 # server (see sites_create.py). It writes ONE file of a react site's source map as a
 # reviewable DRAFT; it does NOT publish and does NOT enqueue a build.
 EDIT_REACT_COMPONENT_TOOL_ID = f"mcp__{SERVER_NAME}__edit_react_component"
+# The READ-ONLY build-status tool (RX-4). It exists because react publishes are
+# ASYNC: ``publish`` returns before the build starts, so without a way to ask again
+# on a later turn the agent learns a build was queued and can never discover it
+# finished. Must ride SITES_TOOL_IDS like the rest — the /sites allow-list is a hard
+# whitelist and filters an absent id out with no error.
+GET_SITE_BUILD_STATUS_TOOL_ID = f"mcp__{SERVER_NAME}__get_site_build_status"
 
 SITES_TOOL_IDS = (
     PUBLISH_TOOL_ID,
@@ -125,6 +161,7 @@ SITES_TOOL_IDS = (
     CREATE_HTML_SITE_TOOL_ID,
     CREATE_REACT_SITE_TOOL_ID,
     EDIT_REACT_COMPONENT_TOOL_ID,
+    GET_SITE_BUILD_STATUS_TOOL_ID,
 )
 
 
@@ -212,18 +249,138 @@ async def _publish_handler(args: dict) -> dict:
         logger.warning("sites publish failed", exc_info=True)
         return _error_response(f"publish failed: {exc}")
 
+    # RX-4 — the build lane's state rides the response. Without it this body was five
+    # keys (id / pocket_id / name / url / deployed), and on the react happy path that
+    # is actively misleading in two different ways, because react is the only engine
+    # with ``build_runs_async(engine) is True``:
+    #
+    #   * FIRST publish — ``_enqueue_static_build`` creates the Site doc with
+    #     ``url=""`` and ``deployed=False``, honestly, because nothing is serving yet.
+    #     The agent was handed an empty string while ``pocketpaw-create-react-site``
+    #     STEP 4 tells it to "show the user the returned url", so it showed nothing or
+    #     invented something.
+    #   * RE-publish — ``url`` and ``deployed`` deliberately keep the PREVIOUS
+    #     deploy's values so a rebuild never reports a working site as down. Correct
+    #     for the frontend, which reads ``build_status`` beside them. For an agent
+    #     that could not see ``build_status``, it meant reporting the OLD url as
+    #     though the change were already live.
+    #
+    # ``build_wire_state`` owns the derivation (shared with get_site_build_status, so
+    # the two can never disagree) and passes ``build_status`` through VERBATIM.
+    # ``is_live`` is the field to gate "show the user this url" on; ``message`` says
+    # the same thing in prose, because a boolean the agent does not look at is not a
+    # fix — the prompt-level failure here was narration, not data.
+    state = sites_service.build_wire_state(doc)
+    if state["is_live"]:
+        message = "The site is live. Show the user the `url`."
+    elif state["build_in_progress"]:
+        message = (
+            "The build is not finished, so the site is NOT live yet and `url` is "
+            "either empty or still serving the PREVIOUS version. Do NOT show the "
+            "user a url and do NOT say it is live. Tell them the build is running "
+            "and that you can check again in a moment with "
+            "`get_site_build_status`."
+        )
+    elif state["build_status"] == "failed":
+        message = (
+            "The build FAILED, so the site is not live. Relay `build_reason` to the "
+            "user rather than a url, and offer to fix the page and publish again."
+        )
+    else:
+        message = (
+            "The publish was accepted but nothing is serving yet. Do NOT show a url "
+            "or say the site is live; check `get_site_build_status` before "
+            "reporting one."
+        )
     return _success_response(
         {
             "ok": True,
+            "message": message,
             "site": {
                 "id": str(doc.id),
                 "pocket_id": doc.pocket_id,
                 "name": doc.name,
-                "url": doc.url,
-                "deployed": doc.deployed,
+                **state,
             },
         }
     )
+
+
+async def _get_site_build_status_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__get_site_build_status`` (RX-4).
+
+    READ-ONLY. The answer to "is it up yet?" on a turn after the publish, and the
+    reason the queued state a react publish returns is not a dead end: with
+    ``build_runs_async("react") is True`` the publish call returns before the build
+    starts, so without this the agent could learn a build was enqueued and then never
+    discover it finished.
+
+    Delegates to ``sites_service.site_build_status``, which resolves the canonical
+    Site doc tenant-scoped on the workspace and derives the same fields the widened
+    publish response carries (one shared derivation, so the two cannot disagree).
+    A pocket that was never published reports ``published=False`` rather than an
+    error — from the agent's side that is the useful answer.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "get_site_build_status requires workspace and user context (call from a "
+            "cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites_manager",
+        tool_name="_get_site_build_status",
+        status="ok",
+        ok=True,
+    )
+
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "get_site_build_status requires a `pocket_id` — the id of the site "
+            "pocket whose build you are checking."
+        )
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        state = await sites_service.site_build_status(
+            workspace_id=workspace_id, pocket_id=pocket_id
+        )
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_site_build_status failed", exc_info=True)
+        return _error_response(f"could not read the build status: {exc}")
+
+    if not state["published"]:
+        message = (
+            "This site has never been published, so there is no build and nothing "
+            "is live. Offer to publish it."
+        )
+    elif state["is_live"]:
+        message = "The build finished and the site is live. Show the user the `url`."
+    elif state["build_in_progress"]:
+        message = (
+            "The build is still running, so the site is NOT live at this version "
+            "yet. Do NOT show a url as if it were current. Tell the user it is "
+            "still building and offer to check again."
+        )
+    elif state["build_status"] == "failed":
+        message = (
+            "The build FAILED. Relay `build_reason` to the user, not a url, and "
+            "offer to fix the page and publish again."
+        )
+    else:
+        message = (
+            "There is no build in flight and the site is not serving a current "
+            "deploy. Do NOT report it as live."
+        )
+    return _success_response({"ok": True, "message": message, **state})
 
 
 def build_sites_manager_server() -> tuple[str, Any] | None:
@@ -284,6 +441,47 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     async def publish(args):  # type: ignore[no-untyped-def]
         return await _publish_handler(args)
 
+    @tool(
+        "get_site_build_status",
+        (
+            "Check whether a published Paw Site's build has finished and whether the "
+            "site is LIVE. READ-ONLY — it changes nothing. Call this when the user "
+            "asks 'is it up yet?', 'did it deploy?', 'is my site live?', or when a "
+            "previous `publish` came back with `build_in_progress: true` and you now "
+            "need to know the outcome. This is the ONLY way to find out: a react "
+            "site's build runs asynchronously, so `publish` returns BEFORE the build "
+            "starts and its response can never tell you how the build ended.\n"
+            "Args: `pocket_id` (required — the site pocket). Returns {ok, message, "
+            "pocket_id, site_id, name, published, url, deployed, build_status, "
+            "build_reason, build_job_id, build_in_progress, is_live}.\n"
+            "HOW TO READ IT: gate everything on `is_live`. Show the user the `url` "
+            "ONLY when `is_live` is true. When `build_in_progress` is true the build "
+            "is still running and `url` is either empty or still serving the "
+            "PREVIOUS version — say it is still building, do NOT show a url, and do "
+            "NOT say it is live. When `build_status` is 'failed', relay "
+            "`build_reason` and offer to fix the page and publish again. When "
+            "`published` is false the site has never been published at all. Relay "
+            "the `message` — it already states the correct conclusion. Never invent "
+            "a url, and never report a site as live off `deployed` or a non-empty "
+            "`url` alone: a rebuild deliberately keeps the previous deploy's values "
+            "so a working site is not reported as down mid-build."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": ("Id of the site pocket whose build status you are checking."),
+                },
+            },
+            "required": ["pocket_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def get_site_build_status(args):  # type: ignore[no-untyped-def]
+        return await _get_site_build_status_handler(args)
+
     # Register the deterministic landing-site create tool on this SAME server.
     # The SKILL flow is: produce the `content` copy → create_landing_site →
     # publish, so the two hops sit on one allowlisted server. Built here (not as a
@@ -330,6 +528,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
         version="1.0.0",
         tools=[
             publish,
+            get_site_build_status,
             create_landing_site,
             create_svelte_site,
             edit_svelte_component,
@@ -350,6 +549,7 @@ __all__ = [
     "CREATE_SVELTE_SITE_TOOL_ID",
     "EDIT_REACT_COMPONENT_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
+    "GET_SITE_BUILD_STATUS_TOOL_ID",
     "PUBLISH_TOOL_ID",
     "SERVER_NAME",
     "SITES_TOOL_IDS",
