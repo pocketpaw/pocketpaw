@@ -68,6 +68,7 @@ import pytest
 from pocketpaw_ee.sites import build_state as bs
 from pocketpaw_ee.sites import daytona_build as db
 from pocketpaw_ee.sites import daytona_runner as dr
+
 from tests.ee.sites.faults import (
     EXIT_SIGKILL,
     EXIT_SIGTERM,
@@ -380,7 +381,7 @@ class TestF5VerificationFailsSoNothingDeploys:
     """
 
     async def test_a_missing_sentinel_never_reaches_the_artifact_download(self) -> None:
-        """"No deploy" starts before the deploy: an unproven build must not even fetch an
+        """ "No deploy" starts before the deploy: an unproven build must not even fetch an
         artifact, because fetching one is the step that makes deploying it possible."""
         client = FaultyDaytonaClient(sentinel=None)
         got = await dr.run_build(
@@ -471,18 +472,14 @@ class TestF5TheIncludeListIsWhatExcludesNodeModules:
         produces: ``node_modules`` next to ``dist``. ``-C <project>/dist .`` cannot reach
         it, so there is no filter to get wrong."""
         project = write_project_tree(tmp_path / "proj", NODE_MODULES_PROJECT)
-        members = pack_with_real_tar(
-            "react", project, str(tmp_path / "out.tgz").replace("\\", "/")
-        )
+        members = pack_with_real_tar("react", project, str(tmp_path / "out.tgz").replace("\\", "/"))
         assert not any("node_modules" in m for m in members), members
 
     def test_the_static_output_is_actually_packed(self, tmp_path) -> None:
         """The other half, and the reason the assertion above is not vacuous: an empty tar
         would also contain no node_modules. The real output has to be in there."""
         project = write_project_tree(tmp_path / "proj", NODE_MODULES_PROJECT)
-        members = pack_with_real_tar(
-            "react", project, str(tmp_path / "out.tgz").replace("\\", "/")
-        )
+        members = pack_with_real_tar("react", project, str(tmp_path / "out.tgz").replace("\\", "/"))
         assert "./index.html" in members
         assert "./assets/app.js" in members
 
@@ -499,9 +496,7 @@ class TestF5TheIncludeListIsWhatExcludesNodeModules:
         tree["dist/node_modules/leaked/index.js"] = b"module.exports = {}"
         tree["dist/node_modules/.bin/vite"] = b"#!/usr/bin/env node"
         project = write_project_tree(tmp_path / "proj", tree)
-        members = pack_with_real_tar(
-            "react", project, str(tmp_path / "out.tgz").replace("\\", "/")
-        )
+        members = pack_with_real_tar("react", project, str(tmp_path / "out.tgz").replace("\\", "/"))
         assert not any("node_modules" in m for m in members), members
         # Not vacuous: an empty tar would also satisfy the assertion above.
         assert "./index.html" in members
@@ -518,9 +513,7 @@ class TestF5TheIncludeListIsWhatExcludesNodeModules:
         tree = dict(NODE_MODULES_PROJECT)
         tree["dist/sub/node_modules/dep/index.js"] = b"module.exports = {}"
         project = write_project_tree(tmp_path / "proj", tree)
-        members = pack_with_real_tar(
-            "react", project, str(tmp_path / "out.tgz").replace("\\", "/")
-        )
+        members = pack_with_real_tar("react", project, str(tmp_path / "out.tgz").replace("\\", "/"))
         assert not any("node_modules" in m for m in members), members
 
     def test_an_innocently_named_file_is_still_packed(self, tmp_path) -> None:
@@ -530,9 +523,7 @@ class TestF5TheIncludeListIsWhatExcludesNodeModules:
         tree = dict(NODE_MODULES_PROJECT)
         tree["dist/docs/node_modules_report.html"] = b"<p>size audit</p>"
         project = write_project_tree(tmp_path / "proj", tree)
-        members = pack_with_real_tar(
-            "react", project, str(tmp_path / "out.tgz").replace("\\", "/")
-        )
+        members = pack_with_real_tar("react", project, str(tmp_path / "out.tgz").replace("\\", "/"))
         assert "./docs/node_modules_report.html" in members
 
     def test_an_engine_whose_output_is_the_project_root_is_refused(self) -> None:
@@ -558,9 +549,7 @@ def _all_classifications() -> dict[str, db.BuildClassification]:
     long_budget = WELL_INSIDE_BUDGET
     return {
         "ok": db.classify_build(ok_sentinel(), elapsed_seconds=1, timeout_seconds=long_budget),
-        "no_sentinel_lost": db.classify_build(
-            None, elapsed_seconds=1, timeout_seconds=long_budget
-        ),
+        "no_sentinel_lost": db.classify_build(None, elapsed_seconds=1, timeout_seconds=long_budget),
         "no_sentinel_timeout": db.classify_build(None, elapsed_seconds=99, timeout_seconds=1),
         "unparseable": db.classify_build(
             b"{not json", elapsed_seconds=1, timeout_seconds=long_budget

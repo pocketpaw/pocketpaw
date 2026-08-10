@@ -260,7 +260,17 @@ class TestArtifactIncludeList:
         # string check fails on the very mention of the word. What the assertion was
         # protecting — that node_modules is not part of what gets packed — is checked
         # properly in test_fault_ladder_build.py by running the real tar over a real tree.
-        assert "--exclude=./node_modules" in cmd
+        #
+        # Updated again 2026-08-10: the pattern is ``node_modules``, NOT ``./node_modules``,
+        # and the missing ``./`` is the fix rather than a tidy-up. GNU tar — what the
+        # debian_slim image runs — anchors an exclude pattern that contains a slash, so
+        # ``./node_modules`` pruned only the top level there and a nested
+        # ``dist/sub/node_modules`` shipped. CI failed on exactly that. Measured on GNU tar
+        # 1.35: ``--exclude=./node_modules`` leaves ``./sub/node_modules/`` in the archive,
+        # ``--exclude=node_modules`` removes every one at any depth. A bare name is
+        # unanchored in bsdtar too, so both tars now agree.
+        assert "--exclude=node_modules" in cmd
+        assert "./node_modules" not in cmd
         # node_modules must appear ONLY as the exclusion, never as a packed path.
         assert cmd.count("node_modules") == 1
 
