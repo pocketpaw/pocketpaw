@@ -241,6 +241,34 @@ class Site(TimestampedDocument):
     # stale, which is the safe direction (a redundant enqueue costs one
     # idempotent job, a stuck guard costs every future publish).
     provision_started_at: datetime | None = None
+    # ── SG-9i: the ephemeral-build lane's own lifecycle ─────────────────────
+    # Deliberately SEPARATE from the provision_* trio rather than reusing it. A site
+    # is provisioned once (its D1 created and migrated) but REBUILT many times, so
+    # collapsing them would make a rebuild look like a re-provision and would let one
+    # overwrite the other's status.
+    #
+    # ``build_status`` — none | queued | building | built | failed.
+    # ``queued`` is a FIRST-CLASS state, not cosmetic. Once a concurrency cap exists a
+    # publish can wait before it starts, and a queued build is indistinguishable from
+    # a hung one unless the wire says so — which turns the cap into support tickets.
+    build_status: str = "none"
+    # When the CURRENT build attempt entered queued/building (UTC). Same bounded
+    # single-flight reasoning as ``provision_started_at``, and the same asymmetry: a
+    # row with no stamp reads as STALE, because a redundant enqueue costs one
+    # idempotent build while a stuck guard costs the pocket every future publish.
+    #
+    # Do NOT substitute ``updated_at`` for this. The DP0-4 comment above says the same
+    # thing and it is worth repeating where the field is: this model has no such
+    # field, so reading one would make every row look stale and silently disable the
+    # guard entirely.
+    build_started_at: datetime | None = None
+    # The build job's id — PERSISTED, unlike ``_provision_job_id`` below, which is a
+    # transient PrivateAttr that only exists on the response object that enqueued it.
+    # That works for a provision the caller watches synchronously and fails for a
+    # build: a queued build is exactly the case where the user reloads the page, and
+    # on reload a transient id is gone, so the client loses its polling handle at the
+    # precise moment the wait is longest.
+    build_job_id: str | None = None
     # BC-9: per-site annual plan (the Webflow model — each published site has its
     # OWN recurring annual plan on a tier, distinct from the workspace plan).
     # ``plan_tier`` is the site-plan catalog key (basic | pro | business — see

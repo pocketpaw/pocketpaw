@@ -205,6 +205,24 @@ class SiteResponse(BaseModel):
     # caller can poll the job. None for a static publish, and None on a single-flight
     # no-op (a second publish while already provisioning does not enqueue a job).
     provision_job_id: str | None = None
+    # ── SG-9i: the ephemeral-build lane's state, on the wire ────────────────
+    # ``build_status`` — none | queued | building | built | failed.
+    #
+    # ``queued`` is the reason this pair exists at all. Once builds run in an ephemeral
+    # sandbox behind a concurrency cap, a publish can WAIT before it starts, and a
+    # queued build is indistinguishable from a hung one unless the wire says which it
+    # is. Without this the cap converts a crash into a support ticket.
+    #
+    # A client MUST treat an unrecognised status as in-progress rather than as an
+    # error: this vocabulary will grow, and a client that errors on unknown values
+    # turns every future state addition into a visible outage.
+    build_status: str = "none"
+    # The build job's id, so a caller can poll it. Unlike ``provision_job_id`` — which
+    # comes from a transient PrivateAttr and therefore only exists on the response that
+    # enqueued it — this is read from a PERSISTED field, so a client that reloads mid-
+    # build still gets it. That matters precisely because a queued build is the case
+    # where the user reloads.
+    build_job_id: str | None = None
     # SI-4: the persisted import summary for an IMPORTED site — {pages: [{path,
     # title}], asset_count, asset_bytes, forms: [{page, original_action, rewired}],
     # scripts, warnings} (from-url adds status/source_url). None for every
