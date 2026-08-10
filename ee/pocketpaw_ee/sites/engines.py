@@ -14,6 +14,21 @@
 # predicate. That is this module's whole design: capabilities stay orthogonal, and a
 # new engine that combines them in a new way adds a predicate rather than overloading
 # one.
+#
+# Edited 2026-08-10 (SL-1 — the static svelte landing lane): added
+# :func:`resolve_static_output_rel` and :func:`resolve_emits_server_worker`, the
+# ARTIFACT-resolving siblings of the last two predicates. The svelte track now builds
+# on adapter-static for a static landing site (output ``build``, no ``_worker.js``) and
+# adapter-cloudflare for a dynamic/auth one — a property of the SITE, not of the engine
+# string, so for the first time a capability here is NOT a function of the engine name
+# and the name-only predicates genuinely cannot answer it.
+#
+# This follows RX-1's design rather than departing from it: a new combination adds a
+# predicate instead of overloading one. What is new is that these two read the
+# filesystem, which no other predicate here does. That exception is deliberate and
+# narrow — see :func:`resolve_static_output_rel` for why reading the artifact beats
+# threading a static/dynamic flag through six call sites, two of which have no
+# generate in scope to thread it from.
 """Engine capability predicates for Paw Sites.
 
 Four site-generation engines are modeled:

@@ -1,9 +1,14 @@
 # ee/pocketpaw_ee/sites/local_server.py — LOCAL static file server for the
 # Sites local-deploy mode (Phase 3). With no Cloudflare creds, publish() builds
-# the static site and "deploys" it by copying the prerendered
-# `.svelte-kit/cloudflare/` tree under a stable per-site dir; this module serves
-# that tree over HTTP so the published site has a real openable localhost URL
-# (what the cmux smoke + Phase 5 open).
+# the static site and "deploys" it by copying the built output tree under a stable
+# per-site dir; this module serves that tree over HTTP so the published site has a
+# real openable localhost URL (what the cmux smoke + Phase 5 open).
+#
+# Updated 2026-08-10 (SL-1): this header used to name `.svelte-kit/cloudflare/` as THE
+# tree that gets copied. That is now only one of the shapes — a STATIC svelte landing
+# site builds on adapter-static and writes `build/`. Both call sites below resolve the
+# dir off the artifact via ``resolve_static_output_rel`` rather than deriving it from
+# the engine name, because after the adapter fork the engine name cannot answer it.
 #
 # Updated 2026-08-10 (SG-10 — serve the built ARTIFACT as a preview): the one
 # handler now has a second branch. `/<site_id>/...` is unchanged — plain static
