@@ -149,12 +149,13 @@ async def test_noop_without_recipient_or_workspace(notify_calls) -> None:
 
 @pytest.mark.parametrize(
     "kind",
-    ["message", "mention", "reaction", "lead_captured"]
+    ["message", "mention", "reaction"]
     + ["paw_bar_conversation_new", "paw_bar_needs_human", "paw_bar_visitor_reply"],
 )
 async def test_content_bearing_body_never_leaks(notify_calls, _unread, kind) -> None:
-    # These kinds persist user-authored text in ``body`` (message content,
-    # a visitor's words, lead fields). A push body lands on a lock screen.
+    # These kinds persist user-authored text in ``body`` (message content, a
+    # visitor's words). A push body lands on a lock screen. ``lead_captured``
+    # is absent on purpose — its persisted body is already content-free.
     secret = "wire me $10k to account 12345"
     await listeners.on_notification_new(
         NotificationNew(data=_dto(kind=kind, title="Something", body=secret, source_room_id="g1"))
@@ -194,6 +195,19 @@ async def test_message_body_singular_without_room(notify_calls, monkeypatch) -> 
     assert payload["body"] == "1 new message"
 
 
+async def test_lead_captured_body_passes_through(notify_calls) -> None:
+    # leads/bridges writes "Someone submitted the {form_type} form on
+    # {site_label}." — no visitor data — so overriding it would be a pure UX
+    # downgrade. Guards against someone "hardening" it back into the map.
+    body = "Someone submitted the contact form on Acme Dental."
+    await listeners.on_notification_new(
+        NotificationNew(data=_dto(kind="lead_captured", body=body, source_type="lead"))
+    )
+
+    _, _, payload = notify_calls[0]
+    assert payload["body"] == body
+
+
 async def test_generic_kind_body_passes_through(notify_calls) -> None:
     # ``task_assigned`` persists a generic body ("Assigned by <id>") — nothing
     # user-authored — so it is NOT rewritten.
@@ -222,6 +236,9 @@ async def test_generic_kind_body_passes_through(notify_calls) -> None:
         ("meeting_started", {"source_room_id": "g1"}, "/chat/g1?join=meeting-s1"),
         ("paw_bar_conversation", {"source_agent_id": "a1"}, "/agents/a1?tab=conversations"),
         ("paw_bar_conversation", {}, "/agents"),
+        # A lead's room_id is its SITE — without the arm the default builds
+        # /chat/<site_id>, a room that cannot exist.
+        ("lead", {"source_room_id": "site1"}, "/sites/site1?view=leads"),
         ("meeting_reminder", {"source_room_id": "g1"}, "/chat/g1"),
     ],
 )
@@ -252,12 +269,23 @@ async def test_payload_omits_url_when_there_is_none(notify_calls) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_mention_flow_pushes_once_per_recipient(notify_calls, _unread, monkeypatch) -> None:
+async def test_mention_flow_sends_twice_under_one_replacing_tag(
+    notify_calls, _unread, monkeypatch
+) -> None:
     """One @mention writes TWO notification rows (kind ``message`` for every
-    member, kind ``mention`` for the mentioned user), so the same user action
-    emits two ``notification.new`` events. Both share the room, so both share a
-    coalesce key and collapse to a single immediate push."""
-    monkeypatch.setenv("CLOUD_PUSH_COALESCE_SECONDS", "5")
+    member, kind ``mention`` for the target), so the same user action emits two
+    ``notification.new`` events for the target.
+
+    The honest behaviour, asserted end to end rather than only at the leading
+    edge: the first send fires IMMEDIATELY, the second is suppressed and
+    flushed when the cooldown window elapses — TWO sends, not one. What the
+    shared coalesce key buys is that they are two rather than N, and both carry
+    the same ``tag``, so the OS replaces the first toast instead of stacking a
+    second. Mutation that breaks it: key the coalescer on the KIND first rather
+    than the room, which splits the two rows onto different keys — both then
+    fire on their own leading edge and the "once immediately" assertion goes to
+    two."""
+    monkeypatch.setenv("CLOUD_PUSH_COALESCE_SECONDS", "0.05")
 
     await listeners.on_notification_new(
         NotificationNew(data=_dto(id="n1", kind="message", source_room_id="g1"))
@@ -268,8 +296,14 @@ async def test_mention_flow_pushes_once_per_recipient(notify_calls, _unread, mon
     # The leading emit is detached (a background task) — let it run.
     await asyncio.sleep(0)
     await asyncio.sleep(0)
+    assert len(notify_calls) == 1, "leading edge fires immediately, once"
 
-    assert len(notify_calls) == 1
+    # Advance past the cooldown: the suppressed mention row flushes.
+    await asyncio.sleep(0.2)
+
+    assert len(notify_calls) == 2, "the second row flushes after the window"
+    assert {p["tag"] for _, _, p in notify_calls} == {"g1"}, "one replacing toast"
+    assert {uid for _, uid, _ in notify_calls} == {"alice"}
     await listeners.coalesce.aclose()
 
 

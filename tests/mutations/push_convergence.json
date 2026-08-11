@@ -45,6 +45,33 @@
     ]
   },
   {
+    "label": "coalesce: key on the kind before the room, splitting a mention's two rows",
+    "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
+    "find": "    tag = data.get(\"source_room_id\") or kind or None",
+    "replace": "    tag = kind or data.get(\"source_room_id\") or None",
+    "tests": [
+      "tests/cloud/push/test_listeners.py"
+    ]
+  },
+  {
+    "label": "deep link: drop the lead arm (bell lands on /chat/<site_id>, a dead room)",
+    "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
+    "find": "        return f\"/sites/{nav_target}?view=leads\"",
+    "replace": "        return f\"/chat/{nav_target}\"",
+    "tests": [
+      "tests/cloud/push/test_listeners.py"
+    ]
+  },
+  {
+    "label": "privacy: over-scrub lead_captured, whose persisted body is already content-free",
+    "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
+    "find": "    \"mention\": \"You were mentioned.\",",
+    "replace": "    \"mention\": \"You were mentioned.\",\n    \"lead_captured\": \"A new lead came in.\",",
+    "tests": [
+      "tests/cloud/push/test_listeners.py"
+    ]
+  },
+  {
     "label": "deep link: let instinct_approval fall through to the dead /chat/<id> default",
     "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
     "find": "    if source_type == \"instinct_approval\":\n        return None\n",

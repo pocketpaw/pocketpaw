@@ -76,10 +76,19 @@ logger = logging.getLogger(__name__)
 # The push body is replaced with the generic string here so the lock screen
 # never shows it. ``message`` is absent on purpose — it gets the unread-count
 # body instead (see ``_push_body``), preserving the pre-convergence UX.
+#
+# BODIES ONLY. Titles pass through untouched, deliberately: a title is a short
+# entitlement-scoped label ("You were mentioned in #ops", "New lead") that the
+# producer already writes content-free, and it is the same string the bell and
+# the old per-event handlers already showed. Bodies are where free-form user
+# content lands, so bodies are what get scrubbed.
+#
+# ``lead_captured`` is deliberately NOT here: leads/bridges writes "Someone
+# submitted the {form_type} form on {site_label}." — no visitor data — so an
+# override would only make the push less useful.
 _GENERIC_BODIES: dict[str, str] = {
     "mention": "You were mentioned.",
     "reaction": "Someone reacted to your message.",
-    "lead_captured": "A new lead came in.",
     "paw_bar_conversation_new": "A new conversation started.",
     "paw_bar_needs_human": "A conversation needs you.",
     "paw_bar_visitor_reply": "A visitor replied.",
@@ -165,8 +174,8 @@ def _target_url(data: dict[str, Any]) -> str | None:
 
     Mirrors the frontend resolver ``paw-enterprise/src/lib/core/notifications/
     target.ts`` (``targetUrl``) — that file is the source of truth; this is the
-    subset that is unambiguous from the wire DTO alone. Two deliberate
-    departures, both to avoid shipping a link that lands nowhere:
+    subset that is unambiguous from the wire DTO alone. Every arm below matches
+    it except two, both departing to avoid shipping a link that lands nowhere:
 
       * ``paw_bar_conversation`` — the frontend splits the compound
         ``<widget_id>:<customer_ref>`` id to reopen the exact conversation. We
@@ -203,6 +212,12 @@ def _target_url(data: dict[str, Any]) -> str | None:
         return f"/meetings?id={source_id}"
     if source_type == "meeting_started":
         return f"/chat/{nav_target}?join=meeting-{source_id}"
+    if source_type == "lead":
+        # The lead lives on its SITE's leads view (the source's room_id is the
+        # site id); ``id`` stays the lead so the panel can identify the row.
+        # Without this arm the default below builds /chat/<site_id> — a room
+        # that cannot exist.
+        return f"/sites/{nav_target}?view=leads"
     # Same default arm as the frontend: unknown source types resolve to the
     # chat room, which is where every other current backend kind lives.
     return f"/chat/{nav_target}"
@@ -243,12 +258,18 @@ async def on_notification_new(event: Event) -> None:
     resolution, so push cannot drift from the bell.
 
     Each send is routed through the leading-edge coalescer (push/coalesce.py)
-    keyed on ``(workspace, user, source_room_id or kind)``: a burst in one
-    conversation — or a burst of one room-less kind — collapses to a leading
-    push plus at most one trailing flush per window. Kinds that persist two
-    rows for a single user action (a mention writes both ``message`` and
-    ``mention``) share a room, so they share a key and collapse; the OS then
-    folds them into one toast via the shared ``tag``.
+    keyed on ``(workspace, user, source_room_id or kind)``, so a burst in one
+    conversation — or a burst of one room-less kind — is throttled to a leading
+    push plus at most one trailing flush per window.
+
+    What that means for a mention, precisely: one @mention writes TWO rows
+    (``message`` for every member, ``mention`` for the target), so the target
+    gets TWO sends, not one. The first fires immediately on the leading edge;
+    the second is suppressed and flushed when the cooldown window elapses
+    (~``CLOUD_PUSH_COALESCE_SECONDS`` later). What the shared key buys is that
+    they are two rather than N, and both carry the same ``tag``, so the OS
+    REPLACES the first toast instead of stacking a second one. The user sees
+    one notification that updates; the transport still made two sends.
     """
     data = event.data or {}
     user_id = data.get("user_id")

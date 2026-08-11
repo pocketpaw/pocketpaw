@@ -941,8 +941,7 @@ def mount_cloud(app: FastAPI) -> None:
     # plus ``agent.stream_end`` (the one product event that persists no
     # notification row) → ``dispatch.notify``, which forks WS-vs-Web-Push so a
     # user with both the desktop app and a browser tab open is notified exactly
-    # once. Must be registered AFTER the notification producers' own bus
-    # subscribers above, and — like every other bus subscriber — after
+    # once. Same constraint as every other bus subscriber: register AFTER
     # init_realtime installed the singleton bus.
     from pocketpaw_ee.cloud.push.listeners import register_push_event_listeners
 
