@@ -113,6 +113,17 @@ EXPECTED_MAX_CALL_SECONDS_PER_DAY: dict[str, int | None] = {
     "pro_max": 28_800,
     "enterprise": None,
 }
+# The workspace S3 STORAGE cap per tier, in BYTES (feat/billing-storage-caps,
+# 2026-08-08). Decimal GB — Free = 5 GB, Go = 15 GB, Pro = 50 GB, Pro Max =
+# 100 GB, Enterprise = None (uncapped). Enforced by the uploads pipeline at
+# upload time; GET /storage/usage surfaces used vs cap.
+EXPECTED_MAX_STORAGE_BYTES: dict[str, int | None] = {
+    "free": 5_000_000_000,
+    "go": 15_000_000_000,
+    "pro": 50_000_000_000,
+    "pro_max": 100_000_000_000,
+    "enterprise": None,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +221,7 @@ def test_every_tier_carries_the_smb_caps():
         assert by_key[key].max_pockets == EXPECTED_MAX_POCKETS[key], key
         assert by_key[key].max_connectors == EXPECTED_MAX_CONNECTORS[key], key
         assert by_key[key].max_call_seconds_per_day == EXPECTED_MAX_CALL_SECONDS_PER_DAY[key], key
+        assert by_key[key].max_storage_bytes == EXPECTED_MAX_STORAGE_BYTES[key], key
 
 
 def test_free_max_seats_is_zero_no_invites():
@@ -261,6 +273,16 @@ def test_daily_call_budget_is_the_consumer_ladder():
     assert plans.get_plan("enterprise").max_call_seconds_per_day is None
 
 
+def test_storage_cap_is_the_consumer_ladder():
+    """The S3 storage cap: Free=5 GB, Go=15 GB, Pro=50 GB, Pro Max=100 GB,
+    Enterprise=None (uncapped). Decimal GB — the SI consumer convention."""
+    assert plans.get_plan("free").max_storage_bytes == 5_000_000_000
+    assert plans.get_plan("go").max_storage_bytes == 15_000_000_000
+    assert plans.get_plan("pro").max_storage_bytes == 50_000_000_000
+    assert plans.get_plan("pro_max").max_storage_bytes == 100_000_000_000
+    assert plans.get_plan("enterprise").max_storage_bytes is None
+
+
 def test_non_enterprise_smb_caps_are_non_negative_ints():
     """Every tier below Pro Max carries a concrete int cap on all three.
 
@@ -273,10 +295,14 @@ def test_non_enterprise_smb_caps_are_non_negative_ints():
         assert isinstance(by_key[key].max_pockets, int) and by_key[key].max_pockets > 0, key
         assert isinstance(by_key[key].max_connectors, int) and by_key[key].max_connectors > 0, key
         # The daily call budget is a concrete non-negative int on every capped
-        # tier too (Free = 0 — "no calls" is a valid ceiling).
+        # tier too (Free = 0 — "no calls" is a valid ceiling); the storage cap
+        # is a positive byte count (Free = 5 GB).
         assert (
             isinstance(by_key[key].max_call_seconds_per_day, int)
             and by_key[key].max_call_seconds_per_day >= 0
+        ), key
+        assert (
+            isinstance(by_key[key].max_storage_bytes, int) and by_key[key].max_storage_bytes > 0
         ), key
 
 
@@ -294,10 +320,15 @@ def test_build_unknown_key_fails_closed_to_free_smb_caps():
     # (no calls), never None/uncapped.
     assert bogus.max_call_seconds_per_day == EXPECTED_MAX_CALL_SECONDS_PER_DAY["free"]
     assert bogus.max_call_seconds_per_day == 0
+    # The storage cap fails closed too: an unknown key gets Free's 5 GB, never
+    # None/uncapped.
+    assert bogus.max_storage_bytes == EXPECTED_MAX_STORAGE_BYTES["free"]
+    assert bogus.max_storage_bytes == 5_000_000_000
     assert bogus.max_seats is not None
     assert bogus.max_pockets is not None
     assert bogus.max_connectors is not None
     assert bogus.max_call_seconds_per_day is not None
+    assert bogus.max_storage_bytes is not None
 
 
 def test_list_plans_is_cheapest_first():

@@ -57,6 +57,12 @@
 #   = 30 min, Pro = 7_200 = 2 hrs, Pro Max = 28_800 = 8 hrs, Enterprise = None).
 #   Enforced at CALL-START time by ``livekit.service.create_room``; an over-budget
 #   in-progress call is force-ended at its budget deadline.
+# Updated 2026-08-08 (feat/billing-storage-caps) — ADDED ``max_storage_bytes``: the
+#   workspace S3 STORAGE cap in bytes (Free = 5 GB, Go = 15 GB, Pro = 50 GB,
+#   Pro Max = 100 GB, Enterprise = None = uncapped). Enforced at UPLOAD time by the
+#   uploads pipeline (``storage.service.storage_cap_exceeded``) against the sum of
+#   the workspace's live ``FileUpload`` blob sizes (the Files → Knowledge Base
+#   store). ``GET /storage/usage`` surfaces used vs cap for the Settings page.
 
 from __future__ import annotations
 
@@ -188,6 +194,27 @@ _MAX_CALL_SECONDS_PER_DAY: dict[str, int | None] = {
     "enterprise": None,
 }
 
+# The workspace S3 STORAGE cap, in BYTES (feat/billing-storage-caps, 2026-08-08).
+# The approved consumer numbers — the Files → Knowledge Base / memory store a
+# workspace may hold (decimal GB, the SI convention Google/consumer storage uses):
+#   * free      =          5 GB — 5_000_000_000 bytes — a generous starter stash
+#   * go        =         15 GB — everyday file + KB usage
+#   * pro       =         50 GB — ~3.3× Go, for daily drivers
+#   * pro_max   =        100 GB — ~2× Pro, for power users
+#   * enterprise = None        — uncapped; negotiated contracts set their own limit.
+# Enforced at UPLOAD time by the uploads pipeline (``storage.service``): the
+# workspace's live ``FileUpload`` blob sizes are summed and a new upload is
+# blocked with ``StorageLimitError`` when it would push the total over the cap.
+# The ``_build`` default for an unknown key FAILS CLOSED to the Free value
+# (5 GB), never None/uncapped.
+_MAX_STORAGE_BYTES: dict[str, int | None] = {
+    "free": 5_000_000_000,
+    "go": 15_000_000_000,
+    "pro": 50_000_000_000,
+    "pro_max": 100_000_000_000,
+    "enterprise": None,
+}
+
 # Order the catalog is listed in — the price ladder, cheapest first. Any tier in
 # PLAN_FEATURES not named here is appended afterwards (so a new tier never
 # silently drops out of the catalog).
@@ -287,6 +314,11 @@ class PlanTier:
     2 hrs, Pro Max = 28800 = 8 hrs; Enterprise = None = uncapped). The LiveKit
     room-create gate enforces it at CALL-START time, and an over-budget single
     call is force-ended at its budget deadline.
+    ``max_storage_bytes`` is the approved CONSUMER workspace S3 STORAGE cap in
+    BYTES (Free = 5 GB, Go = 15 GB, Pro = 50 GB, Pro Max = 100 GB, Enterprise =
+    None = uncapped). The uploads pipeline enforces it at UPLOAD time against the
+    sum of the workspace's live ``FileUpload`` blob sizes (the Files → Knowledge
+    Base store), and ``GET /storage/usage`` surfaces used vs cap.
     ``dodo_product_id`` is the recurring-product id, or None until BC-7 / config
     populates it.
 
@@ -304,6 +336,7 @@ class PlanTier:
     max_pockets: int | None
     max_connectors: int | None
     max_call_seconds_per_day: int | None
+    max_storage_bytes: int | None
     dodo_product_id: str | None
     features: frozenset[str]
     display_name: str
@@ -345,9 +378,9 @@ def _build(key: str) -> PlanTier:
     from ``_PLAN_DISPLAY`` (a missing row degrades to ``_DISPLAY_FALLBACK`` rather
     than NPE-ing). An unknown ``key`` yields an empty feature set and a 0
     allotment — but callers go through ``get_plan`` / ``list_plans``, which only
-    ever pass known keys. ``monthly_ceiling`` and the three SMB caps
-    (``max_seats`` / ``max_pockets`` / ``max_connectors``) FAIL CLOSED: an unknown
-    key defaults to the Free value (the most restrictive tier), never
+    ever pass known keys. ``monthly_ceiling`` and the SMB caps (``max_seats`` /
+    ``max_pockets`` / ``max_connectors`` / ``max_storage_bytes``) FAIL CLOSED: an
+    unknown key defaults to the Free value (the most restrictive tier), never
     None/uncapped.
     """
     display = _PLAN_DISPLAY.get(key, _DISPLAY_FALLBACK)
@@ -365,6 +398,8 @@ def _build(key: str) -> PlanTier:
         max_call_seconds_per_day=_MAX_CALL_SECONDS_PER_DAY.get(
             key, _MAX_CALL_SECONDS_PER_DAY["free"]
         ),
+        # S3 storage cap — fail closed to Free (5 GB), never None/uncapped.
+        max_storage_bytes=_MAX_STORAGE_BYTES.get(key, _MAX_STORAGE_BYTES["free"]),
         dodo_product_id=_dodo_product_for(key),
         features=frozenset(PLAN_FEATURES.get(key, set())),
         display_name=str(display["display_name"]),

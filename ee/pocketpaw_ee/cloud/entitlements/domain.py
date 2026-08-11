@@ -25,6 +25,10 @@
 #   LiveKit CALL-TIME budget in seconds the LiveKit room-create gate enforces
 #   at call-start time. Fail-closed to the Free value (0 = no calls) on the
 #   fallback path.
+# Updated 2026-08-08 (feat/billing-storage-caps): added ``max_storage_bytes``
+#   (``int | None``, None = uncapped) — the workspace S3 STORAGE cap in bytes the
+#   uploads pipeline enforces at upload time. Fail-closed to the Free value
+#   (5 GB) on the fallback path.
 
 from __future__ import annotations
 
@@ -51,7 +55,10 @@ class Entitlements:
     LiveKit CALL-TIME budget in seconds (integer, or None = uncapped for
     Enterprise) the LiveKit room-create gate enforces at call-start time; a
     no/unknown-plan workspace resolves to the Free value (0 = no calls),
-    fail-closed, never None/uncapped.
+    fail-closed, never None/uncapped. ``max_storage_bytes`` is the workspace S3
+    STORAGE cap in bytes (integer, or None = uncapped for Enterprise) the
+    uploads pipeline enforces at upload time; a no/unknown-plan workspace
+    resolves to the Free value (5 GB), fail-closed, never None/uncapped.
     """
 
     workspace_id: str
@@ -62,4 +69,5 @@ class Entitlements:
     max_pockets: int | None
     max_connectors: int | None
     max_call_seconds_per_day: int | None
+    max_storage_bytes: int | None
     features: frozenset[str] = field(default_factory=frozenset)

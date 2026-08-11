@@ -267,6 +267,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.rules.router import router as rules_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
+    from pocketpaw_ee.cloud.storage.router import router as storage_router
     from pocketpaw_ee.cloud.websandbox.router import router as websandbox_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router
 
@@ -335,6 +336,9 @@ def mount_cloud(app: FastAPI) -> None:
     # credit allotment). The plan CATALOG read (GET /billing/plans) is on the
     # billing router above; this router carries only the per-workspace resolve.
     app.include_router(entitlements_router, prefix="/api/v1")
+    # Storage (feat/billing-storage-caps) — the workspace-scoped S3 usage read
+    # (GET /storage/usage -> used_bytes / max_bytes / remaining / percent).
+    app.include_router(storage_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
     app.include_router(pocket_chat_router, prefix="/api/v1")
