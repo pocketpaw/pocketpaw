@@ -18,6 +18,15 @@
 # ``service.send_to_user`` which prunes dead rows as before). The liveness
 # check and the chosen transport are surfaced on a returned ``NotifyResult``
 # so the fork is observable and unit-testable without real sockets.
+#
+# Updated: 2026-08-11 (fix/notif-liveness-dispatch) — the dedupe used to trust
+# the liveness verdict absolutely, so a half-open socket (laptop asleep, NAT
+# timeout) took the WS leg into a dead pipe and the notification was lost: WS
+# delivered nothing, Web Push was skipped by the dedupe. The WS leg now reports
+# how many sockets ACCEPTED the frame; zero means "looked live, reached nobody"
+# and falls through to Web Push in the same call, recorded as the
+# ``ws_fallback_push`` transport. ``is_online`` itself got stricter upstream
+# (traffic-based liveness in chat/ws.py) — this is the safety net beneath it.
 
 from __future__ import annotations
 
@@ -42,11 +51,17 @@ WS_NOTIFICATION_TYPE = "notification.push"
 class NotifyResult:
     """Outcome of a single :func:`notify` dispatch.
 
-    ``transport`` is the leg actually taken — ``"ws"`` when the user had a
-    live WebSocket connection (Web Push was skipped) or ``"push"`` when it
-    fell back to Web Push. ``ws_delivered`` is True only on the WS leg.
-    ``send`` carries the Web Push fan-out summary on the push leg (None on
-    the WS leg, since Web Push never ran).
+    ``transport`` is the leg actually taken:
+
+    - ``"ws"`` — the user had a live socket that accepted the frame; Web Push
+      was skipped (the dedupe).
+    - ``"push"`` — no live connection, so Web Push carried it.
+    - ``"ws_fallback_push"`` — the user LOOKED live but the frame reached zero
+      sockets (half-open / zombie), so Web Push carried it after all.
+
+    ``ws_delivered`` is True only when the WS leg actually landed. ``send``
+    carries the Web Push fan-out summary on both push legs (None on the WS
+    leg, since Web Push never ran).
     """
 
     transport: str = "push"
@@ -75,8 +90,13 @@ def _is_user_live(user_id: str) -> bool:
     return manager.is_online(user_id)
 
 
-async def _send_over_ws(user_id: str, payload: PushPayload) -> None:
-    """Push a lightweight notification event to a user's live sockets."""
+async def _send_over_ws(user_id: str, payload: PushPayload) -> int:
+    """Push a lightweight notification event to a user's live sockets.
+
+    Returns the number of sockets that accepted the frame — 0 means the send
+    reached nobody, which the caller treats as "not delivered" and falls back
+    to Web Push.
+    """
     from pocketpaw_ee.cloud.chat.schemas import WsOutbound
     from pocketpaw_ee.cloud.chat.ws import manager
 
@@ -84,7 +104,7 @@ async def _send_over_ws(user_id: str, payload: PushPayload) -> None:
         type=WS_NOTIFICATION_TYPE,
         data=payload.model_dump(exclude_none=True),
     )
-    await manager.send_to_user(user_id, message)
+    return await manager.send_to_user(user_id, message)
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +135,7 @@ async def notify(
     if _is_user_live(user_id):
         # Live desktop/browser client → WS only, skip Web Push (the dedupe).
         try:
-            await _send_over_ws(user_id, payload)
+            delivered = await _send_over_ws(user_id, payload)
         except Exception:
             # A WS failure must not silently drop the notification, but the
             # send_to_user fan-out is a separate path with its own pruning;
@@ -126,7 +146,21 @@ async def notify(
                 user_id,
             )
             return NotifyResult(transport="ws", ws_delivered=False)
-        return NotifyResult(transport="ws", ws_delivered=True)
+
+        if delivered:
+            return NotifyResult(transport="ws", ws_delivered=True)
+
+        # Looked live, reached nobody — every socket was half-open and got
+        # pruned mid-send. The dedupe would drop the notification entirely, so
+        # fall through to Web Push. Double-notify is not a risk here: zero
+        # sockets received the WS event.
+        logger.info(
+            "ws notification reached no sockets, falling back to web push for workspace=%s user=%s",
+            workspace_id,
+            user_id,
+        )
+        result = await push_service.send_to_user(workspace_id, user_id, payload)
+        return NotifyResult(transport="ws_fallback_push", ws_delivered=False, send=result)
 
     # No live connection → Web Push fallback.
     result = await push_service.send_to_user(workspace_id, user_id, payload)
