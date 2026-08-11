@@ -10,10 +10,13 @@
 #     the coverage hole the convergence closes (invites, leads, tasks,
 #     concierge kinds never reached the OS before);
 #   * lock-screen privacy — the persisted body of a content-bearing kind
-#     (message / mention / reaction / concierge / lead) NEVER crosses into the
-#     push payload, and ``message`` keeps its "N new messages" count body;
-#   * no double-fire — a mention writes two rows for one user action, and the
-#     coalescer collapses them to one immediate push;
+#     (message / mention / reaction / concierge) NEVER crosses into the
+#     push payload, ``message`` keeps its "N new messages" count body, and
+#     ``lead_captured`` (already content-free) passes through verbatim;
+#   * no double-fire — a mention writes two rows for one user action on ONE
+#     coalesce key: the first sends immediately, the second flushes when the
+#     window elapses under the same replacing ``tag`` (two sends, one visible
+#     notification that updates);
 #   * the retired subscriptions are actually gone from ``register``;
 #   * the coalesce key falls back to the KIND for room-less notifications, so
 #     a burst of invites doesn't fan out one Web Push per row;

@@ -49,11 +49,12 @@
 #
 # LOCK-SCREEN PRIVACY. A push body lands on a lock screen, so it must never
 # carry user-authored text. Several kinds persist exactly that — ``message`` /
-# ``mention`` / ``reaction`` store ``content[:200]``, the concierge kinds store
-# a visitor's words, ``lead_captured`` stores lead fields. Those bodies are
-# REPLACED here with a generic one (see ``_GENERIC_BODIES`` and
-# ``_push_body``); ``message`` keeps the pre-convergence "N new messages" count
-# UX. Only kinds whose persisted body is already generic pass through verbatim.
+# ``mention`` / ``reaction`` store ``content[:200]`` and the concierge kinds
+# store a visitor's words. Those bodies are REPLACED here with a generic one
+# (see ``_GENERIC_BODIES`` and ``_push_body``); ``message`` keeps the
+# pre-convergence "N new messages" count UX. Kinds whose persisted body is
+# already generic (``lead_captured`` included — it stores no visitor data)
+# pass through verbatim.
 #
 # Each handler is best-effort: a failure to resolve recipients or dispatch is
 # logged and swallowed so one bad event can't break the bus fan-out (the bus
