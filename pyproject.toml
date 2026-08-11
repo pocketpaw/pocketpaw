@@ -325,7 +325,7 @@ all-tools = [
     "soul-protocol[engine]>=0.3.0",
 ]
 all-backends = [
-    "pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm]",
+    "pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm,pydantic-ai]",
 ]
 # NOTE: the `enterprise` extra was removed in the OSS-EE split (Phase 4).
 # Enterprise features now ship as the separate `pocketpaw-ee` package
@@ -372,6 +372,14 @@ all = [
     "langchain-litellm>=0.6.4,<0.6.5",
     # Local / bring-your-own-model (Ollama) provider path — see deep-agents extra.
     "langchain-ollama>=1.0,<2.0",
+    # A SELF-REFERENCE rather than the four inlined specs the rest of this list
+    # uses, and deliberately: the `pydantic-ai` extra above pins three packages
+    # EXACTLY, with a written justification per pin, so a copy here would be a
+    # second place to bump and the first one to go stale. This entry was missing
+    # entirely until 2026-08-11 — `Dockerfile.enterprise` builds the production
+    # image with `pip install '.[all]'`, so "all" omitting the CLOUD DEFAULT
+    # agent backend is how the enterprise image shipped without it.
+    "pocketpaw[pydantic-ai]",
 ]
 dev = [
     # all deps (flattened from [all])
