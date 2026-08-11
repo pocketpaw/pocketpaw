@@ -8,12 +8,27 @@ Handles:
 - Message routing to group members
 - Typing indicators with auto-expiry (5s)
 - Presence tracking with grace period (30s before marking offline)
+- Per-socket liveness (see below)
+
+Updated: 2026-08-11 (fix/notif-liveness-dispatch) — ``is_online`` used to mean
+"a socket object is present in the dict", which a half-open socket (laptop
+asleep, NAT timeout) satisfies indefinitely: the TCP close never arrives, so
+the registry keeps a socket nobody is listening on. Notification dispatch
+reads that verdict to pick WS over Web Push, so a zombie socket silently ate
+the notification. Liveness is now traffic-based: every socket carries a
+last-activity stamp, refreshed on any inbound frame (``touch``, called from
+the router's receive loop) and on any successful outbound send. A socket with
+no traffic in EITHER direction for ``LIVENESS_STALE_SECONDS`` is presumed
+zombie — excluded from the verdict and closed best-effort, which wakes the
+router's receive loop so the normal disconnect/presence path runs.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import time
 
 from fastapi import WebSocket
 
@@ -23,6 +38,11 @@ logger = logging.getLogger(__name__)
 
 TYPING_TIMEOUT_SECONDS = 5
 PRESENCE_GRACE_SECONDS = 30
+# A socket with no traffic in either direction for this long is presumed dead.
+# Comfortably above the ~30s cadence of ordinary workspace chatter (presence
+# deltas, chat fan-out, client pings) so an idle-but-healthy socket in an
+# active workspace stays fresh on outbound traffic alone.
+LIVENESS_STALE_SECONDS = 60
 
 
 class ConnectionManager:
@@ -39,6 +59,9 @@ class ConnectionManager:
         self._typing_timers: dict[tuple[str, str], asyncio.Task] = {}
         # Current room per socket (at most one): ws -> group_id
         self._ws_to_room: dict[WebSocket, str] = {}
+        # ws -> monotonic timestamp of the last traffic in EITHER direction
+        # (inbound frame received, or outbound send the socket accepted).
+        self._ws_last_seen: dict[WebSocket, float] = {}
 
     async def connect(self, websocket: WebSocket, user_id: str) -> None:
         """Register an authenticated WebSocket connection."""
@@ -46,6 +69,7 @@ class ConnectionManager:
             self.active_connections[user_id] = set()
         self.active_connections[user_id].add(websocket)
         self._ws_to_user[websocket] = user_id
+        self.touch(websocket)
 
         # Cancel any pending offline task
         task = self._offline_tasks.pop(user_id, None)
@@ -67,6 +91,7 @@ class ConnectionManager:
         """
         # Always clear any room association, regardless of user mapping.
         self._ws_to_room.pop(websocket, None)
+        self._ws_last_seen.pop(websocket, None)
 
         user_id = self._ws_to_user.pop(websocket, None)
         if not user_id:
@@ -86,22 +111,96 @@ class ConnectionManager:
         """Return the set of active WebSocket connections for a user."""
         return self.active_connections.get(user_id, set())
 
-    def is_online(self, user_id: str) -> bool:
-        """Check whether a user has at least one active connection."""
-        return bool(self.active_connections.get(user_id))
+    # ------------------------------------------------------------------
+    # Liveness
+    # ------------------------------------------------------------------
 
-    async def send_to_user(self, user_id: str, message: WsOutbound) -> None:
-        """Send a message to all of a user's connections."""
+    def touch(self, websocket: WebSocket) -> None:
+        """Record traffic on a socket, refreshing its liveness window.
+
+        Called by the router's receive loop on EVERY inbound frame (including
+        the client's ``ping`` heartbeat) and internally on every outbound send
+        the socket accepted. Untracked sockets are ignored — a socket that has
+        already been disconnected must not resurrect itself here.
+        """
+        if websocket in self._ws_to_user:
+            self._ws_last_seen[websocket] = time.monotonic()
+
+    def _is_fresh(self, websocket: WebSocket, *, now: float) -> bool:
+        """True when the socket has seen traffic inside the liveness window."""
+        last_seen = self._ws_last_seen.get(websocket)
+        if last_seen is None:
+            # Tracked but never stamped — treat as stale rather than trusting it.
+            return False
+        return (now - last_seen) < LIVENESS_STALE_SECONDS
+
+    def _close_stale(self, websocket: WebSocket) -> None:
+        """Best-effort close of a presumed-zombie socket. Never raises.
+
+        Deliberately does NOT unregister the socket: closing it wakes the
+        router's ``receive_text()`` loop, which runs the normal ``disconnect``
+        path and the presence grace timer with it. Unregistering here instead
+        would swallow the ``presence.offline`` broadcast.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # No loop (sync context) — the next send will prune it.
+
+        async def _close() -> None:
+            with contextlib.suppress(Exception):
+                await websocket.close(code=1001, reason="Stale connection")
+
+        with contextlib.suppress(Exception):
+            loop.create_task(_close())
+
+    def is_online(self, user_id: str) -> bool:
+        """Check whether a user has at least one LIVE connection.
+
+        "Live" means traffic inside ``LIVENESS_STALE_SECONDS``, not merely a
+        socket object in the registry — see the module docstring. Sockets past
+        the window are closed best-effort on the way through, so the verdict
+        and the cleanup converge without a separate sweeper.
+        """
+        conns = self.active_connections.get(user_id)
+        if not conns:
+            return False
+
+        now = time.monotonic()
+        live = False
+        for ws in list(conns):
+            if self._is_fresh(ws, now=now):
+                live = True
+            else:
+                self._close_stale(ws)
+        return live
+
+    async def send_to_user(self, user_id: str, message: WsOutbound) -> int:
+        """Send a message to all of a user's connections.
+
+        Returns the number of sockets that ACCEPTED the frame. Zero means the
+        user looked connected but nothing was delivered (every socket was dead
+        and got pruned) — the signal ``push.dispatch.notify`` uses to fall back
+        to Web Push instead of dropping the notification.
+        """
         data = message.model_dump(mode="json")
+        delivered = 0
         dead: list[WebSocket] = []
         for ws in self.get_user_connections(user_id):
             try:
                 await ws.send_json(data)
             except Exception:
                 dead.append(ws)
+            else:
+                delivered += 1
+                # A send the socket accepted is proof of life for the liveness
+                # window — idle-but-healthy clients that never send anything
+                # inbound stay online on outbound traffic alone.
+                self.touch(ws)
         # Clean up dead connections
         for ws in dead:
             await self.disconnect(ws)
+        return delivered
 
     async def broadcast_to_group(
         self,
@@ -156,6 +255,8 @@ class ConnectionManager:
                 await ws.send_json(data)
             except Exception:
                 dead.append(ws)
+            else:
+                self.touch(ws)
         for ws in dead:
             await self.disconnect(ws)
 

@@ -10,6 +10,11 @@
 # network. The liveness check and the WS send are patched via the module's
 # injectable seams (``_is_user_live`` / ``_send_over_ws``); one integration
 # test drives the real ConnectionManager singleton to prove the seam matches.
+# Updated: 2026-08-11 (fix/notif-liveness-dispatch) — ``_send_over_ws`` now
+# returns the number of sockets that actually accepted the frame, so the
+# zombie case (user "has" a socket, delivery reaches ZERO of them) falls back
+# to Web Push instead of dropping the notification. The seam fakes therefore
+# return a count, and a new test pins ``transport == "ws_fallback_push"``.
 
 from __future__ import annotations
 
@@ -29,8 +34,9 @@ async def test_live_user_delivers_ws_and_skips_web_push(monkeypatch) -> None:
 
     ws_sent: list[tuple[str, PushPayload]] = []
 
-    async def fake_ws(user_id: str, payload: PushPayload) -> None:
+    async def fake_ws(user_id: str, payload: PushPayload) -> int:
         ws_sent.append((user_id, payload))
+        return 1  # one socket accepted the frame
 
     monkeypatch.setattr(dispatch, "_send_over_ws", fake_ws)
 
@@ -96,6 +102,7 @@ async def test_dispatch_validates_dict_payload(monkeypatch) -> None:
 
     async def fake_ws(user_id, payload):
         captured["payload"] = payload
+        return 1
 
     monkeypatch.setattr(dispatch, "_send_over_ws", fake_ws)
 
@@ -128,6 +135,45 @@ async def test_ws_failure_does_not_double_send_over_push(monkeypatch) -> None:
     assert result.transport == "ws"
     assert result.ws_delivered is False
     assert push_calls == []  # Web Push was NOT used as a fallback.
+
+
+# ---------------------------------------------------------------------------
+# Zombie socket — "live" by the registry, but the frame reaches nobody.
+# ---------------------------------------------------------------------------
+
+
+async def test_zombie_socket_falls_back_to_web_push(monkeypatch) -> None:
+    # The half-open socket case: the connection registry still holds a socket
+    # for the user (laptop asleep, NAT timeout — the TCP close never arrived),
+    # so the liveness check says live, but the send reaches ZERO sockets. Before
+    # the fix the notification was dropped on the floor: WS leg taken, Web Push
+    # skipped by the dedupe, nothing delivered. Now the zero-delivery signal
+    # falls the dispatch through to Web Push in the same call.
+    monkeypatch.setattr(dispatch, "_is_user_live", lambda uid: True)
+
+    async def dead_ws(user_id, payload):
+        return 0  # every socket was dead and got pruned mid-send
+
+    monkeypatch.setattr(dispatch, "_send_over_ws", dead_ws)
+
+    push_calls: list = []
+
+    async def fake_send(workspace_id, user_id, payload):
+        push_calls.append((workspace_id, user_id, payload))
+        return SendResult(sent=1, pruned=1)
+
+    monkeypatch.setattr(dispatch.push_service, "send_to_user", fake_send)
+
+    result = await dispatch.notify("w1", "zombie", _PAYLOAD)
+
+    assert result.transport == "ws_fallback_push"
+    assert result.ws_delivered is False
+    # The Web Push leg actually ran, with the same payload.
+    assert len(push_calls) == 1
+    assert push_calls[0][1] == "zombie"
+    assert push_calls[0][2].title == "Hi"
+    assert result.send is not None
+    assert result.send.sent == 1
 
 
 # ---------------------------------------------------------------------------

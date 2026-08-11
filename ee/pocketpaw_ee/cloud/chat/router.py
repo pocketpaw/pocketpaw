@@ -3,6 +3,12 @@
 REST routes live under ``/chat`` and require an enterprise license.
 The WebSocket endpoint at ``/ws/cloud`` authenticates via JWT query param.
 
+Updated 2026-08-11 (fix/notif-liveness-dispatch): the receive loop stamps each
+socket's liveness window via ``manager.touch`` on every inbound frame, so a
+socket that is genuinely talking to us can never be mistaken for a zombie by
+``is_online``. See chat/ws.py's module docstring for what that verdict now
+drives.
+
 Updated 2026-04-19 (Task 19, Cluster A sub-PR 4): presence events are now
 emitted on WS connect and disconnect. PresenceOnline fires immediately when
 a user's first socket accepts; PresenceOffline fires after the existing
@@ -674,6 +680,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
     try:
         while True:
             raw = await websocket.receive_text()
+            # Any inbound frame is proof the socket is alive — refresh its
+            # liveness window before parsing, so even a malformed frame counts
+            # (the client is clearly still there). Notification dispatch reads
+            # this to choose WS over Web Push; see ws.py's module docstring.
+            manager.touch(websocket)
             try:
                 data = json.loads(raw)
                 # Heartbeat: clients ping to keep the socket warm through idle-

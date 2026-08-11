@@ -1,0 +1,51 @@
+[
+  {
+    "label": "is_online reverts to socket-present (the original zombie bug)",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "            if self._is_fresh(ws, now=now):\n                live = True",
+    "replace": "            if True:\n                live = True",
+    "tests": ["tests/cloud/test_ws.py::test_is_online_false_for_stale_socket"]
+  },
+  {
+    "label": "stale socket is never closed",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "            else:\n                self._close_stale(ws)",
+    "replace": "            else:\n                pass",
+    "tests": ["tests/cloud/test_ws.py::test_stale_socket_is_closed_best_effort"]
+  },
+  {
+    "label": "outbound send stops counting as proof of life",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "                delivered += 1\n                # A send the socket accepted is proof of life for the liveness\n                # window — idle-but-healthy clients that never send anything\n                # inbound stay online on outbound traffic alone.\n                self.touch(ws)",
+    "replace": "                delivered += 1",
+    "tests": ["tests/cloud/test_ws.py::test_successful_send_keeps_idle_socket_live"]
+  },
+  {
+    "label": "send_to_user reports delivery it never made",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "        delivered = 0\n        dead: list[WebSocket] = []",
+    "replace": "        delivered = 1\n        dead: list[WebSocket] = []",
+    "tests": ["tests/cloud/test_ws.py::test_send_to_user_returns_delivery_count"]
+  },
+  {
+    "label": "zombie dispatch drops the notification again (no push fallback)",
+    "file": "ee/pocketpaw_ee/cloud/push/dispatch.py",
+    "find": "        if delivered:\n            return NotifyResult(transport=\"ws\", ws_delivered=True)",
+    "replace": "        if True:\n            return NotifyResult(transport=\"ws\", ws_delivered=True)",
+    "tests": ["tests/cloud/push/test_dispatch.py::test_zombie_socket_falls_back_to_web_push"]
+  },
+  {
+    "label": "inbox index points at the nonexistent created_at again",
+    "file": "ee/pocketpaw_ee/cloud/models/notification.py",
+    "find": "IndexModel([(\"recipient\", 1), (\"read\", 1), (\"createdAt\", -1)])",
+    "replace": "IndexModel([(\"recipient\", 1), (\"read\", 1), (\"created_at\", -1)])",
+    "tests": ["tests/cloud/notifications/test_model_indexes.py"]
+  },
+  {
+    "label": "TTL hangs off the dead expires_at field, expiring nothing",
+    "file": "ee/pocketpaw_ee/cloud/models/notification.py",
+    "find": "IndexModel([(\"createdAt\", 1)], expireAfterSeconds=86400 * 90)",
+    "replace": "IndexModel([(\"expires_at\", 1)], expireAfterSeconds=86400 * 90)",
+    "tests": ["tests/cloud/notifications/test_model_indexes.py::test_ttl_index_expires_rows_at_ninety_days"]
+  }
+]
