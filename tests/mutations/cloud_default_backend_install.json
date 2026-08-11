@@ -1,0 +1,30 @@
+[
+  {
+    "label": "the EE wheel goes back to requiring the core WITHOUT the pydantic-ai extra — the shipped bug: every new cloud agent defaults to pydantic_ai, the registry resolves the name without importing it, _initialize swallows the ImportError into a WARNING, and the estate boots clean with a default backend that cannot run",
+    "file": "ee/pyproject.toml",
+    "find": "\"pocketpaw[pydantic-ai]~=0.4.16\"",
+    "replace": "\"pocketpaw~=0.4.16\"",
+    "tests": ["tests/test_cloud_backend_default.py::test_the_ee_wheel_requests_the_cloud_default_backends_extra"]
+  },
+  {
+    "label": "the `all` extra drops pydantic-ai again — Dockerfile.enterprise builds the production image with `pip install '.[all]'`, so an `all` that enumerates backends by hand and misses one is how the enterprise image shipped without its default backend's SDK",
+    "file": "pyproject.toml",
+    "find": "    # agent backend is how the enterprise image shipped without it.\n    \"pocketpaw[pydantic-ai]\",\n]\ndev = [",
+    "replace": "]\ndev = [",
+    "tests": ["tests/test_cloud_backend_default.py::test_the_extra_the_enterprise_image_builds_with_covers_the_default_backend"]
+  },
+  {
+    "label": "`all-backends` drops pydantic-ai while `all` keeps it — the half-fix, and the one a reviewer waves through because the image's own install line still works",
+    "file": "pyproject.toml",
+    "find": "\"pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm,pydantic-ai]\"",
+    "replace": "\"pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm]\"",
+    "tests": ["tests/test_cloud_backend_default.py::test_the_extra_the_enterprise_image_builds_with_covers_the_default_backend"]
+  },
+  {
+    "label": "the extra is renamed in the core but not in the backend's install_hint — proves both gates read the hint as the source of truth instead of restating the literal `pydantic-ai`, so a rename cannot drift past them",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "\"pip_spec\": \"pocketpaw[pydantic-ai]\",",
+    "replace": "\"pip_spec\": \"pocketpaw[pydantic-ai-renamed]\",",
+    "tests": ["tests/test_cloud_backend_default.py::test_the_ee_wheel_requests_the_cloud_default_backends_extra"]
+  }
+]
