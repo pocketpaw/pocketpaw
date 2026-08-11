@@ -12,5 +12,19 @@
     "find": "    \"\"\"Notify that a participant left a call without ending it.\"\"\"\n    await require_license()",
     "replace": "    \"\"\"Notify that a participant left a call without ending it.\"\"\"",
     "tests": ["tests/cloud/livekit/test_leave_route_guard.py::test_leave_requires_license"]
+  },
+  {
+    "label": "move the leave guards inside the try (the except swallows the 403)",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    group = await _get_group_domain_or_404(group_id)\n    _require_domain_group_member(group, str(user.id))\n\n    gid = group_id\n    try:\n        await emit(",
+    "replace": "    gid = group_id\n    try:\n        group = await _get_group_domain_or_404(group_id)\n        _require_domain_group_member(group, str(user.id))\n        await emit(",
+    "tests": ["tests/cloud/livekit/test_leave_route_guard.py"]
+  },
+  {
+    "label": "emit before the guard runs (status stays 403, event still leaks)",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    group = await _get_group_domain_or_404(group_id)\n    _require_domain_group_member(group, str(user.id))\n\n    gid = group_id\n    try:\n        await emit(\n            CallParticipantLeft(\n                data={\n                    \"group_id\": gid,\n                    \"room_name\": livekit_service.room_name_for_group(gid),\n                    \"identity\": str(user.id),\n                    \"name\": user.full_name or str(user.id),\n                }\n            )\n        )\n    except Exception:\n        pass",
+    "replace": "    gid = group_id\n    try:\n        await emit(\n            CallParticipantLeft(\n                data={\n                    \"group_id\": gid,\n                    \"room_name\": livekit_service.room_name_for_group(gid),\n                    \"identity\": str(user.id),\n                    \"name\": user.full_name or str(user.id),\n                }\n            )\n        )\n    except Exception:\n        pass\n    group = await _get_group_domain_or_404(group_id)\n    _require_domain_group_member(group, str(user.id))",
+    "tests": ["tests/cloud/livekit/test_leave_route_guard.py"]
   }
 ]
