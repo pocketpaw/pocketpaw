@@ -1,5 +1,9 @@
 # Attribute-based policy rules — plan gates, action-role mapping, tool whitelist.
 # Created: 2026-04-10
+# Updated: 2026-08-08 (feat/billing-rbac-member-caps) — the Belt & Foresight
+#   display flags moved DOWN to Paw Pro (was Pro Max only), matching the billing
+#   UI decision that both Pro tiers unlock them. Still display-only (not yet
+#   enforced); Pro Max remains differentiated by usage/price, not features.
 # Updated: 2026-06-24 (integration/billing-credits, BC-6) — added a minimal
 #   ``free`` base tier to PLAN_FEATURES so the billing catalog and the
 #   entitlements resolver have an explicit floor to fall back to (a workspace
@@ -64,8 +68,9 @@ PLAN_FEATURES: dict[str, set[str]] = {
         "sites",
     },
     # Paw Pro — daily drivers. Adds automations + knowledge_base + display flags
-    # for the power surfaces (code, deep_work, chain_flow, fleet). Keeps ``sites``;
-    # does NOT carry ``fabric`` (the ontology is enterprise-only).
+    # for the power surfaces (code, deep_work, chain_flow, fleet, belt,
+    # foresight). Keeps ``sites``; does NOT carry ``fabric`` (the ontology is
+    # enterprise-only).
     "pro": {
         "pockets",
         "sessions",
@@ -79,9 +84,12 @@ PLAN_FEATURES: dict[str, set[str]] = {
         "deep_work",
         "chain_flow",
         "fleet",
+        "belt",
+        "foresight",
     },
-    # Paw Pro Max — uncapped power users. Everything in pro + belt + foresight.
-    # Still NO ``fabric`` (enterprise-only ontology).
+    # Paw Pro Max — uncapped power users. Everything in pro (incl. belt +
+    # foresight) + nothing extra at the feature-set level — the differentiator
+    # is usage/price. Still NO ``fabric`` (enterprise-only ontology).
     "pro_max": {
         "pockets",
         "sessions",

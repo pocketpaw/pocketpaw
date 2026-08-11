@@ -28,8 +28,15 @@
 # Updated 2026-07-08 (feat/billing-smb-caps): proves the resolver also surfaces the
 #   three SMB caps (``max_seats`` / ``max_pockets`` / ``max_connectors``) from the
 #   plan catalog for every known tier (incl. enterprise=None uncapped), and that an
-#   unknown / missing plan FAILS CLOSED to the Free values (5 / 200 / 50), never
-#   None/uncapped.
+#   unknown / missing plan FAILS CLOSED to the Free values (0 / 200 / 50), never
+#   None/uncapped. Pro Max is uncapped on seats only.
+# Updated 2026-08-08 (feat/billing-rbac-member-caps): adds the daily LiveKit
+#   CALL-TIME budget (``max_call_seconds_per_day``) — Free = 0 (no calls), Go =
+#   1_800 (30 min), Pro = 7_200 (2 hrs), Pro Max = 28_800 (8 hrs), Enterprise =
+#   None. Unknown / missing plans fail closed to Free's 0 (no calls).
+# Updated 2026-08-08 (feat/billing-storage-caps): adds the S3 STORAGE cap
+#   (``max_storage_bytes``) — Free = 5 GB, Go = 15 GB, Pro = 50 GB, Pro Max =
+#   100 GB, Enterprise = None. Unknown / missing plans fail closed to Free's 5 GB.
 
 from __future__ import annotations
 
@@ -102,7 +109,7 @@ async def test_every_known_plan_resolves_its_catalog_ceiling(patch_plan, plan):
 
 @pytest.mark.parametrize("plan", ["free", "go", "pro", "pro_max", "enterprise"])
 async def test_every_known_plan_resolves_its_catalog_smb_caps(patch_plan, plan):
-    """The resolver mirrors the catalog's three SMB caps for every known tier."""
+    """The resolver mirrors the catalog's SMB caps + daily call budget per tier."""
     from pocketpaw_ee.cloud.billing import plans
 
     patch_plan(plan)
@@ -111,15 +118,29 @@ async def test_every_known_plan_resolves_its_catalog_smb_caps(patch_plan, plan):
     assert ent.max_seats == tier.max_seats
     assert ent.max_pockets == tier.max_pockets
     assert ent.max_connectors == tier.max_connectors
+    assert ent.max_call_seconds_per_day == tier.max_call_seconds_per_day
+    assert ent.max_storage_bytes == tier.max_storage_bytes
     if plan == "enterprise":
-        # The one uncapped tier — all three surface as None.
+        # The fully uncapped tier — all five surface as None.
         assert ent.max_seats is None
         assert ent.max_pockets is None
         assert ent.max_connectors is None
+        assert ent.max_call_seconds_per_day is None
+        assert ent.max_storage_bytes is None
+    elif plan == "pro_max":
+        # Pro Max is uncapped on SEATS only; pockets + connectors + the daily
+        # call budget + the storage cap stay capped (100 GB).
+        assert ent.max_seats is None
+        assert isinstance(ent.max_pockets, int)
+        assert isinstance(ent.max_connectors, int)
+        assert isinstance(ent.max_call_seconds_per_day, int)
+        assert isinstance(ent.max_storage_bytes, int)
     else:
         assert isinstance(ent.max_seats, int)
         assert isinstance(ent.max_pockets, int)
         assert isinstance(ent.max_connectors, int)
+        assert isinstance(ent.max_call_seconds_per_day, int)
+        assert isinstance(ent.max_storage_bytes, int)
 
 
 # ---------------------------------------------------------------------------
@@ -137,9 +158,14 @@ async def test_unknown_plan_falls_back_to_free(patch_plan):
     # FAIL-CLOSED: an unknown plan caps at the Free ceiling, never None/uncapped.
     assert ent.monthly_ceiling == 1_000
     # FAIL-CLOSED on the SMB caps too: the Free values, never None/uncapped.
-    assert ent.max_seats == 5
+    # Free max_seats = 0 — a fallback workspace cannot invite any members.
+    # Free call budget = 0 — it also cannot place any LiveKit calls.
+    assert ent.max_seats == 0
     assert ent.max_pockets == 200
     assert ent.max_connectors == 50
+    assert ent.max_call_seconds_per_day == 0
+    # FAIL-CLOSED on storage too: a fallback workspace gets Free's 5 GB cap.
+    assert ent.max_storage_bytes == 5_000_000_000
 
 
 async def test_missing_workspace_falls_back_to_free_smb_caps(patch_plan):
@@ -147,9 +173,11 @@ async def test_missing_workspace_falls_back_to_free_smb_caps(patch_plan):
     patch_plan(None)
     ent = await entitlements.resolve_entitlements(WS)
     assert ent.plan == "free"
-    assert ent.max_seats == 5
+    assert ent.max_seats == 0
     assert ent.max_pockets == 200
     assert ent.max_connectors == 50
+    assert ent.max_call_seconds_per_day == 0
+    assert ent.max_storage_bytes == 5_000_000_000
 
 
 async def test_missing_workspace_falls_back_to_free(patch_plan):
@@ -231,6 +259,12 @@ def test_get_entitlements_returns_resolved_entitlements(entitlements_client, pat
     assert set(body["features"]) == PLAN_FEATURES["pro"]
     assert body["features"] == sorted(body["features"])  # deterministic JSON
     assert body["monthly_credit_allotment"] > 0
+    # The SMB caps (incl. the S3 storage cap) ride the entitlements response.
+    from pocketpaw_ee.cloud.billing import plans
+
+    pro_tier = plans.get_plan("pro")
+    assert body["max_seats"] == pro_tier.max_seats
+    assert body["max_storage_bytes"] == pro_tier.max_storage_bytes
 
 
 def test_get_entitlements_unknown_plan_is_free(entitlements_client, patch_plan):

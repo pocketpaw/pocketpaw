@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -202,6 +203,24 @@ class EEUploadService:
     ) -> BulkUploadResult:
         # Delegate validation + adapter writes; metadata is discarded inside OSS
         result = await self._oss.upload_many(files, owner_id, chat_id)
+        # feat/billing-storage-caps: block a batch that would push the workspace
+        # over its plan's S3 cap. We check the ACTUAL written sizes (from the
+        # OSS result — not a pre-write guess) and roll back the just-written
+        # blobs so an over-cap batch is a no-op: no Mongo row, no FileReady.
+        # GATED on ``billing_enforced`` (a no-op for OSS / self-host), and never
+        # retroactive — existing blobs are untouched.
+        from pocketpaw_ee.cloud.storage import service as storage_service
+
+        incoming = sum(rec.size for rec in result.uploaded)
+        if incoming:
+            exceeded, _used, limit = await storage_service.storage_cap_exceeded(workspace, incoming)
+            if exceeded:
+                for rec in result.uploaded:
+                    with contextlib.suppress(Exception):
+                        await self._adapter.delete(rec.storage_key)
+                from pocketpaw_ee.cloud._core.errors import StorageLimitError
+
+                raise StorageLimitError(limit)
         # Persist each successful record in Mongo with workspace + pocket scoping.
         for rec in result.uploaded:
             await self._meta.save_scoped(
@@ -392,6 +411,19 @@ async def write_text_file(
         yield payload
 
     obj = await adapter.put(storage_key, _body(), content_type)
+
+    # feat/billing-storage-caps: the programmatic writer honours the workspace's
+    # S3 cap the same way the HTTP upload path does. ``assert_storage_available``
+    # raises ``StorageLimitError`` (402) BEFORE the Mongo row lands; on the raise
+    # we also remove the just-written blob so an over-cap write leaves no orphan.
+    from pocketpaw_ee.cloud.storage import service as storage_service
+
+    try:
+        await storage_service.assert_storage_available(workspace_id, obj.size)
+    except Exception:
+        with contextlib.suppress(Exception):
+            await adapter.delete(storage_key)
+        raise
 
     rec = FileRecord(
         id=uuid4().hex,

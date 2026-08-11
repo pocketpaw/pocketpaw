@@ -697,6 +697,14 @@ class TestSpawnRace:
                 "pocketpaw_ee.cloud.livekit.service._reap_agent_process",
                 new_callable=AsyncMock,
             ),
+            # The budget gate (feat/billing-rbac-member-caps) would resolve the
+            # placeholder "ws" workspace to Free and block the call; give it an
+            # uncapped budget so this test stays about the spawn race only.
+            patch(
+                "pocketpaw_ee.cloud.livekit.service._call_budget_remaining",
+                new_callable=AsyncMock,
+                return_value=(None, 0),
+            ),
         ):
             await asyncio.gather(
                 create_room("g", "ws", "u"),

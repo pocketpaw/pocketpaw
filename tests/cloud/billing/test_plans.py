@@ -30,6 +30,15 @@
 #   The numbers under test are the GENEROUS PLACEHOLDERS pending the captain's
 #   pricing call — these tests lock the machinery (present on every tier, uncapped
 #   Enterprise, fail-closed default), not the exact figures.
+# Updated 2026-08-08 (feat/billing-rbac-member-caps): the CONSUMER member caps are
+#   now LOCKED — Free ``max_seats`` = 0 (a Free workspace cannot invite ANY
+#   members), Paw Go = 5, Paw Pro = 25 total workspace members (owner included),
+#   Paw Pro Max + Enterprise = None (uncapped). The seat gate is plan-authoritative,
+#   so Free = 0 is an actual block, not a no-op. Also added the daily LiveKit
+#   CALL-TIME budget (``max_call_seconds_per_day``): Free = 0 (no calls), Go =
+#   1_800 (30 min), Pro = 7_200 (2 hrs), Pro Max = 28_800 (8 hrs), Enterprise =
+#   None — enforced by ``livekit.service.create_room``. These tests lock the
+#   exact numbers.
 
 from __future__ import annotations
 
@@ -68,14 +77,15 @@ EXPECTED_USAGE_LABELS = {
     "pro_max": "20× the usage",
     "enterprise": "Custom",
 }
-# The three SMB resource caps (feat/billing-smb-caps) — GENEROUS PLACEHOLDERS
-# pending the captain's pricing call. Enterprise is None (uncapped). Free
-# ``max_seats`` MUST equal the Workspace.seats default (5) so no workspace regresses.
+# The three SMB resource caps (feat/billing-smb-caps). ``max_seats`` is the
+# APPROVED CONSUMER member cap — Free = 0 (no invitations allowed), Paw Go = 5,
+# Paw Pro = 25 total workspace members (owner included), Paw Pro Max +
+# Enterprise = None (uncapped). Pockets + connectors remain their tier ceilings.
 EXPECTED_MAX_SEATS: dict[str, int | None] = {
-    "free": 5,
-    "go": 10,
+    "free": 0,
+    "go": 5,
     "pro": 25,
-    "pro_max": 100,
+    "pro_max": None,
     "enterprise": None,
 }
 EXPECTED_MAX_POCKETS: dict[str, int | None] = {
@@ -90,6 +100,28 @@ EXPECTED_MAX_CONNECTORS: dict[str, int | None] = {
     "go": 100,
     "pro": 250,
     "pro_max": 1_000,
+    "enterprise": None,
+}
+# The daily LiveKit CALL-TIME budget per workspace, in SECONDS (2026-08-08).
+# Free = 0 (no calls), Go = 1800 (30 min), Pro = 7200 (2 hrs), Pro Max = 28800
+# (8 hrs), Enterprise = None (uncapped). Enforced by livekit.service at
+# call-start time; an over-budget single call is force-ended at its deadline.
+EXPECTED_MAX_CALL_SECONDS_PER_DAY: dict[str, int | None] = {
+    "free": 0,
+    "go": 1_800,
+    "pro": 7_200,
+    "pro_max": 28_800,
+    "enterprise": None,
+}
+# The workspace S3 STORAGE cap per tier, in BYTES (feat/billing-storage-caps,
+# 2026-08-08). Decimal GB — Free = 5 GB, Go = 15 GB, Pro = 50 GB, Pro Max =
+# 100 GB, Enterprise = None (uncapped). Enforced by the uploads pipeline at
+# upload time; GET /storage/usage surfaces used vs cap.
+EXPECTED_MAX_STORAGE_BYTES: dict[str, int | None] = {
+    "free": 5_000_000_000,
+    "go": 15_000_000_000,
+    "pro": 50_000_000_000,
+    "pro_max": 100_000_000_000,
     "enterprise": None,
 }
 
@@ -179,49 +211,99 @@ def test_build_unknown_key_fails_closed_to_free_ceiling():
 # ---------------------------------------------------------------------------
 
 
-def test_every_tier_carries_the_three_smb_caps():
-    """Each tier exposes max_seats / max_pockets / max_connectors (the machinery).
-
-    Locks that the caps are PRESENT on every tier with the placeholder values, not
-    that the figures are final — the captain's pricing call moves the numbers, not
-    the shape.
-    """
+def test_every_tier_carries_the_smb_caps():
+    """Each tier exposes max_seats / max_pockets / max_connectors + the daily
+    LiveKit call budget (the machinery). Locks that the caps are PRESENT on
+    every tier with the approved values."""
     by_key = {p.key: p for p in plans.list_plans()}
     for key in EXPECTED_ORDER:
         assert by_key[key].max_seats == EXPECTED_MAX_SEATS[key], key
         assert by_key[key].max_pockets == EXPECTED_MAX_POCKETS[key], key
         assert by_key[key].max_connectors == EXPECTED_MAX_CONNECTORS[key], key
+        assert by_key[key].max_call_seconds_per_day == EXPECTED_MAX_CALL_SECONDS_PER_DAY[key], key
+        assert by_key[key].max_storage_bytes == EXPECTED_MAX_STORAGE_BYTES[key], key
 
 
-def test_free_max_seats_is_at_least_the_workspace_default():
-    """Free max_seats MUST be >= the Workspace.seats model default (5) — no regression.
+def test_free_max_seats_is_zero_no_invites():
+    """Free max_seats is 0 — a Free workspace cannot invite ANY members.
 
-    The seat gate enforces max(doc.seats, plan.max_seats); if Free's cap dropped
-    below 5 a default free workspace would be blocked below the seats it already
-    has. This is the CRITICAL non-regression invariant.
+    The ABAC/RBAC member gate (``workspace.service._effective_seat_limit``) is
+    plan-authoritative and blocks an invite once ``member_count >= max_seats``;
+    a Free workspace's owner alone already fills a 0-seat cap, so every invite
+    raises SeatLimitError. This is the CRITICAL consumer-pricing invariant.
     """
-    from pocketpaw_ee.cloud.models.workspace import Workspace
-
-    default_seats = Workspace.model_fields["seats"].default
-    assert default_seats == 5
     assert plans.get_plan("free").max_seats is not None
-    assert plans.get_plan("free").max_seats >= default_seats
+    assert plans.get_plan("free").max_seats == 0
+
+
+def test_paid_tier_seats_are_the_consumer_ladder():
+    """The paid tiers carry the approved caps: Go=5, Pro=25, ProMax=Unlimited.
+
+    Each count is TOTAL workspace members (owner included), so Paw Go allows the
+    owner + 4 invited members, Paw Pro + 24; Paw Pro Max is uncapped (None).
+    """
+    assert plans.get_plan("go").max_seats == 5
+    assert plans.get_plan("pro").max_seats == 25
+    assert plans.get_plan("pro_max").max_seats is None
 
 
 def test_enterprise_smb_caps_are_uncapped():
-    """Enterprise is the one uncapped tier on every SMB cap (None, never a number)."""
+    """Enterprise is fully uncapped on every SMB cap (None, never a number)."""
     ent = plans.get_plan("enterprise")
     assert ent.max_seats is None
     assert ent.max_pockets is None
     assert ent.max_connectors is None
 
 
-def test_non_enterprise_smb_caps_are_positive_ints():
-    """Every non-Enterprise tier carries a concrete positive cap on all three."""
+def test_pro_max_seats_are_uncapped_but_other_caps_concrete():
+    """Paw Pro Max is uncapped on SEATS only; pockets + connectors stay capped."""
+    pro_max = plans.get_plan("pro_max")
+    assert pro_max.max_seats is None
+    assert isinstance(pro_max.max_pockets, int) and pro_max.max_pockets > 0
+    assert isinstance(pro_max.max_connectors, int) and pro_max.max_connectors > 0
+
+
+def test_daily_call_budget_is_the_consumer_ladder():
+    """The daily LiveKit call budget: Free=0 (no calls), Go=30min, Pro=2hrs,
+    Pro Max=8hrs, Enterprise=None (uncapped)."""
+    assert plans.get_plan("free").max_call_seconds_per_day == 0
+    assert plans.get_plan("go").max_call_seconds_per_day == 30 * 60
+    assert plans.get_plan("pro").max_call_seconds_per_day == 2 * 60 * 60
+    assert plans.get_plan("pro_max").max_call_seconds_per_day == 8 * 60 * 60
+    assert plans.get_plan("enterprise").max_call_seconds_per_day is None
+
+
+def test_storage_cap_is_the_consumer_ladder():
+    """The S3 storage cap: Free=5 GB, Go=15 GB, Pro=50 GB, Pro Max=100 GB,
+    Enterprise=None (uncapped). Decimal GB — the SI consumer convention."""
+    assert plans.get_plan("free").max_storage_bytes == 5_000_000_000
+    assert plans.get_plan("go").max_storage_bytes == 15_000_000_000
+    assert plans.get_plan("pro").max_storage_bytes == 50_000_000_000
+    assert plans.get_plan("pro_max").max_storage_bytes == 100_000_000_000
+    assert plans.get_plan("enterprise").max_storage_bytes is None
+
+
+def test_non_enterprise_smb_caps_are_non_negative_ints():
+    """Every tier below Pro Max carries a concrete int cap on all three.
+
+    ``max_seats`` may be 0 (Free — the "no member invites" cap is a valid
+    ceiling); pockets + connectors are always positive on the capped tiers.
+    """
     by_key = {p.key: p for p in plans.list_plans()}
-    for key in ("free", "go", "pro", "pro_max"):
-        for cap in (by_key[key].max_seats, by_key[key].max_pockets, by_key[key].max_connectors):
-            assert isinstance(cap, int) and cap > 0, key
+    for key in ("free", "go", "pro"):
+        assert isinstance(by_key[key].max_seats, int) and by_key[key].max_seats >= 0, key
+        assert isinstance(by_key[key].max_pockets, int) and by_key[key].max_pockets > 0, key
+        assert isinstance(by_key[key].max_connectors, int) and by_key[key].max_connectors > 0, key
+        # The daily call budget is a concrete non-negative int on every capped
+        # tier too (Free = 0 — "no calls" is a valid ceiling); the storage cap
+        # is a positive byte count (Free = 5 GB).
+        assert (
+            isinstance(by_key[key].max_call_seconds_per_day, int)
+            and by_key[key].max_call_seconds_per_day >= 0
+        ), key
+        assert (
+            isinstance(by_key[key].max_storage_bytes, int) and by_key[key].max_storage_bytes > 0
+        ), key
 
 
 def test_build_unknown_key_fails_closed_to_free_smb_caps():
@@ -234,9 +316,19 @@ def test_build_unknown_key_fails_closed_to_free_smb_caps():
     assert bogus.max_seats == EXPECTED_MAX_SEATS["free"]
     assert bogus.max_pockets == EXPECTED_MAX_POCKETS["free"]
     assert bogus.max_connectors == EXPECTED_MAX_CONNECTORS["free"]
+    # The daily call budget fails closed too: an unknown key gets Free's 0
+    # (no calls), never None/uncapped.
+    assert bogus.max_call_seconds_per_day == EXPECTED_MAX_CALL_SECONDS_PER_DAY["free"]
+    assert bogus.max_call_seconds_per_day == 0
+    # The storage cap fails closed too: an unknown key gets Free's 5 GB, never
+    # None/uncapped.
+    assert bogus.max_storage_bytes == EXPECTED_MAX_STORAGE_BYTES["free"]
+    assert bogus.max_storage_bytes == 5_000_000_000
     assert bogus.max_seats is not None
     assert bogus.max_pockets is not None
     assert bogus.max_connectors is not None
+    assert bogus.max_call_seconds_per_day is not None
+    assert bogus.max_storage_bytes is not None
 
 
 def test_list_plans_is_cheapest_first():

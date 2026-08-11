@@ -147,6 +147,57 @@ class ConnectorLimitError(CloudError):
         super().__init__(402, "billing.connector_limit", f"Connector limit of {limit} reached")
 
 
+class CallLimitError(CloudError):
+    """Workspace hit its plan's daily LiveKit call-time cap (402).
+
+    Sibling of ``SeatLimitError`` for the LiveKit room-create seam: Free has no
+    call minutes at all (``max_call_seconds_per_day`` == 0), and a paid tier
+    blocks a NEW call once today's cumulative call time would exceed its daily
+    budget. 402 with a distinct ``billing.call_limit`` code so the UI can prompt
+    a plan upgrade. Enforced at CALL-START time only — an already-running call is
+    force-ended at its budget deadline rather than removed.
+    """
+
+    def __init__(self, limit_seconds: int | None) -> None:
+        if limit_seconds == 0:
+            label = "no call minutes on your plan"
+        elif limit_seconds is not None:
+            label = f"daily call limit of {limit_seconds // 60} minutes reached"
+        else:  # pragma: no cover - uncapped plans never raise
+            label = "daily call limit reached"
+        super().__init__(402, "billing.call_limit", f"Call limit: {label}")
+
+
+def _human_bytes(n: int) -> str:
+    """Format a byte count the way storage products do (GB for this scale)."""
+    if n % 1_000_000_000 == 0:
+        return f"{n // 1_000_000_000} GB"
+    if n % 1_000_000 == 0:
+        return f"{n // 1_000_000} MB"
+    if n % 1_000 == 0:
+        return f"{n // 1_000} KB"
+    return f"{n} bytes"
+
+
+class StorageLimitError(CloudError):
+    """Workspace hit its plan's S3 storage cap (402).
+
+    Sibling of ``SeatLimitError`` for the UPLOAD seam: the sum of the workspace's
+    live ``FileUpload`` blob sizes (the Files → Knowledge Base store) is at its
+    plan's ``max_storage_bytes`` and the new upload would push it over. 402 with
+    a distinct ``billing.storage_limit`` code so the UI can prompt a plan
+    upgrade. Enforced at UPLOAD time only — never deletes an existing blob — and
+    only when ``billing_enforced`` is on.
+    """
+
+    def __init__(self, limit_bytes: int | None) -> None:
+        if limit_bytes is None:  # pragma: no cover - uncapped plans never raise
+            label = "storage limit reached"
+        else:
+            label = f"storage limit of {_human_bytes(limit_bytes)} reached"
+        super().__init__(402, "billing.storage_limit", f"Storage limit: {label}")
+
+
 class InsufficientCredits(CloudError):
     """Credit wallet has too few credits for the requested debit (402)."""
 
@@ -227,6 +278,7 @@ def with_cause(error: CloudError, cause: BaseException) -> CloudError:
 
 __all__ = [
     "BadRequest",
+    "CallLimitError",
     "CloudError",
     "ConflictError",
     "ConnectorLimitError",
@@ -240,6 +292,7 @@ __all__ = [
     "QuotaExceeded",
     "RateLimited",
     "SeatLimitError",
+    "StorageLimitError",
     "ValidationError",
     "with_cause",
 ]
