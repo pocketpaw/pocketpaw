@@ -44,6 +44,11 @@ Install the extra:
 pip install 'pocketpaw[pydantic-ai]'
 ```
 
+That step is for a **self-hosted** install, where this backend is opt-in. The
+enterprise layer pulls the extra in on its own: `pydantic_ai` is the default
+backend for every new cloud agent, so `pocketpaw-ee` depends on
+`pocketpaw[pydantic-ai]` and `pocketpaw[all]` covers it too.
+
 ## Configuration
 
 | Setting | Default | Purpose |
