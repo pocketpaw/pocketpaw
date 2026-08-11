@@ -6,8 +6,9 @@ The WebSocket endpoint at ``/ws/cloud`` authenticates via JWT query param.
 Updated 2026-08-11 (fix/notif-liveness-dispatch): the receive loop stamps each
 socket's liveness window via ``manager.touch`` on every inbound frame, so a
 socket that is genuinely talking to us can never be mistaken for a zombie by
-``is_online``. See chat/ws.py's module docstring for what that verdict now
-drives.
+``is_online``. The ping branch additionally calls ``manager.mark_ping_capable``
+— only clients that prove they heartbeat are held to a staleness deadline. See
+chat/ws.py's module docstring for what that verdict drives.
 
 Updated 2026-04-19 (Task 19, Cluster A sub-PR 4): presence events are now
 emitted on WS connect and disconnect. PresenceOnline fires immediately when
@@ -691,6 +692,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
                 # closing edge proxies (e.g. Cloudflare drops idle WebSockets
                 # after ~100s). Reply pong and skip the message-handling path.
                 if isinstance(data, dict) and data.get("type") == "ping":
+                    # A ping proves this client speaks the heartbeat, which is
+                    # what lets is_online hold it to a staleness deadline.
+                    # Clients that never ping stay on legacy liveness rather
+                    # than being churned offline for going quiet.
+                    manager.mark_ping_capable(websocket)
                     await websocket.send_json({"type": "pong"})
                     continue
                 msg = WsInbound.model_validate(_normalize_ws_inbound(data))

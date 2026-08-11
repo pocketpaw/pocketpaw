@@ -155,8 +155,7 @@ async def notify(
         # fall through to Web Push. Double-notify is not a risk here: zero
         # sockets received the WS event.
         logger.info(
-            "ws notification reached no sockets, falling back to web push "
-            "for workspace=%s user=%s",
+            "ws notification reached no sockets, falling back to web push for workspace=%s user=%s",
             workspace_id,
             user_id,
         )

@@ -52,7 +52,13 @@ class Notification(TimestampedDocument):
     class Settings:
         name = "notifications"
         indexes = [
-            # The bell's list query: this recipient's unread, newest first.
+            # The bell's DEFAULT list query (list_for_user with unread=False):
+            # filters recipient only, sorts newest first. The three-key index
+            # below cannot serve this — skipping a middle key leaves ``read``
+            # as a gap, so the sort can't ride the index.
+            IndexModel([("recipient", 1), ("createdAt", -1)]),
+            # The unread variant: recipient + read, newest first. Its
+            # (recipient, read) prefix also serves count_unread.
             # Sorts on ``createdAt`` — TimestampedDocument's camelCase field,
             # NOT ``created_at``, which does not exist on this document.
             IndexModel([("recipient", 1), ("read", 1), ("createdAt", -1)]),

@@ -1,8 +1,10 @@
 """Tests for the WebSocket connection manager.
 
 Updated: 2026-08-11 (fix/notif-liveness-dispatch) — added the liveness block at
-the bottom: ``is_online`` now means "traffic seen inside the window", and
-``send_to_user`` reports how many sockets accepted the frame.
+the bottom. ``is_online`` is now capability-gated: a socket that has proved it
+pings is held to an INBOUND-traffic deadline, everything else keeps the legacy
+"live while registered" verdict. ``send_to_user`` reports how many sockets
+accepted the frame.
 """
 
 from __future__ import annotations
@@ -189,25 +191,42 @@ async def test_connect_cancels_pending_offline_task(cm):
 
 
 # ---------------------------------------------------------------------------
-# Liveness — is_online means "traffic seen recently", not "socket in the dict"
-# (fix/notif-liveness-dispatch, 2026-08-11). A half-open socket used to report
-# online forever, so notification dispatch took the WS leg into a dead pipe and
-# skipped Web Push. These pin the traffic-based verdict in both directions.
+# Liveness (fix/notif-liveness-dispatch, 2026-08-11)
+#
+# is_online used to mean "a socket object is in the dict", which a half-open
+# socket satisfies forever — so dispatch took the WS leg into a dead pipe and
+# skipped Web Push. The verdict is now capability-gated:
+#   - ping-capable socket  → live iff an INBOUND frame arrived inside the
+#     window. Outbound sends do NOT count: a write to a half-open socket
+#     succeeds for minutes, so counting them would resurrect zombies forever.
+#   - everything else      → legacy "live while registered", no churn.
 # ---------------------------------------------------------------------------
 
 
-def _backdate(cm, ws, seconds: float) -> None:
-    """Age a socket's last-activity stamp by ``seconds``."""
-    cm._ws_last_seen[ws] = time.monotonic() - seconds
+def _backdate_inbound(cm, ws, seconds: float) -> None:
+    """Age a socket's last-INBOUND stamp by ``seconds``."""
+    cm._ws_last_inbound[ws] = time.monotonic() - seconds
 
 
-async def test_is_online_false_for_stale_socket(cm):
-    # The zombie: registered, never closed, silent past the liveness window.
+async def _stale_ping_capable(cm, user_id: str = "u1"):
+    """A registered, ping-capable socket that has gone silent — the zombie."""
+    ws = AsyncMock()
+    await cm.connect(ws, user_id)
+    cm.mark_ping_capable(ws)
+    _backdate_inbound(cm, ws, LIVENESS_STALE_SECONDS + 1)
+    return ws
+
+
+# --- ping-capable sockets are held to the deadline -------------------------
+
+
+async def test_is_online_false_for_stale_ping_capable_socket(cm):
     ws = AsyncMock()
     await cm.connect(ws, "u1")
+    cm.mark_ping_capable(ws)
     assert cm.is_online("u1")
 
-    _backdate(cm, ws, LIVENESS_STALE_SECONDS + 1)
+    _backdate_inbound(cm, ws, LIVENESS_STALE_SECONDS + 1)
 
     assert not cm.is_online("u1")
 
@@ -215,9 +234,7 @@ async def test_is_online_false_for_stale_socket(cm):
 async def test_stale_socket_is_closed_best_effort(cm):
     # The verdict and the cleanup converge: checking liveness closes the zombie,
     # which wakes the router's receive loop into the normal disconnect path.
-    ws = AsyncMock()
-    await cm.connect(ws, "u1")
-    _backdate(cm, ws, LIVENESS_STALE_SECONDS + 1)
+    ws = await _stale_ping_capable(cm)
 
     assert not cm.is_online("u1")
     await asyncio.sleep(0)  # let the fire-and-forget close task run
@@ -228,11 +245,36 @@ async def test_stale_socket_is_closed_best_effort(cm):
     assert ws in cm.get_user_connections("u1")
 
 
+async def test_repeated_is_online_does_not_spawn_duplicate_closes(cm):
+    # is_online runs on every presence snapshot; without the in-flight guard
+    # each call would queue another close task for the same socket.
+    ws = await _stale_ping_capable(cm)
+
+    for _ in range(5):
+        assert not cm.is_online("u1")
+
+    assert len(cm._close_tasks) == 1
+    await asyncio.sleep(0)
+    assert ws.close.await_count == 1
+
+
+async def test_close_task_is_strongly_referenced_until_done(cm):
+    # A bare create_task result is only weakly held by the loop, so an
+    # unreferenced task can be collected mid-close. The manager holds a ref
+    # while it runs and drops it afterwards.
+    await _stale_ping_capable(cm)
+
+    assert not cm.is_online("u1")
+    assert len(cm._close_tasks) == 1  # held while in flight
+
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert cm._close_tasks == set()  # released once done
+
+
 async def test_inbound_touch_keeps_socket_live(cm):
     # What the router calls on every inbound frame (ping included).
-    ws = AsyncMock()
-    await cm.connect(ws, "u1")
-    _backdate(cm, ws, LIVENESS_STALE_SECONDS + 1)
+    ws = await _stale_ping_capable(cm)
     assert not cm.is_online("u1")
 
     cm.touch(ws)
@@ -240,19 +282,85 @@ async def test_inbound_touch_keeps_socket_live(cm):
     assert cm.is_online("u1")
 
 
-async def test_successful_send_keeps_idle_socket_live(cm):
-    # Backward-compat clause: today's clients send nothing for long stretches
-    # while idle-but-alive, so an outbound send the socket ACCEPTED counts as
-    # proof of life. Without this, every quiet client would look like a zombie.
-    ws = AsyncMock()
-    await cm.connect(ws, "u1")
-    _backdate(cm, ws, LIVENESS_STALE_SECONDS + 1)
-    assert not cm.is_online("u1")
+async def test_outbound_send_does_not_resurrect_a_zombie(cm):
+    # THE busy-workspace bug: send_json to a half-open socket succeeds (the
+    # kernel buffers the write), so if outbound counted as proof of life,
+    # ordinary workspace fan-out would keep a dead socket "fresh" forever and
+    # the notification would keep going into the void.
+    await _stale_ping_capable(cm)
 
     delivered = await cm.send_to_user("u1", WsOutbound(type="test", data={}))
 
-    assert delivered == 1
+    assert delivered == 1  # the write "succeeded"...
+    assert not cm.is_online("u1")  # ...and proved nothing.
+
+
+async def test_outbound_stamp_is_recorded_for_diagnostics(cm):
+    # Outbound bookkeeping is kept (useful when debugging a stuck socket) —
+    # it just isn't wired into the verdict.
+    ws = AsyncMock()
+    await cm.connect(ws, "u1")
+
+    await cm.send_to_user("u1", WsOutbound(type="test", data={}))
+
+    assert ws in cm._ws_last_outbound
+
+
+# --- non-ping-capable sockets keep legacy semantics -------------------------
+
+
+async def test_legacy_socket_stays_online_while_registered(cm):
+    # Old FE bundles send nothing for long stretches while perfectly alive.
+    # Applying staleness to them would churn every quiet client into a
+    # close/reconnect loop, so they keep the pre-change verdict.
+    ws = AsyncMock()
+    await cm.connect(ws, "u1")
+    _backdate_inbound(cm, ws, LIVENESS_STALE_SECONDS * 100)
+
     assert cm.is_online("u1")
+
+
+async def test_legacy_socket_is_never_closed_by_a_liveness_check(cm):
+    ws = AsyncMock()
+    await cm.connect(ws, "u1")
+    _backdate_inbound(cm, ws, LIVENESS_STALE_SECONDS * 100)
+
+    cm.is_online("u1")
+    await asyncio.sleep(0)
+
+    assert ws.close.await_count == 0
+
+
+async def test_ping_marks_capability_and_is_idempotent(cm):
+    ws = AsyncMock()
+    await cm.connect(ws, "u1")
+
+    cm.mark_ping_capable(ws)
+    cm.mark_ping_capable(ws)
+
+    assert cm._ping_capable == {ws}
+
+
+def test_mark_ping_capable_ignores_unknown_socket(cm):
+    ws = AsyncMock()
+    cm.mark_ping_capable(ws)
+    assert cm._ping_capable == set()
+
+
+async def test_capability_is_cleared_on_disconnect(cm):
+    # Otherwise a reconnecting socket object could inherit a stale capability.
+    ws = AsyncMock()
+    await cm.connect(ws, "u1")
+    cm.mark_ping_capable(ws)
+
+    await cm.disconnect(ws)
+
+    assert cm._ping_capable == set()
+    assert ws not in cm._ws_last_inbound
+    assert ws not in cm._ws_last_outbound
+
+
+# --- multi-device + delivery counting --------------------------------------
 
 
 async def test_only_live_socket_makes_user_online(cm):
@@ -261,7 +369,9 @@ async def test_only_live_socket_makes_user_online(cm):
     live = AsyncMock()
     await cm.connect(zombie, "u1")
     await cm.connect(live, "u1")
-    _backdate(cm, zombie, LIVENESS_STALE_SECONDS + 1)
+    cm.mark_ping_capable(zombie)
+    cm.mark_ping_capable(live)
+    _backdate_inbound(cm, zombie, LIVENESS_STALE_SECONDS + 1)
 
     assert cm.is_online("u1")
 
@@ -292,8 +402,29 @@ async def test_send_to_user_counts_only_accepted_sockets(cm):
     assert delivered == 1
 
 
+async def test_send_to_user_survives_concurrent_disconnect(cm):
+    # send_to_user must iterate a COPY of the live set. A concurrent
+    # _close_stale -> disconnect mutates it, and "set changed size during
+    # iteration" fires at the `for` — outside the per-send try — so it would
+    # escape to notify(), look like a WS failure, and skip the push fallback.
+    ws1 = AsyncMock()
+    ws2 = AsyncMock()
+    await cm.connect(ws1, "u1")
+    await cm.connect(ws2, "u1")
+
+    async def disconnect_sibling(_data):
+        # Mutate the set mid-iteration, exactly as a concurrent prune would.
+        await cm.disconnect(ws2)
+
+    ws1.send_json.side_effect = disconnect_sibling
+
+    delivered = await cm.send_to_user("u1", WsOutbound(type="test", data={}))
+
+    assert delivered >= 1  # no RuntimeError escaped
+
+
 def test_touch_ignores_unknown_socket(cm):
     # A socket already disconnected must not resurrect itself into the registry.
     ws = AsyncMock()
     cm.touch(ws)
-    assert ws not in cm._ws_last_seen
+    assert ws not in cm._ws_last_inbound

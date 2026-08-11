@@ -44,6 +44,19 @@ def test_inbox_index_sorts_on_the_real_timestamp_field() -> None:
     assert keys[-1] == ("createdAt", -1), "newest-first sort must be descending"
 
 
+def test_default_list_query_has_a_recipient_only_index() -> None:
+    # list_for_user's DEFAULT query (unread=False) filters recipient alone and
+    # sorts createdAt. The three-key index cannot serve it — skipping the
+    # middle `read` key leaves a gap, so the sort can't ride the index and
+    # Mongo falls back to an in-memory sort. The bell's most common query is
+    # exactly this one, so it needs its own index.
+    default_query = [
+        idx for idx in _indexes() if [k for k, _ in _index_keys(idx)] == ["recipient", "createdAt"]
+    ]
+    assert len(default_query) == 1, "the recipient/createdAt index is missing"
+    assert _index_keys(default_query[0])[-1] == ("createdAt", -1)
+
+
 def test_no_index_names_a_nonexistent_field() -> None:
     # Catches the original bug shape generally: every indexed key must be a
     # real field on the document.
