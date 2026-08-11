@@ -1,6 +1,44 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-08-11 (RX-4 — the agent can tell whether a site is actually live): added
+# ``build_wire_state`` (pure) and ``site_build_status`` (a read). ``_to_response``
+# already gave the frontend ``build_status`` / ``build_reason`` / ``build_job_id``, and
+# the frontend polls them next to ``url`` knowing a site can be live and simultaneously
+# mid-rebuild. The chat agent had neither the fields nor that knowledge, and on react —
+# the only engine where ``build_runs_async`` is True — that meant a first publish handed
+# it ``url=""`` and a re-publish handed it the PREVIOUS deploy's url, both reported as
+# success. ``build_wire_state`` derives ``build_in_progress`` and ``is_live`` from the
+# row once, so the publish response and the status tool cannot disagree; the raw status
+# still passes through verbatim. ``build_in_progress`` reads an unknown status as IN
+# PROGRESS, deliberately the OPPOSITE of ``build_state.should_enqueue`` (a redundant
+# build costs one sandbox; a spurious "your site is live" costs trust), and is derived
+# from ``TERMINAL_STATUSES`` so a new state defaults to in-progress here for free.
+# ``site_build_status`` exists because an async publish returns before the build starts:
+# without a later read, "queued" is a dead end.
+#
+# Updated 2026-08-11 (RX-3 — the react track gets an EDIT lane): added
+# ``edit_react_component``, the react peer of ``edit_svelte_component``. Until this
+# existed there was no way to change a react site: this module's edit entry points
+# are svelte-gated, so the chat agent's only response to "shorten the hero
+# headline" was a second ``create_react_site``, which mints a SECOND site pocket.
+# Two contracts differ from the svelte peer on purpose, and both are argued in the
+# function's own docstring so a reader who only opens that one does not have to
+# guess:
+#   * DRAFT-ONLY — it does NOT republish and does NOT enqueue a build. It cannot:
+#     ``build_runs_async("react")`` is True, so a react publish enqueues a Daytona
+#     build and returns before any outcome exists. There is nothing synchronous to
+#     roll back from, and a rollback fired on enqueue-success would revert a good
+#     edit. Persisting the draft IS the job (the shape ``apply_leaf_edits`` already
+#     documents). Publishing stays the user's call.
+#   * A ``create`` flag for a NEW component file, because "add a testimonials
+#     section" needs one plus an ``src/App.tsx`` edit. It INVERTS the existence
+#     check rather than relaxing it.
+# The path guard is shared with create through the new
+# ``sites/react_paths.py`` — an edit that could write ``package.json`` would be a
+# way around the generator's dependency allowlist, and with it the supply-chain
+# release-age floor that manifest is what enforces.
+#
 # Updated 2026-08-10 (SL-3 — the build lane reaches the wire): ``_to_response`` and
 # ``pocket_status`` now populate ``build_status`` / ``build_reason`` / ``build_job_id``
 # from the Site row. They were declared on the DTOs by SG-9i and never passed here, so
@@ -816,6 +854,7 @@ from pocketpaw_ee.sites.dto import (
 )
 from pocketpaw_ee.sites.engines import content_key, is_source_engine, normalize_engine
 from pocketpaw_ee.sites.generator_client import BuildResult, GeneratorClient
+from pocketpaw_ee.sites.react_paths import is_reserved_react_path, react_path_rejection
 
 logger = logging.getLogger(__name__)
 
@@ -3188,6 +3227,109 @@ async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | N
     return next((d for d in docs if d.url), docs[0])
 
 
+def build_wire_state(doc: _SiteDoc | None) -> dict[str, Any]:
+    """The build fields an AGENT-facing tool reports, derived in ONE place (RX-4).
+
+    ``_to_response`` already surfaces ``build_status`` / ``build_reason`` /
+    ``build_job_id`` to the frontend, which polls them alongside ``url`` and knows
+    that a site can be live and simultaneously mid-rebuild. The chat agent has no
+    such knowledge and cannot poll, so it needs the same three fields PLUS the
+    conclusion drawn from them. This function is that conclusion, and it lives here
+    rather than in the two calling handlers because the publish response and the
+    build-status tool disagreeing about whether a site is live is worse than either
+    being wrong on its own.
+
+    The three raw fields pass through VERBATIM, matching ``_to_response``: a
+    ``build_status`` this deploy predates must never be normalised against a known
+    set, because mapping it to "none" would tell a caller nothing is building about
+    a build that is running.
+
+    ``build_in_progress`` reads an unknown status as IN PROGRESS. That is the WIRE
+    direction and it is deliberately the OPPOSITE of ``build_state.should_enqueue``,
+    which treats an unknown status as terminal — both are right on their own axis
+    (see ``build_state``'s header: a redundant build costs one sandbox, while a
+    spurious "your site is live" costs the user's trust). Derived from
+    ``TERMINAL_STATUSES`` rather than from ``IN_FLIGHT_STATUSES`` so a state added
+    to the machine defaults to in-progress here without anyone remembering to
+    update this function.
+
+    ``is_live`` is the only field an agent should gate "show the user this url" on.
+    It requires a real url AND a successful deploy AND no build in flight, because
+    each of the three is individually insufficient:
+
+      * a FIRST async publish creates the Site doc with ``url=""`` and
+        ``deployed=False`` (``_enqueue_static_build`` — honest, nothing is serving
+        yet), so ``url`` alone is an empty string the agent would hand over;
+      * a RE-publish deliberately KEEPS the previous deploy's ``url`` and
+        ``deployed=True`` so a rebuild never reports a working site as down, so
+        those two alone say "live" while serving the pre-change page;
+      * ``build_status`` alone cannot tell a never-built pocket ("none") from a
+        finished one.
+
+    Pure and I/O-free, so it is directly unit-testable, and it takes ``None`` for a
+    pocket with no Site doc at all (never published) rather than making every caller
+    write the same empty shape.
+    """
+    from pocketpaw_ee.sites.build_state import TERMINAL_STATUSES
+
+    if doc is None:
+        return {
+            "url": "",
+            "deployed": False,
+            "build_status": "none",
+            "build_reason": None,
+            "build_job_id": None,
+            "build_in_progress": False,
+            "is_live": False,
+        }
+    status = getattr(doc, "build_status", "none")
+    in_progress = status != "none" and status not in TERMINAL_STATUSES
+    url = doc.url or ""
+    return {
+        "url": url,
+        "deployed": bool(doc.deployed),
+        "build_status": status,
+        "build_reason": getattr(doc, "build_reason", None),
+        "build_job_id": getattr(doc, "build_job_id", None),
+        "build_in_progress": in_progress,
+        "is_live": bool(url) and bool(doc.deployed) and not in_progress,
+    }
+
+
+async def site_build_status(*, workspace_id: str, pocket_id: str) -> dict[str, Any]:
+    """Read a pocket's current build + live state. READ-ONLY (RX-4).
+
+    The answer to "is it up yet?" on a turn AFTER the publish. Without it the queued
+    state a react publish returns is a dead end: the agent learns a build was
+    enqueued and then has no way to ever discover it finished, because
+    ``build_runs_async("react")`` means the publish call returned before the build
+    even started.
+
+    Resolves the ONE canonical Site doc for the pocket through
+    ``canonical_site_for_pocket``, which is tenant-scoped on ``workspace_id`` and
+    dedupe-aware — the same resolution ``pocket_status`` uses, so the two cannot
+    report different sites for one pocket.
+
+    A pocket with no Site doc returns ``published=False`` rather than raising. From
+    the agent's side "this was never published" is the useful answer and is correct
+    whether the pocket has no site or does not exist; the read cannot leak across
+    tenants either way, because the query is filtered on ``workspace``.
+
+    No plan gate: nothing is mutated, and a workspace that has lost the Sites
+    feature reading its own build state changes nothing it could not already see in
+    the /sites UI. The tenancy filter IS the access check here.
+    """
+    doc = await canonical_site_for_pocket(workspace_id, pocket_id)
+    state = build_wire_state(doc)
+    return {
+        "pocket_id": pocket_id,
+        "site_id": str(doc.id) if doc is not None else None,
+        "name": doc.name if doc is not None else "",
+        "published": doc is not None,
+        **state,
+    }
+
+
 async def canonical_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
     """Public: the ONE canonical Site doc for (workspace, pocket_id), or None.
 
@@ -4668,6 +4810,162 @@ async def edit_svelte_component(
         _generator=_generator,
     )
     return doc
+
+
+async def edit_react_component(
+    *,
+    user_id: str,
+    pocket_id: str,
+    component_path: str,
+    new_source: str | None = None,
+    edits: list[dict[str, str]] | None = None,
+    create: bool = False,
+    _pockets: Any = None,
+) -> dict[str, Any]:
+    """Write ONE file of a react Paw Site pocket and leave it as a reviewable DRAFT.
+
+    The chat-agent entry point for a targeted react edit (RX-3). Before this
+    existed the react track had no edit path: ``edit_svelte_component`` rejects a
+    react pocket, so the agent's only move on "shorten the hero headline" was a
+    second ``create_react_site`` — a SECOND site pocket instead of a change to the
+    one the user is looking at.
+
+    The edit is expressed one of two ways (exactly one is required), the same
+    contract ``edit_svelte_component`` uses so the agent's instinct transfers:
+
+      * ``edits`` — a list of ``[{old_string, new_string}, ...]`` search/replace
+        blocks applied to the file's CURRENT contents via the shared
+        :func:`apply_edits`, which requires each ``old_string`` to match exactly
+        once and raises a clear, retry-able ``ValidationError`` otherwise. PREFERRED
+        for small changes: the agent emits only the diff.
+      * ``new_source`` — the FULL new file contents, used as-is. For large rewrites,
+        and the ONLY form accepted with ``create=True`` (there is nothing to diff
+        against a file that does not exist yet).
+
+    ``create=True`` mints a NEW path instead of editing an existing one. It exists
+    because "add a testimonials section" needs a new component file PLUS an edit to
+    ``src/App.tsx``, and without it the agent cannot add a section at all. It
+    INVERTS the existence check rather than relaxing it — ``create=False`` requires
+    the path to exist (a typo is never a silent create), ``create=True`` requires it
+    NOT to (an accidental overwrite of a real component is worse than a rejected
+    call).
+
+    **DRAFT-ONLY. This does NOT republish and does NOT enqueue a build**, and that
+    is a deliberate departure from ``edit_svelte_component``, which republishes and
+    rolls the source back when the workerd smoke gate rejects the edit. That
+    contract cannot transfer: ``build_runs_async("react")`` is True, so a react
+    publish ENQUEUES a Daytona build and returns before any build outcome exists —
+    there is nothing synchronous to roll back from, and a rollback fired on an
+    enqueue-success would revert a good edit. So persisting the edited draft IS the
+    whole job, the same shape ``apply_leaf_edits`` already documents. Publishing
+    stays the user's call (what ``pocketpaw-create-react-site`` STEP 4 promises).
+    A future reader looking at this and reaching for the missing republish should
+    read this paragraph first.
+
+    The path guard is load-bearing, not hygiene. ``create_react_site`` refuses
+    generator-owned paths, and an edit that did not would be a way around that
+    allowlist: ``edit_react_component(component_path="package.json", create=True)``
+    writes the dependency manifest, defeating the generator's dependency allowlist
+    and with it the supply-chain release-age floor the manifest is what enforces.
+    Both guards call the SAME
+    :func:`pocketpaw_ee.sites.react_paths.react_path_rejection` — normalized, so
+    ``./package.json`` and ``src/paw/../paw/entry.tsx`` cannot spell their way past
+    it — and it also requires the resolved path to land under ``src/`` or
+    ``public/``.
+
+    Raises, all BEFORE anything is written:
+      * ``ValidationError("site_edit.invalid_args")`` — not exactly one of
+        ``edits`` / ``new_source``;
+      * ``ValidationError("site_edit.create_needs_source")`` — ``create=True``
+        without ``new_source``;
+      * ``ValidationError("site_edit.reserved_path")`` — a generator-owned path;
+      * ``ValidationError("site_edit.path_outside_source")`` — outside
+        ``src/`` / ``public/``;
+      * ``ValidationError("pocket.not_react_site")`` — not a react site pocket;
+      * ``NotFound("site_component")`` — ``create=False`` and the path is absent;
+      * ``ValidationError("pocket.react_component_exists")`` — ``create=True`` and
+        the path is present;
+      * whatever :func:`apply_edits` raises on a 0-match / ambiguous ``old_string``.
+
+    ``_pockets`` is an injectable seam for the pockets service so the orchestration
+    is unit-testable with no Bun / workerd / Cloudflare in sight — there is nothing
+    else to inject, because there is no build.
+
+    Takes NO ``workspace_id``, unlike its siblings: tenancy is resolved by the
+    pockets service off ``user_id`` (its public ``get`` raises Forbidden itself), and
+    ``edit_svelte_component`` only needs the workspace to look up the Site doc whose
+    builder origin its republish must re-apply — a republish this lane does not do.
+
+    Returns ``{pocket_id, component_path, created}``.
+    """
+    if _pockets is not None:
+        pockets_service = _pockets
+    else:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service  # type: ignore[no-redef]
+
+    # Exactly one of the two edit shapes (mirrors edit_svelte_component).
+    if (edits is None) == (new_source is None):
+        raise ValidationError(
+            "site_edit.invalid_args",
+            "edit_react_component requires exactly one of `edits` (a targeted "
+            "search/replace diff) or `new_source` (a full file rewrite).",
+        )
+    if create and new_source is None:
+        raise ValidationError(
+            "site_edit.create_needs_source",
+            "Creating a new component needs `new_source` — the full contents of the "
+            "new file. There is nothing for `edits` to search against.",
+        )
+
+    # The reserved-path guard. FIRST, before the pocket is even read: a call that
+    # names a generator-owned path is rejected on the path alone, so no amount of
+    # pocket state can make it land.
+    if (reason := react_path_rejection(component_path)) is not None:
+        code = (
+            "site_edit.reserved_path"
+            if is_reserved_react_path(component_path)
+            else "site_edit.path_outside_source"
+        )
+        raise ValidationError(code, reason)
+
+    # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
+    # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if (pocket.get("engine") or "ripple") != "react" or not isinstance(pocket.get("source"), dict):
+        raise ValidationError(
+            "pocket.not_react_site",
+            "This pocket is not a react Paw Site — it has no component source map to edit.",
+        )
+    source_map = pocket["source"]
+    # The MISSING-path half of the inversion is enforced here as well as at the write,
+    # because the ``edits`` branch below indexes the map: without it a typo'd path is a
+    # KeyError instead of the NotFound the caller has to relay. The EXISTING-path half
+    # (``create`` onto a live component) is deliberately NOT duplicated — nothing here
+    # reads the file on the create path, so the check would only be a second copy of a
+    # rule the write chokepoint already owns for every caller. Proven rather than
+    # assumed: with the duplicate present, the mutation that deleted it ESCAPED, because
+    # the chokepoint caught the write anyway.
+    if not create and component_path not in source_map:
+        raise NotFound("site_component", component_path)
+
+    if edits is not None:
+        # apply_edits raises ValidationError (clear, retry-able) on any match-count
+        # violation, BEFORE anything is persisted.
+        new_source = apply_edits(source_map[component_path], edits)
+
+    assert new_source is not None  # narrowing: the arg checks above guarantee it
+    await pockets_service.set_react_source_file(
+        pocket_id,
+        user_id,
+        component_path=component_path,
+        new_source=new_source,
+        create=create,
+    )
+
+    # NO publish, NO enqueue, NO native pre-warm. The pre-warm serves the svelte
+    # native editor's shadow-render, which reads a SvelteKit build; react has no
+    # such artifact, so warming one here would build a site nothing reads.
+    return {"pocket_id": pocket_id, "component_path": component_path, "created": create}
 
 
 async def _latest_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:

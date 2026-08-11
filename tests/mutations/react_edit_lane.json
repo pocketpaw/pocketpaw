@@ -1,0 +1,289 @@
+[
+  {
+    "label": "the reserved-path guard is gone: an edit can write package.json, defeating the dependency allowlist and the supply-chain release-age floor",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if (reason := react_path_rejection(component_path)) is not None:",
+    "replace": "    if False and (reason := react_path_rejection(component_path)) is not None:",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_every_reserved_path_spelling_is_rejected",
+      "tests/ee/sites/test_react_component_edit.py::test_path_outside_src_and_public_is_rejected"
+    ]
+  },
+  {
+    "label": "the reserved set is empty, so only the outside-src check remains and src/paw/ becomes writable",
+    "file": "ee/pocketpaw_ee/sites/react_paths.py",
+    "find": "REACT_RESERVED_PREFIX = \"src/paw/\"",
+    "replace": "REACT_RESERVED_PREFIX = \"zzz-never-matches/\"",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_every_reserved_path_spelling_is_rejected"
+    ]
+  },
+  {
+    "label": "the path is checked as authored instead of normalized, so ./package.json and src\\\\paw\\\\entry.tsx spell their way past the guard",
+    "file": "ee/pocketpaw_ee/sites/react_paths.py",
+    "find": "    return posixpath.normpath(path.replace(\"\\\\\", \"/\"))",
+    "replace": "    return path",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_every_reserved_path_spelling_is_rejected"
+    ]
+  },
+  {
+    "label": "every path becomes authorable, so a ..-escape or a root-level file is written",
+    "file": "ee/pocketpaw_ee/sites/react_paths.py",
+    "find": "REACT_AUTHORABLE_PREFIXES: tuple[str, ...] = (\"src/\", \"public/\")",
+    "replace": "REACT_AUTHORABLE_PREFIXES: tuple[str, ...] = (\"\",)",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_path_outside_src_and_public_is_rejected"
+    ]
+  },
+  {
+    "label": "the guard runs AFTER the pocket read, so pocket state (a 404) decides the error instead of the path alone",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        raise ValidationError(code, reason)\n\n    # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity\n    # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.\n    pocket = await pockets_service.get(pocket_id, user_id)\n    if (pocket.get(\"engine\") or \"ripple\") != \"react\"",
+    "replace": "        pass\n\n    # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity\n    # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.\n    pocket = await pockets_service.get(pocket_id, user_id)\n    if (pocket.get(\"engine\") or \"ripple\") != \"react\"",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_the_guard_runs_before_the_pocket_is_read",
+      "tests/ee/sites/test_react_component_edit.py::test_every_reserved_path_spelling_is_rejected"
+    ]
+  },
+  {
+    "label": "create defaults to True, so a typo'd component_path is a silent new file instead of a 404",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    edits: list[dict[str, str]] | None = None,\n    create: bool = False,\n    _pockets: Any = None,",
+    "replace": "    edits: list[dict[str, str]] | None = None,\n    create: bool = True,\n    _pockets: Any = None,",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_missing_path_is_not_found_when_create_is_false"
+    ]
+  },
+  {
+    "label": "the write chokepoint stops refusing create onto an existing path, so a create silently overwrites a real component",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    exists = component_path in doc.source\n    if create and exists:",
+    "replace": "    exists = component_path in doc.source\n    if False and create and exists:",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_pockets_service_enforces_the_create_inversion",
+      "tests/ee/sites/test_react_component_edit.py::test_existing_path_is_rejected_when_create_is_true"
+    ]
+  },
+  {
+    "label": "the write chokepoint stops requiring an existing path, so a non-create write to a typo'd path is a silent new file",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if not create and not exists:\n        raise NotFound(\"site_component\", component_path)\n\n    # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a\n    # dict field is not always detected as dirty by the ODM) — same note as\n    # ``set_svelte_source_file``.",
+    "replace": "    # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a\n    # dict field is not always detected as dirty by the ODM) — same note as\n    # ``set_svelte_source_file``.",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_pockets_service_enforces_the_create_inversion"
+    ]
+  },
+  {
+    "label": "the sites service stops requiring an existing path, so an `edits` call on a typo'd path is a KeyError instead of a relayable NotFound",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not create and component_path not in source_map:\n        raise NotFound(\"site_component\", component_path)",
+    "replace": "    if False:\n        raise NotFound(\"site_component\", component_path)",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_missing_path_with_edits_is_not_found_not_a_key_error"
+    ]
+  },
+  {
+    "label": "the write chokepoint accepts a non-react pocket, so a react edit can clobber a svelte site's source map",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if getattr(doc, \"engine\", \"ripple\") != \"react\" or not isinstance(doc.source, dict):",
+    "replace": "    if False and not isinstance(doc.source, dict):",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_pockets_service_rejects_a_non_react_pocket"
+    ]
+  },
+  {
+    "label": "the sites service accepts any engine, so an edit runs against a rippleSpec pocket with no source map",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if (pocket.get(\"engine\") or \"ripple\") != \"react\" or not isinstance(pocket.get(\"source\"), dict):",
+    "replace": "    if False and not isinstance(pocket.get(\"source\"), dict):",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_svelte_pocket_is_rejected",
+      "tests/ee/sites/test_react_component_edit.py::test_ripple_pocket_is_rejected"
+    ]
+  },
+  {
+    "label": "the exactly-one-edit-shape check is dropped, so a call with both or neither is accepted",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if (edits is None) == (new_source is None):\n        raise ValidationError(\n            \"site_edit.invalid_args\",\n            \"edit_react_component requires exactly one of `edits` (a targeted \"",
+    "replace": "    if False:\n        raise ValidationError(\n            \"site_edit.invalid_args\",\n            \"edit_react_component requires exactly one of `edits` (a targeted \"",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_both_edits_and_new_source_is_rejected",
+      "tests/ee/sites/test_react_component_edit.py::test_neither_edits_nor_new_source_is_rejected"
+    ]
+  },
+  {
+    "label": "create stops requiring new_source, so an edits-only create writes nothing meaningful",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if create and new_source is None:\n        raise ValidationError(\n            \"site_edit.create_needs_source\",",
+    "replace": "    if False:\n        raise ValidationError(\n            \"site_edit.create_needs_source\",",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_create_without_new_source_is_rejected"
+    ]
+  },
+  {
+    "label": "the edit republishes, which for react enqueues a Daytona build on every keystroke-sized change",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    # NO publish, NO enqueue, NO native pre-warm. The pre-warm serves the svelte",
+    "replace": "    await publish_pocket(workspace_id=\"\", user_id=user_id, pocket_id=pocket_id)\n    # NO publish, NO enqueue, NO native pre-warm. The pre-warm serves the svelte",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_edit_does_not_publish_and_does_not_enqueue_a_build"
+    ]
+  },
+  {
+    "label": "the draft ArtifactVersion is never written, so there is no reviewable draft for a later publish to promote",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    await _record_pocket_svelte_draft_version(doc, author=user_id)\n    return await _resolved_wire_dict(doc, user_id)\n\n\nasync def set_imported_source(",
+    "replace": "    return await _resolved_wire_dict(doc, user_id)\n\n\nasync def set_imported_source(",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_edit_writes_a_reviewable_draft_version"
+    ]
+  },
+  {
+    "label": "the write stops emitting PocketUpdated, so the search index / soul memory / ripple invalidation desync (cloud rule 9)",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    await doc.save()\n    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))\n    # Branch primitive (BP-3): a source-map edit ALSO writes a draft",
+    "replace": "    await doc.save()\n    # Branch primitive (BP-3): a source-map edit ALSO writes a draft",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_pockets_service_emits_pocket_updated"
+    ]
+  },
+  {
+    "label": "the MCP handler skips the Sites plan gate, so a workspace without the plan keeps editing a site its own /sites list 403s",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:\n        return gate\n\n    from pocketpaw_ee.cloud._core.errors import CloudError\n    from pocketpaw_ee.sites import service as sites_service\n\n    try:\n        result = await sites_service.edit_react_component(",
+    "replace": "    from pocketpaw_ee.cloud._core.errors import CloudError\n    from pocketpaw_ee.sites import service as sites_service\n\n    try:\n        result = await sites_service.edit_react_component(",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_edit_react_component.py::TestEditHandler::test_plan_gate_denies_a_workspace_without_sites"
+    ]
+  },
+  {
+    "label": "the edit tool is not registered on the sites_manager server, so the id is allow-listed but nothing answers a call",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "            create_react_site,\n            edit_react_component,",
+    "replace": "            create_react_site,",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_edit_react_component.py::TestRegistration::test_the_built_server_actually_lists_the_tool"
+    ]
+  },
+  {
+    "label": "the create flag leaves the tool schema, so the agent cannot pass it and adding a section becomes impossible",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "                \"create\": {\n                    \"type\": \"boolean\",",
+    "replace": "                \"create_DROPPED\": {\n                    \"type\": \"boolean\",",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_edit_react_component.py::TestRegistration::test_the_schema_declares_the_create_flag"
+    ]
+  },
+  {
+    "label": "the success body claims the change is published, so the agent tells the user a draft edit went live",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "                \"Saved to the site's draft — it is NOT online yet, and no build was \"",
+    "replace": "                \"Published — the change is live at the site's url. Also a draft. \"",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_edit_react_component.py::TestEditHandler::test_success_payload_says_draft_and_never_claims_it_is_live"
+    ]
+  },
+  {
+    "label": "the react refine branch is dropped, so a react site's chat cannot name its edit tool and falls back to the engine-unknown routing table",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "    elif engine == \"react\":  # RX-3's `_react_refine_preamble`, folded in here",
+    "replace": "    elif False:  # RX-3's `_react_refine_preamble`, folded in here",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_react_refine_names_the_edit_tool_and_not_the_ripple_merge",
+      "tests/cloud/surface/test_sites_handler.py::test_react_refine_carries_the_prerender_and_write_scope_rules"
+    ]
+  },
+  {
+    "label": "is_live stops requiring a url, so a first async publish (url=\"\") reports the site as live and the agent hands the user an empty string",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        \"is_live\": bool(url) and bool(doc.deployed) and not in_progress,",
+    "replace": "        \"is_live\": bool(doc.deployed) and not in_progress,",
+    "tests": [
+      "tests/ee/sites/test_agent_build_visibility.py::TestIsLive::test_a_settled_build_with_no_url_is_still_not_live"
+    ]
+  },
+  {
+    "label": "is_live ignores the in-flight build, so a re-publish reports the PREVIOUS deploy's url as though the change were already live",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        \"is_live\": bool(url) and bool(doc.deployed) and not in_progress,",
+    "replace": "        \"is_live\": bool(url) and bool(doc.deployed),",
+    "tests": [
+      "tests/ee/sites/test_agent_build_visibility.py::TestIsLive::test_a_republish_over_a_live_site_is_not_live_at_this_version",
+      "tests/ee/agent/test_sites_mcp_server/test_build_status_tool.py::TestPublishResponseCarriesBuildState::test_a_republish_over_a_live_site_is_not_reported_as_current"
+    ]
+  },
+  {
+    "label": "build_in_progress is derived from IN_FLIGHT_STATUSES, so an unknown status reads as terminal and a running build is reported live (the wire contract is the opposite of should_enqueue's)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    in_progress = status != \"none\" and status not in TERMINAL_STATUSES",
+    "replace": "    in_progress = status in __import__(\"pocketpaw_ee.sites.build_state\", fromlist=[\"x\"]).IN_FLIGHT_STATUSES",
+    "tests": [
+      "tests/ee/sites/test_agent_build_visibility.py::TestUnknownStatusReadsAsInProgress::test_an_unrecognised_status_is_in_progress_not_live"
+    ]
+  },
+  {
+    "label": "build_status is normalised against a known set instead of passing through verbatim, so a status this deploy predates is reported as \"nothing is building\"",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    status = getattr(doc, \"build_status\", \"none\")\n    in_progress =",
+    "replace": "    status = getattr(doc, \"build_status\", \"none\")\n    status = status if status in TERMINAL_STATUSES else \"none\"\n    in_progress =",
+    "tests": [
+      "tests/ee/sites/test_agent_build_visibility.py::TestUnknownStatusReadsAsInProgress::test_an_unrecognised_status_is_in_progress_not_live"
+    ]
+  },
+  {
+    "label": "the publish response goes back to the five hand-built keys, so the agent never sees the build state at all",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "                \"name\": doc.name,\n                **state,",
+    "replace": "                \"name\": doc.name,\n                \"url\": doc.url,\n                \"deployed\": doc.deployed,",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_build_status_tool.py::TestPublishResponseCarriesBuildState::test_a_first_async_publish_does_not_read_as_a_live_site"
+    ]
+  },
+  {
+    "label": "the queued publish message stops naming the status tool, so the agent learns a build is running and can never find out how it ended",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "            \"and that you can check again in a moment with \"\n            \"`get_site_build_status`.\"",
+    "replace": "            \"and that it should be up shortly.\"",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_build_status_tool.py::TestPublishResponseCarriesBuildState::test_a_first_async_publish_does_not_read_as_a_live_site"
+    ]
+  },
+  {
+    "label": "the build-status tool is not registered on the server, so its id is whitelisted but nothing answers a call",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "            publish,\n            get_site_build_status,",
+    "replace": "            publish,",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_build_status_tool.py::TestRegistration::test_the_built_server_lists_the_status_tool"
+    ]
+  },
+  {
+    "label": "the build-status tool id leaves SITES_TOOL_IDS, so the /sites allow-list filters the tool out silently and every handler test still passes",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "    EDIT_REACT_COMPONENT_TOOL_ID,\n    GET_SITE_BUILD_STATUS_TOOL_ID,\n)",
+    "replace": "    EDIT_REACT_COMPONENT_TOOL_ID,\n)",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_build_status_tool.py::TestRegistration::test_status_tool_id_is_on_the_shared_allowlist",
+      "tests/ee/agent/test_sites_mcp_server/test_mcp_tool.py::TestSitesMcpServerRegistration::test_server_name_and_tool_id"
+    ]
+  },
+  {
+    "label": "site_build_status drops the tenancy filter by resolving the doc without the workspace, so one workspace reads another's build state",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    doc = await canonical_site_for_pocket(workspace_id, pocket_id)\n    state = build_wire_state(doc)",
+    "replace": "    doc = await _SiteDoc.find_one({\"pocket_id\": pocket_id})  # global-read: mutation\n    state = build_wire_state(doc)",
+    "tests": [
+      "tests/ee/sites/test_agent_build_visibility.py::test_status_is_tenant_scoped"
+    ]
+  },
+  {
+    "label": "the react create step stops naming the edit tool, so a follow-up change goes back to a second create_react_site and a second site pocket",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            \"`mcp__pocketpaw_sites_manager__edit_react_component` with the SAME \"",
+    "replace": "            \"`create_react_site` again with the SAME \"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_react_create_step_routes_follow_up_changes_to_the_edit_tool"
+    ]
+  }
+]

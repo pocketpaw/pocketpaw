@@ -2,6 +2,26 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-4) — documented the build-lane
+fields now on the `publish` tool response and the new read-only
+`get_site_build_status` tool, in the same MCP section. Both are recorded here
+because the *reason* they exist is not visible from their field lists: `url` and
+`deployed` are individually insufficient to answer "is this site live", and on
+react they actively mislead (a first publish returns `url: ""`, a re-publish
+returns the previous deploy's url). Anyone reading only the field names would
+reasonably use `url` directly, which is the defect.
+
+Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — added the "Sites —
+Agent Editing Tools (in-process MCP)" section documenting `edit_react_component`
+and the per-engine split that decides which editing tool a site gets. This is
+the first MCP tool documented in this file, which is otherwise REST-only, and it
+belongs here for a specific reason: the react edit lane has no REST route at all
+(it is chat-only), so a reader who checks the reference for "how do I change a
+react site" would otherwise find the svelte native-editing endpoints above and
+reasonably conclude nothing exists. The section also records WHY this tool does
+not publish, because the missing republish looks like an omission next to
+`edit_svelte_component` and is not one.
+
 Created: 2026-05-21 (RFC 04 alpha) — documents the per-pocket backend
 binding + read-only source-run endpoints. The rest of the cloud pockets
 API is described in the auto-generated wiki article
@@ -1313,6 +1333,128 @@ Errors:
 | 404 | `pocket.not_found` | Unknown pocket id. |
 | 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
 | 500 | `sites.generator_failed` | The arm build failed (missing toolchain, non-zero build, or smoke-gate failure). |
+
+## Sites — Agent Editing Tools (in-process MCP)
+
+Editing a Paw Site from chat does not go over HTTP. The chat agent reaches it
+through the in-process MCP server `pocketpaw_sites_manager`
+(`ee/pocketpaw_ee/agent/mcp_servers/sites.py`), whose tools are namespaced
+`mcp__pocketpaw_sites_manager__<tool>`. Two editing tools live there, one per
+hand-authored engine, and they are **not interchangeable** — each rejects the
+other's pockets.
+
+| Tool | Engine | Publishes? |
+|------|--------|-----------|
+| `edit_svelte_component` | `engine: "svelte"` | Builds a draft **preview** (workerd smoke gate; rolls the source back if it fails) |
+| `edit_react_component` | `engine: "react"` | **No.** Persists the draft and stops — no build, no deploy |
+
+A ripple or dynamic site is edited through the pocket specialist's rippleSpec
+merge instead; an html site is edited by uid splice via the leaf-edits route
+above.
+
+### `edit_react_component`
+
+Write ONE file of a react site's `source` map as a reviewable draft.
+
+| Arg | Type | Notes |
+|-----|------|-------|
+| `pocket_id` | string | Required. The react site pocket. |
+| `component_path` | string | Required. Project-relative, e.g. `src/components/Hero.tsx`. Must already exist unless `create` is true. |
+| `edits` | array | A list of `{old_string, new_string}` blocks applied to the file's current contents. Each `old_string` must match **exactly once**. Exactly one of `edits` / `new_source`. |
+| `new_source` | string | The full new file contents (replaces the whole file). Required with `create`. |
+| `create` | boolean | Default `false`. Create a NEW file at `component_path`; the path must **not** already exist. |
+
+Returns `{ok: true, status: "draft", is_live: false, pocket_id, component_path,
+created, message}`. To **add a section**, call it twice: once with `create: true`
+for `src/components/<Name>.tsx`, then again with `edits` on `src/App.tsx` to
+import and render it.
+
+**It does not publish and does not enqueue a build**, and that is a deliberate
+divergence from the svelte tool rather than an omission. `build_runs_async("react")`
+is true: a react publish enqueues a Daytona build and returns before any build
+outcome exists, so there is no synchronous result to gate on and nothing to roll
+back from — a rollback fired on enqueue-success would revert a good edit.
+Persisting the draft is the whole job (the same shape the leaf-edits route
+documents). Publishing stays an explicit `publish` call the user asks for.
+
+**Write scope is enforced, not advisory.** The generator owns the build shell, so
+`index.html`, `package.json`, `vite.config.ts`, `paw-prerender.mjs` and everything
+under `src/paw/` are rejected, and the resolved path must land under `src/` or
+`public/`. Paths are normalized (backslashes, `.`/`..`) before the check, so
+`./package.json` and `src/paw/../paw/entry.tsx` are rejected too. This is the same
+policy `create_react_site` applies, shared through
+`ee/pocketpaw_ee/sites/react_paths.py` — an edit that could write `package.json`
+would be writing the dependency manifest, which is where the supply-chain
+release-age floor is enforced.
+
+Errors (relayed to the agent as `is_error` with the code, so it can fix and retry):
+
+| Code | When |
+|------|------|
+| `site_edit.invalid_args` | Not exactly one of `edits` / `new_source`. |
+| `site_edit.create_needs_source` | `create` without `new_source`. |
+| `site_edit.reserved_path` | The resolved path is generator-owned. |
+| `site_edit.path_outside_source` | The resolved path is outside `src/` and `public/`. |
+| `site_edit.no_match` / `site_edit.ambiguous_match` | An `old_string` matched 0 or >1 times. Make it more specific and retry. |
+| `pocket.not_react_site` | The pocket is not a react Paw Site. |
+| `pocket.react_component_exists` | `create` on a path that already exists. |
+| `site_component.not_found` | `create` is false and the path is not in the source map. |
+| `plan.feature_denied` | The workspace's plan lacks the `sites` feature. |
+
+Every write goes through `pockets_service.set_react_source_file`, which emits
+`PocketUpdated` and records a draft `ArtifactVersion` snapshotting the full edited
+source map — so an edit is a reviewable Branch draft a later publish promotes.
+
+### Build state on the `publish` response
+
+`publish` returns `{ok, message, site: {...}}`. The `site` object carries the five
+original keys (`id`, `pocket_id`, `name`, `url`, `deployed`) plus the build lane's
+state:
+
+| Key | Notes |
+|-----|-------|
+| `build_status` | `none` \| `queued` \| `building` \| `built` \| `failed`. Passed through **verbatim** — an unrecognised value is never normalised. |
+| `build_reason` | `"<rung>:<cause>"` explaining how the build settled. `null` until one does. A `failed` status without this is unactionable. |
+| `build_job_id` | Handle for the queued build. Persisted, so it survives a reload. |
+| `build_in_progress` | Derived. `true` while a build is running, **and for any unrecognised `build_status`**. |
+| `is_live` | Derived. The only field to gate "show the user the url" on. |
+
+`is_live` requires a non-empty `url` **and** `deployed` **and** no build in flight,
+because each is individually insufficient. This matters on **react**, the only engine
+where `build_runs_async(engine)` is true:
+
+- On a **first** publish, `_enqueue_static_build` creates the Site doc with `url: ""`
+  and `deployed: false`. That is honest — nothing is serving yet, and the worker flips
+  both when the deploy succeeds — but it means `url` alone is an empty string.
+- On a **re-publish**, `url` and `deployed` deliberately keep the *previous* deploy's
+  values so a rebuild never reports a working site as down. Both say "live" while the
+  url serves the pre-change page.
+- `build_status` alone cannot tell a never-built pocket (`none`) from a finished one.
+
+`build_in_progress` reads an unknown status as in-progress, which is the wire contract
+and the deliberate **opposite** of `build_state.should_enqueue`, which treats an
+unknown status as terminal. Both are correct on their own axis: a redundant build costs
+one sandbox, while a spurious "your site is live" costs the user's trust.
+
+The derivation lives in `sites.service.build_wire_state` and is shared with the status
+tool below, so the two surfaces cannot disagree about whether a site is live.
+
+### `get_site_build_status`
+
+Read-only. Takes `pocket_id` and returns `{ok, message, pocket_id, site_id, name,
+published, url, deployed, build_status, build_reason, build_job_id, build_in_progress,
+is_live}`.
+
+This exists because a react publish is **asynchronous**: the `publish` call returns
+before the build starts, so its response can never report how the build ended. Without
+a later read, `queued` is a dead end — the agent learns a build was enqueued and has no
+way to discover it finished.
+
+A pocket with no Site doc returns `published: false` rather than an error; from the
+caller's side "this was never published" is the useful answer, and it is correct whether
+the pocket has no site or does not exist. The read resolves the canonical Site doc
+through `canonical_site_for_pocket`, which is tenant-scoped on the workspace — that
+filter is the access check, and there is no plan gate because nothing is mutated.
 
 ## Fabric — Transform Mappings (source→Fabric ingest)
 

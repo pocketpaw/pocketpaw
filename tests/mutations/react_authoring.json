@@ -1,9 +1,9 @@
 [
   {
-    "label": "the react engine stops being selectable (create falls back to html and the skill is unreachable)",
+    "label": "the react engine stops being selectable (create falls back to html, the skill is unreachable, and a react refine loses its own branch)",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "    if engine not in (\"html\", \"svelte\", \"ripple\", \"react\"):",
-    "replace": "    if engine not in (\"html\", \"svelte\", \"ripple\"):",
+    "find": "_SITE_ENGINES: tuple[str, ...] = (\"html\", \"svelte\", \"ripple\", \"react\")",
+    "replace": "_SITE_ENGINES: tuple[str, ...] = (\"html\", \"svelte\", \"ripple\")",
     "tests": [
       "tests/cloud/surface/test_sites_handler.py::test_create_mode_engine_react_prefers_create_react_site_skill"
     ]
@@ -55,16 +55,16 @@
   },
   {
     "label": "the reserved-path guard stops normalizing, so ./index.html overwrites the prerender template",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
-    "find": "        norm = posixpath.normpath(key.replace(\"\\\\\", \"/\"))",
-    "replace": "        norm = key",
+    "file": "ee/pocketpaw_ee/sites/react_paths.py",
+    "find": "    return posixpath.normpath(path.replace(\"\\\\\", \"/\"))",
+    "replace": "    return path",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_create_react_site.py::TestReservedPathRejection"
     ]
   },
   {
     "label": "the reserved guard matches by prefix, locking the author out of src/pawprint.ts",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "file": "ee/pocketpaw_ee/sites/react_paths.py",
     "find": "REACT_RESERVED_PREFIX = \"src/paw/\"",
     "replace": "REACT_RESERVED_PREFIX = \"src/paw\"",
     "tests": [

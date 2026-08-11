@@ -1316,7 +1316,8 @@
         "rollback",
         "roll back",
         "history",
-        "changes"
+        "changes",
+        "edit"
       ],
       "kind": "primitive",
       "name": "Branch",
@@ -1876,6 +1877,20 @@
       "narrative": "Edit an existing PocketPaw pocket — add / remove / rename / move / redesign widgets, or mutate state — by delegating to the pocket edit specialist. Invoke when the user asks to change something on the canvas they're currently looking at: \"add a chart\", \"remove that card\", \"mark task 1 as done\", \"filter to overdue\", \"rebuild this as a kanban\", \"make this less cluttered\". The chat agent decides WHAT and WHERE; the specialist applies the granular mutations via ``pocket_specialist__edit``. The skill body sits outside the chat agent's system prompt until invoked, keeping always-on context lean.",
       "requires": [],
       "summary": "Edit an existing PocketPaw pocket — add / remove / rename / move / redesign widgets, or mutate state — by delegating to the pocket edit specialist.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /pocketpaw-edit-react-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:pocketpaw-edit-react-site",
+      "keywords": [
+        "pocketpaw-edit-react-site"
+      ],
+      "kind": "skill",
+      "name": "pocketpaw-edit-react-site",
+      "narrative": "CHANGE an EXISTING react-track Paw Site — edit a component, restyle a section, rewrite copy, add a new section — by editing its source map in place. Invoke when the user asks for a change to a site that already exists and whose pocket is stamped engine=\"react\": \"shorten the hero headline\", \"make the nav sticky\", \"change the pricing copy\", \"add a testimonials section\", \"drop the FAQ\". Decide by TWO facts, both checkable: (1) the site ALREADY EXISTS — if there is no site yet, this is a create and belongs to pocketpaw-create-react-site, NOT here; (2) the pocket's engine is \"react\" — a svelte site is edited with edit_svelte_component, and a ripple / dynamic / html site is not this track at all (see \"When NOT to use this skill\"). The edit is a TARGETED diff against one file: you send only the change, the tool applies it and stages a DRAFT — it does not publish. NEVER answer an edit request by calling create_react_site again; that mints a SECOND site pocket and leaves the one the user is looking at untouched. Loading this skill keeps the chat agent's always-on system prompt small while still delivering the full react edit contract when a react site actually needs changing.",
+      "requires": [],
+      "summary": "CHANGE an EXISTING react-track Paw Site — edit a component, restyle a section, rewrite copy, add a new section — by editing its source map in place.",
       "surface": ""
     },
     {

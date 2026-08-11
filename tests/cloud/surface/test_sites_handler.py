@@ -1,6 +1,15 @@
 # tests/cloud/surface/test_sites_handler.py — Sites surface handler.
 #
 # Created: 2026-06-03 — Guards the /sites surface preamble.
+# Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — four tests at the BOTTOM
+# of this file pin the two preambles that route to the new react edit tool: the
+# react create step now says a follow-up change is
+# `edit_react_component`, NOT a second `create_react_site` (the re-create is what
+# minted a SECOND site pocket), and a react refine routes to
+# `_react_refine_preamble` instead of the rippleSpec merge path a react pocket has
+# nothing to merge into. The fourth test pins that ripple/svelte/no-engine refine is
+# byte-for-byte unchanged, so the fork cannot leak into the engine it was not
+# written for.
 # Updated: 2026-06-03 (pm) — Bundled skills now load on the SDK backend (local
 # plugin via the SDK `plugins=` option), so the preamble PREFERS the
 # `pocketpaw-create-site` skill and keeps the raw MCP tools only as a fallback.
@@ -234,6 +243,22 @@ async def test_sites_handler_specifies_flat_lead_capture_form() -> None:
 REFINE_POCKET = "pkt-existing-site-123"
 
 
+def _refine_meta(pocket_id: str = REFINE_POCKET, **kwargs: str) -> SurfaceMeta:
+    """The meta the live refine surface sends: site_id + pocket_id, NO engine.
+
+    Spelled out in one helper because the missing ``engine`` is load-bearing rather
+    than incidental — the refine SurfaceMetaProvider in paw-enterprise
+    (``routes/sites/[siteId]/+page.svelte``) stamps ``site_id`` / ``pocket_id`` /
+    ``focus_node_id`` / ``mode`` and nothing else. A test that passed
+    ``engine="react"`` here would be testing a wire shape that does not exist and
+    would have reported the engine fork working while every real refine turn got
+    the fallback.
+    """
+    return SurfaceMeta(
+        route_path="/sites/site-abc", pocket_id=pocket_id, site_id="site-abc", **kwargs
+    )
+
+
 async def test_sites_handler_refine_mode_orients_to_existing_site() -> None:
     """When the meta carries a pocket_id, the surface is the per-site refine
     chat: the agent must REFINE the EXISTING published site, not create a new
@@ -263,15 +288,14 @@ async def test_sites_handler_refine_mode_orients_to_existing_site() -> None:
 
 
 async def test_sites_handler_refine_mode_uses_edit_path() -> None:
-    """Refine applies the change via the merge/edit path on the existing pocket,
-    not the create path — so the published site is updated in place."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE,
-            USER,
-            SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
-        )
-    ).text
+    """A RIPPLE refine applies the change via the merge/edit path on the existing
+    pocket, not the create path — so the source spec is updated in place.
+
+    Pinned on the ripple branch EXPLICITLY since the engine fork. The specialist
+    merges a rippleSpec, and ripple is the only engine whose pocket has one; the
+    other three branches must NOT name it (see the engine-fork section below).
+    """
+    preamble = sites_handler._refine_preamble(_refine_meta(), "ripple")
 
     # The edit/merge tool, not a fresh create.
     assert "mcp__pocketpaw_pocket_specialist__edit" in preamble
@@ -280,15 +304,14 @@ async def test_sites_handler_refine_mode_uses_edit_path() -> None:
 
 
 async def test_sites_handler_refine_mode_is_landing_aware() -> None:
-    """The refine preamble carries the same landing structure + 5 SSR rules as
-    the create brain, so an edit can't introduce a static-site trap."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE,
-            USER,
-            SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
-        )
-    ).text
+    """The RIPPLE refine preamble carries the same landing structure + 5 SSR rules
+    as the create brain, so an edit can't introduce a static-site trap.
+
+    These five rules are the ripple branch's and only the ripple branch's: each one
+    names a WIDGET type, and a react/html/svelte page is markup with no widgets in
+    it (test_source_map_refine_drops_the_ripple_widget_rules).
+    """
+    preamble = sites_handler._refine_preamble(_refine_meta(), "ripple")
 
     lower = preamble.lower()
     # Preserve the landing/conversion structure.
@@ -852,11 +875,17 @@ async def test_build_preamble_unchanged_for_create_path() -> None:
 
 async def test_build_preamble_unchanged_for_refine_path() -> None:
     """A refine meta (with pocket_id) still returns exactly `_refine_preamble`'s
-    output — the additive brief helper does not touch the refine dispatch."""
-    meta = SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc")
+    output — the additive brief helper does not touch the refine dispatch.
+
+    With no pocket seeded the engine lookup finds nothing, so the live dispatch
+    renders the unknown-engine branch; comparing against ``_refine_preamble(meta,
+    None)`` states that outright instead of relying on the default argument
+    happening to match.
+    """
+    meta = _refine_meta()
     live = (await sites_handler.build_preamble(WORKSPACE, USER, meta)).text
 
-    assert live == sites_handler._refine_preamble(meta)
+    assert live == sites_handler._refine_preamble(meta, None)
     assert 'mode="frontend"' not in live
 
 
@@ -928,9 +957,11 @@ async def test_sites_handler_build_mode_identical_to_refine() -> None:
 
     # The toggle's Build side is exactly the refine preamble; unset defaults to it.
     assert build == unset
-    # And it is the mutate-and-republish refine preamble (regression guard).
-    assert "mcp__pocketpaw_pocket_specialist__edit" in build
+    # And it is the refine preamble, not the chat one (regression guard). The edit
+    # TOOL it names is engine-dependent since the fork, so the mode tag is what
+    # this test can assert without re-pinning ripple's tool on every engine.
     assert 'mode="refine"' in build
+    assert 'mode="chat"' not in build
 
 
 async def test_sites_handler_chat_mode_ignored_without_pocket_id() -> None:
@@ -975,6 +1006,31 @@ async def test_mode_threads_through_meta_from_request() -> None:
 # concierge exists, so whether the agent mentioned one was decided purely by
 # model sampling — which is exactly what "sometimes" looks like from outside.
 #
+# Updated: 2026-08-11 (fix/sites-refine-preamble-engine-fork) — the REFINE branch
+# forks by engine, so its tests do too. Three things changed shape here:
+#   1. The engine comes from the POCKET, not from `meta`, so the tests that prove
+#      the fork seed a real site pocket and go through `build_preamble`. A test that
+#      passed `engine=` into `_refine_preamble` would have passed against an
+#      implementation that reads `meta.engine` — which the live surface never sends,
+#      so every real refine turn would have taken the fallback. `_refine_meta()`
+#      exists to keep that wire shape (site_id + pocket_id + mode, no engine) in one
+#      place.
+#   2. `test_sites_handler_refine_mode_uses_edit_path` and
+#      `..._is_landing_aware` are now pinned to RIPPLE explicitly. They were
+#      written when there was one branch; the tool and the five widget rules they
+#      assert belong to that engine alone.
+#   3. `test_sites_handler_build_mode_identical_to_refine` no longer asserts the
+#      specialist's tool id, because which edit tool a Build-mode turn names depends
+#      on the site's engine. It pins what it was really about: the Build side of the
+#      toggle is byte-identical to unset.
+# The new section at the bottom pins the per-engine content (react must not command
+# the ripple edit path, must not claim the page runs without JavaScript, must not
+# promise a live url off an async publish, and must carry the prerender contract;
+# html must admit it has no edit tool; ripple must be unchanged), the shared half on
+# every branch including unknown, the content-keyed cache, and — derived from the MCP
+# tool schemas — that every tool id these branches name is one the agent can call.
+# Mutations: tests/mutations/sites_refine_engine_fork.json (11, all caught).
+#
 # These tests make the awareness DETERMINISTIC: every live /sites mode, on every
 # engine, must carry the concierge block. They also pin the two honest LIMITS of
 # that block, because an over-promising preamble would trade a blind agent for a
@@ -1008,8 +1064,7 @@ async def test_every_sites_mode_knows_the_concierge_exists(label: str, meta: Sur
     precisely because no mode carried it, so this is parametrized across all
     five dispatched (engine, mode) combinations rather than spot-checking one.
     """
-    preamble = await sites_handler.build_preamble(WORKSPACE, USER, meta)
-    lower = preamble.lower()
+    lower = (await sites_handler.build_preamble(WORKSPACE, USER, meta)).text.lower()
 
     assert "concierge" in lower, f"{label}: preamble never mentions the concierge"
     # Named as the thing the visitor actually sees on the page.
@@ -1028,8 +1083,7 @@ async def test_concierge_block_never_promises_a_configuration_tool(
     declares them — so the preamble has to route the user to the dashboard
     instead of naming a tool that would hard-error.
     """
-    preamble = await sites_handler.build_preamble(WORKSPACE, USER, meta)
-    lower = preamble.lower()
+    lower = (await sites_handler.build_preamble(WORKSPACE, USER, meta)).text.lower()
 
     # No fabricated tool ids for concierge configuration.
     for phantom in (
@@ -1055,8 +1109,7 @@ async def test_create_ties_the_concierge_to_publish_not_to_the_draft() -> None:
     """
     for engine in (None, "svelte", "ripple"):
         meta = SurfaceMeta(route_path="/sites", engine=engine)
-        preamble = await sites_handler.build_preamble(WORKSPACE, USER, meta)
-        lower = preamble.lower()
+        lower = (await sites_handler.build_preamble(WORKSPACE, USER, meta)).text.lower()
         # The concierge arrives WITH the publish, not with the draft.
         assert "publish" in lower
         concierge_at = lower.index("concierge")
@@ -1088,6 +1141,676 @@ async def test_concierge_awareness_does_not_depend_on_the_mcp_tool_id_import() -
         preamble = await sites_handler.build_preamble(
             WORKSPACE, USER, SurfaceMeta(route_path="/sites")
         )
-        assert "concierge" in preamble.lower()
+        assert "concierge" in preamble.text.lower()
     finally:
         registry._MCP_TOOL_IDS_CACHE = original
+
+
+# ---------------------------------------------------------------------------
+# RX-3 — the react EDIT lane reaches the preambles that route to it
+# ---------------------------------------------------------------------------
+
+
+async def test_react_create_step_routes_follow_up_changes_to_the_edit_tool() -> None:
+    """The reported bug in prompt form: with no edit tool named, a follow-up
+    "shorten the hero headline" left the agent one available move — a second
+    ``create_react_site`` — which mints a SECOND site pocket and leaves the site the
+    user is looking at unchanged. The react build step now names the edit tool and
+    forbids the re-create.
+
+    THE MUTATION THAT BREAKS THIS: delete the CHANGES-GO-THROUGH-THE-EDIT-TOOL
+    paragraph from the react ``build_step``.
+    """
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
+        )
+    ).text
+
+    assert "mcp__pocketpaw_sites_manager__edit_react_component" in preamble
+    lower = preamble.lower()
+    # It says the re-create is wrong, and says WHY (a second site).
+    assert "second `create_react_site`" in preamble or "second create_react_site" in lower
+    assert "second site" in lower
+    # And it teaches the two-call add-a-section shape the tool actually needs.
+    assert "create=true" in lower
+    assert "src/app.tsx" in lower
+
+
+async def test_react_refine_names_the_edit_tool_and_not_the_ripple_merge(mongo_db: object) -> None:
+    """A react site's refine chat must route to ``edit_react_component``.
+
+    The default refine preamble names ``mcp__pocketpaw_pocket_specialist__edit``,
+    which merges a rippleSpec — and a react pocket has no rippleSpec, so that is an
+    instruction with nothing to act on. Per pocketpaw/CLAUDE.md, naming an
+    existing-but-WRONG tool is the same defect as naming an absent one: the model
+    does not error, it improvises.
+
+    RETARGETED 2026-08-11 (fix/sites-refine-preamble-engine-fork). This test used to
+    pass ``engine="react"`` in the meta and reach ``_react_refine_preamble`` through
+    the RX-3 fork. The refine surface never sends ``engine`` — the
+    SurfaceMetaProvider in paw-enterprise stamps site_id / pocket_id /
+    focus_node_id / mode — so that fork rendered for nobody and this test was the
+    only thing exercising it. It now goes through the branch a real turn takes: the
+    engine resolved from the pocket. The prohibition assertion changed with it: the
+    branch forbids "the pocket specialist" by concept rather than by tool id, which
+    is how ``_create_preamble``'s react branch already words it, so the id must be
+    ABSENT here rather than present-as-a-prohibition.
+
+    THE MUTATION THAT BREAKS THIS: point the react branch's edit step at
+    ``mcp__pocketpaw_pocket_specialist__edit``. Run: caught. (Applied 2026-08-11.)
+    """
+    user_id, pocket_id = await _seed_site_pocket("react")
+
+    preamble = (
+        await sites_handler.build_preamble(WORKSPACE, user_id, _refine_meta(pocket_id))
+    ).text
+
+    assert "mcp__pocketpaw_sites_manager__edit_react_component" in preamble
+    # The pocket the agent must edit is named, so it cannot address the wrong one.
+    assert pocket_id in preamble
+    # The rippleSpec merge is refused — by concept, without handing the model the
+    # tool id it would otherwise pattern-match.
+    assert "do NOT call the pocket specialist" in preamble
+    assert "pocket_specialist__edit" not in preamble
+    # The ripple WIDGET vocabulary is absent: those rules are about a spec this
+    # engine does not have, and carrying them would teach a react author to look
+    # for widgets that are not there.
+    assert "pricing-table" not in preamble
+    # Re-creating is explicitly refused.
+    assert "create_react_site" in preamble
+
+
+async def test_react_refine_carries_the_prerender_and_write_scope_rules(mongo_db: object) -> None:
+    """The two rules that replace the ripple widget rules on this engine.
+
+    The prerender rule is the same hazard in React spelling (``useEffect`` does not
+    run at prerender time, so a resting state set only in an effect bakes as the
+    initial value), and the write scope is what the tool actually enforces — an edit
+    naming a reserved path is rejected, so the preamble must not let the agent
+    discover that by trial.
+
+    RETARGETED 2026-08-11: same reason as the test above — through the pocket, not
+    through a meta hint the surface does not send.
+    """
+    user_id, pocket_id = await _seed_site_pocket("react")
+
+    preamble = (
+        await sites_handler.build_preamble(WORKSPACE, user_id, _refine_meta(pocket_id))
+    ).text
+    lower = preamble.lower()
+
+    assert "prerender" in lower
+    assert "useeffect" in lower
+    # The write scope + the reserved shell, spelled out.
+    assert "src/" in preamble and "public/" in preamble
+    assert "package.json" in preamble
+    assert "src/paw/" in preamble
+    # The dependency list, so the agent does not author an import it cannot install.
+    assert "no way to add a dependency" in lower
+    # And that the edit is a DRAFT, so the agent does not announce a live change.
+    assert "draft" in lower
+    assert "nothing is built and nothing goes live" in lower
+
+
+async def test_ripple_refine_keeps_the_rippleSpec_merge(mongo_db: object) -> None:
+    """The fork must not disturb the engine it was not written for.
+
+    REPLACES ``test_non_react_refine_is_unchanged``, which asserted that None,
+    "ripple" AND "svelte" all get the rippleSpec merge preamble. That was true only
+    because the RX-3 fork keyed on a meta field the surface never sends: a svelte
+    site has a ``source`` map and its own ``edit_svelte_component``, so handing it
+    the specialist was the same defect as handing it to react. Ripple is the engine
+    that genuinely keeps the merge path, and it is asserted through the pocket.
+    """
+    user_id, pocket_id = await _seed_site_pocket("ripple")
+
+    preamble = (
+        await sites_handler.build_preamble(WORKSPACE, user_id, _refine_meta(pocket_id))
+    ).text
+
+    assert "mcp__pocketpaw_pocket_specialist__edit" in preamble
+    assert "edit_react_component" not in preamble
+    assert "edit_svelte_component" not in preamble
+
+
+# --- The refine engine fork (fix/sites-refine-preamble-engine-fork) -----------
+#
+# THE BUG: `_refine_preamble` was written for ripple and shipped to all four
+# engines. On a react / html / svelte site it commanded
+# `pocket_specialist__edit` — which merges a rippleSpec those pockets do not have
+# (their content is a `source` map) — told the agent the page renders with no
+# JavaScript (react ships a hydrating client bundle by default), claimed the site
+# "auto-publishes from its source pocket", and then listed five SSR rules about
+# ripple WIDGET shapes at a page with no widgets in it.
+#
+# It was invisible for the reason pocketpaw/CLAUDE.md gives under "The prompt may
+# not command a tool the agent doesn't have": the agent does not raise on an
+# unsatisfiable instruction, it improvises, and the improvisation reads like a
+# normal reply. The specialist IS reachable here (`pocketpaw_pocket_specialist`
+# rides `ALWAYS_ALLOWED_MCP_SERVERS`), so this is that rule's "naming an
+# existing-but-wrong tool is the same defect" clause rather than a missing tool.
+#
+# TWO KINDS OF TEST BELOW, and the split matters:
+#
+#   1. RESOLUTION — that the branch is chosen from the POCKET. These seed a real
+#      pocket through the pockets service and go through `build_preamble`, because
+#      the whole defect is reachable only via the live path: `meta.engine` is a
+#      create hint the refine surface never stamps, so a fork on it would have put
+#      every refine on the `or "html"` default while every unit test that passed
+#      an engine directly reported success.
+#   2. CONTENT — what each branch may and may not say. These call
+#      `_refine_preamble(meta, engine)` directly, so an engine's rules can be
+#      pinned without a DB round trip per assertion.
+
+REACT_TOOL = "mcp__pocketpaw_sites_manager__edit_react_component"
+SVELTE_TOOL = "mcp__pocketpaw_sites_manager__edit_svelte_component"
+RIPPLE_TOOL = "mcp__pocketpaw_pocket_specialist__edit"
+SOURCE_MAP_ENGINES = ("svelte", "react", "html")
+ALL_REFINE_ENGINES = ("ripple", "svelte", "react", "html", None)
+
+
+async def _seed_site_pocket(engine: str, *, workspace: str = WORKSPACE) -> tuple[str, str]:
+    """Seed a real site pocket on ``engine``; return ``(user_id, pocket_id)``."""
+    from pocketpaw_ee.cloud.models.user import User as _UserDoc
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.cloud.pockets.dto import CreatePocketRequest
+
+    user = _UserDoc(
+        email=f"owner-{engine}-{workspace}@sites.test",
+        hashed_password="x",
+        is_active=True,
+        is_verified=True,
+        full_name="Site Owner",
+        active_workspace=workspace,
+    )
+    await user.insert()
+    user_id = str(user.id)
+    source = None if engine == "ripple" else {"src/App.tsx": "export default () => null;"}
+    pocket = await pockets_service.create(
+        workspace,
+        user_id,
+        CreatePocketRequest(
+            name=f"{engine} site",
+            type="site",
+            pattern="landing",
+            engine=engine,
+            source=source,
+        ),
+    )
+    return user_id, pocket["_id"]
+
+
+async def _registered_mcp_tool_ids() -> set[str]:
+    """Every ``mcp__<server>__<tool>`` id the agent layer actually registers.
+
+    Walks the ``agent/mcp_servers`` package's ``build_*`` factories AND the pocket
+    specialist, whose server is built in ``agent/pocket_specialist/mcp_tool.py`` —
+    outside the package, and the one the refine ripple branch names. Two return
+    shapes exist (``(name, server)`` from the package, a bare server dict from the
+    specialist) so both are normalized here.
+
+    A builder that raises is SKIPPED rather than failed on: this helper answers
+    "which ids are real", and a server that cannot be built in a test process
+    (missing SDK, missing credentials) cannot answer either way. The caller
+    asserts the derivation found something, so a wholesale failure still shows up.
+    """
+    import importlib
+    import pkgutil
+
+    import pocketpaw_ee.agent.mcp_servers as servers_pkg
+    from mcp import types
+
+    module_names = [
+        f"{servers_pkg.__name__}.{m.name}"
+        for m in pkgutil.iter_modules(servers_pkg.__path__)
+        if not m.name.startswith("_")
+    ]
+    module_names.append("pocketpaw_ee.agent.pocket_specialist.mcp_tool")
+
+    registered: set[str] = set()
+    for module_name in module_names:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:  # pragma: no cover — see the docstring
+            continue
+        for attr in dir(module):
+            if not attr.startswith("build_"):
+                continue
+            builder = getattr(module, attr)
+            if not callable(builder):
+                continue
+            try:
+                built = builder()
+                if not built:
+                    continue
+                if isinstance(built, tuple):
+                    server_name, server = built
+                else:
+                    server, server_name = built, built.get("name")
+                handler = server["instance"].request_handlers[types.ListToolsRequest]
+                listed = await handler(types.ListToolsRequest(method="tools/list"))
+            except Exception:  # pragma: no cover
+                continue
+            registered |= {f"mcp__{server_name}__{tool.name}" for tool in listed.root.tools}
+    return registered
+
+
+@pytest.mark.parametrize("engine,expected_tool", [("react", REACT_TOOL), ("ripple", RIPPLE_TOOL)])
+async def test_refine_reads_the_engine_off_the_pocket(
+    mongo_db: object, engine: str, expected_tool: str
+) -> None:
+    """THE TEST THE FIX EXISTS FOR: the branch comes from the pocket's engine.
+
+    The meta carries NO engine, exactly as the live refine surface sends it, so
+    this fails on any implementation that forks on ``meta.engine`` — which is what
+    the obvious fix would have done, and it would have handed a react site the html
+    branch while looking correct.
+
+    THE MUTATION THAT BREAKS THIS: make ``build_preamble`` pass ``meta.engine``
+    instead of the resolved engine. Run: react got the unknown branch, the react
+    edit tool was absent and this failed. (Applied 2026-08-11.)
+    """
+    user_id, pocket_id = await _seed_site_pocket(engine)
+
+    preamble = (
+        await sites_handler.build_preamble(WORKSPACE, user_id, _refine_meta(pocket_id))
+    ).text
+
+    assert f'engine="{engine}"' in preamble
+    assert expected_tool in preamble
+
+
+async def test_refine_ignores_a_stale_create_engine_hint(mongo_db: object) -> None:
+    """The POCKET wins over ``meta.engine``, which is a create-time preset hint.
+
+    ``surface_registry._sites_profile`` already states the precedence ("a pocket_id
+    present means refine even if engine=svelte"), and it has to hold here too: a
+    hint left over from the gallery's preset picker must never pick the edit tool
+    for a site that was authored on another track.
+    """
+    user_id, pocket_id = await _seed_site_pocket("ripple")
+
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE, user_id, _refine_meta(pocket_id, engine="react")
+        )
+    ).text
+
+    assert 'engine="ripple"' in preamble
+    assert RIPPLE_TOOL in preamble
+    assert REACT_TOOL not in preamble
+
+
+async def test_refine_on_an_unreadable_pocket_commands_no_edit_tool(mongo_db: object) -> None:
+    """A pocket we cannot read yields "identify the engine first", not a guess.
+
+    Every engine's edit path rejects a pocket from another track, so on an unknown
+    engine the honest move is to make the agent look. The branch may LIST the
+    per-engine tools (it is a routing table the agent resolves after reading the
+    pocket) but must not hand it one as the tool to call now, and must not offer a
+    publish for a change it has not established it can make.
+    """
+    user_id, _ = await _seed_site_pocket("ripple")
+
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE, user_id, _refine_meta("ffffffffffffffffffffffff")
+        )
+    ).text
+    lower = preamble.lower()
+
+    assert 'engine="unknown"' in preamble
+    assert "could not be determined" in lower
+    # It routes through the pocket READ first.
+    assert "mcp__pocketpaw_pocket__get_pocket" in preamble
+    assert "mcp__pocketpaw_sites_manager__publish" not in preamble
+
+
+async def test_refine_does_not_read_an_engine_from_another_workspace(mongo_db: object) -> None:
+    """Tenancy: ``pockets_service.get`` gates by owner / shared_with / visibility and
+    NOT by workspace, so a user in two workspaces could stamp a pocket from B in a
+    chat in A. The engine — and with it the tool the prompt names — must not be read
+    across that line.
+
+    THE MUTATION THAT BREAKS THIS: drop the ``pocket.get("workspace") !=
+    workspace_id`` guard in ``_refine_engine``. Run: the react branch rendered
+    inside workspace A and this failed. (Applied 2026-08-11.)
+    """
+    user_id, pocket_id = await _seed_site_pocket("react", workspace="ws-other-tenant")
+
+    preamble = (
+        await sites_handler.build_preamble(WORKSPACE, user_id, _refine_meta(pocket_id))
+    ).text
+
+    # Not react's branch: the engine was refused, not read. (The unknown branch's
+    # routing table still LISTS every engine's tool, which is the point of it —
+    # what must not appear is react's branch, i.e. its engine tag and its rules.)
+    assert 'engine="react"' not in preamble
+    assert 'engine="unknown"' in preamble
+    assert "could not be determined" in preamble.lower()
+    assert "react-dom/server" not in preamble
+
+
+async def test_react_refine_does_not_command_the_ripple_edit_path() -> None:
+    """A react pocket has a ``source`` map and no rippleSpec, so the specialist's
+    merge path has nothing to act on. The branch names react's own tool instead.
+
+    THE MUTATION THAT BREAKS THIS: point the react branch's edit step at
+    ``mcp__pocketpaw_pocket_specialist__edit``. Run: the forbidden id was present
+    and this failed. (Applied 2026-08-11.)
+    """
+    preamble = sites_handler._refine_preamble(_refine_meta(), "react")
+
+    assert "pocket_specialist__edit" not in preamble
+    assert REACT_TOOL in preamble
+    # And it says why, so the agent does not reach for the specialist off its own
+    # prior about how pockets are edited.
+    assert "do NOT call the pocket specialist" in preamble
+    assert "NOT a rippleSpec" in preamble
+
+
+async def test_react_refine_never_says_the_page_runs_without_javascript() -> None:
+    """React sites ship their client bundle by default
+    (``sites_keep_client_bundle_default``), so the ripple branch's "no JavaScript
+    runs for the visitor" is simply false here — and it is the kind of false that
+    makes an agent refuse a menu toggle the site can actually run."""
+    preamble = sites_handler._refine_preamble(_refine_meta(), "react")
+    lower = preamble.lower()
+
+    assert "no javascript runs for the visitor" not in lower
+    assert "renders statically" not in lower
+    # It states the real shape: prerendered AND hydrating.
+    assert "prerendered" in lower
+    assert "client bundle" in lower
+
+
+async def test_react_refine_does_not_promise_a_live_url_on_publish() -> None:
+    """A react publish QUEUES a build (``sites/service.py::build_runs_async``), so
+    the response is not a finished deploy: ``_enqueue_static_build`` creates the Site
+    doc with ``deployed=False`` / ``url=""`` on a first publish, and a re-publish
+    keeps the PREVIOUS deploy's url serving the pre-change page while the rebuild
+    runs. "Show the live url" is wrong in both directions.
+
+    THE MUTATION THAT BREAKS THIS: make ``_publish_runs_async`` return False. Run:
+    the react branch lost the queued-build paragraph and the status tool, and this
+    failed. (Applied 2026-08-11.)
+    """
+    preamble = sites_handler._refine_preamble(_refine_meta(), "react")
+    lower = preamble.lower()
+
+    assert "asynchronous" in lower
+    assert "returns BEFORE the build starts" in preamble
+    # #1920 shipped the read-only status tool, so the branch names it rather than
+    # gesturing at the app. It is the ONLY way to learn how a react build ended.
+    assert "mcp__pocketpaw_sites_manager__get_site_build_status" in preamble
+    assert "build_reason" in preamble
+    # The gate is `is_live` and not `deployed` / a non-empty url, either of which is
+    # set while a rebuild serves the PREVIOUS page. Asserted as the operative
+    # INSTRUCTION rather than as the presence of the field name: the first version of
+    # this test asserted `` `is_live` `` appeared somewhere and "never report a site
+    # as live off `deployed`", and a mutation that rewrote the gate's opening
+    # sentence escaped both — the surviving body still contained each fragment.
+    assert "`url` only when `is_live` is true" in preamble
+    assert "never report a site as live off `deployed`" in lower
+    # And the inversion the mutation introduced, named directly.
+    assert "whenever `deployed` is true" not in preamble
+
+
+async def test_react_refine_carries_the_prerender_contract() -> None:
+    """The rule that actually binds a react edit, stated as
+    ``pocketpaw-create-react-site/SKILL.md`` states it: ``<App />`` is rendered by
+    ``react-dom/server`` at build time, ``useEffect`` does not run then, and
+    ``window``/``document`` do not exist during that render — so a component must
+    return its resting state in markup."""
+    preamble = sites_handler._refine_preamble(_refine_meta(), "react")
+
+    assert "react-dom/server" in preamble
+    assert "`useEffect` does NOT run at prerender time" in preamble
+    assert "RETURNED MARKUP" in preamble
+
+
+async def test_react_refine_states_the_write_scope_the_tool_enforces() -> None:
+    """The reserved paths come from the module the TOOL checks, not from prose.
+
+    ``sites/react_paths.py`` is shared by ``edit_react_component`` and
+    ``create_react_site``, so deriving the expectation from those constants means a
+    fifth reserved file cannot land with the prompt still listing four. A prompt that
+    under-lists does not fail loudly — the agent writes the file, gets
+    ``site_edit.reserved_path``, and burns a turn learning what it should have been
+    told.
+
+    THE MUTATION THAT BREAKS THIS: hardcode ``_react_write_scope``'s list back into
+    prose, dropping ``paw-prerender.mjs``. Run: the derived expectation still wanted
+    it and this failed. (Applied 2026-08-11.)
+    """
+    from pocketpaw_ee.sites.react_paths import (
+        REACT_AUTHORABLE_PREFIXES,
+        REACT_RESERVED_FILES,
+        REACT_RESERVED_PREFIX,
+    )
+
+    preamble = sites_handler._refine_preamble(_refine_meta(), "react")
+
+    for reserved in REACT_RESERVED_FILES:
+        assert f"`{reserved}`" in preamble, f"reserved path {reserved!r} not stated"
+    assert f"`{REACT_RESERVED_PREFIX}`" in preamble
+    for authorable in REACT_AUTHORABLE_PREFIXES:
+        assert f"`{authorable}`" in preamble, f"authorable prefix {authorable!r} not stated"
+    # Normalization happens before the check, so a literal-string reading of the list
+    # is a loophole the agent must not think it has.
+    assert "normalized" in preamble
+
+
+@pytest.mark.parametrize("engine", SOURCE_MAP_ENGINES)
+async def test_source_map_refine_drops_the_ripple_widget_rules(engine: str) -> None:
+    """The five SSR rules name widget types, and a source-map page has no widgets.
+
+    Shipping them to react/html/svelte was not merely useless: "pricing-table uses
+    tiers" and "never the accordion widget" describe a widget catalog the agent
+    cannot use here, so following them means inventing something.
+
+    THE MUTATION THAT BREAKS THIS: append "Keep the 5 static-site (SSR) rules:
+    `pricing-table` uses `tiers`" to ``_REFINE_SHARED_RULES``. Run: the ripple rules
+    reached all three source-map branches and this failed on each. (Applied
+    2026-08-11.)
+    """
+    preamble = sites_handler._refine_preamble(_refine_meta(), engine)
+
+    # Matched on the RULE, not on the bare word: react's prerender rule legitimately
+    # mentions an accordion's open panel as a `useState` initial value, and a test
+    # that banned the word would have forced that guidance out to keep itself green.
+    for widget_rule in (
+        "`pricing-table` uses `tiers`",
+        "NEVER the `accordion` widget",
+        "NEVER the `form` or `newsletter` widget",
+        "`hero+grid`",
+        "`on_click` handler",
+        "5 static-site (SSR) rules",
+    ):
+        assert widget_rule not in preamble, (
+            f"{engine}: ripple widget rule {widget_rule!r} leaked onto a source-map engine"
+        )
+
+
+@pytest.mark.parametrize("engine", ALL_REFINE_ENGINES)
+async def test_every_refine_branch_keeps_what_transfers(engine: str | None) -> None:
+    """The engine-independent half, pinned on every branch including unknown.
+
+    A fork is a place for four copies of an instruction to drift, so the shared
+    rules are asserted across all of them rather than spot-checked on the one that
+    was edited last.
+
+    THE MUTATION THAT BREAKS THIS: drop ``f"{rules}"`` from ``_refine_preamble``'s
+    return. Run: every branch lost the anchor-CTA rule and this failed on all five.
+    (Applied 2026-08-11.)
+    """
+    preamble = sites_handler._refine_preamble(_refine_meta(), engine)
+    lower = preamble.lower()
+
+    # The source pocket is still threaded through every branch — a refine that
+    # cannot name its pocket cannot act on it.
+    assert REFINE_POCKET in preamble
+    assert 'mode="refine"' in preamble
+    # ASK-DON'T-ASSUME and its mechanism (refine keeps ripple_mode="on" on every
+    # engine, so the widget is real here).
+    assert "ask, don't assume" in lower
+    assert "ask-user-questions" in preamble
+    assert "fabricate" in lower
+    # The funnel, real copy, anchor CTAs, and the flat lead form.
+    assert "hero" in lower
+    assert "pricing" in lower
+    assert "footer" in lower
+    assert "href" in lower
+    assert "flat" in lower
+    # Never reframed as a create or a dashboard pocket.
+    assert "do NOT create a new site or a new pocket" in preamble
+    assert "dashboard pocket" in lower
+    # And the concierge block, on every branch.
+    assert "concierge" in lower
+
+
+async def test_svelte_refine_names_its_own_tool_and_calls_the_edit_a_draft() -> None:
+    """``edit_svelte_component`` STAGES A DRAFT PREVIEW — it returns
+    ``status:"draft"`` / ``is_live:false`` and the user clicks Submit for review.
+    (The mcp server's module header still says "and republishes"; that has been
+    stale since feat/sites-diff-edit.) An agent told the edit republished would
+    announce a change that is not live.
+
+    THE MUTATION THAT BREAKS THIS: retitle the block "THE EDIT REPUBLISHES THE
+    SITE". Run: it ESCAPED the first time — ``"draft" in lower`` still held because
+    the surviving payload mentions ``status:"draft"`` — which is why the assertions
+    below are separate and "republish" is banned outright. Re-run: caught.
+    (Applied 2026-08-11.)
+    """
+    preamble = sites_handler._refine_preamble(_refine_meta(), "svelte")
+    lower = preamble.lower()
+
+    assert SVELTE_TOOL in preamble
+    assert "pocket_specialist__edit" not in preamble
+    assert "draft" in lower
+    # Both halves asserted separately, and "republish" banned outright. An `or`
+    # across these let a mutation that retitled the block "THE EDIT REPUBLISHES THE
+    # SITE" escape: the surviving `status:"draft"` mention kept the test green while
+    # the heading — the sentence the agent actually acts on — said the opposite.
+    assert "not a deploy" in lower
+    assert "is not the live site" in lower
+    assert "republish" not in lower
+    # Both edit shapes, so the agent prefers the diff over a whole-file rewrite.
+    assert "old_string" in preamble
+    assert "new_source" in preamble
+
+
+async def test_html_refine_admits_it_has_no_edit_tool() -> None:
+    """html is the DEFAULT create engine and has NO chat-reachable edit tool:
+    ``create_html_site`` takes no pocket id (it mints a second site),
+    ``edit_svelte_component``'s guard is svelte-only by design, and the uid-splice
+    path behind the native editor is a svelte-gated REST route. So the branch says
+    so — the one thing it must not do is name a tool to fill the gap.
+
+    THE MUTATION THAT BREAKS THIS: point the html branch's edit step at
+    ``mcp__pocketpaw_sites_manager__create_html_site``. Run: a create tool was named
+    as the apply path and this failed. (Applied 2026-08-11.)
+    """
+    preamble = sites_handler._refine_preamble(_refine_meta(), "html")
+    lower = preamble.lower()
+
+    assert "cannot write this site's files from this chat" in lower
+    # No write tool is named — including the create tool that would look like one.
+    assert "create_html_site" not in preamble
+    assert "pocket_specialist__edit" not in preamble
+    assert SVELTE_TOOL not in preamble
+    assert REACT_TOOL not in preamble
+    # It still does the useful half: read the current source and hand back markup.
+    assert "mcp__pocketpaw_pocket__get_pocket" in preamble
+    # And it must not offer to publish a change it never applied.
+    assert "mcp__pocketpaw_sites_manager__publish" not in preamble
+
+
+async def test_ripple_refine_is_unchanged_apart_from_the_publish_claim() -> None:
+    """The ripple branch was always correct, so the fork must not have rewritten it.
+
+    Pins the five widget rules and the Tier-0 animation list that only apply here,
+    plus the one thing that DID change: the old text said the site "auto-publishes
+    from its source pocket", which was never true — publish is a tool call and on a
+    paid tier it can open a checkout.
+
+    THE MUTATION THAT BREAKS THIS: delete rule 2 (``pricing-table`` uses ``tiers``)
+    from the ripple branch. Run: the fork had quietly rewritten the one engine that
+    was already correct and this failed. (Applied 2026-08-11.)
+    """
+    preamble = sites_handler._refine_preamble(_refine_meta(), "ripple")
+    lower = preamble.lower()
+
+    assert RIPPLE_TOOL in preamble
+    assert "tiers" in lower
+    assert "accordion" in lower
+    assert "tier-0" in lower
+    assert "hero+grid" in lower
+    # The corrected publish claim.
+    assert "auto-publish" not in lower
+    assert "the user's call" in lower
+    # ripple publishes INLINE, so its response is already conclusive: no queued-build
+    # paragraph and no status tool. That absence is what makes the
+    # `_publish_runs_async` mutation catchable in both directions.
+    assert "get_site_build_status" not in preamble
+    assert "asynchronous" not in lower
+    # It still gates on `is_live` — that field is on every publish response, and
+    # `deployed` alone lies during a rebuild on any engine that grows one.
+    assert "`url` only when `is_live` is true" in preamble
+
+
+async def test_refine_cache_key_is_the_rendered_digest() -> None:
+    """Refine reads the pocket, so ``meta_key`` can no longer describe it: two sites
+    on different engines render different instructions from the same meta shape.
+    ``content_key`` moves exactly when the rendered text moves.
+
+    THE MUTATION THAT BREAKS THIS: key refine on ``meta_key("sites",
+    meta.pocket_id)``. Run: the key stopped tracking the rendered text and this
+    failed. (Applied 2026-08-11.)
+    """
+    from pocketpaw_ee.cloud.surface.handlers._helpers import content_key
+
+    rendered = await sites_handler.build_preamble(WORKSPACE, USER, _refine_meta())
+
+    assert rendered.cache_key == content_key("sites", rendered.text)
+    # A create meta still answers the meta key (it reads nothing about the site).
+    create = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    assert create.cache_key.startswith("sites:/sites")
+
+
+async def test_every_tool_a_refine_branch_names_is_a_registered_tool() -> None:
+    """The gate pocketpaw/CLAUDE.md asks for, applied to this surface.
+
+    ``tests/test_prompt_names_only_real_tools.py`` does this for the inline ripple
+    prompt and says outright that it covers nothing else. The refine fork now names
+    a different tool per engine, which is exactly the shape that drifts: a tool
+    moves servers or gets renamed, and the prompt keeps commanding the old id while
+    the agent improvises instead of erroring.
+
+    Derived from the MCP tool schemas, never a hand-kept list.
+    """
+    import re
+
+    registered = await _registered_mcp_tool_ids()
+    assert registered, "no MCP tools enumerated — the derivation broke, not the prompt"
+    # The derivation has to reach the specialist's server, which lives OUTSIDE the
+    # mcp_servers package. Asserted rather than assumed: without it the ripple
+    # branch's tool would read as unregistered and the check would fail on the one
+    # branch that was never broken.
+    assert RIPPLE_TOOL in registered, "the enumeration missed the pocket specialist"
+
+    named: set[str] = set()
+    for engine in ALL_REFINE_ENGINES:
+        text = sites_handler._refine_preamble(_refine_meta(), engine)
+        named |= set(re.findall(r"mcp__[a-z0-9_]+__[a-z0-9_]+", text))
+
+    unresolved = named - registered
+    # ``edit_react_component`` lands with feat/sites-react-edit-lane, which this
+    # branch depends on and must merge after. The exemption is self-clearing: it
+    # only tolerates ABSENCE, so the branch that registers the tool turns this into
+    # an ordinary pass with nothing to remove.
+    assert unresolved <= {REACT_TOOL}, (
+        "a refine branch names tools that no MCP server registers — the agent "
+        f"cannot call these and will improvise instead of erroring: {sorted(unresolved)}"
+    )

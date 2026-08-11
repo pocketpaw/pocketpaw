@@ -136,16 +136,114 @@
 # here, and no site content is read — refine and chat echo the pocket id and
 # never describe the page — so a key built from meta is EXACT, and editing a
 # site correctly leaves it still. The sub-builders keep returning ``str``; only
-# the entry point answers the key.
+# the entry point answers the key. (The refine half of that claim no longer
+# holds — see the next entry.)
+#
+# Changes: 2026-08-11 (fix/sites-refine-preamble-engine-fork) — ``_refine_preamble``
+# FORKS BY ENGINE. It was written for ripple and shipped to all four: on a react,
+# html or svelte site it commanded ``pocket_specialist__edit`` (which mutates a
+# rippleSpec those pockets do not have — their content is a ``source`` map),
+# asserted "renders STATICALLY (no JavaScript runs for the visitor)" (react ships a
+# hydrating client bundle by default), claimed "the site auto-publishes from its
+# source pocket" (nothing auto-publishes — publish is a tool call and a paid-tier
+# checkout), and then listed five SSR rules about ripple WIDGET shapes
+# (``pricing-table``/``tiers``, the ``accordion`` ban, the ``form``/``newsletter``
+# ban) at a page with no widgets at all. Per pocketpaw/CLAUDE.md, "The prompt may
+# not command a tool the agent doesn't have" — and its "naming an existing-but-wrong
+# tool is the same defect" clause is exactly this: the specialist IS reachable here
+# (``pocketpaw_pocket_specialist`` rides ``ALWAYS_ALLOWED_MCP_SERVERS``), so the
+# agent got an edit tool that could not touch its pocket and improvised silently.
+#
+# THE ENGINE IS READ FROM THE POCKET, NOT FROM ``meta``. ``meta.engine`` is a
+# CREATE hint — the /sites gallery's preset picker sets it, and the refine
+# SurfaceMetaProvider (paw-enterprise ``routes/sites/[siteId]/+page.svelte``) stamps
+# only ``site_id`` / ``pocket_id`` / ``focus_node_id`` / ``mode``. Forking refine on
+# ``meta.engine`` would therefore have put EVERY site on the ``or "html"`` default:
+# a regression for ripple and no fix for react. So refine resolves the engine from
+# its source pocket through the canonical ``sites/engines.py::normalize_engine``
+# (the same value publish branches on), which makes this preamble the first on this
+# surface to read live state — hence ``content_key`` for the refine branch, per
+# ``_helpers.content_key``'s own rule. Create and chat still answer ``meta_key``.
+# An unreadable pocket (deleted, cross-tenant, DB error) or an engine this module
+# has no branch for lands on ``_refine_unknown_engine_step``, which names NO edit
+# tool and tells the agent to identify the engine first — the one honest answer,
+# and the reason a fifth engine in ``engines.py`` degrades instead of silently
+# inheriting react's rules.
+#
+# Per-branch, only what is TRUE for that engine: ripple keeps its widget rules and
+# the specialist edit path byte-for-byte (it was always correct there); svelte gets
+# ``edit_svelte_component``, which STAGES A DRAFT PREVIEW rather than publishing
+# (the module header above still says "and republishes" — stale since
+# feat/sites-diff-edit); react gets the react component-edit tool and the prerender
+# contract as ``pocketpaw-create-react-site/SKILL.md`` states it; html gets the
+# truth that it has NO chat edit tool at all — ``create_html_site`` takes no
+# ``pocket_id`` and would mint a SECOND site, and ``edit_svelte_component``'s guard
+# is svelte-only by design ("html has no per-component model — it edits by uid
+# splice (HE-9), not here"), so the branch says so instead of naming something.
+# The publish claim is fixed on every branch and the queued-build wording is gated
+# on ``sites/service.py::build_runs_async`` — react alone today — so svelte starts
+# telling the truth on its own if #1913 flips it. ASK-DON'T-ASSUME and the
+# ``ask-user-questions`` widget survive unchanged on every branch: refine keeps
+# ``ripple_mode="on"`` for all engines (``surface_registry._sites_profile``), so
+# that mechanism is real here even where create would have used ``ask_user`` chips.
+
+# Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — the react track finally
+# has an EDIT tool, and two preambles were telling the agent the wrong thing about
+# changing a react site:
+#   * `_create_preamble`'s react `build_step` now says that any change after the
+#     create goes through `mcp__pocketpaw_sites_manager__edit_react_component` with
+#     the same pocket_id, NOT a second `create_react_site`. That is the reported
+#     bug: with no edit tool registered, a follow-up "shorten the hero headline"
+#     had one available move, and it minted a SECOND site pocket while the site the
+#     user was looking at stayed unchanged.
+#   * `_refine_preamble` now routes a react site to the new
+#     `_react_refine_preamble`. The existing refine preamble names
+#     `mcp__pocketpaw_pocket_specialist__edit` and then enumerates five rules about
+#     ripple WIDGETS; a react pocket has no rippleSpec, so on that engine the
+#     instruction is not merely useless, it points at a merge with nothing to merge
+#     into. Per pocketpaw/CLAUDE.md, naming an existing-but-WRONG tool is the same
+#     defect as naming an absent one. The react preamble replaces the widget rules
+#     with the prerender rule (the same hazard in React spelling) and the
+#     src/+public/ write scope the tool actually enforces.
+# The refine fork reads `meta.engine`, which is documented as the CREATE hint, so it
+# only fires when the per-site chat client stamps it — see
+# `_react_refine_preamble`'s docstring. Absent it, refine behaves exactly as before.
+#
+# Updated: 2026-08-11 (fix/sites-refine-preamble-engine-fork) — RX-3's own caveat
+# above was the whole problem, and it is now closed: `meta.engine` is never stamped
+# on the refine surface, so `_react_refine_preamble` rendered for no one. Rather
+# than send the engine from the client (another repo, and wrong-until-deployed),
+# the engine is resolved SERVER-SIDE off the source pocket and `_refine_preamble`
+# forks on it for all four engines. `_react_refine_preamble` is FOLDED INTO that
+# fork's react branch rather than kept beside it: two react refine preambles, one
+# of them dead, is the drift the fork exists to prevent. Its content carries over
+# — the edit tool, the reserved shell, the dependency list, the prerender rule, the
+# draft framing — with three corrections. It used `mcp__pocketpaw_ask__ask_user`,
+# but refine holds `ripple_mode="on"` on every engine, so the `ask-user-questions`
+# widget is the mechanism this surface actually renders. It named
+# `pocket_specialist__edit` inside its prohibition; the create preamble's react
+# branch forbids "the pocket specialist" by concept without the id, and this now
+# matches that. And it told the agent to relay the publish result, which on react
+# is a QUEUED build whose url is empty on a first publish and the previous deploy
+# on a re-publish — see `_refine_publish_step`. RX-3's create-side change (the
+# react `build_step` naming the edit tool) is untouched.
 
 from __future__ import annotations
 
 import functools
+import logging
 from typing import Any
 
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
-from pocketpaw_ee.cloud.surface.handlers._helpers import meta_key
+from pocketpaw_ee.cloud.surface.handlers._helpers import content_key, meta_key
+from pocketpaw_ee.sites.react_paths import (
+    REACT_AUTHORABLE_PREFIXES,
+    REACT_RESERVED_FILES,
+    REACT_RESERVED_PREFIX,
+)
 from pocketpaw_ee.sites_crew.models import DesignBrief
+
+logger = logging.getLogger(__name__)
 
 # --- The concierge block (fix/concierge-tools-for-site-agent) -----------------
 #
@@ -211,6 +309,107 @@ _CONCIERGE_NOTE = (
 )
 
 
+# --- Engine resolution, shared by the create fork and the refine fork ---------
+#
+# ONE tuple and ONE normalizer so the two forks cannot drift: a fifth engine added
+# here has to be given a branch in both, and until it is, both fall back visibly
+# rather than silently instructing the wrong track.
+#
+# The two forks take DIFFERENT defaults, and that is the point of the parameter
+# rather than a wart. Create is choosing an engine for a page that does not exist
+# yet, so an unrecognized hint means "build the default" — html. Refine is
+# describing a page that ALREADY exists, so there is no sensible default: guessing
+# hands the agent the wrong edit tool. Refine passes what the pocket stored and
+# treats anything unrecognized as unknown (see ``_refine_engine``).
+_SITE_ENGINES: tuple[str, ...] = ("html", "svelte", "ripple", "react")
+
+
+def _preamble_engine(raw: str | None, *, default: str) -> str:
+    """Normalize an engine value for a preamble fork. Never raises.
+
+    Mirrors ``sites/engines.py::normalize_engine``'s never-raise policy (an
+    unusable engine string must not break chat) while keeping the create fork's
+    html default, which differs from that module's ripple one.
+    """
+    engine = (raw or default).lower()
+    return engine if engine in _SITE_ENGINES else default
+
+
+async def _refine_engine(pocket_id: str, user_id: str, workspace_id: str) -> str | None:
+    """Resolve which engine authored the site being refined. ``None`` if unknowable.
+
+    Read from the SOURCE POCKET, not from ``meta``: ``meta.engine`` is a create-time
+    hint that the /sites gallery's preset picker sets and the refine surface never
+    stamps at all, so a fork on it would put every refine on the create default.
+    The pocket's own ``engine`` is what publish branches on, so a preamble keyed to
+    it describes the page the user is actually looking at.
+
+    Normalized through the canonical ``sites/engines.py::normalize_engine`` rather
+    than ``_preamble_engine`` so this agrees with the publish path by construction —
+    including its legacy default: a pocket predating the field reads ``"ripple"``,
+    which is exactly the branch such a site has always been given.
+
+    Returns ``None`` on any failure, which the caller renders as an explicit
+    "identify the engine first" instruction. The catch is broad on purpose (the same
+    shape ``handlers/pocket.py::_load_pocket`` uses): NotFound, Forbidden and a
+    dropped connection all mean the same thing here — we cannot say, so we must not
+    claim. A preamble is never worth breaking a chat turn over.
+
+    Tenancy: ``pockets_service.get`` gates by owner / shared_with / visibility, NOT
+    by workspace, so a user in two workspaces could stamp a pocket from B in a chat
+    in A. Rejecting a workspace mismatch keeps the engine (and with it the tool the
+    prompt names) from being read out of the wrong tenant.
+    """
+    try:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+        pocket = await pockets_service.get(pocket_id, user_id)
+    except Exception:  # noqa: BLE001 — see the docstring: never break a turn
+        logger.debug("sites_handler: engine lookup for %s failed", pocket_id, exc_info=True)
+        return None
+    if pocket.get("workspace") != workspace_id:
+        logger.warning(
+            "sites_handler: workspace mismatch for pocket %s (chat=%s, pocket=%s); "
+            "refusing to read its engine",
+            pocket_id,
+            workspace_id,
+            pocket.get("workspace"),
+        )
+        return None
+    try:
+        from pocketpaw_ee.sites.engines import normalize_engine
+
+        return normalize_engine(pocket.get("engine"))
+    except Exception:  # noqa: BLE001
+        logger.debug("sites_handler: normalize_engine unavailable", exc_info=True)
+        return None
+
+
+def _publish_runs_async(engine: str) -> bool:
+    """Does publishing this engine QUEUE its build instead of running it inline?
+
+    Delegates to ``sites/service.py::build_runs_async`` — the predicate the publish
+    path itself branches on — so this prompt cannot claim a synchronous publish for
+    an engine that has since moved to the queue (static svelte is the live
+    candidate). Hardcoding ``engine == "react"`` here would be a second copy of a
+    fact that is actively moving.
+
+    An import failure answers TRUE, deliberately. The two wordings are not
+    symmetric: telling the agent to report a queued build when the publish was
+    actually inline costs the user one extra click to see a url, while telling it to
+    show a url when the build is still queued makes it announce a change that is not
+    live yet — on a first publish there is no url at all, and on a re-publish the url
+    serves the PREVIOUS page. Degrade toward the claim that cannot be false.
+    """
+    try:
+        from pocketpaw_ee.sites.service import build_runs_async
+
+        return build_runs_async(engine)
+    except Exception:  # noqa: BLE001
+        logger.debug("sites_handler: build_runs_async unavailable", exc_info=True)
+        return True
+
+
 @functools.lru_cache(maxsize=1)
 def _design_taste_system() -> str:
     """Return the ``pocketpaw-design-taste`` SKILL.md body (frontmatter stripped)
@@ -258,13 +457,6 @@ def _design_taste_system() -> str:
 async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
     """Render the /sites surface preamble.
 
-    The cache key is built from ``meta`` alone, and here that is exact rather
-    than a concession: all three sub-preambles are pure functions of the meta
-    plus a process-cached read of the design-taste SKILL.md. Nothing about the
-    SITE is read — the refine and chat modes echo the ``pocket_id`` and never
-    describe the page's contents — so editing a site does NOT move this key,
-    and should not: the preamble says the same thing before and after.
-
     Modes, keyed on the meta:
 
     * **Create** (no ``pocket_id``) — the /sites gallery / describe-to-create
@@ -276,14 +468,44 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     * **Refine / Build** (``pocket_id`` present, ``mode`` "build" or unset) —
       the per-site chat at ``/sites/[siteId]``. Refine the EXISTING published
       site by editing its source pocket in place; never rebuild from scratch.
+
+    TWO KEYING RULES, because the modes no longer read the same amount:
+
+    * Create and chat are pure functions of ``meta`` plus a process-cached read
+      of the design-taste SKILL.md. Nothing about the SITE is read — chat echoes
+      the ``pocket_id`` and never describes the page's contents — so ``meta_key``
+      is exact rather than a concession, and editing a site correctly leaves the
+      key still: the preamble says the same thing before and after.
+    * Refine reads the pocket to learn which ENGINE authored the site, because
+      the instructions it renders (which edit tool exists, whether JavaScript
+      runs for the visitor, whether a publish returns a usable url) are different
+      facts per engine and ``meta`` does not carry the engine on this surface. So
+      it answers ``content_key`` — the digest of what was actually rendered,
+      which is the honest key the moment a handler reads live state. It moves
+      when the rendered instructions move and not otherwise: editing the SITE
+      does not shift it (the text describes the track, never the content), while
+      a pocket that became unreadable does, which is correct — that turn's
+      preamble genuinely says something different.
+
+    The sub-builders keep returning ``str``; only the entry point answers the key.
     """
     if meta.pocket_id:
-        text = _chat_preamble(meta) if meta.mode == "chat" else _refine_preamble(meta)
+        if meta.mode == "chat":
+            text = _chat_preamble(meta)
+        else:
+            # The one read on this surface. Its failure mode is a preamble that
+            # says "identify the engine first", never a failed turn.
+            engine = await _refine_engine(meta.pocket_id, user_id, workspace_id)
+            refine_text = _refine_preamble(meta, engine)
+            return SurfacePreamble(
+                text=refine_text,
+                cache_key=content_key("sites", refine_text),
+            )
     else:
         text = _create_preamble(meta)
-    # The five inputs the three sub-preambles read, all off ``meta``. ``mode``
-    # and ``engine`` are in there because they pick which preamble was rendered
-    # at all — toggling Build/Chat on the same site is a different prompt.
+    # The five inputs the two meta-only sub-preambles read, all off ``meta``.
+    # ``mode`` and ``engine`` are in there because they pick which preamble was
+    # rendered at all — toggling Build/Chat on the same site is a different prompt.
     return SurfacePreamble(
         text=text,
         cache_key=meta_key(
@@ -325,16 +547,15 @@ def _create_preamble(meta: SurfaceMeta) -> str:
     is the user's call — not an automatic step off a plain "create a site".
     """
     route = meta.route_path or "/sites"
-    engine = (meta.engine or "html").lower()
     # RX-2 adds "react". Every engine named here MUST have a create tool the
     # /sites agent can actually reach — the build step below names one, and a
     # preamble that commands an absent tool does not error, it makes the model
     # improvise (pocketpaw/CLAUDE.md, "The prompt may not command a tool the agent
     # doesn't have"). react's tool is ``create_react_site``, registered on the
     # sites_manager server and carried into the surface allow-list by
-    # ``SITES_TOOL_IDS``. An unknown engine still falls back to html.
-    if engine not in ("html", "svelte", "ripple", "react"):
-        engine = "html"
+    # ``SITES_TOOL_IDS``. An unknown engine still falls back to html — shared with
+    # the refine fork via ``_preamble_engine`` so the two engine lists are one list.
+    engine = _preamble_engine(meta.engine, default="html")
     engine_attr = f' engine="{engine}"'
 
     if engine == "svelte":
@@ -395,7 +616,19 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "rippleSpec and NO widget catalog on this track — do not draft a "
             "rippleSpec or call the pocket specialist, and there is no "
             "`/api/submit` route (no server runtime), so a lead form is a native "
-            "`<form>` with flat named fields."
+            "`<form>` with flat named fields.\n"
+            "CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further "
+            "change the user asks for in this conversation — 'shorten the hero "
+            "headline', 'darker pricing cards', 'add a testimonials section' — is "
+            "`mcp__pocketpaw_sites_manager__edit_react_component` with the SAME "
+            "pocket_id, NOT a second `create_react_site` call. Calling create again "
+            "mints a SECOND site and leaves the one the user is looking at "
+            "unchanged. Send a targeted `edits` diff for a small change; to add a "
+            "section, call it with `create=true` for the new "
+            "`src/components/<Name>.tsx` and then again with `edits` on "
+            "`src/App.tsx` to render it. The edit saves to the DRAFT — it does not "
+            "publish, so keep offering the Preview rather than announcing a live "
+            "change."
         )
     elif engine == "ripple":
         engine_note = " The page is rendered STATICALLY (no JavaScript runs for the visitor)."
@@ -585,17 +818,355 @@ def _create_preamble(meta: SurfaceMeta) -> str:
     )
 
 
-def _refine_preamble(meta: SurfaceMeta) -> str:
+# The rules that transfer to EVERY engine, because they are properties of a
+# marketing landing page and not of a rendering track. The five numbered rules the
+# ripple branch keeps are the ones that do NOT transfer: they name widget types
+# (``pricing-table``'s ``tiers``, the ``accordion`` ban, the ``form`` /
+# ``newsletter`` ban) and a react/html/svelte page has no widgets to name.
+_REFINE_SHARED_RULES = (
+    "PRESERVE the landing funnel (nav → hero → services → proof → pricing → "
+    "call-to-action → lead form → footer): a refine changes a section, it does not "
+    "reorder or drop the funnel, and it does not turn the page into a dashboard.\n"
+    "REAL COPY ONLY. Never invent a testimonial, a statistic, a price, an address, "
+    "or a phone number to fill a section you are editing — ask, or keep what is "
+    "there.\n"
+    "Every CTA stays an anchor `href` (or `tel:` / `mailto:`), never a click "
+    "handler that needs JavaScript to navigate.\n"
+    "The lead form stays a FLAT native `<form>` — real `name=` on every "
+    '`input`/`textarea` and a `button type="submit"`. Never nest a form inside a '
+    "form, and never replace it with a widget that does.\n"
+)
+
+
+def _react_write_scope() -> str:
+    """The paths a react edit may and may not write — rendered from the constants
+    the tool ENFORCES, not retyped as prose beside them.
+
+    ``sites/react_paths.py`` is the shared module ``edit_react_component`` and
+    ``create_react_site`` both check against, so reading it here means the day a
+    fifth reserved file is added, this instruction gains it in the same commit
+    instead of drifting into a stale list the agent trusts. A prompt that lists four
+    reserved paths when the tool rejects five does not fail loudly: the agent writes
+    the fifth, gets ``site_edit.reserved_path`` back, and spends a turn discovering
+    what the prompt was supposed to have told it.
+
+    The normalization note is not decoration — the tool collapses ``.``/``..`` and
+    backslashes BEFORE it checks, so ``./package.json`` is rejected too and an agent
+    that reads the list as a literal string match would think it found a loophole.
+    """
+    reserved = ", ".join(f"`{path}`" for path in REACT_RESERVED_FILES)
+    authorable = " and ".join(f"`{prefix}`" for prefix in REACT_AUTHORABLE_PREFIXES)
+    return (
+        f"YOU MAY ONLY WRITE under {authorable}, and never under "
+        f"`{REACT_RESERVED_PREFIX}`. {reserved} and everything under "
+        f"`{REACT_RESERVED_PREFIX}` are GENERATED and will be rejected — they carry "
+        "the prerender contract and the dependency list. Paths are normalized "
+        "before that check, so a `./` prefix or a `..` segment does not get around "
+        "it. The project has react, react-dom and vite and NOTHING else: no router, "
+        "no CSS framework, no state or animation library, and no way to add a "
+        "dependency — so build the change with what is there, and if it genuinely "
+        "needs a new package, say so instead of importing one.\n"
+    )
+
+
+def _refine_publish_step(engine: str | None, pocket_id: str) -> str:
+    """The publish instruction for a refine turn. Honest per engine.
+
+    Three claims in the old text were wrong at once, and each was wrong in the
+    direction that makes the agent announce something that did not happen: that the
+    site "auto-publishes from its source pocket" (nothing auto-publishes — publish
+    is a tool call, and on a paid tier it can open a checkout), that an edit is
+    followed by a re-publish at all (the svelte and react edit tools stage a DRAFT
+    and deliberately do not build), and that the agent should "show the live `url`"
+    (on an ASYNC engine that url is empty on a first publish and points at the
+    PREVIOUS deploy on a re-publish, so it serves the pre-change page).
+
+    ``_publish_runs_async`` decides the last part, so the wording follows the
+    publish path instead of restating it.
+
+    THE GATE IS ``is_live``, WHICH IS WHY THIS NAMES A FIELD AT ALL (#1920). The
+    publish response carries ``build_status`` / ``build_reason`` / ``build_job_id`` /
+    ``build_in_progress`` / ``is_live`` beside the original five keys, and ``is_live``
+    is the only one that answers the question the agent is about to answer out loud:
+    it is true only when there is a non-empty ``url`` AND ``deployed`` AND no build
+    in flight. ``deployed`` and a non-empty ``url`` each look like that answer and
+    are not — a rebuild deliberately keeps the previous deploy's values so a working
+    site is not reported as down mid-build, which is exactly the state where they
+    lie. The statuses are deliberately NOT enumerated here: the wire contract treats
+    an unrecognized ``build_status`` as in-progress, so a closed list in the prompt
+    would go stale in the unsafe direction.
+    """
+    common = (
+        "PUBLISHING IS A SEPARATE STEP AND THE USER'S CALL. Nothing you do here "
+        "goes live on its own: the published page keeps serving its last build "
+        "until someone publishes, and publishing deploys to the public edge (on a "
+        "paid tier it can open a checkout). Do NOT publish off a plain edit "
+        "request. Tell the user their change is saved and offer to take it live.\n"
+        "When they DO ask ('publish', 'make it live', 'ship it'), call "
+        f"`mcp__pocketpaw_sites_manager__publish` with pocket_id `{pocket_id}` and "
+        "relay the REAL result — the real error text on a failure. Never claim a "
+        "publish that did not happen.\n"
+        "GATE 'IT IS LIVE' ON THE `is_live` FIELD AND ON NOTHING ELSE. Show the "
+        "`url` only when `is_live` is true. Never report a site as live off "
+        "`deployed` or a non-empty `url` alone — a rebuild keeps the PREVIOUS "
+        "deploy's url and `deployed:true` on purpose, so both are set while the "
+        "page the user just changed is not live. The response also carries a "
+        "`message` that already states the correct conclusion: relay it.\n"
+    )
+    if not _publish_runs_async(engine or ""):
+        return common + ("Never invent or guess a url — show only what the tool returned.\n")
+    return common + (
+        "THE BUILD IS ASYNCHRONOUS ON THIS ENGINE, so publish returns BEFORE the "
+        "build starts and its response can never tell you how the build ended. On a "
+        "FIRST publish the site is created with no url at all (empty) and "
+        "`deployed` false; on a RE-publish the url is the PREVIOUS deploy, which "
+        "keeps serving the OLD page for as long as the rebuild takes. Report it as "
+        "a build that has STARTED, not as a live page.\n"
+        "TO LEARN THE OUTCOME, call "
+        "`mcp__pocketpaw_sites_manager__get_site_build_status` with pocket_id "
+        f"`{pocket_id}` — that is the ONLY way, and it is the follow-up whenever a "
+        "publish came back with `build_in_progress` true. While it is still true, "
+        "say the site is still building and show no url. If the build FAILED, relay "
+        "`build_reason` instead of a url and offer to fix the page and publish "
+        "again. Only once `is_live` is true is the url the thing to show.\n"
+    )
+
+
+def _refine_unknown_engine_step(pocket_id: str) -> str:
+    """What to say when we could not read which engine authored the site.
+
+    The read fails on a deleted pocket, a cross-workspace stamp, or a dropped
+    connection — and a fifth engine in ``sites/engines.py`` with no branch here
+    lands in the same place. Every engine's edit path is a DIFFERENT tool and three
+    of the four reject a pocket from another track, so guessing is the one move
+    guaranteed to be wrong roughly three times in four. Name no tool; make the
+    agent look first.
+    """
+    return (
+        "WHICH ENGINE AUTHORED THIS SITE COULD NOT BE DETERMINED, so do not assume "
+        "one. The edit path is a different tool per engine and each rejects a site "
+        "from another track, so a guess is a failed tool call at best and a "
+        "confident wrong answer at worst.\n"
+        f"FIRST call `mcp__pocketpaw_pocket__get_pocket` with pocket_id "
+        f"`{pocket_id}` and read its `engine`. A `ripple` pocket carries a "
+        "`rippleSpec` (a widget tree) and is edited with "
+        "`mcp__pocketpaw_pocket_specialist__edit`. `svelte`, `react` and `html` "
+        "pockets carry a `source` map ({path: file contents}) instead, and the "
+        "specialist CANNOT edit those — svelte uses "
+        "`mcp__pocketpaw_sites_manager__edit_svelte_component`, react uses "
+        "`mcp__pocketpaw_sites_manager__edit_react_component`, and html has no "
+        "edit tool at all yet (say so plainly rather than reaching for a create "
+        "tool).\n"
+        "If the read fails too, tell the user you could not load their site rather "
+        "than attempting an edit blind.\n"
+    )
+
+
+def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
     """The /sites/[siteId] refine preamble — edit an EXISTING published site.
 
-    Landing-aware: mirrors the create-paw-site brain's structure + 5 SSR rules
-    so an edit can't reintroduce a static-site trap. Carries the source
-    ``pocket_id`` so the agent edits the right pocket in place.
+    IT FORKS BY ENGINE because every load-bearing instruction in it is a different
+    fact per engine, not a different phrasing of one fact:
+
+    * **which tool can edit the page at all** — ripple's content is a ``rippleSpec``
+      the pocket specialist merges into; svelte, react and html carry a ``source``
+      map instead, which that tool cannot touch. Each source engine has (or lacks)
+      its own file-level edit tool;
+    * **whether JavaScript runs for the visitor** — a react site ships a hydrating
+      client bundle by default (``sites_keep_client_bundle_default``), so "no
+      JavaScript runs" is false there, while the prerender contract that DOES bind
+      react has no analogue on a ripple widget page;
+    * **whether a publish hands back a url worth showing** — see
+      ``_refine_publish_step``.
+
+    Written for ripple and shipped to all four, it asserted the ripple answer to all
+    three on every site. ``engine`` is resolved by ``_refine_engine`` from the
+    SOURCE POCKET (``meta`` does not carry it on this surface); ``None`` means it
+    could not be read and routes to ``_refine_unknown_engine_step``.
+
+    The ripple branch is deliberately unchanged apart from the publish claim: it was
+    correct there, and this is a fix for the other three engines rather than a
+    rewrite of working behaviour. What is shared across all branches is the
+    ASK-DON'T-ASSUME gate, the ``ask-user-questions`` mechanism (refine keeps
+    ``ripple_mode="on"`` on every engine, so that widget is real here), the funnel /
+    real-copy / anchor-CTA / flat-form rules, and the source ``pocket_id`` — which
+    every branch still threads into the tool call it names.
     """
     route = meta.route_path or "/sites"
     pocket_id = meta.pocket_id or ""
+    engine_attr = f' engine="{engine}"' if engine else ' engine="unknown"'
+
+    if engine == "ripple":
+        render_truth = (
+            " The page renders STATICALLY (no JavaScript runs for the visitor), so "
+            "every change must still work as plain HTML."
+        )
+        edit_step = (
+            "Treat the user's message as an edit to APPLY to the existing site. "
+            f"Apply the change to pocket `{pocket_id}` via "
+            "`mcp__pocketpaw_pocket_specialist__edit` (the merge/edit path — it "
+            "mutates the existing spec in place). NEVER use the create path and "
+            "NEVER rebuild the page from scratch; a refine is a targeted edit on "
+            "top of the current landing spec.\n"
+        )
+        # The five rules are ripple's and stay ripple's: each names a widget type,
+        # and the other three engines have no widgets. Byte-identical to the text
+        # that shipped before the fork.
+        rules = (
+            "PRESERVE the landing structure (nav → hero → services → proof → "
+            "pricing → flat lead form → footer) and keep the 5 static-site (SSR) "
+            "rules intact while you edit:\n"
+            "1. Lead capture stays FLAT native `input`/`textarea`/"
+            '`button{type:"submit"}` with real field names (name, email, phone, '
+            "message) — NEVER the `form` or `newsletter` widget, which nests an "
+            "invalid `<form>` inside the site template's outer POST form and "
+            "captures zero leads.\n"
+            "2. `pricing-table` uses `tiers` (never `plans`/`columns`).\n"
+            "3. An FAQ is `heading` + `text` pairs — NEVER the `accordion` widget "
+            "(its panels only open with JS, so on a static site the answers never "
+            "expand).\n"
+            "4. Every CTA is an anchor `href` (or `tel:` / `mailto:`) — never an "
+            "`on_click` handler, which is a dead button with no client JS.\n"
+            "5. `hero` is the marketing Hero widget — never the dashboard "
+            "`hero+grid` (a page-header plus a KPI `stat` grid); no metric grid, "
+            "no charts. This is marketing, not analytics.\n"
+            "Any animation stays Tier-0 (CSS-only, static-safe) — `aurora`, "
+            "`marquee`, `border-beam`, `shimmer`, `text-effect`; never `reveal`, "
+            "`parallax`, or `spotlight` (they need client JS and hide content on a "
+            "static page).\n"
+        )
+    elif engine == "svelte":
+        render_truth = (
+            " The page is hand-written SvelteKit components PRERENDERED to static "
+            "HTML, so a section must look finished in the markup it returns — "
+            "never set the resting state only in `onMount`."
+        )
+        edit_step = (
+            "Treat the user's message as an edit to ONE component file. This "
+            "site's content is a `source` map ({path: file contents}), NOT a "
+            "rippleSpec — there is no widget spec here, so do NOT call the pocket "
+            "specialist and do NOT draft a rippleSpec.\n"
+            "Call `mcp__pocketpaw_sites_manager__edit_svelte_component` with "
+            f"pocket_id `{pocket_id}`, the `component_path` of the file to change "
+            "(it must already exist in the source map, e.g. "
+            "'src/lib/components/Hero.svelte'), and EXACTLY ONE of `edits` (a "
+            "list of {old_string, new_string} blocks — prefer this for anything "
+            "targeted; each old_string must match the current file verbatim and "
+            "exactly once) or `new_source` (the whole new file, for a large "
+            "rewrite). Read the file before you diff it. NEVER call a create tool "
+            "to apply a change — that mints a second site and leaves this one "
+            "untouched.\n"
+            "THE EDIT IS A DRAFT PREVIEW, NOT A DEPLOY. The tool returns "
+            '`status:"draft"`, `is_live:false` and a `preview_url` that previews '
+            "the edit — it is not the live site and the live page is unchanged. "
+            "Relay the tool's own `message`, and never tell the user the change is "
+            "published or live. On `ok:false` nothing was staged: an old_string "
+            "that matched 0 or more than 1 time needs more context, and a "
+            "smoke-test failure means fix the component and retry.\n"
+        )
+        rules = _REFINE_SHARED_RULES
+    elif engine == "react":  # RX-3's `_react_refine_preamble`, folded in here
+        # The tool id and its argument names are read off ``edit_react_component``'s
+        # own schema (RX-3), not guessed.
+        render_truth = (
+            " The page is hand-written React components PRERENDERED to static HTML "
+            "at build time, and it ALSO ships a client bundle by default — so it "
+            "is not a no-JavaScript page, and it is not a page you may leave blank "
+            "until JavaScript runs."
+        )
+        edit_step = (
+            "Treat the user's message as an edit to ONE component file. This "
+            "site's content is a `source` map ({path: file contents}), NOT a "
+            "rippleSpec — there is no widget spec here, so do NOT call the pocket "
+            "specialist and do NOT draft a rippleSpec.\n"
+            "Call `mcp__pocketpaw_sites_manager__edit_react_component` with "
+            f"pocket_id `{pocket_id}`, the `component_path` to write (e.g. "
+            "'src/components/Hero.tsx'), and EXACTLY ONE of `edits` (a list of "
+            "{old_string, new_string} blocks — prefer this for anything targeted; "
+            "each old_string must match the current file verbatim and exactly "
+            "once) or `new_source` (the whole new file). Read the file before you "
+            "diff it. To ADD a section, call it twice: once with `create=true` and "
+            "`new_source` for the new `src/components/<Name>.tsx`, then once with "
+            "`edits` on `src/App.tsx` to import and render it. NEVER call "
+            "`create_react_site` again for a change — that mints a SECOND site "
+            "pocket and leaves the one the user is looking at untouched.\n"
+            f"{_react_write_scope()}"
+            "THE EDIT IS SAVED TO THE DRAFT, NOT PUBLISHED. The tool returns "
+            '`status:"draft"` / `is_live:false`, nothing is built and nothing '
+            "goes live; the user previews it under /sites. Relay the tool's own "
+            "`message` and do not tell them it is live. On `ok:false` NOTHING was "
+            "saved — relay the reason (a reserved path, the wrong engine, an "
+            "old_string that matched 0 or more than 1 time) rather than reporting "
+            "a successful edit.\n"
+        )
+        rules = _REFINE_SHARED_RULES + (
+            "THE PRERENDER RULE governs every component you touch: at build time "
+            "`<App />` is rendered to HTML by `react-dom/server`, before any "
+            "browser JavaScript runs. `useEffect` does NOT run at prerender time, "
+            "and `window` / `document` do not exist during that render. So every "
+            "component must render its resting/final state in its RETURNED MARKUP "
+            "— a count-up initialized to 0 bakes '0', so initialize it to the "
+            "final value; an accordion's open panel is the `useState` initial "
+            "value; a scroll-reveal keeps its content in the markup and only adds "
+            "a class. Touch `window`/`document` inside `useEffect` (or behind a "
+            "`typeof window !== 'undefined'` check), never in a component body or "
+            "at module top level. If your edit would leave a section looking "
+            "unfinished with JavaScript disabled, move the final state into the "
+            "returned markup.\n"
+        )
+    elif engine == "html":
+        render_truth = (
+            " The page is a hand-authored static HTML/CSS bundle served straight "
+            "from the edge — the files in the source map ARE the page."
+        )
+        # THE HONEST BRANCH. html is the DEFAULT create engine and has no
+        # chat-reachable edit tool: ``create_html_site`` takes no ``pocket_id`` (it
+        # mints a new pocket, so calling it here would leave the user with a second,
+        # unrelated site), ``edit_svelte_component``'s service guard is svelte-only
+        # by design, and the uid-splice path behind the native editor
+        # (``sites/service.py::apply_leaf_edits``) is a REST route and svelte-gated
+        # too. Naming any of them would be the exact defect this fork fixes, so the
+        # branch states the gap instead. Being useful inside a real limit beats
+        # improvising outside it.
+        edit_step = (
+            "YOU CANNOT WRITE THIS SITE'S FILES FROM THIS CHAT. An html site has "
+            "no edit tool yet — that is a real gap in the product, not something "
+            "to work around:\n"
+            "- the pocket specialist edits a rippleSpec. This pocket has a "
+            "`source` map instead, so it has nothing to merge into — do NOT call "
+            "it and do NOT draft a rippleSpec.\n"
+            "- the create tools take no pocket id: each one creates a NEW pocket "
+            "and a SECOND site, leaving the one the user is looking at untouched. "
+            "Do NOT call a create tool to 'apply' a change.\n"
+            "WHAT TO DO INSTEAD, in one turn: call "
+            f"`mcp__pocketpaw_pocket__get_pocket` with pocket_id `{pocket_id}` to "
+            "read the current files from its `source` map, work out exactly what "
+            "the change is, and give the user the finished replacement markup for "
+            "the file that changes (in a code block, with the file's path) plus a "
+            "one-line description of where it goes. Then say plainly that editing "
+            "an html site's files from chat is not wired up yet, so you cannot "
+            "apply it for them. Do not imply you saved, published, or previewed "
+            "anything — nothing was written.\n"
+        )
+        rules = _REFINE_SHARED_RULES + (
+            "Whatever markup you hand back keeps the page working with no "
+            "JavaScript: the full resting state lives in the HTML, never rendered "
+            "only by a script.\n"
+        )
+    else:
+        render_truth = ""
+        edit_step = _refine_unknown_engine_step(pocket_id)
+        rules = _REFINE_SHARED_RULES
+
+    # html has nothing to publish FROM chat (no write landed), and the unknown
+    # branch has not established which engine it would be publishing — naming a
+    # publish flow in either would invite the agent to publish the LAST build as
+    # if it carried the change the user just asked for.
+    publish_step = "" if engine in (None, "html") else _refine_publish_step(engine, pocket_id)
+
     return (
-        f'<surface kind="sites" route="{route}" pocket="{pocket_id}" mode="refine" />\n'
+        f'<surface kind="sites" route="{route}" pocket="{pocket_id}"'
+        f'{engine_attr} mode="refine" />\n'
         "<sites-orientation>\n"
         f"The user is REFINING an EXISTING published Paw Site (source pocket "
         f"`{pocket_id}`) — a live standalone marketing website already deployed "
@@ -605,9 +1176,7 @@ def _refine_preamble(meta: SurfaceMeta) -> str:
         "dashboard pocket. It is a real marketing landing page that reads top to "
         "bottom as a conversion funnel: nav, hero, services, social proof, "
         "pricing, a call-to-action, a flat lead-capture form, footer. Talk about "
-        "it as a 'site' or 'page' — never a 'pocket'. The page renders STATICALLY "
-        "(no JavaScript runs for the visitor), so every change must still work as "
-        "plain HTML.\n"
+        f"it as a 'site' or 'page' — never a 'pocket'.{render_truth}\n"
         "</sites-orientation>\n"
         "<sites-procedure>\n"
         "ASK, DON'T ASSUME: if the requested edit is ambiguous, or applying it "
@@ -616,36 +1185,11 @@ def _refine_preamble(meta: SurfaceMeta) -> str:
         "ASK with an `ask-user-questions` ripple widget (include a 'you decide' "
         "option) instead of guessing — and NEVER fabricate real-world facts "
         "(testimonials, stats, prices, addresses, contact details).\n"
-        "Treat the user's message as an edit to APPLY to the existing site, then "
-        f"re-publish. Apply the change to pocket `{pocket_id}` via "
-        "`mcp__pocketpaw_pocket_specialist__edit` (the merge/edit path — it "
-        "mutates the existing spec in place). NEVER use the create path and NEVER "
-        "rebuild the page from scratch; a refine is a targeted edit on top of the "
-        "current landing spec. After the edit lands it can be re-published (the "
-        "site auto-publishes from its source pocket); relay any publish error — "
-        "never claim a phantom publish — and show the live `url`.\n"
-        "PRESERVE the landing structure (nav → hero → services → proof → pricing "
-        "→ flat lead form → footer) and keep the 5 static-site (SSR) rules intact "
-        "while you edit:\n"
-        "1. Lead capture stays FLAT native `input`/`textarea`/"
-        '`button{type:"submit"}` with real field names (name, email, phone, '
-        "message) — NEVER the `form` or `newsletter` widget, which nests an "
-        "invalid `<form>` inside the site template's outer POST form and captures "
-        "zero leads.\n"
-        "2. `pricing-table` uses `tiers` (never `plans`/`columns`).\n"
-        "3. An FAQ is `heading` + `text` pairs — NEVER the `accordion` widget "
-        "(its panels only open with JS, so on a static site the answers never "
-        "expand).\n"
-        "4. Every CTA is an anchor `href` (or `tel:` / `mailto:`) — never an "
-        "`on_click` handler, which is a dead button with no client JS.\n"
-        "5. `hero` is the marketing Hero widget — never the dashboard "
-        "`hero+grid` (a page-header plus a KPI `stat` grid); no metric grid, no "
-        "charts. This is marketing, not analytics.\n"
-        "Any animation stays Tier-0 (CSS-only, static-safe) — `aurora`, "
-        "`marquee`, `border-beam`, `shimmer`, `text-effect`; never `reveal`, "
-        "`parallax`, or `spotlight` (they need client JS and hide content on a "
-        'static page). Keep `type="site"` + `pattern="landing"` on the pocket. '
-        "Keep talking 'site' / 'page', never 'pocket'.\n"
+        f"{edit_step}"
+        f"{rules}"
+        f"{publish_step}"
+        'Keep `type="site"` + `pattern="landing"` on the pocket. Keep talking '
+        "'site' / 'page', never 'pocket'.\n"
         "</sites-procedure>\n"
         f"{_CONCIERGE_NOTE}"
     )
@@ -862,4 +1406,10 @@ def _chat_preamble(meta: SurfaceMeta) -> str:
     )
 
 
-__all__ = ["build_preamble", "_create_preamble", "_frontend_preamble", "_chat_preamble"]
+__all__ = [
+    "build_preamble",
+    "_create_preamble",
+    "_frontend_preamble",
+    "_chat_preamble",
+    "_refine_preamble",
+]
