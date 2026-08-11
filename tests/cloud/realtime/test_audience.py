@@ -415,3 +415,104 @@ async def test_workspace_job_events_route_to_workspace_members():
             }
         )
         assert set(await r.audience(ev)) == {"a", "b"}, cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_call_participant_events_route_to_group_members():
+    # A pre-join tab shows "who's already in the call" from these two events.
+    # Before this branch existed they fell through to [], so InProcessBus
+    # skipped the fan-out entirely and the roster chip went stale.
+    async def group_members(_gid: str) -> list[str]:
+        return ["u1", "u2", "u3"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        CallParticipantJoined,
+        CallParticipantLeft,
+    )
+
+    r = AudienceResolver(group_members=group_members)
+    for cls in (CallParticipantJoined, CallParticipantLeft):
+        ev = cls(
+            data={
+                "group_id": "g1",
+                "room_name": "group-call-g1",
+                "identity": "u2",
+                "name": "Bob",
+            }
+        )
+        assert set(await r.audience(ev)) == {"u1", "u2", "u3"}, cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_call_participant_events_exclude_non_members():
+    # Membership is DB-resolved, not payload-supplied: a stranger holding a
+    # live socket never learns who is on another group's call.
+    members_by_group = {"g1": ["u-alice", "u-bob"]}
+
+    async def group_members(gid: str) -> list[str]:
+        return list(members_by_group.get(gid, []))
+
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        CallParticipantJoined,
+        CallParticipantLeft,
+    )
+
+    r = AudienceResolver(group_members=group_members)
+    for cls in (CallParticipantJoined, CallParticipantLeft):
+        ev = cls(data={"group_id": "g1", "identity": "u-alice", "name": "Alice"})
+        audience = await r.audience(ev)
+        assert "u-mallory" not in audience, cls.__name__
+        assert set(audience) == {"u-alice", "u-bob"}, cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_call_participant_joined_keeps_the_joiner_in_the_audience():
+    # The joiner's own tab needs the roster too. ``identity`` is also not a
+    # safe audience key — livekit/invites.py mints ``guest-<hex>`` identities
+    # for invite links, which are not workspace user_ids.
+    async def group_members(_gid: str) -> list[str]:
+        return ["u1", "u2"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import CallParticipantJoined
+
+    r = AudienceResolver(group_members=group_members)
+    ev = CallParticipantJoined(
+        data={"group_id": "g1", "identity": "guest-deadbeef", "name": "Guest"}
+    )
+    assert set(await r.audience(ev)) == {"u1", "u2"}
+
+
+@pytest.mark.asyncio
+async def test_call_participant_events_without_group_id_have_no_audience():
+    # Defensive: a malformed event must fall through to [], never to an
+    # unscoped audience. The fetcher raises to prove the guard short-circuits.
+    async def group_members(_gid: str) -> list[str]:
+        raise AssertionError("group_members must not be called without a group_id")
+
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        CallParticipantJoined,
+        CallParticipantLeft,
+    )
+
+    r = AudienceResolver(group_members=group_members)
+    for cls in (CallParticipantJoined, CallParticipantLeft):
+        assert await r.audience(cls(data={"identity": "u1"})) == [], cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_call_lifecycle_events_still_route_to_group_members():
+    # Pin: adding the participant types to the shared call branch (and removing
+    # the unreachable duplicate below it) must not change the lifecycle events.
+    async def group_members(_gid: str) -> list[str]:
+        return ["u1", "u2"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        CallEnded,
+        CallNotesPosted,
+        CallStarted,
+    )
+
+    r = AudienceResolver(group_members=group_members)
+    for cls in (CallStarted, CallEnded, CallNotesPosted):
+        ev = cls(data={"group_id": "g1"})
+        assert set(await r.audience(ev)) == {"u1", "u2"}, cls.__name__
