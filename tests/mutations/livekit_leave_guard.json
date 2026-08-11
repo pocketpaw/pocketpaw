@@ -1,0 +1,16 @@
+[
+  {
+    "label": "drop the membership check from leave_call",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    group = await _get_group_domain_or_404(group_id)\n    _require_domain_group_member(group, str(user.id))\n\n    gid = group_id",
+    "replace": "    gid = group_id",
+    "tests": ["tests/cloud/livekit/test_leave_route_guard.py"]
+  },
+  {
+    "label": "drop the license check from leave_call",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    \"\"\"Notify that a participant left a call without ending it.\"\"\"\n    await require_license()",
+    "replace": "    \"\"\"Notify that a participant left a call without ending it.\"\"\"",
+    "tests": ["tests/cloud/livekit/test_leave_route_guard.py::test_leave_requires_license"]
+  }
+]

@@ -3,6 +3,7 @@
 Endpoints:
 - ``POST /api/v1/livekit/rooms`` — create/get a call room for a group
 - ``POST /api/v1/livekit/token`` — generate participant access token
+- ``POST /api/v1/livekit/rooms/{group_id}/leave`` — announce a participant left
 - ``DELETE /api/v1/livekit/rooms/{group_id}`` — end a call
 - ``GET /api/v1/livekit/rooms/{group_id}`` — get room status
 - ``POST /api/v1/livekit/rooms/{group_id}/recording/start`` — start recording (owner only)
@@ -17,7 +18,14 @@ Endpoints:
 All routes require an active enterprise license, user authentication,
 and group membership, EXCEPT the public invite validate/join endpoints
 which allow external guests without a Pocketpaw account. Recording endpoints
-additionally require workspace ownership."""
+additionally require workspace ownership.
+
+``/rooms/{group_id}/leave`` was the one exception to that guarantee until
+2026-08-11 — it emitted ``CallParticipantLeft`` to the group's members with
+no license and no membership check, so any authenticated user could inject a
+fabricated participant-left event into any group in any workspace. It now
+carries the same guard as its siblings; see
+``tests/cloud/livekit/test_leave_route_guard.py``."""
 
 from __future__ import annotations
 
@@ -301,6 +309,16 @@ async def leave_call(
     user=Depends(current_user),
 ):
     """Notify that a participant left a call without ending it."""
+    await require_license()
+
+    # Verify the caller is a member of the target group. This runs OUTSIDE the
+    # try below on purpose: the emit's blanket ``except`` must never swallow a
+    # 403/404 raised here. ``CallParticipantLeft`` fans out to the group's
+    # members, so an unguarded handler let any authenticated user push a
+    # fabricated "X left the call" into a group they don't belong to.
+    group = await _get_group_domain_or_404(group_id)
+    _require_domain_group_member(group, str(user.id))
+
     gid = group_id
     try:
         await emit(
