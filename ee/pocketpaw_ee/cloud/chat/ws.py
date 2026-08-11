@@ -53,10 +53,13 @@ logger = logging.getLogger(__name__)
 
 TYPING_TIMEOUT_SECONDS = 5
 PRESENCE_GRACE_SECONDS = 30
-# A ping-capable socket silent this long is presumed dead. Sized at two missed
-# 30s client pings, so a single dropped heartbeat never flips a healthy client
-# offline. Sockets that don't ping are exempt entirely (see _is_fresh).
-LIVENESS_STALE_SECONDS = 60
+# A ping-capable socket silent this long is presumed dead. The client pings
+# every 30s foregrounded, but Chrome's intensive throttling slows hidden tabs'
+# timers to ~1/min after 5 minutes — so size for two missed pings at the
+# THROTTLED cadence, or backgrounded tabs (exactly where push matters) would
+# sit on the boundary and flap close(1001)/reconnect. Costs only slower zombie
+# detection. Sockets that don't ping are exempt entirely (see _is_fresh).
+LIVENESS_STALE_SECONDS = 150
 
 
 class ConnectionManager:
