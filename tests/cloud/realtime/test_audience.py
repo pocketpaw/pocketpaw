@@ -390,6 +390,46 @@ async def test_site_published_without_workspace_id_has_no_audience():
 
 
 @pytest.mark.asyncio
+async def test_site_created_routes_to_workspace_members():
+    # A DRAFT is created async relative to the chat turn exactly like a publish, and
+    # it is just as much a change to what the gallery shows — a new card. It fans out
+    # to the whole workspace for the same reason: only the one tab that ran the create
+    # hears the per-run ``pocket_created`` SSE, so everyone else (a second tab, a
+    # teammate, an import) needs the bus or sees nothing until a manual refresh.
+    async def ws_members(_wid: str) -> list[str]:
+        return ["a", "b", "c"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import SiteCreated
+
+    r = AudienceResolver(workspace_members=ws_members)
+    ev = SiteCreated(
+        data={
+            "workspace_id": "w1",
+            "site_id": "s1",
+            "pocket_id": "pkt1",
+            "owner": "a",
+            "deployed": False,
+        }
+    )
+    assert set(await r.audience(ev)) == {"a", "b", "c"}
+
+
+@pytest.mark.asyncio
+async def test_site_created_without_workspace_id_has_no_audience():
+    # Same defensive guard the publish event carries: no workspace_id → no fan-out,
+    # never an unscoped audience. The fetcher raises to prove the guard short-circuits
+    # before any member lookup.
+    async def ws_members(_wid: str) -> list[str]:
+        raise AssertionError("workspace_members must not be called without a workspace_id")
+
+    from pocketpaw_ee.cloud._core.realtime.events import SiteCreated
+
+    r = AudienceResolver(workspace_members=ws_members)
+    ev = SiteCreated(data={"site_id": "s1", "pocket_id": "pkt1"})
+    assert await r.audience(ev) == []
+
+
+@pytest.mark.asyncio
 async def test_workspace_job_events_route_to_workspace_members():
     # A dynamic site's provisioning job finishes in the ARQ worker, long after
     # publish — the terminal update fans out to the workspace so the gallery can

@@ -340,15 +340,18 @@ class AudienceResolver:
                 return []
             return await self._group(gid)
 
-        # --- Sites (published site lifecycle) -----------------------------------
-        # Workspace-scoped: the /sites gallery is a per-workspace view, and a
-        # publish lands asynchronously relative to the chat turn that started it
-        # (the agent creates + publishes server-side). Fan out to every workspace
-        # member so an open gallery flips the new site to Live on its own — no
-        # poll, no manual refresh. Payload carries {workspace_id, site_id,
-        # pocket_id, owner, plan_tier}; the client keys the gallery row off
-        # site_id / pocket_id.
-        if t == "site.published":
+        # --- Sites (site lifecycle: draft created, then published) ---------------
+        # Workspace-scoped: the /sites gallery is a per-workspace view, and BOTH
+        # halves of the lifecycle land asynchronously relative to the chat turn that
+        # started them (the agent creates, then publishes, server-side). Fan out to
+        # every workspace member so an open gallery gains the new card
+        # (``site.created``) and flips it to Live (``site.published``) on its own —
+        # no poll, no manual refresh. The per-run ``pocket_created`` SSE cannot do
+        # this job: it reaches only the tab that owns that chat stream, so a create
+        # from a second tab / a teammate / an import is invisible without the bus.
+        # Payloads carry {workspace_id, site_id, pocket_id, owner, ...}; the client
+        # keys the gallery row off site_id / pocket_id.
+        if t in {"site.created", "site.published"}:
             if wid := d.get("workspace_id"):
                 return await self._workspace(wid)
             return []
