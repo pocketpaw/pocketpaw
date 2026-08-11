@@ -936,12 +936,14 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_lead_notification_listeners()
 
-    # Push notifications fan-out (#1393) — v1 product events
-    # (agent.stream_end / instinct.approval.created / meeting.started) →
-    # ``dispatch.notify``, which forks WS-vs-Web-Push so a user with both the
-    # desktop app and a browser tab open is notified exactly once. Same
-    # constraint as the other bus subscribers: register AFTER init_realtime
-    # installed the singleton bus.
+    # Push notifications fan-out (#1393) — ``notification.new`` (every
+    # persisted notification, so the OS surface can't drift from the bell)
+    # plus ``agent.stream_end`` (the one product event that persists no
+    # notification row) → ``dispatch.notify``, which forks WS-vs-Web-Push so a
+    # user with both the desktop app and a browser tab open is notified exactly
+    # once. Must be registered AFTER the notification producers' own bus
+    # subscribers above, and — like every other bus subscriber — after
+    # init_realtime installed the singleton bus.
     from pocketpaw_ee.cloud.push.listeners import register_push_event_listeners
 
     register_push_event_listeners()

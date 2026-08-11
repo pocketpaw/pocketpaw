@@ -1,0 +1,74 @@
+[
+  {
+    "label": "privacy: stop rewriting content-bearing bodies (persisted text reaches the lock screen)",
+    "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
+    "find": "    generic = _GENERIC_BODIES.get(kind)\n    if generic is not None:\n        return generic\n    return data.get(\"body\") or \"\"",
+    "replace": "    return data.get(\"body\") or \"\"",
+    "tests": [
+      "tests/cloud/push/test_listeners.py"
+    ]
+  },
+  {
+    "label": "privacy: message body carries the persisted content instead of the unread count",
+    "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
+    "find": "        count = await _unread_count(user_id, room_id) if room_id else 1\n        return _count_body(count)",
+    "replace": "        return data.get(\"body\") or \"\"",
+    "tests": [
+      "tests/cloud/push/test_listeners.py"
+    ]
+  },
+  {
+    "label": "convergence: re-subscribe a retired event (double-fires against notification.new)",
+    "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
+    "find": "    bus.subscribe(\"agent.stream_end\", on_agent_complete)",
+    "replace": "    bus.subscribe(\"agent.stream_end\", on_agent_complete)\n    bus.subscribe(\"message.sent\", on_agent_complete)",
+    "tests": [
+      "tests/cloud/push/test_listeners.py"
+    ]
+  },
+  {
+    "label": "convergence: drop the notification.new subscription (every kind loses push)",
+    "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
+    "find": "    bus.subscribe(NotificationNew.EVENT_TYPE, on_notification_new)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/push/test_listeners.py"
+    ]
+  },
+  {
+    "label": "coalesce: drop the kind fallback so room-less kinds share one key",
+    "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
+    "find": "    await coalesce.submit((workspace_id, user_id, tag or \"notification\"), _emit)",
+    "replace": "    await coalesce.submit((workspace_id, user_id, \"notification\"), _emit)",
+    "tests": [
+      "tests/cloud/push/test_listeners.py"
+    ]
+  },
+  {
+    "label": "deep link: let instinct_approval fall through to the dead /chat/<id> default",
+    "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
+    "find": "    if source_type == \"instinct_approval\":\n        return None\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/push/test_listeners.py"
+    ]
+  },
+  {
+    "label": "guardian block: stop persisting the notification (bell + OS both go dark again)",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "    await _notify_requester(domain)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_instinct_approvals_service.py"
+    ]
+  },
+  {
+    "label": "guardian block: notify the wrong recipient",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "            recipient=approval.requested_by,",
+    "replace": "            recipient=\"someone-else\",",
+    "tests": [
+      "tests/cloud/test_instinct_approvals_service.py"
+    ]
+  }
+]
