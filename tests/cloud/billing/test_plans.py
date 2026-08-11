@@ -34,7 +34,11 @@
 #   now LOCKED — Free ``max_seats`` = 0 (a Free workspace cannot invite ANY
 #   members), Paw Go = 5, Paw Pro = 25 total workspace members (owner included),
 #   Paw Pro Max + Enterprise = None (uncapped). The seat gate is plan-authoritative,
-#   so Free = 0 is an actual block, not a no-op. These tests lock the exact numbers.
+#   so Free = 0 is an actual block, not a no-op. Also added the daily LiveKit
+#   CALL-TIME budget (``max_call_seconds_per_day``): Free = 0 (no calls), Go =
+#   1_800 (30 min), Pro = 7_200 (2 hrs), Pro Max = 28_800 (8 hrs), Enterprise =
+#   None — enforced by ``livekit.service.create_room``. These tests lock the
+#   exact numbers.
 
 from __future__ import annotations
 
@@ -96,6 +100,17 @@ EXPECTED_MAX_CONNECTORS: dict[str, int | None] = {
     "go": 100,
     "pro": 250,
     "pro_max": 1_000,
+    "enterprise": None,
+}
+# The daily LiveKit CALL-TIME budget per workspace, in SECONDS (2026-08-08).
+# Free = 0 (no calls), Go = 1800 (30 min), Pro = 7200 (2 hrs), Pro Max = 28800
+# (8 hrs), Enterprise = None (uncapped). Enforced by livekit.service at
+# call-start time; an over-budget single call is force-ended at its deadline.
+EXPECTED_MAX_CALL_SECONDS_PER_DAY: dict[str, int | None] = {
+    "free": 0,
+    "go": 1_800,
+    "pro": 7_200,
+    "pro_max": 28_800,
     "enterprise": None,
 }
 
@@ -185,18 +200,16 @@ def test_build_unknown_key_fails_closed_to_free_ceiling():
 # ---------------------------------------------------------------------------
 
 
-def test_every_tier_carries_the_three_smb_caps():
-    """Each tier exposes max_seats / max_pockets / max_connectors (the machinery).
-
-    Locks that the caps are PRESENT on every tier with the placeholder values, not
-    that the figures are final — the captain's pricing call moves the numbers, not
-    the shape.
-    """
+def test_every_tier_carries_the_smb_caps():
+    """Each tier exposes max_seats / max_pockets / max_connectors + the daily
+    LiveKit call budget (the machinery). Locks that the caps are PRESENT on
+    every tier with the approved values."""
     by_key = {p.key: p for p in plans.list_plans()}
     for key in EXPECTED_ORDER:
         assert by_key[key].max_seats == EXPECTED_MAX_SEATS[key], key
         assert by_key[key].max_pockets == EXPECTED_MAX_POCKETS[key], key
         assert by_key[key].max_connectors == EXPECTED_MAX_CONNECTORS[key], key
+        assert by_key[key].max_call_seconds_per_day == EXPECTED_MAX_CALL_SECONDS_PER_DAY[key], key
 
 
 def test_free_max_seats_is_zero_no_invites():
@@ -238,6 +251,16 @@ def test_pro_max_seats_are_uncapped_but_other_caps_concrete():
     assert isinstance(pro_max.max_connectors, int) and pro_max.max_connectors > 0
 
 
+def test_daily_call_budget_is_the_consumer_ladder():
+    """The daily LiveKit call budget: Free=0 (no calls), Go=30min, Pro=2hrs,
+    Pro Max=8hrs, Enterprise=None (uncapped)."""
+    assert plans.get_plan("free").max_call_seconds_per_day == 0
+    assert plans.get_plan("go").max_call_seconds_per_day == 30 * 60
+    assert plans.get_plan("pro").max_call_seconds_per_day == 2 * 60 * 60
+    assert plans.get_plan("pro_max").max_call_seconds_per_day == 8 * 60 * 60
+    assert plans.get_plan("enterprise").max_call_seconds_per_day is None
+
+
 def test_non_enterprise_smb_caps_are_non_negative_ints():
     """Every tier below Pro Max carries a concrete int cap on all three.
 
@@ -249,6 +272,12 @@ def test_non_enterprise_smb_caps_are_non_negative_ints():
         assert isinstance(by_key[key].max_seats, int) and by_key[key].max_seats >= 0, key
         assert isinstance(by_key[key].max_pockets, int) and by_key[key].max_pockets > 0, key
         assert isinstance(by_key[key].max_connectors, int) and by_key[key].max_connectors > 0, key
+        # The daily call budget is a concrete non-negative int on every capped
+        # tier too (Free = 0 — "no calls" is a valid ceiling).
+        assert (
+            isinstance(by_key[key].max_call_seconds_per_day, int)
+            and by_key[key].max_call_seconds_per_day >= 0
+        ), key
 
 
 def test_build_unknown_key_fails_closed_to_free_smb_caps():
@@ -261,9 +290,14 @@ def test_build_unknown_key_fails_closed_to_free_smb_caps():
     assert bogus.max_seats == EXPECTED_MAX_SEATS["free"]
     assert bogus.max_pockets == EXPECTED_MAX_POCKETS["free"]
     assert bogus.max_connectors == EXPECTED_MAX_CONNECTORS["free"]
+    # The daily call budget fails closed too: an unknown key gets Free's 0
+    # (no calls), never None/uncapped.
+    assert bogus.max_call_seconds_per_day == EXPECTED_MAX_CALL_SECONDS_PER_DAY["free"]
+    assert bogus.max_call_seconds_per_day == 0
     assert bogus.max_seats is not None
     assert bogus.max_pockets is not None
     assert bogus.max_connectors is not None
+    assert bogus.max_call_seconds_per_day is not None
 
 
 def test_list_plans_is_cheapest_first():

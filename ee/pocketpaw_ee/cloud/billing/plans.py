@@ -52,6 +52,11 @@
 #   (5 / 10 / 25 / 100). The seat gate became plan-AUTHORITATIVE so Free=0 actually
 #   blocks invites (see ``workspace.service._effective_seat_limit``). The ``_build``
 #   default for an unknown key still FAILS CLOSED to the Free value, never None.
+# Updated 2026-08-08 (feat/billing-rbac-member-caps) — ADDED ``max_call_seconds_per_day``:
+#   the daily LiveKit CALL-TIME budget in seconds (Free = 0 → no calls, Go = 1_800
+#   = 30 min, Pro = 7_200 = 2 hrs, Pro Max = 28_800 = 8 hrs, Enterprise = None).
+#   Enforced at CALL-START time by ``livekit.service.create_room``; an over-budget
+#   in-progress call is force-ended at its budget deadline.
 
 from __future__ import annotations
 
@@ -162,6 +167,27 @@ _MAX_CONNECTORS: dict[str, int | None] = {
     "enterprise": None,
 }
 
+# The daily LiveKit CALL-TIME budget, in SECONDS per workspace per calendar day
+# (feat/billing-rbac-member-caps, 2026-08-08). The approved consumer numbers:
+#   * free      =        0 — no calls at all (a single-seat workspace has no one
+#                            to call); every room-create is blocked.
+#   * go        =    1_800 — 30 minutes of calls a day.
+#   * pro       =    7_200 —  2 hours of calls a day.
+#   * pro_max   =   28_800 —  8 hours of calls a day.
+#   * enterprise = None    — uncapped; negotiated contracts set their own limit.
+# Enforced at CALL-START time (``livekit.service.create_room``): the workspace's
+# today's cumulative LiveKit call duration (from the ``Meeting`` docs) is checked
+# against the cap, and an in-progress call is force-ended once it hits its budget
+# deadline. The ``_build`` default for an unknown key FAILS CLOSED to the Free
+# value (0), never None/uncapped.
+_MAX_CALL_SECONDS_PER_DAY: dict[str, int | None] = {
+    "free": 0,
+    "go": 1_800,
+    "pro": 7_200,
+    "pro_max": 28_800,
+    "enterprise": None,
+}
+
 # Order the catalog is listed in — the price ladder, cheapest first. Any tier in
 # PLAN_FEATURES not named here is appended afterwards (so a new tier never
 # silently drops out of the catalog).
@@ -256,6 +282,11 @@ class PlanTier:
     Go = 5, Pro = 25 total members, owner included; Pro Max and Enterprise are
     uncapped/None); it is plan-AUTHORITATIVE at the invite gate, so Free blocks
     all new invitations.
+    ``max_call_seconds_per_day`` is the approved CONSUMER daily LiveKit call
+    budget in SECONDS (Free = 0 → no calls, Go = 1800 = 30 min, Pro = 7200 =
+    2 hrs, Pro Max = 28800 = 8 hrs; Enterprise = None = uncapped). The LiveKit
+    room-create gate enforces it at CALL-START time, and an over-budget single
+    call is force-ended at its budget deadline.
     ``dodo_product_id`` is the recurring-product id, or None until BC-7 / config
     populates it.
 
@@ -272,6 +303,7 @@ class PlanTier:
     max_seats: int | None
     max_pockets: int | None
     max_connectors: int | None
+    max_call_seconds_per_day: int | None
     dodo_product_id: str | None
     features: frozenset[str]
     display_name: str
@@ -329,6 +361,10 @@ def _build(key: str) -> PlanTier:
         max_seats=_MAX_SEATS.get(key, _MAX_SEATS["free"]),
         max_pockets=_MAX_POCKETS.get(key, _MAX_POCKETS["free"]),
         max_connectors=_MAX_CONNECTORS.get(key, _MAX_CONNECTORS["free"]),
+        # Daily LiveKit call budget — fail closed to Free (0 = no calls).
+        max_call_seconds_per_day=_MAX_CALL_SECONDS_PER_DAY.get(
+            key, _MAX_CALL_SECONDS_PER_DAY["free"]
+        ),
         dodo_product_id=_dodo_product_for(key),
         features=frozenset(PLAN_FEATURES.get(key, set())),
         display_name=str(display["display_name"]),

@@ -30,6 +30,10 @@
 #   plan catalog for every known tier (incl. enterprise=None uncapped), and that an
 #   unknown / missing plan FAILS CLOSED to the Free values (0 / 200 / 50), never
 #   None/uncapped. Pro Max is uncapped on seats only.
+# Updated 2026-08-08 (feat/billing-rbac-member-caps): adds the daily LiveKit
+#   CALL-TIME budget (``max_call_seconds_per_day``) — Free = 0 (no calls), Go =
+#   1_800 (30 min), Pro = 7_200 (2 hrs), Pro Max = 28_800 (8 hrs), Enterprise =
+#   None. Unknown / missing plans fail closed to Free's 0 (no calls).
 
 from __future__ import annotations
 
@@ -102,7 +106,7 @@ async def test_every_known_plan_resolves_its_catalog_ceiling(patch_plan, plan):
 
 @pytest.mark.parametrize("plan", ["free", "go", "pro", "pro_max", "enterprise"])
 async def test_every_known_plan_resolves_its_catalog_smb_caps(patch_plan, plan):
-    """The resolver mirrors the catalog's three SMB caps for every known tier."""
+    """The resolver mirrors the catalog's SMB caps + daily call budget per tier."""
     from pocketpaw_ee.cloud.billing import plans
 
     patch_plan(plan)
@@ -111,20 +115,25 @@ async def test_every_known_plan_resolves_its_catalog_smb_caps(patch_plan, plan):
     assert ent.max_seats == tier.max_seats
     assert ent.max_pockets == tier.max_pockets
     assert ent.max_connectors == tier.max_connectors
+    assert ent.max_call_seconds_per_day == tier.max_call_seconds_per_day
     if plan == "enterprise":
-        # The fully uncapped tier — all three surface as None.
+        # The fully uncapped tier — all four surface as None.
         assert ent.max_seats is None
         assert ent.max_pockets is None
         assert ent.max_connectors is None
+        assert ent.max_call_seconds_per_day is None
     elif plan == "pro_max":
-        # Pro Max is uncapped on SEATS only; pockets + connectors stay capped.
+        # Pro Max is uncapped on SEATS only; pockets + connectors + the daily
+        # call budget stay capped (8 hrs/day).
         assert ent.max_seats is None
         assert isinstance(ent.max_pockets, int)
         assert isinstance(ent.max_connectors, int)
+        assert isinstance(ent.max_call_seconds_per_day, int)
     else:
         assert isinstance(ent.max_seats, int)
         assert isinstance(ent.max_pockets, int)
         assert isinstance(ent.max_connectors, int)
+        assert isinstance(ent.max_call_seconds_per_day, int)
 
 
 # ---------------------------------------------------------------------------
@@ -143,9 +152,11 @@ async def test_unknown_plan_falls_back_to_free(patch_plan):
     assert ent.monthly_ceiling == 1_000
     # FAIL-CLOSED on the SMB caps too: the Free values, never None/uncapped.
     # Free max_seats = 0 — a fallback workspace cannot invite any members.
+    # Free call budget = 0 — it also cannot place any LiveKit calls.
     assert ent.max_seats == 0
     assert ent.max_pockets == 200
     assert ent.max_connectors == 50
+    assert ent.max_call_seconds_per_day == 0
 
 
 async def test_missing_workspace_falls_back_to_free_smb_caps(patch_plan):
@@ -156,6 +167,7 @@ async def test_missing_workspace_falls_back_to_free_smb_caps(patch_plan):
     assert ent.max_seats == 0
     assert ent.max_pockets == 200
     assert ent.max_connectors == 50
+    assert ent.max_call_seconds_per_day == 0
 
 
 async def test_missing_workspace_falls_back_to_free(patch_plan):

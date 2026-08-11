@@ -33,8 +33,10 @@
 #   base-floor branch sets the Free values (5 / 200 / 50) so every path fails closed.
 # Updated 2026-08-08 (feat/billing-rbac-member-caps): the Free base-floor
 #   ``max_seats`` is now 0 — a workspace with no/unknown plan resolves to the Free
-#   tier, which cannot invite ANY members (Paw Go = 5, Paw Pro = 10, Paw Pro Max
-#   = 50; Enterprise = None). Fails closed to the most restrictive tier.
+#   tier, which cannot invite ANY members (Paw Go = 5, Paw Pro = 25; Pro Max and
+#   Enterprise = None). Fails closed to the most restrictive tier. Also added
+#   ``max_call_seconds_per_day`` — the daily LiveKit call budget (Free = 0 → no
+#   calls) surfaced to the LiveKit room-create gate; fail-closed to 0.
 
 from __future__ import annotations
 
@@ -79,10 +81,12 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
                 # the catalog itself is somehow missing the base tier.
                 monthly_ceiling=1_000,
                 # Fail closed on the SMB caps too: the Free values (max_seats = 0
-                # → a fallback workspace cannot invite any members), never uncapped.
+                # → a fallback workspace cannot invite any members; call budget 0
+                # → no LiveKit calls), never uncapped.
                 max_seats=0,
                 max_pockets=200,
                 max_connectors=50,
+                max_call_seconds_per_day=0,
                 features=frozenset(),
             )
 
@@ -94,5 +98,6 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
         max_seats=tier.max_seats,
         max_pockets=tier.max_pockets,
         max_connectors=tier.max_connectors,
+        max_call_seconds_per_day=tier.max_call_seconds_per_day,
         features=tier.features,
     )

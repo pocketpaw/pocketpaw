@@ -147,6 +147,27 @@ class ConnectorLimitError(CloudError):
         super().__init__(402, "billing.connector_limit", f"Connector limit of {limit} reached")
 
 
+class CallLimitError(CloudError):
+    """Workspace hit its plan's daily LiveKit call-time cap (402).
+
+    Sibling of ``SeatLimitError`` for the LiveKit room-create seam: Free has no
+    call minutes at all (``max_call_seconds_per_day`` == 0), and a paid tier
+    blocks a NEW call once today's cumulative call time would exceed its daily
+    budget. 402 with a distinct ``billing.call_limit`` code so the UI can prompt
+    a plan upgrade. Enforced at CALL-START time only — an already-running call is
+    force-ended at its budget deadline rather than removed.
+    """
+
+    def __init__(self, limit_seconds: int | None) -> None:
+        if limit_seconds == 0:
+            label = "no call minutes on your plan"
+        elif limit_seconds is not None:
+            label = f"daily call limit of {limit_seconds // 60} minutes reached"
+        else:  # pragma: no cover - uncapped plans never raise
+            label = "daily call limit reached"
+        super().__init__(402, "billing.call_limit", f"Call limit: {label}")
+
+
 class InsufficientCredits(CloudError):
     """Credit wallet has too few credits for the requested debit (402)."""
 
