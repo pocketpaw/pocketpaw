@@ -1,6 +1,16 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-08-12 (sites Settings consolidation): added ``get_site_client`` /
+# ``update_site_client`` / ``record_site_invoice`` — the owner's record of who a
+# site is FOR and what they have billed them. Two decisions worth knowing before
+# editing them. (1) The PATCH is THREE-WAY: absent means "leave alone", explicit
+# "" means "clear", read off ``model_fields_set``. A two-way patch would let an
+# autosaving form blank the fields the user did not touch. (2) Both writers use a
+# targeted ``set()``, not ``save()`` — this is a human-paced edit against a
+# document the BUILD lane also writes, so a full-document save could push a stale
+# snapshot back and roll ``build_status`` backwards while an owner types notes.
+#
 # Updated 2026-08-11 (RX-4 — the agent can tell whether a site is actually live): added
 # ``build_wire_state`` (pure) and ``site_build_status`` (a read). ``_to_response``
 # already gave the frontend ``build_status`` / ``build_reason`` / ``build_job_id``, and
@@ -837,6 +847,7 @@ from pocketpaw_ee.cloud._core.errors import (
 )
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
+from pocketpaw_ee.cloud.models.site import SiteInvoice as _SiteInvoiceDoc
 from pocketpaw_ee.sites.build_state import claim_precondition
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
@@ -844,9 +855,13 @@ from pocketpaw_ee.sites.dto import (
     AuditResponse,
     DevPreviewResponse,
     DomainStatusResponse,
+    SiteClientResponse,
+    SiteClientUpdate,
     SiteDataRowsResponse,
     SiteDataTableInfo,
     SiteDataTablesResponse,
+    SiteInvoiceCreate,
+    SiteInvoiceOut,
     SitePreviewRefreshResponse,
     SitePreviewResponse,
     SiteResponse,
@@ -3754,6 +3769,121 @@ async def list_domains(*, workspace_id: str, site_id: str) -> list[DomainStatusR
         DomainStatusResponse(hostname=d.hostname, cname_target=d.cname_target, status=d.status)
         for d in site.domains
     ]
+
+
+# How many manual receipts one site's client record retains, newest first. A site
+# billed monthly for a decade is 120 rows, so this is generous enough that no real
+# owner meets it — it exists to bound the document, not to ration the feature.
+_INVOICE_KEEP = 500
+
+
+def _client_response(site: _SiteDoc) -> SiteClientResponse:
+    """Project a Site doc onto the client-record wire shape. ``issued_at`` is
+    serialized here rather than by the DTO so the wire always carries a plain ISO
+    string, matching every other timestamp the sites surface returns."""
+    return SiteClientResponse(
+        site_id=str(site.id),
+        name=site.client_name,
+        contact=site.client_contact,
+        notes=site.client_notes,
+        invoices=[
+            SiteInvoiceOut(
+                id=inv.id,
+                issued_at=inv.issued_at.isoformat(),
+                amount_cents=inv.amount_cents,
+                currency=inv.currency,
+                paid=inv.paid,
+                note=inv.note,
+            )
+            for inv in site.client_invoices
+        ],
+    )
+
+
+async def get_site_client(*, workspace_id: str, site_id: str) -> SiteClientResponse:
+    """Return the owner's client record for a site (name / contact / notes and the
+    manual receipts recorded against it). Tenant-scoped via ``_load``, so a missing
+    or cross-tenant site is a 404.
+
+    A site that has never had a client recorded returns a BLANK record, not a 404:
+    "no client yet" is the ordinary starting state of every site, and the Settings
+    form renders the same fields either way. Reserving 404 for "no such site" keeps
+    the two genuinely different failures distinguishable at the edge.
+    """
+    site = await _load(workspace_id, site_id)
+    return _client_response(site)
+
+
+async def update_site_client(
+    *, workspace_id: str, site_id: str, body: SiteClientUpdate
+) -> SiteClientResponse:
+    """Patch the owner's client record. THREE-WAY: a field absent from the body is
+    left alone, while an explicitly-sent empty string clears it — which is how the
+    form deletes a value without a separate endpoint. ``model_fields_set`` is what
+    tells the two apart, so this must read the un-dumped model.
+
+    Writes through a targeted ``set()`` rather than ``save()`` on purpose. This is a
+    human-paced edit against a document a BUILD also writes to: an owner typing
+    notes while a publish settles would, under ``save()``, push their whole stale
+    snapshot back and silently roll ``build_status`` backwards. A field-scoped
+    update cannot.
+    """
+    body = SiteClientUpdate.model_validate(body)
+    site = await _load(workspace_id, site_id)
+
+    updates: dict[str, Any] = {}
+    if "name" in body.model_fields_set:
+        updates["client_name"] = (body.name or "").strip()
+    if "contact" in body.model_fields_set:
+        updates["client_contact"] = (body.contact or "").strip()
+    if "notes" in body.model_fields_set:
+        updates["client_notes"] = body.notes or ""
+
+    # An empty PATCH is a no-op read, not an error — a form that autosaves on blur
+    # will send one, and failing it would surface as a spurious error toast.
+    if updates:
+        await site.set(updates)
+
+    # no-event: the client record is the owner's own bookkeeping. Nothing
+    # downstream (search index, soul memory, ripple invalidation, the deploy lane)
+    # reads it, and it never reaches a generated page.
+    return _client_response(site)
+
+
+async def record_site_invoice(
+    *, workspace_id: str, site_id: str, body: SiteInvoiceCreate
+) -> SiteClientResponse:
+    """Append one manual receipt to the site's client record and return the whole
+    updated record (so the caller re-renders from one authoritative response rather
+    than splicing the new row in locally).
+
+    Nothing here charges anyone — it is the owner writing down that their client
+    paid. The list is capped at ``_INVOICE_KEEP`` newest-first entries so a site
+    that is billed monthly for years cannot grow a document without bound; the cap
+    drops the OLDEST, which is the only end that can be dropped without losing the
+    balance the owner is actually looking at.
+    """
+    body = SiteInvoiceCreate.model_validate(body)
+    site = await _load(workspace_id, site_id)
+
+    entry = _SiteInvoiceDoc(
+        id=f"inv_{secrets.token_hex(8)}",
+        issued_at=datetime.now(UTC),
+        amount_cents=body.amount_cents,
+        currency=body.currency,
+        paid=body.paid,
+        note=body.note.strip(),
+    )
+    kept = [entry, *site.client_invoices][:_INVOICE_KEEP]
+    # Beanie's ``set()`` merges the updated document back onto ``site``, so the
+    # response below is built from the list INCLUDING this receipt. That is
+    # load-bearing and not obvious at the call site: an explicit local mirror was
+    # written here first, then mutation-tested away as dead.
+    await site.set({"client_invoices": [inv.model_dump() for inv in kept]})
+
+    # no-event: see update_site_client. Recording a receipt moves no money and
+    # nothing downstream subscribes to it.
+    return _client_response(site)
 
 
 async def publish_pocket(

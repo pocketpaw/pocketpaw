@@ -2,6 +2,17 @@
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
 #
+# Updated 2026-08-12 (sites Settings consolidation — the client record gets a
+# backend): added ``SiteClientResponse`` / ``SiteClientUpdate`` / ``SiteInvoiceOut``
+# / ``SiteInvoiceCreate``, backing GET+PATCH /sites/{site_id}/client and
+# POST /sites/{site_id}/invoices. The builder's Settings surface had held the
+# owner's client details and manual receipts in COMPONENT STATE with a comment
+# saying persistence was a later task, so every value typed there was gone on
+# reload and on a site switch — the panel demonstrated its own contract without
+# honouring it. ``SiteClientUpdate`` is three-way (absent ≠ empty) so a partial
+# edit cannot blank a field the caller never sent, and money is integer minor
+# units end to end so no receipt is ever a float on the wire.
+#
 # Updated 2026-08-10 (SL-3 — the build lane reaches the wire): added
 # ``SiteResponse.build_reason`` and put all three build fields
 # (``build_status`` / ``build_reason`` / ``build_job_id``) on ``SiteStatusResponse``
@@ -580,6 +591,107 @@ class ImportFromUrlResponse(BaseModel):
     site_id: str
     pocket_id: str
     status: str  # queued
+
+
+class SiteInvoiceOut(BaseModel):
+    """One manual receipt on the site's client record. ``amount_cents`` is integer
+    MINOR units — the wire never carries a float for money, so the reading client
+    formats it and nothing rounds in transit."""
+
+    id: str
+    issued_at: str
+    amount_cents: int
+    currency: str
+    paid: bool
+    note: str = ""
+
+
+class SiteClientResponse(BaseModel):
+    """The site owner's record of their own client (backs GET/PATCH
+    /sites/{site_id}/client). This is the owner's address book and receipt book for
+    the business the site belongs to — NOT the owner's own subscription with us,
+    which lives on ``SiteResponse.plan_tier`` / ``subscription_status``. Every field
+    defaults empty, so a site that has never been edited returns a valid, blank
+    record rather than a 404: the Settings surface renders the same form either way.
+    """
+
+    site_id: str
+    name: str = ""
+    contact: str = ""
+    notes: str = ""
+    invoices: list[SiteInvoiceOut] = []
+
+
+class SiteClientUpdate(BaseModel):
+    """PATCH body for the client record. Every field is optional and OMISSION MEANS
+    "leave unchanged" — the service applies three-way semantics via
+    ``model_fields_set``, so a caller editing only the notes cannot blank the name
+    it never sent. Sending an explicit empty string DOES clear that field, which is
+    how the form deletes a value.
+
+    The caps are the reason this validation lives at the edge rather than on the
+    document: an over-long value is a 422 the form can show, instead of a record
+    that silently lost its tail on the way to Mongo.
+    """
+
+    name: str | None = None
+    contact: str | None = None
+    notes: str | None = None
+
+    @field_validator("name", "contact")
+    @classmethod
+    def _cap_short(cls, v: str | None) -> str | None:
+        if v is not None and len(v) > 200:
+            raise ValueError("value must be 200 characters or fewer")
+        return v
+
+    @field_validator("notes")
+    @classmethod
+    def _cap_notes(cls, v: str | None) -> str | None:
+        if v is not None and len(v) > 5000:
+            raise ValueError("notes must be 5000 characters or fewer")
+        return v
+
+
+class SiteInvoiceCreate(BaseModel):
+    """POST body for recording one manual receipt against the client record.
+
+    ``amount_cents`` is a non-negative integer in minor units. It is bounded on BOTH
+    ends on purpose: negative would let a receipt reverse the running total, and the
+    upper bound stops a typo (or a paste of an id into an amount field) from writing
+    a number no currency has a use for. ``currency`` is normalized to upper case and
+    must be a 3-letter ISO-4217-shaped code, so the list cannot end up rendering
+    "usd" and "USD" as two different currencies.
+    """
+
+    amount_cents: int = 0
+    currency: str = "USD"
+    paid: bool = True
+    note: str = ""
+
+    @field_validator("amount_cents")
+    @classmethod
+    def _validate_amount(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("amount_cents must not be negative")
+        if v > 1_000_000_000_000:
+            raise ValueError("amount_cents is implausibly large")
+        return v
+
+    @field_validator("currency")
+    @classmethod
+    def _validate_currency(cls, v: str) -> str:
+        code = (v or "").strip().upper()
+        if not re.fullmatch(r"[A-Z]{3}", code):
+            raise ValueError("currency must be a 3-letter code")
+        return code
+
+    @field_validator("note")
+    @classmethod
+    def _cap_note(cls, v: str) -> str:
+        if len(v) > 500:
+            raise ValueError("note must be 500 characters or fewer")
+        return v
 
 
 class NativeArtifactResponse(BaseModel):
