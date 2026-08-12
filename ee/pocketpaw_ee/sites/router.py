@@ -3,6 +3,14 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# Updated 2026-08-12 (the custom-domain routing lane): added DELETE
+# ``/sites/{site_id}/domains/{hostname}``. Domains could be connected and never
+# disconnected, so a removed or re-pointed domain left its Cloudflare custom hostname
+# on the zone permanently — consuming quota, pointing at a Worker that might no longer
+# exist, and (because Cloudflare rejects duplicate hostnames) blocking that domain from
+# ever being connected to a different site. Gated on ``fabric.write`` like ``add_domain``:
+# it releases a name on the shared zone that anyone may then claim.
+#
 # Updated 2026-08-12 (sites Settings consolidation): three endpoints for the
 # owner's client record — GET + PATCH ``/sites/{site_id}/client`` and POST
 # ``/sites/{site_id}/invoices``. They exist because the builder's Settings surface
@@ -721,6 +729,24 @@ async def add_domain(
 ) -> DomainStatusResponse:
     return await sites_service.add_domain(
         workspace_id=ctx.workspace_id, site_id=site_id, hostname=body.hostname
+    )
+
+
+@router.delete("/sites/{site_id}/domains/{hostname}", status_code=204)
+async def remove_domain(
+    site_id: str,
+    hostname: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> None:
+    """Disconnect a custom domain — delete its Worker route and its Cloudflare
+    custom hostname, then drop it from the site.
+
+    Gated on ``fabric.write`` like ``add_domain``: this releases a hostname on the
+    shared zone, and once released anyone may claim it. 204 because there is nothing
+    left to describe; a hostname this site does not have is a 404."""
+    await sites_service.remove_domain(
+        workspace_id=ctx.workspace_id, site_id=site_id, hostname=hostname
     )
 
 

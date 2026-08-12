@@ -1,0 +1,138 @@
+[
+  {
+    "label": "never write the worker route — back to the hostname-only add_domain that made a domain validate, go green, and serve the fallback origin's error page",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            route_id = await cf.create_worker_route(\n                pattern=_route_pattern(ch.hostname), script=script\n            )",
+    "replace": "            route_id = \"\"",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_add_domain_routes_the_hostname_to_this_sites_worker"
+    ]
+  },
+  {
+    "label": "route the bare host instead of every path — the home page loads and every other page 404s, which reads as a broken site rather than a broken route",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return f\"{hostname}/*\"",
+    "replace": "    return hostname",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_add_domain_routes_the_hostname_to_this_sites_worker"
+    ]
+  },
+  {
+    "label": "drop the route id on the floor — the route exists on the zone and nothing records it, so teardown can never remove it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            cf_route_id=route_id,",
+    "replace": "            cf_route_id=\"\",",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_add_domain_routes_the_hostname_to_this_sites_worker"
+    ]
+  },
+  {
+    "label": "write a route in every deploy mode — names a script Cloudflare cannot find on local/wfp",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if _deploy_mode() != \"workers\":\n        return \"\"",
+    "replace": "    if False:\n        return \"\"",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_modes_without_a_per_site_worker_write_no_route"
+    ]
+  },
+  {
+    "label": "allow a domain on a site that was never published — a route naming a Worker that does not exist",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if script and not site.deployed:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_add_domain_refuses_a_site_that_was_never_published"
+    ]
+  },
+  {
+    "label": "do not roll the hostname back when the route fails — the name stays occupied and the user's retry fails on a conflict they cannot clear",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                await cf.delete_custom_hostname(ch.id)",
+    "replace": "                pass",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_a_failed_route_rolls_the_custom_hostname_back"
+    ]
+  },
+  {
+    "label": "tear down the hostname before the route — leaves a window where Cloudflare has forgotten the name while a route still claims it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if dom.cf_route_id:\n        await cf.delete_worker_route(dom.cf_route_id)\n    if dom.cf_hostname_id:\n        await cf.delete_custom_hostname(dom.cf_hostname_id)",
+    "replace": "    if dom.cf_hostname_id:\n        await cf.delete_custom_hostname(dom.cf_hostname_id)\n    if dom.cf_route_id:\n        await cf.delete_worker_route(dom.cf_route_id)",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_remove_domain_tears_down_route_then_hostname"
+    ]
+  },
+  {
+    "label": "leave the disconnected host in allowed_origins — a standing capture grant for a host we no longer serve",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    site.allowed_origins = [o for o in site.allowed_origins if o != hostname]",
+    "replace": "    site.allowed_origins = list(site.allowed_origins)",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_remove_domain_tears_down_route_then_hostname"
+    ]
+  },
+  {
+    "label": "re-adding a connected hostname makes a second hostname and a second route claiming one pattern",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    existing = next((d for d in site.domains if d.hostname == hostname), None)\n    if existing is not None:",
+    "replace": "    existing = next((d for d in site.domains if d.hostname == hostname), None)\n    if False:",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_adding_the_same_hostname_twice_makes_no_second_route"
+    ]
+  },
+  {
+    "label": "restore the constructed CNAME target — the name with no DNS records that customers were told to paste",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "            cname_target=self._cname_target,",
+    "replace": "            cname_target=f\"{self._zone_id}.cdn.cloudflare.net\",",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client.py::test_create_custom_hostname_returns_cname_target"
+    ]
+  },
+  {
+    "label": "hand out an unconfigured CNAME target instead of refusing",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "        if not self._cname_target:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client.py::test_create_custom_hostname_refuses_without_a_cname_target"
+    ]
+  },
+  {
+    "label": "restore BC-10's custom_metadata block — a 403/1413 on any zone without account-team access, so paid tiers fail where free ones work",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "    if settings:\r\n        ssl[\"settings\"] = settings\r\n    return ssl",
+    "replace": "    if settings:\r\n        ssl[\"settings\"] = settings\r\n    ssl[\"custom_metadata\"] = {\"resold_features\": \",\".join(sorted(features))}\r\n    return ssl",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client.py::test_paid_tier_features_no_longer_send_custom_metadata",
+      "tests/cloud/sites/test_cloudflare_tiers.py::test_create_custom_hostname_premium_features_inject_ssl_settings"
+    ]
+  },
+  {
+    "label": "create the route with PUT — update-by-id on a collection, which is not a create",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "            resp = await client.post(url, json={\"pattern\": pattern, \"script\": script})",
+    "replace": "            resp = await client.put(url, json={\"pattern\": pattern, \"script\": script})",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client.py::test_create_worker_route_posts_the_pattern_and_returns_the_id"
+    ]
+  },
+  {
+    "label": "raise on a 404 delete — a half-finished teardown becomes permanently un-finishable",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "        url = f\"{_CF_API}/zones/{self._zone_id}/workers/routes/{route_id}\"\r\n        async with self._client() as client:\r\n            resp = await client.delete(url)\r\n        if resp.status_code == 404:\r\n            return",
+    "replace": "        url = f\"{_CF_API}/zones/{self._zone_id}/workers/routes/{route_id}\"\r\n        async with self._client() as client:\r\n            resp = await client.delete(url)",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client.py::test_deletes_treat_a_404_as_already_done"
+    ]
+  },
+  {
+    "label": "swallow a real delete failure as if it were a 404 — the orphan is stranded silently",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "        url = f\"{_CF_API}/zones/{self._zone_id}/custom_hostnames/{hostname_id}\"\r\n        async with self._client() as client:\r\n            resp = await client.delete(url)\r\n        if resp.status_code == 404:\r\n            return\r\n        self._unwrap(resp)",
+    "replace": "        url = f\"{_CF_API}/zones/{self._zone_id}/custom_hostnames/{hostname_id}\"\r\n        async with self._client() as client:\r\n            resp = await client.delete(url)\r\n        return",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client.py::test_deletes_still_fail_closed_on_a_real_error"
+    ]
+  }
+]

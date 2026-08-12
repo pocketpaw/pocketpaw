@@ -1,9 +1,12 @@
 # ee/pocketpaw_ee/sites/cloudflare_client.py — async Cloudflare API client for
-# the Sites control plane. Five surfaces:
+# the Sites control plane. Six surfaces:
 #   * Workers for Platforms — PUT a user Worker into our dispatch namespace
 #     (one synchronous call per site; live on 200; no per-account script cap).
 #   * Cloudflare for SaaS — create a custom hostname, return the single CNAME
-#     the client pastes, poll validation + TLS status.
+#     the client pastes, poll validation + TLS status, and delete it on teardown.
+#   * Worker routes — bind ``<custom hostname>/*`` to the site's Worker, and
+#     remove it again. This is the half that decides WHICH site a custom domain
+#     serves; the hostname alone only gets Cloudflare to accept the request.
 #   * D1 provisioning (DP0-1) — create a per-tenant D1 database and return its
 #     real uuid, so a Dynamic Paw Site's data plane can be stood up; see
 #     create_database.
@@ -81,6 +84,38 @@
 # neither rather than letting Cloudflare answer 400. Note that an ``html`` body
 # renders at ``about:blank``, so nothing relative inside it resolves: assembling a
 # SELF-CONTAINED document is the caller's job (``sites.draft_markup``).
+
+# Updated 2026-08-12 (the custom-domain routing lane): three changes, all of them
+# things this module was getting wrong rather than new capability.
+#
+#   * ``cname_target`` is now CONFIGURED, not constructed. It used to return
+#     ``f"{zone_id}.cdn.cloudflare.net"`` — measured over DNS-over-HTTPS on
+#     2026-08-12, that name answers NOERROR with NO RECORDS. It is the one value the
+#     entire custom-domain flow asks a human to act on, and it could never come live.
+#     Cloudflare's getting-started doc is explicit that the target must be "a proxied
+#     CNAME that points your CNAME target to your fallback origin" — a record on OUR
+#     zone, which cannot be derived from a zone id. It is now a constructor argument
+#     (``PAW_CF_CNAME_TARGET`` at the service seam) and ``create_custom_hostname``
+#     REFUSES when it is unset rather than handing out a dead name. Fail-closed on an
+#     operator's misconfiguration beats a customer waiting forever on a hostname that
+#     can never validate.
+#
+#   * ``custom_metadata`` is GONE from the SSL payload. BC-10 attached it for any
+#     plan tier declaring ``cloudflare_features``; Cloudflare's custom-metadata doc
+#     says "only certain customers have access to this feature… contact your account
+#     team", which is a 403/1413 on an ordinary zone. It made custom domains work on
+#     FREE sites and fail on PAID ones — the worst possible split. The
+#     ``ssl.settings`` map stays: it is not entitlement-gated.
+#
+#   * Worker ROUTES are now part of this client — ``create_worker_route`` /
+#     ``delete_worker_route``, plus ``delete_custom_hostname`` to make teardown
+#     possible at all. A custom hostname only gets Cloudflare to ACCEPT the traffic;
+#     something still has to decide which site answers it. Cloudflare's
+#     worker-as-origin doc supports a route scoped to one exact hostname, so the
+#     control plane writes ``<hostname>/*`` -> that site's Worker at add time. That
+#     is the whole routing design: no dispatcher, no KV, no extra hop. (The wildcard
+#     ``*/*`` + dynamic-dispatch shape is Workers for Platforms, and it is the
+#     >1000-domain path — see docs/design/drafts/2026-08-12-sites-custom-domain-lane.md.)
 
 # Updated 2026-08-12 (a 403 that could not be diagnosed): ``_unwrap``'s non-2xx
 # branch raised the bare status and never read the body, while the branch that DOES
@@ -183,12 +218,20 @@ _FEATURE_SSL_SETTINGS: dict[str, dict] = {
 def _ssl_for_features(features: set[str] | None) -> dict:
     """Build the custom-hostname ``ssl`` payload for a tier's resold features.
 
-    No features (base tier) → the prior basic ``{"method": "http", "type": "dv"}``
-    payload, unchanged. With features, the basic payload gains an ``ssl.settings``
-    block that is the UNION of every known feature's fragment (``_FEATURE_SSL_SETTINGS``)
-    plus a ``custom_metadata`` recording the full resold feature set (sorted, so the
-    wire payload is deterministic). A feature with no ssl fragment still lands on
-    ``custom_metadata`` — the tier is visible even when it provisions no toggle.
+    No features (base tier) → the basic ``{"method": "http", "type": "dv"}`` payload.
+    With features, it gains an ``ssl.settings`` block that is the UNION of every known
+    feature's fragment (``_FEATURE_SSL_SETTINGS``). A feature with no fragment
+    contributes nothing, which is the honest answer: nothing about the hostname
+    changes for it.
+
+    **No ``custom_metadata``.** BC-10 recorded the resold feature set there so a tier
+    was auditable on Cloudflare's side. Per-hostname metadata is not generally
+    available — Cloudflare's own doc says "only certain customers have access to this
+    feature… contact your account team" — so on an ordinary zone that block turned the
+    create into a 403/1413. The effect was that custom domains worked on FREE sites and
+    failed on PAID ones. The 2026-06-25 resale research had already marked these SKUs
+    DEFER; this restores that decision. The tier is recorded on the Site document,
+    which is where anything in this codebase actually reads it from.
     """
     if not features:
         return dict(_BASIC_SSL)
@@ -198,9 +241,6 @@ def _ssl_for_features(features: set[str] | None) -> dict:
     ssl: dict = dict(_BASIC_SSL)
     if settings:
         ssl["settings"] = settings
-    # Record the resold feature set on the hostname so the tier is auditable on
-    # the CF side (sorted → deterministic wire payload).
-    ssl["custom_metadata"] = {"resold_features": ",".join(sorted(features))}
     return ssl
 
 
@@ -222,11 +262,17 @@ class CloudflareClient:
         api_token: str,
         zone_id: str,
         dispatch_namespace: str,
+        cname_target: str = "",
         _transport: httpx.BaseTransport | None = None,
     ) -> None:
         self._account_id = account_id
         self._zone_id = zone_id
         self._namespace = dispatch_namespace
+        # The name a customer pastes into their own registrar. MUST be a proxied
+        # record on our zone (see the module header); defaults empty so a caller that
+        # has not configured one fails loudly at create time rather than silently
+        # handing out something that does not resolve.
+        self._cname_target = cname_target.strip()
         self._headers = {"Authorization": f"Bearer {api_token}"}
         self._transport = _transport  # tests inject a MockTransport
 
@@ -319,12 +365,23 @@ class CloudflareClient:
 
         ``features`` (BC-10) is the site plan tier's ``cloudflare_features`` set.
         When present, the create request carries the premium ``ssl`` payload built
-        by ``_ssl_for_features`` (strict-TLS / HTTP-2 toggles for WAF / edge-cache
-        + a ``custom_metadata`` recording the resold set), so a HIGHER-tier site
-        provisions paid security at hostname-create time. When None/empty (the BASE
-        tier), the request is the prior basic DV ``ssl`` payload, unchanged — a
-        base-tier site never regresses.
+        by ``_ssl_for_features`` (strict-TLS / HTTP-2 toggles for WAF / edge-cache).
+        When None/empty (the BASE tier), the request is the basic DV ``ssl`` payload.
+
+        **Refuses without a configured CNAME target.** The returned ``cname_target``
+        is the single instruction the customer acts on, and this used to construct
+        ``{zone_id}.cdn.cloudflare.net`` — a name with no DNS records at all. A
+        hostname created against a dead target can never validate, and nothing
+        downstream can tell the customer why, so an unconfigured target is refused
+        here instead of producing a hostname that is guaranteed to fail. Cloudflare
+        wants a proxied record on our own zone; only the operator knows which one.
         """
+        if not self._cname_target:
+            raise ValidationError(
+                "sites.cloudflare_unconfigured",
+                "Custom domains need a CNAME target configured (PAW_CF_CNAME_TARGET) "
+                "— a proxied hostname on the Paw zone for customers to point at.",
+            )
         url = f"{_CF_API}/zones/{self._zone_id}/custom_hostnames"
         async with self._client() as client:
             resp = await client.post(
@@ -338,7 +395,7 @@ class CloudflareClient:
             status=_map_status(
                 result.get("status", ""), (result.get("ssl") or {}).get("status", "")
             ),
-            cname_target=f"{self._zone_id}.cdn.cloudflare.net",
+            cname_target=self._cname_target,
         )
 
     async def get_hostname_status(self, hostname_id: str) -> HostnameStatus:
@@ -347,6 +404,51 @@ class CloudflareClient:
             resp = await client.get(url)
         result = self._unwrap(resp)
         return _map_status(result.get("status", ""), (result.get("ssl") or {}).get("status", ""))
+
+    async def delete_custom_hostname(self, hostname_id: str) -> None:
+        """Remove a custom hostname from the zone. Idempotent on a 404.
+
+        There was no delete path at all before this, which is why a removed site left
+        its hostnames on the zone counting against quota and pointing at a Worker that
+        no longer existed. A 404 is treated as SUCCESS: the goal is "this hostname is
+        not on the zone", and something already gone satisfies it. Raising there would
+        make a half-finished teardown permanently un-finishable, which is the exact
+        orphan-accumulation this method exists to stop."""
+        url = f"{_CF_API}/zones/{self._zone_id}/custom_hostnames/{hostname_id}"
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
+
+    async def create_worker_route(self, *, pattern: str, script: str) -> str:
+        """Bind a URL pattern on our zone to a Worker, and return the route id.
+
+        This is what makes a custom hostname reach a particular site. Cloudflare for
+        SaaS gets the request into our zone; a route scoped to that exact hostname
+        (``myportfolio.com/*``) is what decides which Worker answers it. One route per
+        custom domain, written by the control plane at add time — see the module
+        header for why there is no dispatcher.
+
+        ``POST`` creates; ``PUT`` on this collection is update-by-id and needs a route
+        id we do not have yet. The zone allows 1,000 routes, which is far past the
+        per-account Worker limit this deploy mode runs into first."""
+        url = f"{_CF_API}/zones/{self._zone_id}/workers/routes"
+        async with self._client() as client:
+            resp = await client.post(url, json={"pattern": pattern, "script": script})
+        result = self._unwrap(resp)
+        return result.get("id", "")
+
+    async def delete_worker_route(self, route_id: str) -> None:
+        """Remove a Worker route. Idempotent on a 404, for the same reason
+        ``delete_custom_hostname`` is: a teardown that cannot complete leaves exactly
+        the orphan it was called to remove."""
+        url = f"{_CF_API}/zones/{self._zone_id}/workers/routes/{route_id}"
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
 
     async def create_database(self, name: str) -> str:
         """Create a Cloudflare D1 database and return its real uuid (DP0-1).
