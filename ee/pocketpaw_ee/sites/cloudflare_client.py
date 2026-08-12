@@ -82,6 +82,19 @@
 # renders at ``about:blank``, so nothing relative inside it resolves: assembling a
 # SELF-CONTAINED document is the caller's job (``sites.draft_markup``).
 
+# Updated 2026-08-12 (a 403 that could not be diagnosed): ``_unwrap``'s non-2xx
+# branch raised the bare status and never read the body, while the branch that DOES
+# read it can only run on a 2xx. So Cloudflare's own description of the failure was
+# discarded on exactly the responses somebody needed it for: a live report of
+# "Cloudflare API 403" from POST custom_hostnames, which is equally true of a token
+# missing the SSL-and-Certificates edit scope, a token with no access to the zone,
+# and a zone with no Cloudflare for SaaS entitlement — three problems, three
+# different fixes, one useless message. ``_error_detail`` now joins EVERY entry in
+# the errors array with its Cloudflare code (the docs are indexed by those numbers),
+# capped, and degrades to the status code when the body is not the JSON envelope.
+# The body is Cloudflare describing OUR request; the token only ever lives in a
+# request header, so nothing secret rides along.
+
 from __future__ import annotations
 
 import json
@@ -92,6 +105,48 @@ from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.sites.domain import CustomHostname, HostnameStatus
 
 _CF_API = "https://api.cloudflare.com/client/v4"
+
+# How much of an error body to carry into the raised message. Cloudflare's own
+# messages are short sentences; the cap exists so a proxy's HTML error page cannot
+# paste a whole document into a toast.
+_ERROR_DETAIL_MAX = 300
+
+
+def _error_detail(resp: httpx.Response) -> str:
+    """The reason Cloudflare gave, as one line.
+
+    Cloudflare answers failures with ``{"success": false, "errors": [{code,
+    message}, ...]}``. EVERY entry is joined, not just the first: on a refusal the
+    second is often the actionable one — the first names the endpoint, the second
+    names the missing entitlement. Codes ride along because Cloudflare's docs are
+    indexed by them, so a number an operator can paste into a search is worth more
+    than the sentence next to it.
+
+    Falls back to the raw body, then to nothing, so a non-JSON reply (an edge HTML
+    error page) degrades to the status code the caller already has rather than
+    turning a diagnosis into a second exception. The response body is never a
+    secret: it is Cloudflare's description of OUR request, and the token only ever
+    lives in a request header.
+    """
+    try:
+        body = resp.json()
+    except (json.JSONDecodeError, ValueError):
+        text = (resp.text or "").strip()
+        return text[:_ERROR_DETAIL_MAX] if text else "no error detail"
+
+    errors = body.get("errors") if isinstance(body, dict) else None
+    if not errors:
+        return "no error detail"
+
+    parts: list[str] = []
+    for err in errors:
+        if not isinstance(err, dict):
+            parts.append(str(err))
+            continue
+        code, message = err.get("code"), str(err.get("message", "")).strip()
+        parts.append(f"{message} (code {code})" if code and message else message or f"code {code}")
+    return "; ".join(p for p in parts if p)[:_ERROR_DETAIL_MAX] or "no error detail"
+
 
 # Filename the module part is uploaded under (and named by ``main_module`` in the
 # metadata). The Workers multipart upload references modules by filename; the
@@ -181,11 +236,21 @@ class CloudflareClient:
     @staticmethod
     def _unwrap(resp: httpx.Response) -> dict:
         if resp.status_code // 100 != 2:
-            raise ValidationError("sites.cloudflare_error", f"Cloudflare API {resp.status_code}")
+            # Cloudflare names the reason in the body on a refusal, and this branch
+            # used to drop it: it raised the bare status and never looked, while the
+            # body-reading branch below can only run on a 2xx. So the one useful
+            # sentence was discarded on exactly the responses that needed it — a 403
+            # on custom_hostnames reached the operator as "Cloudflare API 403", which
+            # is true of a token missing the SSL-and-Certificates edit scope, a token
+            # with no access to the zone, and a zone without Cloudflare for SaaS,
+            # three problems with three different fixes.
+            raise ValidationError(
+                "sites.cloudflare_error",
+                f"Cloudflare API {resp.status_code}: {_error_detail(resp)}",
+            )
         body = resp.json()
         if not body.get("success", False):
-            errs = body.get("errors") or [{"message": "unknown"}]
-            raise ValidationError("sites.cloudflare_error", str(errs[0].get("message")))
+            raise ValidationError("sites.cloudflare_error", _error_detail(resp))
         return body.get("result", {})
 
     async def put_worker(
