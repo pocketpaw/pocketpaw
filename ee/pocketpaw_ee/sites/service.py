@@ -3782,10 +3782,30 @@ def _route_target(site: Any) -> str:
     describes what actually exists. Same "ask the artifact, not the intent" move
     ``workers_deploy`` made for engines in SL-1, one level up.
 
+    **Rows that predate the field.** ``deploy_target`` is new, so every site deployed
+    before it shipped carries ``""`` — which is indistinguishable, by the field alone,
+    from "never deployed". Reading it strictly would mean no already-live site could
+    connect a domain until it was republished, and the failure would be the silent kind:
+    a hostname created, no route written, the fallback origin served. So a row that is
+    ``deployed`` but unstamped falls back to the deploy MODE, which is exactly the answer
+    this code used before the field existed — not a regression, and self-healing, because
+    the next publish stamps the real value and this branch stops being reached.
+
+    The fallback is deliberately NOT extended to unstamped rows that are not
+    ``deployed``: there, "" really does mean no Worker.
+
     The name comes from ``workers_deploy.worker_name`` rather than being rebuilt here:
     a route naming a script that does not exist is rejected, so the deploy's answer and
     this one have to be the same function."""
-    if site.deploy_target != "workers":
+    target = site.deploy_target
+    if not target and site.deployed:
+        # Migration bridge for pre-field rows. Mirrors provision_deploy's local->workers
+        # degradation for a provisioned (dynamic) site, the same way the pre-field code
+        # had to.
+        target = _deploy_mode() or ""
+        if target == "local" and site.provision_status == "provisioned":
+            target = "workers"
+    if target != "workers":
         return ""
     from pocketpaw_ee.sites.workers_deploy import worker_name
 

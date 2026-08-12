@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import base64
 from typing import Any
-from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -357,9 +356,10 @@ async def _fake_publish(beanie_test_db, monkeypatch) -> dict[str, Any]:
 async def _queue_import(monkeypatch, url: str = "https://example.com/") -> dict[str, str]:
     """Run the real import_from_url (plan stubbed, scheduler captured-and-closed)
     to mint the pocket + queued draft Site the crawl then fills."""
-    import pocketpaw_ee.cloud.workspace.service as ws_svc
 
-    monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="go"))
+    # No plan patch: the tree conftest already defaults this to "go" for every test
+    # here. Patching it again nests two patches on one attribute and leaks the mock
+    # past teardown — see the conftest note.
     monkeypatch.setattr(import_service, "_default_crawl_scheduler", lambda coro: coro.close())
     return await import_service.import_from_url(workspace_id=_WS, user_id=_USER, url=url)
 
@@ -469,10 +469,11 @@ async def test_from_url_byte_cap_marks_failed_report(beanie_test_db, monkeypatch
     ],
 )
 async def test_endpoint_rejects_forbidden_seed_with_422(beanie_test_db, monkeypatch, seed):
-    import pocketpaw_ee.cloud.workspace.service as ws_svc
     from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 
-    monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="go"))
+    # No plan patch: the tree conftest already defaults this to "go" for every test
+    # here. Patching it again nests two patches on one attribute and leaks the mock
+    # past teardown — see the conftest note.
     with pytest.raises(ValidationError):
         await import_service.import_from_url(workspace_id=_WS, user_id=_USER, url=seed)
     assert await _SiteDoc.find_one({"workspace": _WS}) is None
