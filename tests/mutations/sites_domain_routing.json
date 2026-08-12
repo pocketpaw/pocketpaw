@@ -29,10 +29,28 @@
   {
     "label": "write a route in every deploy mode — names a script Cloudflare cannot find on local/wfp",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if _deploy_mode() != \"workers\":\n        return \"\"",
+    "find": "    if mode != \"workers\":\n        return \"\"",
     "replace": "    if False:\n        return \"\"",
     "tests": [
       "tests/ee/sites/test_domain_routing.py::test_modes_without_a_per_site_worker_write_no_route"
+    ]
+  },
+  {
+    "label": "ask only the deploy mode — a provisioned site on a local-mode box has a real Worker and would get no route, so its domain validates, goes green, and serves the wrong thing",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if mode == \"local\" and site.provision_status == \"provisioned\":",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_a_provisioned_site_gets_a_route_even_in_local_mode"
+    ]
+  },
+  {
+    "label": "degrade for ANY provision_status, not just provisioned — routes a site mid-provision to a Worker that does not exist yet",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if mode == \"local\" and site.provision_status == \"provisioned\":",
+    "replace": "    if mode == \"local\" and site.provision_status != \"none\":",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_a_site_still_provisioning_in_local_mode_writes_no_route"
     ]
   },
   {

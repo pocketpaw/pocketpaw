@@ -3712,20 +3712,41 @@ def _route_pattern(hostname: str) -> str:
 
 
 def _route_target(site: Any) -> str:
-    """The Worker name a custom domain's route should point at, or ``""`` when this
-    deploy mode has no per-site Worker to point at.
+    """The Worker name a custom domain's route should point at, or ``""`` when nothing
+    route-addressable was deployed for this site.
 
-    Only ``workers`` mode deploys a site as its own addressable Worker
-    (``paw-site-<id>``), so only there is a route meaningful. ``local`` serves from
-    localhost; ``wfp`` puts the script inside a dispatch namespace, where it is not
-    route-addressable at all and the namespace's own dispatch Worker does the routing.
-    Both keep the prior hostname-only behaviour rather than writing a route that names
-    a script Cloudflare cannot find.
+    A route is meaningful only where the site was deployed as its OWN addressable
+    Worker (``paw-site-<id>``, via ``workers_deploy``). ``wfp`` uploads into a dispatch
+    namespace, where the script is not route-addressable at all and the namespace's own
+    dispatch Worker routes; ``local`` serves from localhost. Those keep the prior
+    hostname-only behaviour rather than writing a route naming a script Cloudflare
+    cannot find.
+
+    **The deploy mode alone does not answer this, and reading it as if it did was a
+    bug.** ``provision_deploy`` DEGRADES ``local`` to ``workers`` for a DYNAMIC site —
+    nothing serves a D1 binding on localhost — so a dynamic site on a local-mode box
+    has a real ``paw-site-<id>`` Worker while ``_deploy_mode()`` still says ``local``.
+    Asking only the mode returned "" there and wrote no route, which is precisely the
+    "the domain validates, goes green, and serves the wrong thing" failure this lane
+    exists to remove.
+
+    The site doc has no ``pattern`` field to re-run ``_is_dynamic`` against — that
+    lives on the pocket — but it does carry the ARTIFACT of having been provisioned:
+    ``provision_status``, which only a dynamic site ever leaves at ``"none"``. Asking
+    the artifact is the better question anyway, and the same one ``workers_deploy``
+    settled for engines (SL-1): what was actually emitted, not what kind of thing it
+    was meant to be.
 
     The name comes from ``workers_deploy.worker_name`` rather than being rebuilt here:
     a route naming a script that does not exist is rejected, so the deploy's answer and
     this one have to be the same function."""
-    if _deploy_mode() != "workers":
+    mode = _deploy_mode()
+    if mode == "local" and site.provision_status == "provisioned":
+        # Mirrors provision_deploy's own degradation. Kept as an explicit branch
+        # rather than folded into the comparison so the two stay legibly paired: if
+        # that one stops degrading, this one is the next line somebody reads.
+        mode = "workers"
+    if mode != "workers":
         return ""
     from pocketpaw_ee.sites.workers_deploy import worker_name
 
