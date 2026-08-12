@@ -1741,6 +1741,31 @@ async def require_sites_plan(workspace_id: str) -> None:
         )
 
 
+async def _emit_site_created(doc: _SiteDoc) -> None:
+    """Publish ``SiteCreated`` for a freshly minted DRAFT Site doc.
+
+    Deliberately UNGUARDED — the caller owns the try/except, so patching this in a
+    test exercises that guard rather than replacing it. Lazy imports keep the sites
+    service free of a hard cloud-realtime dependency, matching ``publish_pocket``.
+    """
+    from pocketpaw_ee.cloud._core.realtime.emit import emit
+    from pocketpaw_ee.cloud._core.realtime.events import SiteCreated
+
+    await emit(
+        SiteCreated(
+            data={
+                "workspace_id": doc.workspace,
+                "site_id": str(doc.id),
+                "pocket_id": doc.pocket_id,
+                "owner": doc.owner,
+                # Always False on a fresh draft. Sent anyway so a listener can tell a
+                # draft from a publish off the payload alone, with no second read.
+                "deployed": False,
+            }
+        )
+    )
+
+
 async def create_draft_site(
     *,
     workspace_id: str,
@@ -1776,6 +1801,17 @@ async def create_draft_site(
     publish. ``publish`` reuses a stored non-empty ``signed_key``, so minting one here is
     what keeps the built key and the doc in sync (the same invariant
     ``test_republish_reuses_signed_key`` pins for a re-publish).
+
+    REALTIME (fix/sites-draft-realtime): a FRESH mint emits ``SiteCreated`` so an
+    already-open gallery gains the card on its own. This used to carry a
+    ``# no-event`` opt-out reasoning that nothing downstream keys on a draft doc —
+    true of the search index and soul memory, but the gallery is a listener too, and
+    it was left with no signal at all. The per-run ``pocket_created`` SSE does not
+    cover this: it reaches only the tab that owns that chat stream, so a draft
+    created from /chat, a second tab, a teammate's session, or a zip/url import was
+    invisible until someone pressed Refresh. The emit sits AFTER the idempotent early
+    return above, so it fires once per real insert — a repeat create, or one against
+    an already-live doc, stays silent.
     """
     oid = _live_object_id(workspace_id, pocket_id)
     # Idempotent + dedupe-safe: never mint a second doc for a pocket, and never reset
@@ -1805,10 +1841,22 @@ async def create_draft_site(
         allowed_origins=_default_allowed_origins(),
         event_mapping=_DEFAULT_EVENT_MAPPING,
     )
-    # no-event: a DRAFT is not a published/deployed mutation — nothing downstream
-    # (search index, soul memory, ripple invalidation) keys on a draft Site doc;
-    # publish emits SitePublished when the site actually goes live.
     await doc.insert()
+    # The gallery IS a downstream listener, and a draft is the moment its card
+    # appears — so this emits, where it used to carry a ``# no-event`` opt-out.
+    # Guarded like every other post-insert side effect below: the Site doc is the
+    # primary contract, and a realtime failure must never cost the user the site
+    # they just asked for. ``emit`` already swallows publish errors; this also
+    # catches the "no bus initialised" AssertionError, so a create that runs outside
+    # a booted cloud (a script, a test tree without the bus fixture) still succeeds.
+    try:
+        await _emit_site_created(doc)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "create_draft_site: site.created emit failed (non-fatal) for pocket %s",
+            pocket_id,
+            exc_info=True,
+        )
     # SC-2: this is the moment the draft becomes a card in the gallery, so it is the
     # moment to try to give that card a picture. A draft has no url, so the capture
     # shoots its MARKUP instead. Only on a fresh mint — the idempotent early return

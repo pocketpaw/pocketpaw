@@ -1,0 +1,57 @@
+[
+  {
+    "label": "draft realtime: the mint goes back to emitting nothing, so an open gallery never hears about the draft",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    try:\n        await _emit_site_created(doc)\n    except Exception:  # noqa: BLE001\n        logger.warning(\n            \"create_draft_site: site.created emit failed (non-fatal) for pocket %s\",\n            pocket_id,\n            exc_info=True,\n        )",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_draft_first_visibility.py"
+    ]
+  },
+  {
+    "label": "draft realtime: the emit moves above the idempotent return, so a retried create pushes a duplicate card",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    existing = await _SiteDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})\n    if existing is not None:\n        return existing",
+    "replace": "    existing = await _SiteDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})\n    if existing is not None:\n        await _emit_site_created(existing)\n        return existing",
+    "tests": [
+      "tests/ee/sites/test_draft_first_visibility.py"
+    ]
+  },
+  {
+    "label": "draft realtime: a bus failure escapes and costs the user the site they just created",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    try:\n        await _emit_site_created(doc)\n    except Exception:  # noqa: BLE001",
+    "replace": "    await _emit_site_created(doc)\n    if False:",
+    "tests": [
+      "tests/ee/sites/test_draft_first_visibility.py"
+    ]
+  },
+  {
+    "label": "draft realtime: the event carries no workspace_id, so the audience resolver fans it out to nobody",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                \"workspace_id\": doc.workspace,\n                \"site_id\": str(doc.id),",
+    "replace": "                \"site_id\": str(doc.id),",
+    "tests": [
+      "tests/ee/sites/test_draft_first_visibility.py"
+    ]
+  },
+  {
+    "label": "draft realtime: site.created loses its audience branch, so the push reaches no workspace member",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "        if t in {\"site.created\", \"site.published\"}:",
+    "replace": "        if t in {\"site.published\"}:",
+    "tests": [
+      "tests/cloud/realtime/test_audience.py",
+      "tests/cloud/realtime/test_audience_coverage.py"
+    ]
+  },
+  {
+    "label": "draft realtime: site.created routes to the creator alone instead of the whole workspace",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "        if t in {\"site.created\", \"site.published\"}:\n            if wid := d.get(\"workspace_id\"):\n                return await self._workspace(wid)\n            return []",
+    "replace": "        if t in {\"site.created\", \"site.published\"}:\n            if owner := d.get(\"owner\"):\n                return [owner]\n            return []",
+    "tests": [
+      "tests/cloud/realtime/test_audience.py"
+    ]
+  }
+]

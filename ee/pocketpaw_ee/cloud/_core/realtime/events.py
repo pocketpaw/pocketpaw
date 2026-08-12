@@ -532,6 +532,27 @@ class SitePublished(Event):
     EVENT_TYPE: ClassVar[str] = "site.published"
 
 
+# Sites — a DRAFT site was created (fix/sites-draft-realtime). Emitted by
+# ``sites.service.create_draft_site`` after the Site doc is inserted, on the FRESH
+# mint only (the mint is idempotent — a repeat create, or one against an
+# already-live doc, returns the existing doc and emits nothing). data:
+# {workspace_id, site_id, pocket_id, owner, deployed} — ``deployed`` is always
+# False here, and rides along so a listener can tell a draft from a publish
+# without a second read.
+#
+# WHY A SECOND SITE EVENT. ``site.published`` used to be the only one, so the
+# /sites gallery had no way to hear that a draft had appeared: draft-first create
+# (pocketpaw#1744) mints the Site doc long before any publish, and the only other
+# signal is the ``pocket_created`` SSE, which is per-RUN and therefore reaches
+# just the one tab that started the create. Every other open gallery — a second
+# tab, a teammate, the /chat surface, a zip/url import — showed the new draft only
+# after a manual Refresh. This is the draft half of the pair, routed to the same
+# workspace audience for the same reason.
+@dataclass
+class SiteCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "site.created"
+
+
 # Tasks (Mission Control work-item primitive)
 @dataclass
 class TaskProposed(Event):
