@@ -16,6 +16,12 @@
 # SvelteKit-worker config + the ``_worker.js`` ``.assetsignore`` (the default engine is
 # ``"ripple"``, so every existing caller is byte-for-byte unchanged).
 #
+# Updated 2026-08-12 (the custom-domain routing lane) — ``_worker_name`` is now the
+# PUBLIC ``worker_name``. A custom domain is served by pointing a Cloudflare Worker
+# route at the site's Worker, so the control plane needs the same name this module
+# deploys under. Cloudflare rejects a route naming a script that does not exist, so
+# the two answers must be one function rather than two that agree today.
+#
 # Updated 2026-08-07 (RX-1 — the react engine) — the assets-only branch now keys on
 # ``emits_server_worker(engine)`` instead of ``not needs_node_build(engine)``. Those
 # two questions had the same answer for ripple/svelte/html, so the old condition read
@@ -154,12 +160,23 @@ _D1_BINDING_NAME = "DB"
 _CONFIG_FILENAME = "wrangler.jsonc"
 
 
-def _worker_name(site_id: str) -> str:
+def worker_name(site_id: str) -> str:
     """The worker / workers.dev subdomain name for a site: ``paw-site-<site_id>``,
     sanitized so it always matches ``^[a-z0-9][a-z0-9-]*$`` (CF rejects underscores
     + uppercase). The ``paw-site-`` prefix starts with a letter, so the leading-char
-    rule holds regardless of the (sanitized) id."""
+    rule holds regardless of the (sanitized) id.
+
+    PUBLIC since 2026-08-12 (was ``_worker_name``): the custom-domain lane needs the
+    same answer to point a Worker route at a site, and a second copy of this rule
+    living in the service layer would drift from the one the deploy actually uses.
+    A route naming a script that does not exist is rejected by Cloudflare, so the two
+    must agree exactly."""
     return f"paw-site-{_sanitize(site_id)}"
+
+
+# Back-compat alias — the private name predates the route lane and is still what the
+# deploy path reads below.
+_worker_name = worker_name
 
 
 def _wrangler_jsonc(
@@ -405,4 +422,4 @@ async def deploy_workers(
     return url
 
 
-__all__ = ["deploy_workers"]
+__all__ = ["deploy_workers", "worker_name"]

@@ -1559,6 +1559,11 @@ def _cf_client():
         api_token=api_token,
         zone_id=zone_id,
         dispatch_namespace=os.environ.get("PAW_CF_DISPATCH_NAMESPACE", "paw-sites"),
+        # The name a customer pastes at their own registrar. NOT defaulted here: it
+        # must be a proxied record on our zone, only the operator knows which one, and
+        # the value this used to derive from the zone id had no DNS records at all.
+        # ``create_custom_hostname`` refuses when it is unset — see cloudflare_client.
+        cname_target=os.environ.get("PAW_CF_CNAME_TARGET", ""),
     )
 
 
@@ -3697,6 +3702,36 @@ async def record_build_outcome(site: _SiteDoc, *, status: str, reason: str) -> N
     await site.set({"build_status": status, "build_reason": reason})
 
 
+def _route_pattern(hostname: str) -> str:
+    """The Worker-route pattern for a custom hostname: every path on that host.
+
+    Cloudflare route patterns are ``<host>/<path>``; a bare host matches only the
+    root, which would serve the home page and 404 everything else — a failure that
+    looks like a broken site rather than a broken route."""
+    return f"{hostname}/*"
+
+
+def _route_target(site: Any) -> str:
+    """The Worker name a custom domain's route should point at, or ``""`` when this
+    deploy mode has no per-site Worker to point at.
+
+    Only ``workers`` mode deploys a site as its own addressable Worker
+    (``paw-site-<id>``), so only there is a route meaningful. ``local`` serves from
+    localhost; ``wfp`` puts the script inside a dispatch namespace, where it is not
+    route-addressable at all and the namespace's own dispatch Worker does the routing.
+    Both keep the prior hostname-only behaviour rather than writing a route that names
+    a script Cloudflare cannot find.
+
+    The name comes from ``workers_deploy.worker_name`` rather than being rebuilt here:
+    a route naming a script that does not exist is rejected, so the deploy's answer and
+    this one have to be the same function."""
+    if _deploy_mode() != "workers":
+        return ""
+    from pocketpaw_ee.sites.workers_deploy import worker_name
+
+    return worker_name(str(site.id))
+
+
 async def add_domain(
     *,
     workspace_id: str,
@@ -3704,8 +3739,27 @@ async def add_domain(
     hostname: str,
     _cloudflare: Any | None = None,
 ) -> DomainStatusResponse:
-    """Register a custom hostname with Cloudflare for SaaS and store it on the
-    site. Returns the ONE CNAME the client pastes at their registrar."""
+    """Register a custom hostname with Cloudflare and route it to this site.
+
+    Two calls, and the second is the one that was missing. ``create_custom_hostname``
+    only gets Cloudflare to ACCEPT traffic for the domain; a Worker route scoped to
+    ``<hostname>/*`` is what decides that THIS site answers it. Without the route the
+    domain validates, goes green in the panel, and serves an error page from the
+    fallback origin — the worst kind of broken, because every signal says it worked.
+
+    Returns the ONE CNAME the client pastes at their registrar.
+
+    **A site must be published first.** A route can only name a Worker that exists, and
+    an unpublished site has none. Refusing here costs the user one ordering hint;
+    allowing it produces a domain that is live-looking and dead, with nothing in the UI
+    able to explain the difference.
+
+    **A failed route is rolled back.** If the route call fails after the hostname was
+    created, the hostname is deleted again before the error propagates. Cloudflare
+    rejects a duplicate hostname (1406), so leaving the half-made pair behind would
+    make the user's obvious next move — press Add again — fail with an error about a
+    conflict they cannot see or clear.
+    """
     # BC-10: a higher site-plan tier resells Cloudflare paid features (WAF /
     # edge-cache / strict TLS). Lazy import mirrors publish_pocket's site_plans
     # use — keeps the billing catalog off the module-import path.
@@ -3713,18 +3767,63 @@ async def add_domain(
 
     cf = _cloudflare or _cf_client()
     site = await _load(workspace_id, site_id)
+
+    # Already connected → return what we have, without touching Cloudflare. Adding
+    # the same hostname twice used to append a SECOND row (only allowed_origins was
+    # de-duped), which under routing means two routes for one pattern and a teardown
+    # that removes half of it. Cloudflare would reject the duplicate hostname anyway
+    # (1406); answering from the stored row turns "you pressed Add twice" into the
+    # same CNAME instruction rather than an error about a conflict with itself.
+    existing = next((d for d in site.domains if d.hostname == hostname), None)
+    if existing is not None:
+        return DomainStatusResponse(
+            hostname=existing.hostname,
+            cname_target=existing.cname_target,
+            status=existing.status,
+        )
+
+    script = _route_target(site)
+    if script and not site.deployed:
+        raise ValidationError(
+            "sites.domain_needs_publish",
+            "Publish the site before connecting a domain — a custom domain has to "
+            "point at a published site, and this one hasn't been published yet.",
+        )
+
     # Resolve the site's tier → its cloudflare_features and provision them on the
     # custom hostname. A base-tier (or unknown) site resolves to an empty set, so
     # create_custom_hostname stays on the basic path.
     plan = site_plans.get_site_plan(site.plan_tier)
     features = set(plan.cloudflare_features) if plan else set()
     ch = await cf.create_custom_hostname(hostname, features=features)
+
+    route_id = ""
+    if script:
+        try:
+            route_id = await cf.create_worker_route(
+                pattern=_route_pattern(ch.hostname), script=script
+            )
+        except Exception:
+            # Compensate, then re-raise the ORIGINAL failure: the rollback is
+            # housekeeping, and reporting its outcome instead would replace the real
+            # reason the domain could not be added with a second, less useful one.
+            try:
+                await cf.delete_custom_hostname(ch.id)
+            except Exception:  # noqa: BLE001 — best effort; the original error wins
+                logger.exception(
+                    "sites: could not roll back custom hostname %s after a failed "
+                    "route create — it may need removing by hand",
+                    ch.hostname,
+                )
+            raise
+
     site.domains.append(
         _SiteDomainDoc(
             hostname=ch.hostname,
             cf_hostname_id=ch.id,
             cname_target=ch.cname_target,
             status=ch.status.value,
+            cf_route_id=route_id,
         )
     )
     # Authorize the site's own origin for capture: the deployed form posts from
@@ -3736,6 +3835,52 @@ async def add_domain(
     return DomainStatusResponse(
         hostname=ch.hostname, cname_target=ch.cname_target, status=ch.status.value
     )
+
+
+async def remove_domain(
+    *,
+    workspace_id: str,
+    site_id: str,
+    hostname: str,
+    _cloudflare: Any | None = None,
+) -> None:
+    """Disconnect a custom domain: drop its route, its hostname, and its origin.
+
+    There was no teardown path at all before this, and its absence is not cosmetic.
+    A hostname left on the zone counts against the account's quota forever, keeps
+    pointing at a Worker that may no longer exist, and — because Cloudflare rejects
+    duplicates — permanently blocks anyone from connecting that domain to a different
+    site.
+
+    Ordering is deliberate: the ROUTE goes first, so the domain stops being served
+    before it stops being recognised. The reverse order leaves a window where
+    Cloudflare no longer knows the hostname while a route still claims it.
+
+    Both deletes treat a Cloudflare 404 as success (see ``cloudflare_client``): the
+    goal is a state, not an event, and a teardown that cannot finish leaves exactly the
+    orphan it was called to remove. The local row is dropped even if Cloudflare has
+    already forgotten both — otherwise a partially-torn-down domain would be
+    un-removable from the UI forever.
+    """
+    cf = _cloudflare or _cf_client()
+    site = await _load(workspace_id, site_id)
+    dom = next((d for d in site.domains if d.hostname == hostname), None)
+    if dom is None:
+        raise NotFound("domain", hostname)
+
+    if dom.cf_route_id:
+        await cf.delete_worker_route(dom.cf_route_id)
+    if dom.cf_hostname_id:
+        await cf.delete_custom_hostname(dom.cf_hostname_id)
+
+    site.domains = [d for d in site.domains if d.hostname != hostname]
+    # The origin was authorized by add_domain purely so this domain's forms could
+    # post; with the domain gone it is a standing grant to a host we no longer serve.
+    site.allowed_origins = [o for o in site.allowed_origins if o != hostname]
+    await site.save()
+    # no-event: no SiteDomain event type exists — add_domain does not emit one either,
+    # and inventing a half of the pair here would leave connects silent and
+    # disconnects loud. Both belong in the reconciler work the design defers.
 
 
 async def domain_status(
@@ -6095,6 +6240,7 @@ __all__ = [
     "make_site_editable",
     "require_sites_plan",
     "add_domain",
+    "remove_domain",
     "domain_status",
     "list_domains",
     "list_for_workspace",

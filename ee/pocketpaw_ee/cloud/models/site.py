@@ -219,6 +219,13 @@ class SiteDomain(BaseModel):
     cf_hostname_id: str = ""
     cname_target: str = ""
     status: str = "pending"  # pending | verifying | live | error
+    # Cloudflare Worker route bound to ``<hostname>/*``, which is what decides that
+    # THIS site answers this domain. The custom hostname alone only gets Cloudflare to
+    # accept the request. Empty means no route was written: either the deploy mode has
+    # no per-site Worker to point at (local / WfP), or the row predates the routing
+    # lane. Stored rather than re-derived because teardown needs the id, and a route
+    # nobody recorded is an orphan nobody can delete.
+    cf_route_id: str = ""
 
 
 class SiteInvoice(BaseModel):
