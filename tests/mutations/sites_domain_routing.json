@@ -27,30 +27,31 @@
     ]
   },
   {
-    "label": "write a route in every deploy mode — names a script Cloudflare cannot find on local/wfp",
+    "label": "write a route for every site — names a script Cloudflare cannot find on a local / wfp / never-deployed site",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if mode != \"workers\":\n        return \"\"",
+    "find": "    if site.deploy_target != \"workers\":\n        return \"\"",
     "replace": "    if False:\n        return \"\"",
     "tests": [
-      "tests/ee/sites/test_domain_routing.py::test_modes_without_a_per_site_worker_write_no_route"
+      "tests/ee/sites/test_domain_routing.py::test_targets_without_a_per_site_worker_write_no_route"
     ]
   },
   {
-    "label": "ask only the deploy mode — a provisioned site on a local-mode box has a real Worker and would get no route, so its domain validates, goes green, and serves the wrong thing",
+    "label": "ask the ENVIRONMENT what was deployed — the mode is read at request time while the Worker was made at deploy time, and they disagree on republish, on a mode change, and on the local->workers degradation",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if mode == \"local\" and site.provision_status == \"provisioned\":",
-    "replace": "    if False:",
+    "find": "    if site.deploy_target != \"workers\":",
+    "replace": "    if _deploy_mode() != \"workers\":",
     "tests": [
-      "tests/ee/sites/test_domain_routing.py::test_a_provisioned_site_gets_a_route_even_in_local_mode"
+      "tests/ee/sites/test_domain_routing.py::test_the_environment_does_not_decide_whether_a_worker_exists",
+      "tests/ee/sites/test_domain_routing.py::test_a_republishing_site_keeps_the_worker_its_last_deploy_made"
     ]
   },
   {
-    "label": "degrade for ANY provision_status, not just provisioned — routes a site mid-provision to a Worker that does not exist yet",
+    "label": "stop stamping the deploy target on a republish — the field goes stale and routes a site at the Worker its PREVIOUS deploy made",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if mode == \"local\" and site.provision_status == \"provisioned\":",
-    "replace": "    if mode == \"local\" and site.provision_status != \"none\":",
+    "find": "        doc.deploy_target = mode\n",
+    "replace": "",
     "tests": [
-      "tests/ee/sites/test_domain_routing.py::test_a_site_still_provisioning_in_local_mode_writes_no_route"
+      "tests/ee/sites/test_domain_routing.py::test_publish_stamps_the_target_it_actually_deployed_to"
     ]
   },
   {
@@ -83,7 +84,7 @@
   {
     "label": "leave the disconnected host in allowed_origins — a standing capture grant for a host we no longer serve",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    site.allowed_origins = [o for o in site.allowed_origins if o != hostname]",
+    "find": "    site.allowed_origins = [o for o in site.allowed_origins if _normalize_hostname(o) != hostname]",
     "replace": "    site.allowed_origins = list(site.allowed_origins)",
     "tests": [
       "tests/ee/sites/test_domain_routing.py::test_remove_domain_tears_down_route_then_hostname"
@@ -92,8 +93,8 @@
   {
     "label": "re-adding a connected hostname makes a second hostname and a second route claiming one pattern",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    existing = next((d for d in site.domains if d.hostname == hostname), None)\n    if existing is not None:",
-    "replace": "    existing = next((d for d in site.domains if d.hostname == hostname), None)\n    if False:",
+    "find": "    existing = next((d for d in site.domains if _normalize_hostname(d.hostname) == hostname), None)\n    if existing is not None:",
+    "replace": "    existing = next((d for d in site.domains if _normalize_hostname(d.hostname) == hostname), None)\n    if False:",
     "tests": [
       "tests/ee/sites/test_domain_routing.py::test_adding_the_same_hostname_twice_makes_no_second_route"
     ]
@@ -151,6 +152,42 @@
     "replace": "        url = f\"{_CF_API}/zones/{self._zone_id}/custom_hostnames/{hostname_id}\"\r\n        async with self._client() as client:\r\n            resp = await client.delete(url)\r\n        return",
     "tests": [
       "tests/ee/sites/test_cloudflare_client.py::test_deletes_still_fail_closed_on_a_real_error"
+    ]
+  },
+  {
+    "label": "tolerate an id-less route response — the route exists on the zone, the document says it does not, and teardown deletes BY id so nothing can ever remove it",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "        try:\r\n            return result[\"id\"]\r\n        except (KeyError, TypeError) as exc:",
+    "replace": "        try:\r\n            return result.get(\"id\", \"\")\r\n        except (KeyError, TypeError) as exc:",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client.py::test_create_worker_route_rejects_a_response_with_no_id"
+    ]
+  },
+  {
+    "label": "skip the missing-route repair — every domain connected before this lane shipped stays unrouted, and the only self-service action a user has does nothing",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if script and not existing.cf_route_id:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_re_adding_repairs_a_domain_that_has_no_route"
+    ]
+  },
+  {
+    "label": "compare hostnames raw — a connected domain spelled Example.com. 404s on delete and slips the add guard into a Cloudflare 1406",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return (hostname or \"\").strip().rstrip(\".\").lower()",
+    "replace": "    return hostname or \"\"",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_a_hostname_spelled_differently_still_finds_its_domain"
+    ]
+  },
+  {
+    "label": "full save() instead of a targeted set — a domain write from a stale doc rolls back the build lane's fields and can strand build_status in-flight forever",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    # Targeted ``set`` for the same reason ``add_domain`` uses one — see there.\n    await site.set(\n        {\n            \"domains\": [d.model_dump() for d in site.domains],\n            \"allowed_origins\": list(site.allowed_origins),\n        }\n    )",
+    "replace": "    await site.save()",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_remove_domain_writes_only_the_domain_fields"
     ]
   }
 ]

@@ -2519,6 +2519,10 @@ async def _deploy_site_doc(
             script_name=site_id,
             deployed=True,
             deployed_at=now,
+            # Record WHICH target this deploy used, not which one was configured. The
+            # custom-domain lane needs "does this site have its own route-addressable
+            # Worker", and PAW_CF_DEPLOY_MODE cannot answer it at request time.
+            deploy_target=mode,
             signed_key=signed_key,
             url=url,
             # DS-2: persist the D1 id this dynamic site is bound to ("" for static)
@@ -2544,6 +2548,7 @@ async def _deploy_site_doc(
         doc.script_name = site_id
         doc.deployed = True
         doc.deployed_at = now
+        doc.deploy_target = mode
         doc.url = url
         # The deploy may have moved (local → workers, or a new sites domain), so
         # re-assert the site's own host on every publish. Idempotent and additive:
@@ -3445,9 +3450,17 @@ async def provision_deploy(
     bundle: bytes,
     d1_database_id: str,
     cloudflare: Any = None,
-) -> str:
+) -> tuple[str, str]:
     """Deploy a PROVISIONED dynamic site to whichever target ``_deploy_mode()`` names,
-    and return its public URL. The one seam the provision job deploys through.
+    and return ``(public_url, resolved_target)``. The one seam the provision job
+    deploys through.
+
+    The RESOLVED target is returned, not left for the caller to re-derive, because this
+    function is the only place that knows it: ``local`` degrades to ``workers`` below,
+    so re-reading ``PAW_CF_DEPLOY_MODE`` afterwards gives an answer that disagrees with
+    what was actually deployed. The custom-domain lane keys a site's Worker route off
+    that answer, so a disagreement there writes the route against the wrong target — or
+    silently writes none.
 
     Before this existed the job always called ``cf.put_worker``, which only uploads
     into a Workers-for-Platforms dispatch namespace. WfP is a PAID add-on, so an
@@ -3472,9 +3485,10 @@ async def provision_deploy(
     if mode == "workers":
         from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
 
-        return await workers_deploy_mod.deploy_workers(
+        url = await workers_deploy_mod.deploy_workers(
             site_id, project_dir, d1_database_id=d1_database_id
         )
+        return url, "workers"
 
     cf = cloudflare or _cf_client()
     await cf.put_worker(
@@ -3482,7 +3496,7 @@ async def provision_deploy(
         bundle=bundle,
         bindings=provision_d1_bindings(d1_database_id),
     )
-    return provision_site_url(site_id)
+    return provision_site_url(site_id), "wfp"
 
 
 def provision_site_url(site_id: str) -> str:
@@ -3515,14 +3529,23 @@ async def persist_provision_d1_id(site: _SiteDoc, d1_database_id: str) -> None:
     await site.save()
 
 
-async def finalize_provisioned_site(site: _SiteDoc, *, url: str) -> None:
+async def finalize_provisioned_site(site: _SiteDoc, *, url: str, deploy_target: str = "") -> None:
     """Mark a Site doc fully provisioned after migrate + deploy succeed (DP0-3):
     ``provision_status="provisioned"``, ``deployed=True``, stamp the live URL +
-    ``deployed_at``. The last write of the durable job's happy path."""
+    ``deployed_at``. The last write of the durable job's happy path.
+
+    ``deploy_target`` is the target ``provision_deploy`` RESOLVED — which is not the
+    configured mode, because it degrades ``local`` to ``workers`` for a dynamic site.
+    Passed in rather than re-derived here: re-reading the env would ask the question a
+    second time and could get a different answer, which is the whole class of bug this
+    field exists to end. Defaulted to "" so an older caller writes nothing rather than
+    something wrong."""
     site.provision_status = "provisioned"
     site.deployed = True
     site.deployed_at = datetime.now(UTC)
     site.url = url
+    if deploy_target:
+        site.deploy_target = deploy_target
     await site.save()
     # A dynamic site stands up through this job rather than through
     # ``_deploy_site_doc``, so it needs its own knowledge sync or its concierge
@@ -3702,6 +3725,22 @@ async def record_build_outcome(site: _SiteDoc, *, status: str, reason: str) -> N
     await site.set({"build_status": status, "build_reason": reason})
 
 
+def _normalize_hostname(hostname: str) -> str:
+    """One spelling for a hostname, applied on every path that names one.
+
+    DNS is case-insensitive and the trailing FQDN dot is optional, so ``Example.com``,
+    ``example.com.`` and ``example.com`` are the same name — but Python string equality
+    is not, and this module finds a stored domain with ``==``. Cloudflare echoes back a
+    lowercased hostname, which is what gets stored, so without this
+    ``DELETE .../domains/Example.com`` 404s a domain that is plainly connected, and
+    adding ``Example.com`` after ``example.com`` slips the dedupe guard into a
+    Cloudflare 1406 instead of the friendly early return.
+
+    The DTO validator already strips whitespace and the trailing dot on the ADD path;
+    this is the shared spelling every path uses, so the two cannot drift."""
+    return (hostname or "").strip().rstrip(".").lower()
+
+
 def _route_pattern(hostname: str) -> str:
     """The Worker-route pattern for a custom hostname: every path on that host.
 
@@ -3722,31 +3761,31 @@ def _route_target(site: Any) -> str:
     hostname-only behaviour rather than writing a route naming a script Cloudflare
     cannot find.
 
-    **The deploy mode alone does not answer this, and reading it as if it did was a
-    bug.** ``provision_deploy`` DEGRADES ``local`` to ``workers`` for a DYNAMIC site —
-    nothing serves a D1 binding on localhost — so a dynamic site on a local-mode box
-    has a real ``paw-site-<id>`` Worker while ``_deploy_mode()`` still says ``local``.
-    Asking only the mode returned "" there and wrote no route, which is precisely the
-    "the domain validates, goes green, and serves the wrong thing" failure this lane
-    exists to remove.
+    **This asks the SITE what was deployed, never the environment what is configured.**
+    Two earlier versions of this function read ``PAW_CF_DEPLOY_MODE`` and both were
+    wrong, in opposite directions, because the mode is read at request time while the
+    Worker was made at deploy time:
 
-    The site doc has no ``pattern`` field to re-run ``_is_dynamic`` against — that
-    lives on the pocket — but it does carry the ARTIFACT of having been provisioned:
-    ``provision_status``, which only a dynamic site ever leaves at ``"none"``. Asking
-    the artifact is the better question anyway, and the same one ``workers_deploy``
-    settled for engines (SL-1): what was actually emitted, not what kind of thing it
-    was meant to be.
+    * ``provision_deploy`` degrades ``local`` to ``workers`` for a dynamic site, so a
+      dynamic site on a local-mode box has a real Worker the mode denies.
+    * ``provision_status`` (the second attempt) records that *a* deploy finished, not
+      which target it used, and a REPUBLISH resets it to ``"provisioning"`` while last
+      deploy's Worker is still live and serving. That window is the ordinary lifecycle
+      of any site that has been up for a while — and worse than the first-provision
+      case, because afterwards the status returns to ``"provisioned"`` and the row looks
+      healthy while permanently missing its route.
+    * Nothing in this codebase ever deletes a Worker, so a site published under
+      ``workers`` keeps its ``paw-site-<id>`` Worker after the env moves to ``wfp`` —
+      and a wfp-provisioned site never had one, whatever the env says now.
+
+    ``deploy_target`` is stamped after a deploy RETURNS, so it is the only value that
+    describes what actually exists. Same "ask the artifact, not the intent" move
+    ``workers_deploy`` made for engines in SL-1, one level up.
 
     The name comes from ``workers_deploy.worker_name`` rather than being rebuilt here:
     a route naming a script that does not exist is rejected, so the deploy's answer and
     this one have to be the same function."""
-    mode = _deploy_mode()
-    if mode == "local" and site.provision_status == "provisioned":
-        # Mirrors provision_deploy's own degradation. Kept as an explicit branch
-        # rather than folded into the comparison so the two stay legibly paired: if
-        # that one stops degrading, this one is the next line somebody reads.
-        mode = "workers"
-    if mode != "workers":
+    if site.deploy_target != "workers":
         return ""
     from pocketpaw_ee.sites.workers_deploy import worker_name
 
@@ -3780,6 +3819,14 @@ async def add_domain(
     rejects a duplicate hostname (1406), so leaving the half-made pair behind would
     make the user's obvious next move — press Add again — fail with an error about a
     conflict they cannot see or clear.
+
+    **Re-adding a connected domain REPAIRS a missing route.** Every domain connected
+    before this lane shipped has no route and is silently serving the fallback origin,
+    and Cloudflare reports those hostnames ``active``, so the panel shows them green.
+    Without this, the one self-service action available — press Add again — became a
+    no-op that returned the stored row, so nothing a user could do would fix them. The
+    repair is the same call the first add makes, so it costs nothing to reach and it
+    also recovers a route lost to a partial failure.
     """
     # BC-10: a higher site-plan tier resells Cloudflare paid features (WAF /
     # edge-cache / strict TLS). Lazy import mirrors publish_pocket's site_plans
@@ -3795,8 +3842,21 @@ async def add_domain(
     # that removes half of it. Cloudflare would reject the duplicate hostname anyway
     # (1406); answering from the stored row turns "you pressed Add twice" into the
     # same CNAME instruction rather than an error about a conflict with itself.
-    existing = next((d for d in site.domains if d.hostname == hostname), None)
+    hostname = _normalize_hostname(hostname)
+    existing = next((d for d in site.domains if _normalize_hostname(d.hostname) == hostname), None)
     if existing is not None:
+        # ...but repair a MISSING route first. Domains connected before this lane
+        # shipped all have ``cf_route_id == ""`` and no route, so they serve the
+        # fallback origin while Cloudflare reports the hostname active and the panel
+        # shows them green. Pressing Add again is the only self-service action there is;
+        # without this it returned the stored row and changed nothing. Also recovers a
+        # route lost to a partial failure.
+        script = _route_target(site)
+        if script and not existing.cf_route_id:
+            existing.cf_route_id = await cf.create_worker_route(
+                pattern=_route_pattern(existing.hostname), script=script
+            )
+            await site.set({"domains": [d.model_dump() for d in site.domains]})
         return DomainStatusResponse(
             hostname=existing.hostname,
             cname_target=existing.cname_target,
@@ -3852,7 +3912,18 @@ async def add_domain(
     # here so connecting a domain needs no separate "allow this origin" step.
     if ch.hostname not in site.allowed_origins:
         site.allowed_origins.append(ch.hostname)
-    await site.save()
+    # Targeted ``set``, not ``save()`` — this module's own header (the build-lane note)
+    # warns why: a build runs for MINUTES beside a publish writing ``url`` / ``deployed``
+    # / ``build_status`` on the same row, and a full save from a doc loaded before those
+    # writes rolls them back. Land after the terminal build write and ``build_status``
+    # reverts to in-flight permanently, at which point ``build_state.should_enqueue``
+    # refuses to republish that site ever again. Only these two fields changed here.
+    await site.set(
+        {
+            "domains": [d.model_dump() for d in site.domains],
+            "allowed_origins": list(site.allowed_origins),
+        }
+    )
     return DomainStatusResponse(
         hostname=ch.hostname, cname_target=ch.cname_target, status=ch.status.value
     )
@@ -3885,7 +3956,8 @@ async def remove_domain(
     """
     cf = _cloudflare or _cf_client()
     site = await _load(workspace_id, site_id)
-    dom = next((d for d in site.domains if d.hostname == hostname), None)
+    hostname = _normalize_hostname(hostname)
+    dom = next((d for d in site.domains if _normalize_hostname(d.hostname) == hostname), None)
     if dom is None:
         raise NotFound("domain", hostname)
 
@@ -3894,11 +3966,17 @@ async def remove_domain(
     if dom.cf_hostname_id:
         await cf.delete_custom_hostname(dom.cf_hostname_id)
 
-    site.domains = [d for d in site.domains if d.hostname != hostname]
+    site.domains = [d for d in site.domains if _normalize_hostname(d.hostname) != hostname]
     # The origin was authorized by add_domain purely so this domain's forms could
     # post; with the domain gone it is a standing grant to a host we no longer serve.
-    site.allowed_origins = [o for o in site.allowed_origins if o != hostname]
-    await site.save()
+    site.allowed_origins = [o for o in site.allowed_origins if _normalize_hostname(o) != hostname]
+    # Targeted ``set`` for the same reason ``add_domain`` uses one — see there.
+    await site.set(
+        {
+            "domains": [d.model_dump() for d in site.domains],
+            "allowed_origins": list(site.allowed_origins),
+        }
+    )
     # no-event: no SiteDomain event type exists — add_domain does not emit one either,
     # and inventing a half of the pair here would leave connects silent and
     # disconnects loud. Both belong in the reconciler work the design defers.
@@ -3914,7 +3992,8 @@ async def domain_status(
     """Poll Cloudflare for the hostname's current status and persist it."""
     cf = _cloudflare or _cf_client()
     site = await _load(workspace_id, site_id)
-    dom = next((d for d in site.domains if d.hostname == hostname), None)
+    hostname = _normalize_hostname(hostname)
+    dom = next((d for d in site.domains if _normalize_hostname(d.hostname) == hostname), None)
     if dom is None:
         raise NotFound("domain", hostname)
     status: HostnameStatus = await cf.get_hostname_status(dom.cf_hostname_id)

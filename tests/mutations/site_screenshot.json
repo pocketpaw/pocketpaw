@@ -20,8 +20,8 @@
   {
     "label": "screenshot: a Cloudflare error page is stored as the site's preview",
     "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
-    "find": "        if resp.status_code // 100 == 2 and content_type.startswith(\"image/\") and resp.content:\n            return resp.content",
-    "replace": "        if True:\n            return resp.content",
+    "find": "        if resp.status_code // 100 == 2 and content_type.startswith(\"image/\") and resp.content:\r\n            return resp.content",
+    "replace": "        if True:\r\n            return resp.content",
     "tests": [
       "tests/ee/sites/test_screenshot_capture.py"
     ]
