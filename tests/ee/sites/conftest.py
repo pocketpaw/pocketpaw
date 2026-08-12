@@ -279,8 +279,27 @@ def _default_sites_plan(request: pytest.FixtureRequest):
     sites mechanics tests, so the new service-level plan gate doesn't reject their
     synthetic workspace ids. test_plan_gate.py patches the same target per-test to
     exercise the denial paths."""
-    # The gate test owns the plan itself — don't double-patch under it.
-    if request.module.__name__.endswith("test_plan_gate"):
+    # Modules that patch this target THEMSELVES must not be patched under, because two
+    # patches on one attribute unwind in the wrong order: this fixture starts first and
+    # saves the REAL function, the module's own patch then saves OUR MOCK as its
+    # "original", and whichever restores last wins. When that is the module's, the mock
+    # is put back after this fixture has correctly removed it — and then outlives every
+    # fixture in the run.
+    #
+    # Measured 2026-08-12: it escaped this whole tree and broke
+    # tests/cloud/sites/test_site_billing.py's entitlement test, where a `free` workspace
+    # read back as `go` and a publish that should have been Forbidden was allowed. The
+    # failure named a test and a subsystem that had nothing to do with it.
+    #
+    # So a module either takes this default or owns the target outright — never both.
+    # Add a module here ONLY if it genuinely needs a different plan than "go"; if it just
+    # wants Sites unlocked, delete its patch and take this default instead.
+    _OWNS_ITS_OWN_PLAN_PATCH = (
+        "test_plan_gate",  # exercises the DENIAL paths, so it needs several plans
+        "test_request_publish",  # one case needs "enterprise", not "go"
+        "test_html_e2e",  # module-scoped fixture of its own
+    )
+    if request.module.__name__.rsplit(".", 1)[-1] in _OWNS_ITS_OWN_PLAN_PATCH:
         yield
         return
     from unittest.mock import patch
