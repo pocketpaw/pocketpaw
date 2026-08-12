@@ -3,6 +3,17 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# Updated 2026-08-12 (sites Settings consolidation): three endpoints for the
+# owner's client record — GET + PATCH ``/sites/{site_id}/client`` and POST
+# ``/sites/{site_id}/invoices``. They exist because the builder's Settings surface
+# had shipped a Client panel and a "Record payment" button backed by nothing:
+# component state with a comment saying persistence was a later task, so every
+# value typed there was lost on reload. Gated by the same fabric.read /
+# fabric.write actions as the domain ops above, tenant-scoped through the
+# service's ``_load``. NONE OF THIS CHARGES ANYONE — recording a receipt is the
+# owner writing down that their client paid, and is unrelated to the owner's own
+# subscription with us (``/sites/publish``'s ``site_plan_key``).
+#
 # Pocket read: uses pockets_service.get(pocket_id, user_id) — the real
 # single-pocket reader, which returns a wire DICT (camelCase keys: rippleSpec,
 # name) and RAISES NotFound when missing / access-denied (it does not return
@@ -196,8 +207,11 @@ from pocketpaw_ee.sites.dto import (
     NativeArtifactResponse,
     PublishRequest,
     RequestPublishResponse,
+    SiteClientResponse,
+    SiteClientUpdate,
     SiteDataRowsResponse,
     SiteDataTablesResponse,
+    SiteInvoiceCreate,
     SitePreviewRefreshResponse,
     SitePreviewResponse,
     SiteResponse,
@@ -729,4 +743,46 @@ async def domain_status(
 ) -> DomainStatusResponse:
     return await sites_service.domain_status(
         workspace_id=ctx.workspace_id, site_id=site_id, hostname=hostname
+    )
+
+
+@router.get("/sites/{site_id}/client", response_model=SiteClientResponse)
+async def get_site_client(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteClientResponse:
+    """The owner's record of who this site is for, plus the receipts they have
+    logged against that client. A site with nothing recorded returns a blank
+    record; only a missing or cross-tenant site is a 404."""
+    return await sites_service.get_site_client(workspace_id=ctx.workspace_id, site_id=site_id)
+
+
+@router.patch("/sites/{site_id}/client", response_model=SiteClientResponse)
+async def update_site_client(
+    site_id: str,
+    body: SiteClientUpdate,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteClientResponse:
+    """Patch the client record. Omitting a field leaves it untouched; sending it
+    empty clears it. Returns the whole updated record."""
+    return await sites_service.update_site_client(
+        workspace_id=ctx.workspace_id, site_id=site_id, body=body
+    )
+
+
+@router.post("/sites/{site_id}/invoices", response_model=SiteClientResponse)
+async def record_site_invoice(
+    site_id: str,
+    body: SiteInvoiceCreate,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteClientResponse:
+    """Log one manual receipt against the site's client. This records that the
+    owner was paid — it does NOT charge anyone, and it is unrelated to the owner's
+    own subscription with us. Returns the whole updated client record so the caller
+    re-renders from one response instead of splicing the new row in locally."""
+    return await sites_service.record_site_invoice(
+        workspace_id=ctx.workspace_id, site_id=site_id, body=body
     )

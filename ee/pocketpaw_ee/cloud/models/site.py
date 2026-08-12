@@ -4,6 +4,17 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-08-12 (sites Settings consolidation): added the owner's CLIENT
+# record — ``client_name`` / ``client_contact`` / ``client_notes`` and a
+# ``client_invoices`` list of ``SiteInvoice``. TWO BILLING RELATIONSHIPS NOW MEET
+# ON THIS DOCUMENT AND THEY ARE NOT THE SAME ONE: ``plan_tier`` /
+# ``subscription_status`` are what the site's owner pays US, while these four are
+# what the owner's OWN client owes THEM. Only the first is a real charge; the
+# second is an address book and a receipt book, and nothing in the deploy or
+# billing lanes reads it. It lives on the Site rather than in its own collection
+# because it is per-site by definition and has no lifecycle of its own — it is
+# born and deleted with the site. All four default empty, so no migration.
+#
 # Updated 2026-07-31 (provisioning brick): added ``provision_started_at`` — the
 # clock behind a BOUNDED single-flight guard. ``provision_status="provisioning"``
 # alone is a one-way door: a job that no worker ever consumed, or that died before
@@ -210,6 +221,23 @@ class SiteDomain(BaseModel):
     status: str = "pending"  # pending | verifying | live | error
 
 
+class SiteInvoice(BaseModel):
+    """One manual receipt the site's OWNER recorded against their own client.
+
+    This is bookkeeping the owner keeps, not a charge we process: nothing here
+    moves money, and the sites service never reads it back for billing. Amounts
+    are integer MINOR units (cents) so a receipt cannot drift through float
+    arithmetic on its way to and from the wire.
+    """
+
+    id: str
+    issued_at: datetime
+    amount_cents: int = 0
+    currency: str = "USD"
+    paid: bool = True
+    note: str = ""
+
+
 class Site(TimestampedDocument):
     """A published site generated from a pocket's rippleSpec."""
 
@@ -413,6 +441,23 @@ class Site(TimestampedDocument):
     # public url, capture failed, Cloudflare unconfigured); the card falls back to
     # the text layout on empty, so this is never a gate on publishing.
     preview_image_url: str = ""
+    # The site owner's record of WHO this site is for, and what they have billed
+    # them. Two billing relationships meet on this document and they are not the
+    # same one: ``plan_tier`` / ``subscription_status`` above are what the owner
+    # pays US, while everything below is what the owner's OWN client owes THEM.
+    # Only the first is a real charge; these four are an address book and a
+    # receipt book that the Settings surface reads and writes.
+    #
+    # ``client_contact`` and ``client_notes`` are free text a human types about a
+    # third party, so they hold personal data by design. They are workspace-scoped
+    # like every other field here (read and write both go through ``_load``), never
+    # reach a generated page, and are capped in the DTO rather than here so an
+    # over-long value is a 422 at the edge instead of a silently truncated record.
+    # All four default empty, so no migration.
+    client_name: str = ""
+    client_contact: str = ""
+    client_notes: str = ""
+    client_invoices: list[SiteInvoice] = Field(default_factory=list)
 
     def rotate_signed_key(self) -> str:
         """Regenerate the public embed key and return the new value (T1).
