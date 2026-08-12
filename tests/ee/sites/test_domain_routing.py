@@ -274,6 +274,52 @@ async def test_the_environment_does_not_decide_whether_a_worker_exists(monkeypat
     assert cf2.calls == [("create_hostname", "shop.example.com")]
 
 
+async def test_a_site_deployed_before_the_field_existed_still_gets_a_route(
+    monkeypatch, beanie_test_db
+):
+    """``deploy_target`` is new, so every site already live carries "".
+
+    Read strictly, none of them could connect a domain until republished — and the
+    failure would be the silent kind this whole lane exists to remove: hostname created,
+    no route, fallback origin served, panel green. So an unstamped row that IS
+    ``deployed`` falls back to the deploy mode, which is precisely what the code did
+    before the field existed.
+
+    MUTATION THAT BREAKS THIS: dropping the ``not target and site.deployed`` bridge.
+    """
+    site_id = await _make_site(pocket_id="pk-legacy-row", deploy_target="")
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "workers")
+    cf = _FakeCF(route_id="route_legacy")
+
+    await sites_service.add_domain(
+        workspace_id="ws1", site_id=site_id, hostname="www.example.com", _cloudflare=cf
+    )
+
+    assert cf.calls == [
+        ("create_hostname", "www.example.com"),
+        ("create_route", "www.example.com/*", f"paw-site-{site_id}"),
+    ]
+
+
+async def test_an_unstamped_site_that_never_deployed_gets_no_route(monkeypatch, beanie_test_db):
+    """The bridge covers rows that predate the field, NOT rows that never deployed.
+
+    For a site that was never published, "" means exactly what it says — there is no
+    Worker — and routing to one would name a script Cloudflare cannot find. Pinned
+    separately because the two states share a value and only ``deployed`` tells them
+    apart.
+    """
+    site_id = await _make_site(pocket_id="pk-never", deployed=False, deploy_target="")
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "workers")
+    cf = _FakeCF()
+
+    await sites_service.add_domain(
+        workspace_id="ws1", site_id=site_id, hostname="www.example.com", _cloudflare=cf
+    )
+
+    assert cf.calls == [("create_hostname", "www.example.com")]
+
+
 async def test_a_republishing_site_keeps_the_worker_its_last_deploy_made(beanie_test_db):
     """A republish of a dynamic site sets ``deployed=False`` and ``provision_status`` back
     to ``"provisioning"`` — while the Worker from the LAST successful deploy is still

@@ -29,7 +29,7 @@
   {
     "label": "write a route for every site — names a script Cloudflare cannot find on a local / wfp / never-deployed site",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if site.deploy_target != \"workers\":\n        return \"\"",
+    "find": "    if target != \"workers\":\n        return \"\"",
     "replace": "    if False:\n        return \"\"",
     "tests": [
       "tests/ee/sites/test_domain_routing.py::test_targets_without_a_per_site_worker_write_no_route"
@@ -38,8 +38,8 @@
   {
     "label": "ask the ENVIRONMENT what was deployed — the mode is read at request time while the Worker was made at deploy time, and they disagree on republish, on a mode change, and on the local->workers degradation",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if site.deploy_target != \"workers\":",
-    "replace": "    if _deploy_mode() != \"workers\":",
+    "find": "    target = site.deploy_target\n",
+    "replace": "    target = _deploy_mode() or \"\"\n",
     "tests": [
       "tests/ee/sites/test_domain_routing.py::test_the_environment_does_not_decide_whether_a_worker_exists",
       "tests/ee/sites/test_domain_routing.py::test_a_republishing_site_keeps_the_worker_its_last_deploy_made"
@@ -188,6 +188,24 @@
     "replace": "    await site.save()",
     "tests": [
       "tests/ee/sites/test_domain_routing.py::test_remove_domain_writes_only_the_domain_fields"
+    ]
+  },
+  {
+    "label": "drop the pre-field migration bridge — every site already live gets a hostname with no route until it is republished, silently serving the fallback origin",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not target and site.deployed:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_a_site_deployed_before_the_field_existed_still_gets_a_route"
+    ]
+  },
+  {
+    "label": "extend the bridge to sites that never deployed — routes a domain at a Worker that was never created",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not target and site.deployed:",
+    "replace": "    if not target:",
+    "tests": [
+      "tests/ee/sites/test_domain_routing.py::test_an_unstamped_site_that_never_deployed_gets_no_route"
     ]
   }
 ]
