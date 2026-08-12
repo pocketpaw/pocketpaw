@@ -273,3 +273,88 @@ async def test_create_database_non_2xx_raises_cloudflare_error():
     with pytest.raises(ValidationError) as exc:
         await client.create_database("site-db")
     assert exc.value.code == "sites.cloudflare_error"
+
+
+# ── The error body on a non-2xx is the diagnosis, and it was being discarded ──
+# Added 2026-08-12, from a live report: adding a custom domain answered 422 with
+# ``{"code": "sites.cloudflare_error", "message": "Cloudflare API 403"}``.
+#
+# A bare status code is not a diagnosis. Cloudflare 403s the custom-hostname
+# endpoint for several unrelated reasons — a token missing the SSL-and-Certificates
+# edit scope, a token with no access to that zone, a zone without Cloudflare for
+# SaaS enabled — and it names which one in the response body every time. ``_unwrap``
+# read that body only on the ``success: false`` branch, which cannot run on a
+# non-2xx, so the one useful sentence was dropped on exactly the responses where
+# somebody needed it.
+
+
+@pytest.mark.asyncio
+async def test_non_2xx_surfaces_cloudflares_own_error_message():
+    """MUTATION THAT BREAKS THIS: reverting _unwrap's non-2xx branch to
+    ``f"Cloudflare API {resp.status_code}"``. Everything still fails closed — the
+    loss is purely diagnostic, which is why it survived: no test asserted on the
+    message, only on the code."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # The shape Cloudflare actually returns for a token that cannot edit
+        # custom hostnames on this zone.
+        return httpx.Response(
+            403,
+            json={
+                "success": False,
+                "errors": [{"code": 9109, "message": "Unauthorized to access requested resource"}],
+            },
+        )
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.create_custom_hostname("www.example.com")
+    assert exc.value.code == "sites.cloudflare_error"
+    assert "Unauthorized to access requested resource" in str(exc.value)
+    # The status is still worth carrying — it is how an operator tells a refusal
+    # (403) apart from an outage (5xx) at a glance.
+    assert "403" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_non_2xx_with_an_unparseable_body_still_reports_the_status():
+    """Cloudflare's edge can answer a non-2xx with an HTML error page rather than
+    the JSON envelope. Parsing must not become the new failure mode — the status
+    code is the floor, not the ceiling."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, text="<html><body>Bad gateway</body></html>")
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.create_custom_hostname("www.example.com")
+    assert exc.value.code == "sites.cloudflare_error"
+    assert "502" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_non_2xx_reports_every_error_cloudflare_listed():
+    """Cloudflare returns an ARRAY. The ``success: false`` branch already only read
+    errors[0]; on a refusal the second entry is often the actionable one (the first
+    names the endpoint, the second names the missing permission)."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={
+                "success": False,
+                "errors": [
+                    {"code": 1109, "message": "Invalid access token"},
+                    {"code": 1049, "message": "zone is not entitled to Cloudflare for SaaS"},
+                ],
+            },
+        )
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.create_custom_hostname("www.example.com")
+    assert "Invalid access token" in str(exc.value)
+    assert "not entitled to Cloudflare for SaaS" in str(exc.value)
