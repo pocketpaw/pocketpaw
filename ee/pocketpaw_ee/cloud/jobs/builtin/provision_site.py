@@ -121,7 +121,11 @@ class ProvisionSiteJob:
             # wrangler on the free tier; ``wfp`` keeps the dispatch-namespace
             # put_worker. The seam owns the choice AND returns the live URL, since
             # the two targets resolve URLs differently.
-            url = await sites_service.provision_deploy(
+            # The seam returns the target it RESOLVED alongside the URL — it degrades
+            # local -> workers for a dynamic site, so the configured mode is not what
+            # was deployed, and the custom-domain lane keys a site's Worker route off
+            # the difference.
+            url, deploy_target = await sites_service.provision_deploy(
                 site_id=site_id,
                 project_dir=project_dir,
                 bundle=bundle,
@@ -130,7 +134,9 @@ class ProvisionSiteJob:
             )
 
             # f. Mark the Site doc provisioned + live.
-            await sites_service.finalize_provisioned_site(site, url=url)
+            await sites_service.finalize_provisioned_site(
+                site, url=url, deploy_target=deploy_target
+            )
         except Exception:
             # Any failure in b–f: mark failed (the d1 id, if created, is already
             # persisted so a retry reuses it) and re-raise so the worker marks the

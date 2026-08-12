@@ -464,13 +464,36 @@ async def test_create_worker_route_posts_the_pattern_and_returns_the_id():
         return httpx.Response(200, json={"success": True, "result": {"id": "route_9"}})
 
     client = _client(handler)
-    route_id = await client.create_worker_route(
-        pattern="www.example.com/*", script="paw-site-abc"
-    )
+    route_id = await client.create_worker_route(pattern="www.example.com/*", script="paw-site-abc")
     assert route_id == "route_9"
     assert seen["method"] == "POST"
     assert seen["url"].endswith("/zones/zone_1/workers/routes")
     assert seen["body"] == {"pattern": "www.example.com/*", "script": "paw-site-abc"}
+
+
+@pytest.mark.asyncio
+async def test_create_worker_route_rejects_a_response_with_no_id():
+    """An id-less success is a FAILURE here, not a tolerable gap.
+
+    Returning "" would let the caller store an empty ``cf_route_id`` and report
+    success while the route exists on the zone. Teardown deletes BY id, so nothing
+    could ever remove it — the exact orphan the id is stored to prevent. This used to
+    be ``result.get("id", "")``; ``create_custom_hostname`` two methods up has always
+    indexed its id directly, and now these agree.
+
+    MUTATION THAT BREAKS THIS: restoring ``result.get("id", "")``.
+    """
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # 2xx, success:true, and no id — the shape that used to slip through.
+        return httpx.Response(200, json={"success": True, "result": {"pattern": "x.com/*"}})
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.create_worker_route(pattern="x.com/*", script="paw-site-1")
+    assert exc.value.code == "sites.cloudflare_error"
+    assert "no id" in str(exc.value)
 
 
 @pytest.mark.asyncio

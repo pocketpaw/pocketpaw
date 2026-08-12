@@ -115,7 +115,8 @@
 #     control plane writes ``<hostname>/*`` -> that site's Worker at add time. That
 #     is the whole routing design: no dispatcher, no KV, no extra hop. (The wildcard
 #     ``*/*`` + dynamic-dispatch shape is Workers for Platforms, and it is the
-#     >1000-domain path — see docs/design/drafts/2026-08-12-sites-custom-domain-lane.md.)
+#     >1000-domain path — see the custom-domain-lane design doc, which lives in the
+#     paw-workspace repo at docs/design/drafts/2026-08-12-sites-custom-domain-lane.md.)
 
 # Updated 2026-08-12 (a 403 that could not be diagnosed): ``_unwrap``'s non-2xx
 # branch raised the bare status and never read the body, while the branch that DOES
@@ -432,12 +433,26 @@ class CloudflareClient:
 
         ``POST`` creates; ``PUT`` on this collection is update-by-id and needs a route
         id we do not have yet. The zone allows 1,000 routes, which is far past the
-        per-account Worker limit this deploy mode runs into first."""
+        per-account Worker limit this deploy mode runs into first.
+
+        The id is read with ``result["id"]``, NOT ``.get("id", "")``. A response with no
+        id would otherwise return "" while the route exists on the zone: the caller
+        stores an empty ``cf_route_id``, reports success, and teardown — which deletes
+        BY id — can never remove it. That is the orphan the id is stored to prevent, so
+        an id-less success is a failure and must raise like one. ``create_custom_hostname``
+        already indexes its id directly; this now matches."""
         url = f"{_CF_API}/zones/{self._zone_id}/workers/routes"
         async with self._client() as client:
             resp = await client.post(url, json={"pattern": pattern, "script": script})
         result = self._unwrap(resp)
-        return result.get("id", "")
+        try:
+            return result["id"]
+        except (KeyError, TypeError) as exc:
+            raise ValidationError(
+                "sites.cloudflare_error",
+                "Cloudflare accepted the Worker route but returned no id — it cannot "
+                "be recorded, and an unrecorded route cannot be removed later.",
+            ) from exc
 
     async def delete_worker_route(self, route_id: str) -> None:
         """Remove a Worker route. Idempotent on a 404, for the same reason
