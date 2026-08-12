@@ -214,7 +214,7 @@ async def test_modes_without_a_per_site_worker_write_no_route(
     add would fail for a site that is otherwise fine. Prior behaviour — hostname only —
     is preserved exactly.
 
-    MUTATION THAT BREAKS THIS: dropping the ``_deploy_mode() != "workers"`` check in
+    MUTATION THAT BREAKS THIS: dropping the ``mode != "workers"`` check in
     ``_route_target`` so every mode writes a route.
     """
     site_id = await _make_site(pocket_id=f"pk-{mode}")
@@ -228,6 +228,66 @@ async def test_modes_without_a_per_site_worker_write_no_route(
     assert cf.calls == [("create_hostname", "www.example.com")]
     site = await sites_service._load("ws1", site_id)
     assert site.domains[0].cf_route_id == ""
+
+
+async def test_a_provisioned_site_gets_a_route_even_in_local_mode(monkeypatch, beanie_test_db):
+    """The deploy MODE does not decide whether a Worker exists, and reading it as if it
+    did was a bug this suite originally shipped with.
+
+    ``provision_deploy`` degrades ``local`` to ``workers`` for a dynamic site — nothing
+    serves a D1 binding on localhost — so a provisioned site on a local-mode box has a
+    real ``paw-site-<id>`` Worker while ``_deploy_mode()`` still answers ``local``. The
+    first version of ``_route_target`` asked only the mode, returned "", and wrote no
+    route: the domain would validate, go green, and serve the wrong thing, which is the
+    entire failure this lane exists to remove.
+
+    ``provision_status == "provisioned"`` is the artifact of that degradation actually
+    having happened, which is a better question than "what kind of site was this meant
+    to be" — the same move ``workers_deploy`` made for engines in SL-1.
+
+    MUTATION THAT BREAKS THIS: removing the ``provision_status`` branch from
+    ``_route_target``, restoring the mode-only check.
+    """
+    site_id = await _make_site(pocket_id="pk-dynamic-local")
+    site = await sites_service._load("ws1", site_id)
+    site.provision_status = "provisioned"
+    await site.save()
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "local")
+    cf = _FakeCF(route_id="route_dyn")
+
+    await sites_service.add_domain(
+        workspace_id="ws1", site_id=site_id, hostname="www.example.com", _cloudflare=cf
+    )
+
+    assert cf.calls == [
+        ("create_hostname", "www.example.com"),
+        ("create_route", "www.example.com/*", f"paw-site-{site_id}"),
+    ]
+    site = await sites_service._load("ws1", site_id)
+    assert site.domains[0].cf_route_id == "route_dyn"
+
+
+async def test_a_site_still_provisioning_in_local_mode_writes_no_route(monkeypatch, beanie_test_db):
+    """The degradation only applies once provisioning SUCCEEDED. A site mid-provision
+    (or failed) has no Worker yet, so a route would name a script Cloudflare cannot
+    find and the add would fail for a site that is merely not ready.
+
+    Pinned separately from the happy path because "provisioned" and "has a
+    provision_status at all" are easy to conflate, and conflating them turns a clean
+    "publish first" refusal into a Cloudflare error.
+    """
+    site_id = await _make_site(pocket_id="pk-provisioning")
+    site = await sites_service._load("ws1", site_id)
+    site.provision_status = "provisioning"
+    await site.save()
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "local")
+    cf = _FakeCF()
+
+    await sites_service.add_domain(
+        workspace_id="ws1", site_id=site_id, hostname="www.example.com", _cloudflare=cf
+    )
+
+    assert cf.calls == [("create_hostname", "www.example.com")]
 
 
 async def test_adding_the_same_hostname_twice_makes_no_second_route(monkeypatch, beanie_test_db):
