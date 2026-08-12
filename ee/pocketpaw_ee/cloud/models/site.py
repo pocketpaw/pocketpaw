@@ -255,6 +255,19 @@ class Site(TimestampedDocument):
     # Workers-for-Platforms script name (== site id) once deployed.
     script_name: str = ""
     deployed: bool = False
+    # Which target the last SUCCESSFUL deploy actually used: "" (never deployed) |
+    # "local" | "workers" | "wfp". Stamped only after a deploy returns, so it records
+    # what happened rather than what was configured.
+    #
+    # Exists because PAW_CF_DEPLOY_MODE cannot answer "does this site have its own
+    # route-addressable Worker". It is read at request time, while the Worker was
+    # created at deploy time, and the two disagree constantly: `provision_deploy`
+    # degrades local -> workers for dynamic sites; nothing ever deletes a Worker, so a
+    # site published under `workers` keeps its Worker after the env moves to `wfp`; and
+    # a republish resets a dynamic site's provision_status while last deploy's Worker is
+    # still live and serving. Each disagreement writes — or fails to write — a custom
+    # domain's route against the wrong answer.
+    deploy_target: str = ""
     # P2b: UTC timestamp of the most recent SUCCESSFUL live deploy. Stamped by
     # service.publish ONLY when a non-preview deploy succeeds (when ``deployed``
     # flips True) — never on a preview/edit build, never on a plain updatedAt bump.
