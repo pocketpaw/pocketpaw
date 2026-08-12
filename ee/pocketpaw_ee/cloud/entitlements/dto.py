@@ -25,6 +25,10 @@
 #   ``max_pockets`` / ``max_connectors`` (the enforced ceilings the plan ladder
 #   added), so the plan cards can render real per-tier limits and the settings UI
 #   can show a workspace's resolved caps. ``None`` == uncapped (Enterprise).
+# Updated 2026-08-08 (feat/billing-storage-caps): both responses now also carry
+#   ``max_storage_bytes`` (the workspace S3 storage cap in bytes; ``None`` ==
+#   uncapped Enterprise) so the plan cards can render the storage limit and the
+#   Settings storage page can show used vs cap.
 
 from __future__ import annotations
 
@@ -61,6 +65,7 @@ class PlanTierResponse(BaseModel):
     max_seats: int | None = None
     max_pockets: int | None = None
     max_connectors: int | None = None
+    max_storage_bytes: int | None = None
 
 
 class PlanCatalogResponse(BaseModel):
@@ -82,6 +87,7 @@ class EntitlementsResponse(BaseModel):
     max_seats: int | None = None
     max_pockets: int | None = None
     max_connectors: int | None = None
+    max_storage_bytes: int | None = None
 
 
 def plan_tier_to_dto(tier: PlanTier) -> PlanTierResponse:
@@ -101,6 +107,7 @@ def plan_tier_to_dto(tier: PlanTier) -> PlanTierResponse:
         max_seats=tier.max_seats,
         max_pockets=tier.max_pockets,
         max_connectors=tier.max_connectors,
+        max_storage_bytes=tier.max_storage_bytes,
     )
 
 
@@ -114,6 +121,7 @@ def entitlements_to_dto(ent: Entitlements) -> EntitlementsResponse:
         max_seats=ent.max_seats,
         max_pockets=ent.max_pockets,
         max_connectors=ent.max_connectors,
+        max_storage_bytes=ent.max_storage_bytes,
     )
 
 

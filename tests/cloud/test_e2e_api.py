@@ -169,7 +169,11 @@ async def _register_and_login(http: AsyncClient, email: str | None = None) -> di
 
 
 async def _make_workspace(http: AsyncClient, headers: dict, slug: str | None = None) -> dict:
-    """Create a workspace and return the workspace dict."""
+    """Create a workspace on a PAID plan and return the workspace dict.
+
+    Since feat/billing-rbac-member-caps a Free workspace (max_seats=0) can't
+    invite anyone; the invite e2e tests need seats, so each created workspace is
+    upgraded to Paw Pro (10 seats) in the DB before it's handed back."""
     slug = slug or f"ws-{uuid.uuid4().hex[:8]}"
     r = await http.post(
         "/api/v1/workspaces",
@@ -180,7 +184,15 @@ async def _make_workspace(http: AsyncClient, headers: dict, slug: str | None = N
         headers=headers,
     )
     assert r.status_code == 200, f"Create workspace failed: {r.text}"
-    return r.json()
+    ws = r.json()
+
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
+
+    doc = await _WorkspaceDoc.get(ws["_id"])
+    if doc is not None:
+        doc.plan = "pro"
+        await doc.save()
+    return ws
 
 
 # ===========================================================================

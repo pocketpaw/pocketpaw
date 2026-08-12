@@ -81,6 +81,11 @@ class Meeting(TimestampedDocument):
     scheduled_end: datetime | None = None
     actual_start: datetime | None = None
     actual_end: datetime | None = None
+    # For LiveKit instant calls this is the daily-budget cutoff (now + remaining
+    # plan call time). The ``livekit.service._force_end_at_budget`` watchdog
+    # force-ends the call once it passes. None for recall meetings and for
+    # uncapped (Enterprise) livekit calls.
+    call_budget_deadline: datetime | None = None
     status: MeetingStatus = "scheduled"
     participants: list[dict[str, Any]] = Field(default_factory=list)
     recording_file_ids: list[str] = Field(default_factory=list)
