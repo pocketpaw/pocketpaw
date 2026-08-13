@@ -41,6 +41,8 @@ from pocketpaw_ee.cloud.leads import service as leads_service
 from pocketpaw_ee.cloud.models.site import Site
 from pocketpaw_ee.cloud.shared.events import event_bus
 
+from pocketpaw.sites_capture import contact_form
+
 
 @pytest.fixture
 def lead_events():
@@ -528,3 +530,116 @@ async def test_dropped_submission_emits_nothing(mongo_db, lead_events):
         submitter_ref="ip_unmapped",
     )
     assert lead_events == []
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-13 — the canonical contact-form schema (sites_capture/contact_form.py).
+# Normalization + validation run ONLY for the contact form type, so everything
+# above this line — all of which uses "AppointmentRequest" — is deliberately
+# untouched by them. That containment is itself pinned below.
+# ---------------------------------------------------------------------------
+
+
+async def _contact_site(**over) -> Site:
+    """A site carrying the REAL seeded contact mapping, like a published one."""
+    site = Site(
+        workspace="ws1",
+        pocket_id="pk1",
+        owner="u1",
+        name=SITE_NAME,
+        script_name=SITE_ID,
+        allowed_origins=["brightsmiledental.com"],
+        signed_key="pp_tok_x",
+        event_mapping=contact_form.default_event_mapping(),
+        **over,
+    )
+    await site.insert()
+    return site
+
+
+@pytest.mark.asyncio
+async def test_a_live_sites_legacy_field_name_still_lands_its_lead(mongo_db):
+    """The fleet published before the schema existed POSTs ``name=``. Those Workers
+    are deployed and nobody republishes a site that looks fine, so the alias is the
+    only thing standing between them and a permanently empty name column."""
+    site = await _contact_site()
+    lead = await leads_service.capture(
+        site=site,
+        form_type=contact_form.CONTACT_FORM_TYPE,
+        payload={"name": "Sam Rivera", "email": "sam@example.com"},
+        submitter_ref="anon",
+        rate_key="rk1",
+    )
+    assert lead is not None
+    assert lead.properties["full_name"] == "Sam Rivera"
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_submission_is_dropped_with_its_reason(mongo_db, _isolate_audit_log):
+    """No email, no phone — nobody can answer it. Dropped like any other, through
+    the same audit path, and carrying none of the submitted values."""
+    sink = _capture_audit(_isolate_audit_log)
+    site = await _contact_site()
+    secret = "SecretLeadName1234"
+
+    lead = await leads_service.capture(
+        site=site,
+        form_type=contact_form.CONTACT_FORM_TYPE,
+        payload={"full_name": secret, "message": "call me"},
+        submitter_ref="anon",
+        rate_key="rk2",
+    )
+
+    assert lead is None
+    assert await leads_service.count_for_site("ws1", SITE_ID) == 0
+    assert len(sink) == 1
+    assert sink[0]["context"]["reason"] == "no_reply_channel"
+    assert secret not in json.dumps(sink[0], default=str)
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_contact_submission_never_rings_the_workspace(mongo_db, lead_events):
+    """Same rule the other drops follow: nothing stored, nothing emitted."""
+    site = await _contact_site()
+    await leads_service.capture(
+        site=site,
+        form_type=contact_form.CONTACT_FORM_TYPE,
+        payload={"full_name": "Sam", "message": "call me"},
+        submitter_ref="anon",
+        rate_key="rk3",
+    )
+    assert lead_events == []
+
+
+@pytest.mark.asyncio
+async def test_a_form_the_schema_does_not_recognize_is_still_captured(mongo_db):
+    """An imported form using names outside the alias table is OUR gap, not a bad
+    submission. It stores an empty lead and rings the bell — ugly, but an honest
+    signal that submissions are arriving and the mapping needs attention. Dropping
+    it would make a broken capture indistinguishable from having no visitors."""
+    site = await _contact_site()
+    lead = await leads_service.capture(
+        site=site,
+        form_type=contact_form.CONTACT_FORM_TYPE,
+        payload={"how_did_you_hear": "a friend", "budget_range": "10-20k"},
+        submitter_ref="anon",
+        rate_key="rk4",
+    )
+    assert lead is not None
+
+
+@pytest.mark.asyncio
+async def test_a_non_contact_form_type_is_left_entirely_alone(mongo_db):
+    """The schema governs the contact form and nothing else. A site with a custom
+    mapping keeps its own field names and gets no validation — otherwise adding
+    this module would have silently started dropping other people's submissions."""
+    site = await _site()  # "AppointmentRequest", mapping name <- payload.full_name
+    lead = await leads_service.capture(
+        site=site,
+        form_type="AppointmentRequest",
+        payload={"full_name": "Sam"},  # no reply channel at all
+        submitter_ref="anon",
+        rate_key="rk5",
+    )
+    assert lead is not None
+    assert lead.properties == {"name": "Sam"}
