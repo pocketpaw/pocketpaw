@@ -41,6 +41,7 @@ class TestSitesMcpServerRegistration:
             CREATE_LANDING_SITE_TOOL_ID,
             CREATE_REACT_SITE_TOOL_ID,
             CREATE_SVELTE_SITE_TOOL_ID,
+            EDIT_HTML_FILE_TOOL_ID,
             EDIT_REACT_COMPONENT_TOOL_ID,
             EDIT_SVELTE_COMPONENT_TOOL_ID,
             GET_SITE_BUILD_STATUS_TOOL_ID,
@@ -70,6 +71,12 @@ class TestSitesMcpServerRegistration:
         # Its absence was the whole react-edit hole: with only the svelte edit tool
         # registered, a react site could be created and published but never changed.
         assert EDIT_REACT_COMPONENT_TOOL_ID == "mcp__pocketpaw_sites_manager__edit_react_component"
+        # HE-10 — the html-track EDIT tool, the THIRD edit tool and the one that
+        # completes the set: every engine with a create tool now has an edit tool.
+        # Named for a FILE because an html site has no component model. Its absence
+        # was the react hole one engine over — an html site could be created,
+        # imported and published but never changed.
+        assert EDIT_HTML_FILE_TOOL_ID == "mcp__pocketpaw_sites_manager__edit_html_file"
         assert PUBLISH_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_LANDING_SITE_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_SVELTE_SITE_TOOL_ID in SITES_TOOL_IDS
@@ -78,7 +85,8 @@ class TestSitesMcpServerRegistration:
         assert CREATE_HTML_SITE_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_REACT_SITE_TOOL_ID in SITES_TOOL_IDS
         assert EDIT_REACT_COMPONENT_TOOL_ID in SITES_TOOL_IDS
-        # RX-4 — the READ-ONLY build-status tool, the 9th id. It is the only way the
+        assert EDIT_HTML_FILE_TOOL_ID in SITES_TOOL_IDS
+        # RX-4 — the READ-ONLY build-status tool. It is the only way the
         # agent can learn how an ASYNC build ended, since publish returns before the
         # build starts.
         assert (
@@ -88,7 +96,7 @@ class TestSitesMcpServerRegistration:
         # The count is deliberate: adding a tool here widens the /sites surface
         # allow-list (SITES_TOOL_IDS feeds it), so a new id must be a decision,
         # not a side effect. Bump it WITH an id assertion above — never alone.
-        assert len(SITES_TOOL_IDS) == 9
+        assert len(SITES_TOOL_IDS) == 10
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk

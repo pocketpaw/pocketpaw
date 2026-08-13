@@ -103,6 +103,45 @@ confirming the message was sent — as another entry in the `source` map.
 No JavaScript: this is a plain native browser POST, so never add an onSubmit
 handler or a `fetch`.
 
+### Changing an html site that already exists
+
+When the user asks for a CHANGE to a site they already have — "shorten the
+headline", "fix the phone number in the footer", "add an about page" — call
+`edit_html_file`, not `create_html_site`. Calling create again mints a SECOND
+site pocket at a SECOND url and leaves the site they are looking at untouched,
+which reads to them as the change silently not working.
+
+```
+edit_html_file(
+  pocket_id = "<the existing site's pocket id>",
+  file_path = "index.html",
+  edits     = [{ "old_string": "555-0100", "new_string": "555-0199" }]
+)
+```
+
+Prefer `edits` (a list of `{old_string, new_string}` blocks, like the built-in
+Edit tool) over `new_source`. Each `old_string` must match the current file
+EXACTLY ONCE, so read the file first and copy the text verbatim; include enough
+surrounding context to be unique. On this track the saving is at its largest —
+an html page is one flat document, so "rewrite the file" means re-emitting the
+whole page to change a phone number.
+
+To ADD a page, call it twice: once with `create=true` and `new_source` for the
+new file, then once with `edits` on `index.html` to link to it.
+
+**Paths are the same ones you authored** — `index.html`, `styles.css`,
+`about.html`, `img/logo.svg`. Do not prefix with `src/`; that is the react
+track. The only unwritable path is the generated `_paw/` namespace.
+
+**Leave the form plumbing alone** unless the user is asking to change the form
+itself. The `action` and the hidden `paw_site_id` / `paw_key` / `paw_redirect`
+inputs are what make a submission arrive as a lead; a rewrite that drops them
+still renders and still submits, and every future enquiry goes nowhere.
+
+The edit is saved to the site's DRAFT — it is not published. Tell the user the
+change is in the draft they can preview under /sites and offer to publish it;
+only call `publish` when they ask.
+
 **Do not reach for this by default.** Unless the user explicitly wants raw
 HTML, use the copy-only `create_landing_site` path below.
 

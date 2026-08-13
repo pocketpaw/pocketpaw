@@ -71,6 +71,21 @@
 # enqueued (a react publish is async, so there is no synchronous outcome to gate
 # on). Its id rides ``SITES_TOOL_IDS``, so the per-surface allowlist picks it up.
 #
+# Updated 2026-08-13 (HE-10 — the html track gets an EDIT lane): the
+# ``edit_html_file`` tool also registers on this SAME server, completing the set —
+# every engine that can be CREATED from chat can now be CHANGED from chat. It had
+# the same hole RX-3 closed for react, one engine over: ``edit_svelte_component``
+# raises ``pocket.not_svelte_site`` on an html pocket and ``edit_react_component``
+# raises ``pocket.not_react_site``, so no tool on this server would accept "change
+# the phone number in the footer" and the agent's only move was a second
+# ``create_html_site`` — a second pocket at a second url, leaving the site the user
+# was looking at untouched. It writes ONE file of the pocket's html source map as a
+# reviewable DRAFT and does NOT republish; html runs no build and therefore has no
+# smoke gate, so a republish here would push unvalidated markup straight to a live
+# site with nothing in between. Named ``edit_html_file`` rather than
+# ``edit_html_component`` because an html site genuinely has no component model —
+# its source map is the raw {path: contents} tree the edge serves verbatim.
+#
 # Updated 2026-08-07 (RX-2 — the agent can select the react engine): the
 # ``create_react_site`` tool also registers on this SAME server. A react site is a
 # {path: contents} map of hand-written React files; publish runs a Vite SSG build
@@ -145,6 +160,12 @@ CREATE_REACT_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_react_site"
 # server (see sites_create.py). It writes ONE file of a react site's source map as a
 # reviewable DRAFT; it does NOT publish and does NOT enqueue a build.
 EDIT_REACT_COMPONENT_TOOL_ID = f"mcp__{SERVER_NAME}__edit_react_component"
+# The targeted html-file edit tool (HE-10) — also registers on this SAME server
+# (see sites_create.py). It writes ONE file of an html site's source map as a
+# reviewable DRAFT; it does NOT publish. Named for a FILE rather than a component
+# because an html site has no component model — its source map is the raw
+# {path: contents} tree the edge serves.
+EDIT_HTML_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__edit_html_file"
 # The READ-ONLY build-status tool (RX-4). It exists because react publishes are
 # ASYNC: ``publish`` returns before the build starts, so without a way to ask again
 # on a later turn the agent learns a build was queued and can never discover it
@@ -161,6 +182,7 @@ SITES_TOOL_IDS = (
     CREATE_HTML_SITE_TOOL_ID,
     CREATE_REACT_SITE_TOOL_ID,
     EDIT_REACT_COMPONENT_TOOL_ID,
+    EDIT_HTML_FILE_TOOL_ID,
     GET_SITE_BUILD_STATUS_TOOL_ID,
 )
 
@@ -493,6 +515,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
         make_create_landing_site_tool,
         make_create_react_site_tool,
         make_create_svelte_site_tool,
+        make_edit_html_file_tool,
         make_edit_react_component_tool,
         make_edit_svelte_component_tool,
     )
@@ -522,6 +545,11 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     # stops the agent answering "shorten the hero headline" with a second
     # create_react_site call and a second site pocket.
     edit_react_component = make_edit_react_component_tool(tool)
+    # The html-track EDIT tool (HE-10) — same server, completing the set: every
+    # engine that can be created from chat can now be CHANGED from chat. Registering
+    # it is what stops the agent answering "change the phone number in the footer"
+    # with a second create_html_site call and a second site pocket.
+    edit_html_file = make_edit_html_file_tool(tool)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
@@ -536,6 +564,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             create_html_site,
             create_react_site,
             edit_react_component,
+            edit_html_file,
         ],
     )
     return SERVER_NAME, server
@@ -547,6 +576,7 @@ __all__ = [
     "CREATE_LANDING_SITE_TOOL_ID",
     "CREATE_REACT_SITE_TOOL_ID",
     "CREATE_SVELTE_SITE_TOOL_ID",
+    "EDIT_HTML_FILE_TOOL_ID",
     "EDIT_REACT_COMPONENT_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "GET_SITE_BUILD_STATUS_TOOL_ID",
