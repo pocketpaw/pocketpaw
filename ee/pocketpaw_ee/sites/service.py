@@ -870,6 +870,11 @@ from pocketpaw_ee.sites.dto import (
 )
 from pocketpaw_ee.sites.engines import content_key, is_source_engine, normalize_engine
 from pocketpaw_ee.sites.generator_client import BuildResult, GeneratorClient
+from pocketpaw_ee.sites.html_paths import (
+    html_path_rejection,
+    is_reserved_html_path,
+    normalize_html_path,
+)
 from pocketpaw_ee.sites.react_paths import is_reserved_react_path, react_path_rejection
 
 logger = logging.getLogger(__name__)
@@ -5408,6 +5413,181 @@ async def edit_react_component(
     # native editor's shadow-render, which reads a SvelteKit build; react has no
     # such artifact, so warming one here would build a site nothing reads.
     return {"pocket_id": pocket_id, "component_path": component_path, "created": create}
+
+
+async def edit_html_file(
+    *,
+    user_id: str,
+    pocket_id: str,
+    file_path: str,
+    new_source: str | None = None,
+    edits: list[dict[str, str]] | None = None,
+    create: bool = False,
+    _pockets: Any = None,
+) -> dict[str, Any]:
+    """Write ONE file of an html Paw Site pocket and leave it as a reviewable DRAFT.
+
+    The chat-agent entry point for a targeted html edit (HE-10), and the third and
+    last engine to get one. Before this the html track had NO chat edit path at
+    all: ``edit_svelte_component`` raises ``pocket.not_svelte_site`` on an html
+    pocket and ``edit_react_component`` raises ``pocket.not_react_site``, so the
+    agent's only move on "change the phone number in the footer" was a second
+    ``create_html_site`` — a SECOND site pocket, at a second URL, instead of a
+    change to the one the user is looking at. That is the exact hole RX-3 closed
+    for react, reopened one engine over.
+
+    **This is a FILE edit, not a component edit, and the name says so.** svelte and
+    react both have a component model, so their tools take a ``component_path``. An
+    html site has none: ``html-scaffold.ts`` writes the author's map verbatim into
+    the directory the edge serves, so what exists is files — ``index.html``,
+    ``css/site.css``, ``about/index.html``. Calling the parameter
+    ``component_path`` here would have been consistency bought by lying about the
+    content model.
+
+    The edit is expressed one of two ways (exactly one is required), the same
+    contract both siblings use so the agent's instinct transfers:
+
+      * ``edits`` — a list of ``[{old_string, new_string}, ...]`` search/replace
+        blocks applied to the file's CURRENT contents via the shared
+        :func:`apply_edits`, which requires each ``old_string`` to match exactly
+        once and raises a clear, retry-able ``ValidationError`` otherwise. PREFERRED
+        for small changes: the agent emits only the diff. On this track that saving
+        is at its largest — an html page is one flat document with no component
+        decomposition, so a "full rewrite" means re-emitting the entire site page.
+      * ``new_source`` — the FULL new file contents, used as-is. For large rewrites,
+        and the ONLY form accepted with ``create=True`` (there is nothing to diff
+        against a file that does not exist yet).
+
+    ``create=True`` mints a NEW path instead of editing an existing one — "add an
+    about page" needs ``about.html`` PLUS a link from ``index.html``. It INVERTS the
+    existence check rather than relaxing it (``create=False`` requires the path to
+    exist, ``create=True`` requires it not to), so exactly one of the two mistakes
+    is impossible in each mode.
+
+    **DRAFT-ONLY. This does NOT republish**, matching ``edit_react_component`` and
+    ``apply_leaf_edits`` rather than ``edit_svelte_component``. The svelte tool
+    republishes because it has a workerd smoke gate to catch a broken edit and a
+    rollback to run when the gate fires. html has NEITHER: ``needs_node_build``
+    is False for html, so there is no build, no smoke render, and nothing that can
+    reject an edit before it deploys. A republish here would therefore push
+    unvalidated markup straight to a live customer site with no gate in between —
+    strictly worse than leaving it as a draft the user publishes deliberately. So
+    persisting the edited draft IS the whole job, and publishing stays the user's
+    call. A future reader looking at this and reaching for the missing republish
+    should read this paragraph first.
+
+    The path guard is load-bearing, not hygiene, and it is html's own — see
+    :mod:`pocketpaw_ee.sites.html_paths` for why react's rules could not be reused
+    (an html site's files legitimately live at the project ROOT, which react's
+    ``src/``-or-``public/`` rule would reject outright). Two rejections: a path that
+    escapes the site directory, and the generator-owned ``_paw/`` namespace, where
+    ``_paw/edit-manifest.json`` maps each editable element to a byte range. An
+    author who could shadow that manifest would not break anything loudly — the
+    next NATIVE editor edit would splice at wrong offsets, landing mid-tag.
+
+    Raises, all BEFORE anything is written:
+      * ``ValidationError("site_edit.invalid_args")`` — not exactly one of
+        ``edits`` / ``new_source``;
+      * ``ValidationError("site_edit.create_needs_source")`` — ``create=True``
+        without ``new_source``;
+      * ``ValidationError("site_edit.reserved_path")`` — the ``_paw/`` namespace;
+      * ``ValidationError("site_edit.path_outside_source")`` — escapes the site dir;
+      * ``ValidationError("pocket.not_html_site")`` — not an html site pocket;
+      * ``NotFound("site_component")`` — ``create=False`` and the path is absent;
+      * ``ValidationError("pocket.html_file_exists")`` — ``create=True`` and the
+        path is present;
+      * whatever :func:`apply_edits` raises on a 0-match / ambiguous ``old_string``.
+
+    ``_pockets`` is an injectable seam for the pockets service so the orchestration
+    is unit-testable with no Bun / Cloudflare in sight — there is nothing else to
+    inject, because there is no build.
+
+    Takes NO ``workspace_id``, for the same reason ``edit_react_component`` does
+    not: tenancy is resolved by the pockets service off ``user_id`` (its public
+    ``get`` raises Forbidden itself), and the workspace is only needed to look up
+    the Site doc whose builder origin a REPUBLISH must re-apply — which this lane
+    does not do.
+
+    Returns ``{pocket_id, file_path, created}``.
+    """
+    if _pockets is not None:
+        pockets_service = _pockets
+    else:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service  # type: ignore[no-redef]
+
+    # Exactly one of the two edit shapes (mirrors both siblings).
+    if (edits is None) == (new_source is None):
+        raise ValidationError(
+            "site_edit.invalid_args",
+            "edit_html_file requires exactly one of `edits` (a targeted "
+            "search/replace diff) or `new_source` (a full file rewrite).",
+        )
+    if create and new_source is None:
+        raise ValidationError(
+            "site_edit.create_needs_source",
+            "Creating a new file needs `new_source` — the full contents of the new "
+            "file. There is nothing for `edits` to search against.",
+        )
+
+    # The path guard. FIRST, before the pocket is even read: a call that names an
+    # unwritable path is rejected on the path alone, so no amount of pocket state
+    # can make it land.
+    if (reason := html_path_rejection(file_path)) is not None:
+        code = (
+            "site_edit.reserved_path"
+            if is_reserved_html_path(file_path)
+            else "site_edit.path_outside_source"
+        )
+        raise ValidationError(code, reason)
+
+    # Store under the NORMALIZED key, not the one the agent spelled. The generator
+    # normalizes before it writes (``assertSafeRelPath`` → ``join(outDir, rel)``), so
+    # two keys that normalize to the same path are ONE file on disk. Persisting the
+    # raw spelling would let ``create=True`` on ``./index.html`` pass the
+    # not-already-present check, land a SECOND map entry, and then have both entries
+    # materialize onto ``index.html`` — leaving the live home page decided by dict
+    # iteration order. Normalizing here also makes ``./index.html`` and
+    # ``img\\logo.svg`` resolve to the existing file the author meant, instead of
+    # 404ing on a path that is present under its canonical spelling.
+    file_path = normalize_html_path(file_path)
+
+    # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
+    # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if (pocket.get("engine") or "ripple") != "html" or not isinstance(pocket.get("source"), dict):
+        raise ValidationError(
+            "pocket.not_html_site",
+            "This pocket is not an html Paw Site — it has no raw source map to edit.",
+        )
+    source_map = pocket["source"]
+    # The MISSING-path half of the inversion is enforced here as well as at the
+    # write, because the ``edits`` branch below indexes the map: without it a typo'd
+    # path is a KeyError instead of the NotFound the caller has to relay. The
+    # EXISTING-path half is deliberately NOT duplicated — nothing here reads the
+    # file on the create path, so the check would only be a second copy of a rule
+    # the write chokepoint already owns for every caller. (Same reasoning, and the
+    # same proven-by-mutation result, as ``edit_react_component``.)
+    if not create and file_path not in source_map:
+        raise NotFound("site_component", file_path)
+
+    if edits is not None:
+        # apply_edits raises ValidationError (clear, retry-able) on any match-count
+        # violation, BEFORE anything is persisted.
+        new_source = apply_edits(source_map[file_path], edits)
+
+    assert new_source is not None  # narrowing: the arg checks above guarantee it
+    await pockets_service.set_html_source_file(
+        pocket_id,
+        user_id,
+        file_path=file_path,
+        new_source=new_source,
+        create=create,
+    )
+
+    # NO publish, NO enqueue, NO native pre-warm — see the DRAFT-ONLY paragraph
+    # above. The pre-warm serves the svelte native editor's shadow-render, which
+    # reads a SvelteKit build; html has no such artifact.
+    return {"pocket_id": pocket_id, "file_path": file_path, "created": create}
 
 
 async def _latest_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:

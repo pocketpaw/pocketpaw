@@ -268,6 +268,14 @@ CREATE_REACT_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_react_site"
 # changing the one the user is looking at.
 EDIT_REACT_COMPONENT_TOOL_ID = f"mcp__{SERVER_NAME}__edit_react_component"
 
+# HE-10 — the html-track EDIT tool, and the last engine to get one. Same server
+# again. Its absence had the same shape as RX-3's: ``edit_svelte_component``
+# rejects an html pocket and so does ``edit_react_component``, so "change the phone
+# number in the footer" had no tool that would take it and the agent's only move was
+# a second ``create_html_site`` — a second pocket at a second url. Named for a FILE,
+# not a component, because an html site has no component model to name.
+EDIT_HTML_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__edit_html_file"
+
 SITES_CREATE_TOOL_IDS = (
     CREATE_LANDING_SITE_TOOL_ID,
     CREATE_SVELTE_SITE_TOOL_ID,
@@ -276,6 +284,7 @@ SITES_CREATE_TOOL_IDS = (
     CREATE_HTML_SITE_TOOL_ID,
     CREATE_REACT_SITE_TOOL_ID,
     EDIT_REACT_COMPONENT_TOOL_ID,
+    EDIT_HTML_FILE_TOOL_ID,
 )
 
 
@@ -2195,12 +2204,295 @@ def make_edit_react_component_tool(tool: Any) -> Any:
     return edit_react_component
 
 
+async def _edit_html_file_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__edit_html_file`` (HE-10).
+
+    Reads workspace/user identity from the per-stream ContextVars, runs the same
+    plan gate the create handlers run, validates the inputs, and delegates to
+    ``sites_service.edit_html_file`` — which resolves the edit and persists the one
+    file as a reviewable DRAFT.
+
+    Mirrors ``_edit_react_component_handler`` almost line for line, and the places
+    it does NOT are the html-specific ones: the argument is ``file_path`` (an html
+    site has files, not components), and the path guidance names the ``_paw/``
+    namespace rather than react's build shell.
+
+    Like the react handler it does NOT republish, so there is no ``SmokeGateFailed``
+    case to map. The reason differs and is worth keeping straight: react cannot roll
+    back because its build is async, whereas html has no build to gate on AT ALL —
+    which means a republish here would push unvalidated markup straight to a live
+    site. Draft-only is the safer contract, not merely the convenient one.
+
+    Returns ``{ok, status:"draft", is_live:false, pocket_id, file_path, created,
+    message}``; sets ``is_error`` when identity is missing, the plan lacks Sites,
+    the inputs are malformed, or the service rejects the edit (a reserved or
+    escaping path, a wrong-engine pocket, a missing/colliding file, an ambiguous
+    ``old_string``) — each relayed by code so the agent can fix and retry rather
+    than report a change that did not happen.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "edit_html_file requires workspace and user context (call from a "
+            "cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_edit_html_file",
+        status="ok",
+        ok=True,
+    )
+
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "edit_html_file requires a `pocket_id` — the id of the html site "
+            "pocket whose file you are editing."
+        )
+    file_path = args.get("file_path")
+    if not isinstance(file_path, str) or not file_path:
+        return _error_response(
+            "edit_html_file requires a `file_path` — the relative path of the file "
+            "to write (e.g. 'index.html' or 'css/site.css'). It must already exist "
+            "in the site's source map unless you pass `create=true`."
+        )
+    args = coerce_json_object_args(args, ("edits",))
+    edits = args.get("edits")
+    new_source = args.get("new_source")
+    has_edits = edits is not None
+    has_new_source = new_source is not None
+    if has_edits == has_new_source:
+        return _error_response(
+            "edit_html_file requires exactly one of `edits` (a targeted "
+            "search/replace diff — PREFERRED for small changes) or `new_source` "
+            "(the FULL new file contents — for large rewrites and for `create`). "
+            "Provide one, not both and not neither."
+        )
+    if has_new_source and not isinstance(new_source, str):
+        return _error_response(
+            "edit_html_file `new_source` must be the FULL new contents of the file "
+            "as a string (the tool replaces the whole file, not a patch)."
+        )
+    if has_edits:
+        # Validate the diff SHAPE here so a malformed payload gets a clear error
+        # before the service runs. The MATCH-uniqueness contract belongs to the
+        # service's apply_edits (relayed below as a ValidationError).
+        if not isinstance(edits, list) or not edits:
+            return _error_response(
+                "edit_html_file `edits` must be a non-empty list of "
+                "{old_string, new_string} blocks (like the built-in Edit tool)."
+            )
+        for i, block in enumerate(edits):
+            if (
+                not isinstance(block, dict)
+                or not isinstance(block.get("old_string"), str)
+                or not isinstance(block.get("new_string"), str)
+            ):
+                return _error_response(
+                    f"edit_html_file `edits` block {i} must be an object with "
+                    "string `old_string` and `new_string`."
+                )
+    create = bool(args.get("create"))
+    if create and not has_new_source:
+        return _error_response(
+            "edit_html_file `create=true` needs `new_source` — the full contents of "
+            "the new file. There is nothing for `edits` to search against in a file "
+            "that does not exist yet."
+        )
+
+    # Plan gate (Sites = "sites"): an edit mutates a site pocket, so it is gated on
+    # the same feature the create tools are. Without this a workspace that lost the
+    # plan could keep editing a site its own /sites list 403s.
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        result = await sites_service.edit_html_file(
+            user_id=user_id,
+            pocket_id=pocket_id,
+            file_path=file_path,
+            new_source=new_source if has_new_source else None,
+            edits=edits if has_edits else None,
+            create=create,
+        )
+    except CloudError as exc:
+        # ValidationError (reserved `_paw/` path / escapes the site dir / not an
+        # html site / already exists / a bad diff) or NotFound (unknown pocket or
+        # file). Relay the code + message so the agent knows WHICH guard rejected it.
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("edit_html_file failed", exc_info=True)
+        return _error_response(f"edit failed: {exc}")
+
+    # The edit is a DRAFT. The chat agent narrates this payload, so — exactly like
+    # both sibling edit tools — it must not contain a completed-state publish claim.
+    return _success_response(
+        {
+            "ok": True,
+            "status": "draft",
+            "is_live": False,
+            "pocket_id": result["pocket_id"],
+            "file_path": result["file_path"],
+            "created": result["created"],
+            "message": (
+                "Saved to the site's draft — it is NOT online yet. Tell the user the "
+                "change is in the draft they can preview under /sites, and offer to "
+                "publish it; only call the publish tool when they ask."
+            ),
+        }
+    )
+
+
+def make_edit_html_file_tool(tool: Any) -> Any:
+    """Build the ``edit_html_file`` SDK tool object using the SDK's ``tool``
+    decorator (passed in by the caller that already imported it).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as create + publish +
+    the two sibling edit tools (see ``make_create_landing_site_tool`` for why one
+    server)."""
+
+    @tool(
+        "edit_html_file",
+        (
+            "Change an EXISTING html Paw Site (a raw HTML/CSS/JS site — the kind "
+            "`create_html_site` makes, and the kind a site imported from a URL is). "
+            "Use this WHENEVER the user asks to alter an html site that already "
+            "exists — 'change the phone number in the footer', 'shorten the hero "
+            "headline', 'fix the typo on the about page', 'add a contact page'. "
+            "NEVER call `create_html_site` again for a change: that mints a SECOND "
+            "site pocket at a SECOND url and leaves the one the user is looking at "
+            "untouched. The change is saved to the site's DRAFT — it is NOT "
+            "published and nothing goes live.\n"
+            "Give the change ONE of two ways (exactly one, not both):\n"
+            "  * `edits` — PREFER THIS, and prefer it harder here than on the other "
+            "tracks. A list of search/replace blocks [{old_string, new_string}, "
+            "...], exactly like the built-in Edit tool: each `old_string` is copied "
+            "VERBATIM from the current file and must match EXACTLY ONCE (include "
+            "enough surrounding context to be unique), and `new_string` is what it "
+            "becomes. An html page is ONE flat document with no components, so a "
+            "full rewrite means re-emitting the entire page to change a phone "
+            "number. If you have not read the file this turn, read it first so "
+            "old_string matches.\n"
+            "  * `new_source` — the FULL new file contents as a string (REPLACES "
+            "the whole file). For large rewrites, and the only form `create` "
+            "accepts.\n"
+            "To ADD a page: call this twice — once with `create=true` and "
+            "`new_source` for the new file (e.g. `about.html`), then once with "
+            "`edits` on `index.html` to link to it. `create=true` REQUIRES the path "
+            "to be new; editing an existing file with it is rejected so you cannot "
+            "overwrite a page by accident. Without `create` the path must already "
+            "exist, so a typo is an error and never a stray new file.\n"
+            "PATHS: an html site's files are project-relative and MOST LIVE AT THE "
+            "ROOT — `index.html` is the page the edge serves, alongside things like "
+            "`styles.css`, `about.html`, `img/logo.svg`. This is NOT like the react "
+            "track: do NOT prefix paths with `src/`. The ONLY forbidden paths are "
+            "the generated `_paw/` namespace and anything that climbs out of the "
+            "site with `..`.\n"
+            "KEEP THE FORM PLUMBING. If the file contains a `<form>` posting to a "
+            "`/capture/form` endpoint, leave its `action` and its hidden "
+            "`paw_site_id` / `paw_key` / `paw_redirect` inputs EXACTLY as they are "
+            "unless the user asks to change the form itself — they are what makes "
+            "submissions arrive as leads, and a rewrite that drops them silently "
+            "sends every future enquiry nowhere.\n"
+            "Args: `pocket_id` (the html site pocket), `file_path`, and one of "
+            "`edits` / `new_source`, plus optional `create`. Returns {ok, "
+            "status:'draft', is_live:false, pocket_id, file_path, created, "
+            "message}. Relay the `message`: the change is in the DRAFT the user can "
+            "preview under /sites, and publishing is their call — do NOT tell them "
+            "it is live. ok=false with an error means NOTHING was saved: an "
+            "old_string that matched 0 or >1 times means make it more specific and "
+            "retry; a reserved-path, wrong-engine, already-exists or not-found "
+            "error means relay the reason. Do NOT report a successful edit when "
+            "ok=false."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Id of the html site pocket to edit.",
+                },
+                "file_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Relative path of the file to write (e.g. 'index.html', "
+                        "'styles.css', 'about.html'). Files usually sit at the site "
+                        "ROOT — do NOT prefix with 'src/'. Must already exist in the "
+                        "site's source map unless `create` is true. The generated "
+                        "`_paw/` namespace is not writable."
+                    ),
+                },
+                "edits": {
+                    "type": "array",
+                    "description": (
+                        "PREFERRED for small changes: a list of search/replace "
+                        "blocks applied to the file's CURRENT contents. Each "
+                        "`old_string` must match exactly once. Send this INSTEAD of "
+                        "`new_source` so you emit only the diff. Not valid with "
+                        "`create`."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": {
+                                "type": "string",
+                                "description": (
+                                    "Exact text to replace, copied verbatim from the "
+                                    "current file; must match exactly once."
+                                ),
+                            },
+                            "new_string": {
+                                "type": "string",
+                                "description": "Replacement text (may be empty to delete).",
+                            },
+                        },
+                        "required": ["old_string", "new_string"],
+                        "additionalProperties": False,
+                    },
+                },
+                "new_source": {
+                    "type": "string",
+                    "description": (
+                        "The FULL new contents of the file as a string (REPLACES the "
+                        "whole file — not a diff). Use for large rewrites, and "
+                        "always with `create`."
+                    ),
+                },
+                "create": {
+                    "type": "boolean",
+                    "description": (
+                        "Create a NEW file at `file_path` instead of editing an "
+                        "existing one. Requires `new_source`, and the path must NOT "
+                        "already exist. Use it to add a page, then edit "
+                        "`index.html` to link to it."
+                    ),
+                },
+            },
+            "required": ["pocket_id", "file_path"],
+            "additionalProperties": False,
+        },
+    )
+    async def edit_html_file(args):  # type: ignore[no-untyped-def]
+        return await _edit_html_file_handler(args)
+
+    return edit_html_file
+
+
 __all__ = [
     "CREATE_DYNAMIC_SITE_TOOL_ID",
     "CREATE_HTML_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",
     "CREATE_REACT_SITE_TOOL_ID",
     "CREATE_SVELTE_SITE_TOOL_ID",
+    "EDIT_HTML_FILE_TOOL_ID",
     "EDIT_REACT_COMPONENT_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "HTML_REQUIRED_KEYS",
@@ -2216,6 +2508,7 @@ __all__ = [
     "make_create_landing_site_tool",
     "make_create_react_site_tool",
     "make_create_svelte_site_tool",
+    "make_edit_html_file_tool",
     "make_edit_react_component_tool",
     "make_edit_svelte_component_tool",
 ]

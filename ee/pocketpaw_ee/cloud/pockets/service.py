@@ -2272,6 +2272,82 @@ async def set_react_source_file(
     return await _resolved_wire_dict(doc, user_id)
 
 
+async def set_html_source_file(
+    pocket_id: str,
+    user_id: str,
+    *,
+    file_path: str,
+    new_source: str,
+    create: bool = False,
+) -> dict:
+    """Write ONE file in an html-engine pocket's ``source`` map and persist it.
+
+    The html peer of ``set_react_source_file``. Until HE-10 the html track had no
+    per-file writer at all: ``set_imported_source`` (below) replaces the WHOLE map
+    and is the crawler's, taking an explicit ``workspace_id`` with no viewer check
+    because it runs in the background off a request. Pointing an agent edit at it
+    would have swapped a site's entire contents to change one headline, and done so
+    without the ``_check_domain_edit_access`` every other authored write runs.
+
+    Access mirrors ``update`` / ``set_react_source_file``: explicit
+    ``(pocket_id, user_id)`` with ``_check_domain_edit_access`` (owner /
+    shared_with / workspace-visible). A missing pocket raises ``NotFound``.
+
+    ``create`` carries the same inverted contract as the react peer, for the same
+    reason — "add an about page" needs a new FILE plus a link from ``index.html``:
+
+      * ``create=False`` (default) — ``file_path`` MUST already exist, else
+        ``NotFound`` (404). A typo'd path is never a silent create.
+      * ``create=True`` — ``file_path`` must NOT already exist, else
+        ``ValidationError`` (422). Silently overwriting a real page is worse than
+        a rejected call the agent can retry.
+
+    A non-html pocket (``engine != "html"`` or no ``source`` map) is a
+    ``ValidationError`` (422, ``pocket.not_html_site``) rather than a write against
+    the wrong content model.
+
+    Returns the resolved wire dict every other write returns. Like the react peer
+    and unlike the svelte one it does NOT return the file's prior contents: that
+    value exists there only so the caller can roll back a failed republish, and
+    this lane has no republish to fail — an html publish runs no build and no
+    smoke gate, so there is no gate to be rejected by. Persisting the draft IS
+    the whole job.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    if getattr(doc, "engine", "ripple") != "html" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_html_site",
+            "This pocket is not an html Paw Site — it has no raw source map to edit.",
+        )
+    exists = file_path in doc.source
+    if create and exists:
+        raise ValidationError(
+            "pocket.html_file_exists",
+            f"`{file_path}` already exists in this site's source map. Edit it "
+            "without `create` instead of overwriting it.",
+        )
+    if not create and not exists:
+        raise NotFound("site_component", file_path)
+
+    # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a
+    # dict field is not always detected as dirty by the ODM) — same note as
+    # ``set_svelte_source_file``.
+    updated = dict(doc.source)
+    updated[file_path] = new_source
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    # Branch primitive (BP-3): a source-map edit ALSO writes a draft
+    # ArtifactVersion snapshotting the FULL map, so the edit is a reviewable draft
+    # a later publish promotes. The helper is engine-agnostic despite its name (it
+    # snapshots ``doc.source`` whatever engine wrote it) — the same reuse
+    # ``set_react_source_file`` makes.
+    await _record_pocket_svelte_draft_version(doc, author=user_id)
+    return await _resolved_wire_dict(doc, user_id)
+
+
 async def set_imported_source(
     pocket_id: str,
     *,
