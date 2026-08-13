@@ -225,8 +225,17 @@ def _safe_relative_redirect(path: str) -> bool:
     """Open-redirect guard for the native-form 303: the redirect target must be a
     RELATIVE path on the submitting site. Rejects absolute URLs (no leading "/"),
     protocol-relative ("//host"), backslash tricks, embedded schemes, and CR/LF
-    (header injection). The accepted value is later prefixed with the VALIDATED
-    request Origin, so the browser can only ever land back on the pinned site."""
+    (header injection).
+
+    This carries MORE weight since the origin pin became opt-in (2026-08-13). It
+    used to be the second of two locks — the accepted path was prefixed with an
+    Origin that had already been pinned, so a bad path still could not leave the
+    site. Now ``_redirect_base`` resolves to "" for a site with no canonical url
+    yet (a draft, or an async build whose worker has not reported back), and on
+    that branch THIS FUNCTION IS THE ONLY LOCK: the accepted value becomes the
+    whole ``Location``. The ``//host`` and ``://`` rejections are what stop a
+    protocol-relative or absolute target there, so neither may be relaxed on the
+    grounds that something downstream re-checks the host. Nothing does."""
     if not path.startswith("/") or path.startswith("//"):
         return False
     if "\\" in path or "\r" in path or "\n" in path or "://" in path:
