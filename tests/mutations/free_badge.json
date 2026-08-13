@@ -1,0 +1,79 @@
+[
+  {
+    "label": "the gate stops requiring the badge at all",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "    return not badge_removal",
+    "replace": "    return False",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_the_base_tier_is_badged",
+      "tests/ee/sites/test_free_badge.py::test_an_unknown_tier_is_badged"
+    ]
+  },
+  {
+    "label": "the free tier is handed badge removal",
+    "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
+    "find": "    \"basic\": False,",
+    "replace": "    \"basic\": True,",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_the_base_tier_is_badged",
+      "tests/ee/sites/test_free_badge.py::test_a_basic_tier_site_is_badged"
+    ]
+  },
+  {
+    "label": "an undecodable page is skipped instead of aborting the publish",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "            raise BadgeInjectionError(f\"unreadable page {path} — refusing to deploy\") from exc",
+    "replace": "            continue",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_an_undecodable_page_raises_rather_than_being_skipped",
+      "tests/ee/sites/test_free_badge.py::test_one_bad_page_stops_the_whole_publish",
+      "tests/ee/sites/test_free_badge.py::test_an_unbadgeable_page_aborts_the_publish"
+    ]
+  },
+  {
+    "label": "an unwritable page is skipped instead of aborting the publish",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "            raise BadgeInjectionError(f\"unwritable page {path} — refusing to deploy\") from exc",
+    "replace": "            continue",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_an_unwritable_page_raises_rather_than_being_skipped"
+    ]
+  },
+  {
+    "label": "a first publish (no Site doc yet) defaults to UNbadged",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    badge_removal = bool(tier.badge_removal) if tier is not None else False",
+    "replace": "    badge_removal = bool(tier.badge_removal) if tier is not None else True",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_a_first_publish_badges_before_it_deploys"
+    ]
+  },
+  {
+    "label": "the badge lands at the FIRST </body>, so a code sample can swallow it",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "    idx = page.lower().rfind(\"</body>\")",
+    "replace": "    idx = page.lower().find(\"</body>\")",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_the_last_closing_body_wins"
+    ]
+  },
+  {
+    "label": "the display lock loses its !important, so author CSS can hide the badge",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "    \"display:flex!important;\"",
+    "replace": "    \"display:flex;\"",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_every_hiding_vector_is_locked_important"
+    ]
+  },
+  {
+    "label": "the stamper stops walking the tree, so no page is ever badged",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "        seen_pages += 1",
+    "replace": "        seen_pages += 1\n        continue",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_every_page_in_the_tree_gets_a_badge",
+      "tests/ee/sites/test_free_badge.py::test_a_first_publish_badges_before_it_deploys"
+    ]
+  }
+]

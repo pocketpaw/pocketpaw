@@ -1,0 +1,315 @@
+# tests/ee/sites/test_free_badge.py — a free site cannot ship without its badge.
+# Created 2026-08-13 (feat/sites-free-badge). What this pins shut: the badge is the
+# ONLY difference between the free tier and the paid per-site tier, so every way it
+# could quietly not happen is a way to get the paid product for nothing. Four
+# layers, matching where it can break:
+#   * Pure injection (no I/O): the badge lands before </body>, a page with no
+#     </body> still gets one, a second pass is a no-op, every page in a tree gets
+#     one.
+#   * The lock: it is server-rendered markup rather than a script, and every
+#     property an author stylesheet would use to hide it is inline + !important.
+#     A badge that a customer's own CSS can hide is not an enforcement mechanism.
+#   * FAILURE-CLOSED on every page that ships: an unreadable/undecodable page and
+#     an unwritable page each RAISE, and one bad page aborts the whole publish.
+#     This is the inversion from ``_embed_concierge_bar`` (which logs and
+#     continues) and it is the heart of the feature — if injection could fail
+#     soft, the exploit is to make it fail. An EMPTY root is the one survivable
+#     case, because the deploy resolves its upload source from that same root, so
+#     nothing ships from it either; those two tests pin the reasoning so nobody
+#     "restores" a raise that would protect no site.
+#   * The gate: basic is badged, pro/business are not, and an unknown or missing
+#     tier is BADGED (fail-closed on the gate too, so a typo can't buy a free
+#     removal).
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from pocketpaw_ee.cloud.billing import site_plans as site_plan_catalog
+from pocketpaw_ee.sites import badge
+from pocketpaw_ee.sites import service as sites_service
+
+# --------------------------------------------------------------------------- #
+# Layer 1 — injection (pure)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_badge_lands_before_the_closing_body():
+    page = "<!doctype html><html><body><h1>Atlas AC</h1></body></html>"
+
+    out = badge.inject_into_html(page, badge.build_badge_html())
+
+    assert out is not None
+    assert out.index("<a ") < out.index("</body>")
+    assert out.endswith("</body></html>")
+
+
+def test_the_last_closing_body_wins():
+    """A page can mention the string in a code sample; the real closing tag is the
+    final one. Injecting at the FIRST match buries the badge inside the sample,
+    where a <code> block renders it as text rather than a badge.
+
+    The assertion has to be "after the first </body>", not "before the last one" —
+    the latter is true even when the badge lands in the sample, which is how the
+    ``rfind``->``find`` mutation escaped this test's first version."""
+    page = "<html><body><code></body></code><p>real content</p></body></html>"
+
+    out = badge.inject_into_html(page, badge.build_badge_html())
+
+    assert out is not None
+    assert out.count(badge.BADGE_MARKER) == 1
+    assert out.index(badge.BADGE_MARKER) > out.lower().index("</body>")
+
+
+def test_a_page_without_a_body_tag_still_gets_a_badge():
+    """Fragments and hand-written partials have no </body>. Appending beats
+    skipping — an unbadged page is the one outcome this module does not accept."""
+    out = badge.inject_into_html("<h1>Atlas AC</h1>", badge.build_badge_html())
+
+    assert out is not None
+    assert badge.BADGE_MARKER in out
+
+
+def test_rebadging_is_a_no_op():
+    """The steady state on every re-publish. Returning None (not the unchanged
+    page) is what lets the caller skip the write."""
+    once = badge.inject_into_html("<body>hi</body>", badge.build_badge_html())
+    assert once is not None
+
+    assert badge.inject_into_html(once, badge.build_badge_html()) is None
+
+
+def test_every_page_in_the_tree_gets_a_badge(tmp_path):
+    (tmp_path / "index.html").write_text("<body>home</body>", encoding="utf-8")
+    (tmp_path / "about.html").write_text("<body>about</body>", encoding="utf-8")
+    nested = tmp_path / "blog"
+    nested.mkdir()
+    (nested / "post.html").write_text("<body>post</body>", encoding="utf-8")
+    (tmp_path / "styles.css").write_text("body{color:red}", encoding="utf-8")
+
+    changed = badge.inject_into_tree(tmp_path)
+
+    assert len(changed) == 3
+    for name in ("index.html", "about.html", "blog/post.html"):
+        assert badge.BADGE_MARKER in (tmp_path / name).read_text(encoding="utf-8")
+    assert badge.BADGE_MARKER not in (tmp_path / "styles.css").read_text(encoding="utf-8")
+
+
+def test_a_second_publish_rewrites_nothing_but_still_succeeds(tmp_path):
+    (tmp_path / "index.html").write_text("<body>home</body>", encoding="utf-8")
+    badge.inject_into_tree(tmp_path)
+
+    assert badge.inject_into_tree(tmp_path) == []
+
+
+# --------------------------------------------------------------------------- #
+# Layer 2 — the lock (server-rendered, not CSS-hideable)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_badge_is_markup_not_a_script():
+    """Server-rendered is the spec's word. A JS-blocked visitor still sees it, and
+    there is no loader that can 404 the enforcement away."""
+    out = badge.build_badge_html()
+
+    assert out.lstrip().startswith("<a ")
+    assert "<script" not in out.lower()
+
+
+@pytest.mark.parametrize(
+    "prop",
+    ["display", "visibility", "opacity", "position", "z-index", "width", "height"],
+)
+def test_every_hiding_vector_is_locked_important(prop):
+    """The realistic attack is not editing our artifact — customers never touch it.
+    It is a rule in the customer's OWN stylesheet, which we build from. Inline
+    !important outranks any author rule, including #id .class {display:none}."""
+    out = badge.build_badge_html()
+
+    assert f"{prop}:" in out
+    start = out.index(f"{prop}:")
+    assert "!important" in out[start : start + 40]
+
+
+def test_the_badge_links_out_and_names_itself():
+    out = badge.build_badge_html()
+
+    assert badge.BADGE_HREF in out
+    assert badge.BADGE_TEXT in out
+    assert 'rel="noopener noreferrer nofollow"' in out
+    assert "aria-label=" in out
+
+
+# --------------------------------------------------------------------------- #
+# Layer 3 — failure-closed (the inversion from the concierge bar)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_missing_build_tree_is_survivable(tmp_path):
+    """The deliberate exception to fail-closed, and the reasoning is load-bearing:
+    this root is the SAME path the deploy resolves its upload source from, so no
+    tree means nothing ships from it either. Raising here would protect no site
+    and would turn every stubbed-build publish test into a failure."""
+    assert badge.inject_into_tree(tmp_path / "nope") == []
+
+
+def test_a_tree_with_no_html_is_survivable(tmp_path):
+    """Same argument: no HTML at the root the deploy uploads from means no page
+    goes live, badged or otherwise."""
+    (tmp_path / "styles.css").write_text("body{}", encoding="utf-8")
+
+    assert badge.inject_into_tree(tmp_path) == []
+
+
+def test_an_undecodable_page_raises_rather_than_being_skipped(tmp_path):
+    """The skip-and-continue that is correct for the concierge bar is the exploit
+    here: one unreadable file and that page ships unbadged."""
+    (tmp_path / "index.html").write_bytes(b"<body>\xff\xfe not utf-8 </body>")
+
+    with pytest.raises(badge.BadgeInjectionError):
+        badge.inject_into_tree(tmp_path)
+
+
+def test_an_unwritable_page_raises_rather_than_being_skipped(tmp_path, monkeypatch):
+    (tmp_path / "index.html").write_text("<body>home</body>", encoding="utf-8")
+
+    def _boom(self, *a, **kw):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(Path, "write_text", _boom)
+
+    with pytest.raises(badge.BadgeInjectionError):
+        badge.inject_into_tree(tmp_path)
+
+
+def test_one_bad_page_stops_the_whole_publish(tmp_path):
+    """Not "the good pages ship badged and the bad one slips through" — the publish
+    aborts, so the site does not go live half-enforced."""
+    (tmp_path / "a.html").write_text("<body>a</body>", encoding="utf-8")
+    (tmp_path / "b.html").write_bytes(b"\xff\xfe")
+
+    with pytest.raises(badge.BadgeInjectionError):
+        badge.inject_into_tree(tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# Layer 4 — the gate (which tiers must carry it)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_base_tier_is_badged():
+    """This is what free means, and it is the only thing the paid tier sells."""
+    tier = site_plan_catalog.get_site_plan(site_plan_catalog.BASE_SITE_PLAN_KEY)
+
+    assert tier is not None
+    assert tier.badge_removal is False
+    assert badge.badge_required(badge_removal=tier.badge_removal) is True
+
+
+@pytest.mark.parametrize("key", ["pro", "business"])
+def test_the_paid_tiers_may_drop_the_badge(key):
+    tier = site_plan_catalog.get_site_plan(key)
+
+    assert tier is not None
+    assert tier.badge_removal is True
+    assert badge.badge_required(badge_removal=tier.badge_removal) is False
+
+
+def test_an_unknown_tier_is_badged():
+    """``get_site_plan`` deliberately does not substitute a floor, so the caller's
+    fail-closed default is what a typo lands on. A misspelled tier must not buy a
+    free badge removal."""
+    assert site_plan_catalog.get_site_plan("stduio") is None
+    assert badge.badge_required(badge_removal=False) is True
+
+
+def test_a_site_with_no_tier_at_all_is_badged():
+    """A FIRST publish reaches the stamper before its Site doc exists, so "no tier"
+    is the single most common case on the path — and it must mean free."""
+    assert site_plan_catalog.get_site_plan(None) is None
+    assert badge.badge_required(badge_removal=False) is True
+
+
+# --------------------------------------------------------------------------- #
+# Layer 5 — the publish path (gate + injection wired together)
+# --------------------------------------------------------------------------- #
+
+
+def _site_doc_returning(monkeypatch, doc):
+    """Point ``_stamp_free_badge``'s tier lookup at ``doc`` without a database."""
+
+    async def _find_one(*_a, **_kw):
+        return doc
+
+    monkeypatch.setattr(sites_service._SiteDoc, "find_one", _find_one)
+
+
+class _Doc:
+    def __init__(self, plan_tier):
+        self.plan_tier = plan_tier
+
+
+@pytest.mark.asyncio
+async def test_a_first_publish_badges_before_it_deploys(tmp_path, monkeypatch):
+    """The case the whole feature turns on: a brand-new site reaches the stamper
+    BEFORE its Site doc is inserted, so the tier lookup finds nothing. That must
+    resolve to free-and-badged, not to skip."""
+    _site_doc_returning(monkeypatch, None)
+    (tmp_path / "index.html").write_text("<body>home</body>", encoding="utf-8")
+
+    await sites_service._stamp_free_badge(
+        workspace_id="w1",
+        site_id="6512c1f0e4b0a1b2c3d4e5f6",
+        project_dir=str(tmp_path),
+        engine="html",
+    )
+
+    assert badge.BADGE_MARKER in (tmp_path / "index.html").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_basic_tier_site_is_badged(tmp_path, monkeypatch):
+    _site_doc_returning(monkeypatch, _Doc("basic"))
+    (tmp_path / "index.html").write_text("<body>home</body>", encoding="utf-8")
+
+    await sites_service._stamp_free_badge(
+        workspace_id="w1",
+        site_id="6512c1f0e4b0a1b2c3d4e5f6",
+        project_dir=str(tmp_path),
+        engine="html",
+    )
+
+    assert badge.BADGE_MARKER in (tmp_path / "index.html").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_paid_site_ships_clean(tmp_path, monkeypatch):
+    """What the customer actually bought."""
+    _site_doc_returning(monkeypatch, _Doc("pro"))
+    (tmp_path / "index.html").write_text("<body>home</body>", encoding="utf-8")
+
+    await sites_service._stamp_free_badge(
+        workspace_id="w1",
+        site_id="6512c1f0e4b0a1b2c3d4e5f6",
+        project_dir=str(tmp_path),
+        engine="html",
+    )
+
+    assert badge.BADGE_MARKER not in (tmp_path / "index.html").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_an_unbadgeable_page_aborts_the_publish(tmp_path, monkeypatch):
+    """The enforcement, end to end: the stamper does NOT swallow, so publish_pocket
+    raises and the site never reaches the deploy."""
+    _site_doc_returning(monkeypatch, None)
+    (tmp_path / "index.html").write_bytes(b"<body>\xff\xfe</body>")
+
+    with pytest.raises(badge.BadgeInjectionError):
+        await sites_service._stamp_free_badge(
+            workspace_id="w1",
+            site_id="6512c1f0e4b0a1b2c3d4e5f6",
+            project_dir=str(tmp_path),
+            engine="html",
+        )

@@ -2405,6 +2405,20 @@ async def _deploy_site_doc(
         site_name=site_name,
     )
 
+    # Stamp the free-tier attribution badge onto the same built tree, also before
+    # the deploy. Ordered AFTER the concierge so the bar is present when the badge
+    # walks the pages (both are idempotent, so the order only decides which one
+    # logs the rewrite — but a fixed order keeps re-publishes byte-stable).
+    #
+    # NOT failure-soft, unlike the concierge above: this raises and the publish
+    # aborts rather than deploying an unbadged free site. See ``_stamp_free_badge``.
+    await _stamp_free_badge(
+        workspace_id=workspace_id,
+        site_id=site_id,
+        project_dir=build.project_dir,
+        engine=engine,
+    )
+
     # DS-2: a DYNAMIC site (pattern == "dynamic", or a spec carrying live
     # bindings) is backed by a per-tenant Cloudflare D1, so its deployed Worker
     # needs a D1 binding to reach that DB. Resolve the site's D1 id BEFORE deploy:
@@ -2682,6 +2696,60 @@ async def _embed_concierge_bar(
             site_id,
             exc_info=True,
         )
+
+
+async def _stamp_free_badge(
+    *,
+    workspace_id: str,
+    site_id: str,
+    project_dir: str,
+    engine: str,
+) -> None:
+    """Stamp the attribution badge onto the built pages, before they deploy.
+
+    The sibling of ``_embed_concierge_bar`` — same seam (between build and deploy,
+    so the artifact that lands is already right), same output-root resolution —
+    with the OPPOSITE failure posture, which is the entire point.
+
+    ``_embed_concierge_bar`` swallows everything because a site going live matters
+    more than its bar. This one swallows NOTHING. The badge is what the paid
+    per-site tier sells the removal of, so a badge that fails open is not an
+    enforcement mechanism: the exploit is to make injection fail and keep the free
+    unbadged site. ``BadgeInjectionError`` therefore propagates and the publish
+    aborts before deploy — a site that cannot be badged does not ship.
+
+    The tier is read off the site's EXISTING doc, defaulting to the base (badged)
+    tier when there is none. A FIRST publish reaches here BEFORE the Site doc is
+    inserted, exactly as the concierge embed above documents, so "no doc" must
+    mean "free" rather than "skip" — the opposite default would ship every
+    brand-new site unbadged, which is the bug this whole module exists to prevent.
+    """
+    from pocketpaw_ee.cloud.billing import site_plans as site_plan_catalog
+    from pocketpaw_ee.sites import badge
+    from pocketpaw_ee.sites.engines import resolve_static_output_rel
+
+    doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+    tier_key = getattr(doc, "plan_tier", None) if doc is not None else None
+    tier = site_plan_catalog.get_site_plan(tier_key)
+    # ``get_site_plan`` returns None for an unknown/missing key and deliberately
+    # does NOT substitute a floor, so the fail-closed default lands here.
+    badge_removal = bool(tier.badge_removal) if tier is not None else False
+
+    if not badge.badge_required(badge_removal=badge_removal):
+        logger.info(
+            "sites: site %s is on tier %s — badge not required",
+            site_id,
+            tier_key,
+        )
+        return
+
+    root = Path(project_dir, resolve_static_output_rel(project_dir, engine))
+    changed = badge.inject_into_tree(root)
+    logger.info(
+        "sites: stamped the attribution badge onto %d page(s) of site %s",
+        len(changed),
+        site_id,
+    )
 
 
 def _with_deployed_host(allowed_origins: list[str], url: str) -> list[str]:
