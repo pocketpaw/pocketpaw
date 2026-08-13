@@ -246,8 +246,14 @@ def _site_doc_returning(monkeypatch, doc):
 
 
 class _Doc:
-    def __init__(self, plan_tier):
+    """A Site row's billing fields. ``subscription_status`` is required here on
+    purpose: a fixture carrying only ``plan_tier`` models a site that never paid,
+    and pretending that is a paid site is how the cancelled-site hole hides."""
+
+    def __init__(self, plan_tier, subscription_status="active", concierge_enabled=True):
         self.plan_tier = plan_tier
+        self.subscription_status = subscription_status
+        self.concierge_enabled = concierge_enabled
 
 
 @pytest.mark.asyncio
@@ -285,8 +291,8 @@ async def test_a_basic_tier_site_is_badged(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_paid_site_ships_clean(tmp_path, monkeypatch):
-    """What the customer actually bought."""
-    _site_doc_returning(monkeypatch, _Doc("pro"))
+    """What the customer actually bought — a paid tier WITH a paying subscription."""
+    _site_doc_returning(monkeypatch, _Doc("pro", subscription_status="active"))
     (tmp_path / "index.html").write_text("<body>home</body>", encoding="utf-8")
 
     await sites_service._stamp_free_badge(
@@ -297,6 +303,27 @@ async def test_a_paid_site_ships_clean(tmp_path, monkeypatch):
     )
 
     assert badge.BADGE_MARKER not in (tmp_path / "index.html").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["cancelled", "none", "pending"])
+async def test_a_paid_tier_that_stopped_paying_gets_its_badge_back(tmp_path, monkeypatch, status):
+    """Cancellation sets subscription_status and LEAVES plan_tier on "pro" —
+    nothing resets it — so gating the stamp on the tier alone meant a cancelled
+    site never saw a badge again. "none" is the same hole and is the LIVE state
+    today, because no Dodo product is configured and a paid publish records its
+    tier without taking money."""
+    _site_doc_returning(monkeypatch, _Doc("pro", subscription_status=status))
+    (tmp_path / "index.html").write_text("<body>home</body>", encoding="utf-8")
+
+    await sites_service._stamp_free_badge(
+        workspace_id="w1",
+        site_id="6512c1f0e4b0a1b2c3d4e5f6",
+        project_dir=str(tmp_path),
+        engine="html",
+    )
+
+    assert badge.BADGE_MARKER in (tmp_path / "index.html").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

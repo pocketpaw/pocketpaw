@@ -2718,28 +2718,40 @@ async def _stamp_free_badge(
     unbadged site. ``BadgeInjectionError`` therefore propagates and the publish
     aborts before deploy — a site that cannot be badged does not ship.
 
-    The tier is read off the site's EXISTING doc, defaulting to the base (badged)
-    tier when there is none. A FIRST publish reaches here BEFORE the Site doc is
-    inserted, exactly as the concierge embed above documents, so "no doc" must
-    mean "free" rather than "skip" — the opposite default would ship every
-    brand-new site unbadged, which is the bug this whole module exists to prevent.
+    The site's billing fields are read off its EXISTING doc and resolved by
+    ``entitlements.resolve_site_entitlements``, which is where the "may this site
+    drop its badge" rule lives — NOT here, and not off ``plan_tier`` alone. A paid
+    tier whose subscription is cancelled, pending, or was never charged at all
+    keeps its ``plan_tier``, so reading the tier by itself hands those sites a
+    free badge removal.
+
+    A FIRST publish reaches here BEFORE the Site doc is inserted, exactly as the
+    concierge embed above documents, so "no doc" must mean "free" rather than
+    "skip" — the opposite default would ship every brand-new site unbadged, which
+    is the bug this whole module exists to prevent.
     """
-    from pocketpaw_ee.cloud.billing import site_plans as site_plan_catalog
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
     from pocketpaw_ee.sites import badge
     from pocketpaw_ee.sites.engines import resolve_static_output_rel
 
     doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
-    tier_key = getattr(doc, "plan_tier", None) if doc is not None else None
-    tier = site_plan_catalog.get_site_plan(tier_key)
-    # ``get_site_plan`` returns None for an unknown/missing key and deliberately
-    # does NOT substitute a floor, so the fail-closed default lands here.
-    badge_removal = bool(tier.badge_removal) if tier is not None else False
+    # ``getattr`` carries the no-doc case on its own: a first publish has no Site
+    # row yet, and ``getattr(None, "plan_tier", None)`` is already the fail-closed
+    # answer. The defaults here ARE the first-publish contract — an absent tier and
+    # an absent subscription resolve to free-and-badged.
+    ent = entitlements_service.resolve_site_entitlements(
+        site_id=site_id,
+        workspace_id=workspace_id,
+        plan_tier=getattr(doc, "plan_tier", None),
+        subscription_status=getattr(doc, "subscription_status", None),
+        concierge_enabled=bool(getattr(doc, "concierge_enabled", True)),
+    )
 
-    if not badge.badge_required(badge_removal=badge_removal):
+    if not ent.badge_required:
         logger.info(
-            "sites: site %s is on tier %s — badge not required",
+            "sites: site %s is on paid tier %s with an active subscription — badge not required",
             site_id,
-            tier_key,
+            ent.plan_tier,
         )
         return
 

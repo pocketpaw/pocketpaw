@@ -40,10 +40,21 @@
     ]
   },
   {
-    "label": "a first publish (no Site doc yet) defaults to UNbadged",
+    "label": "the resolver's fail-closed default flips to UNbadged",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    badge_removal = False",
+    "replace": "    badge_removal = True",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_a_first_publish_badges_before_it_deploys",
+      "tests/cloud/entitlements/test_site_entitlements.py::test_the_base_tier_is_badged_even_when_active",
+      "tests/cloud/entitlements/test_site_entitlements.py::test_an_unknown_or_absent_tier_falls_to_the_base"
+    ]
+  },
+  {
+    "label": "a first publish (no Site row yet) is read as a paid ACTIVE site",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    badge_removal = bool(tier.badge_removal) if tier is not None else False",
-    "replace": "    badge_removal = bool(tier.badge_removal) if tier is not None else True",
+    "find": "        plan_tier=getattr(doc, \"plan_tier\", None),\n        subscription_status=getattr(doc, \"subscription_status\", None),",
+    "replace": "        plan_tier=getattr(doc, \"plan_tier\", \"pro\"),\n        subscription_status=getattr(doc, \"subscription_status\", \"active\"),",
     "tests": [
       "tests/ee/sites/test_free_badge.py::test_a_first_publish_badges_before_it_deploys"
     ]
@@ -64,6 +75,27 @@
     "replace": "    \"display:flex;\"",
     "tests": [
       "tests/ee/sites/test_free_badge.py::test_every_hiding_vector_is_locked_important"
+    ]
+  },
+  {
+    "label": "a cancelled subscription counts as paying",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "_ACTIVE_SITE_SUBSCRIPTION_STATUSES = frozenset({\"active\"})",
+    "replace": "_ACTIVE_SITE_SUBSCRIPTION_STATUSES = frozenset({\"active\", \"cancelled\", \"none\"})",
+    "tests": [
+      "tests/cloud/entitlements/test_site_entitlements.py::test_a_paid_tier_without_an_active_subscription_is_badged",
+      "tests/cloud/entitlements/test_site_entitlements.py::test_a_tier_recorded_but_never_charged_is_badged",
+      "tests/ee/sites/test_free_badge.py::test_a_paid_tier_that_stopped_paying_gets_its_badge_back"
+    ]
+  },
+  {
+    "label": "paid capability stops requiring a paying subscription (the tier alone wins)",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    if tier is not None and subscription_active:",
+    "replace": "    if tier is not None:",
+    "tests": [
+      "tests/cloud/entitlements/test_site_entitlements.py::test_a_paid_tier_without_an_active_subscription_is_badged",
+      "tests/ee/sites/test_free_badge.py::test_a_paid_tier_that_stopped_paying_gets_its_badge_back"
     ]
   },
   {

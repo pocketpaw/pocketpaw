@@ -45,7 +45,8 @@ from __future__ import annotations
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.billing import plans as plan_catalog
-from pocketpaw_ee.cloud.entitlements.domain import Entitlements
+from pocketpaw_ee.cloud.billing import site_plans as site_plan_catalog
+from pocketpaw_ee.cloud.entitlements.domain import Entitlements, SiteEntitlements
 
 
 async def resolve_entitlements(workspace_id: str) -> Entitlements:
@@ -105,4 +106,64 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
         max_call_seconds_per_day=tier.max_call_seconds_per_day,
         max_storage_bytes=tier.max_storage_bytes,
         features=tier.features,
+    )
+
+
+# The per-site subscription states that count as PAYING. Everything else —
+# ``none`` (no subscription, including the paid-tier-recorded-but-never-charged
+# case a missing Dodo product produces), ``pending`` (created, not yet confirmed;
+# such a site is not deployed yet) and ``cancelled`` (which LEAVES ``plan_tier``
+# on the paid key) — resolves to no paid capability.
+_ACTIVE_SITE_SUBSCRIPTION_STATUSES = frozenset({"active"})
+
+
+def resolve_site_entitlements(
+    *,
+    site_id: str,
+    workspace_id: str,
+    plan_tier: str | None,
+    subscription_status: str | None,
+    concierge_enabled: bool,
+) -> SiteEntitlements:
+    """Resolve ONE site to what it may do, from its own per-site plan.
+
+    PURE and synchronous, taking the site's billing fields rather than reading
+    them: ``entitlements`` may not import ``models.site`` (EE cloud rule 2 — only
+    ``sites/service.py`` owns that document), so the caller that owns the doc
+    passes what it owns. That also makes every branch here testable without a
+    database.
+
+    Every paid capability is gated on the tier granting it AND the subscription
+    being active. Reading the tier alone is the bug this function exists to
+    prevent: cancellation never resets ``plan_tier``, and an unconfigured Dodo
+    product records a paid tier with no charge at all.
+
+    Fails closed on every unknown: an absent/unknown tier resolves to the base
+    (badged, no custom domain) rather than raising or substituting a paid tier.
+    """
+    tier = site_plan_catalog.get_site_plan(plan_tier)
+    # ``get_site_plan`` deliberately does not substitute a floor, so an unknown or
+    # missing key lands here as None — the fail-closed default.
+    resolved_key = tier.key if tier is not None else site_plan_catalog.BASE_SITE_PLAN_KEY
+
+    subscription_active = (subscription_status or "none") in _ACTIVE_SITE_SUBSCRIPTION_STATUSES
+
+    # Both paid capabilities collapse to False unless the tier grants them AND the
+    # subscription is paying. Written as an explicit branch rather than
+    # ``paid and tier.x`` so the None-narrowing is visible to the type checker
+    # instead of resting on short-circuit evaluation.
+    badge_removal = False
+    custom_domain = False
+    if tier is not None and subscription_active:
+        badge_removal = tier.badge_removal
+        custom_domain = "custom_domain" in tier.cloudflare_features
+
+    return SiteEntitlements(
+        site_id=site_id,
+        workspace_id=workspace_id,
+        plan_tier=resolved_key,
+        subscription_active=subscription_active,
+        badge_required=not badge_removal,
+        custom_domain=custom_domain,
+        concierge_enabled=bool(concierge_enabled),
     )
