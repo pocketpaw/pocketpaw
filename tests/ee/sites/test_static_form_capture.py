@@ -191,3 +191,84 @@ def test_the_prompt_names_the_canonical_field_names_rather_than_its_own():
     block = native_form_contract()
     for field in contact_form.CONTACT_FIELD_NAMES:
         assert field in block, f"the prompt never tells the agent to emit {field!r}"
+
+
+# --------------------------------------------------------------------------- #
+# The svelte track — and the /api/submit route it used to depend on
+# --------------------------------------------------------------------------- #
+#
+# The skill taught `<form method="POST" action="/api/submit">` for as long as that
+# route existed, so it is in the stored source of every svelte pocket authored
+# before this change. On a STATIC svelte site the route was never actually served:
+# svelte-scaffold.ts deletes src/routes/api because adapter-static cannot prerender
+# a POST handler, so those forms have been 404ing and losing every lead. Removing
+# the route for the dynamic sites too is what leaves ONE capture path across all
+# four engines — but it can only be removed if the already-published fleet is
+# carried across, which is what the rewrite below does.
+
+LEGACY_FORM = (
+    '<form method="POST" action="/api/submit">'
+    '<input name="full_name" required><button type="submit">Send</button></form>'
+)
+
+
+def test_a_form_still_aimed_at_the_removed_route_is_repointed():
+    """The fleet does not republish itself and nobody edits a site that looks fine,
+    so deleting the route without this would turn every existing svelte site's form
+    into a 404 the owner reads as "nobody is filling it in"."""
+    emitted = _input("svelte", {"src/routes/+page.svelte": LEGACY_FORM})["source"][
+        "src/routes/+page.svelte"
+    ]
+
+    assert f'action="{CAPTURE_BASE}/capture/form"' in emitted
+    assert "/api/submit" not in emitted
+
+
+def test_the_repointed_form_gains_the_credentials_the_endpoint_requires():
+    """Repointing the action alone would 401 — /capture/form gates on the per-site
+    signed key and needs the site id to resolve the tenant. The rewrite injects both
+    (plus the redirect) as hidden inputs inside the form it just repointed."""
+    emitted = _input("svelte", {"src/routes/+page.svelte": LEGACY_FORM})["source"][
+        "src/routes/+page.svelte"
+    ]
+
+    assert f'name="paw_site_id" value="{SITE_ID}"' in emitted
+    assert f'name="paw_key" value="{SIGNED_KEY}"' in emitted
+    assert 'name="paw_redirect"' in emitted
+    # Inside the form, not after it — a hidden input outside the form is not sent.
+    assert emitted.index("paw_site_id") < emitted.index("</form>")
+
+
+def test_the_rewrite_is_idempotent():
+    """A republish runs this again over source that was already rewritten in a
+    previous publish's payload (and over freshly authored source, which already
+    carries the new contract). Neither may accumulate a second set of hidden
+    inputs."""
+    once = _input("svelte", {"p.svelte": LEGACY_FORM})["source"]["p.svelte"]
+    twice = _input("svelte", {"p.svelte": once})["source"]["p.svelte"]
+    assert once == twice
+    assert once.count("paw_site_id") == 1
+
+
+def test_a_form_authored_against_the_new_contract_is_left_alone():
+    """Source written to the CURRENT skill has no legacy action, so the rewrite must
+    not touch it — it only resolves the tokens."""
+    emitted = _input("svelte", {"p.svelte": AUTHORED_FORM})["source"]["p.svelte"]
+    assert emitted.count("paw_site_id") == 1
+    assert emitted.count("<form") == 1
+
+
+def test_an_unrelated_form_is_not_hijacked():
+    """A search box or a newsletter form on the same page posts somewhere else, and
+    rewriting it would both break it and start minting leads from it."""
+    other = '<form method="GET" action="/search"><input name="q"></form>'
+    assert _input("svelte", {"p.svelte": other})["source"]["p.svelte"] == other
+
+
+def test_the_svelte_prompt_carries_the_capture_contract():
+    """The svelte create branch had no form guidance at all — the skill owned it, and
+    the skill was pointing at the route that no longer exists."""
+    from pocketpaw_ee.cloud.surface.handlers.sites import native_form_contract
+
+    block = native_form_contract()
+    assert "__CAPTURE_API_BASE__/capture/form" in block

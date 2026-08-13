@@ -244,9 +244,14 @@ async def test_the_tracks_that_author_their_own_form_are_told_where_it_posts() -
     to be missing entirely — the prompt said "a native `<form>` with flat named
     fields" and never said where it posts.
 
+    svelte is in this list too, and it is the one that was quietly worst: the skill
+    taught `action="/api/submit"` while `svelte-scaffold.ts` DELETES `src/routes/api`
+    for a static site (adapter-static cannot prerender a POST handler), so those
+    forms 404'd and the owner read it as nobody filling the form in.
+
     Asserted per-track rather than over a merged blob: a rule that reaches only one
-    of the two authoring tracks is the same silent loss on the other."""
-    for engine in (None, "react"):  # None == the html default
+    of the three authoring tracks is the same silent loss on the others."""
+    for engine in (None, "react", "svelte"):  # None == the html default
         preamble = await _preamble_for(engine)
         assert "__CAPTURE_API_BASE__/capture/form" in preamble, f"{engine}: no capture action"
         assert "__CAPTURE_SIGNED_KEY__" in preamble, f"{engine}: no signed key field"

@@ -90,5 +90,41 @@
     "tests": [
       "tests/cloud/surface/test_sites_handler.py"
     ]
+  },
+  {
+    "label": "static capture: a form still aimed at the removed /api/submit route is left to 404",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "        contents = _rewire_legacy_submit_forms(contents)",
+    "replace": "        contents = contents",
+    "tests": [
+      "tests/ee/sites/test_static_form_capture.py"
+    ]
+  },
+  {
+    "label": "static capture: the repointed form loses the credentials the endpoint gates on",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "        + _CAPTURE_HIDDEN_FIELDS,",
+    "replace": "        ,",
+    "tests": [
+      "tests/ee/sites/test_static_form_capture.py"
+    ]
+  },
+  {
+    "label": "static capture: the rewrite hijacks every form, not just the legacy capture one",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "/api/submit\\2([^>]*>)\"",
+    "replace": "[^\"']*\\2([^>]*>)\"",
+    "tests": [
+      "tests/ee/sites/test_static_form_capture.py"
+    ]
+  },
+  {
+    "label": "static capture: the svelte track loses the contract",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            + native_form_contract()\r\n        )",
+    "replace": "        )",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py"
+    ]
   }
 ]
