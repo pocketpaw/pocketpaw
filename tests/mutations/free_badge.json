@@ -71,8 +71,8 @@
   {
     "label": "the display lock loses its !important, so author CSS can hide the badge",
     "file": "ee/pocketpaw_ee/sites/badge.py",
-    "find": "    \"display:flex!important;\"",
-    "replace": "    \"display:flex;\"",
+    "find": "    \"display:inline-flex!important;\"",
+    "replace": "    \"display:inline-flex;\"",
     "tests": [
       "tests/ee/sites/test_free_badge.py::test_every_hiding_vector_is_locked_important"
     ]
@@ -96,6 +96,24 @@
     "tests": [
       "tests/cloud/entitlements/test_site_entitlements.py::test_a_paid_tier_without_an_active_subscription_is_badged",
       "tests/ee/sites/test_free_badge.py::test_a_paid_tier_that_stopped_paying_gets_its_badge_back"
+    ]
+  },
+  {
+    "label": "the brand mark becomes a fetched asset a CSP can block",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "    '<svg width=\"17\" height=\"17\" viewBox=\"0 0 32 32\" aria-hidden=\"true\" focusable=\"false\">'",
+    "replace": "    '<img src=\"https://pocketpaw.dev/favicon.svg\" width=\"17\" height=\"17\" alt=\"\"><svg viewBox=\"0 0 32 32\" aria-hidden=\"true\">'",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_nothing_in_the_badge_is_fetched"
+    ]
+  },
+  {
+    "label": "a lock-strength declaration migrates into the beatable stylesheet",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "    \"background:rgba(15,17,21,.78);\"",
+    "replace": "    \"background:rgba(15,17,21,.78)!important;\"",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_the_lock_lives_on_the_element_not_the_stylesheet"
     ]
   },
   {

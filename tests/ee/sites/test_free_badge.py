@@ -58,8 +58,10 @@ def test_the_last_closing_body_wins():
     out = badge.inject_into_html(page, badge.build_badge_html())
 
     assert out is not None
-    assert out.count(badge.BADGE_MARKER) == 1
-    assert out.index(badge.BADGE_MARKER) > out.lower().index("</body>")
+    # Count ANCHORS, not markers — the marker is also the look block's selector,
+    # so it legitimately appears several times in one injection.
+    assert out.count(f"<a {badge.BADGE_MARKER}") == 1
+    assert out.index(f"<a {badge.BADGE_MARKER}") > out.lower().index("</body>")
 
 
 def test_a_page_without_a_body_tag_still_gets_a_badge():
@@ -113,23 +115,77 @@ def test_the_badge_is_markup_not_a_script():
     there is no loader that can 404 the enforcement away."""
     out = badge.build_badge_html()
 
-    assert out.lstrip().startswith("<a ")
     assert "<script" not in out.lower()
+    assert "<a " in out
+
+
+def test_nothing_in_the_badge_is_fetched():
+    """A strict CSP or a blocked host must not leave a hole where the brand goes,
+    so the mark is an inline SVG and there is no src/href to an asset."""
+    out = badge.build_badge_html()
+
+    assert "<svg" in out
+    assert "<img" not in out.lower()
+    assert 'src="' not in out
+    assert "@import" not in out
+    # The only URL in the snippet is the badge's own link target.
+    assert out.count("http") == 1
 
 
 @pytest.mark.parametrize(
     "prop",
-    ["display", "visibility", "opacity", "position", "z-index", "width", "height"],
+    [
+        "display",
+        "visibility",
+        "opacity",
+        "position",
+        "z-index",
+        "width",
+        "height",
+        "transform",
+        "filter",
+        "clip-path",
+        "pointer-events",
+    ],
 )
 def test_every_hiding_vector_is_locked_important(prop):
     """The realistic attack is not editing our artifact — customers never touch it.
-    It is a rule in the customer's OWN stylesheet, which we build from. Inline
-    !important outranks any author rule, including #id .class {display:none}."""
-    out = badge.build_badge_html()
+    It is a rule in the customer's OWN stylesheet, which we build from. A
+    style-attribute !important is the strongest author-origin declaration, so it
+    outranks even #id .class {display:none !important}.
 
-    assert f"{prop}:" in out
-    start = out.index(f"{prop}:")
-    assert "!important" in out[start : start + 40]
+    Asserted against the ANCHOR, not the whole snippet: the look block carries
+    unlocked declarations by design, and scanning the snippet finds whichever copy
+    comes first — which passes while the lock is gone."""
+    anchor = badge.build_badge_anchor()
+
+    assert f"{prop}:" in anchor
+    start = anchor.index(f"{prop}:")
+    assert "!important" in anchor[start : start + 40]
+
+
+def test_the_lock_lives_on_the_element_not_the_stylesheet():
+    """The <style> block is beatable by a later author rule; the style attribute is
+    not. If a locked property ever migrates into the block, enforcement silently
+    becomes a suggestion."""
+    style_block = badge.build_badge_html().split("</style>")[0]
+
+    assert "!important" not in style_block
+
+
+def test_the_hover_moves_colour_not_position():
+    """``transform`` is locked, so a hover LIFT cannot work — a locked transform
+    can't be re-enabled for one state. The lock is worth more than the animation;
+    this pins the trade rather than leaving a dead rule that looks like a bug."""
+    out = badge.build_badge_html()
+    hover = out.split(":hover{")[1].split("}")[0]
+
+    assert "transform" not in hover
+    assert "background" in hover
+
+
+def test_motion_is_optional():
+    assert "prefers-reduced-motion" in badge.build_badge_html()
 
 
 def test_the_badge_links_out_and_names_itself():
@@ -139,6 +195,9 @@ def test_the_badge_links_out_and_names_itself():
     assert badge.BADGE_TEXT in out
     assert 'rel="noopener noreferrer nofollow"' in out
     assert "aria-label=" in out
+    # The mark is decorative — the accessible name comes from the label + text,
+    # so a screen reader announces the badge once, not once per shape in the paw.
+    assert 'aria-hidden="true"' in out
 
 
 # --------------------------------------------------------------------------- #
