@@ -118,6 +118,8 @@ from pocketpaw_ee.sites_crew.models import (
     Section,
 )
 
+from pocketpaw.sites_capture import contact_form
+
 pytestmark = pytest.mark.asyncio
 
 WORKSPACE = "ws-surface-sites"
@@ -219,23 +221,50 @@ async def test_create_ripple_engine_uses_pocket_specialist_fallback() -> None:
     assert "fall back" in preamble.lower() or "fallback" in preamble.lower()
 
 
+async def _preamble_for(engine: str | None) -> str:
+    return (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
+        )
+    ).text
+
+
 async def test_sites_handler_specifies_flat_lead_capture_form() -> None:
-    """Every create carries the flat-native lead-form rule so the published
-    static site captures leads: named fields (email) built FLAT, never a nested
-    form widget. Checked on both the html default and the ripple track."""
-    for engine in (None, "ripple"):
-        preamble = (
-            await sites_handler.build_preamble(
-                WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
-            )
-        ).text
-        lower = preamble.lower()
-        # A lead-capture form is part of the marketing/landing build.
+    """Every create carries the flat-native lead-form rule so the published static
+    site captures leads: fields built FLAT, never a nested form widget."""
+    for engine in (None, "ripple", "react"):
+        lower = (await _preamble_for(engine)).lower()
         assert "form" in lower
-        # At least one concrete, named field so leads are actually captured.
-        assert "email" in lower
-        # The flat-native rule.
         assert "flat" in lower
+
+
+async def test_the_tracks_that_author_their_own_form_are_told_where_it_posts() -> None:
+    """html and react have no server route, so the form's ACTION is the whole
+    difference between a captured lead and a page reload that loses it. This used
+    to be missing entirely — the prompt said "a native `<form>` with flat named
+    fields" and never said where it posts.
+
+    Asserted per-track rather than over a merged blob: a rule that reaches only one
+    of the two authoring tracks is the same silent loss on the other."""
+    for engine in (None, "react"):  # None == the html default
+        preamble = await _preamble_for(engine)
+        assert "__CAPTURE_API_BASE__/capture/form" in preamble, f"{engine}: no capture action"
+        assert "__CAPTURE_SIGNED_KEY__" in preamble, f"{engine}: no signed key field"
+        for field in contact_form.CONTACT_FIELD_NAMES:
+            assert field in preamble, f"{engine}: never told to emit {field!r}"
+
+
+async def test_the_ripple_track_is_not_told_to_author_a_form() -> None:
+    """On ripple the form is COMPOSED BY CODE — ``assemble_landing_spec`` builds it
+    from ``contact_form.CONTACT_FIELDS`` and the skill supplies copy only. Handing
+    that track the native-form contract would tell the agent to write markup it has
+    no way to write, and naming the fields would imply it chooses them.
+
+    This is the "the prompt may not command something the agent cannot do" rule
+    applied to markup rather than to a tool."""
+    preamble = await _preamble_for("ripple")
+    assert "__CAPTURE_API_BASE__" not in preamble
+    assert "paw_site_id" not in preamble
 
 
 # --- Refine mode (meta carries a pocket_id — the per-site /sites/[siteId] chat) ---

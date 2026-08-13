@@ -209,12 +209,38 @@ The React track deploys as a **purely static asset tree** — there is no server
 route, so the SvelteKit skeleton's `/api/submit` endpoint does not exist here.
 This matches the html track.
 
-Author the form as a real `<form>` with FLAT named fields
-(`name`, `email`, `phone`, `message`) and a `<button type="submit">`, and post
-it natively. Do **not** wire an `onSubmit` handler that fetches — a static page
-should capture the lead whether or not JavaScript ran. If you have no capture
-endpoint to target, prefer a `mailto:` form action or a plain `tel:` / `mailto:`
-CTA over a form that silently drops submissions, and say so in your summary.
+There **is** a capture endpoint, and it is the shared one. Post to it natively:
+
+```jsx
+<form method="POST" action="__CAPTURE_API_BASE__/capture/form">
+  <input type="hidden" name="paw_site_id" value="__SITE_ID__" />
+  <input type="hidden" name="paw_key" value="__CAPTURE_SIGNED_KEY__" />
+  <input type="hidden" name="paw_redirect" value="/thank-you" />
+
+  <label>Your name<input name="full_name" required /></label>
+  <label>Email<input type="email" name="email" required /></label>
+  <label>Phone<input type="tel" name="phone" /></label>
+  <label>How can we help?<textarea name="message" /></label>
+
+  <button type="submit">Send</button>
+</form>
+```
+
+**Write the three `__TOKENS__` exactly as shown.** They are placeholders —
+publish substitutes the real capture URL, site id and signed key. You do not
+have those values while authoring (on a create the site does not exist yet, and
+the key is minted at publish), so never invent one or leave the action empty.
+
+**The visible field names are fixed**: `full_name`, `email`, `phone`, `message`.
+They are the names the lead pipeline maps; a field named anything else is stored
+empty and the business never sees what the visitor typed.
+
+**`paw_redirect` must be a relative path on this site** — an absolute URL is
+rejected with a 400 — so author the page it points at (a small `thank-you`
+route or `thank-you.html` confirming the message was sent).
+
+Do **not** wire an `onSubmit` handler that fetches. A static page should capture
+the lead whether or not JavaScript ran, and this is a plain native browser POST.
 
 ### What the project has (and what it does not)
 

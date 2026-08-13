@@ -899,6 +899,41 @@ def _rewrite_ripple_dep(project_dir: str, source: str) -> None:
         pkg_path.write_text(json.dumps(pkg, indent=2))
 
 
+def _resolve_capture_tokens(
+    source: dict[str, Any],
+    *,
+    site_id: str,
+    capture_api_base: str,
+    capture_signed_key: str,
+) -> dict[str, Any]:
+    """Replace the capture placeholders in every text entry of a source map.
+
+    The same three tokens ``scaffoldProject`` substitutes into the svelte templates,
+    so a site author (human or agent) writes one convention on every engine. Returns
+    a NEW map — the caller's dict is the stored pocket source and must not be mutated.
+
+    Only ``str`` values are touched. A svelte source envelope carries live-data
+    binding keys alongside its files (see ``_split_svelte_source``), and those are
+    dicts/lists that must ride through untouched.
+
+    Idempotent, and a no-op on source with no tokens — which is every ripple and
+    almost every svelte site, so this cannot change their emitted bytes."""
+    resolved = {
+        "__CAPTURE_API_BASE__": capture_api_base,
+        "__SITE_ID__": site_id,
+        "__CAPTURE_SIGNED_KEY__": capture_signed_key,
+    }
+    out: dict[str, Any] = {}
+    for path, contents in source.items():
+        if not isinstance(contents, str):
+            out[path] = contents
+            continue
+        for token, value in resolved.items():
+            contents = contents.replace(token, value)
+        out[path] = contents
+    return out
+
+
 def build_generator_input(
     *,
     engine: str,
@@ -951,6 +986,45 @@ def build_generator_input(
     # False so a plain static site's payload is byte-identical to before.
     if keeps_client_bundle:
         site_config["keepsClientBundle"] = True
+    # 2026-08-13 — resolve the capture tokens in AUTHORED source, public deploys only.
+    #
+    # The react and html tracks have no server route: there is no ``/api/submit`` to
+    # forward a lead, and ``rewireForms`` runs only on the IMPORT path. So a
+    # hand-authored ``<form>`` on those tracks posted to nothing and every submission
+    # was lost on page reload. The authoring prompt now tells the agent to write the
+    # native-form contract with ``__CAPTURE_API_BASE__`` / ``__SITE_ID__`` /
+    # ``__CAPTURE_SIGNED_KEY__`` placeholders — the same token convention
+    # ``scaffoldProject`` already substitutes into the svelte templates — and this is
+    # where they become real values.
+    #
+    # It happens HERE, not in the generator, for one reason: the prompt that emits the
+    # tokens and the code that resolves them then ship in the same commit. Split across
+    # repos, a prompt live before its substitution puts a literal
+    # ``__CAPTURE_API_BASE__`` in the action of every react/html site published in
+    # between.
+    #
+    # GATED ON A PUBLIC DEPLOY (``not builder_origin``), and that gate is load-bearing
+    # rather than tidiness: the html edit lane records ``byteSpan`` offsets in its edit
+    # manifest, computed over the bytes the generator was handed. Substitution changes
+    # lengths (a real signed key is roughly twice its placeholder), so arming a build
+    # with substituted source and later splicing edits into the STORED placeholder
+    # source would land every edit after the form at the wrong offset and quietly
+    # corrupt the page. Armed builds therefore keep the placeholders — the form does
+    # not submit inside the builder preview, which is also the better behaviour (an
+    # edit session cannot mint live leads).
+    #
+    # The pocket keeps the placeholders either way: ``apply_leaf_edits`` has its own
+    # subprocess path and never sees a substituted map, so stored source is never
+    # rewritten with a real key. That is what keeps ``rotate_signed_key`` meaningful —
+    # the next publish substitutes the new key with nothing to migrate.
+    if source and not builder_origin:
+        source = _resolve_capture_tokens(
+            source,
+            site_id=site_id,
+            capture_api_base=capture_api_base,
+            capture_signed_key=capture_signed_key,
+        )
+
     input_json: dict[str, Any] = {
         "engine": engine,
         "theme": theme,
