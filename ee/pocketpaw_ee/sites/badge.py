@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,23 @@ logger = logging.getLogger(__name__)
 # contract as ``paw_bar.embed.EMBED_MARKER``, deliberately a different string so
 # the two features can never satisfy each other's check.
 BADGE_MARKER = "data-paw-badge"
+
+# The sentinels wrapping every injected badge. They exist so a LATER version can
+# remove an EARLIER one without knowing anything about the markup between them:
+# the badge is a thing we restyle, and the first version had no way to be
+# replaced, so a republished site kept whatever badge it was first given.
+BADGE_OPEN = "<!--paw-badge-->"
+BADGE_CLOSE = "<!--/paw-badge-->"
+
+# Removal patterns. The sentinelled one covers this version onward; the two
+# legacy ones cover the un-sentinelled badge already deployed to live sites.
+# All three match only markup THIS module wrote — a customer's own ``<style>`` or
+# ``<a>`` cannot satisfy them, because each is anchored on our marker.
+_SENTINELLED_RE = re.compile(re.escape(BADGE_OPEN) + ".*?" + re.escape(BADGE_CLOSE), re.DOTALL)
+_LEGACY_STYLE_RE = re.compile(
+    r"<style>(?=[^<]*a\[" + re.escape(BADGE_MARKER) + r"\]).*?</style>", re.DOTALL
+)
+_LEGACY_ANCHOR_RE = re.compile(r"<a\s+" + re.escape(BADGE_MARKER) + r"=.*?</a>", re.DOTALL)
 
 # Where the badge points. NOTE: this is the PRODUCT domain, which is open
 # decision #7 in the pricing spec (the sites' own hostname is still unsettled —
@@ -224,15 +242,44 @@ def build_badge_html() -> str:
     and a reader with JavaScript off. Those are the same conditions under which a
     script-injected badge quietly disappears, which is why this one is markup.
     """
-    return f"<style>{_LOOK_CSS}</style>{build_badge_anchor()}"
+    return f"{BADGE_OPEN}<style>{_LOOK_CSS}</style>{build_badge_anchor()}{BADGE_CLOSE}"
+
+
+def strip_badge(page: str) -> str:
+    """Remove any badge this module has ever injected, leaving the page otherwise
+    byte-identical.
+
+    Two patterns, because the badge outlived its first markup:
+      * SENTINELLED — everything between the comment markers. Every badge from
+        this version on is wrapped, so removal never has to understand the markup
+        inside and a future restyle costs nothing here.
+      * LEGACY — the un-sentinelled shapes already deployed: the scoped style
+        block and the anchor. Both are matched on our own marker only, so nothing
+        of the customer's can be caught by them.
+
+    Regex over HTML is normally a bad idea; it is bounded here because this only
+    ever matches markup THIS module wrote, whose shape is known exactly.
+    """
+    page = _SENTINELLED_RE.sub("", page)
+    page = _LEGACY_STYLE_RE.sub("", page)
+    page = _LEGACY_ANCHOR_RE.sub("", page)
+    return page
 
 
 def inject_into_html(page: str, badge: str) -> str | None:
-    """Return ``page`` with ``badge`` before the last ``</body>``, or ``None`` if
-    it is already badged.
+    """Return ``page`` carrying the CURRENT badge, or ``None`` if it already does.
 
-    ``None`` (not the unchanged page) so the caller can tell "nothing to do" from
-    "rewritten" and skip the write — the steady state on every re-publish.
+    REPLACES rather than skips. Skip-if-present is what
+    ``paw_bar.embed.inject_into_html`` does, and it is right there — that snippet
+    never changes. The badge is markup we iterate on, and PERF-3 builds into a
+    STABLE per-pocket working dir, so an already-injected page comes back around
+    on the next publish. Skipping it pinned the first badge a site was ever given,
+    permanently, which is exactly how a restyle reached a republished site and
+    changed nothing.
+
+    Still returns ``None`` when the page already carries this exact badge, so the
+    steady-state re-publish writes nothing and the caller's "changed" count stays
+    honest.
 
     The insertion point is the LAST ``</body>``: a page can mention the string in
     an inline script or a code sample, and the real closing tag is the final one.
@@ -240,12 +287,18 @@ def inject_into_html(page: str, badge: str) -> str | None:
     the badge appended rather than skipped — an unbadged page is the one outcome
     this module does not accept.
     """
-    if BADGE_MARKER in page:
-        return None
-    idx = page.lower().rfind("</body>")
+    stripped = strip_badge(page)
+    idx = stripped.lower().rfind("</body>")
     if idx == -1:
-        return f"{page}\n{badge}\n"
-    return f"{page[:idx]}{badge}\n{page[idx:]}"
+        updated = f"{stripped}{badge}"
+    else:
+        updated = f"{stripped[:idx]}{badge}{stripped[idx:]}"
+    # No surrounding whitespace, and that is load-bearing rather than tidy:
+    # ``strip_badge`` removes exactly the sentinelled block, so any newline added
+    # around it would survive the strip and make the round-trip differ from the
+    # original by one character — which reads as "changed" on every single
+    # re-publish and rewrites every page forever.
+    return None if updated == page else updated
 
 
 def inject_into_tree(root: Path) -> list[Path]:

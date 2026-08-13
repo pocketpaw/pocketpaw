@@ -62,8 +62,8 @@
   {
     "label": "the badge lands at the FIRST </body>, so a code sample can swallow it",
     "file": "ee/pocketpaw_ee/sites/badge.py",
-    "find": "    idx = page.lower().rfind(\"</body>\")",
-    "replace": "    idx = page.lower().find(\"</body>\")",
+    "find": "    idx = stripped.lower().rfind(\"</body>\")",
+    "replace": "    idx = stripped.lower().find(\"</body>\")",
     "tests": [
       "tests/ee/sites/test_free_badge.py::test_the_last_closing_body_wins"
     ]
@@ -114,6 +114,26 @@
     "replace": "    \"background:rgba(15,17,21,.78)!important;\"",
     "tests": [
       "tests/ee/sites/test_free_badge.py::test_the_lock_lives_on_the_element_not_the_stylesheet"
+    ]
+  },
+  {
+    "label": "an already-badged page is skipped again, pinning the first badge forever",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "    page = _SENTINELLED_RE.sub(\"\", page)",
+    "replace": "    return page",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_an_OUTDATED_badge_is_replaced_not_kept",
+      "tests/ee/sites/test_free_badge.py::test_a_stale_badge_is_replaced_across_a_whole_tree"
+    ]
+  },
+  {
+    "label": "one stray newline makes every re-publish rewrite every page",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "        updated = f\"{stripped[:idx]}{badge}{stripped[idx:]}\"",
+    "replace": "        updated = f\"{stripped[:idx]}{badge}\\n{stripped[idx:]}\"",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_rebadging_with_the_SAME_badge_is_a_no_op",
+      "tests/ee/sites/test_free_badge.py::test_a_second_publish_rewrites_nothing_but_still_succeeds"
     ]
   },
   {

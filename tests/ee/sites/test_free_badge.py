@@ -73,13 +73,64 @@ def test_a_page_without_a_body_tag_still_gets_a_badge():
     assert badge.BADGE_MARKER in out
 
 
-def test_rebadging_is_a_no_op():
+def test_rebadging_with_the_SAME_badge_is_a_no_op():
     """The steady state on every re-publish. Returning None (not the unchanged
     page) is what lets the caller skip the write."""
     once = badge.inject_into_html("<body>hi</body>", badge.build_badge_html())
     assert once is not None
 
     assert badge.inject_into_html(once, badge.build_badge_html()) is None
+
+
+def test_an_OUTDATED_badge_is_replaced_not_kept():
+    """The stale-badge bug, reported live: a site republished after the badge was
+    restyled kept the badge it was first given.
+
+    Skip-if-present is correct for the concierge bar, whose snippet never
+    changes. The badge is markup we iterate on, and PERF-3 builds into a STABLE
+    per-pocket working dir, so an already-injected page comes back around on the
+    next publish. Skipping it pins the first badge a site ever got, forever."""
+    old = (
+        '<a data-paw-badge="1" href="https://pocketpaw.dev" '
+        'style="background:#111;">Built with PocketPaw</a>'
+    )
+    page = f"<html><body><h1>site</h1>{old}</body></html>"
+
+    out = badge.inject_into_html(page, badge.build_badge_html())
+
+    assert out is not None, "an outdated badge must be replaced, not skipped"
+    assert "background:#111" not in out
+    assert out.count(f"<a {badge.BADGE_MARKER}") == 1
+    assert "backdrop-filter" in out
+
+
+def test_replacing_leaves_the_page_otherwise_intact():
+    page = "<html><body><h1>site</h1><p>copy</p></body></html>"
+    first = badge.inject_into_html(page, badge.build_badge_html())
+    assert first is not None
+
+    # A second pass with a DIFFERENT badge must swap only the badge.
+    swapped = badge.inject_into_html(first, "<a data-paw-badge='1'>v2</a>")
+
+    assert swapped is not None
+    assert "<h1>site</h1><p>copy</p>" in swapped
+    assert swapped.count("<h1>") == 1
+    assert "backdrop-filter" not in swapped
+
+
+def test_a_stale_badge_is_replaced_across_a_whole_tree(tmp_path):
+    """The republish path, not just one page."""
+    old = '<a data-paw-badge="1" style="background:#111;">Built with PocketPaw</a>'
+    for name in ("index.html", "about.html"):
+        (tmp_path / name).write_text(f"<body>x{old}</body>", encoding="utf-8")
+
+    changed = badge.inject_into_tree(tmp_path)
+
+    assert len(changed) == 2
+    for name in ("index.html", "about.html"):
+        page = (tmp_path / name).read_text(encoding="utf-8")
+        assert "background:#111" not in page
+        assert page.count(f"<a {badge.BADGE_MARKER}") == 1
 
 
 def test_every_page_in_the_tree_gets_a_badge(tmp_path):
