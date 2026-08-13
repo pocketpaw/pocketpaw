@@ -88,6 +88,42 @@ def test_list_workspace_articles_unions_scopes(client: TestClient) -> None:
     assert set(body["agent_ids"]) == {"agent-1", "agent-2"}
 
 
+def test_list_workspace_articles_paginated(client: TestClient) -> None:
+    """limit/offset slice the newest-first stream and report has_more.
+
+    Seed order (newest first after the aggregator sort): ws-doc-2
+    (2026-04-19), ws-doc-1 (2026-04-18), a1-doc (2026-04-17), a2-doc
+    (2026-04-16). Page of 2 → first page has_more=True, second page False.
+    """
+    first = client.get("/api/v1/knowledge/articles?limit=2&offset=0")
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert [a["id"] for a in body["articles"]] == ["ws-doc-2", "ws-doc-1"]
+    assert body["total"] == 4
+    assert body["has_more"] is True
+    assert body["offset"] == 0
+    assert body["limit"] == 2
+
+    second = client.get("/api/v1/knowledge/articles?limit=2&offset=2")
+    assert second.status_code == 200, second.text
+    second_body = second.json()
+    assert [a["id"] for a in second_body["articles"]] == ["a1-doc", "a2-doc"]
+    assert second_body["total"] == 4
+    assert second_body["has_more"] is False
+
+
+def test_list_workspace_articles_without_limit_is_unchanged(client: TestClient) -> None:
+    """Omit limit/offset → the legacy one-shot full listing, plus has_more
+    False so the frontend knows there's nothing left to page."""
+    response = client.get("/api/v1/knowledge/articles")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body["articles"]) == 4
+    assert body["has_more"] is False
+    assert body["limit"] is None
+    assert body["offset"] == 0
+
+
 def test_filter_by_workspace_keyword(client: TestClient) -> None:
     response = client.get("/api/v1/knowledge/articles?agent_id=workspace")
     assert response.status_code == 200

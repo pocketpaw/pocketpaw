@@ -13,6 +13,15 @@ optional ``pocket_id``. When set, the chat-uploads slice is filtered to
 that pocket only. When ``None`` (the default), the listing returns
 workspace-only rows — the workspace Files panel never sees pocket files,
 which is the privacy contract for pocket-scoped uploads.
+
+2026-08-13 (Files pagination): ``list_unified`` now returns a
+``UnifiedPage`` (files + warnings + total + has_more) and accepts an
+``offset`` for offset-based paging. ``total`` comes from a cheap count
+query on the dominant chat-uploads source so ``has_more`` is accurate
+even when the fetch is capped at the mongo 500-row limit. Each source is
+fetched with ``offset + limit`` rows so slicing the merged, deduped set
+at ``[offset:offset+limit]`` stays correct within that cap. Callers that
+only need the flat list keep working via ``page.files``.
 """
 
 from __future__ import annotations
@@ -42,6 +51,20 @@ class UnifiedFile:
     url: str | None  # None for local fs (FE uses Tauri for those)
     created: datetime | None
     chat_id: str | None = None
+
+
+@dataclass
+class UnifiedPage:
+    """One page of the unified Files listing plus pagination metadata.
+
+    ``total`` is the number of rows matching the query (independent of the
+    per-source fetch cap), so ``has_more`` stays correct on a full page.
+    """
+
+    files: list[UnifiedFile]
+    warnings: list[str]
+    total: int
+    has_more: bool
 
 
 def _dedupe(files: list[UnifiedFile]) -> list[UnifiedFile]:
@@ -113,18 +136,35 @@ class UnifiedFilesService:
         )
         return []
 
+    async def _count_chat_uploads(self, workspace_id: str, pocket_id: str | None) -> int:
+        """Count live chat uploads under the same scope ``list_chat_uploads``
+        lists. Mirrors its tri-state ``pocket_id`` handling so ``total`` and
+        ``has_more`` describe exactly the rows that can be paged through."""
+        if pocket_id:
+            return await self._uploads.count_by_workspace(workspace_id, pocket_id=pocket_id)
+        return await self._uploads.count_by_workspace(workspace_id, pocket_id=LIST_WORKSPACE_ONLY)
+
     async def list_unified(
         self,
         workspace_id: str,
         *,
         source: FileSource | None,
         limit: int,
+        offset: int = 0,
         pocket_id: str | None = None,
-    ) -> tuple[list[UnifiedFile], list[str]]:
-        """Return (files, warnings).
+    ) -> UnifiedPage:
+        """Return a ``UnifiedPage`` for the given offset/limit window.
 
         ``source`` is optional — omit for "everything we can reach". When
         a specific source is requested, only that source is queried.
+
+        Pagination: each source is fetched with ``offset + limit`` rows
+        (capped at the mongo 500-row fetch limit), then the merged,
+        deduped set is sliced at ``[offset : offset + limit]``. ``total``
+        is the real matching count from a cheap count query so ``has_more``
+        is accurate even when the fetch is capped. Sources that can't be
+        paged (local files enumerated client-side, the stubbed Drive
+        branch) report ``total=0`` / ``has_more=False``.
 
         Stage 3.E: when ``pocket_id`` is set, the chat slice is filtered
         to that pocket. When ``None`` (the default), the chat slice
@@ -132,7 +172,8 @@ class UnifiedFilesService:
         workspace Files panel. The Drive branch is workspace-level for
         now (a Drive-per-pocket connector is Phase 4 territory).
         """
-        per_source = max(1, min(limit, 500))
+        # Fetch enough rows per source to satisfy the requested window.
+        per_source = max(1, min(offset + limit, 500))
         warnings: list[str] = []
         merged: list[UnifiedFile] = []
 
@@ -167,4 +208,11 @@ class UnifiedFilesService:
         merged.sort(key=lambda f: f.created or datetime.min, reverse=True)
         merged = _dedupe(merged)
 
-        return merged[:limit], warnings
+        total = 0
+        if source in (None, "chat"):
+            total = await self._count_chat_uploads(workspace_id, pocket_id)
+
+        page = merged[offset : offset + limit]
+        has_more = offset + len(page) < total
+
+        return UnifiedPage(files=page, warnings=warnings, total=total, has_more=has_more)

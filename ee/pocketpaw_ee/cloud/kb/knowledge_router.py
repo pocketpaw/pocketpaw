@@ -315,6 +315,18 @@ async def list_workspace_articles(
     agent_id: str | None = Query(
         None, description="Filter by agent; 'workspace' for workspace-only"
     ),
+    limit: int | None = Query(
+        None,
+        ge=1,
+        le=500,
+        description="Max rows to return. Omit for the legacy one-shot "
+        "full listing (backward compatible).",
+    ),
+    offset: int = Query(
+        0,
+        ge=0,
+        description="Offset into the newest-first listing (with `limit`).",
+    ),
     active_workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> dict:
@@ -325,6 +337,10 @@ async def list_workspace_articles(
        if set (prevents accidental cross-tenant reads).
     - ``agent_id`` — optional filter. ``"workspace"`` means workspace-only,
       otherwise restricts to one agent's KB.
+    - ``limit`` / ``offset`` — optional offset pagination for the unified
+      Files panel. The merge itself still fans out across every scope; only
+      the response window is sliced. When ``limit`` is omitted the endpoint
+      keeps returning every article (existing consumers unchanged).
     """
     if workspace_id_q is not None and workspace_id_q != active_workspace_id:
         raise Forbidden(
@@ -336,7 +352,14 @@ async def list_workspace_articles(
     if agent_id is not None and agent_id != "workspace" and agent_id not in agent_ids:
         # Unknown agent or an agent outside this workspace — surface as empty
         # rather than leaking existence of agents in other workspaces.
-        return {"articles": [], "total": 0, "agent_ids": agent_ids}
+        return {
+            "articles": [],
+            "total": 0,
+            "has_more": False,
+            "offset": offset,
+            "limit": limit,
+            "agent_ids": agent_ids,
+        }
 
     articles = await aggregate_workspace_articles(
         workspace_id=active_workspace_id,
@@ -347,9 +370,16 @@ async def list_workspace_articles(
         agent_filter=agent_id,
     )
 
+    total = len(articles)
+    page = articles[offset : offset + limit] if limit is not None else articles
+    has_more = offset + len(page) < total
+
     return {
-        "articles": [a.to_dict() for a in articles],
-        "total": len(articles),
+        "articles": [a.to_dict() for a in page],
+        "total": total,
+        "has_more": has_more,
+        "offset": offset,
+        "limit": limit,
         "agent_ids": agent_ids,
     }
 
