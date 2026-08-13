@@ -66,6 +66,43 @@ never "TBD"/"Lorem ipsum"). It returns `{ ok, pocket_id, pocket }`; hand
 `pocket_id` to `publish` exactly like the copy path (STEP 3). If `ok` is
 false, relay the error.
 
+### The lead form on this track
+
+There is no `/api/submit` here — an html site deploys as a static asset tree
+with no server route — so a `<form>` with no `action` posts to the page itself
+and the lead is lost with no error. Author the form exactly like this:
+
+```html
+<form method="POST" action="__CAPTURE_API_BASE__/capture/form">
+  <input type="hidden" name="paw_site_id" value="__SITE_ID__">
+  <input type="hidden" name="paw_key" value="__CAPTURE_SIGNED_KEY__">
+  <input type="hidden" name="paw_redirect" value="/thank-you.html">
+
+  <label>Your name<input name="full_name" required></label>
+  <label>Email<input type="email" name="email" required></label>
+  <label>Phone<input type="tel" name="phone"></label>
+  <label>How can we help?<textarea name="message"></textarea></label>
+
+  <button type="submit">Send</button>
+</form>
+```
+
+**Write the three `__TOKENS__` exactly as shown** — they are placeholders that
+publish substitutes with the real capture URL, site id and signed key. You have
+none of those values while authoring, so never invent one or leave `action`
+empty.
+
+**The visible field names are fixed**: `full_name`, `email`, `phone`, `message`.
+A field named anything else is stored empty, and the business never sees what
+the visitor typed.
+
+**`paw_redirect` must be a relative path on this site** (an absolute URL is
+rejected with a 400), so include the page it names — a small `thank-you.html`
+confirming the message was sent — as another entry in the `source` map.
+
+No JavaScript: this is a plain native browser POST, so never add an onSubmit
+handler or a `fetch`.
+
 **Do not reach for this by default.** Unless the user explicitly wants raw
 HTML, use the copy-only `create_landing_site` path below.
 

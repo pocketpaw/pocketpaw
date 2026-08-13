@@ -1,0 +1,94 @@
+[
+  {
+    "label": "static capture: a public deploy stops resolving the tokens (form action ships a literal __CAPTURE_API_BASE__)",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "    if source and not builder_origin:\n        source = _resolve_capture_tokens(",
+    "replace": "    if False:\n        source = _resolve_capture_tokens(",
+    "tests": [
+      "tests/ee/sites/test_static_form_capture.py"
+    ]
+  },
+  {
+    "label": "static capture: an ARMED build gets substituted source, shifting every html edit byteSpan",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "    if source and not builder_origin:",
+    "replace": "    if source:",
+    "tests": [
+      "tests/ee/sites/test_static_form_capture.py"
+    ]
+  },
+  {
+    "label": "static capture: the substitution mutates the caller's map, baking a real signed key into the stored pocket",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "    out: dict[str, Any] = {}\n    for path, contents in source.items():",
+    "replace": "    out: dict[str, Any] = source\n    for path, contents in list(source.items()):",
+    "tests": [
+      "tests/ee/sites/test_static_form_capture.py"
+    ]
+  },
+  {
+    "label": "static capture: a non-string source entry is run through the string replace (dynamic svelte bindings)",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "        if not isinstance(contents, str):\n            out[path] = contents\n            continue",
+    "replace": "        contents = str(contents)",
+    "tests": [
+      "tests/ee/sites/test_static_form_capture.py"
+    ]
+  },
+  {
+    "label": "static capture: the signed-key token stops being resolved (form 401s on every submit)",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "        \"__CAPTURE_SIGNED_KEY__\": capture_signed_key,",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_static_form_capture.py"
+    ]
+  },
+  {
+    "label": "static capture: the prompt stops naming the capture endpoint (form posts to the page itself)",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "action=\"__CAPTURE_API_BASE__/capture/form\"",
+    "replace": "action=\"\"",
+    "tests": [
+      "tests/ee/sites/test_static_form_capture.py",
+      "tests/cloud/surface/test_sites_handler.py"
+    ]
+  },
+  {
+    "label": "static capture: the prompt spells its own field names instead of rendering the schema's",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "    fields = \", \".join(f\"`{name}`\" for name in contact_form.CONTACT_FIELD_NAMES)",
+    "replace": "    fields = \"`name`, `email`, `phone`, `message`\"",
+    "tests": [
+      "tests/ee/sites/test_static_form_capture.py",
+      "tests/cloud/surface/test_sites_handler.py"
+    ]
+  },
+  {
+    "label": "static capture: the react track loses the contract while html keeps it",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            \"`<form>` with flat named fields.\\n\"\r\n            + native_form_contract()\r\n            + \"CHANGES GO THROUGH THE EDIT TOOL.",
+    "replace": "            \"`<form>` with flat named fields.\\n\"\r\n            + \"CHANGES GO THROUGH THE EDIT TOOL.",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py"
+    ]
+  },
+  {
+    "label": "static capture: the ripple track is handed markup instructions it cannot act on",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            \"URLs. The lead-capture form must be FLAT native \"\r\n            '`input`/`textarea`/`button{type:\"submit\"}` widgets — NEVER the `form` or '",
+    "replace": "            \"URLs. \" + native_form_contract() + \"The lead-capture form must be FLAT native \"\r\n            '`input`/`textarea`/`button{type:\"submit\"}` widgets — NEVER the `form` or '",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py"
+    ]
+  },
+  {
+    "label": "static capture: a refine is no longer told to preserve the form's plumbing",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "    \"PRESERVE the form's PLUMBING exactly as it is: the `action`, the `method`, \"",
+    "replace": "    \"\" \"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py"
+    ]
+  }
+]

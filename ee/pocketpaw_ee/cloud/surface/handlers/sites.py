@@ -234,6 +234,7 @@ import functools
 import logging
 from typing import Any
 
+from pocketpaw.sites_capture import contact_form
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import content_key, meta_key
 from pocketpaw_ee.sites.react_paths import (
@@ -617,7 +618,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "rippleSpec or call the pocket specialist, and there is no "
             "`/api/submit` route (no server runtime), so a lead form is a native "
             "`<form>` with flat named fields.\n"
-            "CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further "
+            + native_form_contract()
+            + "CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further "
             "change the user asks for in this conversation — 'shorten the hero "
             "headline', 'darker pricing cards', 'add a testimonials section' — is "
             "`mcp__pocketpaw_sites_manager__edit_react_component` with the SAME "
@@ -638,8 +640,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             'and stamps the source pocket `type="site"` + `pattern="landing"`. '
             "THEME the page with the chosen design system's tokens + your asset "
             "URLs. The lead-capture form must be FLAT native "
-            '`input`/`textarea`/`button{type:"submit"}` widgets with real field '
-            "names (name, email, phone, message) — NEVER the `form` or "
+            '`input`/`textarea`/`button{type:"submit"}` widgets — NEVER the `form` or '
             "`newsletter` widget, which nests an invalid `<form>` on a static "
             "site and captures zero leads. If the skill is unavailable, fall back "
             "to `mcp__pocketpaw_pocket_specialist__create` (build the "
@@ -669,11 +670,12 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "explicit request per the DRAFT-FIRST step. There is NO rippleSpec and NO widget "
             "catalog on this track — do not draft a rippleSpec or call the pocket "
             "specialist; the HTML files ARE the page. The lead-capture form must "
-            "be a real `<form>` with FLAT named `input`/`textarea` fields (name, "
-            'email, phone, message) and a `button type="submit"`. `index.html` '
+            "be a real `<form>` with FLAT named `input`/`textarea` fields and a "
+            '`button type="submit"`. `index.html` '
             "MUST contain the full resting state in markup (never rendered only "
             "by JS), since the visitor is served static HTML.\n"
-            "DO NOT switch engines. You MUST use "
+            + native_form_contract()
+            + "DO NOT switch engines. You MUST use "
             "`mcp__pocketpaw_sites_manager__create_html_site` — do NOT call "
             "`create_svelte_site`, `create_landing_site`, or the "
             "`pocketpaw-create-svelte-site` / `pocketpaw-create-paw-site` skills, "
@@ -835,7 +837,59 @@ _REFINE_SHARED_RULES = (
     "The lead form stays a FLAT native `<form>` — real `name=` on every "
     '`input`/`textarea` and a `button type="submit"`. Never nest a form inside a '
     "form, and never replace it with a widget that does.\n"
+    # A refine rewrites whole sections, and the form's plumbing does not look like
+    # copy — the action and the three hidden inputs are the first thing a rewrite
+    # drops as noise. Losing them costs every subsequent lead on the site, silently
+    # and with no visible change to the page, so the rule has to be stated where
+    # refines read it and not only where creates do.
+    "PRESERVE the form's PLUMBING exactly as it is: the `action`, the `method`, "
+    "and every hidden `paw_*` input (including any `__TOKEN__` placeholder value — "
+    "those are resolved at publish and are NOT stale placeholders to clean up). "
+    "They are what deliver the lead; a form that keeps its fields but loses its "
+    "action still looks right and captures nothing.\n"
 )
+
+
+def native_form_contract() -> str:
+    """Where a lead form posts on the tracks that have NO server route.
+
+    react and raw-html sites have no ``/api/submit`` (nothing runs server-side), and
+    the generator's ``rewireForms`` fires only on the IMPORT path. The prompt used to
+    stop at "a lead form is a native ``<form>`` with flat named fields" — correct as
+    far as it went, and it never said where the form posts. A ``<form>`` with no
+    action posts to itself, so the visitor pressed Send, the page reloaded, and the
+    lead was gone. No error, no log, a site that looks perfect.
+
+    The agent has neither the site id nor the signed key while authoring (on a create
+    the site does not exist yet, and the key is minted at publish), so it writes
+    PLACEHOLDERS. ``build_generator_input`` resolves them on the way to the generator,
+    for public deploys only. Same three tokens the svelte templates already use.
+
+    Field names render from ``contact_form.CONTACT_FIELDS``, never spelled out here.
+    A prompt is one more hand-written field list, and a hand-written field list
+    drifting from the mapping that reads it is the exact bug the schema was created
+    to end — writing them out again would reintroduce it one layer up.
+    """
+    fields = ", ".join(f"`{name}`" for name in contact_form.CONTACT_FIELD_NAMES)
+    return (
+        "LEAD FORM — WHERE IT POSTS. This track has no server route, so a `<form>` "
+        "with no `action` submits to the page itself and the lead is LOST SILENTLY. "
+        "Every contact form you write MUST carry, verbatim:\n"
+        '  `<form method="POST" action="__CAPTURE_API_BASE__/capture/form">`\n'
+        "and these three hidden inputs inside it:\n"
+        '  `<input type="hidden" name="paw_site_id" value="__SITE_ID__">`\n'
+        '  `<input type="hidden" name="paw_key" value="__CAPTURE_SIGNED_KEY__">`\n'
+        '  `<input type="hidden" name="paw_redirect" value="/thank-you">`\n'
+        "The three `__TOKENS__` are placeholders — write them EXACTLY as shown and "
+        "never invent a value for them; publish substitutes the real site id, "
+        "capture URL and signed key. `paw_redirect` MUST be a relative path on this "
+        "site (an absolute URL is rejected with a 400), so author the page it names — "
+        "a small `/thank-you` route or `thank-you.html` confirming the message was "
+        "sent. Name the visible inputs " + fields + " — those are the names the lead "
+        "pipeline maps, and a field named anything else is stored empty. Mark the "
+        "name and email inputs `required`. No JavaScript: this is a plain native "
+        "browser POST, so never attach an onSubmit handler or a fetch call.\n"
+    )
 
 
 def _react_write_scope() -> str:
