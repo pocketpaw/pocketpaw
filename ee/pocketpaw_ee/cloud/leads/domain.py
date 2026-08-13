@@ -21,4 +21,11 @@ class Lead:
     form_type: str
     properties: dict[str, Any] = field(default_factory=dict)
     submitter_ref: str = ""
+    # Flattened off ``LeadSource``, the same way ``submitter_ref`` is. Surfaced
+    # because ``Site.enforce_origin`` defaults OFF: a submission from an
+    # unrecognized host is now accepted rather than 403'd, so the only thing that
+    # keeps that trade honest is the owner being able to SEE where a lead came
+    # from. A signal nobody can read is not a signal.
+    origin: str = ""
+    origin_unrecognized: bool = False
     created_at: datetime | None = None

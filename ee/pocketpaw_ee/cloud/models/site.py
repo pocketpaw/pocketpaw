@@ -396,6 +396,35 @@ class Site(TimestampedDocument):
     import_report: dict[str, Any] = Field(default_factory=dict)
     # Capture hardening config (mirrors sites_capture.SiteFormConfig fields).
     allowed_origins: list[str] = Field(default_factory=list)
+    # Whether ``allowed_origins`` HARD-GATES lead capture, or is only a signal.
+    #
+    # Default OFF, deliberately, and this is the Formspree/Basin/Getform posture
+    # rather than a relaxation of ours by accident. Two facts make the pin close to
+    # worthless as a gate on the capture path while keeping all of its ability to
+    # break a customer's contact form:
+    #
+    #   * The credential it guards is ALREADY PUBLIC on three of the four engines.
+    #     html / react / static-svelte all ship ``paw_key`` as a hidden input in the
+    #     page source, so "the signed key" is a site IDENTIFIER that anyone can read,
+    #     not a secret the origin pin is protecting.
+    #   * ``Origin`` binds BROWSERS ONLY. Any curl/script forges it in one flag, so
+    #     the pin never stopped a determined spammer — it stopped the honest case.
+    #
+    # What it DID do reliably was 403 real submissions: a site whose doc predates
+    # the deployed-host stamping, an async (react) build whose Site row was inserted
+    # with ``url=""`` before the worker filled it in, an apex/``www.`` mismatch, a
+    # preview URL, a page opened over ``file://`` (Origin: null). Every one of those
+    # fails CLOSED, and on the native-form path the visitor — the customer's actual
+    # prospect — is shown a raw JSON 403 instead of a thank-you page.
+    #
+    # So the controls that survive are the ones that work on a public endpoint with
+    # a public key: the honeypot, the per-(scope, minute) rate limit, the injection
+    # screen, and the payload cap. Origin becomes an ATTRIBUTABLE SIGNAL — recorded
+    # on every lead (``LeadSource.origin``) so an owner can see where submissions
+    # came from — and a per-site opt-in for anyone who wants the strict behaviour
+    # back. Existing rows read the default and are therefore un-gated, which is the
+    # intended migration: they were the ones silently dropping leads.
+    enforce_origin: bool = False
     signed_key: str = ""
     rate_limit_per_min: int = 60
     per_ip_limit_per_min: int = 10

@@ -83,7 +83,11 @@ from pocketpaw.security.injection_scanner import (
     get_injection_scanner,
 )
 from pocketpaw.sites_capture import contact_form
-from pocketpaw.sites_capture.ingest import interpolate_mapping, is_honeypot_tripped
+from pocketpaw.sites_capture.ingest import (
+    interpolate_mapping,
+    is_honeypot_tripped,
+    origin_allowed,
+)
 from pocketpaw.sites_capture.models import SiteEventMapping
 from pocketpaw_ee.cloud.leads.domain import Lead
 from pocketpaw_ee.cloud.models.lead import Lead as _LeadDoc
@@ -103,6 +107,8 @@ def _to_domain(doc: _LeadDoc) -> Lead:
         form_type=doc.form_type,
         properties=doc.properties,
         submitter_ref=doc.source.submitter_ref if doc.source else "",
+        origin=doc.source.origin if doc.source else "",
+        origin_unrecognized=bool(doc.source and doc.source.origin_unrecognized),
         created_at=getattr(doc, "createdAt", None),
     )
 
@@ -239,6 +245,8 @@ async def capture(
     payload: dict[str, Any],
     submitter_ref: str,
     rate_key: str = "",
+    origin: str = "",
+    known_origins: list[str] | None = None,
 ) -> Lead | None:
     """Harden + persist one submission as a tenant-scoped Lead. Returns None
     when the submission is dropped (honeypot / rate-limited / injection screen /
@@ -248,7 +256,21 @@ async def capture(
     the client host). ``submitter_ref`` is only an opaque label. An empty
     ``rate_key`` falls back to a fixed sentinel — never to ``submitter_ref`` —
     so a missing client host collapses to one shared bucket rather than handing
-    the caller a fresh bucket per request."""
+    the caller a fresh bucket per request.
+
+    ``origin`` is the submitting page's ``Origin`` header, recorded on the lead for
+    attribution. It is NOT a gate here: the router owns the (opt-in,
+    ``Site.enforce_origin``) enforcement decision, and by default a submission from
+    an unrecognized host is accepted and flagged rather than dropped. Passing it is
+    what lets an owner see that leads are arriving from somewhere they did not
+    expect — the visibility that replaces the old silent 403.
+
+    ``known_origins`` is the set the flag is judged against, and the router passes
+    its DERIVED set (``allowed_origins`` plus the site's own url host and attached
+    custom domains) rather than letting this re-read the stored field. The two must
+    agree: if the gate accepts a host the flag then marks unrecognized, the flag
+    fires on a site's own normal traffic and stops meaning anything. Defaults to the
+    stored field for a caller with nothing better."""
     effective_rate_key = rate_key or "unknown"
     if is_honeypot_tripped(payload, honeypot_field=site.honeypot_field):
         _emit_drop_audit(site=site, form_type=form_type, reason="honeypot")
@@ -292,6 +314,14 @@ async def capture(
             site_id=site.script_name,
             submitter_ref=submitter_ref,
             rate_key=effective_rate_key,
+            origin=origin,
+            # Evaluated NOW, against the allowlist as it stands at capture time, so
+            # the flag keeps meaning "unrecognized when it arrived" even after the
+            # owner later connects the domain it came from.
+            origin_unrecognized=bool(origin)
+            and not origin_allowed(
+                site.allowed_origins if known_origins is None else known_origins, origin
+            ),
         ),
     )
     await doc.insert()
