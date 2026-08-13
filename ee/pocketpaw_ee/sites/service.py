@@ -837,6 +837,7 @@ from typing import Any
 from bson import ObjectId
 from bson.errors import InvalidId
 
+from pocketpaw.sites_capture.contact_form import CONTACT_FORM_TYPE, default_event_mapping
 from pocketpaw_ee.cloud._core.errors import (
     CloudError,
     Forbidden,
@@ -1502,24 +1503,22 @@ def _builder_origin() -> str:
 # The default logical form type. The generated /api/submit endpoint sends this
 # constant as ``form_type`` (the static page wraps the whole spec in one form, so
 # there is no per-form id at submit time), so the seeded mapping must key on it.
-_DEFAULT_FORM_TYPE = "lead"
+#
+# Updated 2026-08-13: both this and the mapping below are now DERIVED from
+# ``sites_capture.contact_form``, the single declaration of what a contact form
+# is. They used to be restated here, and the restatement drifted from the form
+# ``landing_assembler`` actually generates — the assembler emitted ``name="name"``
+# while this mapping read ``{{ payload.full_name }}``, so every lead captured
+# through the deterministic landing path stored an empty name and threw away the
+# value the visitor typed. Nothing compared the two files, so nothing caught it.
+# Derivation is the fix: a field rename is now one edit in one tuple.
+_DEFAULT_FORM_TYPE = CONTACT_FORM_TYPE
 
 # Default event mapping seeded at publish so a basic contact lead lands with NO
-# manual Mongo edit. Maps the common lead fields a marketing form collects; the
-# interpolator drops any ``{{ payload.X }}`` whose key is absent from the
-# submission (resolves to None), so a form that only sends {full_name, phone}
-# still produces a Lead — the extra fields simply come back empty.
-_DEFAULT_EVENT_MAPPING: dict[str, Any] = {
-    _DEFAULT_FORM_TYPE: {
-        "creates": "Lead",
-        "fields": {
-            "full_name": "{{ payload.full_name }}",
-            "phone": "{{ payload.phone }}",
-            "email": "{{ payload.email }}",
-            "message": "{{ payload.message }}",
-        },
-    }
-}
+# manual Mongo edit. The interpolator drops any ``{{ payload.X }}`` whose key is
+# absent from the submission (resolves to None), so a form that only sends
+# {full_name, phone} still produces a Lead — the extra fields come back empty.
+_DEFAULT_EVENT_MAPPING: dict[str, Any] = default_event_mapping()
 
 
 def _default_allowed_origins() -> list[str]:

@@ -82,6 +82,7 @@ from pocketpaw.security.injection_scanner import (
     ThreatLevel,
     get_injection_scanner,
 )
+from pocketpaw.sites_capture import contact_form
 from pocketpaw.sites_capture.ingest import interpolate_mapping, is_honeypot_tripped
 from pocketpaw.sites_capture.models import SiteEventMapping
 from pocketpaw_ee.cloud.leads.domain import Lead
@@ -259,6 +260,20 @@ async def capture(
     if not _passes_injection_screen(payload):
         _emit_drop_audit(site=site, form_type=form_type, reason="injection")
         return None
+
+    # CONTACT FORM ONLY — alias normalization + schema validation. Other form
+    # types have no declared schema, so they keep the previous behaviour exactly.
+    if form_type == contact_form.CONTACT_FORM_TYPE:
+        # Non-destructive: adds canonical keys, drops nothing. This is what makes
+        # a lead from an ALREADY-PUBLISHED site land — those Workers POST
+        # ``name=...`` and will until someone republishes them, which nobody does
+        # because the site looks fine. Also what lets an IMPORTED form's
+        # ``your-email`` / ``Phone Number`` reach the mapping at all.
+        payload = contact_form.normalize(payload)
+        reason = contact_form.validate(payload)
+        if reason is not None:
+            _emit_drop_audit(site=site, form_type=form_type, reason=reason)
+            return None
 
     raw_mapping = site.event_mapping.get(form_type)
     if raw_mapping is None:
