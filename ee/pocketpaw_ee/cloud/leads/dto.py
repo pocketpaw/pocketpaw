@@ -33,7 +33,13 @@ class LeadOut(BaseModel):
     site_id: str
     form_type: str
     properties: dict[str, Any]
-    created_at: str | None
+    # Where the submission came from, and whether that host was on the site's
+    # allowlist AT CAPTURE TIME. Both are informational — since origin enforcement
+    # is opt-in (``Site.enforce_origin``), an unrecognized origin is an accepted
+    # lead the owner can judge for themselves rather than one we silently refused.
+    origin: str = ""
+    origin_unrecognized: bool = False
+    created_at: str | None = None
 
 
 def lead_to_dto(lead: Lead) -> LeadOut:
@@ -42,6 +48,8 @@ def lead_to_dto(lead: Lead) -> LeadOut:
         site_id=lead.site_id,
         form_type=lead.form_type,
         properties=lead.properties,
+        origin=lead.origin,
+        origin_unrecognized=lead.origin_unrecognized,
         created_at=iso_utc(lead.created_at),
     )
 

@@ -53,21 +53,198 @@ async def _site(ws="ws1", site_id="site_1") -> Site:
     return site
 
 
-@pytest.mark.asyncio
-async def test_capture_rejects_wrong_origin(mongo_db, capture_app):
-    await _site()
+async def _capture_json(capture_app, *, origin, site_id="site_1"):
+    headers = {"origin": origin} if origin is not None else {}
     async with AsyncClient(transport=ASGITransport(app=capture_app), base_url="http://t") as c:
-        resp = await c.post(
-            "/api/v1/sites/site_1/capture",
+        return await c.post(
+            f"/api/v1/sites/{site_id}/capture",
             json={
                 "form_type": "AppointmentRequest",
                 "payload": {"full_name": "Sam"},
                 "submitter_ref": "ip1",
                 "signed_key": "key_ok",
             },
-            headers={"origin": "https://evil.example.com"},
+            headers=headers,
         )
+
+
+@pytest.mark.asyncio
+async def test_capture_accepts_an_unrecognized_origin_and_flags_it(mongo_db, capture_app):
+    """THE DEFAULT FLIPPED, deliberately. This used to assert 403.
+
+    The origin pin guards a credential that is ALREADY PUBLIC on three of the four
+    engines (``paw_key`` ships as a hidden input in the page source), and ``Origin``
+    constrains browsers only — any script forges it. So as a gate it did not stop a
+    determined spammer; it 403'd real submissions whenever the allowlist and the
+    serving host disagreed (a doc predating deployed-host stamping, an async react
+    build inserted with ``url=""``, apex vs ``www.``, a preview URL, a ``file://``
+    open). Every one of those failed CLOSED, and on the native-form path the
+    customer's own prospect was shown a raw JSON 403.
+
+    So the submission is now ACCEPTED and ATTRIBUTED. The flag is what makes the
+    trade honest — the lead is not silently indistinguishable from an expected one.
+
+    Mutation: restore the unconditional ``origin_allowed`` gate in the router and
+    this fails."""
+    from pocketpaw_ee.cloud.leads import service as leads_service
+
+    site = await _site()
+    resp = await _capture_json(capture_app, origin="https://evil.example.com")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["ok"] is True
+    leads = await leads_service.list_for_site(site.workspace, "site_1")
+    assert len(leads) == 1
+    assert leads[0].origin == "https://evil.example.com"
+    assert leads[0].origin_unrecognized is True
+
+
+@pytest.mark.asyncio
+async def test_capture_records_a_recognized_origin_without_flagging_it(mongo_db, capture_app):
+    """The other half: an expected origin is recorded too, and NOT flagged — so the
+    flag distinguishes rather than firing on everything."""
+    from pocketpaw_ee.cloud.leads import service as leads_service
+
+    site = await _site()
+    resp = await _capture_json(capture_app, origin="https://brightsmiledental.com")
+
+    assert resp.status_code == 200, resp.text
+    leads = await leads_service.list_for_site(site.workspace, "site_1")
+    assert leads[0].origin == "https://brightsmiledental.com"
+    assert leads[0].origin_unrecognized is False
+
+
+@pytest.mark.asyncio
+async def test_capture_still_403s_when_the_site_opts_into_enforcement(mongo_db, capture_app):
+    """The strict behaviour is not gone, it is OPT-IN. A site that flips
+    ``enforce_origin`` gets the old fail-closed gate back verbatim.
+
+    Mutation: drop the ``site.enforce_origin and`` guard's first operand (making the
+    gate unconditional) and the two tests above fail; delete the guard entirely and
+    this one fails. Both directions are covered."""
+    from pocketpaw_ee.cloud.leads import service as leads_service
+
+    site = await _site()
+    site.enforce_origin = True
+    await site.save()
+
+    resp = await _capture_json(capture_app, origin="https://evil.example.com")
+
     assert resp.status_code == 403
+    assert await leads_service.count_for_site(site.workspace, "site_1") == 0
+
+
+@pytest.mark.asyncio
+async def test_an_enforcing_site_still_fails_closed_on_a_missing_origin(mongo_db, capture_app):
+    """``origin_allowed`` fails closed on an absent header, and opting in must
+    preserve that — otherwise "strict" would be weaker than the old default against
+    the one caller that trivially omits the header."""
+    site = await _site()
+    site.enforce_origin = True
+    await site.save()
+
+    resp = await _capture_json(capture_app, origin=None)
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_capture_accepts_a_submission_with_no_origin_header_by_default(mongo_db, capture_app):
+    """A missing Origin is the ``file://`` / stripped-header case. Under the old
+    fail-closed default it was a 403; it is now an accepted, unflagged lead — there
+    is no origin to find unrecognized."""
+    from pocketpaw_ee.cloud.leads import service as leads_service
+
+    site = await _site()
+    resp = await _capture_json(capture_app, origin=None)
+
+    assert resp.status_code == 200, resp.text
+    leads = await leads_service.list_for_site(site.workspace, "site_1")
+    assert leads[0].origin == ""
+    assert leads[0].origin_unrecognized is False
+
+
+@pytest.mark.asyncio
+async def test_a_sites_own_deployed_host_is_never_unrecognized(mongo_db, capture_app):
+    """THE CASE THAT PRODUCED THE ORIGINAL 403 REPORT: a site deployed to
+    ``*.workers.dev`` whose ``allowed_origins`` still carried only the localhost
+    seed, so its own visitors were foreign to it.
+
+    ``allowed_origins`` is stamped by the publish deploy path, and there are real
+    ways to land a Site row that never got the stamp — a draft/preview publish
+    returns before it, an async react build inserts with ``url=""`` and fills the
+    url in later, and rows predating the stamping keep the seed. Deriving the
+    effective set from the site's own ``url`` closes all of them at once.
+
+    Mutation: make ``_effective_origins`` return ``site.allowed_origins`` unchanged
+    and this fails."""
+    from pocketpaw_ee.cloud.leads import service as leads_service
+
+    site = await _site()
+    site.allowed_origins = ["localhost", "127.0.0.1"]  # the un-stamped seed
+    site.url = "https://bright.workers.dev"
+    await site.save()
+
+    resp = await _capture_json(capture_app, origin="https://bright.workers.dev")
+
+    assert resp.status_code == 200, resp.text
+    leads = await leads_service.list_for_site(site.workspace, "site_1")
+    assert leads[0].origin_unrecognized is False, (
+        "a site's own deployed host was recorded as unrecognized"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_attached_custom_domain_is_never_unrecognized(mongo_db, capture_app):
+    """Same derivation, other source. ``add_domain`` appends to ``allowed_origins``,
+    but a row whose domain was attached by any path that did not is still the site's
+    own domain — and its visitors are its own."""
+    from pocketpaw_ee.cloud.leads import service as leads_service
+    from pocketpaw_ee.cloud.models.site import SiteDomain
+
+    site = await _site()
+    site.allowed_origins = ["localhost"]
+    site.domains = [SiteDomain(hostname="northdental.example", status="live")]
+    await site.save()
+
+    resp = await _capture_json(capture_app, origin="https://northdental.example")
+
+    assert resp.status_code == 200, resp.text
+    leads = await leads_service.list_for_site(site.workspace, "site_1")
+    assert leads[0].origin_unrecognized is False
+
+
+@pytest.mark.asyncio
+async def test_an_enforcing_site_accepts_its_own_deployed_host(mongo_db, capture_app):
+    """The derivation has to reach the GATE too, not just the flag. A site that opts
+    into enforcement while carrying an un-stamped allowlist would otherwise 403 its
+    own pages — the strict mode would be unusable exactly where it is wanted."""
+    site = await _site()
+    site.allowed_origins = ["localhost"]
+    site.url = "https://bright.workers.dev"
+    site.enforce_origin = True
+    await site.save()
+
+    resp = await _capture_json(capture_app, origin="https://bright.workers.dev")
+
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_the_derivation_does_not_admit_an_unrelated_host(mongo_db, capture_app):
+    """The widening is bounded: only hosts WE wrote (the deploy url, attached
+    domains) join the set, so a third-party origin is still unrecognized."""
+    from pocketpaw_ee.cloud.leads import service as leads_service
+
+    site = await _site()
+    site.url = "https://bright.workers.dev"
+    await site.save()
+
+    resp = await _capture_json(capture_app, origin="https://evil.example.com")
+
+    assert resp.status_code == 200, resp.text
+    leads = await leads_service.list_for_site(site.workspace, "site_1")
+    assert leads[0].origin_unrecognized is True
 
 
 @pytest.mark.asyncio
@@ -274,15 +451,90 @@ async def test_capture_form_non_relative_redirect_is_400(mongo_db, capture_app, 
 
 
 @pytest.mark.asyncio
-async def test_capture_form_wrong_origin_is_403(mongo_db, capture_app):
-    await _form_site()
+async def test_capture_form_accepts_an_unrecognized_origin(mongo_db, capture_app):
+    """The native-form half of the flipped default, and the one that motivated it:
+    here the 403 was rendered TO THE VISITOR as raw JSON. A prospect filling in a
+    contact form saw ``{"detail":"Origin not allowed for this site"}`` instead of a
+    thank-you page, and the site owner saw no lead and no error."""
+    from pocketpaw_ee.cloud.leads import service as leads_service
+
+    site = await _form_site()
     async with AsyncClient(transport=ASGITransport(app=capture_app), base_url="http://t") as c:
         resp = await c.post(
             "/api/v1/capture/form",
             data=_form_fields(),
             headers={"origin": "https://evil.example.com"},
         )
+
+    assert resp.status_code == 303
+    assert await leads_service.count_for_site(site.workspace, "site_form") == 1
+
+
+@pytest.mark.asyncio
+async def test_capture_form_redirects_to_the_site_not_the_claimed_origin(mongo_db, capture_app):
+    """THE OPEN REDIRECT THE FLIPPED DEFAULT WOULD OTHERWISE HAVE OPENED.
+
+    The 303 Location used to be the request Origin verbatim, which was safe ONLY
+    because the origin had just been pinned. With the pin opt-in, echoing it back
+    would let anyone POST with ``Origin: https://evil.example.com`` and have us send
+    the browser there. ``_redirect_base`` therefore falls back to the site's OWN url
+    whenever the origin is not allowlisted.
+
+    Mutation: return ``origin`` unconditionally from ``_redirect_base`` and this
+    fails."""
+    site = await _form_site()
+    site.url = "https://bright.workers.dev"
+    await site.save()
+
+    async with AsyncClient(transport=ASGITransport(app=capture_app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/capture/form",
+            data=_form_fields(),
+            headers={"origin": "https://evil.example.com"},
+        )
+
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    assert location == "https://bright.workers.dev/thanks.html", location
+    assert "evil.example.com" not in location
+
+
+@pytest.mark.asyncio
+async def test_capture_form_keeps_the_visitor_on_a_recognized_origin(mongo_db, capture_app):
+    """An allowlisted origin IS used as the base, so a visitor on the custom domain
+    stays there instead of being bounced to the workers.dev url after submitting."""
+    site = await _form_site()
+    site.url = "https://bright.workers.dev"
+    await site.save()
+
+    async with AsyncClient(transport=ASGITransport(app=capture_app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/capture/form",
+            data=_form_fields(),
+            headers={"origin": "https://brightsmiledental.com"},
+        )
+
+    assert resp.headers["location"] == "https://brightsmiledental.com/thanks.html"
+
+
+@pytest.mark.asyncio
+async def test_capture_form_403s_for_an_enforcing_site(mongo_db, capture_app):
+    """Opt-in strictness works on this path too."""
+    from pocketpaw_ee.cloud.leads import service as leads_service
+
+    site = await _form_site()
+    site.enforce_origin = True
+    await site.save()
+
+    async with AsyncClient(transport=ASGITransport(app=capture_app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/capture/form",
+            data=_form_fields(),
+            headers={"origin": "https://evil.example.com"},
+        )
+
     assert resp.status_code == 403
+    assert await leads_service.count_for_site(site.workspace, "site_form") == 0
 
 
 @pytest.mark.asyncio
