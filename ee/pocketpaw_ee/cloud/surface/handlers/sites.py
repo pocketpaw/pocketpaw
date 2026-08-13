@@ -579,7 +579,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "this track — do not draft a rippleSpec or call the pocket "
             "specialist. If the skill is unavailable, author the source map "
             "yourself and call `mcp__pocketpaw_sites_manager__create_svelte_site` "
-            "(then STOP at the draft — publish only on explicit request)."
+            "(then STOP at the draft — publish only on explicit request).\n"
+            + native_form_contract()
         )
     elif engine == "react":
         engine_note = (

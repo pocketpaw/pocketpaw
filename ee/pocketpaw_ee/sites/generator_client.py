@@ -899,6 +899,50 @@ def _rewrite_ripple_dep(project_dir: str, source: str) -> None:
         pkg_path.write_text(json.dumps(pkg, indent=2))
 
 
+# A `<form … action="/api/submit" …>` opening tag, in any attribute order and with
+# either quote style. ``[^>]*`` cannot cross the tag boundary, so this matches one
+# opening tag and never runs past it — the same shape paw-sites' ``rewireForms``
+# uses on arbitrary imported HTML, applied here to markup we generated ourselves.
+_LEGACY_SUBMIT_FORM = re.compile(
+    r"(<form\b[^>]*\baction=)([\"'])/api/submit\2([^>]*>)", re.IGNORECASE
+)
+
+# The hidden inputs a direct capture POST needs, in TOKEN form — ``_resolve_capture_tokens``
+# runs after this and turns them into real values, so there is exactly one place in this
+# module that knows the site id and the signed key.
+_CAPTURE_HIDDEN_FIELDS = (
+    '<input type="hidden" name="paw_site_id" value="__SITE_ID__">'
+    '<input type="hidden" name="paw_key" value="__CAPTURE_SIGNED_KEY__">'
+    '<input type="hidden" name="paw_redirect" value="/thank-you">'
+)
+
+
+def _rewire_legacy_submit_forms(contents: str) -> str:
+    """Repoint a form still aimed at the removed ``/api/submit`` route.
+
+    The svelte skill taught ``<form method="POST" action="/api/submit">`` for as long
+    as that route existed, so it is baked into the stored source of every svelte pocket
+    authored before this change. The route is gone — a STATIC svelte site never even
+    served it (``svelte-scaffold.ts`` deletes ``src/routes/api`` because adapter-static
+    cannot prerender a POST handler, which is why those sites have been losing every
+    lead), and deleting it for the dynamic sites too is what leaves one capture path
+    across all four engines instead of one per engine.
+
+    Rewriting rather than leaving them to break is the same call the alias table in
+    ``sites_capture.contact_form`` makes: the fleet is already published, nobody
+    republishes a site that looks fine, and a form that 404s looks exactly like a site
+    nobody is filling in.
+
+    Emits PLACEHOLDERS, never values — the caller resolves them immediately after.
+    Idempotent: the rewritten action is no longer ``/api/submit``, so a second pass
+    matches nothing, and source authored against the new contract is untouched."""
+    return _LEGACY_SUBMIT_FORM.sub(
+        lambda m: f'{m.group(1)}"__CAPTURE_API_BASE__/capture/form"{m.group(3)}'
+        + _CAPTURE_HIDDEN_FIELDS,
+        contents,
+    )
+
+
 def _resolve_capture_tokens(
     source: dict[str, Any],
     *,
@@ -916,8 +960,12 @@ def _resolve_capture_tokens(
     binding keys alongside its files (see ``_split_svelte_source``), and those are
     dicts/lists that must ride through untouched.
 
-    Idempotent, and a no-op on source with no tokens — which is every ripple and
-    almost every svelte site, so this cannot change their emitted bytes."""
+    Runs ``_rewire_legacy_submit_forms`` FIRST, so a form still pointing at the removed
+    ``/api/submit`` route is repointed into tokens and then resolved by the same pass —
+    one place that knows the real values, rather than two.
+
+    Idempotent, and a no-op on source with no tokens and no legacy form — which is every
+    ripple site, so this cannot change their emitted bytes."""
     resolved = {
         "__CAPTURE_API_BASE__": capture_api_base,
         "__SITE_ID__": site_id,
@@ -928,6 +976,7 @@ def _resolve_capture_tokens(
         if not isinstance(contents, str):
             out[path] = contents
             continue
+        contents = _rewire_legacy_submit_forms(contents)
         for token, value in resolved.items():
             contents = contents.replace(token, value)
         out[path] = contents
