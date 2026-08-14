@@ -358,6 +358,33 @@ class MongoFileStore:
         docs = await FileUpload.find(query).sort([("createdAt", -1)]).limit(capped).to_list()
         return [r for r in (self._to_record(d) for d in docs) if r is not None]
 
+    async def count_by_workspace(
+        self,
+        workspace: str,
+        *,
+        pocket_id: str | None | _Sentinel = None,
+    ) -> int:
+        """Count live (non-deleted) file records in a workspace.
+
+        Mirrors ``list_by_workspace``'s tri-state ``pocket_id`` so the
+        count always describes exactly the rows a matching list call would
+        return:
+        - ``None`` (default): no pocket filter applied.
+        - A string id: rows scoped to that pocket.
+        - ``LIST_WORKSPACE_ONLY`` sentinel: rows with ``pocket_id IS None``
+          (workspace-scoped uploads only — what the workspace Files panel
+          surfaces).
+        """
+        query: dict = {
+            "workspace": workspace,
+            "deleted_at": None,
+        }
+        if pocket_id is LIST_WORKSPACE_ONLY:
+            query["pocket_id"] = None
+        elif isinstance(pocket_id, str):
+            query["pocket_id"] = pocket_id
+        return await FileUpload.find(query).count()
+
     async def iter_by_pocket(
         self,
         workspace: str,

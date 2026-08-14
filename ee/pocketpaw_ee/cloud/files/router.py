@@ -51,6 +51,7 @@ async def list_files(
     source: Literal["chat", "local", "drive"] | None = Query(None),
     pocket_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     user_id: str = Depends(current_user_id),
     current_workspace: str = Depends(current_workspace_id),
 ) -> JSONResponse:
@@ -58,6 +59,16 @@ async def list_files(
 
     ``workspace_id`` is accepted for explicitness but must match the
     caller's current workspace — cross-workspace listing is rejected.
+
+    Pagination is offset-based: ``limit`` bounds each page (default 100,
+    max 500) and ``offset`` skips that many rows into the sorted, deduped
+    listing. The response carries ``total`` (rows matching the query,
+    independent of the page) and ``has_more`` so clients can render a
+    "load more" affordance. Offset pages are sliced after the merge +
+    dedupe + newest-first sort, so pages are stable while the set is
+    unchanged. Fetching is capped at 500 rows per source, so ``offset``
+    beyond ~500 cannot page further (the FE stops offering "load more"
+    when a page comes back empty).
 
     Stage 3.E: when ``pocket_id`` is set, the caller must be a pocket
     member (owner / team / shared / workspace-visible). Non-members get
@@ -87,8 +98,8 @@ async def list_files(
                 content={"detail": "files.pocket_forbidden"},
             )
 
-    files, warnings = await _SVC.list_unified(
-        current_workspace, source=source, limit=limit, pocket_id=pocket_id
+    page = await _SVC.list_unified(
+        current_workspace, source=source, limit=limit, offset=offset, pocket_id=pocket_id
     )
 
     return JSONResponse(
@@ -107,9 +118,13 @@ async def list_files(
                     "created": f.created.isoformat() if f.created else None,
                     "chat_id": f.chat_id,
                 }
-                for f in files
+                for f in page.files
             ],
-            "warnings": warnings,
+            "warnings": page.warnings,
+            "total": page.total,
+            "has_more": page.has_more,
+            "offset": offset,
+            "limit": limit,
         }
     )
 

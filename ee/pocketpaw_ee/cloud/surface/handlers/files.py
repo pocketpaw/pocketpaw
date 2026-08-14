@@ -51,7 +51,8 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         from pocketpaw_ee.cloud.files.service import UnifiedFilesService
 
         svc = UnifiedFilesService()
-        files, _warnings = await svc.list_unified(workspace_id, source=None, limit=LIST_LIMIT)
+        page = await svc.list_unified(workspace_id, source=None, limit=LIST_LIMIT)
+        files = page.files
     except Exception:
         logger.debug("files_handler: list_unified failed", exc_info=True)
         return SurfacePreamble(
