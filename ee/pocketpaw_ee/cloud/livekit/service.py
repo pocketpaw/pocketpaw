@@ -764,6 +764,7 @@ async def create_room(
                 name=room_name,
                 empty_timeout=5 * 60,
                 max_participants=50,
+                max_playout_delay=750,
             )
             await lk.room.create_room(req)
             logger.info("Created LiveKit room %s for group %s", room_name, group_id)
