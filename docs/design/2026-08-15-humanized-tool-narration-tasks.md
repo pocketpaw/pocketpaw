@@ -129,7 +129,33 @@ asserts the emitted `AgentToolUse.data.narration` equals `"Searching the web for
 **Slice:** every tool that declares nothing still reads like English.
 `pocketpaw_sites_publish` → "Publishing the site", not `using pocketpaw_sites_publish`.
 
+> **Inherited from HTN-1, 2026-08-15 — read before starting.**
+> HTN-1 shipped `_ANNOTATED_TOOLS` in `narration.py`: a hardcoded `tool name → (module, class)`
+> map with exactly one entry. **It is a stopgap to DELETE, not an extension point to grow.** It
+> maps to builtin *classes*, so MCP and connector tools — precisely what this task must cover —
+> can never appear in it by construction.
+>
+> HTN-1 read `src/pocketpaw/tools/registry.py` in full and rejected it for three concrete
+> reasons, so do not re-derive them: (1) `ToolRegistry` is instance-based (`__init__(self,
+> policy=None)`) with no module-level singleton — `get_tool_registry` / `_global_registry` /
+> `create_default_registry` all return zero hits across `src/`; (2) the bridge has no registry
+> handle to reach — `_run_agent_response` only receives `instance` from `pool.get(agent_id)`, and
+> `pool.py` exposes no tool registry; (3) registries are populated per-caller (e.g.
+> `tools/cli.py:102` constructs and registers `WebSearchTool()` itself), and `builtin/__init__.py`
+> uses lazy `__getattr__` over `_LAZY_IMPORTS` *specifically because* optional dependencies are
+> missing in some installs — so walking every builtin to find narrations would import the world
+> and can raise `ImportError`, just to phrase a status line.
+>
+> **The real fix is threading the agent's actual `ToolRegistry` through to the bridge.** That is
+> this task's central design problem, not the verb lexicon.
+>
+> **Sequencing: HTN-2 MUST land before HTN-3.** Until the registry lookup replaces
+> `_ANNOTATED_TOOLS`, every tool HTN-3 annotates is dead code unless someone also hand-adds a line
+> to that map. The dependency order below already reflects this; this note records why.
+
 **Do:**
+- Replace `_ANNOTATED_TOOLS` with a real lookup that reaches the agent's `ToolRegistry`, per the
+  note above. Delete the stopgap map in the same change.
 - Derive-from-name fallback in `narration.py`: strip vendor prefix, verb-first via a small
   deterministic lexicon (`publish`→Publishing, `create`→Creating, `search`→Searching,
   `invite`→Inviting, `delete`→Deleting, `update`→Updating, `list`→Listing, `send`→Sending).
