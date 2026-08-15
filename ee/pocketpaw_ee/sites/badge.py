@@ -94,15 +94,42 @@ BADGE_MARKER = "data-paw-badge"
 BADGE_OPEN = "<!--paw-badge-->"
 BADGE_CLOSE = "<!--/paw-badge-->"
 
-# Removal patterns. The sentinelled one covers this version onward; the two
-# legacy ones cover the un-sentinelled badge already deployed to live sites.
-# All three match only markup THIS module wrote — a customer's own ``<style>`` or
-# ``<a>`` cannot satisfy them, because each is anchored on our marker.
-_SENTINELLED_RE = re.compile(re.escape(BADGE_OPEN) + ".*?" + re.escape(BADGE_CLOSE), re.DOTALL)
-_LEGACY_STYLE_RE = re.compile(
-    r"<style>(?=[^<]*a\[" + re.escape(BADGE_MARKER) + r"\]).*?</style>", re.DOTALL
+# Removal patterns. The sentinelled one covers this version onward; the two legacy
+# ones cover the un-sentinelled badge already deployed to live sites.
+#
+# EACH IS TEMPERED AND BOUNDED, and the first draft was neither. ``.*?`` between
+# our own delimiters looks safe because "only our markup has our marker" — but the
+# match does not have to START at our markup. A page carrying one stray
+# ``<!--paw-badge-->`` (a customer who pasted it, or an imported page that already
+# had one) matched from THAT open forward to OUR badge's close, and everything
+# between was deleted: a 3,127-byte page came out at 26 bytes, the whole body gone.
+#
+# The tempered group ``(?:(?!<open>)[\s\S])`` cannot cross a second opening
+# delimiter, so a stray open can no longer swallow the region up to our real badge
+# — the match fails there and succeeds on our badge alone, leaving their content
+# untouched. The ``{0,N}`` bound is the backstop: our whole snippet is ~2.9KB, so
+# nothing legitimate approaches this, and a pattern that somehow still ran away
+# would drop a bounded region rather than a page.
+#
+# The customer cannot USE any of this — a stripped page is immediately re-injected,
+# so there is no bypass here, only the risk of destroying their content.
+_MAX_BADGE_SPAN = 16384
+
+
+def _tempered(open_pat: str, close_pat: str, guard: str) -> re.Pattern[str]:
+    """``open … close``, unable to cross another ``guard``, bounded in length."""
+    return re.compile(
+        open_pat + r"(?:(?!" + guard + r")[\s\S]){0," + str(_MAX_BADGE_SPAN) + r"}?" + close_pat
+    )
+
+
+_SENTINELLED_RE = _tempered(re.escape(BADGE_OPEN), re.escape(BADGE_CLOSE), re.escape(BADGE_OPEN))
+_LEGACY_STYLE_RE = _tempered(
+    r"<style>(?=[^<]*a\[" + re.escape(BADGE_MARKER) + r"\])", r"</style>", r"<style[\s>]"
 )
-_LEGACY_ANCHOR_RE = re.compile(r"<a\s+" + re.escape(BADGE_MARKER) + r"=.*?</a>", re.DOTALL)
+# ``="1"`` is the value this module has always emitted, so requiring it is a
+# positive identification rather than "any element wearing our attribute name".
+_LEGACY_ANCHOR_RE = _tempered(r"<a\s+" + re.escape(BADGE_MARKER) + r'="1"', r"</a>", r"<a[\s>]")
 
 # Where the badge points. NOTE: this is the PRODUCT domain, which is open
 # decision #7 in the pricing spec (the sites' own hostname is still unsettled —

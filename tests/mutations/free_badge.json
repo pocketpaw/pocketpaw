@@ -184,6 +184,34 @@
     ]
   },
   {
+    "label": "the strip patterns lose their temper, so a stray sentinel eats the page",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "        open_pat + r\"(?:(?!\" + guard + r\")[\\s\\S]){0,\" + str(_MAX_BADGE_SPAN) + r\"}?\" + close_pat",
+    "replace": "        open_pat + r\"[\\s\\S]{0,\" + str(_MAX_BADGE_SPAN) + r\"}?\" + close_pat",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_a_stray_open_sentinel_does_not_swallow_the_page",
+      "tests/ee/sites/test_free_badge.py::test_a_fake_anchor_does_not_swallow_the_page"
+    ]
+  },
+  {
+    "label": "the strip span loses its bound",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "_MAX_BADGE_SPAN = 16384",
+    "replace": "_MAX_BADGE_SPAN = 10000000",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_the_strip_span_is_bounded"
+    ]
+  },
+  {
+    "label": "the legacy anchor stops requiring our attribute VALUE",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "_LEGACY_ANCHOR_RE = _tempered(r\"<a\\s+\" + re.escape(BADGE_MARKER) + r'=\"1\"', r\"</a>\", r\"<a[\\s>]\")",
+    "replace": "_LEGACY_ANCHOR_RE = _tempered(r\"<a\\s+\" + re.escape(BADGE_MARKER) + r'=', r\"</a>\", r\"<zzz[\\s>]\")",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_an_element_wearing_our_attribute_with_another_value_survives"
+    ]
+  },
+  {
     "label": "the stamper stops walking the tree, so no page is ever badged",
     "file": "ee/pocketpaw_ee/sites/badge.py",
     "find": "        seen_pages += 1",

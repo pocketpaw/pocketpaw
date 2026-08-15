@@ -119,6 +119,90 @@ def test_replacing_leaves_the_page_otherwise_intact():
     assert "backdrop-filter" not in swapped
 
 
+def test_a_stray_open_sentinel_does_not_swallow_the_page():
+    """The strip patterns' worst case, and it was live: a page carrying ONE stray
+    ``<!--paw-badge-->`` matched from THAT open forward to our badge's close and
+    deleted everything between. A 3,127-byte page came out at 26 bytes.
+
+    The match does not have to start at our markup — that is the assumption
+    "only our markup has our marker" quietly makes and does not earn."""
+    page = (
+        "<html><body>"
+        + badge.BADGE_OPEN
+        + "<h1>customer content</h1>"
+        + "x" * 200
+        + badge.build_badge_html()
+        + "</body></html>"
+    )
+
+    out = badge.strip_badge(page)
+
+    assert "customer content" in out
+    assert "x" * 200 in out
+    assert badge.BADGE_MARKER not in out  # our real badge still went
+
+
+def test_a_fake_anchor_does_not_swallow_the_page():
+    """Same shape on the legacy anchor: an element wearing our marker with no
+    nearby ``</a>`` used to match forward to some distant one."""
+    page = (
+        '<body><a data-paw-badge="1">x</a>'
+        "<h1>customer content</h1>"
+        '<a href="/y">their link</a>' + badge.build_badge_html() + "</body>"
+    )
+
+    out = badge.strip_badge(page)
+
+    assert "customer content" in out
+    assert "their link" in out
+
+
+def test_a_customer_style_block_survives():
+    page = "<body>" + badge.build_badge_html() + "<style>body{color:red}</style><p>copy</p></body>"
+
+    out = badge.strip_badge(page)
+
+    assert "body{color:red}" in out
+    assert "<p>copy</p>" in out
+    assert badge.BADGE_MARKER not in out
+
+
+def test_the_strip_span_is_bounded():
+    """The backstop. Even a correctly-delimited region cannot remove an unbounded
+    amount of a page — a runaway drops a bounded region, never the document.
+
+    The size here is a FIXED 200KB, deliberately not ``_MAX_BADGE_SPAN + n``: a
+    test that scales with the constant it guards moves with the mutation and
+    reports "bounded" for any bound at all, which is exactly how the first
+    version of this passed while the bound was raised to ten million."""
+    huge = badge.BADGE_OPEN + ("y" * 200_000) + badge.BADGE_CLOSE
+    page = f"<body>{huge}<p>after</p></body>"
+
+    out = badge.strip_badge(page)
+
+    assert "y" * 100 in out, "a region larger than the bound must be left alone"
+    assert "<p>after</p>" in out
+
+
+def test_an_element_wearing_our_attribute_with_another_value_survives():
+    """The legacy anchor requires ``="1"`` — the value this module has always
+    emitted — so it is a positive identification of OUR markup rather than
+    "anything carrying our attribute name"."""
+    page = '<body><a data-paw-badge="mine" href="/x">customer link</a><p>copy</p></body>'
+
+    out = badge.strip_badge(page)
+
+    assert "customer link" in out
+    assert "<p>copy</p>" in out
+
+
+def test_our_own_badge_is_still_fully_stripped():
+    """The hardening must not cost the thing the patterns exist for."""
+    page = "<body><p>hi</p>" + badge.build_badge_html() + "</body>"
+
+    assert badge.strip_badge(page) == "<body><p>hi</p></body>"
+
+
 def test_a_stale_badge_is_replaced_across_a_whole_tree(tmp_path):
     """The republish path, not just one page."""
     old = '<a data-paw-badge="1" style="background:#111;">Built with PocketPaw</a>'
