@@ -47,7 +47,21 @@ vertical: the unit of *value* is the visible phrase, not the layer.
 
 ---
 
-## HTN-0 — Resolve the two sequencing unknowns · ~0.5 agent-hrs
+## HTN-0 — Resolve the two sequencing unknowns · ~0.5 agent-hrs · **DONE (partial)**
+
+> **Findings, 2026-08-15.**
+> 1. **Streaming vs block path — ANSWERED.** Both fire. `claude_agent_sdk` delivers fully
+>    assembled real arguments on the `AssistantMessage` (`_extract_tool_info` → `block.input`,
+>    `claude_sdk.py:1156-1162`); pocketpaw suppresses that emission with the `_announced_tools`
+>    guard at `:3243`. The arguments were never lost, so HTN-4 needs no `input_json_delta`
+>    accumulation and is rescoped from ~1.5h/high-risk to ~0.5h/low-risk.
+> 2. **Event ordering — DOWNGRADED to informational, not blocking.** The answer does not change
+>    what gets built: `seq` is cheap and ships either way. It determines only whether `seq` is
+>    load-bearing or belt-and-braces. HTN-5 proceeds without it.
+> 3. **Live `TodoWrite` payload — STILL OPEN, needs the captain.** `TodoWrite` is a CLI-side
+>    builtin bundled inside `claude_agent_sdk/_bundled/claude.exe`, so its shape is not readable
+>    from source and requires a live default-backend run to capture. **HTN-6 is blocked on this**
+>    and must not be written against an inferred payload.
 
 **Slice:** the answers that decide whether HTN-4 is release-blocking and whether `seq` is
 load-bearing. Cheap to run, expensive to guess wrong.
@@ -162,32 +176,38 @@ test asserting the derived phrasing for a sample of unannotated tools; `statusMa
 
 ---
 
-## HTN-4 — Narration works on the default backend · ~1.5 agent-hrs
+## HTN-4 — Narration works on the default backend · ~0.5 agent-hrs
 
-**Slice:** `claude_agent_sdk` — the shipped default — carries tool arguments through its streaming
-path, so narration and the plan panel are not pydantic-ai-only features.
+> **Rescoped 2026-08-15 by HTN-0, from ~1.5h and "highest-risk" down to ~0.5h and low-risk.** The
+> arguments are not lost and never needed reassembling — see below.
+
+**Slice:** `claude_agent_sdk` — the shipped default — delivers tool arguments to the bridge, so
+narration and the plan panel are not pydantic-ai-only features.
 
 **Do:**
-- `src/pocketpaw/agents/claude_sdk.py`: accumulate `input_json_delta` fragments (currently handled
-  nowhere in the file) and emit the `tool_use` event on `content_block_stop` with the assembled
-  input, replacing the hardcoded `"input": {}` at `:3160`.
-- Leave the block path at `:3251` untouched — it already passes real args and is the reference
-  behavior to match.
-- Tests: a streaming fixture with a multi-fragment tool input asserting the assembled args match
-  the block path's output for the same call.
+- `src/pocketpaw/agents/claude_sdk.py`: the completed `AssistantMessage` already carries fully
+  assembled real arguments (`_extract_tool_info` → `block.input`, `:1156-1162`). They are dropped
+  by the guard `if tool["name"] not in _announced_tools` at `:3243`, because the streaming path at
+  `:3156` already added the name while emitting `"input": {}`.
+- Let the args-bearing emission through. Likely minimal shape: the streaming path announces the
+  name for a fast indicator without suppressing the later event; the `AssistantMessage` path emits
+  with real arguments, upgrading narration from `bare` to `active`.
+- **Do not** implement `input_json_delta` accumulation. The SDK assembles the input itself; that
+  work is unnecessary.
+- Tests: assert a streamed tool call produces a `tool_use` event carrying real `input`, and that
+  narration upgrades from `bare` to `active` across the pair.
 
-**Done when:** a streamed default-backend turn emits `tool_use` with populated `input`, and the
-streaming and block paths produce identical metadata for an equivalent call.
+**Done when:** a streamed default-backend tool call reaches the bridge with populated `input`, with
+a test covering the announce-then-upgrade sequence.
 
 **Interfaces:**
-- exposes: populated `metadata["input"]` on the streaming path (consumed by HTN-6, and by HTN-1's
+- exposes: populated `metadata["input"]` on the default backend (consumed by HTN-6, and by HTN-1's
   bridge rendering for default-backend users)
 - consumes: nothing new
 
-**Deps:** HTN-0 (which confirms whether this path is actually live, and therefore whether this
-task is release-blocking or a follow-up).
-**PRs:** 1 — pocketpaw. **Highest-risk task in the set:** streaming assembly in a 3000-line module.
-Keep it alone in its PR.
+**Deps:** HTN-0 (done).
+**PRs:** 1 — pocketpaw. Still keep it alone in its PR: it changes event cardinality on the default
+backend's hot path, so it deserves an isolated diff even though it is small.
 
 ---
 

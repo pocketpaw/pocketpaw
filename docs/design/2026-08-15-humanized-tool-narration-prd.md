@@ -152,21 +152,31 @@ drop point. It is two:
 
 | Layer | Location | Behavior |
 |---|---|---|
-| Backend, claude_agent_sdk **streaming** path | `src/pocketpaw/agents/claude_sdk.py:3160` | emits `metadata={"name": …, "input": {}}` — **hardcoded empty**. `input_json_delta` is handled nowhere in the file, so incrementally-streamed tool input is discarded at `content_block_start`. |
-| Backend, claude_agent_sdk **block** path | `src/pocketpaw/agents/claude_sdk.py:3251` | emits `"input": tool["input"]` — args present. |
+| Backend, claude_agent_sdk **streaming** path | `src/pocketpaw/agents/claude_sdk.py:3154-3161` | on `content_block_start`, emits `metadata={"name": …, "input": {}}` — hardcoded empty — and adds the name to `_announced_tools`. |
+| Backend, claude_agent_sdk **block** path | `src/pocketpaw/agents/claude_sdk.py:3242-3253` | the completed `AssistantMessage` carries **fully-assembled real arguments** (`_extract_tool_info` reads `block.input` off the SDK's `ToolUseBlock`, `:1156-1162`) — but the guard `if tool["name"] not in _announced_tools` at `:3243` **suppresses the emission**, because the streaming path already announced that name. |
 | Backend, pydantic-ai | `src/pocketpaw/agents/pydantic_ai.py:2156` | emits `"input": args` — args present. |
 | Bridge (all backends) | `ee/.../cloud/shared/agent_bridge.py:582` | reads only the tool name; discards `metadata["input"]` entirely. |
 
-**What:** fix the bridge for all backends (chunk 1) *and* accumulate `input_json_delta` fragments in
-the claude_agent_sdk streaming path, emitting on `content_block_stop` (chunk 5).
+> **Corrected 2026-08-15 by the HTN-0 spike.** This decision originally stated that the streaming
+> path discards incrementally-streamed input and that the fix required accumulating
+> `input_json_delta` fragments. **That was wrong.** The SDK assembles the arguments itself and
+> delivers them intact on the `AssistantMessage`; pocketpaw's own dedup guard is what drops them.
+> No JSON-fragment assembly is needed anywhere.
 
-**Why this matters more than it looks:** `TodoWrite` on the default backend's streaming path
-currently carries no arguments at all. Without chunk 5, the plan panel renders perfectly against
-pydantic-ai in development and is **blank in production for default-config users**. Chunk 5 is not
-optional polish; it is what makes the feature real for most of the install base.
+**What:** fix the bridge for all backends (chunk 1) *and* stop the `_announced_tools` guard from
+suppressing the args-bearing `AssistantMessage` emission (chunk 5). The likely minimal shape: the
+streaming path announces the name for a fast indicator without claiming to carry input, and the
+`AssistantMessage` path still emits, upgrading the narration from `bare` to `active` once the real
+arguments land. One extra `tool_use` event per tool call is acceptable — the surfaces render a
+status line that is replaced, not appended, so an upgrade is invisible except as better text.
 
-**Tradeoff accepted:** chunk 5 touches streaming assembly in a 3000-line backend module, the
-riskiest edit in this PRD. It is isolated behind its own chunk and its own tests for that reason.
+**Why this matters more than it looks:** `TodoWrite` on the default backend currently reaches the
+bridge with no arguments. Without chunk 5, the plan panel renders perfectly against pydantic-ai in
+development and is **blank in production for default-config users**. Chunk 5 is not optional
+polish; it is what makes the feature real for most of the install base.
+
+**Tradeoff accepted:** one duplicate `tool_use` event per call on the streaming path. Cheaper than
+the alternative of delaying the activity indicator until the assistant message completes.
 
 ## Open questions
 
