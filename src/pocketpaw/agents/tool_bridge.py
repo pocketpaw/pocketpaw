@@ -14,6 +14,20 @@ Backend-aware exclusion:
 - BrowserTool/DesktopTool: always excluded (need special session state)
 
 Changes:
+- 2026-08-15 (fix/bridged-tool-arg-types): _signature_from_json_schema now maps
+  each property's JSON-schema ``type`` to the matching Python annotation and
+  keeps the schema's own ``default``, instead of flattening everything to
+  ``str`` / ``str | None = None``. pydantic-ai builds the schema the MODEL sees
+  from this signature, so an ``{"type": "integer", "default": 5}`` property was
+  advertised as a nullable string and execute() received ``"5"`` or ``None``
+  where it annotated ``int = 5``. web_search crashed on
+  ``min(max(num_results, 1), 10)`` ("'>' not supported between instances of
+  'int' and 'NoneType'/'str'"); every bridged tool with a non-string parameter
+  was affected. _make_pydantic_ai_tool also drops an explicit ``null`` for any
+  parameter whose default is not None, so a model sending ``"num_results":
+  null`` no longer overrides the tool's own default. Both halves were masked
+  until the pydantic-ai argument drop was fixed — while the backend delivered
+  ``{}``, no argument ever reached a tool.
 - 2026-08-15 (HTN-2, feat/narration-registry-lookup): the ToolRegistry each
   build_*_tools() constructs is no longer dropped at function exit. It is kept
   on the ToolPolicy it was built under and reachable through
@@ -599,17 +613,36 @@ def _make_pydantic_ai_tool(tool_cls: Any, tool: Any, settings: Any) -> Any:
     * ``args_schema`` present — mirror the Pydantic model's fields with their
       real annotations and defaults, so nested objects (the pocket specialist's
       ``hints``) round-trip as ``$defs`` instead of being flattened to strings.
-    * otherwise — one ``str`` parameter per declared property, optional ones
-      annotated ``str | None`` with a ``None`` default so the model isn't forced
-      to invent a value for every field. (The LangChain bridge marks all
+    * otherwise — one parameter per declared property carrying the PYTHON type
+      its JSON-schema ``type`` names, optional ones annotated ``T | None`` and
+      defaulted to the schema's own ``default``. (The LangChain bridge marks all
       parameters required; respecting ``required`` here is deliberate.)
+
+    Explicit nulls are dropped for any parameter whose default is not ``None``.
+    A model is free to send ``"num_results": null`` for an optional argument,
+    and passing that through would override the tool's own ``= 5`` with ``None``
+    — the omitted-argument bug by another route.
     """
     import inspect
 
     defn = tool.definition
     limit = int(getattr(settings, "pydantic_ai_max_tool_output_chars", 0) or 0)
 
+    schema_cls = getattr(tool, "args_schema", None)
+    if schema_cls is not None:
+        params, annotations = _signature_from_model(inspect, schema_cls)
+    else:
+        params, annotations = _signature_from_json_schema(inspect, defn.parameters or {})
+
+    _drop_when_null = frozenset(
+        p.name
+        for p in params
+        if p.default is not inspect.Parameter.empty and p.default is not None
+    )
+
     async def _run(**kwargs: Any) -> str:
+        if _drop_when_null:
+            kwargs = {k: v for k, v in kwargs.items() if not (v is None and k in _drop_when_null)}
         try:
             result = await tool.execute(**kwargs)
         except Exception as exc:
@@ -631,12 +664,6 @@ def _make_pydantic_ai_tool(tool_cls: Any, tool: Any, settings: Any) -> Any:
     _run.__name__ = defn.name
     _run.__qualname__ = defn.name
     _run.__doc__ = defn.description
-
-    schema_cls = getattr(tool, "args_schema", None)
-    if schema_cls is not None:
-        params, annotations = _signature_from_model(inspect, schema_cls)
-    else:
-        params, annotations = _signature_from_json_schema(inspect, defn.parameters or {})
 
     annotations["return"] = str
     _run.__signature__ = inspect.Signature(parameters=params, return_annotation=str)
@@ -672,30 +699,75 @@ def _signature_from_model(inspect: Any, model: Any) -> tuple[list, dict]:
     return params, annotations
 
 
+#: JSON-schema ``type`` -> the Python annotation pydantic-ai should advertise.
+#: Anything unlisted (``null``, a ``$ref``, a missing ``type``) falls back to
+#: ``str``, which is what every property used to get.
+_JSON_SCHEMA_TYPES: dict[str, Any] = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "array": list,
+    "object": dict,
+}
+
+
+def _python_type_for(prop: Any) -> Any:
+    """Map one JSON-schema property to a Python annotation."""
+    if not isinstance(prop, dict):
+        return str
+    declared = prop.get("type")
+    if isinstance(declared, list):
+        # ``["integer", "null"]`` — nullability is carried by the ``| None`` the
+        # caller adds for optional properties, so take the first real type.
+        declared = next((t for t in declared if t != "null"), None)
+    return _JSON_SCHEMA_TYPES.get(declared, str)
+
+
 def _signature_from_json_schema(inspect: Any, parameters: dict) -> tuple[list, dict]:
-    """Build ``str``-typed signature params from a tool's JSON-schema properties.
+    """Build signature params from a tool's JSON-schema properties.
+
+    Each property carries the Python type its ``type`` names, because
+    pydantic-ai turns this signature into the schema the MODEL is shown. Every
+    property used to be annotated ``str`` regardless of what it declared, so a
+    tool declaring ``num_results: {"type": "integer"}`` advertised a string and
+    ``execute()`` was handed ``"5"`` where it annotated ``int``. ``web_search``
+    died on ``min(max(num_results, 1), 10)``; every bridged tool with a
+    non-string parameter had the same defect.
 
     Honours the schema's ``required`` list: optional properties become
-    ``str | None = None`` so the model may omit them.
+    ``T | None`` so the model may omit them, defaulted to the schema's own
+    ``default`` rather than to ``None``. The default matters as much as the
+    type — ``num_results`` declares ``"default": 5``, and passing ``None`` for
+    an omitted argument OVERRODE the tool's own ``= 5`` instead of leaving it
+    alone.
+
+    Both halves were invisible while the pydantic-ai backend delivered ``{}``
+    for every tool call: no argument arrived, so the tool's Python defaults
+    always applied and the annotations were never exercised.
     """
     props = parameters.get("properties", {}) or {}
     required = set(parameters.get("required", []) or [])
     params: list = []
     annotations: dict = {}
-    for name in props:
+    for name, prop in props.items():
+        declared = _python_type_for(prop)
         if name in required:
-            params.append(inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, annotation=str))
-            annotations[name] = str
+            params.append(
+                inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, annotation=declared)
+            )
+            annotations[name] = declared
         else:
+            optional = declared | None
             params.append(
                 inspect.Parameter(
                     name,
                     inspect.Parameter.KEYWORD_ONLY,
-                    annotation=str | None,
-                    default=None,
+                    annotation=optional,
+                    default=prop.get("default") if isinstance(prop, dict) else None,
                 )
             )
-            annotations[name] = str | None
+            annotations[name] = optional
     return params, annotations
 
 
