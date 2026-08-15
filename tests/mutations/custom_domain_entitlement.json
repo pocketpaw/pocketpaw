@@ -94,5 +94,34 @@
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_an_active_paid_site_attaches_normally",
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_the_resold_feature_set_still_rides_along"
     ]
+  },
+  {
+    "label": "a republish without a plan key silently downgrades the tier to the floor",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    tier = site_plans.get_site_plan(site_plan_key)\n    if tier is None:\n        existing_tier = site_plans.get_site_plan(getattr(doc, \"plan_tier\", None))",
+    "replace": "    tier = site_plans.get_site_plan(site_plan_key)\n    if tier is None:\n        existing_tier = None",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_republish_without_a_plan_key_keeps_the_paid_tier",
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_republish_leaves_a_paying_site_able_to_attach_a_domain"
+    ]
+  },
+  {
+    "label": "a republish writes 'none' over an ACTIVE subscription",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    elif doc.subscription_status != \"active\":",
+    "replace": "    else:",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_republish_without_a_plan_key_keeps_the_paid_tier",
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_republish_leaves_a_paying_site_able_to_attach_a_domain"
+    ]
+  },
+  {
+    "label": "the keep-tier fallback swallows an EXPLICIT downgrade too",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    tier = site_plans.get_site_plan(site_plan_key)\n    if tier is None:",
+    "replace": "    tier = None\n    if tier is None:",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_an_explicit_tier_still_wins"
+    ]
   }
 ]

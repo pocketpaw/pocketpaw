@@ -380,3 +380,98 @@ async def test_with_billing_off_the_gate_never_fires(monkeypatch):
 
     assert res.hostname == "www.selfhost.com"
     assert len(cf.create_calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# The gate is only as correct as the fields it reads, and the publish path used
+# to rewrite both of them on every republish.
+#
+# Added 2026-08-15 after review. ``site_plan_key`` is an optional client-supplied
+# field, so an ordinary republish that omits it reset ``plan_tier`` to the base key
+# and ``subscription_status`` to "none". Nothing restores either — only the
+# ``subscription.active`` webhook writes "active", and no path rewrites the tier.
+# Harmless while nothing read the fields; this branch makes ``add_domain`` read
+# them, which turns the loss into a permanent 402 telling a paying customer to
+# upgrade a plan they already bought.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_republish_without_a_plan_key_keeps_the_paid_tier(monkeypatch):
+    """The tier survives a republish that simply does not mention it."""
+    from pocketpaw_ee.sites import service as svc
+
+    _enforce(monkeypatch, on=True)
+    ws = "ws_keep_tier"
+    tier = _a_tier_granting_custom_domain()
+    site_id = await _seed_site(workspace_id=ws, plan_tier=tier, subscription_status="active")
+    doc = await Site.get(site_id)
+
+    await svc._apply_site_plan(
+        doc=doc,
+        workspace_id=ws,
+        pocket_id="pk_1",
+        user_id="u1",
+        site_plan_key=None,  # the republish says nothing about the plan
+        provider=None,
+    )
+
+    refreshed = await Site.get(site_id)
+    assert refreshed.plan_tier == tier
+    assert refreshed.subscription_status == "active"
+
+
+async def test_a_republish_leaves_a_paying_site_able_to_attach_a_domain(monkeypatch):
+    """The whole point, end to end: republish, then attach. Before the fix this
+    402'd with "upgrade this site's plan" at a customer who was still paying."""
+    from pocketpaw_ee.sites import service as svc
+
+    _enforce(monkeypatch, on=True)
+    ws = "ws_republish_domain"
+    tier = _a_tier_granting_custom_domain()
+    site_id = await _seed_site(workspace_id=ws, plan_tier=tier, subscription_status="active")
+    doc = await Site.get(site_id)
+    await svc._apply_site_plan(
+        doc=doc,
+        workspace_id=ws,
+        pocket_id="pk_1",
+        user_id="u1",
+        site_plan_key=None,
+        provider=None,
+    )
+    cf = _RecordingCF()
+
+    res = await sites_service.add_domain(
+        workspace_id=ws,
+        site_id=site_id,
+        hostname="www.stillpaying.com",
+        _cloudflare=cf,
+    )
+
+    assert res.hostname == "www.stillpaying.com"
+
+
+async def test_an_explicit_tier_still_wins(monkeypatch):
+    """The fix must not make downgrades impossible. A real plan change carries the
+    target tier; only the ABSENCE of one is read as "leave it alone"."""
+    from pocketpaw_ee.sites import service as svc
+
+    _enforce(monkeypatch, on=True)
+    ws = "ws_explicit_downgrade"
+    site_id = await _seed_site(
+        workspace_id=ws,
+        plan_tier=_a_tier_granting_custom_domain(),
+        subscription_status="active",
+    )
+    doc = await Site.get(site_id)
+
+    await svc._apply_site_plan(
+        doc=doc,
+        workspace_id=ws,
+        pocket_id="pk_1",
+        user_id="u1",
+        site_plan_key=_the_free_tier(),  # an explicit move to the floor
+        provider=None,
+    )
+
+    refreshed = await Site.get(site_id)
+    assert refreshed.plan_tier == _the_free_tier()

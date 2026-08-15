@@ -4586,9 +4586,31 @@ async def _apply_site_plan(
     # Resolve the tier; fall back to the base tier for a None / unknown key so a
     # publish is never blocked by a bad tier string (the entitlement gate is the
     # one that matters and already ran).
-    tier = site_plans.get_site_plan(site_plan_key) or site_plans.get_site_plan(
-        site_plans.BASE_SITE_PLAN_KEY
-    )
+    #
+    # ...but NEVER let that fallback DOWNGRADE a site that already holds a tier.
+    # ``site_plan_key`` is an optional client-supplied field, so an ordinary
+    # republish that simply omits it used to rewrite a paying site's ``plan_tier``
+    # to the base key and its ``subscription_status`` to "none". Nothing restores
+    # either — only the ``subscription.active`` webhook writes "active", and no path
+    # rewrites the tier — so the site silently lost every paid capability for good.
+    # That was survivable while nothing read the fields; the custom-domain gate on
+    # ``add_domain`` reads them, which turns it into a permanent 402 telling a
+    # paying customer to upgrade a plan they already bought.
+    #
+    # An EXPLICIT key still wins in both directions: a real downgrade is a request
+    # carrying the target tier, not the absence of one. Only the None/unknown case
+    # is treated as "leave it as it is".
+    tier = site_plans.get_site_plan(site_plan_key)
+    if tier is None:
+        existing_tier = site_plans.get_site_plan(getattr(doc, "plan_tier", None))
+        tier = existing_tier or site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)
+        if existing_tier is not None:
+            logger.info(
+                "sites: publish for site %s carried no site_plan_key — keeping its "
+                "existing tier %s rather than resetting to the base",
+                str(doc.id),
+                existing_tier.key,
+            )
     plan_key = tier.key if tier is not None else site_plans.BASE_SITE_PLAN_KEY
 
     site_id = str(doc.id)
@@ -4623,11 +4645,24 @@ async def _apply_site_plan(
 
     # Stamp the per-site plan on the (already persisted) canonical Site doc.
     doc.plan_tier = plan_key
-    doc.subscription_id = subscription_id
     # A live sub starts pending until Dodo posts a verified subscription.active;
     # an unconfigured (no-charge) tier has no live sub to activate, so it stays
     # "none". The per-site webhook advances "pending" → "active".
-    doc.subscription_status = "pending" if subscription_id else "none"
+    #
+    # The ACTIVE case is carved out, for the same reason the tier fallback above is:
+    # a republish of a site that is already paying opened no new subscription
+    # (``subscription_id`` is None on this pass because no fresh checkout was made),
+    # and writing "none" over "active" silently strips every paid capability from a
+    # customer who is still being charged. Nothing restores it — only the webhook
+    # writes "active", and it has already fired for this subscription. Keep what the
+    # site has; a genuine cancellation arrives as a webhook, never as the absence of
+    # a checkout during an unrelated republish.
+    if subscription_id:
+        doc.subscription_id = subscription_id
+        doc.subscription_status = "pending"
+    elif doc.subscription_status != "active":
+        doc.subscription_id = subscription_id
+        doc.subscription_status = "none"
     await doc.save()
 
     await emit(
