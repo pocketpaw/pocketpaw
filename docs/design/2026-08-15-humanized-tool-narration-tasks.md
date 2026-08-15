@@ -466,6 +466,38 @@ provider-side search emits **no `tool_use` and no `tool_result` at all**. The UI
 **Done when:** with `pydantic_ai_native_web_tools=True`, a search emits a narrated `tool_use`, and a
 test pins that native parts are not silently dropped.
 
+> **There is a THIRD path, and on it narration is impossible from our side.** Checked against the
+> LiteLLM docs 2026-08-15, prompted by the captain running Parallel (parallel.ai) as a LiteLLM
+> search provider.
+>
+> LiteLLM's `websearch_interception` callback resolves web search **inside the proxy**: it detects
+> the model's `litellm_web_search` tool call, executes it against the configured provider
+> (`search_provider: parallel_ai`), makes a follow-up request carrying the results, and returns
+> only the final answer. Its own docs describe the outcome as "One API call from user → Complete
+> answer with search results" — the client never sees the intermediate tool call.
+>
+> So with interception enabled, **no `tool_use` event exists for pocketpaw to narrate**. This is
+> not a mapping bug like HTN-10's native parts; the event genuinely never crosses the wire. HTN-9
+> and HTN-10 cannot fix it, and neither can annotating any tool.
+>
+> **Which path you are on is a config question,** decided by whether `callbacks:
+> ["websearch_interception"]` is set in the LiteLLM config:
+>
+> | LiteLLM config | Tool name pocketpaw sees | Narratable? |
+> |---|---|---|
+> | `websearch_interception` ON | *(nothing — resolved in-proxy)* | **No.** Turn interception off, or surface the search from LiteLLM another way |
+> | Interception OFF, search tool exposed to the model | `litellm_web_search` | Yes, but **not** under the name `web_search` |
+> | Neither; our own `WebSearchTool` via the MCP bridge | `web_search` | Yes — the path HTN-1 annotated |
+>
+> **Two concrete consequences for HTN-2 and HTN-3:**
+> 1. The name is `litellm_web_search`, not `web_search`. HTN-1's `_ANNOTATED_TOOLS` misses it
+>    entirely. HTN-2's derive-from-name fallback should strip a `litellm_` vendor prefix (it
+>    already plans to strip vendor prefixes), which yields "Searching the web" — correct but not
+>    interpolated. Interpolating the query needs an override entry with `safe_args=("query",)`,
+>    since the parameter is `query` per LiteLLM's tool schema.
+> 2. A proxy-executed search has different privacy properties from a local one: the query goes to
+>    Parallel. Worth deciding whether the phrasing should say so rather than implying we searched.
+
 **Interfaces:** consumes HTN-9's contract adoption and HTN-2's identity resolution.
 **Deps:** HTN-9, and HTN-2 if the provider's tool name differs. **PRs:** 1 — pocketpaw.
 
