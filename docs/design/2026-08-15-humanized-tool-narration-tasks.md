@@ -5,6 +5,22 @@
 
 # Humanized tool narration — Tasks (local, not filed)
 
+## Status — wave 1 closed 2026-08-15
+
+| Task | Status | PR | Evidence |
+|---|---|---|---|
+| HTN-0 | done | — | Rescoped HTN-4; findings inline below |
+| HTN-1 | **PR open, awaiting captain** | [#1942](https://github.com/pocketpaw/pocketpaw/pull/1942) | 46 narration tests, 160 in sweep; security SOUND_WITH_FINDINGS, 6 fixed |
+| HTN-4 | **PR open, awaiting captain** | [#1943](https://github.com/pocketpaw/pocketpaw/pull/1943) | 131 passed; correlation regression caught and fixed before PR |
+| HTN-2 | ready | — | Carries inherited design + security notes below |
+| HTN-3 | blocked on HTN-2 | — | See sequencing note |
+| HTN-5 | ready | — | Unblocked by HTN-1 |
+| HTN-6 | **blocked — needs captain** | — | Live `TodoWrite` payload capture; see HTN-0 finding 3 |
+| HTN-7 | ready | — | Unblocked by HTN-1 |
+| HTN-8 | first pass done | — | Re-audit when HTN-2/3 widen the surface |
+
+**Neither PR is merged.** Per the never-merge-on-green gate, both wait on captain review.
+
 Vertical slices from the PRD's 9 build chunks. The PRD's chunks were layered
 (bridge → contract → frontend); they are re-cut here by shippable outcome, so the first
 merge puts a real humanized phrase on a real screen instead of landing plumbing nobody can see.
