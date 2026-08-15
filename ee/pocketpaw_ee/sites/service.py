@@ -840,6 +840,7 @@ from bson.errors import InvalidId
 from pocketpaw.sites_capture.contact_form import CONTACT_FORM_TYPE, default_event_mapping
 from pocketpaw_ee.cloud._core.errors import (
     CloudError,
+    CustomDomainNotEntitled,
     Forbidden,
     Internal,
     NotFound,
@@ -3896,6 +3897,54 @@ def _route_target(site: Any) -> str:
     return worker_name(str(site.id))
 
 
+def _assert_entitled_to_custom_domain(site: Any) -> None:
+    """Refuse the attach unless this site's own plan grants a custom domain.
+
+    Delegates the RULE to ``entitlements.resolve_site_entitlements`` rather than
+    reading ``plan_tier`` here, for the reason that resolver exists: cancellation
+    never resets the tier, and an unconfigured Dodo product records a paid tier with
+    no charge, so tier-alone hands a free custom domain to sites that have never
+    paid. That resolver had exactly one caller (the badge stamper); this is the
+    second, and both paid per-site capabilities now answer to the same function.
+
+    Gated on ``billing_enforced``, matching every other cap in this codebase: OSS /
+    self-host has no billing and must not acquire a paywall. The lazy ``get_settings``
+    import mirrors the connector cap — it keeps the billing posture off this module's
+    import path.
+
+    Synchronous and passed the loaded doc, because the resolver is pure and
+    ``entitlements`` may not import ``models.site`` (EE cloud rule 2): the caller
+    that owns the document passes what it owns.
+    """
+    from pocketpaw.config import get_settings
+
+    if not get_settings().billing_enforced:
+        return
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = entitlements_service.resolve_site_entitlements(
+        site_id=str(site.id),
+        workspace_id=site.workspace,
+        plan_tier=site.plan_tier,
+        subscription_status=site.subscription_status,
+        concierge_enabled=bool(getattr(site, "concierge_enabled", True)),
+    )
+    if ent.custom_domain:
+        return
+
+    logger.info(
+        "sites: refused a custom domain for site %s — tier %s, subscription active: %s",
+        site.id,
+        ent.plan_tier,
+        ent.subscription_active,
+    )
+    raise CustomDomainNotEntitled(
+        plan_tier=ent.plan_tier,
+        subscription_active=ent.subscription_active,
+    )
+
+
 async def add_domain(
     *,
     workspace_id: str,
@@ -3974,6 +4023,27 @@ async def add_domain(
             "Publish the site before connecting a domain — a custom domain has to "
             "point at a published site, and this one hasn't been published yet.",
         )
+
+    # A custom domain is a PAID per-site capability, so ask whether this site is
+    # entitled to one BEFORE anything is created. Until 2026-08-15 nothing asked:
+    # the tier was resolved just below, but only to pass ``cloudflare_features`` to
+    # provisioning (BC-10 resale), and no branch anywhere read whether the tier
+    # granted the domain itself. The endpoint's only gate was RBAC, which is
+    # permission rather than billing, so a base-tier site attached a custom domain
+    # and kept it — as did a paid site whose subscription was cancelled or, with no
+    # Dodo product configured, never charged at all.
+    #
+    # Placed HERE, and the position is the contract:
+    #   * AFTER the already-connected branch above returns, so this is never
+    #     retroactive. A site that loses its entitlement keeps a live domain, and
+    #     the re-Add route repair — the only self-service fix for a domain that
+    #     silently serves the fallback origin — stays reachable. Detaching on
+    #     downgrade happens at period end, which is not this seam.
+    #   * BEFORE ``create_custom_hostname``. Refusing afterwards would leave a
+    #     hostname on the shared zone with no Site row pointing at it: invisible to
+    #     the product, and it makes the customer's next legitimate attach fail on a
+    #     1406 duplicate they can neither see nor clear.
+    _assert_entitled_to_custom_domain(site)
 
     # Resolve the site's tier → its cloudflare_features and provision them on the
     # custom hostname. A base-tier (or unknown) site resolves to an empty set, so
@@ -4516,9 +4586,31 @@ async def _apply_site_plan(
     # Resolve the tier; fall back to the base tier for a None / unknown key so a
     # publish is never blocked by a bad tier string (the entitlement gate is the
     # one that matters and already ran).
-    tier = site_plans.get_site_plan(site_plan_key) or site_plans.get_site_plan(
-        site_plans.BASE_SITE_PLAN_KEY
-    )
+    #
+    # ...but NEVER let that fallback DOWNGRADE a site that already holds a tier.
+    # ``site_plan_key`` is an optional client-supplied field, so an ordinary
+    # republish that simply omits it used to rewrite a paying site's ``plan_tier``
+    # to the base key and its ``subscription_status`` to "none". Nothing restores
+    # either — only the ``subscription.active`` webhook writes "active", and no path
+    # rewrites the tier — so the site silently lost every paid capability for good.
+    # That was survivable while nothing read the fields; the custom-domain gate on
+    # ``add_domain`` reads them, which turns it into a permanent 402 telling a
+    # paying customer to upgrade a plan they already bought.
+    #
+    # An EXPLICIT key still wins in both directions: a real downgrade is a request
+    # carrying the target tier, not the absence of one. Only the None/unknown case
+    # is treated as "leave it as it is".
+    tier = site_plans.get_site_plan(site_plan_key)
+    if tier is None:
+        existing_tier = site_plans.get_site_plan(getattr(doc, "plan_tier", None))
+        tier = existing_tier or site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)
+        if existing_tier is not None:
+            logger.info(
+                "sites: publish for site %s carried no site_plan_key — keeping its "
+                "existing tier %s rather than resetting to the base",
+                str(doc.id),
+                existing_tier.key,
+            )
     plan_key = tier.key if tier is not None else site_plans.BASE_SITE_PLAN_KEY
 
     site_id = str(doc.id)
@@ -4553,11 +4645,24 @@ async def _apply_site_plan(
 
     # Stamp the per-site plan on the (already persisted) canonical Site doc.
     doc.plan_tier = plan_key
-    doc.subscription_id = subscription_id
     # A live sub starts pending until Dodo posts a verified subscription.active;
     # an unconfigured (no-charge) tier has no live sub to activate, so it stays
     # "none". The per-site webhook advances "pending" → "active".
-    doc.subscription_status = "pending" if subscription_id else "none"
+    #
+    # The ACTIVE case is carved out, for the same reason the tier fallback above is:
+    # a republish of a site that is already paying opened no new subscription
+    # (``subscription_id`` is None on this pass because no fresh checkout was made),
+    # and writing "none" over "active" silently strips every paid capability from a
+    # customer who is still being charged. Nothing restores it — only the webhook
+    # writes "active", and it has already fired for this subscription. Keep what the
+    # site has; a genuine cancellation arrives as a webhook, never as the absence of
+    # a checkout during an unrelated republish.
+    if subscription_id:
+        doc.subscription_id = subscription_id
+        doc.subscription_status = "pending"
+    elif doc.subscription_status != "active":
+        doc.subscription_id = subscription_id
+        doc.subscription_status = "none"
     await doc.save()
 
     await emit(

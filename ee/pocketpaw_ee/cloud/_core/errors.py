@@ -31,6 +31,13 @@ Changed 2026-07-08 (feat/billing-smb-caps): added ``PocketLimitError`` (402,
 ``SeatLimitError``. Same 402 money-adjacent family; distinct codes so the UI can
 prompt a plan upgrade. Both enforce at create/enable time only (never retroactive)
 and only when ``billing_enforced`` is on.
+
+Changed 2026-08-15 (fix/sites-custom-domain-entitlement): added
+``CustomDomainNotEntitled`` (402, ``billing.custom_domain_not_entitled``) — the
+domain-attach sibling of the two above, and the first of this family keyed to a
+PER-SITE plan rather than the workspace one. Not a count limit: it reports a
+capability the site's tier does not resell, or a paid tier whose subscription is
+not paying. Attach-time only, gated on ``billing_enforced``.
 """
 
 from __future__ import annotations
@@ -145,6 +152,41 @@ class ConnectorLimitError(CloudError):
 
     def __init__(self, limit: int) -> None:
         super().__init__(402, "billing.connector_limit", f"Connector limit of {limit} reached")
+
+
+class CustomDomainNotEntitled(CloudError):
+    """A site tried to attach a custom domain its per-site plan does not grant (402).
+
+    Sibling of ``PocketLimitError`` / ``ConnectorLimitError`` for the domain-attach
+    seam, and the same money-adjacent 402 family, with a distinct
+    ``billing.custom_domain_not_entitled`` code so the UI prompts a per-SITE plan
+    upgrade rather than a workspace one.
+
+    The distinction from its siblings is that this is not a COUNT limit: there is no
+    ceiling to report, only a capability the site's tier either resells or does not.
+    Two different failures land here and the message separates them, because the
+    remedies differ — a free site upgrades its plan, while a paid site whose
+    subscription lapsed fixes its billing and keeps the tier it already chose.
+
+    Enforced at ATTACH time only — never retroactive. A downgrade does not rip a
+    live domain off a deployed site, and re-adding an already-connected domain
+    (the only self-service repair for a missing Worker route) stays reachable. The
+    spec's period-end detach is a different lane. Gated on ``billing_enforced``,
+    so OSS / self-host never sees it.
+    """
+
+    def __init__(self, *, plan_tier: str, subscription_active: bool) -> None:
+        if subscription_active:
+            detail = (
+                f"the {plan_tier} plan does not include a custom domain — "
+                "upgrade this site's plan to connect one"
+            )
+        else:
+            detail = (
+                f"this site is on {plan_tier} without an active subscription — "
+                "renew it to connect a custom domain"
+            )
+        super().__init__(402, "billing.custom_domain_not_entitled", f"Custom domain: {detail}")
 
 
 class CallLimitError(CloudError):
