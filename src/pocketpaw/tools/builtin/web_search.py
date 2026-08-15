@@ -7,6 +7,9 @@
 #   to a LiteLLM gateway gets web search with no second vendor key and no
 #   second egress path. Whatever the operator registered there (parallel_ai,
 #   tinyfish, …) is reachable by name.
+# 2026-08-15 (HTN-1): declares a ``narration`` — the reference implementation
+#   for humanized tool narration, so a search reads as "Searching the web for
+#   quarterly filings" instead of the bare tool name.
 
 import logging
 from typing import Any
@@ -14,6 +17,7 @@ from typing import Any
 import httpx
 
 from pocketpaw.config import get_settings
+from pocketpaw.tools.narration import Narration
 from pocketpaw.tools.protocol import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -41,6 +45,16 @@ class WebSearchTool(BaseTool):
     @property
     def trust_level(self) -> str:
         return "standard"
+
+    @property
+    def narration(self) -> Narration | None:
+        # ``query`` is the only arg safe to show — ``num_results`` is noise, and
+        # anything not listed here can never reach the rendered phrase.
+        return Narration(
+            active="Searching the web for {query}",
+            bare="Searching the web",
+            safe_args=("query",),
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
