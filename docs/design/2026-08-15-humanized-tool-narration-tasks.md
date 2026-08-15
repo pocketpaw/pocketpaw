@@ -21,7 +21,18 @@
 
 **Neither PR is merged.** Per the never-merge-on-green gate, both wait on captain review.
 
-### ⚠ Merge order is load-bearing: #1943 before HTN-9
+### ⚠ Merge order for the whole wave: #1943 → #1945 → HTN-5
+
+Two independent constraints chain into one order:
+1. **#1943 before #1945** — see below.
+2. **#1945 before HTN-5 (the plan surface)** — pydantic-ai suppresses tool arguments until #1945
+   lands, so `write_plan` reaches the bridge with `input={}` and the plan surface is **inert**.
+   It is not broken; it has nothing to normalize. HTN-5 ships a fail-open fallback (an
+   unrecognized plan call falls through to the ordinary tool chip) precisely so this window
+   degrades to today's behavior rather than to a silent surface. **Do not verify the plan panel
+   live before #1945 merges — it will look broken and will not be.**
+
+### ⚠ #1943 before HTN-9 (#1945)
 
 HTN-9 makes pydantic-ai emit the provisional + resolved pair, same as HTN-4 did for claude_sdk.
 `loop.py`'s skip of provisional events ships in **#1943 (HTN-4)**. Merge HTN-9 first and `dev` gets
@@ -65,8 +76,20 @@ merge puts a real humanized phrase on a real screen instead of landing plumbing 
    not by review. Any chunk touching narration rendering is security-relevant.
 5. **Backward compatibility on the wire.** The existing `tool` field in `AgentToolUse.data` stays
    populated. All new fields are additive so an older client keeps working.
-6. **`topics.gen.ts` is generated.** Never hand-edit; regenerate via
-   `uv run python backend/scripts/gen_topics.py`.
+6. **`topics.gen.ts` is generated — but the generator is LOSSY. Do not run it bare.**
+   ⚠ **Corrected 2026-08-15.** This constraint originally said "regenerate via
+   `uv run python backend/scripts/gen_topics.py`". Following that instruction **deletes 10 live
+   topics.** Measured by running the script redirected to scratch and diffing against the
+   committed file: it adds the one wanted line and removes `belt_plan`, five `mandate.*` topics
+   and four `meeting.*` topics.
+   **Cause:** `EVENT_REGISTRY` is populated by class-definition side effects, and the classes
+   behind those topics live in `ee/pocketpaw_ee/cloud/mandates/events.py` and
+   `.../meetings/events.py`, which `scripts/gen_topics.py` never imports. So it regenerates from a
+   registry missing a third of its sources. **Pre-existing, unrelated to this work, and worth its
+   own fix.**
+   **Until the generator's imports are fixed:** hand-add the single topic line in sort position and
+   say so in the PR body. A one-line manual edit is strictly safer than a lossy regeneration.
+   If you do run it, run it redirected to scratch and diff before writing anything.
 7. **Glossary bindings:** Pocket = workspace container; Connector = workspace-scoped integration;
    Ripple = generative UI layer; Instinct = decision pipeline. No LLM-default readings.
 8. **Docs in the same PR** as the behavior they describe.
