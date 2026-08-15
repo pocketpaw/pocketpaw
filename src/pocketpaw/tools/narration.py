@@ -22,6 +22,28 @@
 #     to copy them, so a hostile ``__format__`` can never reach ``.format()``.
 #   - bound sanitizing work before it starts: truncate to a scan limit first so
 #     a multi-MB tool arg can't drive full-size copies on the event loop.
+#
+# Updated: 2026-08-15 (HTN-2) — every tool reads as English, not just the one
+# annotated tool. ``_ANNOTATED_TOOLS`` (the one-entry name -> (module, class)
+# stopgap) is DELETED: it mapped to builtin classes, so MCP and connector tools
+# could never appear in it, and reading a narration through it CONSTRUCTED the
+# tool. ``narration_for_tool`` now resolves in three steps —
+#
+#   1. the ``Narration`` declared on the LIVE instance a ``ToolRegistry``
+#      already holds. Never construct a tool to read a property:
+#      ``ShellTool.__init__`` calls ``get_settings()``, so a registry-wide
+#      version of the old instantiate-to-read pattern would build settings, and
+#      whatever the credential store does on first load, on the event loop just
+#      to phrase a status line.
+#   2. ``_NARRATION_OVERRIDES`` — phrasing for tools that are external and
+#      cannot self-declare (MCP servers, connector surfaces, proxy-side tools).
+#   3. derive-from-name — strip the vendor prefix, find a verb in a small fixed
+#      lexicon, phrase it verb-first. Deterministic string work, no LLM.
+#
+# and returns ``None`` when all three come up empty, so a caller omits the field
+# rather than inventing a phrase. A derived phrase never interpolates arguments:
+# derivation reads the tool's NAME, and a name carries no ``safe_args``
+# allowlist, so there is nothing that would make an argument safe to show.
 
 from __future__ import annotations
 
@@ -31,7 +53,6 @@ import string
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
-from importlib import import_module
 from numbers import Number
 from typing import Any
 
@@ -274,30 +295,247 @@ def render(narration: Narration | None, args: dict | None) -> str | None:
         return bare
 
 
-# Tool name -> (module, class) for the builtin tools that declare a Narration.
-# Kept explicit rather than walking every builtin so a lookup never imports the
-# world (or an optional dependency) just to phrase a status line. HTN-2 replaces
-# this with the real registry lookup plus the derive-from-name fallback.
-_ANNOTATED_TOOLS: dict[str, tuple[str, str]] = {
-    "web_search": ("pocketpaw.tools.builtin.web_search", "WebSearchTool"),
+# Phrasing for tools that cannot declare a ``Narration`` of their own. An MCP
+# server's tools and a connector's hosted actions are defined outside this
+# codebase, so there is no class to annotate — this table is the only place
+# their phrasing can live.
+#
+# This is NOT the deleted ``_ANNOTATED_TOOLS`` under a new name. That map named
+# a module and a class and CONSTRUCTED the tool to read a property off it; this
+# one holds finished ``Narration`` values and imports nothing. A builtin belongs
+# on its own class (``BaseTool.narration``), never here.
+#
+# Keying is by wire name, which is the only identity the bridge has. See the
+# collision caveat in ``narration_for_tool``.
+_NARRATION_OVERRIDES: dict[str, Narration] = {
+    # LiteLLM's proxy exposes web search under this name, with a ``query``
+    # parameter. Derivation alone would read it as the bare "Searching the web"
+    # — correct but incurious — because a derived phrase never interpolates
+    # arguments. Declaring it here is what puts the query back in the sentence.
+    "litellm_web_search": Narration(
+        active="Searching the web for {query}",
+        bare="Searching the web",
+        safe_args=("query",),
+    ),
 }
+
+# Verb -> gerund. Deliberately small and fixed: a derived phrase is a fallback,
+# so it needs to be predictable and wrong-in-a-boring-way rather than clever. A
+# name whose verb is not in here derives nothing and narrates nothing.
+_VERB_LEXICON: dict[str, str] = {
+    "publish": "Publishing",
+    "create": "Creating",
+    "search": "Searching",
+    "invite": "Inviting",
+    "delete": "Deleting",
+    "update": "Updating",
+    "list": "Listing",
+    "send": "Sending",
+    "read": "Reading",
+    "write": "Writing",
+    "run": "Running",
+    "fetch": "Fetching",
+}
+
+# Leading tokens that name the vendor rather than the thing being acted on.
+# Stripped only from the FRONT, so ``pocketpaw_sites_publish`` loses its prefix
+# while a hypothetical ``export_pocketpaw`` keeps its object.
+_VENDOR_PREFIXES = frozenset({"mcp", "pocketpaw", "paw", "litellm", "composio"})
+
+# Object tokens that are a NAME rather than a common noun, mapped to how they
+# are spelled in a sentence. A name takes no article: the article rule that
+# makes ``sites_publish`` read "Publishing the site" would otherwise make
+# ``gmail_search`` read "Searching the gmail".
+#
+# The services here are the ones PocketPaw actually surfaces tools for — see
+# ``_COMPOSIO_OVERLAPPING_TOOL_NAMES`` in ``agents/tool_bridge.py``, which is
+# where these names come from. One missing from this map degrades to the article
+# form, which reads slightly wrong rather than incorrectly.
+_PROPER_NOUNS: dict[str, str] = {
+    "calendar": "Calendar",
+    "discord": "Discord",
+    "docs": "Docs",
+    "drive": "Drive",
+    "github": "GitHub",
+    "gmail": "Gmail",
+    "jira": "Jira",
+    "linear": "Linear",
+    "notion": "Notion",
+    "python": "Python",
+    "reddit": "Reddit",
+    "sheets": "Sheets",
+    "slack": "Slack",
+    "telegram": "Telegram",
+    "youtube": "YouTube",
+}
+
+# Splits a name into words: an acronym run (``HTTP``), a capitalized word
+# (``Fetch``), or a lowercase/digit run. The default backend's own builtins are
+# camelCase — ``WebSearch``, ``TodoWrite``, ``WebFetch`` — so without this they
+# derive nothing at all, being a single unrecognisable token.
+_WORD_RUN = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
+
+# A tool NAME is externally controlled — a user-added MCP server names its own
+# tools — and a derived phrase embeds it, so the name is validated before any
+# of it reaches a user-visible string. ASCII word characters only: that rejects
+# the bidi overrides and zero-width characters ``_strip_invisibles`` exists to
+# catch, before they ever get near a phrase. Length is capped here so the
+# derived phrase is bounded without a second cap downstream.
+_DERIVABLE_NAME = re.compile(r"^[A-Za-z0-9_]{1,80}$")
+_MAX_NAME_TOKENS = 8
+
+
+def _name_tokens(segment: str) -> list[str]:
+    """Split one name segment into lowercase words.
+
+    Handles both conventions a tool name arrives in: ``sites_publish`` and
+    ``TodoWrite``.
+    """
+    return [word.lower() for word in _WORD_RUN.findall(segment)]
+
+
+def _strip_vendor_prefix(tokens: list[str]) -> list[str]:
+    index = 0
+    while index < len(tokens) and tokens[index] in _VENDOR_PREFIXES:
+        index += 1
+    return tokens[index:]
+
+
+def _singularize(word: str) -> str:
+    """Naive trailing-plural trim — enough for tool names, not for English.
+
+    Tool names are short machine identifiers ("sites", "entries"), so the two
+    common plural forms cover the surface. The ``ss``/``us``/``is``/``os``
+    guard keeps "status", "analysis" and "address" intact.
+    """
+    if len(word) > 3 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 2 and word.endswith("s") and not word.endswith(("ss", "us", "is", "os")):
+        return word[:-1]
+    return word
 
 
 @lru_cache(maxsize=256)
-def narration_for_tool(tool_name: str) -> Narration | None:
-    """Look up the ``Narration`` a builtin tool declares, by tool name.
+def _derive_narration(tool_name: str) -> Narration | None:
+    """Phrase a tool call from the tool's NAME alone.
 
-    Returns ``None`` for any tool that isn't annotated — callers treat that as
-    "no narration", never as a reason to invent one.
+    ``pocketpaw_sites_publish`` -> "Publishing the site". Returns ``None`` when
+    the name carries no verb this can recognise (``shell``), because a phrase
+    invented from a name we cannot read is worse than the raw name: it is a
+    confident sentence about something the agent may not be doing.
+
+    The result carries no placeholders, so it renders identically whatever the
+    call's arguments were.
     """
-    target = _ANNOTATED_TOOLS.get(tool_name)
-    if target is None:
+    if not isinstance(tool_name, str) or not _DERIVABLE_NAME.match(tool_name):
         return None
-    module_path, class_name = target
+
+    # ``mcp__<server>__<tool>`` is how Claude Code namespaces an in-process MCP
+    # tool. The last segment is the tool itself; the segment before it is the
+    # server, which is the only place an object noun lives when the tool
+    # segment is a bare verb (``mcp__pocketpaw_pocket_specialist__create``).
+    segments = [segment for segment in tool_name.split("__") if segment]
+    if not segments:
+        return None
+    tokens = _strip_vendor_prefix(_name_tokens(segments[-1]))
+    if not tokens or len(tokens) > _MAX_NAME_TOKENS:
+        return None
+
+    # Three orders occur in the wild, so the verb is looked for in all of them:
+    #   sites_publish, web_search        verb last, object before it
+    #   create_pocket, send_message      verb first, object after it
+    #   gmail_send, gmail_list_labels    service first, then the verb-first form
+    # The trailing position wins, because a name that ENDS in a verb is using it
+    # as a verb; a name that merely contains one may be using it as a noun
+    # (``search_index_update`` is an update, not a search).
+    if tokens[-1] in _VERB_LEXICON:
+        verb, object_tokens = tokens[-1], tokens[:-1]
+    else:
+        for index, token in enumerate(tokens):
+            if token in _VERB_LEXICON:
+                verb, object_tokens = token, tokens[index + 1 :]
+                break
+        else:
+            return None
+
+    if not object_tokens and len(segments) >= 2:
+        # ``mcp__pocketpaw_pocket_specialist__create`` — the tool segment is a
+        # bare verb, so the server segment is the only noun on offer.
+        object_tokens = _strip_vendor_prefix(_name_tokens(segments[-2]))
+    object_tokens = [token for token in object_tokens if token != "tool"]
+    if len(object_tokens) > _MAX_NAME_TOKENS:
+        return None
+
+    gerund = _VERB_LEXICON[verb]
+    if not object_tokens:
+        # A verb with no object still beats the raw identifier, and inventing
+        # an object would be inventing a fact.
+        phrase = gerund
+    elif len(object_tokens) == 1 and object_tokens[0] in _PROPER_NOUNS:
+        phrase = f"{gerund} {_PROPER_NOUNS[object_tokens[0]]}"
+    else:
+        # "list" is inherently plural — singularizing it gives "Listing the
+        # file" for ``list_files``, which is the one place the trim reads worse
+        # than leaving the name alone.
+        if verb != "list":
+            object_tokens[-1] = _singularize(object_tokens[-1])
+        phrase = f"{gerund} the {' '.join(object_tokens)}"
+
+    return Narration(active=phrase, bare=phrase)
+
+
+def _declared_narration(tool_name: str, registry: Any | None) -> Narration | None:
+    """Read the ``Narration`` off the LIVE instance ``registry`` holds.
+
+    Never constructs anything. The registry already owns instantiated tools
+    (``ToolRegistry.register`` stores the instance), so a lookup is a dict get
+    and an attribute read — no ``__init__`` runs, no settings get built, no
+    credential store gets touched to phrase a status line.
+
+    Every step is guarded because none of it is our code: ``registry`` is
+    duck-typed, ``get`` may be anything callable, and ``narration`` is a
+    property a tool author wrote.
+    """
+    if registry is None:
+        return None
+    getter = getattr(registry, "get", None)
+    if not callable(getter):
+        return None
     try:
-        tool = getattr(import_module(module_path), class_name)()
-        narration = tool.narration
+        tool = getter(tool_name)
+        if tool is None:
+            return None
+        narration = getattr(tool, "narration", None)
     except Exception:
         logger.debug("Narration lookup failed for tool %r", tool_name, exc_info=True)
         return None
     return narration if isinstance(narration, Narration) else None
+
+
+def narration_for_tool(tool_name: str, registry: Any | None = None) -> Narration | None:
+    """Resolve the ``Narration`` for a tool call, by tool name.
+
+    Resolution order, first hit wins:
+
+    1. the narration declared on the live instance in ``registry`` (when the
+       caller has one);
+    2. ``_NARRATION_OVERRIDES``, for external tools that cannot self-declare;
+    3. derive-from-name.
+
+    Returns ``None`` when none of them phrase it. Callers omit the field on
+    ``None`` — they never fall back to a phrase of their own.
+
+    IDENTITY CAVEAT: every step keys on the bare wire name, which is the only
+    identity a caller has at this point. On backends that emit unprefixed MCP
+    tool names (``agents/codex_cli.py``), a user-added MCP server exposing a
+    tool called ``web_search`` would inherit whatever ``web_search`` means
+    here. Resolving that needs the tool's ORIGIN (the server field the caller
+    would have to read alongside the name), not a change in this function.
+    """
+    if not isinstance(tool_name, str) or not tool_name:
+        return None
+    return (
+        _declared_narration(tool_name, registry)
+        or _NARRATION_OVERRIDES.get(tool_name)
+        or _derive_narration(tool_name)
+    )
