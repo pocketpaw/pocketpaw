@@ -43,6 +43,13 @@ delivered-artifact collector around ``pool.run`` and drains it into a
 so a group/DM agent that delivers a file persists the structured signal too.
 This path has no run-transport SSE stream, so it emits no ``artifact`` event —
 that applies only to the streaming ``run_core`` path.
+
+Updated 2026-08-15 (HTN-1): the ``tool_use`` branch reads ``event.metadata``
+(name + input) with ``event.content`` as fallback — the precedence ``run_core``
+already uses — and adds an additive ``narration`` field to ``agent.tool_use``
+carrying the tool's plain-language phrase ("Searching the web for quarterly
+filings"). ``tool`` still carries the tool name, so clients keyed on it are
+unaffected; a tool with no ``Narration`` emits no ``narration`` field.
 """
 
 from __future__ import annotations
@@ -449,6 +456,23 @@ def _augment_message_with_attachments(content: str, attachments: list[dict] | No
     return f"{content}\n\nAttached files:\n" + "\n".join(lines)
 
 
+def _narrate_tool_use(tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    """Render a plain-language phrase for a tool call, or None.
+
+    Returns None for any tool that declares no ``Narration`` — narration is
+    decoration, so it must never raise into, or block, the response stream.
+    """
+    if not tool_name:
+        return None
+    try:
+        from pocketpaw.tools.narration import narration_for_tool, render
+
+        return render(narration_for_tool(tool_name), tool_input)
+    except Exception:
+        logger.debug("Tool narration failed for %s", tool_name, exc_info=True)
+        return None
+
+
 async def _run_agent_response(
     agent_id: str,
     group_id: str,
@@ -580,22 +604,40 @@ async def _run_agent_response(
                         )
                     )
             elif event.type == "tool_use":
-                # Notify clients which tool the agent is using
+                # Notify clients which tool the agent is using, and — when the
+                # tool declares a Narration — what it is doing in plain language.
+                #
+                # Precedence matches the SSE path (``chat/runs/run_core.py``):
+                # ``metadata`` first because every backend puts the bare tool
+                # name and the call's args there, while ``content`` carries a
+                # prose string ("Using web_search..."). Reading content first
+                # gave clients that prose as the ``tool`` value, which no
+                # name-keyed client could match.
                 tool_name = ""
-                if isinstance(event.content, dict):
-                    tool_name = event.content.get("tool") or event.content.get("name") or ""
-                elif isinstance(event.content, str):
-                    tool_name = event.content
-                await emit(
-                    AgentToolUse(
-                        data={
-                            "group_id": group_id,
-                            "agent_id": agent_id,
-                            "agent_name": instance.agent_name,
-                            "tool": tool_name,
-                        },
-                    )
-                )
+                tool_input: dict[str, Any] = {}
+                meta = getattr(event, "metadata", None)
+                meta = meta if isinstance(meta, dict) else {}
+                if meta:
+                    tool_name = meta.get("name") or meta.get("tool") or ""
+                    raw_input = meta.get("input")
+                    tool_input = raw_input if isinstance(raw_input, dict) else {}
+                if not tool_name:
+                    if isinstance(event.content, dict):
+                        tool_name = event.content.get("tool") or event.content.get("name") or ""
+                    elif isinstance(event.content, str):
+                        tool_name = event.content
+                payload: dict[str, Any] = {
+                    "group_id": group_id,
+                    "agent_id": agent_id,
+                    "agent_name": instance.agent_name,
+                    "tool": tool_name,
+                }
+                # Purely additive: a tool with no narration emits no field, and
+                # the bridge never invents a fallback phrase.
+                narration = _narrate_tool_use(tool_name, tool_input)
+                if narration:
+                    payload["narration"] = narration
+                await emit(AgentToolUse(data=payload))
             elif event.type == "thinking":
                 await emit(
                     AgentToolUse(
