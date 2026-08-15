@@ -162,7 +162,12 @@ def test_every_bidi_control_is_stripped():
     """The whole embedding/override/isolate family, not just RLO."""
     for ch in _BIDI_CONTROLS:
         result = render(SEARCH, {"query": f"before{ch}after"})
-        assert ch not in result, f"U+{ord(ch):04X} survived sanitizing"
+        # Assert the whole phrase, not just the character's absence: a broken
+        # implementation that dropped the value entirely would also satisfy
+        # "the control is gone", and that is not the behavior we want here.
+        assert result == "Searching the web for before after", (
+            f"U+{ord(ch):04X} was not stripped cleanly: {result!r}"
+        )
 
 
 def test_zero_width_only_value_falls_back_to_bare():
@@ -179,6 +184,30 @@ def test_each_zero_width_character_alone_falls_back_to_bare():
         )
 
 
+def test_zero_width_padding_never_reaches_the_truncation_cap():
+    """The original bug produced 79 invisible characters plus an ellipsis — the
+    cap fired on content with no visible width at all. The empty check runs
+    against the STRIPPED text, so padding can never get that far, however long
+    it is: past the 80-char cap, and past the sanitize scan limit."""
+    from pocketpaw.tools.narration import _SANITIZE_SCAN_LIMIT
+
+    zwsp = _ZERO_WIDTH[0]
+    for count in (90, _SANITIZE_SCAN_LIMIT + 500, 5_000):
+        assert render(SEARCH, {"query": zwsp * count}) == "Searching the web", (
+            f"{count} zero-width characters did not fall back to bare"
+        )
+
+
+def test_zero_width_padding_around_real_text_is_removed():
+    """Padding must be stripped without taking the real value with it, and
+    without eating into the cap."""
+    zwsp = _ZERO_WIDTH[0]
+    result = render(SEARCH, {"query": zwsp * 200 + "visible" + zwsp * 200})
+
+    assert result == "Searching the web for visible"
+    assert zwsp not in result
+
+
 def test_no_invisible_characters_survive():
     """Blanket guard over the categories the sanitizer promises to remove."""
     hostile = "a\u200bb\u202ec\ufeffd\x00e\u00adf\u2028g"
@@ -186,6 +215,10 @@ def test_no_invisible_characters_survive():
 
     leaked = [ch for ch in result if unicodedata.category(ch) in _INVISIBLE_CATEGORIES]
     assert not leaked, f"invisible characters survived: {[hex(ord(c)) for c in leaked]}"
+    # ...and the visible letters between them are still there, so this can't be
+    # satisfied by an implementation that simply threw the value away.
+    for letter in "abcdefg":
+        assert letter in result, f"visible text was lost: {result!r}"
 
 
 def test_ordinary_unicode_text_is_preserved():
