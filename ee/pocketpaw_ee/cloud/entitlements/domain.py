@@ -29,6 +29,11 @@
 #   (``int | None``, None = uncapped) — the workspace S3 STORAGE cap in bytes the
 #   uploads pipeline enforces at upload time. Fail-closed to the Free value
 #   (5 GB) on the fallback path.
+# Updated 2026-08-15 (feat/sites-concierge-entitlement): added
+#   ``SiteEntitlements.concierge_entitled`` + the ``concierge_available`` property.
+#   ``concierge_enabled`` was a PASS-THROUGH of the owner's toggle that consulted no
+#   plan at all, so a free site served a concierge indefinitely. The two questions
+#   stay separate fields on purpose — see the class docstring.
 # Updated 2026-08-13 (feat/sites-site-entitlements): added ``SiteEntitlements`` —
 #   the PER-SITE shape, a second scope beside the workspace one. Sites are the
 #   only thing billed per-object (``Site.plan_tier`` + ``subscription_status``),
@@ -106,6 +111,15 @@ class SiteEntitlements:
     ``white_label``. The first two wait on which meter owns a concierge run, and
     the third on an org entity that does not exist. A field that always returns
     0/False reads as implemented, which is worse than its absence.
+
+    ``concierge_enabled`` and ``concierge_entitled`` are two different questions
+    and are deliberately NOT folded into one boolean. The first is the owner's own
+    kill switch, echoed unchanged; the second is whether the site's plan sells the
+    concierge at all. Collapsing them would make "off" unattributable — support
+    could not tell an owner who switched it off from an owner whose subscription
+    lapsed, and the dashboard could not offer the right remedy. The public seams
+    refuse identically on either (see ``concierge_available``); only the reason
+    differs, and the reason is what a human needs.
     """
 
     site_id: str
@@ -115,3 +129,16 @@ class SiteEntitlements:
     badge_required: bool
     custom_domain: bool
     concierge_enabled: bool
+    concierge_entitled: bool
+
+    @property
+    def concierge_available(self) -> bool:
+        """May this site actually serve its concierge right now?
+
+        The AND of the owner's intent and the plan's permission — the single
+        question every public paw-bar seam asks, so no caller has to remember to
+        check both. A caller that reads only ``concierge_enabled`` (as every seam
+        did before the billing gate existed) serves a free site's concierge, which
+        is the hole this property closes.
+        """
+        return self.concierge_enabled and self.concierge_entitled
