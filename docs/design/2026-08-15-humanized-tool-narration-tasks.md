@@ -406,7 +406,15 @@ Recorded here rather than quietly absorbed.
 **First broadly useful outcome:** + HTN-2 (~4h) — every tool reads as English, no annotations needed.
 
 **Out of scope (deferred, from the PRD's non-goals):**
-- i18n and per-surface phrasing — `Narration` is structured so these are additive later
+- i18n and per-surface phrasing — `Narration` is structured so these are additive later.
+  **Known consequence to revisit when i18n lands (measured 2026-08-15):** the security fix strips
+  the whole Unicode `Cf` category to close the bidi-override and zero-width-padding findings, and
+  U+200D ZERO WIDTH JOINER is `Cf`. So a ZWJ emoji sequence degrades to its components
+  (👩‍💻 renders as 👩 💻), and ZWJ/ZWNJ conjunct control in Indic and Arabic scripts is stripped
+  too. Ordinary non-ASCII is unaffected — Japanese, Devanagari and accented Latin all verified
+  intact. This is the right trade for an 80-char status line whose arguments are model-authored,
+  and narrowing the class to re-admit U+200D would reopen the zero-width padding bypass. Flagged
+  so i18n work treats it as a known decision rather than a bug to "fix"
 - Pocket-level narration overrides
 - The planner MCP's `todos[]` build brief (`ee/.../mcp_servers/planner.py:528`) — different lifecycle
 - Plan persistence and historical replay — plans stay per-run and in-memory
