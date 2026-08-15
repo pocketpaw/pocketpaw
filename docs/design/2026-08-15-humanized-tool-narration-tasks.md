@@ -21,6 +21,33 @@
 
 **Neither PR is merged.** Per the never-merge-on-green gate, both wait on captain review.
 
+### ⚠ Merge order is load-bearing: #1943 before HTN-9
+
+HTN-9 makes pydantic-ai emit the provisional + resolved pair, same as HTN-4 did for claude_sdk.
+`loop.py`'s skip of provisional events ships in **#1943 (HTN-4)**. Merge HTN-9 first and `dev` gets
+duplicate `pending_tool_calls` entries on the pydantic-ai path — stale residue across a turn and
+corrupted `tool_call_id` correlation via the `pop(0)` fallback — until #1943 lands.
+
+**Merge #1943 before, or in the same batch as, HTN-9.** HTN-9's branch is off `origin/dev` and
+deliberately does not touch `loop.py`, to avoid conflicting with #1943.
+
+### HTN-9 found a second defect this plan never diagnosed
+
+The plan (and my brief) said the bug was the `tool_call_id` dedupe. That was only half.
+`ToolCallPart.args` is typed `str | dict[str, Any] | None` (`pydantic_ai/messages.py:1942`), and
+the streamed path delivers **JSON text**, not a dict. The metadata builder kept the value only
+`if isinstance(args, dict)`, coercing every real streamed call to `{}`. **Fixing the dedupe alone
+would still have shipped `{}`** — a green task and a broken feature.
+
+Two things worth carrying forward:
+- The decoder must not fall back to `args_as_dict()`, whose documented behavior on malformed JSON
+  is to return `{'INVALID_JSON': '<raw args>'}` (`messages.py:1991-2003`) — that would hand the UI a
+  fabricated argument *named* `INVALID_JSON` as though the model had passed it. Non-object payloads
+  become `{}` instead.
+- The replaced test counted one `tool_use` per call and passed for the life of the backend while
+  `input` was unconditionally `{}`. It proved the dedupe worked and said nothing about whether the
+  arguments survived it. **Assert the argument dict, not the event count.**
+
 Vertical slices from the PRD's 9 build chunks. The PRD's chunks were layered
 (bridge → contract → frontend); they are re-cut here by shippable outcome, so the first
 merge puts a real humanized phrase on a real screen instead of landing plumbing nobody can see.
