@@ -274,6 +274,36 @@ test asserting the derived phrasing for a sample of unannotated tools; `statusMa
 
 ## HTN-3 — The builtin surface speaks in the product's voice · ~2 agent-hrs
 
+> **⚠ Re-price this task before running it. Measured 2026-08-15, after HTN-2's seam landed.**
+>
+> HTN-2 anchors the live `ToolRegistry` on the agent's `ToolPolicy`, reachable via
+> `tool_bridge.narration_registry_for(backend)`. That works for the **four** backends whose tools
+> go through the bridge — `build_openai_function_tools`, `build_adk_function_tools`,
+> `build_deep_agents_tools`, `build_pydantic_ai_tools` (`tool_bridge.py:310, 436, 525, 577`).
+>
+> **`claude_agent_sdk` — the shipped default (`config.py:409`) — is NOT one of them.** It never
+> references `tool_bridge`; it surfaces tools over MCP via `build_inprocess_mcp_toolsets`
+> (`tool_bridge.py:816`), which does not build or retain a registry. So on the default backend
+> there is no registry to resolve, and a tool's **declared** `Narration` is unreachable.
+>
+> **What that means for this task:** hand-authoring ~100 `Narration` declarations buys hand-written
+> phrasing on pydantic-ai, openai_agents, google_adk and deep_agents — and buys **nothing** for
+> default-config users, who fall through to the override table and derive-from-name. Derive-from-name
+> is decent ("Publishing the site", not `using pocketpaw_sites_publish`), so the floor is fine; the
+> question is whether ~2 agent-hours of hand-written product voice is worth it while the default
+> backend cannot see it.
+>
+> **Cheaper orderings to consider first:**
+> - Extend the seam to `build_inprocess_mcp_toolsets` so the default backend resolves a registry
+>   too. Probably small, since the pattern now exists — this is the highest-leverage follow-up in
+>   the whole plan and should be scoped before HTN-3.
+> - Or grow the **override table** for the top tools by call volume, which reaches every backend
+>   including the default, and defer per-tool declarations until the seam covers MCP.
+>
+> This does not invalidate HTN-2 — the seam is what rescues the builtin `web_search` on bridged
+> backends, and the security argument for `safe_args` living on the tool is unchanged. It re-prices
+> HTN-3 only.
+
 **Slice:** hand-quality phrasing across all builtin tools, replacing derived phrasing tool by tool.
 
 **Do:**
