@@ -125,6 +125,30 @@ async def test_a_write_plan_call_emits_one_plan_event_with_the_whole_plan():
 
 
 @pytest.mark.asyncio
+async def test_event_keys_match_the_sse_frame_apart_from_group_id():
+    """Cross-channel parity, pinned so it cannot drift into two shapes.
+
+    The panel runs ONE reconciler over both channels, so the payloads have to
+    stay identical. The mirror of this assertion is in
+    ``tests/cloud/runs/test_run_core_plan_surface.py`` — the only difference is
+    ``group_id``, which this path carries and the streaming chat path
+    structurally cannot. If either side gains or loses a field, one of the two
+    tests fails.
+    """
+    payloads = await _of_type([_write_plan_event(*THREE_STEP), _done_event()], "agent.plan_updated")
+
+    assert set(payloads[0]) == {
+        "group_id",
+        "agent_id",
+        "agent_name",
+        "run_id",
+        "seq",
+        "items",
+        "progress",
+    }
+
+
+@pytest.mark.asyncio
 async def test_a_plan_tool_does_not_also_emit_a_tool_chip():
     """The panel IS the narration; "Using write_plan..." next to it is noise."""
     emitted = await _emitted([_write_plan_event(*THREE_STEP), _done_event()])

@@ -141,6 +141,51 @@ async def test_write_plan_yields_a_plan_frame_with_the_whole_plan(monkeypatch):
     assert plans[0]["run_id"], "the panel needs a per-run key to scope itself to"
 
 
+async def test_the_frame_carries_the_agent_identity(monkeypatch):
+    """``agent_id`` lets the panel key plan state by room AND agent instead of
+    by room alone. Without it, a room where two agents plan concurrently shares
+    one entry and the later event wins.
+
+    Pinned on its own because the panel's reconciler depends on it: it is the
+    field that keeps per-agent keying a frontend change rather than a change to
+    a shipped wire contract.
+    """
+    out = await _drive_and_collect(
+        monkeypatch,
+        [_write_plan_event(*THREE_STEP), SimpleNamespace(type="done", content="")],
+    )
+    plans = [data for name, data in out if name == "plan_updated"]
+
+    assert plans[0]["agent_id"] == "a1", "must be ctx.target_agent_id, not the pool's arg"
+    assert plans[0]["agent_name"] == "A"
+
+
+async def test_frame_keys_match_the_ws_event_apart_from_group_id(monkeypatch):
+    """Cross-channel parity, pinned so it cannot drift into two shapes.
+
+    The panel runs ONE reconciler over both channels, so the payloads have to
+    stay identical. The mirror of this assertion is in
+    ``tests/cloud/shared/test_agent_bridge_plan.py`` — the only difference is
+    ``group_id``, which the WS event carries and this path structurally cannot
+    (``_drive_agent_loop`` has no group identity; see the run_core docstring).
+    If either side gains or loses a field, one of the two tests fails.
+    """
+    out = await _drive_and_collect(
+        monkeypatch,
+        [_write_plan_event(*THREE_STEP), SimpleNamespace(type="done", content="")],
+    )
+    plans = [data for name, data in out if name == "plan_updated"]
+
+    assert set(plans[0]) == {
+        "agent_id",
+        "agent_name",
+        "run_id",
+        "seq",
+        "items",
+        "progress",
+    }
+
+
 async def test_a_plan_tool_does_not_also_yield_a_tool_chip(monkeypatch):
     """Same call as the bridge makes: the panel is the narration, so the
     "write_plan" chip would be noise beside it."""
