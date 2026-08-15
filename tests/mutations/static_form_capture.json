@@ -103,8 +103,8 @@
   {
     "label": "static capture: the repointed form loses the credentials the endpoint gates on",
     "file": "ee/pocketpaw_ee/sites/generator_client.py",
-    "find": "        + _CAPTURE_HIDDEN_FIELDS,",
-    "replace": "        ,",
+    "find": "            f'{m.group(1)}\"__CAPTURE_API_BASE__/capture/form\"{m.group(3)}' + _CAPTURE_HIDDEN_FIELDS",
+    "replace": "            f'{m.group(1)}\"__CAPTURE_API_BASE__/capture/form\"{m.group(3)}'",
     "tests": [
       "tests/ee/sites/test_static_form_capture.py"
     ]

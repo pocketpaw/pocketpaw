@@ -937,8 +937,9 @@ def _rewire_legacy_submit_forms(contents: str) -> str:
     Idempotent: the rewritten action is no longer ``/api/submit``, so a second pass
     matches nothing, and source authored against the new contract is untouched."""
     return _LEGACY_SUBMIT_FORM.sub(
-        lambda m: f'{m.group(1)}"__CAPTURE_API_BASE__/capture/form"{m.group(3)}'
-        + _CAPTURE_HIDDEN_FIELDS,
+        lambda m: (
+            f'{m.group(1)}"__CAPTURE_API_BASE__/capture/form"{m.group(3)}' + _CAPTURE_HIDDEN_FIELDS
+        ),
         contents,
     )
 
