@@ -17,6 +17,15 @@ written after the probe, not before.
 
 Everything here runs against pydantic-ai's ``TestModel`` / ``FunctionModel``, so
 no provider key and no network are required.
+
+Updated 2026-08-15 (HTN-9, fix/pydantic-ai-tool-args) — the tool-announcement
+tests now assert the ``input_pending`` contract and, above all, the ARGUMENTS.
+``test_tool_use_announced_once_per_call_id`` used to assert exactly one
+``tool_use`` per call and passed for the life of the backend while ``input`` was
+unconditionally ``{}`` — counting events proved the dedupe worked and said
+nothing about whether the arguments survived it. Its replacement counts one
+event PER PHASE, and ``test_streamed_tool_call_delivers_its_real_arguments``
+pins the payload the count test could never see.
 """
 
 from __future__ import annotations
@@ -222,13 +231,18 @@ async def test_run_emits_tool_use_and_tool_result_in_order():
     assert "echoed x" in result.content
 
 
-async def test_tool_use_announced_once_per_call_id():
-    """The early PartStartEvent signal and the authoritative
-    FunctionToolCallEvent describe the SAME call — the UI must see one."""
+def _search_backend(tool_call_id: str | None):
+    """A backend whose model streams one ``web_search`` call carrying arguments."""
 
     async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
         if len(messages) == 1:
-            yield {0: DeltaToolCall(name="ping", json_args="{}", tool_call_id="dup-1")}
+            yield {
+                0: DeltaToolCall(
+                    name="web_search",
+                    json_args='{"query": "pocketpaw"}',
+                    tool_call_id=tool_call_id,
+                )
+            }
         else:
             yield "ok"
 
@@ -236,14 +250,118 @@ async def test_tool_use_announced_once_per_call_id():
 
     from pydantic_ai.tools import Tool
 
-    async def ping() -> str:
-        """Ping."""
-        return "pong"
+    async def web_search(query: str) -> str:
+        """Search the web."""
+        return f"results for {query}"
 
-    backend._custom_tools = [Tool(ping, name="ping", description="Ping.")]
+    backend._custom_tools = [Tool(web_search, name="web_search", description="Search the web.")]
+    return backend
 
-    events = await _collect(backend, "ping it")
-    assert sum(1 for e in events if e.type == "tool_use") == 1
+
+async def test_streamed_tool_call_delivers_its_real_arguments():
+    """The resolved ``tool_use`` must carry the arguments the tool RAN with.
+
+    Two separate defects used to swallow them, and either one alone is enough to
+    strand a consumer on ``{}`` — which is why this asserts the exact dict and
+    not merely a non-empty one:
+
+    1. ``_announce_tool`` deduped on ``tool_call_id``, so the authoritative
+       ``FunctionToolCallEvent`` returned early behind the early
+       ``PartStartEvent`` signal that had already claimed the id with ``{}``.
+    2. pydantic-ai delivers streamed ``ToolCallPart.args`` as a JSON **string**,
+       and the metadata builder kept it only ``if isinstance(args, dict)`` —
+       so the string was coerced to ``{}`` even once the dedupe let it through.
+
+    A feature rendering "Searching the web for {query}" degrades to a bare
+    "Searching the web" on this backend whenever either regresses.
+    """
+    events = await _collect(_search_backend("c1"), "search for pocketpaw")
+
+    resolved = [
+        e for e in events if e.type == "tool_use" and e.metadata.get("input_pending") is not True
+    ]
+    assert len(resolved) == 1, "exactly one resolved announcement per call"
+    assert resolved[0].metadata["name"] == "web_search"
+    assert resolved[0].metadata["input"] == {"query": "pocketpaw"}
+
+
+async def test_provisional_announcement_still_fires_early():
+    """The early signal is what flips the UI off "Thinking..." — keep it.
+
+    It is flagged ``input_pending=True`` so an appending consumer can skip it;
+    its ``input`` is a placeholder and NOT what the tool runs with.
+    """
+    events = await _collect(_search_backend("c1"), "search for pocketpaw")
+    tool_uses = [e for e in events if e.type == "tool_use"]
+
+    assert tool_uses[0].metadata["input_pending"] is True
+    assert tool_uses[0].metadata["name"] == "web_search"
+    assert tool_uses[0].metadata["input"] == {}
+
+    # Provisional first, resolved after — never the reverse.
+    flags = [e.metadata.get("input_pending") for e in tool_uses]
+    assert flags == [True, False]
+
+    # And the early signal must beat the tool's result to the consumer.
+    kinds = [e.type for e in events]
+    assert kinds.index("tool_use") < kinds.index("tool_result")
+
+
+async def test_tool_use_announced_once_per_call_id_per_phase():
+    """One call yields one PROVISIONAL and one RESOLVED event — never more.
+
+    The dedupe is phase-qualified rather than removed: a repeat of either phase
+    for the same id is still suppressed, so the id remains the thing that stops
+    a UI from stacking duplicate rows for one call.
+    """
+    events = await _collect(_search_backend("dup-1"), "search for pocketpaw")
+    tool_uses = [e for e in events if e.type == "tool_use"]
+
+    assert sum(1 for e in tool_uses if e.metadata.get("input_pending") is True) == 1
+    assert sum(1 for e in tool_uses if e.metadata.get("input_pending") is False) == 1
+
+
+def test_announce_tool_without_call_id_resolves_arguments():
+    """The no-``tool_call_id`` path must not be made worse by the phase key.
+
+    It is exercised directly because it is unreachable from the streaming path:
+    pydantic-ai MINTS an id (``pyd_ai_<hex>``) when the model delta omits one, so
+    a run-level test would silently cover the id path twice. Without an id there
+    is nothing to dedupe on, so both phases emit — and the resolved one must
+    still carry decoded arguments.
+    """
+    backend = PydanticAIBackend(_settings())
+    announced: set[str] = set()
+    out: list = []
+    part = SimpleNamespace(tool_name="web_search", tool_call_id=None)
+
+    backend._announce_tool(part, announced, out, args={}, pending=True)
+    backend._announce_tool(part, announced, out, args='{"query": "pocketpaw"}', pending=False)
+
+    assert [e.metadata["input_pending"] for e in out] == [True, False]
+    assert out[0].metadata["input"] == {}
+    assert out[1].metadata["input"] == {"query": "pocketpaw"}
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ('{"query": "x"}', {"query": "x"}),  # streamed calls arrive as JSON text
+        ({"query": "x"}, {"query": "x"}),  # non-streamed calls arrive decoded
+        (None, {}),  # a no-argument tool
+        ("not json", {}),  # never propagate junk as arguments
+        ("[1, 2]", {}),  # valid JSON, wrong shape
+        (123, {}),
+    ],
+)
+def test_announce_tool_normalizes_arguments(args, expected):
+    """``input`` is always a dict, whatever the provider streamed."""
+    backend = PydanticAIBackend(_settings())
+    out: list = []
+    backend._announce_tool(
+        SimpleNamespace(tool_name="t", tool_call_id="c1"), set(), out, args=args, pending=False
+    )
+    assert out[0].metadata["input"] == expected
 
 
 async def test_history_is_threaded_into_the_model():
