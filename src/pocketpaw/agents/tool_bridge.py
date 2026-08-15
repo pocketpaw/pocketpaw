@@ -14,6 +14,16 @@ Backend-aware exclusion:
 - BrowserTool/DesktopTool: always excluded (need special session state)
 
 Changes:
+- 2026-08-15 (HTN-2, feat/narration-registry-lookup): the ToolRegistry each
+  build_*_tools() constructs is no longer dropped at function exit. It is kept
+  on the ToolPolicy it was built under and reachable through
+  narration_registry_for(backend), so a caller holding an agent can resolve
+  that agent's OWN live tool instances — which is what humanized tool narration
+  reads a tool's declared phrase off. Anchored on the policy because its
+  lifetime is already the agent's; a module-level map would leak, since the
+  registry references its policy and would keep its own weak key alive. The
+  four builders now share _build_tool_registry() instead of repeating the same
+  three lines.
 - 2026-07-29 (feat/pydantic-ai-backend): added build_pydantic_ai_tools() plus the
   two signature builders it shares. pydantic-ai derives a tool's JSON schema from
   the wrapper's *signature*, so the wrappers synthesize one instead of emitting
@@ -39,6 +49,66 @@ from pocketpaw.tools.protocol import BaseTool
 from pocketpaw.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def _build_tool_registry(backend: str, policy: ToolPolicy) -> ToolRegistry:
+    """Build the ToolRegistry for one backend's bridged surface, and retain it.
+
+    The four ``build_*_tools`` functions below all did these three lines
+    themselves and dropped the registry on the floor at function exit. It is
+    now kept on the POLICY, so a caller that has the agent can reach that
+    agent's live tool instances. Humanized tool narration (HTN-2) is the
+    consumer: it reads the ``Narration`` a tool declares off the instance the
+    registry already holds, because CONSTRUCTING a tool to read a property
+    would run ``ShellTool.__init__`` -> ``get_settings()`` on the event loop
+    just to phrase a status line.
+
+    The policy is the anchor for two reasons. Its LIFETIME is already the
+    agent's — the pool builds one policy per agent, the backend holds it, and
+    an evicted ``AgentInstance`` takes both with it — and ``set_tool_policy``
+    swaps the policy while clearing ``_custom_tools``, so a rebuilt surface
+    lands on the new policy instead of serving a stale registry.
+
+    A module-level map would be worse in two distinct ways. It would LEAK: the
+    registry references its policy, so even a weak-keyed entry would keep its
+    own key alive forever, holding every agent's tools for the life of the
+    process. And keyed by tool NAME it would also be ambiguous — EE registers
+    ``DaytonaShellTool`` under the same ``shell`` name as the OSS builtin, so
+    two live agents would disagree and the lookup would have to pick one
+    nondeterministically or refuse to narrate ``shell`` at all.
+    """
+    registry = ToolRegistry(policy=policy)
+    for tool in _instantiate_all_tools(backend=backend):
+        registry.register(tool)
+    policy._bridged_registry = registry
+    return registry
+
+
+def narration_registry_for(backend: Any) -> ToolRegistry | None:
+    """Return the ToolRegistry backing *backend*'s bridged tool surface.
+
+    The seam that lets a caller holding an agent (the cloud agent bridge)
+    resolve that agent's OWN live tools. Returns ``None`` for a backend that
+    never bridged tools through here — the Claude SDK backend surfaces its
+    tools over MCP, so there is no registry to find and narration derives from
+    the tool name instead.
+
+    Duck-typed on the public ``get_tool_policy`` every bridged backend exposes,
+    so no caller has to reach for a private attribute of a backend.
+    """
+    getter = getattr(backend, "get_tool_policy", None)
+    if not callable(getter):
+        return None
+    try:
+        policy = getter()
+        if policy is None:
+            return None
+        registry = getattr(policy, "_bridged_registry", None)
+    except Exception:  # noqa: BLE001 — a status line must never break a run
+        logger.debug("Could not resolve a narration registry for %r", type(backend), exc_info=True)
+        return None
+    return registry if isinstance(registry, ToolRegistry) else None
+
 
 # Tools excluded from ALL backends -- need special session state or desktop access.
 _ALWAYS_EXCLUDED = frozenset({"BrowserTool", "DesktopTool"})
@@ -237,9 +307,7 @@ def build_openai_function_tools(
             deny=settings.tools_deny,
         )
 
-    registry = ToolRegistry(policy=policy)
-    for tool in _instantiate_all_tools(backend=backend):
-        registry.register(tool)
+    registry = _build_tool_registry(backend, policy)
 
     function_tools: list[FunctionTool] = []
     for tool_name in registry.allowed_tool_names:
@@ -365,9 +433,7 @@ def build_adk_function_tools(
             deny=settings.tools_deny,
         )
 
-    registry = ToolRegistry(policy=policy)
-    for tool in _instantiate_all_tools(backend=backend):
-        registry.register(tool)
+    registry = _build_tool_registry(backend, policy)
 
     function_tools: list = []
     for tool_name in registry.allowed_tool_names:
@@ -456,9 +522,7 @@ def build_deep_agents_tools(
             deny=settings.tools_deny,
         )
 
-    registry = ToolRegistry(policy=policy)
-    for tool in _instantiate_all_tools(backend=backend):
-        registry.register(tool)
+    registry = _build_tool_registry(backend, policy)
 
     structured_tools: list = []
     for tool_name in registry.allowed_tool_names:
@@ -510,9 +574,7 @@ def build_pydantic_ai_tools(
             deny=settings.tools_deny,
         )
 
-    registry = ToolRegistry(policy=policy)
-    for tool in _instantiate_all_tools(backend=backend):
-        registry.register(tool)
+    registry = _build_tool_registry(backend, policy)
 
     tools: list = []
     for tool_name in registry.allowed_tool_names:

@@ -2,6 +2,21 @@
 # Created: 2026-08-15 — proves a real ``tool_use`` event reaches the wire as
 # "Searching the web for quarterly filings" instead of a bare tool name.
 #
+# Updated: 2026-08-15 (HTN-2) — the narration lookup no longer instantiates a
+# tool from a one-entry name -> class map, so what the bridge emits changed in
+# three ways:
+#   - an unannotated tool now derives a phrase ("Publishing the site") where it
+#     previously emitted no narration field at all;
+#   - the interpolated search phrase is asserted against ``litellm_web_search``,
+#     the name the CLOUD path actually emits, which resolves through the
+#     override table;
+#   - the builtin ``web_search`` still renders its DECLARED phrase, now read off
+#     the live instance in the agent's own ``ToolRegistry`` (resolved through
+#     ``tool_bridge.narration_registry_for``) instead of off a tool the lookup
+#     constructed. A backend that bridges no tools — the Claude SDK one, whose
+#     tools come over MCP — has no registry to resolve and derives instead;
+#     both paths have a test.
+#
 # The events here use the shape the backends ACTUALLY emit — ``content`` is a
 # prose string ("Using web_search...") and ``metadata`` carries the bare name
 # plus the call's input (see ``agents/claude_sdk.py`` and ``agents/pydantic_ai.py``).
@@ -29,12 +44,34 @@ def _tool_use_event(name: str, tool_input: dict):
     )
 
 
-async def _emitted_tool_use(events: list) -> list[dict]:
+def _bridged_backend():
+    """A backend whose bridged tool surface is reachable, as a real one is.
+
+    Mirrors production: ``tool_bridge`` builds the registry under the agent's
+    ToolPolicy and keeps it there, and every bridged backend exposes
+    ``get_tool_policy``. Building it through the real helper means this carries
+    the live ``WebSearchTool`` instance, not a stub of one — the point of the
+    seam is that the phrase is read off the instance the agent actually holds.
+    """
+    from pocketpaw.agents.tool_bridge import _build_tool_registry
+    from pocketpaw.tools.policy import ToolPolicy
+
+    policy = ToolPolicy(profile="full")
+    _build_tool_registry("pydantic_ai", policy)
+    return SimpleNamespace(get_tool_policy=lambda: policy)
+
+
+async def _emitted_tool_use(events: list, backend=None) -> list[dict]:
     """Drive ``_run_agent_response`` over ``events`` and return the payloads of
-    every ``agent.tool_use`` it emitted."""
+    every ``agent.tool_use`` it emitted.
+
+    ``backend`` rides on the agent instance the pool hands back, which is how
+    the narration lookup reaches the agent's own tool registry. Defaults to
+    None — a backend that bridges no tools, like the Claude SDK one.
+    """
     from pocketpaw_ee.cloud.shared import agent_bridge
 
-    instance = SimpleNamespace(agent_name="Test Agent")
+    instance = SimpleNamespace(agent_name="Test Agent", backend=backend)
     pool = MagicMock()
     pool.get = AsyncMock(return_value=instance)
     pool.observe = AsyncMock()
@@ -90,12 +127,20 @@ async def _emitted_tool_use(events: list) -> list[dict]:
 
 
 @pytest.mark.asyncio
-async def test_web_search_tool_use_carries_a_humanized_narration():
-    """HTN-1's headline behaviour: a real web_search call reaches the wire with
-    a plain-language phrase, and the tool name still rides alongside it."""
+async def test_search_tool_use_carries_a_humanized_narration():
+    """The headline behaviour: a real search call reaches the wire with an
+    interpolated plain-language phrase, and the tool name rides alongside it.
+
+    The name is ``litellm_web_search`` rather than ``web_search`` because that
+    is what the CLOUD path — the only consumer of this bridge — actually emits:
+    with LiteLLM's search interception off, the model calls the proxy's search
+    tool under that name (see the LiteLLM finding in
+    ``docs/design/2026-08-15-humanized-tool-narration-tasks.md``). It resolves
+    through the narration override table, which needs no registry handle.
+    """
     payloads = await _emitted_tool_use(
         [
-            _tool_use_event("web_search", {"query": "quarterly filings"}),
+            _tool_use_event("litellm_web_search", {"query": "quarterly filings"}),
             _done_event(),
         ]
     )
@@ -105,15 +150,55 @@ async def test_web_search_tool_use_carries_a_humanized_narration():
 
     assert payload["narration"] == "Searching the web for quarterly filings"
     # Additive only — clients keyed on ``tool`` keep working untouched.
-    assert payload["tool"] == "web_search"
+    assert payload["tool"] == "litellm_web_search"
     assert payload["agent_id"] == "agent-1"
     assert payload["group_id"] == "group-1"
 
 
 @pytest.mark.asyncio
-async def test_unannotated_tool_emits_no_narration_field():
-    """HTN-2 owns the derive-from-name fallback. Until then an unannotated tool
-    stays silent — the bridge must not invent a phrase of its own."""
+async def test_builtin_web_search_renders_its_declared_phrase_through_the_registry():
+    """THE no-regression test at the bridge.
+
+    ``WebSearchTool`` declares the interpolated phrase. Before HTN-2 the bridge
+    reached it through a name -> (module, class) map that INSTANTIATED the tool;
+    that map is gone, so this now resolves the agent's own ``ToolRegistry`` and
+    reads the declaration off the live instance. If the seam breaks, this drops
+    to the derived "Searching the web" — the silent downgrade of the one tool
+    that already worked.
+    """
+    payloads = await _emitted_tool_use(
+        [
+            _tool_use_event("web_search", {"query": "quarterly filings"}),
+            _done_event(),
+        ],
+        backend=_bridged_backend(),
+    )
+
+    assert payloads[0]["tool"] == "web_search"
+    assert payloads[0]["narration"] == "Searching the web for quarterly filings"
+
+
+@pytest.mark.asyncio
+async def test_a_backend_that_bridges_no_tools_still_narrates_by_derivation():
+    """The Claude SDK backend surfaces its tools over MCP, so there is no
+    registry to resolve. The chain must still answer — from the tool name."""
+    payloads = await _emitted_tool_use(
+        [
+            _tool_use_event("web_search", {"query": "quarterly filings"}),
+            _done_event(),
+        ]
+    )
+
+    assert payloads[0]["narration"] == "Searching the web"
+
+
+@pytest.mark.asyncio
+async def test_unannotated_tool_emits_a_derived_narration():
+    """HTN-2: a tool that declares nothing still reaches the wire as English.
+
+    This is the case the whole feature is named for — the surface used to
+    render "using pocketpaw_sites_publish".
+    """
     payloads = await _emitted_tool_use(
         [
             _tool_use_event("pocketpaw_sites_publish", {"pocket_id": "p1"}),
@@ -125,7 +210,10 @@ async def test_unannotated_tool_emits_no_narration_field():
     payload = payloads[0]
 
     assert payload["tool"] == "pocketpaw_sites_publish"
-    assert payload.get("narration") is None
+    assert payload["narration"] == "Publishing the site"
+    # A derived phrase is built from the NAME, so no argument rides along with
+    # it — the name carries no ``safe_args`` allowlist that could vet one.
+    assert "p1" not in payload["narration"]
 
 
 @pytest.mark.asyncio
@@ -144,21 +232,28 @@ async def test_missing_query_degrades_to_the_bare_phrase():
 
 
 @pytest.mark.asyncio
-async def test_secrets_in_tool_input_never_reach_the_wire():
+@pytest.mark.parametrize("tool_name", ["litellm_web_search", "web_search"])
+async def test_secrets_in_tool_input_never_reach_the_wire(tool_name):
     """The bridge hands the whole input dict to the renderer, so this is the
-    end-to-end proof that only allowlisted fields survive the trip."""
+    end-to-end proof that only allowlisted fields survive the trip.
+
+    Run against both search paths — the interpolating one (override) and the
+    derived one — because the allowlist has to hold on whichever branch of the
+    lookup answers, not just the one that happens to interpolate.
+    """
     payloads = await _emitted_tool_use(
         [
             _tool_use_event(
-                "web_search",
+                tool_name,
                 {"query": "quarterly filings", "api_key": "sk-live-SUPERSECRET"},
             ),
             _done_event(),
         ]
     )
 
-    assert payloads[0]["narration"] == "Searching the web for quarterly filings"
     assert "SUPERSECRET" not in str(payloads[0])
+    assert "api_key" not in str(payloads[0])
+    assert payloads[0]["narration"].startswith("Searching the web")
 
 
 @pytest.mark.asyncio
