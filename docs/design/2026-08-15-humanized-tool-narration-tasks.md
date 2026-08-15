@@ -412,7 +412,66 @@ or a channel adapter.
 
 ---
 
-**Total:** ~12.5 agent-hours across 8 tasks and 11 PRs.
+---
+
+## HTN-9 — pydantic-ai must stop suppressing its own arguments · ~0.5 agent-hrs
+
+**Slice:** the interpolated phrase actually appears on pydantic-ai, instead of degrading to `bare`.
+
+**Why this exists:** HTN-4 fixed exactly this bug in `claude_sdk` and the PRD asserted pydantic-ai
+was unaffected. That was wrong, measured 2026-08-15. `_announce_tool`
+(`agents/pydantic_ai.py:2142-2158`) dedupes on `tool_call_id`; `_map_event` calls it first from
+`PartStartEvent(ToolCallPart)` with `args={}` (`:2110`) and then from `FunctionToolCallEvent` with
+the authoritative args (`:2120`). With a `tool_call_id` present — the normal case — exactly one
+event is emitted and it carries `input={}`. Real arguments never reach a consumer.
+
+**Do:**
+- Adopt the contract HTN-4 already documented on `AgentEvent`: emit the early signal with
+  `input_pending=True`, emit the authoritative one with `input_pending=False`, and stop letting the
+  first suppress the second. The contract and the consumer rule are already written in
+  `agents/protocol.py`; this is the second backend adopting them rather than a new design.
+- `loop.py` already skips provisional events, so correlation needs no further change. Verify that.
+
+**Done when:** a streamed pydantic-ai tool call with a `tool_call_id` yields a resolved event whose
+`input` holds the real arguments, and `web_search` narrates as "Searching the web for {query}"
+rather than "Searching the web".
+
+**Interfaces:** consumes the `input_pending` contract from HTN-4. Exposes nothing new.
+**Deps:** HTN-4 (merged or not — the contract is what matters). **PRs:** 1 — pocketpaw.
+
+---
+
+## HTN-10 — provider-side web tools currently narrate nothing at all · ~1.5 agent-hrs
+
+**Slice:** a web search that runs at the provider (the LiteLLM path) produces a status line.
+
+**Why this exists:** `pydantic_ai_native_web_tools` (`config.py:714`, default `False`) registers
+`WebSearch(local=<our WebSearchTool>)` so the model's native search runs provider-side
+(`pydantic_ai.py:1592-1626`). pydantic-ai 2.18 surfaces those calls as `NativeToolCallPart` /
+`NativeToolReturnPart`, which are **siblings** of `ToolCallPart` under `BaseToolCallPart`, not
+subclasses — verified, `issubclass(NativeToolCallPart, ToolCallPart)` is `False`. `_map_event`
+tests `isinstance(part, ToolCallPart)` at `:2107` and imports neither native type, so a
+provider-side search emits **no `tool_use` and no `tool_result` at all**. The UI holds on
+"Thinking…" for the whole search.
+
+**Do:**
+- Handle `NativeToolCallPart` / `NativeToolReturnPart` in `_map_event`, mapping them to `tool_use`
+  and `tool_result` with the same `input_pending` discipline as HTN-9.
+- Check what the native part actually names the tool. If the provider's name differs from our
+  `web_search`, narration lookup must reconcile the two — this interacts directly with HTN-2's
+  identity work, so do them in that order or share the resolution.
+- Decide and document whether a provider-executed call should be visually distinguishable from a
+  locally executed one. They have different privacy properties: the query leaves for the provider.
+
+**Done when:** with `pydantic_ai_native_web_tools=True`, a search emits a narrated `tool_use`, and a
+test pins that native parts are not silently dropped.
+
+**Interfaces:** consumes HTN-9's contract adoption and HTN-2's identity resolution.
+**Deps:** HTN-9, and HTN-2 if the provider's tool name differs. **PRs:** 1 — pocketpaw.
+
+---
+
+**Total:** ~14.5 agent-hours across 10 tasks and 13 PRs (was ~12.5/8/11 before HTN-9 and HTN-10).
 
 This exceeds the PRD's ~11-hour estimate by ~1.5h: the HTN-0 spike is new (the PRD carried those
 questions as open rather than costed), and the cross-repo tasks each carry a second PR's overhead.
