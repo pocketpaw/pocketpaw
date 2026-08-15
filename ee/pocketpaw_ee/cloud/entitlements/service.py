@@ -154,9 +154,17 @@ def resolve_site_entitlements(
     # instead of resting on short-circuit evaluation.
     badge_removal = False
     custom_domain = False
+    concierge_entitled = False
     if tier is not None and subscription_active:
         badge_removal = tier.badge_removal
         custom_domain = "custom_domain" in tier.cloudflare_features
+        # Any tier ABOVE the free floor sells the concierge. Deliberately derived
+        # from the floor rather than a per-tier catalog flag like ``badge_removal``:
+        # no tier grants concierge today, and the tier that will (``staff``) does not
+        # exist until the pricing-spec rekey, which is blocked on an open decision.
+        # A flag would need a basic/pro/business mapping invented now and rewritten
+        # then. "Paid and paying" needs no mapping and survives the rekey untouched.
+        concierge_entitled = tier.key != site_plan_catalog.BASE_SITE_PLAN_KEY
 
     return SiteEntitlements(
         site_id=site_id,
@@ -165,5 +173,8 @@ def resolve_site_entitlements(
         subscription_active=subscription_active,
         badge_required=not badge_removal,
         custom_domain=custom_domain,
+        # Echoed unchanged — the owner's switch is not a billing question. The
+        # AND of the two is ``concierge_available``, which is what seams ask.
         concierge_enabled=bool(concierge_enabled),
+        concierge_entitled=concierge_entitled,
     )

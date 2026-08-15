@@ -2636,6 +2636,35 @@ async def _embed_concierge_bar(
         doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
         concierge_enabled = True if doc is None else bool(doc.concierge_enabled)
 
+        # Does this site's PLAN sell a concierge (feat/sites-concierge-entitlement)?
+        # Resolved here rather than inside ``concierge_snippet`` because this is the
+        # function that owns the Site doc — ``entitlements`` may not import
+        # ``models.site`` (EE cloud rule 2), and ``embed`` has no business loading it.
+        #
+        # A no-op unless ``billing_enforced``: with billing off (OSS / self-host, and
+        # every in-repo deploy today) this stays True and the publish path is byte
+        # for byte what it was.
+        #
+        # Fail-closed on a FIRST publish, the same way the badge stamper does: no doc
+        # means no ``plan_tier``, which resolves to the free floor and ships the page
+        # bar-less. The opposite default would embed a bar on every brand-new site
+        # regardless of plan, and that bar would 403 every visitor — a broken
+        # concierge is worse than none. A republish after the subscription activates
+        # picks it up, which is the same seam that repairs it for the badge.
+        concierge_entitled = True
+        from pocketpaw.config import get_settings
+
+        if get_settings().billing_enforced:
+            from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+            concierge_entitled = entitlements_service.resolve_site_entitlements(
+                site_id=site_id,
+                workspace_id=workspace_id,
+                plan_tier=getattr(doc, "plan_tier", None),
+                subscription_status=getattr(doc, "subscription_status", None),
+                concierge_enabled=True,  # asking the PLAN; the switch is read above
+            ).concierge_entitled
+
         # Publish-time provisioning (the third trigger): an agent-created site
         # published in the same conversation has passed through NEITHER
         # widget-create NOR a concierge-enable transition, so it reaches this
@@ -2679,6 +2708,7 @@ async def _embed_concierge_bar(
             # only one env var to move when the deploy moves.
             api_base=_capture_base(),
             concierge_enabled=concierge_enabled,
+            concierge_entitled=concierge_entitled,
         )
         if not snippet:
             return

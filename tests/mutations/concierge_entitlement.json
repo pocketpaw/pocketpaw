@@ -1,0 +1,125 @@
+[
+  {
+    "label": "the plan is never consulted — concierge_entitled reverts to a pass-through",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "        concierge_entitled = tier.key != site_plan_catalog.BASE_SITE_PLAN_KEY",
+    "replace": "        concierge_entitled = True",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_a_free_site_is_not_entitled_to_a_concierge",
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_an_unset_tier_is_not_entitled"
+    ]
+  },
+  {
+    "label": "the fail-closed default inverts — an unknown tier is handed a concierge",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    concierge_entitled = False",
+    "replace": "    concierge_entitled = True",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_an_unknown_tier_is_not_entitled",
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_a_paid_tier_without_an_active_subscription_is_not_entitled",
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_an_unset_tier_is_not_entitled"
+    ]
+  },
+  {
+    "label": "the subscription is ignored — a lapsed paid tier keeps its concierge",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    if tier is not None and subscription_active:\n        badge_removal = tier.badge_removal",
+    "replace": "    if tier is not None:\n        badge_removal = tier.badge_removal",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_a_paid_tier_without_an_active_subscription_is_not_entitled"
+    ]
+  },
+  {
+    "label": "concierge_available drops the plan half and echoes the owner switch",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/domain.py",
+    "find": "        return self.concierge_enabled and self.concierge_entitled",
+    "replace": "        return self.concierge_enabled",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_a_free_site_is_not_entitled_to_a_concierge",
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_owner_switch_and_the_plan_are_distinguishable"
+    ]
+  },
+  {
+    "label": "concierge_available drops the owner half — entitlement overrides the switch",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/domain.py",
+    "find": "        return self.concierge_enabled and self.concierge_entitled",
+    "replace": "        return self.concierge_entitled",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_an_entitled_site_with_the_switch_off_stays_off"
+    ]
+  },
+  {
+    "label": "the chat/action seam stops asking the plan",
+    "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
+    "find": "    if not concierge_available(site):\n        raise HTTPException(status_code=403, detail=\"concierge_not_entitled\")",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_chat_is_refused_for_a_free_site"
+    ]
+  },
+  {
+    "label": "the frame stops asking the plan — a free site's bar renders",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if not concierge_available(site):\n        return _dead_frame_response(po, site.allowed_origins)",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_frame_refuses_a_free_site_with_the_self_remove_message"
+    ]
+  },
+  {
+    "label": "the frame refuses with a JSON error rendered onto the customer's page",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if not concierge_available(site):\n        return _dead_frame_response(po, site.allowed_origins)",
+    "replace": "    if not concierge_available(site):\n        raise HTTPException(status_code=403, detail=\"concierge_not_entitled\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_refused_frame_never_renders_an_error_payload"
+    ]
+  },
+  {
+    "label": "the billing_enforced guard is dropped — OSS/self-host loses its concierge",
+    "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
+    "find": "    if not get_settings().billing_enforced:\n        return True",
+    "replace": "    if False:\n        return True",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_frame_is_unaffected_when_billing_is_off"
+    ]
+  },
+  {
+    "label": "the guard inverts — the gate fires ONLY when billing is off",
+    "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
+    "find": "    if not get_settings().billing_enforced:\n        return True",
+    "replace": "    if get_settings().billing_enforced:\n        return True",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_chat_is_refused_for_a_free_site",
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_frame_is_unaffected_when_billing_is_off"
+    ]
+  },
+  {
+    "label": "the billing refusal is indistinguishable from the owner's switch",
+    "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
+    "find": "        raise HTTPException(status_code=403, detail=\"concierge_not_entitled\")",
+    "replace": "        raise HTTPException(status_code=403, detail=\"concierge_disabled\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_billing_refusal_is_distinguishable_from_the_owner_switch"
+    ]
+  },
+  {
+    "label": "the entitled path breaks too — the gate refuses every site",
+    "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
+    "find": "    return ent.concierge_entitled",
+    "replace": "    return False",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_chat_still_works_for_an_entitled_site",
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_frame_still_renders_for_an_entitled_site"
+    ]
+  },
+  {
+    "label": "publish embeds the bar on an unentitled site — it would 403 every visitor",
+    "file": "ee/pocketpaw_ee/paw_bar/embed.py",
+    "find": "    if not concierge_enabled or not concierge_entitled or not site_key or not pocket_id:",
+    "replace": "    if not concierge_enabled or not site_key or not pocket_id:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_entitlement.py::test_an_unentitled_site_publishes_without_the_snippet"
+    ]
+  }
+]

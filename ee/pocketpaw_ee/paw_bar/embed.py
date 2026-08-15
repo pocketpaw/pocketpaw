@@ -142,12 +142,19 @@ async def concierge_snippet(
     site_key: str,
     api_base: str,
     concierge_enabled: bool,
+    concierge_entitled: bool = True,
 ) -> str:
     """The snippet this site has earned, or ``""`` when it has not.
 
-    Four gates, all of which must pass — a site that fails any of them is published
+    Five gates, all of which must pass — a site that fails any of them is published
     exactly as it was before this module existed:
 
+      0. ``concierge_entitled`` — the site's PLAN sells a concierge
+         (feat/sites-concierge-entitlement). Same effect as the owner's switch and
+         for the same reason: the built page ships with no bar rather than a bar
+         that would 403 every visitor at runtime. Defaults True so the only caller
+         that must think about billing is the publish path that resolves it; every
+         test and internal caller keeps the pre-billing behaviour.
       1. ``concierge_enabled`` — the owner's kill switch. Off means no bar, and a
          re-publish with it off is how an owner takes an embedded bar back off their
          site (the marker is only ever written, never re-written, so the page it was
@@ -160,7 +167,7 @@ async def concierge_snippet(
          a bar for it would render and then refuse to answer, which is worse than no
          bar at all.
     """
-    if not concierge_enabled or not site_key or not pocket_id:
+    if not concierge_enabled or not concierge_entitled or not site_key or not pocket_id:
         return ""
 
     from pocketpaw_ee.paw_bar.agent_provisioning import site_widget

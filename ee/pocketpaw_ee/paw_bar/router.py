@@ -919,7 +919,7 @@ async def frame(
     the real controls stay the rate-limit + injection screen + the zero-authority
     CONCIERGE scope. CSP does not close the curl path.
     """
-    from pocketpaw_ee.cloud.auth.site_keys import lookup_site_by_key
+    from pocketpaw_ee.cloud.auth.site_keys import concierge_available, lookup_site_by_key
 
     # (1) Authenticate the embed key. A missing/blank ``key`` query param is a
     # too-short key → 401 (never a 422), so the refusal is uniform with the chat path.
@@ -936,7 +936,14 @@ async def frame(
     # Distinct from ``revoked`` (which cuts the KEY at 401 inside
     # lookup_site_by_key — an api-shaped JSON 401 stays correct there: a revoked
     # key means the embed script itself is stale/removed on next publish).
-    if not site.concierge_enabled:
+    #
+    # (1c) The BILLING gate rides the same branch (feat/sites-concierge-entitlement):
+    # a site whose plan does not sell the concierge refuses identically. Deliberately
+    # the SAME response, not a distinct one — the visitor must not be able to tell a
+    # lapsed subscription from an owner's choice by looking at the page, and the
+    # loader already knows how to remove an iframe that says ``pawbar:dead``. The
+    # reason is surfaced to the OWNER through the dashboard, and to logs, never here.
+    if not concierge_available(site):
         return _dead_frame_response(po, site.allowed_origins)
 
     # (2) The embedder gate: the CSP frame-ancestors header. Fail closed when no
