@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -218,10 +219,72 @@ def test_every_hiding_vector_is_locked_important(prop):
 def test_the_lock_lives_on_the_element_not_the_stylesheet():
     """The <style> block is beatable by a later author rule; the style attribute is
     not. If a locked property ever migrates into the block, enforcement silently
-    becomes a suggestion."""
-    style_block = badge.build_badge_html().split("</style>")[0]
+    becomes a suggestion.
 
-    assert "!important" not in style_block
+    The GUARD rule is the one sanctioned exception — a pseudo-element has no
+    element to carry a style attribute, so it can only be defended from the
+    stylesheet."""
+    assert "!important" not in badge._LOOK_CSS
+    assert "!important" in badge._GUARD_CSS
+
+
+# --------------------------------------------------------------------------- #
+# Layer 2b — the CHILD lock (the bypass this module shipped with)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "prop",
+    ["display", "visibility", "opacity", "font-size", "color", "position", "transform"],
+)
+def test_the_text_is_locked_too(prop):
+    """Two ordinary lines used to defeat the whole feature:
+
+        a[data-paw-badge] span { display:none }
+
+    The anchor stayed fixed, opaque and at max z-index — an empty pill carrying
+    nothing. A child with no inline style is styleable by ANY author rule, without
+    even needing !important, so locking only the container locked nothing."""
+    span = badge.build_badge_anchor().split("<span")[1]
+
+    assert f"{prop}:" in span
+    start = span.index(f"{prop}:")
+    assert "!important" in span[start : start + 40]
+
+
+@pytest.mark.parametrize(
+    "prop", ["display", "visibility", "opacity", "width", "height", "max-width"]
+)
+def test_the_mark_is_locked_too(prop):
+    """``max-width`` earns its place: a locked ``width:17px`` is still beaten by
+    ``max-width:0``, so locking one without the other locks nothing."""
+    svg = badge.build_badge_anchor().split("<svg")[1].split(">")[0]
+
+    assert f"{prop}:" in svg
+    start = svg.index(f"{prop}:")
+    assert "!important" in svg[start : start + 40]
+
+
+def test_no_element_in_the_badge_is_left_unlocked():
+    """The general form of the bug, so a future child element cannot repeat it."""
+    anchor = badge.build_badge_anchor()
+
+    for tag in re.finditer(r"<(a|svg|span)\b([^>]*)>", anchor):
+        assert "style=" in tag.group(2), f"<{tag.group(1)}> ships with no inline lock"
+        assert "!important" in tag.group(2)
+
+
+def test_a_pseudo_element_overlay_is_neutralised():
+    """The one vector with no element to lock — ::after painted over the badge.
+
+    Asserted against the EMITTED snippet, not against ``_GUARD_CSS``: a constant
+    can be perfectly correct and simply not reach the page, which is exactly what
+    the "guard is dropped" mutation does."""
+    out = badge.build_badge_html()
+
+    assert "::before" in out
+    assert "::after" in out
+    assert "content:none!important" in out
 
 
 def test_the_hover_moves_colour_not_position():
@@ -272,10 +335,41 @@ def test_a_tree_with_no_html_is_survivable(tmp_path):
     assert badge.inject_into_tree(tmp_path) == []
 
 
-def test_an_undecodable_page_raises_rather_than_being_skipped(tmp_path):
-    """The skip-and-continue that is correct for the concierge bar is the exploit
-    here: one unreadable file and that page ships unbadged."""
-    (tmp_path / "index.html").write_bytes(b"<body>\xff\xfe not utf-8 </body>")
+def test_the_badge_is_pure_ascii():
+    """The invariant the latin-1 fallback rests on. If the badge ever gains a
+    non-ASCII character — a curly quote in the wording, an en dash in the CSS —
+    writing it back into a latin-1 page corrupts that page. This test is what
+    stops that, so it is not cosmetic."""
+    badge.build_badge_html().encode("ascii")  # raises if anything is non-ASCII
+
+
+def test_a_non_utf8_page_is_badged_byte_preserving(tmp_path):
+    """This used to RAISE, which made an imported windows-1252 site permanently
+    unpublishable with no operator override — worse than what it prevented.
+    sites/import crawls real sites, so non-UTF-8 pages are ordinary, not hostile."""
+    original = "<html><body><p>caf\xe9 r\xe9sum\xe9</p></body></html>".encode("latin-1")
+    (tmp_path / "index.html").write_bytes(original)
+
+    changed = badge.inject_into_tree(tmp_path)
+
+    assert len(changed) == 1
+    out = (tmp_path / "index.html").read_bytes()
+    # the badge landed...
+    assert badge.BADGE_MARKER.encode() in out
+    # ...and every original byte survived it
+    assert b"caf\xe9 r\xe9sum\xe9" in out
+    assert out.decode("latin-1").startswith("<html><body><p>")
+
+
+def test_an_unreadable_page_still_raises(tmp_path, monkeypatch):
+    """Undecodable is survivable; UNREADABLE is not. A page we cannot open at all
+    would ship unbadged, which is the thing this module exists to prevent."""
+    (tmp_path / "index.html").write_text("<body>x</body>", encoding="utf-8")
+
+    def _boom(self, *a, **kw):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
 
     with pytest.raises(badge.BadgeInjectionError):
         badge.inject_into_tree(tmp_path)
@@ -287,17 +381,26 @@ def test_an_unwritable_page_raises_rather_than_being_skipped(tmp_path, monkeypat
     def _boom(self, *a, **kw):
         raise OSError("read-only file system")
 
-    monkeypatch.setattr(Path, "write_text", _boom)
+    monkeypatch.setattr(Path, "write_bytes", _boom)
 
     with pytest.raises(badge.BadgeInjectionError):
         badge.inject_into_tree(tmp_path)
 
 
-def test_one_bad_page_stops_the_whole_publish(tmp_path):
+def test_one_bad_page_stops_the_whole_publish(tmp_path, monkeypatch):
     """Not "the good pages ship badged and the bad one slips through" — the publish
     aborts, so the site does not go live half-enforced."""
     (tmp_path / "a.html").write_text("<body>a</body>", encoding="utf-8")
-    (tmp_path / "b.html").write_bytes(b"\xff\xfe")
+    (tmp_path / "b.html").write_text("<body>b</body>", encoding="utf-8")
+
+    real = Path.write_bytes
+
+    def _boom_on_b(self, data, *a, **kw):
+        if self.name == "b.html":
+            raise OSError("read-only file system")
+        return real(self, data, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_bytes", _boom_on_b)
 
     with pytest.raises(badge.BadgeInjectionError):
         badge.inject_into_tree(tmp_path)
@@ -441,7 +544,12 @@ async def test_an_unbadgeable_page_aborts_the_publish(tmp_path, monkeypatch):
     """The enforcement, end to end: the stamper does NOT swallow, so publish_pocket
     raises and the site never reaches the deploy."""
     _site_doc_returning(monkeypatch, None)
-    (tmp_path / "index.html").write_bytes(b"<body>\xff\xfe</body>")
+    (tmp_path / "index.html").write_text("<body>home</body>", encoding="utf-8")
+
+    def _unwritable(self, *a, **kw):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(Path, "write_bytes", _unwritable)
 
     with pytest.raises(badge.BadgeInjectionError):
         await sites_service._stamp_free_badge(

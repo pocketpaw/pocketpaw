@@ -101,8 +101,8 @@
   {
     "label": "the brand mark becomes a fetched asset a CSP can block",
     "file": "ee/pocketpaw_ee/sites/badge.py",
-    "find": "    '<svg width=\"17\" height=\"17\" viewBox=\"0 0 32 32\" aria-hidden=\"true\" focusable=\"false\">'",
-    "replace": "    '<img src=\"https://pocketpaw.dev/favicon.svg\" width=\"17\" height=\"17\" alt=\"\"><svg viewBox=\"0 0 32 32\" aria-hidden=\"true\">'",
+    "find": "    '<svg width=\"17\" height=\"17\" viewBox=\"0 0 32 32\" aria-hidden=\"true\" '",
+    "replace": "    '<img src=\"https://pocketpaw.dev/favicon.svg\" width=\"17\" height=\"17\" alt=\"\"><svg viewBox=\"0 0 32 32\" aria-hidden=\"true\" '",
     "tests": [
       "tests/ee/sites/test_free_badge.py::test_nothing_in_the_badge_is_fetched"
     ]
@@ -134,6 +134,53 @@
     "tests": [
       "tests/ee/sites/test_free_badge.py::test_rebadging_with_the_SAME_badge_is_a_no_op",
       "tests/ee/sites/test_free_badge.py::test_a_second_publish_rewrites_nothing_but_still_succeeds"
+    ]
+  },
+  {
+    "label": "the TEXT loses its lock, so two lines of author css empty the badge",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "        f'<span style=\"{_SPAN_LOCK}\">{text}</span></a>'",
+    "replace": "        f'<span>{text}</span></a>'",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_the_text_is_locked_too",
+      "tests/ee/sites/test_free_badge.py::test_no_element_in_the_badge_is_left_unlocked"
+    ]
+  },
+  {
+    "label": "the MARK loses its lock",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "    f'focusable=\"false\" style=\"{_MARK_LOCK}\">'",
+    "replace": "    'focusable=\"false\">'",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_the_mark_is_locked_too",
+      "tests/ee/sites/test_free_badge.py::test_no_element_in_the_badge_is_left_unlocked"
+    ]
+  },
+  {
+    "label": "the pseudo-element guard is dropped, so ::after can cover the badge",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "    return f\"{BADGE_OPEN}<style>{_LOOK_CSS}{_GUARD_CSS}</style>{build_badge_anchor()}{BADGE_CLOSE}\"",
+    "replace": "    return f\"{BADGE_OPEN}<style>{_LOOK_CSS}</style>{build_badge_anchor()}{BADGE_CLOSE}\"",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_a_pseudo_element_overlay_is_neutralised"
+    ]
+  },
+  {
+    "label": "a non-UTF-8 page goes back to bricking the publish",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "            page, codec = raw.decode(\"latin-1\"), \"latin-1\"",
+    "replace": "            raise BadgeInjectionError(f\"undecodable page {path} — refusing to deploy\")",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_a_non_utf8_page_is_badged_byte_preserving"
+    ]
+  },
+  {
+    "label": "the badge gains a non-ASCII character the latin-1 write would corrupt",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "BADGE_TEXT = \"Built with PocketPaw\"",
+    "replace": "BADGE_TEXT = \"Built with PocketPaw\\u2019s\"",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_the_badge_is_pure_ascii"
     ]
   },
   {

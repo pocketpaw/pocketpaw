@@ -62,6 +62,15 @@
 #   (look + anchor) so the lock can be asserted against the ELEMENT, not the
 #   snippet — scanning the whole snippet for ``display:`` finds the look block's
 #   copy first and passes while the lock is gone.
+# Updated 2026-08-15 (feat/sites-free-badge, review): closed a bypass this module
+#   shipped with. The lock covered the ANCHOR only, so ``a[data-paw-badge] span
+#   {display:none}`` — two ordinary lines, no ``!important`` needed — left a
+#   visible empty pill carrying no mark and no wording. The mark and the text now
+#   carry their own inline locks (``_CHILD_LOCK``), and a ``_GUARD_CSS`` rule
+#   neutralises the pseudo-element overlay, which is the one vector with no
+#   element to lock. Also replaced the raise on an undecodable page with a
+#   byte-preserving latin-1 round-trip: refusing it made an imported non-UTF-8
+#   site permanently unpublishable, which is worse than what it prevented.
 
 from __future__ import annotations
 
@@ -137,6 +146,55 @@ _LOCKED_STYLE = (
     "text-indent:0!important;"
 )
 
+# THE CHILD LOCK, and the reason it exists is a bug this module shipped with.
+#
+# Locking the anchor alone is not enough, and the gap was invisible because every
+# locked property still reported "visible". The mark and the text are separate
+# elements INSIDE the anchor, and an element with no inline style is styleable by
+# any author rule — it does not even need ``!important``:
+#
+#     a[data-paw-badge] span { display:none }
+#     a[data-paw-badge] svg  { display:none }
+#
+# Two ordinary lines left the anchor fixed, opaque, at max z-index, and carrying
+# nothing: an empty pill. Enforcement that only defends the container is not
+# enforcement, so the children now carry the same treatment.
+_CHILD_LOCK = (
+    "visibility:visible!important;"
+    "opacity:1!important;"
+    "position:static!important;"
+    "transform:none!important;"
+    "filter:none!important;"
+    "clip-path:none!important;"
+    "max-width:none!important;"
+    "max-height:none!important;"
+)
+
+# ``color`` and ``font-size`` are hiding vectors on TEXT specifically —
+# ``color:transparent`` and ``font-size:0`` each erase the wording while leaving a
+# perfectly "visible" element behind. ``letter-spacing`` collapses it the same way.
+_SPAN_LOCK = _CHILD_LOCK + (
+    "display:inline!important;"
+    "font-size:12px!important;"
+    "line-height:1!important;"
+    "color:#f4f6f8!important;"
+    "letter-spacing:.01em!important;"
+    "text-indent:0!important;"
+    "white-space:nowrap!important;"
+)
+
+# ``max-width`` is in the common set for a reason the mark makes obvious: a locked
+# ``width:17px`` is still beaten by ``max-width:0``, so locking one without the
+# other locks nothing. ``flex:none`` stops a flex parent shrinking it to zero.
+_MARK_LOCK = _CHILD_LOCK + (
+    "display:block!important;"
+    "width:17px!important;"
+    "height:17px!important;"
+    "min-width:17px!important;"
+    "min-height:17px!important;"
+    "flex:none!important;"
+)
+
 # THE LOOK. Everything below is presentation and degrades safely: a customer who
 # restyles it still has a visible badge, because the lock above is what keeps it
 # on the page.
@@ -169,10 +227,29 @@ _LOOK_CSS = (
     "a[data-paw-badge]:focus-visible{"
     "outline:2px solid #0A84FF;outline-offset:2px;"
     "}"
-    "a[data-paw-badge] svg{display:block;flex:none;}"
     "@media(prefers-reduced-motion:reduce){"
     "a[data-paw-badge]{transition:none;}"
     "}"
+)
+
+# THE GUARD. One vector that CANNOT be locked inline, because it has no element to
+# put a style attribute on: a pseudo-element painted over the badge —
+# ``a[data-paw-badge]::after{content:"";position:absolute;inset:0;background:#fff}``
+# — covers it as cheaply as the child bypass did.
+#
+# So this rule lives in the stylesheet by necessity, not by preference, and it is
+# the ONE place ``!important`` is allowed outside the element lock. It is emitted
+# LAST in the document, so it beats an author rule of equal specificity on order.
+#
+# It is NOT airtight, and that is worth stating plainly rather than discovering
+# later: a higher-specificity author rule (``body a[data-paw-badge]::after``) with
+# ``!important`` still wins. Neither this nor any CSS can stop a customer script
+# appending an overlay at runtime. The badge raises the cost of removal; it does
+# not make removal impossible, and nothing rendered inside a page the customer
+# controls ever could.
+_GUARD_CSS = (
+    "a[data-paw-badge]::before,a[data-paw-badge]::after"
+    "{content:none!important;display:none!important;}"
 )
 
 # The paw mark, inlined from docs/public/favicon.svg. Inline because the page is
@@ -180,7 +257,8 @@ _LOOK_CSS = (
 # would be a second request to a host this site does not own, and a CSP or an
 # offline viewer would leave a broken box where the brand goes.
 _MARK_SVG = (
-    '<svg width="17" height="17" viewBox="0 0 32 32" aria-hidden="true" focusable="false">'
+    '<svg width="17" height="17" viewBox="0 0 32 32" aria-hidden="true" '
+    f'focusable="false" style="{_MARK_LOCK}">'
     '<circle cx="16" cy="16" r="15" fill="#0A84FF"/>'
     '<g transform="translate(4,4)" fill="none" stroke="#fff" stroke-width="2" '
     'stroke-linecap="round" stroke-linejoin="round">'
@@ -224,13 +302,18 @@ def build_badge_anchor() -> str:
     ``display:`` finds whichever copy comes first, and the look block legitimately
     carries unlocked declarations, so a test scanning the whole string measures
     the wrong one and passes while the lock is gone.
+
+    EVERY element here carries a lock — anchor, mark and text. The children are
+    not decoration inside a locked box: they are the badge, and an unlocked child
+    is a two-line bypass (see ``_CHILD_LOCK``).
     """
     text = html.escape(BADGE_TEXT)
     return (
         f'<a {BADGE_MARKER}="1" href="{BADGE_HREF}" target="_blank" '
         f'rel="noopener noreferrer nofollow" '
         f'aria-label="{text}" '
-        f'style="{_LOCKED_STYLE}">{_MARK_SVG}<span>{text}</span></a>'
+        f'style="{_LOCKED_STYLE}">{_MARK_SVG}'
+        f'<span style="{_SPAN_LOCK}">{text}</span></a>'
     )
 
 
@@ -242,7 +325,7 @@ def build_badge_html() -> str:
     and a reader with JavaScript off. Those are the same conditions under which a
     script-injected badge quietly disappears, which is why this one is markup.
     """
-    return f"{BADGE_OPEN}<style>{_LOOK_CSS}</style>{build_badge_anchor()}{BADGE_CLOSE}"
+    return f"{BADGE_OPEN}<style>{_LOOK_CSS}{_GUARD_CSS}</style>{build_badge_anchor()}{BADGE_CLOSE}"
 
 
 def strip_badge(page: str) -> str:
@@ -308,10 +391,14 @@ def inject_into_tree(root: Path) -> list[Path]:
     ``paw_bar.embed.inject_into_tree`` (that one logs and skips, because a bar is
     worth less than a deploy):
 
-      * an unreadable, undecodable or unwritable page RAISES — that page exists,
-        the deploy will upload it, and it would go out unbadged. This is the whole
-        enforcement, and it is exactly the class of failure a customer's own
-        content can provoke (a page that will not decode as UTF-8).
+      * an unreadable or unwritable page RAISES — that page exists, the deploy
+        will upload it, and it would go out unbadged. This is the whole
+        enforcement.
+
+    An UNDECODABLE page does not raise, and used to. It is badged through a
+    byte-preserving latin-1 round-trip instead — see the read block below. A
+    non-UTF-8 page is an ordinary imported one, not an attack, and raising made
+    that site permanently unpublishable with no override.
 
     ...but NOT on an empty root, and the distinction is deliberate rather than a
     softening. ``root`` here is ``project_dir / resolve_static_output_rel(...)`` —
@@ -346,15 +433,42 @@ def inject_into_tree(root: Path) -> list[Path]:
             continue
         seen_pages += 1
         try:
-            page = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
+            raw = path.read_bytes()
+        except OSError as exc:
             raise BadgeInjectionError(f"unreadable page {path} — refusing to deploy") from exc
+
+        # UTF-8 first, latin-1 as a BYTE-PRESERVING fallback rather than a raise.
+        #
+        # The raise was the wrong tool here. A page that will not decode as UTF-8 is
+        # not an attack — it is an ordinary imported page (sites/import crawls real
+        # sites, which are full of windows-1252) — and refusing it meant that site
+        # could never publish again, with no operator override anywhere. A
+        # permanent, un-overridable publish failure is a worse outcome than the one
+        # it was protecting against.
+        #
+        # latin-1 round-trips ANY byte sequence exactly (every byte maps to one
+        # code point and back), and the badge is pure ASCII, so writing back in the
+        # same codec reproduces the original bytes with ASCII spliced in. That is
+        # safe for every ASCII-compatible encoding — utf-8, latin-1, windows-1252,
+        # the whole ISO-8859 family. ``test_the_badge_is_pure_ascii`` pins the
+        # assumption the fallback rests on; if the badge ever gains a non-ASCII
+        # character, this silently corrupts a latin-1 page and that test is what
+        # stops it.
+        try:
+            page, codec = raw.decode("utf-8"), "utf-8"
+        except UnicodeDecodeError:
+            page, codec = raw.decode("latin-1"), "latin-1"
+            logger.info(
+                "sites badge: %s is not UTF-8 — badging it byte-preserving as latin-1",
+                path,
+            )
+
         updated = inject_into_html(page, badge)
         if updated is None:
             continue
         try:
-            path.write_text(updated, encoding="utf-8")
-        except OSError as exc:
+            path.write_bytes(updated.encode(codec))
+        except (OSError, UnicodeEncodeError) as exc:
             raise BadgeInjectionError(f"unwritable page {path} — refusing to deploy") from exc
         changed.append(path)
 
