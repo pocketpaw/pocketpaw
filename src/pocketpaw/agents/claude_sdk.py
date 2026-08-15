@@ -1,5 +1,20 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-08-15 (HTN-4, feat/claude-sdk-tool-args) — a ``tool_use`` event now
+  reaches consumers carrying the tool's REAL arguments. The stream loop announced
+  a tool twice over: once from the partial ``content_block_start`` (name known,
+  arguments not yet streamed, so ``input={}``) and once from the completed
+  ``AssistantMessage`` (the SDK's fully assembled ``input``). The second was
+  suppressed by an ``_announced_tools`` name guard the first had just populated,
+  so on the DEFAULT backend's streamed path every tool call reached consumers
+  with empty arguments — the announcement won and the truth was dropped. The
+  guard is gone (and with it the set, whose only reader it was): both emissions
+  now go out, distinguished by an additive ``metadata["input_pending"]`` — True
+  on the provisional announcement, False on the resolved one. Two events for one
+  streamed call is intended; consumers render a tool status line they REPLACE, so
+  the resolved event upgrades the display. The non-streaming path (no
+  ``_StreamEvent``, hence no ``include_partial_messages``) never ran the first
+  branch, so it still emits exactly one event per call, as it always did.
 Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — two things, and the
   first is a docstring that had become false. ``_behavior_prefix`` said PA-7
   would delete it once the channel path produced a digest of its own. The channel
@@ -3110,7 +3125,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
             # State tracking for StreamEvent deduplication
             _streamed_via_events = False
-            _announced_tools: set[str] = set()
             _event_count = 0
             _saw_result = False  # Track if ResultMessage was consumed
             # The model that actually answered (from AssistantMessage.model) —
@@ -3153,11 +3167,23 @@ class ClaudeSDKBackend(BaseAgentBackend):
                             cb = raw.get("content_block", {})
                             if cb.get("type") == "tool_use":
                                 tool_name = cb.get("name", "unknown")
-                                _announced_tools.add(tool_name)
+                                # PROVISIONAL announcement. ``content_block_start``
+                                # opens the block before a single argument fragment
+                                # has streamed, so the name is known here and the
+                                # input is not. Emit anyway — a prompt "tool
+                                # started" indicator is the whole reason this
+                                # branch exists — and flag ``input_pending`` so a
+                                # consumer can tell the empty ``input`` is a
+                                # placeholder that the AssistantMessage branch
+                                # below supersedes with the real arguments.
                                 yield AgentEvent(
                                     type="tool_use",
                                     content=f"Using {tool_name}...",
-                                    metadata={"name": tool_name, "input": {}},
+                                    metadata={
+                                        "name": tool_name,
+                                        "input": {},
+                                        "input_pending": True,
+                                    },
                                 )
                         elif event_type == "content_block_stop":
                             if getattr(event, "_block_type", None) == "thinking":
@@ -3239,21 +3265,33 @@ class ClaudeSDKBackend(BaseAgentBackend):
                             if text:
                                 yield AgentEvent(type="message", content=text)
 
+                        # RESOLVED emission. The completed message carries the
+                        # SDK's fully assembled ``input``, and this is the only
+                        # place the real arguments exist — the streamed
+                        # announcement above never has them. It is emitted
+                        # UNCONDITIONALLY: it used to be skipped for any tool the
+                        # streaming branch had already named, which on a streamed
+                        # turn is every tool, so consumers only ever saw
+                        # ``input={}``. A streamed call therefore surfaces twice
+                        # (provisional, then resolved) — correct, because consumers
+                        # REPLACE a tool's status line rather than append to it. On
+                        # the non-streaming path (no ``_StreamEvent``, so no
+                        # ``include_partial_messages``) this branch is the only
+                        # emitter and one call still yields exactly one event.
                         tools = self._extract_tool_info(event)
                         for tool in tools:
-                            if tool["name"] not in _announced_tools:
-                                logger.info(f"🔧 Tool: {tool['name']}")
-                                yield AgentEvent(
-                                    type="tool_use",
-                                    content=f"Using {tool['name']}...",
-                                    metadata={
-                                        "name": tool["name"],
-                                        "input": tool["input"],
-                                    },
-                                )
+                            logger.info(f"🔧 Tool: {tool['name']}")
+                            yield AgentEvent(
+                                type="tool_use",
+                                content=f"Using {tool['name']}...",
+                                metadata={
+                                    "name": tool["name"],
+                                    "input": tool["input"],
+                                    "input_pending": False,
+                                },
+                            )
 
                         _streamed_via_events = False
-                        _announced_tools.clear()
                         continue
 
                     # ========== ResultMessage - final result ==========
