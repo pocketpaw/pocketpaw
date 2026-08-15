@@ -120,7 +120,9 @@ async def test_web_search_survives_the_argument_the_model_actually_sends(supplie
     message, or this passes while the tool is broken.
     """
     tool = _bridged("web_search")
-    kwargs = tool.function_schema.validator.validate_python({"query": "quarterly filings", **supplied})
+    kwargs = tool.function_schema.validator.validate_python(
+        {"query": "quarterly filings", **supplied}
+    )
 
     result = await tool.function(**kwargs)
 
