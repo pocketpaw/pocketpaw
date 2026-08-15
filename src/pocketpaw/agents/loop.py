@@ -1475,7 +1475,18 @@ class AgentLoop:
                     # None here and behave exactly as before.
                     elif etype == "tool_use" and meta.get("input_pending") is not True:
                         tool_name = meta.get("name") or meta.get("tool", "unknown")
-                        tool_input = meta.get("input") or meta
+                        # A tool called with NO arguments reports ``input={}``,
+                        # which is falsy — an ``or meta`` fallback here published
+                        # the whole metadata dict as the call's parameters, so the
+                        # transparency log rendered ``{'input': {}, 'name':
+                        # 'get_system_status'}`` where the arguments belong. No
+                        # backend ever put arguments outside ``input`` (opencode
+                        # omits the key entirely and simply has none to give), so
+                        # the fallback never recovered anything real. Absent or
+                        # malformed now reads as "no arguments", which is true.
+                        tool_input = meta.get("input")
+                        if not isinstance(tool_input, dict):
+                            tool_input = {}
                         tool_call_seq += 1
                         tool_call_id = f"{trace_id}:{tool_call_seq}"
                         pending_tool_calls.append({"id": tool_call_id, "name": tool_name})

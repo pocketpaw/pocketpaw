@@ -301,3 +301,53 @@ async def test_non_streaming_claude_sdk_path_is_unchanged() -> None:
     assert len(starts) == 1
     assert starts[0]["params"] == _WRITE_ARGS
     assert results[0]["tool_call_id"] == starts[0]["tool_call_id"]
+
+
+# ===========================================================================
+# 5. Zero-argument and argument-less calls report no arguments, not the metadata
+# ===========================================================================
+
+
+async def test_zero_argument_call_publishes_empty_params() -> None:
+    """A tool called with no arguments reports ``input={}``, which is falsy. The
+    published ``params`` must be that empty dict — not the metadata dict, which an
+    ``or meta`` fallback used to substitute, putting ``{'input': {}, 'name':
+    'get_system_status'}`` where the arguments belong in the transparency log."""
+    system_events = await _drive(
+        [
+            AgentEvent(
+                type="tool_use",
+                content="Using get_system_status...",
+                metadata={"name": "get_system_status", "input": {}},
+            ),
+            _result("get_system_status"),
+        ]
+    )
+
+    starts = _of_type(system_events, "tool_start")
+
+    assert len(starts) == 1
+    assert starts[0]["params"] == {}, (
+        "a zero-argument call must publish empty params, not the metadata dict — "
+        f"got {starts[0]['params']}"
+    )
+
+
+async def test_backend_omitting_input_publishes_empty_params() -> None:
+    """opencode emits ``metadata={"name": ...}`` with no ``input`` key at all. It
+    has no arguments to give, so the loop must say so rather than pass the
+    metadata dict off as the call's parameters."""
+    system_events = await _drive(
+        [
+            AgentEvent(type="tool_use", content="Using Read...", metadata={"name": "Read"}),
+            _result("Read"),
+        ]
+    )
+
+    starts = _of_type(system_events, "tool_start")
+
+    assert len(starts) == 1
+    assert starts[0]["name"] == "Read"
+    assert starts[0]["params"] == {}, (
+        f"a backend omitting 'input' must publish empty params, got {starts[0]['params']}"
+    )
