@@ -1,0 +1,673 @@
+<!doctype html>
+<!--
+  recap-template.html — paw-visual-recap skill (created 2026-07-03).
+  Changes: initial version. Self-contained diff-recap viewer: ALL CSS/JS inline, zero external
+  requests (no CDN, no fonts, no http(s) references). Renders entirely from window.RECAP_SPEC
+  (contract: recap-spec.schema.json). The RECAP_SPEC placeholder line in the script below is
+  replaced by string substitution — see SKILL.md. Rendered copies are GENERATED artifacts:
+  never hand-edit one; regenerate from the refs (the diff wins on conflict).
+  Sibling of paw-visual-plan/plan-template.html — same mechanism, same visual language.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Recap</title>
+<style>
+  *{box-sizing:border-box}
+  :root{
+    --bg:#0b0e14;--panel:#11161f;--panel2:#182031;--line:#232c3d;
+    --text:#c8d3e0;--dim:#7f8b9e;--green:#5ac8a8;--amber:#d9a854;
+    --blue:#6ca8d9;--red:#d97c7c;
+    --addbg:rgba(90,200,168,.08);--delbg:rgba(217,124,124,.09);
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 var(--mono);-webkit-font-smoothing:antialiased}
+  a{color:var(--blue);text-decoration:none}
+  main,header.mast{max-width:1060px;margin:0 auto;padding:0 24px}
+  header.mast{padding-top:30px;padding-bottom:14px}
+  .kicker{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+  header.mast h1{margin:6px 0 12px;font-size:26px;line-height:1.2;color:#e8eef5;font-weight:600}
+  .meta-row{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:3px 10px;font-size:12px;color:var(--dim)}
+  .chip b{color:var(--green);font-weight:600;margin-right:4px}
+  .refline{color:var(--dim);font-size:13px;margin:8px 0 0}
+  .refline code{color:#dbe6f1}
+  .refline .arr{color:var(--green);margin:0 6px}
+  ul.commits{list-style:none;margin:10px 0 0;padding:0}
+  ul.commits li{padding:2px 0;font-size:13px}
+  ul.commits .sha{color:var(--amber);margin-right:10px}
+  nav{position:sticky;top:0;z-index:10;background:rgba(11,14,20,.92);backdrop-filter:blur(6px);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+  nav .inner{max-width:1060px;margin:0 auto;padding:7px 20px;display:flex;flex-wrap:wrap;gap:2px}
+  nav a{padding:4px 10px;border-radius:4px;color:var(--dim);font-size:11px;letter-spacing:.06em;text-transform:uppercase}
+  nav a:hover{color:var(--text);background:var(--panel2)}
+  main{padding-bottom:90px}
+  section{margin-top:46px;scroll-margin-top:56px}
+  h2{margin:0 0 14px;font-size:13px;text-transform:uppercase;letter-spacing:.14em;color:var(--dim);border-bottom:1px solid var(--line);padding-bottom:8px;font-weight:600}
+  h2 .hash{color:var(--green);margin-right:7px}
+  .prose p{margin:9px 0;max-width:76ch}
+  .prose ul{margin:8px 0;padding-left:22px}
+  .prose li{margin:3px 0}
+  code{background:var(--panel2);border:1px solid var(--line);padding:1px 5px;border-radius:3px;font-size:.92em;color:#dbe6f1}
+  .tag{display:inline-block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;border-radius:3px;padding:1px 7px;border:1px solid;vertical-align:middle}
+  .tag.warn{color:var(--amber);border-color:var(--amber)}
+  /* stats */
+  .stat-row{display:flex;flex-wrap:wrap;gap:14px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 22px;min-width:130px}
+  .stat .n{font-size:26px;font-weight:600;color:#e8eef5;display:block}
+  .stat .n.plus{color:var(--green)}
+  .stat .n.minus{color:var(--red)}
+  .stat .k{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim)}
+  .bar{margin-top:14px;height:8px;border-radius:4px;overflow:hidden;display:flex;background:var(--panel2);border:1px solid var(--line);max-width:420px}
+  .bar .add{background:var(--green)}
+  .bar .del{background:var(--red)}
+  /* key changes accordion */
+  details.kc{border:1px solid var(--line);border-radius:6px;background:var(--panel);margin:0 0 12px}
+  details.kc summary{cursor:pointer;padding:10px 14px;display:flex;flex-wrap:wrap;align-items:baseline;gap:10px}
+  details.kc summary::marker{color:var(--green)}
+  details.kc[open] summary{border-bottom:1px solid var(--line)}
+  .kc-path{color:#e8eef5;font-weight:600;font-size:13px;word-break:break-all}
+  .kc-note{color:var(--dim);font-size:13px;flex:1 1 100%;margin-left:22px}
+  .hunk{margin:12px 14px;border:1px solid var(--line);border-radius:4px;overflow-x:auto}
+  .hunk-h{background:var(--panel2);color:var(--blue);padding:4px 12px;font-size:12px;border-bottom:1px solid var(--line);white-space:pre}
+  .hunk pre{margin:0;padding:6px 0;font:12px/1.5 var(--mono)}
+  .dl{display:block;padding:0 12px;white-space:pre}
+  .dl.add{color:var(--green);background:var(--addbg)}
+  .dl.del{color:var(--red);background:var(--delbg)}
+  .dl.ctx{color:var(--dim)}
+  .dl .m{display:inline-block;width:1.2em;user-select:none;opacity:.8}
+  /* file tree */
+  .dirgrp{margin:0 0 18px}
+  .dirname{color:var(--blue);font-size:12px;letter-spacing:.04em;padding:4px 0;border-bottom:1px dashed var(--line)}
+  table.ft{width:100%;border-collapse:collapse;font-size:13px}
+  table.ft td{padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:baseline}
+  table.ft td.f{width:60%}
+  table.ft td.n{text-align:right;white-space:nowrap}
+  .plus{color:var(--green)}
+  .minus{color:var(--red)}
+  .fflag{font-size:10px;letter-spacing:.1em;text-transform:uppercase;border-radius:3px;padding:1px 7px;border:1px solid}
+  .fflag.new{color:var(--green);border-color:var(--green)}
+  .fflag.modified{color:var(--amber);border-color:var(--amber)}
+  .fflag.deleted{color:var(--red);border-color:var(--red)}
+  .fflag.renamed{color:var(--blue);border-color:var(--blue)}
+  .keymark{color:var(--green);font-size:11px;margin-left:8px}
+  /* api deltas */
+  .delta{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 16px;margin:0 0 12px}
+  .delta .kind{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--amber);border:1px solid var(--amber);border-radius:3px;padding:1px 7px}
+  .delta .pair{margin-top:8px;overflow-x:auto}
+  .delta .b,.delta .a{display:block;padding:3px 10px;white-space:pre-wrap;border-radius:3px;font-size:13px}
+  .delta .b{color:var(--red);background:var(--delbg)}
+  .delta .a{color:var(--green);background:var(--addbg);margin-top:3px}
+  .delta .note{margin-top:8px;color:var(--dim);font-size:13px}
+  ul.inf{list-style:none;margin:0;padding:0}
+  ul.inf li{padding:8px 0;border-bottom:1px dashed var(--line);max-width:80ch}
+  ul.inf .tag{margin-right:10px}
+  footer{max-width:1060px;margin:60px auto 0;padding:14px 24px;border-top:1px solid var(--line);color:var(--dim);font-size:11px}
+  @media print{
+    :root{--bg:#fff;--panel:#fff;--panel2:#f2f2f2;--line:#bbb;--text:#111;--dim:#555;--green:#0a7a5c;--amber:#8a6414;--blue:#1c5f96;--red:#a33;--addbg:#eaf6f1;--delbg:#faeceb}
+    nav{display:none}
+    body{font-size:12px}
+    details.kc,.delta,.dirgrp{break-inside:avoid}
+    section{margin-top:26px}
+  }
+</style>
+</head>
+<body>
+<header class="mast" id="mast"></header>
+<nav><div class="inner" id="navlinks"></div></nav>
+<main id="main"></main>
+<footer>generated by paw-visual-recap — the refs are the source of truth; regenerate, don't hand-edit.</footer>
+<script>
+window.RECAP_SPEC = {
+  "meta": {
+    "title": "Humanized tool narration (PR #1942)",
+    "date": "2026-08-15",
+    "base": "origin/dev",
+    "head": "origin/feat/humanized-tool-narration",
+    "commits": [
+      {
+        "sha": "639b0d89",
+        "subject": "docs(design): wave 1 status \u2014 two PRs open, neither merged"
+      },
+      {
+        "sha": "a2ce35d4",
+        "subject": "test(tools): pin the emoji ZWJ cost of stripping the Cf category"
+      },
+      {
+        "sha": "d7538a83",
+        "subject": "test(tools): assert narration falls back, not just that the character vanished"
+      },
+      {
+        "sha": "c537bd0f",
+        "subject": "docs(design): stripping Cf closes two findings and costs emoji ZWJ sequences"
+      },
+      {
+        "sha": "e9857a16",
+        "subject": "fix(tools): close the invisible-character and declaration gaps in narration"
+      },
+      {
+        "sha": "22ef0a65",
+        "subject": "docs(design): security review corrects this plan's threat model in two directions"
+      },
+      {
+        "sha": "1ad93e24",
+        "subject": "docs(design): HTN-2 should delete the stopgap map, not grow it"
+      },
+      {
+        "sha": "1440437f",
+        "subject": "feat(tools): narrate tool calls in plain language server-side"
+      },
+      {
+        "sha": "01c2bf71",
+        "subject": "docs(design): HTN-0 says the SDK arguments were never lost, just suppressed"
+      },
+      {
+        "sha": "227750e3",
+        "subject": "docs(design): task breakdown \u2014 re-cut the PRD's chunks so the first merge is visible"
+      },
+      {
+        "sha": "4bb6b2c0",
+        "subject": "docs(design): PRD \u2014 and the argument drop turns out to be two bugs, not one"
+      },
+      {
+        "sha": "e4c40350",
+        "subject": "docs(design): the tool narration and the agent plan are the same bug"
+      }
+    ]
+  },
+  "narrative": "Users watching an agent work read `using pocketpaw_sites_publish`. The only humanized phrasing that existed was a nine-entry lookup table in the Svelte chat store, keyed to Claude Agent SDK tool names, so every PocketPaw-native tool fell through to `using ${tool}` \u2014 48 builtin modules, ~49 bridged MCP tools, and the whole connector surface.\n\nThis moves phrasing to the server. A tool declares a `Narration` and the bridge renders it once, so every surface reads the same words. `web_search` is annotated as the reference; a tool without a `Narration` emits no field and the bridge invents nothing.\n\n**Review the allowlist first.** Tool arguments are model-authored and routinely carry credentials, so only fields named in `safe_args` may interpolate. A security review returned SOUND_WITH_FINDINGS: the allowlist held against every format-string escape hatch tried against it. Six findings were fixed here, three of them reproduced by running the exploit first and re-run after to confirm closure.\n\n**The bridge change also closed a leak that predates this work.** Reading `event.content` first meant codex_cli's entire shell command went into the `tool` field, unbounded and unsanitized, out to every group member.",
+  "stats": {
+    "files": 9,
+    "adds": 2037,
+    "dels": 15
+  },
+  "fileTree": [
+    {
+      "path": "src/pocketpaw/tools/narration.py",
+      "adds": 303,
+      "dels": 0,
+      "flag": "new"
+    },
+    {
+      "path": "src/pocketpaw/tools/protocol.py",
+      "adds": 14,
+      "dels": 0,
+      "flag": "modified"
+    },
+    {
+      "path": "src/pocketpaw/tools/builtin/web_search.py",
+      "adds": 14,
+      "dels": 0,
+      "flag": "modified"
+    },
+    {
+      "path": "ee/pocketpaw_ee/cloud/shared/agent_bridge.py",
+      "adds": 57,
+      "dels": 15,
+      "flag": "modified"
+    },
+    {
+      "path": "tests/test_tool_narration.py",
+      "adds": 527,
+      "dels": 0,
+      "flag": "new"
+    },
+    {
+      "path": "tests/cloud/shared/test_agent_bridge_narration.py",
+      "adds": 191,
+      "dels": 0,
+      "flag": "new"
+    },
+    {
+      "path": "docs/design/2026-08-15-humanized-tool-narration.md",
+      "adds": 247,
+      "dels": 0,
+      "flag": "new"
+    },
+    {
+      "path": "docs/design/2026-08-15-humanized-tool-narration-prd.md",
+      "adds": 242,
+      "dels": 0,
+      "flag": "new"
+    },
+    {
+      "path": "docs/design/2026-08-15-humanized-tool-narration-tasks.md",
+      "adds": 442,
+      "dels": 0,
+      "flag": "new"
+    }
+  ],
+  "keyChanges": [
+    {
+      "path": "src/pocketpaw/tools/narration.py",
+      "annotation": "The security boundary. `_template_fields` refuses every construct that could escape the allowlist \u2014 attribute access, indexing, positional, conversions, format specs. The review traced each against CPython's own parser and called the rejection list complete.",
+      "hunks": [
+        {
+          "header": "@@ -0,0 +1,303 @@ (new file)",
+          "lines": [
+            {
+              "t": "add",
+              "s": "    fields: list[str] = []"
+            },
+            {
+              "t": "add",
+              "s": "    try:"
+            },
+            {
+              "t": "add",
+              "s": "        parsed = list(_FORMATTER.parse(template))"
+            },
+            {
+              "t": "add",
+              "s": "    except ValueError:"
+            },
+            {
+              "t": "add",
+              "s": "        # Malformed template (unbalanced braces) \u2014 treat as unrenderable."
+            },
+            {
+              "t": "add",
+              "s": "        return None"
+            },
+            {
+              "t": "add",
+              "s": "    for _literal, field_name, format_spec, conversion in parsed:"
+            },
+            {
+              "t": "add",
+              "s": "        if field_name is None:"
+            },
+            {
+              "t": "add",
+              "s": "            continue"
+            },
+            {
+              "t": "add",
+              "s": "        if conversion is not None or format_spec:"
+            },
+            {
+              "t": "add",
+              "s": "            return None"
+            },
+            {
+              "t": "add",
+              "s": "        if not field_name.isidentifier():"
+            },
+            {
+              "t": "add",
+              "s": "            return None"
+            },
+            {
+              "t": "add",
+              "s": "        fields.append(field_name)"
+            },
+            {
+              "t": "add",
+              "s": "    return fields"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "src/pocketpaw/tools/protocol.py",
+      "annotation": "The declaration surface: an optional property on `BaseTool`, sitting beside `trust_level`. Narration lives with the tool because which arguments are safe to display is knowledge only the tool has.",
+      "hunks": [
+        {
+          "header": "@@ -99,6 +103,16 @@ class BaseTool(ABC):",
+          "lines": [
+            {
+              "t": "ctx",
+              "s": "        \"\"\"Required trust level to use this tool.\"\"\""
+            },
+            {
+              "t": "ctx",
+              "s": "        return \"standard\""
+            },
+            {
+              "t": "ctx",
+              "s": ""
+            },
+            {
+              "t": "add",
+              "s": "    @property"
+            },
+            {
+              "t": "add",
+              "s": "    def narration(self) -> Narration | None:"
+            },
+            {
+              "t": "add",
+              "s": "        \"\"\"Plain-language phrasing for a call to this tool."
+            },
+            {
+              "t": "add",
+              "s": ""
+            },
+            {
+              "t": "add",
+              "s": "        Override to give users a readable status line (\"Searching the web for"
+            },
+            {
+              "t": "add",
+              "s": "        quarterly filings\") instead of the bare tool name. ``None`` means the"
+            },
+            {
+              "t": "add",
+              "s": "        tool has no phrasing and callers should not invent one."
+            },
+            {
+              "t": "add",
+              "s": "        \"\"\""
+            },
+            {
+              "t": "add",
+              "s": "        return None"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "src/pocketpaw/tools/builtin/web_search.py",
+      "annotation": "The reference annotation, and the shape every tool in HTN-3 will copy. Note `num_results` is deliberately left out of `safe_args`.",
+      "hunks": [
+        {
+          "header": "@@ -42,6 +46,16 @@ class WebSearchTool(BaseTool):",
+          "lines": [
+            {
+              "t": "ctx",
+              "s": "    def trust_level(self) -> str:"
+            },
+            {
+              "t": "ctx",
+              "s": "        return \"standard\""
+            },
+            {
+              "t": "ctx",
+              "s": ""
+            },
+            {
+              "t": "add",
+              "s": "    @property"
+            },
+            {
+              "t": "add",
+              "s": "    def narration(self) -> Narration | None:"
+            },
+            {
+              "t": "add",
+              "s": "        # ``query`` is the only arg safe to show \u2014 ``num_results`` is noise, and"
+            },
+            {
+              "t": "add",
+              "s": "        # anything not listed here can never reach the rendered phrase."
+            },
+            {
+              "t": "add",
+              "s": "        return Narration("
+            },
+            {
+              "t": "add",
+              "s": "            active=\"Searching the web for {query}\","
+            },
+            {
+              "t": "add",
+              "s": "            bare=\"Searching the web\","
+            },
+            {
+              "t": "add",
+              "s": "            safe_args=(\"query\",),"
+            },
+            {
+              "t": "add",
+              "s": "        )"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "ee/pocketpaw_ee/cloud/shared/agent_bridge.py",
+      "annotation": "Two things at once: arguments now survive the bridge, and the `tool` field stops carrying prose. The deleted lines are the pre-existing leak \u2014 on codex_cli, `event.content` is the full shell command.",
+      "hunks": [
+        {
+          "header": "@@ -580,22 +604,40 @@",
+          "lines": [
+            {
+              "t": "ctx",
+              "s": "            elif event.type == \"tool_use\":"
+            },
+            {
+              "t": "del",
+              "s": "                tool_name = \"\""
+            },
+            {
+              "t": "del",
+              "s": "                if isinstance(event.content, dict):"
+            },
+            {
+              "t": "del",
+              "s": "                    tool_name = event.content.get(\"tool\") or event.content.get(\"name\") or \"\""
+            },
+            {
+              "t": "del",
+              "s": "                elif isinstance(event.content, str):"
+            },
+            {
+              "t": "del",
+              "s": "                    tool_name = event.content"
+            },
+            {
+              "t": "add",
+              "s": "                tool_input: dict[str, Any] = {}"
+            },
+            {
+              "t": "add",
+              "s": "                meta = getattr(event, \"metadata\", None)"
+            },
+            {
+              "t": "add",
+              "s": "                meta = meta if isinstance(meta, dict) else {}"
+            },
+            {
+              "t": "add",
+              "s": "                if meta:"
+            },
+            {
+              "t": "add",
+              "s": "                    tool_name = meta.get(\"name\") or meta.get(\"tool\") or \"\""
+            },
+            {
+              "t": "add",
+              "s": "                    raw_input = meta.get(\"input\")"
+            },
+            {
+              "t": "add",
+              "s": "                    tool_input = raw_input if isinstance(raw_input, dict) else {}"
+            },
+            {
+              "t": "add",
+              "s": "                # Purely additive: a tool with no narration emits no field, and"
+            },
+            {
+              "t": "add",
+              "s": "                # the bridge never invents a fallback phrase."
+            },
+            {
+              "t": "add",
+              "s": "                narration = _narrate_tool_use(tool_name, tool_input)"
+            },
+            {
+              "t": "add",
+              "s": "                if narration:"
+            },
+            {
+              "t": "add",
+              "s": "                    payload[\"narration\"] = narration"
+            },
+            {
+              "t": "add",
+              "s": "                await emit(AgentToolUse(data=payload))"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "apiDeltas": [
+    {
+      "kind": "schema",
+      "before": "agent.tool_use -> {group_id, agent_id, agent_name, tool}",
+      "after": "agent.tool_use -> {group_id, agent_id, agent_name, tool, narration?}",
+      "note": "Additive. `tool` stays populated, so an older client is unaffected. `narration` is absent for any tool that declares none."
+    },
+    {
+      "kind": "schema",
+      "before": "tool field value on codex_cli: \"Running: curl -H 'Authorization: Bearer ...'\"",
+      "after": "tool field value on codex_cli: \"shell\"",
+      "note": "The old value was event.content, which carried the whole command. This is the pre-existing leak the precedence change closes."
+    }
+  ],
+  "inferred": [
+    "Tool counts (48 builtin modules, ~49 bridged MCP tools) are read from the repo layout and the pydantic_ai backend docstring, not measured at runtime.",
+    "The security review was static analysis: Bash was unavailable to the reviewer, so its CPython parser and re.sub claims were reasoned, not executed. Three of its findings were separately reproduced and re-verified by running them.",
+    "'Every surface inherits the phrasing' is the design intent. Verified today: narration reaches one emit scoped to chat-group members, and no channel adapter consumes the field yet."
+  ]
+};
+(function(){
+"use strict";
+var S = window.RECAP_SPEC;
+var main = document.getElementById("main");
+if (!S) {
+  main.innerHTML = "<p style='padding:40px 0'>window.RECAP_SPEC is empty — this file was not generated. Run the substitution in the paw-visual-recap SKILL.md.</p>";
+  return;
+}
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
+function inline(t){
+  t = esc(t);
+  t = t.replace(/`([^`]+)`/g,"<code>$1</code>");
+  t = t.replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>");
+  t = t.replace(/\*([^*]+)\*/g,"<em>$1</em>");
+  return t;
+}
+function md(s){ /* md-lite: paragraphs, "- " lists, **bold**, *em*, `code` */
+  return String(s).trim().split(/\n\s*\n/).map(function(b){
+    var lines = b.split("\n");
+    var isList = lines.length > 0 && lines.every(function(l){return /^\s*-\s+/.test(l);});
+    if (isList) return "<ul>" + lines.map(function(l){return "<li>"+inline(l.replace(/^\s*-\s+/,""))+"</li>";}).join("") + "</ul>";
+    return "<p>" + inline(b) + "</p>";
+  }).join("");
+}
+function chip(k,v){return '<span class="chip"><b>'+esc(k)+'</b>'+esc(v)+'</span>';}
+
+/* masthead */
+var meta = S.meta || {};
+document.title = (meta.title || "Recap") + " — recap";
+var mast = '<div class="kicker">paw-visual-recap &middot; generated &mdash; regenerate, don\'t hand-edit</div>'
+  + '<h1>'+esc(meta.title || "Untitled recap")+'</h1>'
+  + '<div class="refline"><code>'+esc(meta.base||"?")+'</code><span class="arr">&rarr;</span><code>'+esc(meta.head||"?")+'</code></div>'
+  + '<div class="meta-row" style="margin-top:10px">'
+  + (meta.date ? chip("date", meta.date) : "")
+  + ((meta.commits||[]).length ? chip("commits", String(meta.commits.length)) : "")
+  + (S.stats ? chip("files", String(S.stats.files)) : "")
+  + '</div>'
+  + (meta.prUrl ? '<div class="refline">PR: <a href="'+esc(meta.prUrl)+'">'+esc(meta.prUrl)+'</a></div>' : "");
+if ((meta.commits || []).length) {
+  mast += '<ul class="commits">' + meta.commits.map(function(c){
+    return '<li><span class="sha">'+esc(c.sha)+'</span>'+esc(c.subject)+'</li>';
+  }).join("") + '</ul>';
+}
+document.getElementById("mast").innerHTML = mast;
+
+/* sections — only pushed when the spec has data, so empty blocks disappear */
+var sections = [];
+function section(id, label, html){ sections.push({id:id, label:label, html:html}); }
+
+if (S.narrative) section("narrative", "Narrative", '<div class="prose">'+md(S.narrative)+'</div>');
+
+if (S.stats) {
+  var st = S.stats, tot = (st.adds + st.dels) || 1;
+  section("stats", "Stats",
+    '<div class="stat-row">'
+    + '<div class="stat"><span class="n">'+st.files+'</span><span class="k">files</span></div>'
+    + '<div class="stat"><span class="n plus">+'+st.adds+'</span><span class="k">insertions</span></div>'
+    + '<div class="stat"><span class="n minus">&minus;'+st.dels+'</span><span class="k">deletions</span></div>'
+    + '</div>'
+    + '<div class="bar" title="+'+st.adds+' / -'+st.dels+'">'
+    + '<div class="add" style="width:'+Math.round(100*st.adds/tot)+'%"></div>'
+    + '<div class="del" style="flex:1"></div>'
+    + '</div>');
+}
+
+var keyPaths = {};
+if ((S.keyChanges || []).length) {
+  var kcs = S.keyChanges.map(function(k, i){
+    keyPaths[k.path] = true;
+    var hunks = (k.hunks || []).map(function(h){
+      var body = (h.lines || []).map(function(l){
+        var m = l.t === "add" ? "+" : (l.t === "del" ? "-" : " ");
+        return '<span class="dl '+esc(l.t)+'"><span class="m">'+m+'</span>'+esc(l.s)+'</span>';
+      }).join("");
+      return '<div class="hunk"><div class="hunk-h">'+esc(h.header)+'</div><pre>'+body+'</pre></div>';
+    }).join("");
+    return '<details class="kc"'+(i===0?' open':'')+'>'
+      + '<summary><span class="kc-path">'+esc(k.path)+'</span>'
+      + '<span class="kc-note">'+inline(k.annotation||"")+'</span></summary>'
+      + hunks + '</details>';
+  }).join("");
+  section("keychanges", "Key changes", kcs);
+}
+
+if ((S.fileTree || []).length) {
+  var groups = {}, order = [];
+  S.fileTree.forEach(function(f){
+    var i = f.path.lastIndexOf("/");
+    var dir = i < 0 ? "." : f.path.slice(0, i);
+    if (!groups[dir]) { groups[dir] = []; order.push(dir); }
+    groups[dir].push(f);
+  });
+  var ft = order.map(function(dir){
+    var rows = groups[dir].map(function(f){
+      var base = f.path.slice(dir === "." ? 0 : dir.length + 1);
+      return '<tr><td class="f"><code>'+esc(base)+'</code>'
+        + (keyPaths[f.path] ? '<span class="keymark" title="annotated in key changes">&#9670; key</span>' : '')
+        + '</td>'
+        + '<td class="n"><span class="plus">+'+f.adds+'</span> <span class="minus">&minus;'+f.dels+'</span></td>'
+        + '<td><span class="fflag '+esc(f.flag)+'">'+esc(f.flag)+'</span></td></tr>';
+    }).join("");
+    return '<div class="dirgrp"><div class="dirname">'+esc(dir)+'/</div><table class="ft"><tbody>'+rows+'</tbody></table></div>';
+  }).join("");
+  section("files", "Files", ft);
+}
+
+if ((S.apiDeltas || []).length) {
+  section("apideltas", "API deltas", S.apiDeltas.map(function(d){
+    return '<div class="delta"><span class="kind">'+esc(d.kind)+'</span>'
+      + '<div class="pair"><span class="b">- '+esc(d.before)+'</span><span class="a">+ '+esc(d.after)+'</span></div>'
+      + (d.note ? '<div class="note">'+inline(d.note)+'</div>' : '')
+      + '</div>';
+  }).join(""));
+}
+
+if ((S.inferred || []).length)
+  section("inferred", "Inferred", '<ul class="inf">'+S.inferred.map(function(x){
+    return '<li><span class="tag warn">inferred</span>'+inline(x)+'</li>';
+  }).join("")+'</ul>');
+
+main.innerHTML = sections.map(function(s){
+  return '<section id="'+s.id+'"><h2><span class="hash">#</span>'+s.label+'</h2>'+s.html+'</section>';
+}).join("");
+document.getElementById("navlinks").innerHTML = sections.map(function(s){
+  return '<a href="#'+s.id+'">'+s.label+'</a>';
+}).join("");
+
+/* print-friendly: expand all collapsed key changes before printing */
+window.addEventListener("beforeprint", function(){
+  document.querySelectorAll("details").forEach(function(d){ d.open = true; });
+});
+})();
+</script>
+</body>
+</html>
