@@ -840,6 +840,7 @@ from bson.errors import InvalidId
 from pocketpaw.sites_capture.contact_form import CONTACT_FORM_TYPE, default_event_mapping
 from pocketpaw_ee.cloud._core.errors import (
     CloudError,
+    CustomDomainNotEntitled,
     Forbidden,
     Internal,
     NotFound,
@@ -3896,6 +3897,54 @@ def _route_target(site: Any) -> str:
     return worker_name(str(site.id))
 
 
+def _assert_entitled_to_custom_domain(site: Any) -> None:
+    """Refuse the attach unless this site's own plan grants a custom domain.
+
+    Delegates the RULE to ``entitlements.resolve_site_entitlements`` rather than
+    reading ``plan_tier`` here, for the reason that resolver exists: cancellation
+    never resets the tier, and an unconfigured Dodo product records a paid tier with
+    no charge, so tier-alone hands a free custom domain to sites that have never
+    paid. That resolver had exactly one caller (the badge stamper); this is the
+    second, and both paid per-site capabilities now answer to the same function.
+
+    Gated on ``billing_enforced``, matching every other cap in this codebase: OSS /
+    self-host has no billing and must not acquire a paywall. The lazy ``get_settings``
+    import mirrors the connector cap — it keeps the billing posture off this module's
+    import path.
+
+    Synchronous and passed the loaded doc, because the resolver is pure and
+    ``entitlements`` may not import ``models.site`` (EE cloud rule 2): the caller
+    that owns the document passes what it owns.
+    """
+    from pocketpaw.config import get_settings
+
+    if not get_settings().billing_enforced:
+        return
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = entitlements_service.resolve_site_entitlements(
+        site_id=str(site.id),
+        workspace_id=site.workspace,
+        plan_tier=site.plan_tier,
+        subscription_status=site.subscription_status,
+        concierge_enabled=bool(getattr(site, "concierge_enabled", True)),
+    )
+    if ent.custom_domain:
+        return
+
+    logger.info(
+        "sites: refused a custom domain for site %s — tier %s, subscription active: %s",
+        site.id,
+        ent.plan_tier,
+        ent.subscription_active,
+    )
+    raise CustomDomainNotEntitled(
+        plan_tier=ent.plan_tier,
+        subscription_active=ent.subscription_active,
+    )
+
+
 async def add_domain(
     *,
     workspace_id: str,
@@ -3974,6 +4023,27 @@ async def add_domain(
             "Publish the site before connecting a domain — a custom domain has to "
             "point at a published site, and this one hasn't been published yet.",
         )
+
+    # A custom domain is a PAID per-site capability, so ask whether this site is
+    # entitled to one BEFORE anything is created. Until 2026-08-15 nothing asked:
+    # the tier was resolved just below, but only to pass ``cloudflare_features`` to
+    # provisioning (BC-10 resale), and no branch anywhere read whether the tier
+    # granted the domain itself. The endpoint's only gate was RBAC, which is
+    # permission rather than billing, so a base-tier site attached a custom domain
+    # and kept it — as did a paid site whose subscription was cancelled or, with no
+    # Dodo product configured, never charged at all.
+    #
+    # Placed HERE, and the position is the contract:
+    #   * AFTER the already-connected branch above returns, so this is never
+    #     retroactive. A site that loses its entitlement keeps a live domain, and
+    #     the re-Add route repair — the only self-service fix for a domain that
+    #     silently serves the fallback origin — stays reachable. Detaching on
+    #     downgrade happens at period end, which is not this seam.
+    #   * BEFORE ``create_custom_hostname``. Refusing afterwards would leave a
+    #     hostname on the shared zone with no Site row pointing at it: invisible to
+    #     the product, and it makes the customer's next legitimate attach fail on a
+    #     1406 duplicate they can neither see nor clear.
+    _assert_entitled_to_custom_domain(site)
 
     # Resolve the site's tier → its cloudflare_features and provision them on the
     # custom hostname. A base-tier (or unknown) site resolves to an empty set, so

@@ -1,0 +1,98 @@
+[
+  {
+    "label": "the gate is deleted outright",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    _assert_entitled_to_custom_domain(site)",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_free_site_cannot_attach_a_custom_domain",
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_an_unset_tier_cannot_attach_a_custom_domain"
+    ]
+  },
+  {
+    "label": "the gate reads the TIER alone, ignoring whether the subscription pays",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if ent.custom_domain:\n        return",
+    "replace": "    if \"custom_domain\" in (site_plans.get_site_plan(site.plan_tier).cloudflare_features if site_plans.get_site_plan(site.plan_tier) else set()):\n        return",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_paid_tier_without_an_active_subscription_is_refused"
+    ]
+  },
+  {
+    "label": "the fail-closed default inverts — an unknown tier is handed a domain",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    custom_domain = False",
+    "replace": "    custom_domain = True",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_an_unset_tier_cannot_attach_a_custom_domain",
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_free_site_cannot_attach_a_custom_domain",
+      "tests/cloud/entitlements/test_site_entitlements.py::test_an_unknown_or_absent_tier_falls_to_the_base"
+    ]
+  },
+  {
+    "label": "the gate runs AFTER Cloudflare has already created the hostname",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    _assert_entitled_to_custom_domain(site)\n\n    # Resolve the site's tier",
+    "replace": "\n    # Resolve the site's tier",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_refused_attach_never_reaches_cloudflare"
+    ]
+  },
+  {
+    "label": "a refused attach still writes the hostname onto allowed_origins",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    _assert_entitled_to_custom_domain(site)",
+    "replace": "    site.allowed_origins.append(hostname)\n    await site.set({\"allowed_origins\": list(site.allowed_origins)})\n    _assert_entitled_to_custom_domain(site)",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_refused_attach_writes_nothing_to_the_site"
+    ]
+  },
+  {
+    "label": "the gate becomes retroactive — it runs before the already-connected repair",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    hostname = _normalize_hostname(hostname)\n    existing = next(",
+    "replace": "    _assert_entitled_to_custom_domain(site)\n    hostname = _normalize_hostname(hostname)\n    existing = next(",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_an_already_connected_domain_still_repairs_its_route"
+    ]
+  },
+  {
+    "label": "the billing_enforced guard is dropped — OSS/self-host inherits the paywall",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not get_settings().billing_enforced:\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
+    "replace": "    from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_with_billing_off_the_gate_never_fires"
+    ]
+  },
+  {
+    "label": "the guard inverts — the gate fires ONLY when billing is off",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not get_settings().billing_enforced:\n        return",
+    "replace": "    if get_settings().billing_enforced:\n        return",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_free_site_cannot_attach_a_custom_domain",
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_with_billing_off_the_gate_never_fires"
+    ]
+  },
+  {
+    "label": "the refusal degrades to a 4xx the UI cannot tell from a validation error",
+    "file": "ee/pocketpaw_ee/cloud/_core/errors.py",
+    "find": "        super().__init__(402, \"billing.custom_domain_not_entitled\", f\"Custom domain: {detail}\")",
+    "replace": "        super().__init__(422, \"sites.custom_domain_not_entitled\", f\"Custom domain: {detail}\")",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_free_site_cannot_attach_a_custom_domain",
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_paid_tier_without_an_active_subscription_is_refused"
+    ]
+  },
+  {
+    "label": "the entitled path is broken too — the gate refuses everyone",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if ent.custom_domain:\n        return",
+    "replace": "    if False:\n        return",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_an_active_paid_site_attaches_normally",
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_the_resold_feature_set_still_rides_along"
+    ]
+  }
+]
