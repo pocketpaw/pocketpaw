@@ -312,6 +312,15 @@ _NARRATION_OVERRIDES: dict[str, Narration] = {
     # parameter. Derivation alone would read it as the bare "Searching the web"
     # — correct but incurious — because a derived phrase never interpolates
     # arguments. Declaring it here is what puts the query back in the sentence.
+    #
+    # This entry does NOT make the registry lookup optional, and the two cover
+    # different tools. With LiteLLM's search interception off, the cloud path
+    # calls the proxy's search tool under THIS name and narrates from this
+    # table, needing no registry. The builtin ``web_search`` — our own
+    # ``WebSearchTool`` via the MCP bridge — is a different row of that table
+    # and declares its own phrase, which is reachable only through the live
+    # registry. Delete the seam and this entry keeps the cloud path speaking
+    # while the builtin quietly drops its query.
     "litellm_web_search": Narration(
         active="Searching the web for {query}",
         bare="Searching the web",
@@ -491,6 +500,13 @@ def _declared_narration(tool_name: str, registry: Any | None) -> Narration | Non
     (``ToolRegistry.register`` stores the instance), so a lookup is a dict get
     and an attribute read — no ``__init__`` runs, no settings get built, no
     credential store gets touched to phrase a status line.
+
+    ``.narration`` IS THE ONLY ATTRIBUTE THIS MAY TOUCH on the tool. Not
+    ``definition``, not ``parameters``, never ``execute``. Narration is a
+    description of a call, so it needs one declaration and nothing else, and a
+    lookup that reaches further turns a status line into a second caller of the
+    tool surface. Widening this is a change to the security boundary, not a
+    convenience.
 
     Every step is guarded because none of it is our code: ``registry`` is
     duck-typed, ``get`` may be anything callable, and ``narration`` is a

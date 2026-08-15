@@ -10,9 +10,12 @@
 #   - the interpolated search phrase is asserted against ``litellm_web_search``,
 #     the name the CLOUD path actually emits, which resolves through the
 #     override table;
-#   - the builtin ``web_search`` degrades to the bare phrase here, because this
-#     bridge has no ``ToolRegistry`` handle to read the declaration off. That is
-#     pinned by its own test rather than left to be discovered.
+#   - the builtin ``web_search`` still renders its DECLARED phrase, now read off
+#     the live instance in the agent's own ``ToolRegistry`` (resolved through
+#     ``tool_bridge.narration_registry_for``) instead of off a tool the lookup
+#     constructed. A backend that bridges no tools — the Claude SDK one, whose
+#     tools come over MCP — has no registry to resolve and derives instead;
+#     both paths have a test.
 #
 # The events here use the shape the backends ACTUALLY emit — ``content`` is a
 # prose string ("Using web_search...") and ``metadata`` carries the bare name
@@ -41,12 +44,34 @@ def _tool_use_event(name: str, tool_input: dict):
     )
 
 
-async def _emitted_tool_use(events: list) -> list[dict]:
+def _bridged_backend():
+    """A backend whose bridged tool surface is reachable, as a real one is.
+
+    Mirrors production: ``tool_bridge`` builds the registry under the agent's
+    ToolPolicy and keeps it there, and every bridged backend exposes
+    ``get_tool_policy``. Building it through the real helper means this carries
+    the live ``WebSearchTool`` instance, not a stub of one — the point of the
+    seam is that the phrase is read off the instance the agent actually holds.
+    """
+    from pocketpaw.agents.tool_bridge import _build_tool_registry
+    from pocketpaw.tools.policy import ToolPolicy
+
+    policy = ToolPolicy(profile="full")
+    _build_tool_registry("pydantic_ai", policy)
+    return SimpleNamespace(get_tool_policy=lambda: policy)
+
+
+async def _emitted_tool_use(events: list, backend=None) -> list[dict]:
     """Drive ``_run_agent_response`` over ``events`` and return the payloads of
-    every ``agent.tool_use`` it emitted."""
+    every ``agent.tool_use`` it emitted.
+
+    ``backend`` rides on the agent instance the pool hands back, which is how
+    the narration lookup reaches the agent's own tool registry. Defaults to
+    None — a backend that bridges no tools, like the Claude SDK one.
+    """
     from pocketpaw_ee.cloud.shared import agent_bridge
 
-    instance = SimpleNamespace(agent_name="Test Agent")
+    instance = SimpleNamespace(agent_name="Test Agent", backend=backend)
     pool = MagicMock()
     pool.get = AsyncMock(return_value=instance)
     pool.observe = AsyncMock()
@@ -131,20 +156,32 @@ async def test_search_tool_use_carries_a_humanized_narration():
 
 
 @pytest.mark.asyncio
-async def test_builtin_web_search_degrades_to_the_bare_phrase_here():
-    """KNOWN GAP, pinned deliberately rather than left to be discovered.
+async def test_builtin_web_search_renders_its_declared_phrase_through_the_registry():
+    """THE no-regression test at the bridge.
 
-    ``WebSearchTool`` DECLARES the interpolated phrase, and the lookup renders
-    it whenever a caller passes the ``ToolRegistry`` holding that tool (see
-    ``test_narration_lookup_reads_the_declaration_off_a_live_registry``). This
-    bridge has no registry handle to pass — every ``ToolRegistry`` in the
-    process is built inside ``agents/tool_bridge.py`` and discarded there — so
-    the lookup falls through to derive-from-name and the query is dropped.
-
-    Restoring the interpolation is a seam, not a phrasing change: it needs the
-    agent's registry threaded to this function. Until then this asserts what
-    actually happens, so the gap stays visible in the suite.
+    ``WebSearchTool`` declares the interpolated phrase. Before HTN-2 the bridge
+    reached it through a name -> (module, class) map that INSTANTIATED the tool;
+    that map is gone, so this now resolves the agent's own ``ToolRegistry`` and
+    reads the declaration off the live instance. If the seam breaks, this drops
+    to the derived "Searching the web" — the silent downgrade of the one tool
+    that already worked.
     """
+    payloads = await _emitted_tool_use(
+        [
+            _tool_use_event("web_search", {"query": "quarterly filings"}),
+            _done_event(),
+        ],
+        backend=_bridged_backend(),
+    )
+
+    assert payloads[0]["tool"] == "web_search"
+    assert payloads[0]["narration"] == "Searching the web for quarterly filings"
+
+
+@pytest.mark.asyncio
+async def test_a_backend_that_bridges_no_tools_still_narrates_by_derivation():
+    """The Claude SDK backend surfaces its tools over MCP, so there is no
+    registry to resolve. The chain must still answer — from the tool name."""
     payloads = await _emitted_tool_use(
         [
             _tool_use_event("web_search", {"query": "quarterly filings"}),
@@ -152,7 +189,6 @@ async def test_builtin_web_search_degrades_to_the_bare_phrase_here():
         ]
     )
 
-    assert payloads[0]["tool"] == "web_search"
     assert payloads[0]["narration"] == "Searching the web"
 
 

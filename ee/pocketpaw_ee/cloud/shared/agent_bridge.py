@@ -44,6 +44,13 @@ so a group/DM agent that delivers a file persists the structured signal too.
 This path has no run-transport SSE stream, so it emits no ``artifact`` event —
 that applies only to the streaming ``run_core`` path.
 
+Updated 2026-08-15 (HTN-2): ``_narrate_tool_use`` takes the running agent and
+resolves that agent's OWN ``ToolRegistry`` (``tool_bridge.narration_registry_for``),
+so a tool's declared phrase is read off the live instance the registry holds
+rather than from a hardcoded name->class map that constructed the tool. Tools
+that declare nothing now derive a phrase from their name, so an unannotated
+tool reaches the wire as "Publishing the site" instead of no narration at all.
+
 Updated 2026-08-15 (HTN-1): the ``tool_use`` branch reads ``event.metadata``
 (name + input) with ``event.content`` as fallback — the precedence ``run_core``
 already uses — and adds an additive ``narration`` field to ``agent.tool_use``
@@ -468,18 +475,40 @@ def _augment_message_with_attachments(content: str, attachments: list[dict] | No
     return f"{content}\n\nAttached files:\n" + "\n".join(lines)
 
 
-def _narrate_tool_use(tool_name: str, tool_input: dict[str, Any]) -> str | None:
+def _narrate_tool_use(
+    tool_name: str, tool_input: dict[str, Any], instance: Any = None
+) -> str | None:
     """Render a plain-language phrase for a tool call, or None.
 
-    Returns None for any tool that declares no ``Narration`` — narration is
+    Returns None for any tool that has no phrasing at all — narration is
     decoration, so it must never raise into, or block, the response stream.
+
+    ``instance`` is the running agent, and it is what makes a tool's OWN
+    declared phrase reachable: ``narration_registry_for`` resolves the live
+    ``ToolRegistry`` backing that agent's bridged tool surface, and the lookup
+    reads the ``Narration`` off the instance the registry already holds. It is
+    never constructed — ``ShellTool.__init__`` calls ``get_settings()``, and on
+    cloud EE substitutes ``DaytonaShellTool`` under the same name, so building a
+    tool to read a property would run real setup on the event loop to phrase a
+    status line, and could phrase the wrong tool's.
+
+    Without a resolvable registry (the Claude SDK backend surfaces its tools
+    over MCP rather than through the bridge) the lookup still answers from the
+    override table or by deriving from the tool name — that is why the cloud
+    path's ``litellm_web_search`` narrates with its query either way, and why
+    the registry is what rescues the builtin ``web_search`` specifically.
     """
     if not tool_name:
         return None
     try:
         from pocketpaw.tools.narration import narration_for_tool, render
 
-        return render(narration_for_tool(tool_name), tool_input)
+        registry = None
+        if instance is not None:
+            from pocketpaw.agents.tool_bridge import narration_registry_for
+
+            registry = narration_registry_for(getattr(instance, "backend", None))
+        return render(narration_for_tool(tool_name, registry), tool_input)
     except Exception:
         logger.debug("Tool narration failed for %s", tool_name, exc_info=True)
         return None
@@ -678,7 +707,7 @@ async def _run_agent_response(
                 }
                 # Purely additive: a tool with no narration emits no field, and
                 # the bridge never invents a fallback phrase.
-                narration = _narrate_tool_use(tool_name, tool_input)
+                narration = _narrate_tool_use(tool_name, tool_input, instance)
                 if narration:
                     payload["narration"] = narration
                 await emit(AgentToolUse(data=payload))
