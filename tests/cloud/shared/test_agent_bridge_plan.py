@@ -130,8 +130,17 @@ async def test_a_plan_tool_does_not_also_emit_a_tool_chip():
     emitted = await _emitted([_write_plan_event(*THREE_STEP), _done_event()])
     types = [e.type for e in emitted]
 
-    assert "agent.plan_updated" in types
     assert "agent.tool_use" not in types, f"plan call also emitted a tool chip: {types}"
+    # Assert the plan event is real, not merely present — a substitution that
+    # suppressed the chip and emitted an empty plan would satisfy the negative
+    # assertion above on its own.
+    plans = [e.data for e in emitted if e.type == "agent.plan_updated"]
+    assert len(plans) == 1
+    assert [item["content"] for item in plans[0]["items"]] == [
+        "Add the database migration",
+        "Wire the endpoint",
+        "Backfill the existing rows",
+    ]
 
 
 @pytest.mark.asyncio
@@ -144,6 +153,15 @@ async def test_two_identical_write_plan_calls_emit_one_event():
     )
 
     assert len(payloads) == 1, f"expected coalescing to one event, got {len(payloads)}"
+    # A count alone would also pass if the surviving event carried a wrong or
+    # degenerate plan, so pin its contents: the point is that the ONE event
+    # that got through is the full plan, not merely that one event got through.
+    assert payloads[0]["items"] == [
+        {"id": "1", "content": "Add the database migration", "status": "completed"},
+        {"id": "2", "content": "Wire the endpoint", "status": "in_progress"},
+        {"id": "3", "content": "Backfill the existing rows", "status": "pending"},
+    ]
+    assert payloads[0]["progress"] == {"completed": 1, "total": 3}
 
 
 @pytest.mark.asyncio
@@ -162,6 +180,17 @@ async def test_seq_increases_across_genuine_updates_in_a_run():
 
     assert [p["seq"] for p in payloads] == [1, 2, 3]
     assert [p["items"][0]["status"] for p in payloads] == ["pending", "in_progress", "completed"]
+    # The content must survive every update, not just the status field.
+    assert [p["items"] for p in payloads] == [
+        [{"id": "1", "content": "Wire the endpoint", "status": "pending"}],
+        [{"id": "1", "content": "Wire the endpoint", "status": "in_progress"}],
+        [{"id": "1", "content": "Wire the endpoint", "status": "completed"}],
+    ]
+    assert [p["progress"] for p in payloads] == [
+        {"completed": 0, "total": 1},
+        {"completed": 0, "total": 1},
+        {"completed": 1, "total": 1},
+    ]
 
 
 @pytest.mark.asyncio
