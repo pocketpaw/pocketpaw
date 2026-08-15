@@ -51,6 +51,10 @@
 #   ``WebSandboxStatusChanged`` (type="websandbox.status_changed") for the Web
 #   Cursor sandbox registry. Emitted by ``websandbox.service`` on every
 #   state-mutating call per cloud rule 9.
+# Updated: 2026-08-15 (HTN-5, feat/agent-plan-surface) — added
+#   ``AgentPlanUpdated`` (type="agent.plan_updated") for the agent plan panel.
+#   Emitted by ``shared/agent_bridge.py`` when a backend's plan tool call
+#   normalizes to a plan that actually changed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -381,6 +385,22 @@ class AgentStreamEnd(Event):
 @dataclass
 class AgentToolUse(Event):
     EVENT_TYPE: ClassVar[str] = "agent.tool_use"
+
+
+@dataclass
+class AgentPlanUpdated(Event):
+    # HTN-5: the agent's ordered plan, normalized out of whichever plan tool the
+    # backend exposes (``write_plan`` today; ``write_todos`` / ``TodoWrite`` in
+    # HTN-6). Payload: ``{group_id, agent_id, agent_name, run_id, seq,
+    # items: [{id, content, status}], progress: {completed, total}}`` with
+    # status in ``pending|in_progress|completed|cancelled``.
+    #
+    # WHOLE-LIST REPLACEMENT: every emit carries the complete ordered plan, so
+    # a receiver replaces its state and never merges — inherited from
+    # ``write_plan``, which overwrites its own state on each call. ``seq`` is a
+    # per-run monotonic counter so a reordered delivery cannot let a stale plan
+    # overwrite a fresh one.
+    EVENT_TYPE: ClassVar[str] = "agent.plan_updated"
 
 
 # Agents (entity CRUD — distinct from agent.* runtime stream events above)

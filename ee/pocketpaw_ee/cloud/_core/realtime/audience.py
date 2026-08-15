@@ -1,4 +1,6 @@
 # audience.py — resolves an Event into the user_ids that should receive it.
+# Updated: 2026-08-15 (HTN-5) — agent.plan_updated joins the agent runtime
+#   stream branch, scoped to the group's members like agent.tool_use.
 # Updated: 2026-08-11 — call.participant_joined / call.participant_left now
 #   resolve to the call's group members (they previously fell through to [],
 #   so InProcessBus skipped fan-out and the frontend's pre-join "who's in the
@@ -198,6 +200,9 @@ class AudienceResolver:
             "agent.stream_end",
             "agent.stream_start",
             "agent.tool_use",
+            # HTN-5: the plan panel is chat furniture, so it is scoped exactly
+            # like the tool chips it replaces — group members, never a broadcast.
+            "agent.plan_updated",
         }:
             return await self._group(d["group_id"])
 
