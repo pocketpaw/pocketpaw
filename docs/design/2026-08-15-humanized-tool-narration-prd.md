@@ -154,8 +154,52 @@ drop point. It is two:
 |---|---|---|
 | Backend, claude_agent_sdk **streaming** path | `src/pocketpaw/agents/claude_sdk.py:3154-3161` | on `content_block_start`, emits `metadata={"name": …, "input": {}}` — hardcoded empty — and adds the name to `_announced_tools`. |
 | Backend, claude_agent_sdk **block** path | `src/pocketpaw/agents/claude_sdk.py:3242-3253` | the completed `AssistantMessage` carries **fully-assembled real arguments** (`_extract_tool_info` reads `block.input` off the SDK's `ToolUseBlock`, `:1156-1162`) — but the guard `if tool["name"] not in _announced_tools` at `:3243` **suppresses the emission**, because the streaming path already announced that name. |
-| Backend, pydantic-ai | `src/pocketpaw/agents/pydantic_ai.py:2156` | emits `"input": args` — args present. |
+| Backend, pydantic-ai | `src/pocketpaw/agents/pydantic_ai.py:2156` | emits `"input": args` — **but see the correction below; in practice the args-bearing emission is usually suppressed.** |
 | Bridge (all backends) | `ee/.../cloud/shared/agent_bridge.py:582` | reads only the tool name; discards `metadata["input"]` entirely. |
+
+> **Correction 2026-08-15 (b) — pydantic-ai has the SAME bug, and this PRD said it did not.**
+> `_announce_tool` (`pydantic_ai.py:2142-2158`) dedupes on `tool_call_id`, and `_map_event` calls
+> it twice for one call: first from `PartStartEvent(ToolCallPart)` with `args={}` as an early UI
+> signal (`:2110`), then from `FunctionToolCallEvent` with the authoritative args (`:2120`). The
+> comment at `:1965` states the suppression as the intent. Measured:
+>
+> | `tool_call_id` | events emitted | real args reach a consumer |
+> |---|---|---|
+> | present (the normal case) | 1 | **no** — `input={}` |
+> | absent | 2 | yes |
+>
+> So on pydantic-ai, narration renders `bare` ("Searching the web") and never the interpolated
+> `active` phrase. **The interpolation this whole feature exists for does not happen in production
+> on either major backend** until HTN-4's `input_pending` contract is mirrored here. HTN-1's
+> demonstration of "Searching the web for quarterly filings" holds in its tests, which construct
+> the event directly, and not in a live streamed run.
+
+### Decision 7: provider-side (native) web tools emit no tool event at all
+
+**Discovered 2026-08-15 while answering "what if web search comes from LiteLLM?"**
+
+`pydantic_ai_native_web_tools` (`config.py:714`, default `False`) moves web search and page fetch
+provider-side, registering `WebSearch(local=<our WebSearchTool>)` so the model's own native search
+runs at the provider instead of inside the agent process (`pydantic_ai.py:1592-1626`). Routing
+search through LiteLLM/the provider means turning this on.
+
+pydantic-ai 2.18 represents a provider-executed call as **`NativeToolCallPart`** /
+**`NativeToolReturnPart`**. Measured: these are *siblings* of `ToolCallPart` under
+`BaseToolCallPart`, **not subclasses** (`issubclass(NativeToolCallPart, ToolCallPart)` is `False`).
+`_map_event` tests `isinstance(part, ToolCallPart)` at `:2107` and imports neither native type.
+
+**Consequence:** with native web tools on, a web search produces **no `tool_use` event and no
+`tool_result` event whatsoever**. Not a wrong phrase — nothing. The UI stays on "Thinking…" for the
+entire search, which is the single operation a user most wants narrated. The `web_search`
+annotation and `_ANNOTATED_TOOLS` are irrelevant on that path because no event ever reaches the
+bridge.
+
+**What:** map the native parts in `_map_event` and give them the same `input_pending` treatment.
+Tracked as HTN-9 and HTN-10 in the tasks doc.
+
+**Tradeoff accepted:** this widens the feature past "annotate our own tools". It is not optional
+work — a narration feature that goes silent exactly when the agent reaches the internet is worse
+than the raw tool name it replaced.
 
 > **Corrected 2026-08-15 by the HTN-0 spike.** This decision originally stated that the streaming
 > path discards incrementally-streamed input and that the fix required accumulating
