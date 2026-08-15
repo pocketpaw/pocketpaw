@@ -149,6 +149,34 @@ asserts the emitted `AgentToolUse.data.narration` equals `"Searching the web for
 > **The real fix is threading the agent's actual `ToolRegistry` through to the bridge.** That is
 > this task's central design problem, not the verb lexicon.
 >
+> **From the HTN-1 security review, 2026-08-15 — three things this task inherits:**
+>
+> - **Read the narration off the live instance; never construct a tool to read a property.**
+>   The registry already stores live instances (`tools/registry.py:47,52,61-63`), so use
+>   `registry.get(name).narration`. HTN-1's `narration_for_tool` instantiates the class, which is
+>   harmless for `WebSearchTool` but does not generalize: `ShellTool.__init__` calls
+>   `get_settings()` (`tools/builtin/shell.py:22`), so a registry-wide version of that pattern
+>   would construct settings — and whatever the credential store does on first load — on the event
+>   loop, purely to phrase a status line.
+>
+> - **[MEDIUM] Narration must key on resolved tool IDENTITY, not the bare wire name.** Today the
+>   lookup is a process-global name→class map with no namespace or ownership check, and
+>   `registry.py:52` (`self._tools[tool.name] = tool`) overwrites silently on collision. On the
+>   codex_cli backend the MCP branch (`agents/codex_cli.py:523-532`) emits the RAW unprefixed MCP
+>   tool name while keeping `server` in a field the bridge never reads — so a user-added MCP server
+>   exposing `web_search(query)` inherits the builtin's phrase, and every group member's ticker
+>   asserts in the product's own voice that the agent is searching the web. Misattribution is the
+>   core failure mode for a feature whose entire job is to say what the agent is doing. (On the
+>   default `claude_sdk` backend MCP tools carry `mcp__<server>__<tool>` names, so there it
+>   requires overriding a builtin name in the registry instead.) At minimum, refuse to narrate a
+>   name that is not the builtin registry's own entry.
+>
+> - **Truncate before sanitizing, once large-arg tools are annotated.** HTN-1 sanitizes the full
+>   untruncated value before capping at 80 chars. Negligible for `web_search.query`; it becomes
+>   multi-MB copies per `tool_use` event on the response stream's own task the moment this task or
+>   HTN-3 annotates `shell`'s command, a file write's content, or a connector payload. (A fix is
+>   landing in HTN-1; verify it survived before annotating anything large.)
+>
 > **Sequencing: HTN-2 MUST land before HTN-3.** Until the registry lookup replaces
 > `_ANNOTATED_TOOLS`, every tool HTN-3 annotates is dead code unless someone also hand-adds a line
 > to that map. The dependency order below already reflects this; this note records why.
@@ -321,6 +349,30 @@ real run shows no operator-facing regression.
 ---
 
 ## HTN-8 — Security audit of the interpolation path · ~0.5 agent-hrs
+
+> **A first pass already ran against HTN-1 on 2026-08-15 — verdict SOUND_WITH_FINDINGS.** The
+> allowlist held against every format-string escape hatch (`{q.__class__}`, `{q[0]}`, `{0}`,
+> `{q!r}`, `{q:>99999999}`, nested specs, malformed and doubled braces); `_template_fields` was
+> judged complete against CPython's own parser, and ANSI/terminal escape injection is genuinely
+> blocked (both the 7-bit `\x1b[` and 8-bit `\x9b` introducers fall inside the stripped ranges).
+> Findings 1-6 were fixed in HTN-1; the tool-identity MEDIUM moved to HTN-2 above.
+>
+> **Two corrections to this plan's stated threat model, from that review:**
+> 1. **Narration does NOT currently reach any channel adapter or the CLI.** It rides one emit, and
+>    `agent.tool_use` scopes its audience to chat-group members only
+>    (`_core/realtime/audience.py:192-202`). The wider blast radius this plan assumed is the design
+>    *intent*, not the current wiring — it becomes true only when a surface actually consumes the
+>    field. Re-audit at that point, not before.
+> 2. **HTN-1 incidentally closed a real pre-existing leak.** The old bridge read `event.content`
+>    first, and on codex_cli that is `f"Running: {item.command}"` — so the ENTIRE shell command was
+>    written to the `tool` field, unbounded and unsanitized, and emitted to every group member
+>    (`agents/codex_cli.py:497-506`, and the same shape at `:511-512` / `:535-536` for file paths
+>    and search queries). Those are the arguments that carry `Authorization: Bearer …` and
+>    `export …_KEY=`. That field is now just `"shell"`.
+>
+> **What this task still owes:** re-audit once HTN-2/HTN-3 widen the surface from one tool to ~100
+> and from builtins to MCP/connector tools, and close the layer-5 gap — nothing on this path emits
+> an `AuditEvent`, though narration is the first place tool ARGUMENTS become user-visible.
 
 **Slice:** independent confirmation that no argument path can leak a credential into a transcript
 or a channel adapter.
