@@ -49,8 +49,8 @@
   {
     "label": "create defaults to True, so a typo'd component_path is a silent new file instead of a 404",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    edits: list[dict[str, str]] | None = None,\n    create: bool = False,\n    _pockets: Any = None,",
-    "replace": "    edits: list[dict[str, str]] | None = None,\n    create: bool = True,\n    _pockets: Any = None,",
+    "find": "    component_path: str,\n    new_source: str | None = None,\n    edits: list[dict[str, str]] | None = None,\n    create: bool = False,\n    _pockets: Any = None,",
+    "replace": "    component_path: str,\n    new_source: str | None = None,\n    edits: list[dict[str, str]] | None = None,\n    create: bool = True,\n    _pockets: Any = None,",
     "tests": [
       "tests/ee/sites/test_react_component_edit.py::test_missing_path_is_not_found_when_create_is_false"
     ]
@@ -115,8 +115,8 @@
   {
     "label": "create stops requiring new_source, so an edits-only create writes nothing meaningful",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if create and new_source is None:\n        raise ValidationError(\n            \"site_edit.create_needs_source\",",
-    "replace": "    if False:\n        raise ValidationError(\n            \"site_edit.create_needs_source\",",
+    "find": "    if create and new_source is None:\n        raise ValidationError(\n            \"site_edit.create_needs_source\",\n            \"Creating a new component needs `new_source` — the full contents of the \"",
+    "replace": "    if False:\n        raise ValidationError(\n            \"site_edit.create_needs_source\",\n            \"Creating a new component needs `new_source` — the full contents of the \"",
     "tests": [
       "tests/ee/sites/test_react_component_edit.py::test_create_without_new_source_is_rejected"
     ]
@@ -133,8 +133,8 @@
   {
     "label": "the draft ArtifactVersion is never written, so there is no reviewable draft for a later publish to promote",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
-    "find": "    await _record_pocket_svelte_draft_version(doc, author=user_id)\n    return await _resolved_wire_dict(doc, user_id)\n\n\nasync def set_imported_source(",
-    "replace": "    return await _resolved_wire_dict(doc, user_id)\n\n\nasync def set_imported_source(",
+    "find": "    # ``doc.source`` whatever engine wrote it); same best-effort contract — an\n    # additive history layer, never a gate on the edit.\n    await _record_pocket_svelte_draft_version(doc, author=user_id)\n    return await _resolved_wire_dict(doc, user_id)",
+    "replace": "    # ``doc.source`` whatever engine wrote it); same best-effort contract — an\n    # additive history layer, never a gate on the edit.\n    return await _resolved_wire_dict(doc, user_id)",
     "tests": [
       "tests/ee/sites/test_react_component_edit.py::test_edit_writes_a_reviewable_draft_version"
     ]
@@ -142,8 +142,8 @@
   {
     "label": "the write stops emitting PocketUpdated, so the search index / soul memory / ripple invalidation desync (cloud rule 9)",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
-    "find": "    await doc.save()\n    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))\n    # Branch primitive (BP-3): a source-map edit ALSO writes a draft",
-    "replace": "    await doc.save()\n    # Branch primitive (BP-3): a source-map edit ALSO writes a draft",
+    "find": "    updated[component_path] = new_source\n    doc.source = updated\n    await doc.save()\n    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))\n    # Branch primitive (BP-3): a source-map edit ALSO writes a draft",
+    "replace": "    updated[component_path] = new_source\n    doc.source = updated\n    await doc.save()\n    # Branch primitive (BP-3): a source-map edit ALSO writes a draft",
     "tests": [
       "tests/ee/sites/test_react_component_edit.py::test_pockets_service_emits_pocket_updated"
     ]
@@ -169,8 +169,8 @@
   {
     "label": "the create flag leaves the tool schema, so the agent cannot pass it and adding a section becomes impossible",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
-    "find": "                \"create\": {\n                    \"type\": \"boolean\",",
-    "replace": "                \"create_DROPPED\": {\n                    \"type\": \"boolean\",",
+    "find": "                \"create\": {\n                    \"type\": \"boolean\",\n                    \"description\": (\n                        \"Create a NEW file at `component_path` instead of editing an \"",
+    "replace": "                \"create_DROPPED\": {\n                    \"type\": \"boolean\",\n                    \"description\": (\n                        \"Create a NEW file at `component_path` instead of editing an \"",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_edit_react_component.py::TestRegistration::test_the_schema_declares_the_create_flag"
     ]
@@ -261,8 +261,8 @@
   {
     "label": "the build-status tool id leaves SITES_TOOL_IDS, so the /sites allow-list filters the tool out silently and every handler test still passes",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
-    "find": "    EDIT_REACT_COMPONENT_TOOL_ID,\n    GET_SITE_BUILD_STATUS_TOOL_ID,\n)",
-    "replace": "    EDIT_REACT_COMPONENT_TOOL_ID,\n)",
+    "find": "    EDIT_REACT_COMPONENT_TOOL_ID,\n    EDIT_HTML_FILE_TOOL_ID,\n    GET_SITE_BUILD_STATUS_TOOL_ID,\n)",
+    "replace": "    EDIT_REACT_COMPONENT_TOOL_ID,\n    EDIT_HTML_FILE_TOOL_ID,\n)",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_build_status_tool.py::TestRegistration::test_status_tool_id_is_on_the_shared_allowlist",
       "tests/ee/agent/test_sites_mcp_server/test_mcp_tool.py::TestSitesMcpServerRegistration::test_server_name_and_tool_id"

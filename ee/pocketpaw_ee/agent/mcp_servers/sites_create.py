@@ -2233,8 +2233,7 @@ async def _edit_html_file_handler(args: dict) -> dict:
     workspace_id, user_id = _identity()
     if not workspace_id or not user_id:
         return _error_response(
-            "edit_html_file requires workspace and user context (call from a "
-            "cloud chat session)."
+            "edit_html_file requires workspace and user context (call from a cloud chat session)."
         )
 
     record_tool_call(
