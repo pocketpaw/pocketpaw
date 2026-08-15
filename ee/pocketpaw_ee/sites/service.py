@@ -2649,19 +2649,43 @@ async def _embed_concierge_bar(
         # means no ``plan_tier``, which resolves to the free floor and ships the page
         # bar-less. The opposite default would embed a bar on every brand-new site
         # regardless of plan, and that bar would 403 every visitor — a broken
-        # concierge is worse than none. A republish after the subscription activates
-        # picks it up, which is the same seam that repairs it for the badge.
+        # concierge is worse than none.
+        #
+        # ``pending`` IS ENTITLED HERE, and only here — belt and braces beside the
+        # ordering fix in ``activate_site``.
+        #
+        # That fix (flip the status BEFORE ``_deploy_site_doc``) closes the
+        # charge-first window this function used to land in. This mapping covers the
+        # OTHER direction the publish path can produce it: ``_apply_site_plan``
+        # stamps ``plan_tier`` / ``subscription_status`` AFTER ``publish()`` has
+        # already deployed, and a republish onto a paid tier resets a live site to
+        # "pending" until the new sub confirms. Both mean a paying customer can
+        # reach this line with "pending" on the doc.
+        #
+        # Getting it wrong here is expensive and silent: the page ships with no
+        # loader script, and NOTHING re-runs this embed afterwards, so it stays
+        # bar-less until some unrelated publish. Found by review before it shipped.
+        #
+        # It does not weaken the RUNTIME gate, which is what actually enforces:
+        # ``auth.site_keys.concierge_available`` still refuses "pending" on every
+        # visitor request, and a test pins that. A site deployed with a bar but not
+        # yet activated serves a bar that declines until the webhook lands — seconds,
+        # and self-correcting in the right direction. The inverse (refuse at publish,
+        # allow at runtime) does not self-correct at all.
         concierge_entitled = True
         from pocketpaw.config import get_settings
 
         if get_settings().billing_enforced:
             from pocketpaw_ee.cloud.entitlements import service as entitlements_service
 
+            status = getattr(doc, "subscription_status", None)
             concierge_entitled = entitlements_service.resolve_site_entitlements(
                 site_id=site_id,
                 workspace_id=workspace_id,
                 plan_tier=getattr(doc, "plan_tier", None),
-                subscription_status=getattr(doc, "subscription_status", None),
+                # See above: the charge-first deploy runs while the status is still
+                # "pending". Read it as active for the EMBED decision only.
+                subscription_status="active" if status == "pending" else status,
                 concierge_enabled=True,  # asking the PLAN; the switch is read above
             ).concierge_entitled
 
@@ -2711,6 +2735,19 @@ async def _embed_concierge_bar(
             concierge_entitled=concierge_entitled,
         )
         if not snippet:
+            # Say WHY when the reason is billing. This early return is the exact
+            # shape of the 2026-07-30 provisioning bug documented above ("with no
+            # log line, because the empty snippet returns early") — a page ships
+            # bar-less and nothing anywhere records it. The other four gates are
+            # ordinary states a reader can infer from the site; "the plan does not
+            # sell this" is the one nobody would think to check, and it is the one
+            # a support ticket will be about.
+            if not concierge_entitled:
+                logger.info(
+                    "sites: site %s published without its concierge — the plan does "
+                    "not include one",
+                    site_id,
+                )
             return
 
         # HE-4: where the deployable pages live differs by engine — the SvelteKit
@@ -4832,6 +4869,34 @@ async def activate_site(
     pocket_id = doc.pocket_id
     # Deploy live using the inputs captured at publish time (NOT a fresh pocket read
     # — the webhook has no pocket scope, and the pocket's draft may have advanced).
+    # Mark the subscription ACTIVE BEFORE the deploy, not after.
+    #
+    # This call only happens on the ``subscription.active`` webhook — the payment is
+    # already confirmed — so "active" is true the moment we get here, and the old
+    # ordering made it true only after the artifact had been built. That mattered
+    # because the deploy stamps the site's PAID capabilities off this very field:
+    # ``_embed_concierge_bar`` and ``_stamp_free_badge`` both re-read the doc mid-
+    # deploy and resolve entitlements from it. With the flip afterwards, both read
+    # "pending", so a customer who had just paid got a page with the FREE
+    # attribution badge stamped on it and no concierge loader — and nothing
+    # re-runs either stamper, so the page stayed that way until some unrelated
+    # publish. A republish makes it recur: ``_publish_pending_site`` resets the
+    # status to "pending" every time.
+    #
+    # Saved separately from the post-deploy save below so the value is on the doc
+    # the deploy re-reads (both stampers ``find_one`` it fresh rather than taking
+    # the in-memory object).
+    #
+    # Safe on the failure path: if the deploy raises, this row is "active" with
+    # ``deployed=False`` for the duration of the retry. The webhook is at-least-once
+    # and the idempotency guard above keys on ``deployed AND active``, so a retry
+    # still re-enters and re-deploys rather than short-circuiting. That is the same
+    # exposure the pre-existing ``no captured inputs`` branch reasons about, in the
+    # opposite direction, and it is the lesser of the two: a paid site that retries
+    # its deploy beats a paid site permanently branded as free.
+    doc.subscription_status = "active"
+    await doc.save()
+
     deployed = await _deploy_site_doc(
         workspace_id=workspace_id,
         user_id=doc.owner,
@@ -4854,9 +4919,12 @@ async def activate_site(
         local_deploy=_local_deploy,
     )
 
-    # The deploy flipped ``deployed=True`` and cleared pending_deploy_inputs; now
-    # mark the per-site sub active and advance the annual renewal date (one year out
-    # — the next charge cycle), mirroring the renewed path.
+    # The deploy flipped ``deployed=True`` and cleared pending_deploy_inputs; advance
+    # the annual renewal date (one year out — the next charge cycle), mirroring the
+    # renewed path. ``subscription_status`` was already set above, BEFORE the deploy,
+    # so the paid capabilities were stamped correctly; re-asserted here because
+    # ``deployed`` is a separately-loaded doc and this save must not write back a
+    # stale value it read before that flip landed.
     deployed.subscription_status = "active"
     deployed.annual_renewal_date = datetime.now(UTC) + timedelta(days=365)
     await deployed.save()

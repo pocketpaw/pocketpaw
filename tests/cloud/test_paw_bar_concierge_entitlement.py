@@ -344,6 +344,71 @@ async def bound_widget(tmp_path):
         yield store
 
 
+# --------------------------------------------------------------------------- #
+# The charge-first deploy — a paying customer must not get a bar-less page.
+#
+# Found by review before this shipped. ``activate_pending_site`` runs on the
+# ``subscription.active`` webhook (payment CONFIRMED) and calls ``_deploy_site_doc``
+# — which reaches ``_embed_concierge_bar`` — BEFORE it flips ``subscription_status``
+# to "active" a few lines later. So the publish-time embed sees "pending" for a
+# customer who has already paid. Refusing there ships a page with no bar, and
+# NOTHING republishes afterwards: the activation path saves the status and stops.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_the_publish_embed_treats_a_pending_subscription_as_paid(bound_widget, monkeypatch):
+    """The charge-first regression. Payment is confirmed and the deploy is running;
+    the status flip has not happened yet. The page must ship WITH its bar."""
+    from pocketpaw_ee.cloud.entitlements.service import resolve_site_entitlements
+    from pocketpaw_ee.paw_bar.embed import concierge_snippet
+
+    _enforce(monkeypatch, on=True)
+    # What the resolver says in isolation — "pending" is NOT entitled, and that is
+    # correct for the runtime gate. The publish seam deliberately reads it as active.
+    ent = resolve_site_entitlements(
+        site_id="6512c1f0e4b0a1b2c3d4e5f6",
+        workspace_id="ws-1",
+        plan_tier=_paid_tier(),
+        subscription_status="pending",
+        concierge_enabled=True,
+    )
+    assert ent.concierge_entitled is False
+
+    snippet = await concierge_snippet(
+        workspace_id="ws-1",
+        pocket_id="pocket-1",
+        site_key=_VALID_KEY,
+        api_base="https://api.test/api/v1",
+        concierge_enabled=True,
+        # The publish path's own resolution, which maps pending -> active.
+        concierge_entitled=True,
+    )
+
+    assert snippet != ""
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_gate_still_refuses_pending(mongo_db, monkeypatch):
+    """The other half of the same decision: publish is lenient, RUNTIME is not.
+
+    A site deployed with a bar but not yet activated serves a bar that declines
+    until the webhook lands — seconds, and self-correcting in the right direction.
+    If this ever passes, the leniency has leaked out of the publish seam.
+    """
+    from fastapi import HTTPException
+    from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key
+
+    _enforce(monkeypatch, on=True)
+    await _site(plan_tier=_paid_tier(), subscription_status="pending")
+
+    with pytest.raises(HTTPException) as exc:
+        await resolve_site_key(_VALID_KEY, "https://brewco.com", "customer_abc123")
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "concierge_not_entitled"
+
+
 @pytest.mark.asyncio
 async def test_an_unentitled_site_publishes_without_the_snippet(bound_widget, monkeypatch):
     """The strongest form of "remove the bar": the built page never carries it.

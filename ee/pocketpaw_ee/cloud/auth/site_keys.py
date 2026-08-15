@@ -167,8 +167,18 @@ def concierge_available(site: _SiteDoc) -> bool:
     ``site.concierge_enabled`` directly and no plan was consulted anywhere, so a free
     site served a concierge indefinitely.
 
-    Gated on ``billing_enforced``, matching every other cap in this codebase: with
-    billing off (OSS / self-host) only the owner's switch applies, exactly as before.
+    Gated on ``billing_enforced``, matching the workspace caps
+    (``PocketLimitError`` / ``ConnectorLimitError`` / the credit guards): with billing
+    off — OSS, self-host, and every in-repo deploy today — only the owner's switch
+    applies, exactly as before.
+
+    Worth knowing that this is NOT universal: the badge stamper
+    (``sites.service._stamp_free_badge``) resolves the same per-site entitlements and
+    does not check the flag, so it badges a free site regardless. That is an
+    inconsistency in the per-site family, not a rule this function is breaking, and
+    the two should converge — but silently 403ing a visitor's chat is a harsher
+    failure than stamping a badge, so the safer of the two defaults is the one taken
+    here. Flipping it is a product decision, not a refactor.
 
     Synchronous and passed the loaded doc: the gate already holds the Site, and
     ``resolve_site_entitlements`` is pure and may not import ``models.site``
@@ -333,4 +343,9 @@ async def resolve_site_key_with_site(
     return _context_from_site(site, customer_ref), site
 
 
-__all__ = ["lookup_site_by_key", "resolve_site_key", "resolve_site_key_with_site"]
+__all__ = [
+    "concierge_available",
+    "lookup_site_by_key",
+    "resolve_site_key",
+    "resolve_site_key_with_site",
+]

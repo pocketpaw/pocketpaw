@@ -121,5 +121,42 @@
     "tests": [
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_an_unentitled_site_publishes_without_the_snippet"
     ]
+  },
+  {
+    "label": "the publish-path resolver is deleted entirely",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if get_settings().billing_enforced:\n            from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
+    "replace": "        if False:\n            from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
+    "tests": [
+      "tests/ee/sites/test_concierge_autoembed.py::test_a_free_site_publishes_with_no_bar_when_billing_is_enforced",
+      "tests/ee/sites/test_concierge_autoembed.py::test_a_cancelled_paid_site_loses_its_bar_on_the_next_publish"
+    ]
+  },
+  {
+    "label": "the charge-first window reopens — pending is refused at publish",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                subscription_status=\"active\" if status == \"pending\" else status,",
+    "replace": "                subscription_status=status,",
+    "tests": [
+      "tests/ee/sites/test_concierge_autoembed.py::test_a_paying_site_mid_activation_still_gets_its_bar"
+    ]
+  },
+  {
+    "label": "activation flips the status AFTER the deploy again (the original P0)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    doc.subscription_status = \"active\"\n    await doc.save()\n\n    deployed = await _deploy_site_doc(",
+    "replace": "    deployed = await _deploy_site_doc(",
+    "tests": [
+      "tests/cloud/sites/test_charge_first.py::test_the_subscription_reads_active_before_the_activation_deploy_runs"
+    ]
+  },
+  {
+    "label": "the publish seam grants entitlement to a CANCELLED site too",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                subscription_status=\"active\" if status == \"pending\" else status,",
+    "replace": "                subscription_status=\"active\",",
+    "tests": [
+      "tests/ee/sites/test_concierge_autoembed.py::test_a_cancelled_paid_site_loses_its_bar_on_the_next_publish"
+    ]
   }
 ]
