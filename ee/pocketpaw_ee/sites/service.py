@@ -2410,6 +2410,20 @@ async def _deploy_site_doc(
         site_name=site_name,
     )
 
+    # Stamp the free-tier attribution badge onto the same built tree, also before
+    # the deploy. Ordered AFTER the concierge so the bar is present when the badge
+    # walks the pages (both are idempotent, so the order only decides which one
+    # logs the rewrite — but a fixed order keeps re-publishes byte-stable).
+    #
+    # NOT failure-soft, unlike the concierge above: this raises and the publish
+    # aborts rather than deploying an unbadged free site. See ``_stamp_free_badge``.
+    await _stamp_free_badge(
+        workspace_id=workspace_id,
+        site_id=site_id,
+        project_dir=build.project_dir,
+        engine=engine,
+    )
+
     # DS-2: a DYNAMIC site (pattern == "dynamic", or a spec carrying live
     # bindings) is backed by a per-tenant Cloudflare D1, so its deployed Worker
     # needs a D1 binding to reach that DB. Resolve the site's D1 id BEFORE deploy:
@@ -2687,6 +2701,72 @@ async def _embed_concierge_bar(
             site_id,
             exc_info=True,
         )
+
+
+async def _stamp_free_badge(
+    *,
+    workspace_id: str,
+    site_id: str,
+    project_dir: str,
+    engine: str,
+) -> None:
+    """Stamp the attribution badge onto the built pages, before they deploy.
+
+    The sibling of ``_embed_concierge_bar`` — same seam (between build and deploy,
+    so the artifact that lands is already right), same output-root resolution —
+    with the OPPOSITE failure posture, which is the entire point.
+
+    ``_embed_concierge_bar`` swallows everything because a site going live matters
+    more than its bar. This one swallows NOTHING. The badge is what the paid
+    per-site tier sells the removal of, so a badge that fails open is not an
+    enforcement mechanism: the exploit is to make injection fail and keep the free
+    unbadged site. ``BadgeInjectionError`` therefore propagates and the publish
+    aborts before deploy — a site that cannot be badged does not ship.
+
+    The site's billing fields are read off its EXISTING doc and resolved by
+    ``entitlements.resolve_site_entitlements``, which is where the "may this site
+    drop its badge" rule lives — NOT here, and not off ``plan_tier`` alone. A paid
+    tier whose subscription is cancelled, pending, or was never charged at all
+    keeps its ``plan_tier``, so reading the tier by itself hands those sites a
+    free badge removal.
+
+    A FIRST publish reaches here BEFORE the Site doc is inserted, exactly as the
+    concierge embed above documents, so "no doc" must mean "free" rather than
+    "skip" — the opposite default would ship every brand-new site unbadged, which
+    is the bug this whole module exists to prevent.
+    """
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+    from pocketpaw_ee.sites import badge
+    from pocketpaw_ee.sites.engines import resolve_static_output_rel
+
+    doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+    # ``getattr`` carries the no-doc case on its own: a first publish has no Site
+    # row yet, and ``getattr(None, "plan_tier", None)`` is already the fail-closed
+    # answer. The defaults here ARE the first-publish contract — an absent tier and
+    # an absent subscription resolve to free-and-badged.
+    ent = entitlements_service.resolve_site_entitlements(
+        site_id=site_id,
+        workspace_id=workspace_id,
+        plan_tier=getattr(doc, "plan_tier", None),
+        subscription_status=getattr(doc, "subscription_status", None),
+        concierge_enabled=bool(getattr(doc, "concierge_enabled", True)),
+    )
+
+    if not ent.badge_required:
+        logger.info(
+            "sites: site %s is on paid tier %s with an active subscription — badge not required",
+            site_id,
+            ent.plan_tier,
+        )
+        return
+
+    root = Path(project_dir, resolve_static_output_rel(project_dir, engine))
+    changed = badge.inject_into_tree(root)
+    logger.info(
+        "sites: stamped the attribution badge onto %d page(s) of site %s",
+        len(changed),
+        site_id,
+    )
 
 
 def _with_deployed_host(allowed_origins: list[str], url: str) -> list[str]:

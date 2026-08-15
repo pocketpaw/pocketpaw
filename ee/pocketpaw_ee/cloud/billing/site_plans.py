@@ -13,6 +13,9 @@
 #     records the intended tier WITHOUT a live charge.
 #   * ``cloudflare_features`` — the set of Cloudflare features a higher tier
 #     resells (BC-10 provisions these on publish). The base tier resells none.
+#   * ``badge_removal`` — whether a site on this tier may ship WITHOUT the
+#     free-tier attribution badge. This is the per-site paid tier's headline
+#     feature, so it lives on the tier rather than on the workspace plan.
 #
 # Read-only by design (mirrors ``billing.plans``): no DB, no writes, no emit.
 # ``list_site_plans`` / ``get_site_plan`` return frozen ``SitePlanTier`` value
@@ -20,6 +23,16 @@
 # never drift.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-9): new module.
+# Updated 2026-08-13 (feat/sites-free-badge): added ``badge_removal`` — the gate
+#   ``sites.badge`` reads to decide whether a publish must stamp the attribution
+#   badge. The base tier does NOT carry it (that is what free means); the paid
+#   tiers do. Sourced from its own constant rather than folded into
+#   ``cloudflare_features``, which is specifically about RESOLD Cloudflare
+#   capability and would be the wrong home for a billing-policy flag.
+#   NOTE for the pricing-spec migration (step 3 of the build order in
+#   docs/design/drafts/2026-08-13-paw-sites-pricing-spec.md): when basic/pro/
+#   business are rekeyed to free/site/staff, this mapping moves with them and is
+#   the ONLY place the badge's plan gate is expressed.
 
 from __future__ import annotations
 
@@ -48,6 +61,16 @@ _SITE_PLAN_CF_FEATURES: dict[str, frozenset[str]] = {
     "business": frozenset({"custom_domain", "analytics", "waf", "edge_cache"}),
 }
 
+# Whether a tier may ship a site WITHOUT the attribution badge. ``basic`` is the
+# free floor and keeps its badge — that is the whole difference between free and
+# paid. Absent/unknown keys resolve False in ``_build``, so a typo means BADGED:
+# fail-closed, matching ``sites.badge``'s posture everywhere else.
+_SITE_PLAN_BADGE_REMOVAL: dict[str, bool] = {
+    "basic": False,
+    "pro": True,
+    "business": True,
+}
+
 # Order the catalog is listed in — the price ladder, cheapest first.
 _SITE_TIER_ORDER: tuple[str, ...] = ("basic", "pro", "business")
 
@@ -63,12 +86,15 @@ class SitePlanTier:
     recurring annual sticker (USD, whole dollars). ``dodo_product_id`` is the
     recurring-product id, or None until config populates it. ``cloudflare_features``
     is the set of Cloudflare features the tier resells (BC-10 provisions them).
+    ``badge_removal`` is whether a site on this tier may ship without the
+    attribution badge — read by ``sites.badge.badge_required``.
     """
 
     key: str
     annual_price_usd: int
     dodo_product_id: str | None
     cloudflare_features: frozenset[str]
+    badge_removal: bool = False
 
 
 def _dodo_product_for(key: str) -> str | None:
@@ -105,6 +131,7 @@ def _build(key: str) -> SitePlanTier:
         annual_price_usd=_SITE_PLAN_ANNUAL_PRICE_USD.get(key, 0),
         dodo_product_id=_dodo_product_for(key),
         cloudflare_features=_SITE_PLAN_CF_FEATURES.get(key, frozenset()),
+        badge_removal=_SITE_PLAN_BADGE_REMOVAL.get(key, False),
     )
 
 
