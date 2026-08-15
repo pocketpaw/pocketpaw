@@ -221,6 +221,35 @@ def test_no_invisible_characters_survive():
         assert letter in result, f"visible text was lost: {result!r}"
 
 
+def test_emoji_zwj_sequences_split_a_known_accepted_cost():
+    """Stripping the whole Cf category takes U+200D with it, so a multi-person
+    emoji splits into its components: the phrase stays readable but the glyph
+    is no longer joined.
+
+    This is deliberate, and pinned here so it does not get "fixed" by exempting
+    U+200D. Doing that would reopen the zero-width padding bypass for that
+    character — a ZWJ-only value would once again be invisible content that
+    sails past the empty check. Cosmetic degradation in a status line is the
+    cheaper side of that trade.
+    """
+    zwj = "\u200d"
+    woman_technologist = "\U0001f469" + zwj + "\U0001f4bb"
+
+    result = render(SEARCH, {"query": woman_technologist})
+
+    assert result == "Searching the web for \U0001f469 \U0001f4bb"
+    assert zwj not in result
+
+    # Plain emoji, variation selectors and skin-tone modifiers are NOT Cf and
+    # must come through untouched.
+    assert render(SEARCH, {"query": "\U0001f600 recipes"}) == (
+        "Searching the web for \U0001f600 recipes"
+    )
+    assert render(SEARCH, {"query": "\U0001f44d\U0001f3fd"}) == (
+        "Searching the web for \U0001f44d\U0001f3fd"
+    )
+
+
 def test_ordinary_unicode_text_is_preserved():
     """Stripping targets invisibles, not non-ASCII — a real query in Hindi or
     Japanese must still render."""
