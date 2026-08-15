@@ -1,6 +1,30 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-08-15 (HTN-5) — ``_drive_agent_loop`` routes a recognized plan tool
+  (``write_plan`` today) through ``shared/plan_normalizer.py`` and yields a
+  ``plan_updated`` SSE frame INSTEAD of the ``tool_start`` chip, so the plan
+  panel renders on the streaming chat surface and not only on the group/DM
+  bridge. Same normalizer, same ``PlanTracker``, same fail-open rule as the
+  bridge: a plan call whose arguments don't normalize falls through to the
+  ordinary chip.
+
+  **Why a frame here and a bus event there.** The bridge emits
+  ``agent.plan_updated`` through ``emit()``, which the AudienceResolver scopes
+  by ``data["group_id"]``. This function has NO group identity — ``RunSpec.group``
+  is nullable and never reaches it, and ``ScopeContext`` carries no group — so a
+  bus emit would raise ``KeyError('group_id')`` inside the resolver, get
+  swallowed by ``emit``'s except, and be delivered to nobody. On this surface the
+  audience is the one client streaming the run, which is exactly what the SSE
+  transport already addresses. ``execute_run`` forwards every yielded frame via
+  ``transport.append_event`` with no name whitelist, so the frame needs no
+  registration.
+
+  ``_new_run_id()`` was hoisted to ``stream_run_id`` for this: it used to be
+  minted inline inside the ``emit_stream_start`` block, so it did not exist when
+  that flag was false and nothing else could reference it. Same value on the
+  wire; now the plan frames carry the same ``run_id`` the client already has
+  from ``stream_start``.
 - 2026-08-07 (fix/code-delegate-pooled-context) — ``_drive_agent_loop`` now
   PUBLISHES its side-channel queue under the run's ``session_mongo_id``
   (``register_stream_sink``, beside the existing ``attach_sse_event_sink``)
@@ -307,6 +331,7 @@ from pocketpaw_ee.cloud.chat.runs import service as run_service
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
 from pocketpaw_ee.cloud.shared.errors import CloudError
+from pocketpaw_ee.cloud.shared.plan_normalizer import PlanTracker
 from pocketpaw_ee.cloud.surface import (
     SurfaceKind,
     SurfaceMeta,
@@ -1163,9 +1188,18 @@ async def _drive_agent_loop(
     )
     behavior_instructions = build_behavior_instructions(ctx, backend_name=backend_name)
 
+    # HTN-5: one id for the whole invocation. It was previously minted inline in
+    # the ``stream_start`` payload, so it existed only when ``emit_stream_start``
+    # was true and nothing else could refer to it. Hoisting it changes no wire
+    # value — ``stream_start`` still carries exactly this — but gives the plan
+    # frames below a ``run_id`` the client already holds, matching the group/DM
+    # bridge where ``run_id`` equals the id on ``agent.stream_start``.
+    stream_run_id = _new_run_id()
+    plan_tracker = PlanTracker(run_id=stream_run_id)
+
     if emit_stream_start:
         stream_start_payload: dict[str, Any] = {
-            "run_id": _new_run_id(),
+            "run_id": stream_run_id,
             "agent_id": ctx.target_agent_id,
             "agent_name": getattr(instance, "agent_name", ""),
             "scope": ctx.kind.value,
@@ -1507,7 +1541,28 @@ async def _drive_agent_loop(
                         },
                     )
                 else:
-                    yield ("tool_start", {"tool": name, "input": tool_input})
+                    # HTN-5: a plan tool is not a tool chip. Same normalizer and
+                    # same per-run tracker as the group/DM bridge — only the
+                    # transport differs, because this surface has no group to
+                    # fan out to (see the module docstring) and the client
+                    # streaming the run IS the audience. Same fail-open rule:
+                    # arguments that don't normalize fall through to the chip.
+                    observation = plan_tracker.observe(name, tool_input)
+                    if observation.recognized:
+                        # ``payload is None`` means the plan didn't change; the
+                        # tool fires at the start and end of every step, and
+                        # emitting nothing is what keeps the panel from flickering.
+                        if observation.payload is not None:
+                            yield (
+                                "plan_updated",
+                                {
+                                    "agent_id": ctx.target_agent_id,
+                                    "agent_name": getattr(instance, "agent_name", ""),
+                                    **observation.payload,
+                                },
+                            )
+                    else:
+                        yield ("tool_start", {"tool": name, "input": tool_input})
             elif etype == "tool_result":
                 meta = getattr(event, "metadata", None) or {}
                 name = ""
