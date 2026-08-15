@@ -93,6 +93,61 @@ def test_two_agents_resolve_their_own_registries():
     assert tool_bridge.narration_registry_for(_FakeBackend(policy_b)) is registry_b
 
 
+class _DeclaringShell:
+    """A tool named ``shell`` that declares its own phrase."""
+
+    def __init__(self, phrase: str):
+        self._phrase = phrase
+
+    name = "shell"
+
+    @property
+    def narration(self):
+        from pocketpaw.tools.narration import Narration
+
+        return Narration(active=self._phrase, bare=self._phrase)
+
+
+def test_an_ee_substituted_tool_narrates_from_its_own_declaration():
+    """The case that decided the seam's shape.
+
+    On cloud, EE registers ``DaytonaShellTool`` under the SAME ``shell`` name as
+    the OSS ``ShellTool`` and it wins by last-writer-wins registration
+    (``extensions.py:1297``, ``daytona/tools.py:763``). Two agents can be live in
+    one process with different instances behind that one name. A process-global
+    name index would have to pick one nondeterministically, or refuse to narrate
+    ``shell`` at all; resolving through the agent's OWN registry makes both
+    answers correct at once.
+
+    Neither shell tool declares a ``Narration`` yet — HTN-3 writes those — so
+    this uses two declaring stand-ins registered exactly the way EE substitutes,
+    which pins the property now instead of waiting on annotations to exist.
+    """
+    oss_policy = ToolPolicy(profile="full")
+    oss_registry = tool_bridge._build_tool_registry("pydantic_ai", oss_policy)
+    oss_registry.register(_DeclaringShell("Running a shell command"))
+
+    cloud_policy = ToolPolicy(profile="full")
+    cloud_registry = tool_bridge._build_tool_registry("pydantic_ai", cloud_policy)
+    cloud_registry.register(_DeclaringShell("Running a command in the sandbox"))
+
+    oss_backend = _FakeBackend(oss_policy)
+    cloud_backend = _FakeBackend(cloud_policy)
+
+    oss_phrase = render(
+        narration_for_tool("shell", tool_bridge.narration_registry_for(oss_backend)), {}
+    )
+    cloud_phrase = render(
+        narration_for_tool("shell", tool_bridge.narration_registry_for(cloud_backend)), {}
+    )
+
+    assert oss_phrase == "Running a shell command"
+    assert cloud_phrase == "Running a command in the sandbox"
+    assert oss_phrase != cloud_phrase, (
+        "both agents resolved the same instance — the lookup is not per-agent"
+    )
+
+
 def test_the_retained_registry_is_released_with_its_policy():
     """Lifetime — the reason this hangs off the policy and not a module map.
 
