@@ -93,13 +93,16 @@ class TestServerStartup:
         from fastapi import FastAPI
 
         from pocketpaw.api.v1.health import router
+        from tests._route_paths import registered_paths
 
         app = FastAPI()
         # Should not raise during mount
         app.include_router(router, prefix="/api/v1")
 
-        # Verify the expected routes are registered
-        routes = {r.path for r in app.routes}
+        # Verify the expected routes are registered. Read from the OpenAPI
+        # schema — `app.routes` no longer flattens included routers, so `.path`
+        # is absent on them. See tests/_route_paths.py.
+        routes = registered_paths(app)
         assert "/api/v1/health" in routes
         assert "/api/v1/version" in routes
 
@@ -161,13 +164,15 @@ class TestServerStartup:
         from fastapi import FastAPI
 
         from pocketpaw.api.v1 import mount_v1_routers
+        from tests._route_paths import registered_paths
 
         app = FastAPI()
         # Should not raise — critical routers are re-raised by mount_v1_routers
         mount_v1_routers(app)
 
-        # Spot-check that key health routes are registered
-        routes = {r.path for r in app.routes}
+        # Spot-check that key health routes are registered. See the note in
+        # tests/_route_paths.py on why this does not read `app.routes`.
+        routes = registered_paths(app)
         assert "/api/v1/health" in routes
         assert "/api/v1/version" in routes
 

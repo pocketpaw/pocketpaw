@@ -29,9 +29,11 @@ class TestEventsRouter:
     def test_stream_endpoint_exists_on_dashboard(self, _mock):
         """The /api/v1/events/stream endpoint should be reachable on the dashboard app."""
         from pocketpaw.dashboard import app
+        from tests._route_paths import has_path
 
-        route_paths = [r.path for r in app.routes if hasattr(r, "path")]
-        assert any("/api/v1/events/stream" in p for p in route_paths)
+        # Via the OpenAPI schema — `app.routes` no longer flattens included
+        # routers, see tests/_route_paths.py.
+        assert has_path(app, "/api/v1/events/stream")
 
     @patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True)
     def test_openapi_includes_events(self, _mock):

@@ -30,14 +30,15 @@ class TestV1RouterRegistration:
         """mount_v1_routers should not raise on a real FastAPI app."""
         from fastapi import FastAPI
 
+        from tests._route_paths import has_path
+
         app = FastAPI()
         mount_v1_routers(app)
-        # Check that routes were added
-        route_paths = [r.path for r in app.routes if hasattr(r, "path")]
-        # Should have at least auth and sessions routes
-        assert any("/api/v1/auth/session" in p for p in route_paths)
-        assert any("/api/v1/sessions" in p for p in route_paths)
-        assert any("/api/v1/health" in p for p in route_paths)
+        # Check that routes were added. Asked through the OpenAPI schema, not
+        # by reading `.path` off `app.routes` — see tests/_route_paths.py.
+        assert has_path(app, "/api/v1/auth/session")
+        assert has_path(app, "/api/v1/sessions")
+        assert has_path(app, "/api/v1/health")
 
 
 class TestCORSConfig:
