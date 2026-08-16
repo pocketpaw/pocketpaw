@@ -169,7 +169,7 @@ def test_no_optional_argument_reaches_a_tool_as_none():
             continue
 
         required = set(spec.get("required", []) or [])
-        for pname in (spec.get("properties", {}) or {}):
+        for pname in spec.get("properties", {}) or {}:
             if pname in required:
                 continue
             own = execute_sig.parameters.get(pname)

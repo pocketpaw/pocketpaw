@@ -23,11 +23,18 @@ Changes:
   where it annotated ``int = 5``. web_search crashed on
   ``min(max(num_results, 1), 10)`` ("'>' not supported between instances of
   'int' and 'NoneType'/'str'"); every bridged tool with a non-string parameter
-  was affected. _make_pydantic_ai_tool also drops an explicit ``null`` for any
-  parameter whose default is not None, so a model sending ``"num_results":
-  null`` no longer overrides the tool's own default. Both halves were masked
-  until the pydantic-ai argument drop was fixed — while the backend delivered
-  ``{}``, no argument ever reached a tool.
+  was affected. Where the schema declares no ``default`` at all,
+  _borrow_defaults_from_execute takes it from ``tool.execute`` instead of
+  falling back to None — 26 parameters across 13 tools document their default
+  only in the Python signature (``connector_*`` has ``pocket_id: str =
+  "default"``, ``drive_list`` has ``max_results: int = 20``), and every one was
+  handed None the moment real arguments started arriving. The numeric ones
+  crash like web_search did; the string ones are quieter and worse, because
+  ``pocket_id=None`` is a wrong scope rather than an error. _run additionally
+  drops an explicit ``null`` for any OPTIONAL parameter, so a model sending
+  ``"num_results": null`` gets the tool's default rather than None. All of it
+  was masked until the pydantic-ai argument drop was fixed — while the backend
+  delivered ``{}``, no argument ever reached a tool.
 - 2026-08-15 (HTN-2, feat/narration-registry-lookup): the ToolRegistry each
   build_*_tools() constructs is no longer dropped at function exit. It is kept
   on the ToolPolicy it was built under and reachable through
@@ -650,9 +657,7 @@ def _make_pydantic_ai_tool(tool_cls: Any, tool: Any, settings: Any) -> Any:
         params, annotations = _signature_from_json_schema(inspect, defn.parameters or {})
         params = _borrow_defaults_from_execute(inspect, params, tool)
 
-    _drop_when_null = frozenset(
-        p.name for p in params if p.default is not inspect.Parameter.empty
-    )
+    _drop_when_null = frozenset(p.name for p in params if p.default is not inspect.Parameter.empty)
 
     async def _run(**kwargs: Any) -> str:
         if _drop_when_null:
