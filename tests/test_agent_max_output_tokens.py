@@ -104,9 +104,7 @@ def test_the_model_ceiling_can_never_raise_the_cap():
 
     So a ceiling above the target must be ignored, whatever the metadata says.
     """
-    with patch(
-        "pocketpaw.agents.model_limits.model_output_ceiling", return_value=393_216
-    ):
+    with patch("pocketpaw.agents.model_limits.model_output_ceiling", return_value=393_216):
         got = resolve_max_output_tokens("litellm", "deepseek/deepseek-v4-flash", _settings())
 
     assert got == DEFAULT_MAX_OUTPUT_TOKENS
@@ -115,9 +113,12 @@ def test_the_model_ceiling_can_never_raise_the_cap():
 
 def test_a_junk_setting_does_not_break_a_run():
     """Settings can arrive from a UI, a YAML file, or an env var."""
-    assert resolve_max_output_tokens(
-        "litellm", "deepseek/deepseek-v4-flash", _settings(agent_max_output_tokens=0)
-    ) == DEFAULT_MAX_OUTPUT_TOKENS
+    assert (
+        resolve_max_output_tokens(
+            "litellm", "deepseek/deepseek-v4-flash", _settings(agent_max_output_tokens=0)
+        )
+        == DEFAULT_MAX_OUTPUT_TOKENS
+    )
 
 
 def test_a_resolver_failure_never_breaks_a_run():
