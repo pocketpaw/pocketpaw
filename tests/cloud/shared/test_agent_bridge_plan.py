@@ -262,7 +262,32 @@ async def test_an_unreadable_plan_call_falls_back_to_the_tool_chip():
 @pytest.mark.asyncio
 async def test_a_non_plan_tool_is_untouched():
     """Regression guard on HTN-1: ordinary tools still emit their chip and
-    their narration, and never emit a plan event."""
+    their narration, and never emit a plan event.
+
+    The narration assertion was ``"Searching the web for quarterly filings"``
+    when this was written, because HTN-1 resolved a tool's declared phrase from
+    a static name->class map and CONSTRUCTED the tool to read it. HTN-2 removed
+    that on purpose — ``ShellTool.__init__`` calls ``get_settings()`` and cloud
+    EE substitutes ``DaytonaShellTool`` under the same name, so constructing a
+    tool to phrase a status line ran real setup and could phrase the wrong
+    tool's — and reads the phrase off the live instance in the agent's own
+    ``ToolRegistry`` instead.
+
+    ``instance`` here has no ``backend``, so no registry resolves and the lookup
+    falls through to derive-from-name, which never interpolates arguments: a
+    NAME carries no ``safe_args`` allowlist saying which are safe to show. The
+    bare phrase is the correct outcome for THIS fixture.
+
+    That is not the whole story, and the gap is real rather than an artifact:
+    the claude_agent_sdk backend surfaces its tools over MCP and never
+    populates a registry either, so it loses argument interpolation in
+    production the same way. The four bridged backends (pydantic_ai,
+    openai_agents, google_adk, deep_agents) do resolve one and get the full
+    phrase. Both halves are pinned in
+    ``tests/cloud/runs/test_run_core_narration.py``, which builds a real
+    bridged registry for the good case rather than asserting only the degraded
+    one.
+    """
     emitted = await _emitted(
         [_tool_use_event("web_search", {"query": "quarterly filings"}), _done_event()]
     )
@@ -271,4 +296,4 @@ async def test_a_non_plan_tool_is_untouched():
     tool_uses = [e.data for e in emitted if e.type == "agent.tool_use"]
     assert len(tool_uses) == 1
     assert tool_uses[0]["tool"] == "web_search"
-    assert tool_uses[0]["narration"] == "Searching the web for quarterly filings"
+    assert tool_uses[0]["narration"] == "Searching the web"
