@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -123,15 +124,45 @@ def _paw_enterprise_settings_dir() -> Path | None:
 
     ``PAW_ENTERPRISE_DIR`` overrides the search and should point at the repo
     root. Without it, every ancestor of this file is checked for a
-    ``paw-enterprise`` sibling — the plain checkout has one two levels up, and a
-    git worktree of pocketpaw sits at a different depth.
+    ``paw-enterprise`` sibling.
+
+    The ancestor walk alone is not enough, and the reason is worth stating: a
+    git worktree of pocketpaw lives OUTSIDE the workspace (``D:/paw-worktrees/
+    settings-field-tiers``), so no ancestor of it holds a ``paw-enterprise``
+    sibling and the walk returns None. The gate then skips — silently, and
+    exactly in the setup an implementer working on a feature branch uses. A
+    completeness gate that no-ops in the common case is decoration.
+
+    So the worktree case is resolved explicitly: ask git for the main
+    checkout's path (``git rev-parse --path-format=absolute --git-common-dir``
+    points at ``<main>/.git`` even from a linked worktree) and look for the
+    sibling beside that.
     """
     override = os.environ.get("PAW_ENTERPRISE_DIR")
     if override:
         candidate = Path(override) / _SETTINGS_ROUTES
         return candidate if candidate.is_dir() else None
 
-    for ancestor in Path(__file__).resolve().parents:
+    here = Path(__file__).resolve()
+    roots = list(here.parents)
+
+    # A linked worktree's ancestors don't include the workspace, so resolve the
+    # main checkout via git and search from there too.
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=here.parent,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if common.returncode == 0 and common.stdout.strip():
+            roots.extend(Path(common.stdout.strip()).resolve().parents)
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover - git absent
+        pass
+
+    for ancestor in roots:
         candidate = ancestor / "paw-enterprise" / _SETTINGS_ROUTES
         if candidate.is_dir():
             return candidate
