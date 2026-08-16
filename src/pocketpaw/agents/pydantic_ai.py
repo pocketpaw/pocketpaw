@@ -868,6 +868,23 @@ class PydanticAIBackend:
             provider = "litellm"
         return provider, model_str
 
+    def _resolve_max_output_tokens(self) -> int | None:
+        """The ``max_tokens`` this run should send, or None to send none.
+
+        Resolved from the SAME ``_parse_provider_model`` output that built the
+        model, so the cap and the model can never disagree. Never raises — the
+        helper fails open to None, which is the no-cap behaviour this backend
+        had before the setting existed.
+        """
+        try:
+            from pocketpaw.agents.model_limits import resolve_max_output_tokens
+
+            provider, model = self._parse_provider_model()
+            return resolve_max_output_tokens(provider, model, self.settings)
+        except Exception:  # noqa: BLE001 — a token cap must never break a run
+            logger.debug("Could not resolve a max output token cap", exc_info=True)
+            return None
+
     def _build_model(self, model_spec: str | None = None) -> Any:
         """Build the pydantic-ai model client for the configured provider."""
         provider, model = self._parse_provider_model(model_spec)
@@ -2036,6 +2053,16 @@ class PydanticAIBackend:
                 from pydantic_ai.usage import UsageLimits
 
                 kwargs["usage_limits"] = UsageLimits(request_limit=max_turns)
+
+            # Per-RUN like ``usage_limits`` above, and for the same reason: the
+            # cached agent is shared across runs, while the cap is a property of
+            # the model THIS run resolved. The fast-model path builds its own
+            # model and is unaffected.
+            max_output = self._resolve_max_output_tokens()
+            if max_output:
+                from pydantic_ai.settings import ModelSettings
+
+                kwargs["model_settings"] = ModelSettings(max_tokens=max_output)
 
             async with agent.run_stream_events(message, **kwargs) as stream:
                 async for event in stream:
