@@ -128,3 +128,62 @@ async def test_web_search_survives_the_argument_the_model_actually_sends(supplie
 
     assert "not supported between instances" not in result, result
     assert not result.startswith("Error executing web_search"), result
+
+
+def test_no_optional_argument_reaches_a_tool_as_none():
+    """The wider half of the bug, swept across the whole bridged surface.
+
+    ``web_search`` is where this crashed loudly. It is not where it was rare:
+    26 parameters across 13 tools declare no JSON-schema ``default`` while their
+    ``execute()`` declares a real one — ``connector_*`` has
+    ``pocket_id: str = "default"``, ``drive_list`` has ``max_results: int = 20``.
+    The synthesized signature defaulted those to ``None``, pydantic-ai filled the
+    ``None`` in when the model omitted the argument, and it overrode the tool's
+    own default.
+
+    The integer ones crash the same way ``web_search`` did. The string ones are
+    worse: ``pocket_id=None`` instead of ``"default"`` is a silently wrong scope,
+    not an error anyone sees.
+
+    Asserted over EVERY bridged tool rather than a sample, because the failure is
+    per-parameter and a sample is how 25 of the 26 stay hidden.
+    """
+    import inspect
+
+    from pocketpaw.agents.tool_bridge import _instantiate_all_tools, build_pydantic_ai_tools
+
+    wrappers = {t.name: t for t in build_pydantic_ai_tools(_settings(), backend="pydantic_ai")}
+    if not wrappers:
+        pytest.skip("pydantic-ai not installed; nothing bridged")
+
+    offenders: list[str] = []
+    for tool in _instantiate_all_tools("pydantic_ai"):
+        wrapper = wrappers.get(getattr(tool, "name", ""))
+        if wrapper is None:
+            continue
+        try:
+            spec = tool.definition.parameters or {}
+            execute_sig = inspect.signature(tool.execute)
+            bridged_sig = inspect.signature(wrapper.function)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            continue
+
+        required = set(spec.get("required", []) or [])
+        for pname in (spec.get("properties", {}) or {}):
+            if pname in required:
+                continue
+            own = execute_sig.parameters.get(pname)
+            bridged = bridged_sig.parameters.get(pname)
+            if own is None or bridged is None:
+                continue
+            if own.default is inspect.Parameter.empty or own.default is None:
+                continue
+            # The tool has a real default. Omitting the argument must NOT
+            # deliver None over the top of it.
+            if bridged.default is None:
+                offenders.append(f"{tool.name}.{pname} (execute default {own.default!r})")
+
+    assert not offenders, (
+        f"{len(offenders)} optional argument(s) would arrive as None and override "
+        f"the tool's own default: {offenders[:8]}"
+    )

@@ -618,10 +618,25 @@ def _make_pydantic_ai_tool(tool_cls: Any, tool: Any, settings: Any) -> Any:
       defaulted to the schema's own ``default``. (The LangChain bridge marks all
       parameters required; respecting ``required`` here is deliberate.)
 
-    Explicit nulls are dropped for any parameter whose default is not ``None``.
-    A model is free to send ``"num_results": null`` for an optional argument,
-    and passing that through would override the tool's own ``= 5`` with ``None``
-    — the omitted-argument bug by another route.
+    A ``None`` is dropped for any OPTIONAL parameter rather than forwarded, so
+    ``tool.execute``'s own default applies. Two ways a ``None`` gets here and
+    both are wrong to pass on:
+
+    * the model sends ``"num_results": null`` explicitly;
+    * the model omits an optional argument whose JSON schema declares no
+      ``default``, so the synthesized signature defaults it to ``None`` and
+      pydantic-ai fills that in.
+
+    The second is the wider hole. 26 parameters across 13 tools are in that
+    shape — ``connector_*`` takes ``pocket_id: str = "default"``, ``drive_list``
+    takes ``max_results: int = 20``, ``reddit_search`` takes ``limit: int = 10``
+    — and every one of them was being handed ``None`` instead of its default the
+    moment real arguments started arriving.
+
+    Dropping rather than forwarding is safe in both directions: a tool whose own
+    default IS ``None`` gets ``None`` either way, so the only behaviour that
+    changes is the one that was already broken. Required parameters are never
+    dropped — a missing required argument must still fail loudly.
     """
     import inspect
 
@@ -633,11 +648,10 @@ def _make_pydantic_ai_tool(tool_cls: Any, tool: Any, settings: Any) -> Any:
         params, annotations = _signature_from_model(inspect, schema_cls)
     else:
         params, annotations = _signature_from_json_schema(inspect, defn.parameters or {})
+        params = _borrow_defaults_from_execute(inspect, params, tool)
 
     _drop_when_null = frozenset(
-        p.name
-        for p in params
-        if p.default is not inspect.Parameter.empty and p.default is not None
+        p.name for p in params if p.default is not inspect.Parameter.empty
     )
 
     async def _run(**kwargs: Any) -> str:
@@ -722,6 +736,44 @@ def _python_type_for(prop: Any) -> Any:
         # caller adds for optional properties, so take the first real type.
         declared = next((t for t in declared if t != "null"), None)
     return _JSON_SCHEMA_TYPES.get(declared, str)
+
+
+def _borrow_defaults_from_execute(inspect: Any, params: list, tool: Any) -> list:
+    """Fill an optional parameter's default from ``tool.execute`` when the JSON
+    schema does not declare one.
+
+    Most tools document a default in prose ("Number of results (default: 5)")
+    and encode it only in the Python signature. The schema then has no
+    ``default``, the synthesized parameter falls back to ``None``, and
+    pydantic-ai passes that ``None`` when the model omits the argument — right
+    over the top of the tool's own value.
+
+    26 parameters across 13 tools are in that shape: ``connector_*`` declares
+    ``pocket_id: str = "default"``, ``drive_list`` declares
+    ``max_results: int = 20``, ``reddit_search`` declares ``limit: int = 10``.
+    The numeric ones crash exactly like ``web_search`` did; the string ones are
+    quieter and worse, because ``pocket_id=None`` is a wrong scope rather than an
+    error.
+
+    Borrowing the real default also tells the MODEL the truth: the advertised
+    schema shows ``"default": 20`` instead of a nullable field with no default,
+    so it can omit the argument knowingly. ``_run`` still drops an explicit
+    ``null`` as a second line of defence.
+    """
+    try:
+        execute_params = inspect.signature(tool.execute).parameters
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return params
+
+    patched: list = []
+    for p in params:
+        own = execute_params.get(p.name)
+        needs_default = p.default is None and own is not None
+        if needs_default and own.default is not inspect.Parameter.empty and own.default is not None:
+            patched.append(p.replace(default=own.default))
+        else:
+            patched.append(p)
+    return patched
 
 
 def _signature_from_json_schema(inspect: Any, parameters: dict) -> tuple[list, dict]:
