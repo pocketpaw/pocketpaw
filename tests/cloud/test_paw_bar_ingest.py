@@ -17,6 +17,15 @@
 # current_workspace_id dep via _override_workspace (the admin CRUD routes
 # thread it); added workspace-stamp-on-create + spec rollback endpoint tests
 # (round-trip, 409 when no revision, owner-token required).
+# Updated: 2026-08-16 (fix/paw-bar-role-gates) — widget CRUD moved off
+# require_scope("admin") onto the paw_bar.read / paw_bar.manage ROLE gate, so
+# _override_workspace now pins the caller's ROLE as well as their workspace and
+# TestWidgetManagementAuth was rewritten around it: unauthenticated is 401 (no
+# session), a signed-in MEMBER is 403 (the case the old scope gate wrongly let
+# through on self-hosted, where a session cookie sets full_access), and
+# admin/owner succeed. The request.state auth markers (full_access, an
+# admin-scoped api_key) and the enforce_scope marker are gone from this file —
+# the role gate never reads request.state, so they proved nothing about it.
 
 from __future__ import annotations
 
@@ -66,17 +75,19 @@ def _widget_payload(**overrides: Any) -> dict[str, Any]:
     return payload
 
 
-def _override_workspace(app: FastAPI, workspace_id: str = "w-test") -> None:
-    """Pin current_workspace_id for a bare test app (W4a).
+def _override_workspace(app: FastAPI, workspace_id: str = "w-test", role: str = "admin") -> None:
+    """Pin the caller's active workspace AND workspace ROLE for a bare test app.
 
     The admin CRUD routes resolve the caller's active workspace through the
-    cloud session dep; these router-level tests mount the router on a bare
-    FastAPI app with no auth stack, so the dep is overridden the same way
-    tests/cloud/conftest.py does for other cloud routers.
+    cloud session dep and their role through ``require_action``; these
+    router-level tests mount the router on a bare FastAPI app with no auth
+    stack, so both deps are overridden the same way tests/cloud/conftest.py
+    does for other cloud routers. Default ``admin`` clears ``paw_bar.read`` /
+    ``paw_bar.manage``; the guard itself still runs for real.
     """
-    from pocketpaw_ee.cloud._core.deps import current_workspace_id
+    from tests.cloud.conftest import override_workspace_role
 
-    app.dependency_overrides[current_workspace_id] = lambda: workspace_id
+    override_workspace_role(app, role=role, workspace_id=workspace_id)
 
 
 @pytest.fixture
@@ -478,42 +489,53 @@ class TestInterpolate:
 # W0b — widget-management auth + access_token non-leak
 # ---------------------------------------------------------------------------
 #
-# These tests opt OUT of the root conftest's _TESTING_FULL_ACCESS bypass
-# (via the `enforce_scope` marker) so require_scope("admin") behaves exactly
-# as it does in production: fail-closed for an unauthenticated caller, open
-# only when an explicit auth marker (full_access / admin-scoped api_key) is on
-# request.state.
+# Rewritten 2026-08-16 (fix/paw-bar-role-gates). These routes used to gate on
+# ``require_scope("admin")``, so this block used to opt out of the root
+# conftest's _TESTING_FULL_ACCESS bypass (the ``enforce_scope`` marker) and
+# stamp ``full_access`` / an admin-scoped api_key onto request.state. Both are
+# now irrelevant: the gate is ``require_action("paw_bar.read"/".manage")``,
+# which reads the caller's WORKSPACE ROLE and never looks at request.state, so
+# the bypass flag cannot reach it either way. Fail-closed now has two shapes,
+# and the tests below pin both:
+#   * no session at all  -> 401 from ``current_active_user`` (fastapi-users)
+#   * signed in as member -> 403 from the role guard
+# The role gate is also STRICTER than what it replaced: an admin-scoped OSS API
+# key / ppat_ OAuth token used to clear ``require_scope("admin")`` and no longer
+# opens these routes. That matches the eight sibling routes in this router that
+# already gated on the same actions.
 
 
-def _build_authed_app(store: PawBarStore, **state_kwargs):
-    """Mount the paw_bar router behind a middleware that stamps the given
-    auth markers onto request.state — the same markers dashboard_auth sets in
-    production. With no kwargs the caller is effectively unauthenticated.
+def _build_authed_app(store: PawBarStore, *, role: str | None = "admin"):
+    """Mount the paw_bar router on a bare app with the caller's ROLE pinned.
+
+    ``role=None`` leaves the auth deps unresolved — i.e. an unauthenticated
+    caller, which is what the fail-closed tests want. ``current_workspace_id``
+    is pinned in every case so a 401/403 is attributable to the role gate and
+    never to a missing workspace.
     """
     app = FastAPI()
-
-    @app.middleware("http")
-    async def _inject(request, call_next):
-        for key, value in state_kwargs.items():
-            setattr(request.state, key, value)
-        return await call_next(request)
-
     app.include_router(router)
-    _override_workspace(app)
+    if role is None:
+        from pocketpaw_ee.cloud._core.deps import current_workspace_id
+
+        app.dependency_overrides[current_workspace_id] = lambda: "w-test"
+    else:
+        _override_workspace(app, role=role)
     return app
-
-
-class _AdminApiKey:
-    """Stand-in for an api-key record with admin scope (matches require_scope)."""
-
-    def __init__(self) -> None:
-        self.scopes = ["admin"]
 
 
 @pytest.fixture
 def unauth_client(tmp_path: Path):
     store = PawBarStore(tmp_path / "paw_bar_unauth.db")
-    app = _build_authed_app(store)  # no auth markers → unauthenticated
+    app = _build_authed_app(store, role=None)  # no session → unauthenticated
+    with patch("pocketpaw_ee.paw_bar.router._store", return_value=store):
+        yield TestClient(app), store
+
+
+@pytest.fixture
+def member_client(tmp_path: Path):
+    store = PawBarStore(tmp_path / "paw_bar_member.db")
+    app = _build_authed_app(store, role="member")
     with patch("pocketpaw_ee.paw_bar.router._store", return_value=store):
         yield TestClient(app), store
 
@@ -521,55 +543,69 @@ def unauth_client(tmp_path: Path):
 @pytest.fixture
 def admin_client(tmp_path: Path):
     store = PawBarStore(tmp_path / "paw_bar_admin.db")
-    app = _build_authed_app(store, full_access=True)
+    app = _build_authed_app(store, role="admin")
     with patch("pocketpaw_ee.paw_bar.router._store", return_value=store):
         yield TestClient(app), store
 
 
-@pytest.mark.enforce_scope
 class TestWidgetManagementAuth:
-    """Widget create / list / update / delete require an authenticated caller."""
+    """Widget create / list / update / delete require an ADMIN workspace role."""
 
-    def test_unauthenticated_list_is_forbidden(self, unauth_client) -> None:
+    def test_unauthenticated_list_is_refused(self, unauth_client) -> None:
         client, _ = unauth_client
         res = client.get("/paw-bar/widgets")
-        assert res.status_code == 403
+        assert res.status_code == 401
 
-    def test_unauthenticated_create_is_forbidden(self, unauth_client) -> None:
+    def test_unauthenticated_create_is_refused(self, unauth_client) -> None:
         client, _ = unauth_client
         res = client.post("/paw-bar/widgets", json=_widget_payload())
-        assert res.status_code == 403
+        assert res.status_code == 401
 
-    def test_unauthenticated_update_is_forbidden(self, unauth_client) -> None:
+    def test_unauthenticated_update_is_refused(self, unauth_client) -> None:
         client, _ = unauth_client
         res = client.patch(
             "/paw-bar/widgets/pp_anything/spec",
             json=_spec().model_dump(),
         )
-        assert res.status_code == 403
+        assert res.status_code == 401
 
-    def test_unauthenticated_delete_is_forbidden(self, unauth_client) -> None:
+    def test_unauthenticated_delete_is_refused(self, unauth_client) -> None:
         client, _ = unauth_client
         res = client.delete("/paw-bar/widgets/pp_anything")
-        assert res.status_code == 403
+        assert res.status_code == 401
 
-    def test_full_access_caller_can_create_and_list(self, admin_client) -> None:
-        client, _ = admin_client
-        created = client.post("/paw-bar/widgets", json=_widget_payload())
-        assert created.status_code == 201
-        listed = client.get("/paw-bar/widgets")
-        assert listed.status_code == 200
-        assert listed.json()["total"] == 1
+    def test_member_role_is_forbidden_on_every_management_route(self, member_client) -> None:
+        """A signed-in MEMBER clears authentication and still fails the role gate.
 
-    def test_admin_scoped_api_key_can_list(self, tmp_path: Path) -> None:
-        store = PawBarStore(tmp_path / "paw_bar_apikey.db")
-        app = _build_authed_app(store, api_key=_AdminApiKey())
+        This is the half ``require_scope("admin")`` got wrong on self-hosted: a
+        session cookie sets ``full_access``, so every one of these calls used to
+        succeed for a member.
+        """
+        client, _ = member_client
+        assert client.get("/paw-bar/widgets").status_code == 403
+        assert client.post("/paw-bar/widgets", json=_widget_payload()).status_code == 403
+        assert (
+            client.patch("/paw-bar/widgets/pp_anything/spec", json=_spec().model_dump()).status_code
+            == 403
+        )
+        assert client.patch("/paw-bar/widgets/pp_anything", json={}).status_code == 403
+        assert client.post("/paw-bar/widgets/pp_anything/spec/rollback").status_code == 403
+        assert client.post("/paw-bar/widgets/pp_anything/rotate-token").status_code == 403
+        assert client.delete("/paw-bar/widgets/pp_anything").status_code == 403
+
+    @pytest.mark.parametrize("role", ["admin", "owner"])
+    def test_admin_and_owner_can_create_and_list(self, tmp_path: Path, role: str) -> None:
+        store = PawBarStore(tmp_path / f"paw_bar_{role}.db")
+        app = _build_authed_app(store, role=role)
         with patch("pocketpaw_ee.paw_bar.router._store", return_value=store):
             client = TestClient(app)
-            assert client.get("/paw-bar/widgets").status_code == 200
+            created = client.post("/paw-bar/widgets", json=_widget_payload())
+            assert created.status_code == 201, created.text
+            listed = client.get("/paw-bar/widgets")
+            assert listed.status_code == 200
+            assert listed.json()["total"] == 1
 
 
-@pytest.mark.enforce_scope
 class TestNoTokenLeak:
     """No list/read response may carry the per-widget access_token (W0b)."""
 

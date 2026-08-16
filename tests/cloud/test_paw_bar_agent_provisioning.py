@@ -134,14 +134,17 @@ async def client(tmp_path, mongo_db):
     the SAME tmp store. Yields ``(client, store)``."""
     from unittest.mock import patch
 
-    from pocketpaw_ee.cloud._core.deps import current_workspace_id
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.paw_bar.router import router
+
+    from tests.cloud.conftest import override_workspace_role
 
     app = FastAPI()
     add_error_handler(app)
     app.include_router(router)
-    app.dependency_overrides[current_workspace_id] = lambda: _WS
+    # The admin routes gate on the caller's workspace ROLE since
+    # fix/paw-bar-role-gates, so pin an ADMIN alongside the workspace.
+    override_workspace_role(app, role="admin", workspace_id=_WS)
 
     store = PawBarStore(tmp_path / "provisioning.db")
     with patch("pocketpaw_ee.api.get_paw_bar_store", return_value=store):
