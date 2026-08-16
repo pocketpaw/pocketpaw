@@ -237,6 +237,28 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Run agent plan + narration surface tests
+        # Same addopts escape as the two steps above. These four files are the
+        # ONLY coverage of the plan panel and tool narration, and both features
+        # ship on two independent transports (the group/DM bus and the SSE
+        # stream). Living in the tests/cloud blind spot is how HTN-2 merged
+        # green while breaking an assertion in HTN-5's own sibling file: no lane
+        # ran either one, so "CI is green" said nothing about this surface.
+        #
+        # test_run_core_narration.py in particular compares the two transports
+        # against each other, which is the check that catches a feature wired to
+        # one surface and silently not the other — the bug this step exists for.
+        run: >-
+          uv run pytest
+          tests/cloud/runs/test_run_core_narration.py
+          tests/cloud/runs/test_run_core_plan_surface.py
+          tests/cloud/shared/test_agent_bridge_plan.py
+          tests/cloud/shared/test_agent_bridge_narration.py
+          -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
   mutation-anchors:
     # ANCHOR VALIDATION ONLY, NOT A SWEEP. `mutate.py --validate` reads each plan, counts
     # its `find` string in the target file, and exits. It applies no mutation, runs no
