@@ -1,4 +1,23 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-08-16 (fix/paw-bar-role-gates) — the last nine ``require_scope`` gates
+#   in this router become ROLE gates, so the ``require_scope`` import is gone. The
+#   two admin site-settings routes (the concierge kill switch) and the seven widget
+#   CRUD routes now take ``_require_paw_bar_read`` on the two GETs and
+#   ``_require_paw_bar_manage`` on every mutation — the same pair the D2 reads and
+#   the knowledge endpoints already used, so the whole admin surface of this router
+#   is finally gated one way. ``_require_paw_bar_manage`` moved up beside its read
+#   sibling because widget CRUD is now its first caller.
+#   ``require_scope("admin")`` is an OSS SINGLE-TENANT primitive: it accepts
+#   ``request.state.full_access`` (master token / session cookie / localhost, and in
+#   cloud only an ``is_superuser`` platform admin), a file-backed ``pp_`` API key, or
+#   a ``ppat_`` OAuth token. A CLOUD workspace admin presents none of those, so
+#   PATCH /paw-bar/admin/site/{site_id}/settings answered its intended caller with
+#   403 "Missing required scope: admin" — the kill switch was unreachable for the
+#   owner it belongs to. The same line failed the opposite way on self-hosted: a
+#   session cookie sets ``full_access``, so ANY signed-in dashboard user, member
+#   role included, could rotate a widget's token or delete it. One swap closes both.
+#   No new actions: ``paw_bar.read`` / ``paw_bar.manage`` already sit at ADMIN in
+#   guards/actions.py.
 # Updated: 2026-08-01 (AL-2, paw-bar emitters) — three conversation write paths
 #   now record their agent-ledger beats through ``paw_bar/ledger.py`` (fail-soft,
 #   never raises, ~4 lines each):
@@ -406,7 +425,6 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from pocketpaw.api.deps import require_scope
 from pocketpaw.paw_bar.models import (
     MAX_PAYLOAD_BYTES,
     ConversationState,
@@ -432,6 +450,12 @@ logger = logging.getLogger(__name__)
 # path-sourced dep would read an attacker-suppliable query param), the SAME
 # workspace the reads scope their data to.
 _require_paw_bar_read = require_action("paw_bar.read", workspace_dep=current_workspace_id)
+
+# The write half of the same pair (ADMIN, same session-workspace binding). Declared
+# here beside its read sibling because the widget CRUD routes — the first routes in
+# the file — now gate on it; it used to sit next to the knowledge-sync routes that
+# introduced it, several hundred lines below its first use.
+_require_paw_bar_manage = require_action("paw_bar.manage", workspace_dep=current_workspace_id)
 
 router = APIRouter(tags=["PawBar"])
 
@@ -1065,12 +1089,22 @@ class EventsListResponse(BaseModel):
 # Auth model (W0b): these routes are mounted under /api/v1, which the
 # dashboard AuthMiddleware treats as auth-OPTIONAL — it populates request.state
 # but does NOT 401. So management routes MUST gate themselves at the route
-# level. require_scope("admin") is fail-closed: it accepts a full-access
-# dashboard session (master/session-cookie/localhost) or an admin-scoped
-# API-key / OAuth token, and 403s everyone else (including unauthenticated
-# callers). The per-widget access_token (X-Paw-Bar-Token) is a SECOND factor
-# on read/mutate of a specific widget — it is not a substitute for being a
-# signed-in dashboard user, which is why create/list need this guard.
+# level. They gate on the caller's WORKSPACE ROLE — ``_require_paw_bar_manage``
+# (``paw_bar.manage``, ADMIN) for every mutation, ``_require_paw_bar_read``
+# (``paw_bar.read``, ADMIN) for the list — bound to the SESSION's active
+# workspace, the same one every handler below scopes its store calls to.
+# The per-widget access_token (X-Paw-Bar-Token) is a SECOND factor on
+# read/mutate of a specific widget — it is not a substitute for being a
+# signed-in workspace admin, which is why create/list need this guard.
+#
+# These used to gate on ``require_scope("admin")``, which is an OSS
+# SINGLE-TENANT primitive: it admits a full-access dashboard session, an
+# admin-scoped file-backed API key, or a ppat_ OAuth token. A cloud workspace
+# admin holds NONE of those, so the gate was unsatisfiable for the caller it
+# was meant for (403 on their own site's settings); on self-hosted it was the
+# opposite problem — any signed-in dashboard session sets ``full_access``, so
+# it admitted members too. The role gate fixes both directions at once, and
+# matches what the D2 reads below already did.
 # ---------------------------------------------------------------------------
 
 
@@ -1078,7 +1112,7 @@ class EventsListResponse(BaseModel):
     "/paw-bar/widgets",
     response_model=PawBarWidget,
     status_code=201,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def create_widget(
     req: CreateWidgetRequest,
@@ -1115,7 +1149,7 @@ async def create_widget(
 @router.get(
     "/paw-bar/widgets",
     response_model=WidgetListResponse,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_read)],
 )
 async def list_widgets(
     pocket_id: str | None = Query(None),
@@ -1150,7 +1184,7 @@ async def get_widget(
 @router.patch(
     "/paw-bar/widgets/{widget_id}/spec",
     response_model=PawBarWidgetPublic,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def update_spec(
     widget_id: str,
@@ -1173,7 +1207,7 @@ async def update_spec(
 @router.patch(
     "/paw-bar/widgets/{widget_id}",
     response_model=PawBarWidgetPublic,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def update_widget(
     widget_id: str,
@@ -1210,7 +1244,7 @@ async def update_widget(
 @router.post(
     "/paw-bar/widgets/{widget_id}/spec/rollback",
     response_model=PawBarWidgetPublic,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def rollback_spec(
     widget_id: str,
@@ -1238,7 +1272,7 @@ async def rollback_spec(
 @router.post(
     "/paw-bar/widgets/{widget_id}/rotate-token",
     response_model=PawBarWidget,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def rotate_token(
     widget_id: str,
@@ -1263,7 +1297,7 @@ async def rotate_token(
 @router.delete(
     "/paw-bar/widgets/{widget_id}",
     status_code=204,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def delete_widget(
     widget_id: str,
@@ -1298,9 +1332,10 @@ async def list_events(
 #
 # The kill switch + greeting live on the SITE doc (not the widget), so the owner
 # read/update is keyed on ``site_id``, not a widget id. Auth mirrors the widget
-# admin CRUD above: ``require_scope("admin")`` (a signed-in dashboard session) +
-# the caller's ACTIVE workspace via ``current_workspace_id``. The lookup is
-# workspace-scoped, so another tenant's site id resolves to 404 and never leaks or
+# admin CRUD above: the caller's WORKSPACE ROLE must clear ``paw_bar.read`` on the
+# GET and ``paw_bar.manage`` on the PATCH (both ADMIN), bound to their ACTIVE
+# workspace via ``current_workspace_id``. The lookup is workspace-scoped, so
+# another tenant's site id resolves to 404 and never leaks or
 # mutates. Reads/writes touch ONLY the concierge fields (the kill switch, the
 # greeting, and the transcript-retention toggle) — the site's publish / billing /
 # capture config is out of scope here. Co-located with the paw-bar
@@ -1362,7 +1397,7 @@ async def _load_site_scoped(site_id: str, workspace_id: str) -> Any:
 @router.get(
     "/paw-bar/admin/site/{site_id}/settings",
     response_model=ConciergeSettingsResponse,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_read)],
 )
 async def get_site_concierge_settings(
     site_id: str,
@@ -1382,7 +1417,7 @@ async def get_site_concierge_settings(
 @router.patch(
     "/paw-bar/admin/site/{site_id}/settings",
     response_model=ConciergeSettingsResponse,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def update_site_concierge_settings(
     site_id: str,
@@ -1441,7 +1476,8 @@ async def update_site_concierge_settings(
 # ADMIN). The sync is a mutation that spends compute, so it does not ride the read.
 # ---------------------------------------------------------------------------
 
-_require_paw_bar_manage = require_action("paw_bar.manage", workspace_dep=current_workspace_id)
+# ``_require_paw_bar_manage`` is now declared beside ``_require_paw_bar_read`` near
+# the top of the file — the widget CRUD routes above use it too.
 
 
 class ConciergeKnowledgeResponse(BaseModel):

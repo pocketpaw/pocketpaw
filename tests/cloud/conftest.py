@@ -18,6 +18,12 @@ Also exposes:
 - ``cloud_app_client`` — a FastAPI app with the enterprise chat routers
   mounted and auth/license dependencies overridden, used by HTTP-layer
   tests so they don't need a real JWT.
+- ``override_workspace_role`` — pins a caller ROLE + workspace on a bare test
+  app so ``require_action(...)`` guards run their real role check. Added
+  2026-08-16 when the paw-bar admin routes moved off ``require_scope("admin")``
+  onto the role gate: those router-level tests mount the router with no auth
+  stack, so ``current_active_user`` has nothing to resolve and every admin
+  route answers 401 until the dep is overridden.
 """
 
 from __future__ import annotations
@@ -207,6 +213,53 @@ def _fixed_workspace() -> str:
 
 def _no_op_license() -> None:
     return None
+
+
+def fake_workspace_user(role: str = "admin", workspace_id: str = "w1", user_id: str = "u1") -> Any:
+    """User stand-in shaped like ``ee.cloud.models.user.User`` — only the fields
+    the RBAC chain reads (``id``, ``active_workspace``, ``workspaces``).
+
+    ``role`` is the caller's WorkspaceRole in ``workspace_id`` (member | admin |
+    owner), which is what ``check_workspace_action`` compares against the ACTIONS
+    matrix. Nothing here is faked past the identity: the guard itself runs for real.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        id=user_id,
+        active_workspace=workspace_id,
+        workspaces=[SimpleNamespace(workspace=workspace_id, role=role)],
+    )
+
+
+def override_workspace_role(
+    app: FastAPI,
+    role: str = "admin",
+    workspace_id: str = "w1",
+    user_id: str = "u1",
+) -> None:
+    """Pin a caller ROLE + active workspace on a bare test app.
+
+    Router-level tests mount a single router on a plain ``FastAPI()`` with no auth
+    stack, so ``current_active_user`` (fastapi-users) finds no session and any
+    ``require_action`` guard 401s before its role check ever runs. Overriding both
+    deps here lets the guard execute for real against the given role — pass
+    ``role="member"`` to assert a 403, ``role="admin"``/``"owner"`` to assert
+    success.
+
+    Also installs ``add_error_handler``: a denied guard raises the cloud-native
+    ``Forbidden`` (a CloudError), which without the handler escapes as an
+    unhandled exception instead of the 403 envelope production returns. The call
+    is idempotent, so an app that already registered it is unaffected.
+    """
+    from pocketpaw_ee.cloud._core.deps import current_workspace_id
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud.auth import current_active_user
+
+    add_error_handler(app)
+    user = fake_workspace_user(role=role, workspace_id=workspace_id, user_id=user_id)
+    app.dependency_overrides[current_active_user] = lambda: user
+    app.dependency_overrides[current_workspace_id] = lambda: workspace_id
 
 
 @pytest_asyncio.fixture

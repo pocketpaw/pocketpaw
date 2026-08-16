@@ -94,9 +94,12 @@ def client(stores, monkeypatch):
     app.include_router(router)
     # W4a — the admin CRUD routes resolve the caller's workspace via the cloud
     # session dep; pin it for the bare test app (same as tests/cloud/conftest.py).
-    from pocketpaw_ee.cloud._core.deps import current_workspace_id
+    # Since fix/paw-bar-role-gates those routes also gate on the caller's
+    # workspace ROLE (paw_bar.read / paw_bar.manage, both ADMIN), so the role is
+    # pinned too — otherwise every widget create here 401s.
+    from tests.cloud.conftest import override_workspace_role
 
-    app.dependency_overrides[current_workspace_id] = lambda: "w-test"
+    override_workspace_role(app, role="admin", workspace_id="w-test")
     monkeypatch.setattr("pocketpaw_ee.paw_bar.router._store", lambda *a, **k: pp_store)
     return TestClient(app)
 
