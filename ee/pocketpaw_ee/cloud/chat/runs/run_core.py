@@ -1,6 +1,20 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-08-15 (HTN-11) — the ``tool_start`` frame carries an additive
+  ``narration``: the tool's plain-language phrase, from the SAME
+  ``shared/tool_narration.py`` the group/DM bridge calls.
+
+  Narration shipped in HTN-1 wired to the bridge alone, so this surface — the
+  main streaming chat — kept sending bare tool names while group/DM read as
+  English. No task in that plan covered this path; HTN-7 is Mission Control's
+  activity ticker, not the chat stream. The asymmetry survived because each
+  surface had its own tests and neither compared against the other, which is
+  why ``test_run_core_narration.py`` asserts the two frames agree rather than
+  only that this one is populated.
+
+  Additive, exactly as on the bridge: a tool with no phrasing emits no field
+  and a client keyed on ``tool`` is unaffected.
 - 2026-08-15 (HTN-5) — ``_drive_agent_loop`` routes a recognized plan tool
   (``write_plan`` today) through ``shared/plan_normalizer.py`` and yields a
   ``plan_updated`` SSE frame INSTEAD of the ``tool_start`` chip, so the plan
@@ -332,6 +346,7 @@ from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
 from pocketpaw_ee.cloud.shared.errors import CloudError
 from pocketpaw_ee.cloud.shared.plan_normalizer import PlanTracker
+from pocketpaw_ee.cloud.shared.tool_narration import narrate_tool_use
 from pocketpaw_ee.cloud.surface import (
     SurfaceKind,
     SurfaceMeta,
@@ -1562,7 +1577,16 @@ async def _drive_agent_loop(
                                 },
                             )
                     else:
-                        yield ("tool_start", {"tool": name, "input": tool_input})
+                        # HTN-11: the same phrase the group/DM bridge sends, from
+                        # the same function, so one tool cannot read as English on
+                        # one surface and as a raw name on the other. Additive:
+                        # a tool with no phrasing emits no field and the client
+                        # keeps rendering ``tool``.
+                        frame: dict[str, Any] = {"tool": name, "input": tool_input}
+                        narration = narrate_tool_use(name, tool_input, instance)
+                        if narration:
+                            frame["narration"] = narration
+                        yield ("tool_start", frame)
             elif etype == "tool_result":
                 meta = getattr(event, "metadata", None) or {}
                 name = ""
