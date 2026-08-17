@@ -332,6 +332,33 @@ When you touch any `ee/pocketpaw_ee/cloud/<entity>/*.py` file for any reason —
 
 `pockets/` is the canonical reference. Copy its shape.
 
+### Atlas touch-time rule — the OS self-model must not drift
+
+atlas (`src/pocketpaw/atlas/`) is the runtime OS self-model: the compiled corpus
+agents query via `atlas_search` / `atlas_describe` and the always-on Paw OS
+Primer. **A primitive, surface, or agent-facing capability that isn't in atlas is
+undiscoverable to agents — and its CI drift check only proves the compiled
+`atlas.json` matches the authored JSON, NOT that the authored facts match the
+live OS.** Two whole subsystems (Fabric source-truth, the verify loop) shipped
+after atlas was seeded and stayed invisible for weeks; three live routes were
+once missing/stale while the check stayed green.
+
+When you **add, rename, or remove a primitive, a user-facing surface/route, or
+an agent-facing capability** — in the same PR:
+
+1. Update `src/pocketpaw/atlas/authored/{primitives,surfaces,capabilities}.json`
+   (all 10 `AtlasEntry` fields; primitives carry a `gist`; capabilities carry a
+   `role:*` marker in `requires`; verify every route/fact against the real
+   frontend routes, not just that it recompiles).
+2. Recompile: `uv run pocketpaw atlas build`, then `atlas build --check` green;
+   commit `src/pocketpaw/atlas/data/atlas.json`.
+3. Pin the new intent(s) in `tests/atlas/eval_cases.json` (both directions — the
+   new entry wins its intents, existing primitives still win theirs).
+
+Routine refactors and bug fixes don't need atlas updates. If a subsystem ships
+behind a rollout flag, keep the entry discoverable and let the overlay mark its
+live `mode` (see `docs/atlas.md`) — never hide it.
+
 ---
 
 ## Prompt rows must carry the id the tools take
