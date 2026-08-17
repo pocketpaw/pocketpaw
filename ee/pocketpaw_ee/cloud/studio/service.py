@@ -8,8 +8,9 @@
 #                         image_generation/video entries only, shaped to the
 #                         frontend's StudioModel.
 #   * generate (image)  — POST {proxy}/v1/images/generations (OpenAI-compatible,
-#                         fal.ai models served upstream), save the returned PNG
-#                         under ~/.pocketpaw/generated, return a Generation.
+#                         fal.ai models served upstream), persist the returned
+#                         PNG through the media storage adapter (local disk or
+#                         S3), return a Generation.
 #   * generations       — persisted per-workspace history (JSONL under
 #                         ~/.pocketpaw/studio) so the gallery survives reloads.
 #   * edit              — the canvas edit ops are NOT yet wired through the
@@ -41,6 +42,7 @@ from pocketpaw.config import get_config_dir
 from pocketpaw_ee.catalog import config as catalog_config
 from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
+from pocketpaw_ee.cloud.media import storage as media_storage
 
 from . import schemas
 
@@ -118,14 +120,6 @@ _SIZE_MAP: dict[str, str] = {
 # gateway serves return one image per request; keeping count=1 is reliable and
 # matches how the agent-side media MCP already calls the endpoint).
 _MAX_GENERATED_ASSETS = 4
-
-
-def _generated_dir() -> Path:
-    """Get (and create) the generated-media directory — same location the OSS
-    ImageGenerateTool and the media MCP server use (``get_config_dir()/generated``)."""
-    d = get_config_dir() / "generated"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
 
 
 def _history_path() -> Path:
@@ -428,12 +422,11 @@ async def _proxy_generate_image(
         return None, f"image generation failed: {exc}"
 
 
-def _save_image_bytes(image_bytes: bytes) -> str:
-    """Persist one generated PNG under the generated-media dir and return its
-    backend-relative URL (the /media router serves it)."""
-    out_path = _generated_dir() / f"{uuid.uuid4()}.png"
-    out_path.write_bytes(image_bytes)
-    return f"/api/v1/media/{out_path.name}"
+async def _save_image_bytes(image_bytes: bytes) -> str:
+    """Persist one generated PNG through the media storage adapter and return
+    its backend-relative URL (the /media router serves it). Shared with the
+    agent-side media MCP so every generated asset lands on the same storage."""
+    return await media_storage.save_generated(image_bytes, mime="image/png")
 
 
 async def _apply_style(prompt: str, style_id: str | None) -> str:
@@ -525,7 +518,7 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
         assets.append(
             {
                 "id": _seq_id("asset"),
-                "url": _save_image_bytes(image_bytes),
+                "url": await _save_image_bytes(image_bytes),
                 "mime": "image/png",
             }
         )

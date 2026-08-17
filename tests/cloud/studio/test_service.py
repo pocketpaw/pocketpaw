@@ -3,9 +3,9 @@
 # The proxy calls are mocked at the SAME seam the media MCP uses
 # (``service._PROXY_TRANSPORT`` → httpx.MockTransport) so the full request
 # shape — path, model, prompt, size, count, the OpenAI ``user`` tenant tag, and
-# the Bearer key — is asserted end-to-end without a live proxy. ``_generated_dir``
-# and ``_history_path`` are redirected to a tmp dir so nothing touches the
-# developer's real ``~/.pocketpaw``. Coverage:
+# the Bearer key — is asserted end-to-end without a live proxy. The media
+# storage adapter and ``_history_path`` are redirected to tmp dirs so nothing
+# touches the developer's real ``~/.pocketpaw``. Coverage:
 #   * list_models — catalog image/video entries map onto StudioModel shapes,
 #     first image model is the catalog default, chat entries are excluded.
 #   * generate (image) — happy path (b64_json): POSTs the right payload, saves a
@@ -31,7 +31,10 @@ import pytest
 from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.litellm_client import CatalogUpstreamError
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry, Pricing
+from pocketpaw_ee.cloud.media import storage as media_storage
 from pocketpaw_ee.cloud.studio import schemas
+
+from pocketpaw.uploads.local import LocalStorageAdapter
 
 _PROXY_BASE = "https://proxy.test:4000"
 _PROXY_KEY = "sk-proxy-master"
@@ -65,14 +68,19 @@ def proxy_env(monkeypatch):
 
 @pytest.fixture
 def studio_env(tmp_path, monkeypatch):
-    """Redirect generated-media + history persistence into a tmp dir so tests
-    never touch the real ~/.pocketpaw, and resolve the tenant key to a fixed
-    value (no provisioning lookup)."""
-    generated = tmp_path / "generated"
+    """Redirect media storage + history persistence into tmp dirs so tests never
+    touch the real ~/.pocketpaw, and resolve the tenant key to a fixed value.
+
+    The media storage adapter is swapped for a tmp-backed LOCAL adapter, so a
+    generated PNG lands at ``<media_root>/generated/<name>`` — the same layout
+    the deployed S3 adapter uses (key "generated/<name>")."""
+    media_root = tmp_path / "media-root"
+    media_root.mkdir(exist_ok=True)
+    generated = media_root / "generated"
     generated.mkdir(exist_ok=True)
+    monkeypatch.setattr(media_storage, "_ADAPTER", LocalStorageAdapter(root=media_root))
     history = tmp_path / "studio" / "generations.jsonl"
     history.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(service, "_generated_dir", lambda: generated)
     monkeypatch.setattr(service, "_history_path", lambda: history)
 
     async def _tenant_key(workspace_id):
