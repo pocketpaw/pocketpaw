@@ -68,6 +68,24 @@
 #   * ``build_workspace_fabric_introspector`` also binds
 #     ``get_fabric_store(workspace_id=...)``; that binding degrades alone (the
 #     registry introspector still returns, only ``source_truth`` goes absent).
+#
+# Updated: 2026-08-17 (AST-5a — pre-merge review fixes on the aggregate) —
+#   ``entity_type_source_truth`` is now honest AND O(1) in store connections:
+#   * mode ``"off"`` short-circuits with ZERO store reads (``live=False``,
+#     ``tracked=False``, a ``note``) — off means no provenance is read anywhere
+#     else, so shadow-era leftovers must not read as "tracked" beside a
+#     primitive the overlay marks unavailable. ``live`` (mode != off) is in
+#     every payload.
+#   * the per-key ``get_statements`` walk (one aiosqlite connection per key —
+#     ~500 serial opens on a saturated type) is replaced by ONE bulk
+#     ``FabricStore.get_statements_for_type`` read (grouped by key, same
+#     per-key order) plus ``statement_coverage_for_type`` (uncapped
+#     ``COUNT(DISTINCT object_id)`` overall + per property).
+#   * the cap no longer hides data: ``object_count`` and every property's
+#     ``objects`` are the exact uncapped counts, so a property that only
+#     appears on later object_ids can't vanish; disputed / stale / aging /
+#     winner mix come from the walked keys, ``sampled_keys`` says how many,
+#     and ``sampled=True`` carries a ``note`` saying so.
 
 from __future__ import annotations
 
@@ -93,6 +111,12 @@ MAX_FABRIC_RESULTS = 3
 # the per-object truth is one fabric_query away (SOURCE_TRUTH_POINTER).
 SOURCE_TRUTH_SAMPLE_CAP = 500
 SOURCE_TRUTH_POINTER = "fabric_query include_provenance=true for the per-object answer"
+# AST-5a: what the aggregate says instead of reading anything when the
+# deployment's source-truth flag is off (see entity_type_source_truth).
+SOURCE_TRUTH_OFF_NOTE = (
+    "source-truth is off in this deployment; statement history from an earlier "
+    "shadow phase is not read"
+)
 
 # Entity-type names are commonly CamelCase ("CustomerAccount"); split on
 # case boundaries before stemming so "customer account" queries match. Two
@@ -403,28 +427,47 @@ class RegistryFabricIntrospector:
         return sorted(self._registry.get_entity_properties(name))
 
     async def entity_type_source_truth(self, name: str) -> dict | None:
-        """Live type-level source-truth roll-up for the describe view (AST-2).
+        """Live type-level source-truth roll-up for the describe view (AST-2,
+        reworked AST-5a).
 
         Optional, duck-typed — NOT a ``FabricIntrospector`` Protocol member
         (see the OPTIONAL note on the Protocol). ``None`` when no store is
         bound. Otherwise::
 
-            {mode, tracked, sampled, object_count,
+            {mode, live, tracked, sampled, sampled_keys, object_count,
              properties: {<prop>: {objects, disputed, stale, aging,
                                    winner_writer_mix: {<writer_class>: n}}},
-             pointer}
+             pointer, note?}
 
-        Cost is bounded by the TRACKED set, never the whole fabric: the type
-        name resolves to the store's type row (``get_type_by_name``, a
-        ``fabric_object_types`` read); ONE indexed ``list_statement_keys``
-        query (type-scoped join, ``LIMIT cap+1``) is the only statement read
-        for an untracked type — no keys → ``tracked=False`` and it stops.
-        Tracked keys are walked with ``get_statements`` + the pure
-        ``resolve()`` (mirroring ``FabricStore.get_object_provenance`` —
-        dispute/freshness/winner metadata are never persisted, so they are
-        recomputed here), capped at ``SOURCE_TRUTH_SAMPLE_CAP`` keys
-        (``sampled=True`` beyond it). ``winner_freshness`` is None on the
-        pinned path, so a pinned winner counts as neither stale nor aging.
+        ``mode == "off"`` short-circuits with ZERO store reads:
+        ``live=False, tracked=False`` plus a ``note`` — off means the store
+        records and reads no provenance (``config.py`` / ``store.py``), so
+        statement history left over from an earlier shadow phase must not be
+        reported as tracked beside a ``primitive:source-truth`` the overlay
+        marks unavailable. ``live`` (= ``mode != "off"``) is present in every
+        mode.
+
+        Cost is bounded by the TRACKED set, never the whole fabric, and by a
+        CONSTANT number of store connections, never one per key: the type
+        name resolves to the store's type row (``get_type_by_name``);
+        ``statement_coverage_for_type`` (one connection, two indexed
+        ``COUNT(DISTINCT object_id)`` aggregates) gives the HONEST uncapped
+        totals — no objects → ``tracked=False`` and it stops; then ONE bulk
+        ``get_statements_for_type`` read (type-scoped join, grouped by key,
+        ``key_cap=SOURCE_TRUTH_SAMPLE_CAP``) feeds the pure ``resolve()``
+        (mirroring ``FabricStore.get_object_provenance`` — dispute / freshness
+        / winner metadata are never persisted, so they are recomputed here).
+
+        Honesty under the cap: ``object_count`` is the true distinct count and
+        ``properties`` ALWAYS lists every tracked property with ``objects`` =
+        its true per-property object count, so a property that only appears on
+        later object_ids can never vanish. ``disputed`` / ``stale`` / ``aging``
+        / ``winner_writer_mix`` are computed from the walked keys only;
+        ``sampled_keys`` says how many were walked and, when ``sampled`` is
+        true (fewer walked than tracked), a ``note`` says those per-property
+        counts cover only the first ``sampled_keys`` keys by object_id.
+        ``winner_freshness`` is None on the pinned path, so a pinned winner
+        counts as neither stale nor aging.
         """
         store = self._source_truth
         if store is None:
@@ -435,41 +478,56 @@ class RegistryFabricIntrospector:
         from pocketpaw.fabric.resolver import resolve
         from pocketpaw.fabric.trust import default_trust_rules
 
-        ws = self._workspace_id
+        mode = get_settings().fabric_source_truth_mode
         out: dict[str, Any] = {
-            "mode": get_settings().fabric_source_truth_mode,
+            "mode": mode,
+            "live": mode != "off",
             "tracked": False,
             "sampled": False,
+            "sampled_keys": 0,
             "object_count": 0,
             "properties": {},
             "pointer": SOURCE_TRUTH_POINTER,
         }
+        if mode == "off":
+            out["note"] = SOURCE_TRUTH_OFF_NOTE
+            return out
+        ws = self._workspace_id
         obj_type = await store.get_type_by_name(name, workspace_id=ws)
         if obj_type is None:
             return out
-        keys = await store.list_statement_keys(
-            workspace_id=ws, type_id=obj_type.id, limit=SOURCE_TRUTH_SAMPLE_CAP + 1
-        )
-        if not keys:
+        coverage = await store.statement_coverage_for_type(obj_type.id, workspace_id=ws)
+        object_count = int(coverage.get("object_count") or 0)
+        per_property: dict[str, int] = dict(coverage.get("properties") or {})
+        if object_count == 0 or not per_property:
             return out
-        if len(keys) > SOURCE_TRUTH_SAMPLE_CAP:
-            out["sampled"] = True
-            keys = keys[:SOURCE_TRUTH_SAMPLE_CAP]
         out["tracked"] = True
-        out["object_count"] = len({oid for oid, _prop in keys})
+        out["object_count"] = object_count
+        properties: dict[str, dict[str, Any]] = {
+            prop: {
+                "objects": int(n),
+                "disputed": 0,
+                "stale": 0,
+                "aging": 0,
+                "winner_writer_mix": {},
+            }
+            for prop, n in sorted(per_property.items())
+        }
+        grouped = await store.get_statements_for_type(
+            obj_type.id, workspace_id=ws, key_cap=SOURCE_TRUTH_SAMPLE_CAP
+        )
         now = datetime.now(UTC)
         rules = default_trust_rules()
-        properties: dict[str, dict[str, Any]] = {}
-        for object_id, prop in keys:
-            stmts = await store.get_statements(object_id, prop, workspace_id=ws)
+        walked = 0
+        for (_object_id, prop), stmts in grouped.items():
             if not stmts:
                 continue
+            walked += 1
             resolution = resolve(stmts, rules, object_type=obj_type.name, now=now)
             entry = properties.setdefault(
                 prop,
                 {"objects": 0, "disputed": 0, "stale": 0, "aging": 0, "winner_writer_mix": {}},
             )
-            entry["objects"] += 1
             if resolution.is_disputed:
                 entry["disputed"] += 1
             if resolution.winner_freshness in ("stale", "aging"):
@@ -478,7 +536,16 @@ class RegistryFabricIntrospector:
             if winner is not None:
                 mix = entry["winner_writer_mix"]
                 mix[winner.writer_class] = mix.get(winner.writer_class, 0) + 1
+        total_keys = sum(per_property.values())
+        out["sampled_keys"] = walked
         out["properties"] = properties
+        if walked < total_keys:
+            out["sampled"] = True
+            out["note"] = (
+                f"per-property disputed/stale/aging/winner counts cover only the first "
+                f"{walked} of {total_keys} tracked keys by object_id; object_count and "
+                f"each property's objects are exact"
+            )
         return out
 
 
@@ -525,6 +592,7 @@ __all__ = [
     "FABRIC_ID_PREFIX",
     "FABRIC_KIND",
     "MAX_FABRIC_RESULTS",
+    "SOURCE_TRUTH_OFF_NOTE",
     "SOURCE_TRUTH_POINTER",
     "SOURCE_TRUTH_SAMPLE_CAP",
     "FabricIntrospector",

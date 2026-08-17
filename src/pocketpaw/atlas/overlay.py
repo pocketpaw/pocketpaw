@@ -61,6 +61,16 @@
 # ``search`` applies unchanged. ``FLAG_ENABLE_HINTS`` carries the "how to enable"
 # pointer describe renders when off. DISCOVERY HINTS ONLY — never an
 # enforcement gate (``is_granted`` is untouched by the flags).
+#
+# Updated: 2026-08-17 (AST-5a — review fix V9) — the two member-level
+# ``capability:fabric.*`` cards derive from the same ``fabric_source_truth_mode``
+# as ``primitive:source-truth`` but were never flag-marked, so with the flag off
+# an un-marked card (available None) outranked the demoted primitive in search
+# and its describe had no enable hint. ``FLAGGED_CAPABILITY_MODES`` maps each
+# derived card to its primitive; ``_flag_modes`` copies the primitive's mode onto
+# the card, so ``_overlay_one`` (unchanged) stamps identical ``mode`` /
+# ``available`` and describe renders the same ``enable_hint``. Sort logic and
+# ``is_granted`` are untouched — the cards keep their ``role:member`` gate.
 
 from __future__ import annotations
 
@@ -97,15 +107,34 @@ ROLE_LEVELS: dict[str, int] = {"member": 1, "admin": 2, "owner": 3}
 # flags, read from live settings once per overlay pass (see ``_flag_modes``).
 FLAGGED_PRIMITIVE_IDS: tuple[str, ...] = ("primitive:source-truth", "primitive:verify-loop")
 
+# Capability cards that DERIVE from a flagged primitive (AST-5a): each maps to
+# the primitive whose live mode it inherits, so ``_flag_modes`` stamps the same
+# tri-state ``mode`` / ``available`` on the card as on the primitive. Without
+# this, a member-level ``capability:fabric.*`` card sat un-marked (available
+# None) ABOVE the demoted primitive in search when source-truth was off, and its
+# describe carried no enable hint. Kept SEPARATE from ``FLAGGED_PRIMITIVE_IDS``
+# because these cards are role-gated (``role:member``): the role-blind default
+# provider filters them, so they can never be part of the provider-parity set.
+FLAGGED_CAPABILITY_MODES: dict[str, str] = {
+    "capability:fabric.provenance_read": "primitive:source-truth",
+    "capability:fabric.conflict_steward": "primitive:source-truth",
+}
+
+# Every id ``_flag_modes`` stamps — the primitives plus their derived cards.
+FLAGGED_IDS: tuple[str, ...] = (*FLAGGED_PRIMITIVE_IDS, *FLAGGED_CAPABILITY_MODES)
+
 # The one-line "how to enable" pointer describe renders when a flagged
 # primitive is off — same shape as the unavailable-connector ``connect_hint``,
 # different pointer (env flag instead of the integrations surface).
+_SOURCE_TRUTH_ENABLE_HINT = (
+    "Source-truth is off in this deployment — set "
+    "POCKETPAW_FABRIC_SOURCE_TRUTH_MODE=shadow|enforce to enable it "
+    "(see docs/atlas.md)."
+)
 FLAG_ENABLE_HINTS: dict[str, str] = {
-    "primitive:source-truth": (
-        "Source-truth is off in this deployment — set "
-        "POCKETPAW_FABRIC_SOURCE_TRUTH_MODE=shadow|enforce to enable it "
-        "(see docs/atlas.md)."
-    ),
+    "primitive:source-truth": _SOURCE_TRUTH_ENABLE_HINT,
+    "capability:fabric.provenance_read": _SOURCE_TRUTH_ENABLE_HINT,
+    "capability:fabric.conflict_steward": _SOURCE_TRUTH_ENABLE_HINT,
     "primitive:verify-loop": (
         "The verify loop is off in this deployment — set deep_work_verify_mode "
         "and/or cloud_plan_verify_mode (POCKETPAW_DEEP_WORK_VERIFY_MODE / "
@@ -214,9 +243,10 @@ def _flag_modes() -> dict[str, str]:
     — or a monkeypatched setting — is reflected on the next atlas call.
     ``primitive:verify-loop`` folds its two flags to the HIGHER one
     (enforce > shadow > off): the loop is live if EITHER terminal runs it, and
-    the strongest position is the honest headline. Fail-closed: a settings
-    failure reports ``"off"`` for both — the entry is still described, just
-    marked not live.
+    the strongest position is the honest headline. The derived
+    ``FLAGGED_CAPABILITY_MODES`` cards (AST-5a) copy their primitive's mode.
+    Fail-closed: a settings failure reports ``"off"`` for every flagged id —
+    the entry is still described, just marked not live.
     """
     try:
         from pocketpaw.config import get_settings
@@ -226,13 +256,17 @@ def _flag_modes() -> dict[str, str]:
             settings.effective_deep_work_verify_mode(),
             settings.effective_cloud_plan_verify_mode(),
         )
-        return {
+        modes = {
             "primitive:source-truth": settings.fabric_source_truth_mode,
             "primitive:verify-loop": max(verify_modes, key=lambda m: _MODE_RANK.get(m, 0)),
         }
+        # AST-5a: derived capability cards inherit their primitive's mode.
+        for card_id, primitive_id in FLAGGED_CAPABILITY_MODES.items():
+            modes[card_id] = modes[primitive_id]
+        return modes
     except Exception as exc:  # noqa: BLE001 — fail closed to "off", never break the tool
         logger.warning("atlas overlay: rollout-flag resolution failed: %s", exc)
-        return dict.fromkeys(FLAGGED_PRIMITIVE_IDS, "off")
+        return dict.fromkeys(FLAGGED_IDS, "off")
 
 
 def _overlay_one(
@@ -413,6 +447,8 @@ def build_role_aware_provider(scope_key: str) -> EntitlementProvider | None:
 __all__ = [
     "DEFAULT_SCOPE_KEY",
     "FLAG_ENABLE_HINTS",
+    "FLAGGED_CAPABILITY_MODES",
+    "FLAGGED_IDS",
     "FLAGGED_PRIMITIVE_IDS",
     "ROLE_LEVELS",
     "ROLE_REQUIRE_PREFIX",

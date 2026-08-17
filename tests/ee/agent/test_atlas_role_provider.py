@@ -30,8 +30,17 @@
 # ``is_granted`` for those primitives is unaffected by the flags (discovery
 # hints only); the ``capability:fabric.*`` cards stay ``role:member``-gated
 # regardless of mode.
+# Updated: 2026-08-17 (AST-5a — review fix V9) — the two ``capability:fabric.*``
+# cards a primed MEMBER sees now inherit ``primitive:source-truth``'s mode
+# through the same overlay stamp: mode off → both ``available False`` /
+# ``mode "off"`` with the source-truth ``enable_hint`` on describe; shadow /
+# enforce → available with the mode; and the exact review repro (member, mode
+# off, "where did this value come from") never returns an UN-MARKED fabric card
+# above the demoted primitive. The role gate itself is unchanged.
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
@@ -44,8 +53,14 @@ from pocketpaw_ee.cloud.chat.agent_service import (  # noqa: E402
     detach_agent_identity,
 )
 
+from pocketpaw.agents.sdk_mcp_atlas import (  # noqa: E402
+    _atlas_describe_handler,
+    _atlas_search_handler,
+)
 from pocketpaw.atlas.model import AtlasEntry, AtlasModel  # noqa: E402
 from pocketpaw.atlas.overlay import (  # noqa: E402
+    FLAG_ENABLE_HINTS,
+    FLAGGED_CAPABILITY_MODES,
     FLAGGED_PRIMITIVE_IDS,
     AtlasOverlay,
     DefaultEntitlementProvider,
@@ -443,3 +458,60 @@ class TestFlagAwareParity:
             unresolved = RoleAwareEntitlementProvider(scope_key=SCOPE)  # never primed
             assert all(unresolved.is_granted(e) is True for e in flagged), mode
             assert all(unresolved.is_granted(e) is False for e in fabric_caps), mode
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fabric", ["off", "shadow", "enforce"])
+    async def test_member_fabric_cards_inherit_source_truth_mode(self, _flags, _patch_user, fabric):
+        """AST-5a (V9): the two member-level capability:fabric.* cards carry
+        the SAME mode / available as primitive:source-truth for a primed member;
+        off → describe renders the source-truth enable_hint on the card too."""
+        _flags(fabric=fabric)
+        _patch_user("member")
+        store = get_atlas_store()
+        cards = [store.describe(i) for i in FLAGGED_CAPABILITY_MODES]
+        assert all(c is not None for c in cards)
+        with _identity():
+            member = await _primed(RoleAwareEntitlementProvider(scope_key=SCOPE))
+            overlaid = {o.entry.id: o for o in AtlasOverlay.apply(cards, member)}
+            assert set(overlaid) == set(FLAGGED_CAPABILITY_MODES), "member sees both cards"
+            for card_id, o in overlaid.items():
+                assert (o.available, o.mode) == (fabric != "off", fabric), card_id
+            for card_id in FLAGGED_CAPABILITY_MODES:
+                out = await _atlas_describe_handler({"id": card_id}, member)
+                assert not out.get("is_error")
+                payload = json.loads(out["content"][0]["text"])
+                assert payload["mode"] == fabric
+                if fabric == "off":
+                    assert payload["available"] is False
+                    assert payload["enable_hint"] == FLAG_ENABLE_HINTS["primitive:source-truth"]
+                else:
+                    assert payload["available"] is True
+                    assert "enable_hint" not in payload
+
+    @pytest.mark.asyncio
+    async def test_review_repro_member_search_off_marks_every_fabric_card(
+        self, _flags, _patch_user
+    ):
+        """The exact V9 repro: member provider, source-truth off,
+        atlas_search "where did this value come from". Before: #1 was
+        capability:fabric.provenance_read (available None, mode None) above #2
+        primitive:source-truth (available False, mode off). Now no fabric card
+        in the answer is un-marked, so the agent can't read it as live."""
+        _flags(fabric="off")
+        _patch_user("member")
+        with _identity():
+            member = await _primed(RoleAwareEntitlementProvider(scope_key=SCOPE))
+            out = await _atlas_search_handler({"intent": "where did this value come from"}, member)
+        cards = json.loads(out["content"][0]["text"])["results"]
+        ids = [c["id"] for c in cards]
+        assert "primitive:source-truth" in ids and "capability:fabric.provenance_read" in ids, ids
+        fabric_cards = [c for c in cards if c["id"] in FLAGGED_CAPABILITY_MODES]
+        assert fabric_cards
+        for card in fabric_cards:
+            assert card["available"] is False and card["mode"] == "off", card
+        primitive_at = ids.index("primitive:source-truth")
+        assert not [
+            c["id"]
+            for c in cards[:primitive_at]
+            if c["id"].startswith("capability:fabric.") and "mode" not in c
+        ]

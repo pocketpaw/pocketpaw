@@ -82,6 +82,16 @@ a gate; `mode?` on search cards. AST-4: the atlas TOUCH-TIME RULE (pocketpaw
 CLAUDE.md) — add/rename/remove a primitive, surface, or capability → update
 authored/ + recompile + eval-pin in the same PR — because the drift check
 proves recompile fidelity, not accuracy vs the live OS.
+Updated: 2026-08-17 (AST-5a — pre-merge review fixes on the stack): the
+type-level `source_truth` aggregate is honest and O(1) in store connections
+(ONE bulk `get_statements_for_type` + ONE uncapped `statement_coverage_for_type`
+instead of a per-key `get_statements` walk; `object_count` and every property's
+`objects` are exact so the 500-key cap can't hide a property; new
+`live`, `sampled_keys`, `note`); mode `off` short-circuits with zero store
+reads; the two `capability:fabric.*` cards inherit `primitive:source-truth`'s
+flag mode (`FLAGGED_CAPABILITY_MODES`); `primitive:source-truth`'s `how` is
+hedged to where the EE fabric MCP server is bound (OSS has no
+`include_provenance`).
 -->
 
 # Atlas — the OS self-model
@@ -319,7 +329,13 @@ the calling workspace's reality:
   the overlay stamps `available` (flag not `off`) plus a tri-state `mode`
   (`off` | `shadow` | `enforce`), read from live settings on every pass:
   source-truth from `fabric_source_truth_mode`
-  (`POCKETPAW_FABRIC_SOURCE_TRUTH_MODE`); verify-loop from the HIGHER of
+  (`POCKETPAW_FABRIC_SOURCE_TRUTH_MODE`) — and the two member-level cards that
+  derive from the same flag, `capability:fabric.provenance_read` and
+  `capability:fabric.conflict_steward`, inherit that mode / `available` /
+  `enable_hint` verbatim (`overlay.FLAGGED_CAPABILITY_MODES`, AST-5a — before,
+  an un-marked card outranked the demoted primitive in search when off; the
+  role gate is unchanged, so `FLAGGED_PRIMITIVE_IDS` stays the provider-parity
+  set); verify-loop from the HIGHER of
   `effective_deep_work_verify_mode()` / `effective_cloud_plan_verify_mode()`
   (`POCKETPAW_DEEP_WORK_VERIFY_MODE` / `POCKETPAW_CLOUD_PLAN_VERIFY_MODE`).
   Search cards and describe carry `mode`; an off primitive's describe adds
@@ -417,13 +433,26 @@ shipped instance-level read instead of duplicating it:
 ```
 source_truth: {
   mode: "off" | "shadow" | "enforce",   # settings.fabric_source_truth_mode
+  live: bool,                            # mode != "off" (AST-5a)
   tracked: bool,                         # any statements for this type at all
-  sampled: bool, object_count: int,
-  properties: { <prop>: { objects, disputed, stale, aging,
+  sampled: bool,                         # fewer keys walked than tracked
+  sampled_keys: int,                     # keys actually walked (≤ 500)
+  object_count: int,                     # EXACT distinct objects with statements
+  properties: { <prop>: { objects,       # EXACT distinct objects on this property
+                          disputed, stale, aging,           # walked keys only
                           winner_writer_mix: {human: n, connector: n, ...} } },
-  pointer: "fabric_query include_provenance=true for the per-object answer"
+  pointer: "fabric_query include_provenance=true for the per-object answer",
+  note?: str                             # when off, or when sampled
 }
 ```
+
+**Mode `off` short-circuits (AST-5a).** Off means the store records and reads
+no provenance anywhere else, so the aggregate does ZERO store reads and answers
+`live=false, tracked=false, properties={}` plus a `note` ("source-truth is off
+in this deployment; statement history from an earlier shadow phase is not
+read") — it never reports shadow-era leftovers as `tracked` beside a
+`primitive:source-truth` the overlay marks unavailable. `live` is present in
+every mode.
 
 Mechanics: an optional, **async**, duck-typed
 `RegistryFabricIntrospector.entity_type_source_truth(name)` (documented in the
@@ -435,16 +464,38 @@ workspace_id=)` (a *different* DB from the EE registry — `fabric.db` vs
 ONLY `describe_fabric_id_async` consumes it (via `getattr` + `callable` +
 `await`, from the already-async `atlas_describe` handler); the sync
 `describe_fabric_id` is unchanged; `search_entity_types` NEVER calls it (search
-stays properties-only). Cost is bounded by the **tracked-key set**:
-`FabricStore.list_statement_keys` gained additive `type_id` / `limit` kwargs — an
-indexed `fabric_objects(type_id) ⋈ fabric_statements(object_id)` join (EXPLAIN
-pinned: no SCAN) — and the winner cache stores only the value, so `is_disputed`
-/ freshness / winner writer-class are computed by running the pure resolver per
-key. Cap = 500 keys → `sampled=true`. An **untracked** type is one indexed
-lookup → `tracked=false` with zero statement reads (asserted). `tracked=false`
-renders as "no source-truth tracking yet", never as "0 disputed" (which would
-read as verified-clean). Any error → the key is absent; the registry payload
-still answers.
+stays properties-only). Cost is bounded by the **tracked-key set**
+and by a CONSTANT number of store connections (AST-5a — the first cut walked
+keys with one `get_statements` per key, i.e. one aiosqlite connection per key,
+~500 serial opens on a saturated type). Two additive `FabricStore` reads over
+the same indexed `fabric_objects(type_id) ⋈ fabric_statements(object_id)` join
+(EXPLAIN pinned: no SCAN), W4a-scoped on BOTH `s.workspace_id` and
+`o.workspace_id` (as is `list_statement_keys(type_id=)` now — a legacy
+NULL-workspace type shared by two tenants no longer rolls B's objects into A):
+`statement_coverage_for_type` — uncapped `COUNT(DISTINCT object_id)` overall
+and per property, the source of `object_count` and each property's `objects` —
+and `get_statements_for_type(key_cap=500)` — ONE query grouped by
+`(object_id, property)` in the same `(recorded_at, id)` order `get_statements`
+returns, so the pure resolver's input is unchanged. The winner cache stores only
+the value, so `is_disputed` / freshness / winner writer-class are recomputed per
+walked key. **The cap can no longer hide data**: `properties` ALWAYS lists every
+tracked property with its exact object count (before, a 500-key object_id-ordered
+prefix silently dropped a property that only appears on later objects — 600
+Customers with `arr` + a disputed `late` on the last 50 read "tracked, clean");
+`disputed` / `stale` / `aging` / `winner_writer_mix` cover the walked keys only,
+`sampled_keys` says how many, and `sampled=true` adds a `note` saying those
+counts cover the first N keys by object_id. An **untracked** type is the type
+lookup + one coverage read → `tracked=false` with zero statement reads
+(asserted). `tracked=false` renders as "no source-truth tracking yet", never as
+"0 disputed" (which would read as verified-clean). Any error → the key is
+absent; the registry payload still answers.
+
+`primitive:source-truth`'s `how` names `fabric_query include_provenance=true`
+**where an EE fabric MCP server is bound** (mirroring `primitive:fabric`'s
+hedge, AST-5a): the flag exists only on the EE MCP `fabric_query`; the OSS
+builtin fabric tools have no provenance flag. Availability semantics are
+unchanged — the overlay still marks the primitive live whenever the mode is not
+off; the `how` just stops implying every deployment has the read.
 
 ## Agent tools (`pocketpaw_atlas` MCP server)
 
