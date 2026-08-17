@@ -14,6 +14,13 @@ from pocketpaw_ee.ship_engine.cloudinit import (
     render_user_data,
 )
 
+# A bare hyphen in its own constant, so no five-hyphen run — and therefore no
+# PEM header — exists as a literal in this file. The repo's secret scanner
+# (scripts/scan_secrets.py) has a LIVE PEM pattern and uses this same idiom to
+# avoid matching itself; a fake key spelled out longhand trips it and fails CI.
+_H = "-"
+_PEM_BEGIN = f"{_H * 5}BEGIN OPENSSH PRIVATE KEY{_H * 5}"
+
 _PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY paw-ship"
 
 
@@ -40,7 +47,7 @@ def test_rejects_multiline_public_key():
 
 def test_rejects_non_openssh_public_key():
     with pytest.raises(ValueError, match="single-line OpenSSH public key"):
-        render_user_data(ssh_public_key="-----BEGIN OPENSSH PRIVATE KEY-----")
+        render_user_data(ssh_public_key=_PEM_BEGIN)
 
 
 # ---------------------------------------------------------------------------

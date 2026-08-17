@@ -15,9 +15,17 @@ import pytest
 from cryptography.fernet import Fernet
 from pocketpaw_ee.cloud.ship import job, store
 
+# A bare hyphen in its own constant, so no five-hyphen run — and therefore no
+# PEM header — exists as a literal in this file. The repo's secret scanner
+# (scripts/scan_secrets.py) has a LIVE PEM pattern and uses this same idiom to
+# avoid matching itself; a fake key spelled out longhand trips it and fails CI.
+_H = "-"
+_PEM_BEGIN = f"{_H * 5}BEGIN OPENSSH PRIVATE KEY{_H * 5}"
+_PEM_END = f"{_H * 5}END OPENSSH PRIVATE KEY{_H * 5}"
+
 _KEY_ENV = "CLOUD_ENCRYPTION_KEY"
 _TOKEN_ENV = "POCKETPAW_HCLOUD_TOKEN"
-_PRIV = "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE\n-----END OPENSSH PRIVATE KEY-----\n"
+_PRIV = f"{_PEM_BEGIN}\nFAKE\n{_PEM_END}\n"
 _PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITEST paw-ship"
 
 
