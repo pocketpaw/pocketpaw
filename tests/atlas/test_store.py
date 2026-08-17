@@ -29,6 +29,9 @@
 # the kind-priority bias: a real-store governance-paraphrase pin (Instinct #1,
 # not the /agents surface) and a synthetic-model ``TestKindPriorityBias`` proving
 # the primitive edges a same-overlap surface but a genuine margin still wins.
+# Updated: 2026-08-17 (feat/ast-1-atlas-primitives, AST-1) — two authored
+# primitives joined the seed (primitive:source-truth, primitive:verify-loop);
+# EXPECTED_PRIMITIVE_IDS pins the twelve.
 
 import json
 
@@ -56,6 +59,8 @@ EXPECTED_PRIMITIVE_IDS = {
     "primitive:workspace-jobs",
     "primitive:sites",
     "primitive:belt",
+    "primitive:source-truth",
+    "primitive:verify-loop",
 }
 
 # Surface entries mirror REAL user-facing routes in

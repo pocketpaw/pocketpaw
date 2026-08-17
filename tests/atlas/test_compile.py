@@ -25,6 +25,9 @@
 # hedged numeric counts in authored prose so they can't silently pass a
 # fidelity-only drift check. Surface count assertion bumped 21 → 23 for the
 # new /settings/billing and /security authored surfaces.
+# Updated: 2026-08-17 (feat/ast-1-atlas-primitives, AST-1) — primitive count
+# assertion bumped 10 → 12 for the new authored primitive:source-truth and
+# primitive:verify-loop entries.
 
 import json
 import logging
@@ -83,7 +86,7 @@ class TestAuthoredFiles:
         surfs = AtlasModel.model_validate(json.loads(AUTHORED_FILES[1].read_text(encoding="utf-8")))
         assert {e.kind for e in prims.entries} == {"primitive"}
         assert {e.kind for e in surfs.entries} == {"surface"}
-        assert len(prims.entries) == 10
+        assert len(prims.entries) == 12
         assert len(surfs.entries) == 23
 
     def test_authored_entries_survive_compile_unchanged(self):

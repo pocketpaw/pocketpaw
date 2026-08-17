@@ -1,5 +1,5 @@
 {
-  "_comment": "eval_cases.json — atlas intent→capability eval cases (AT-2). Created 2026-07-02. Updated 2026-07-03: re-baselined against the full compiled model (237 entries: widgets, skills, connectors, senses — was the 31-entry hand seed) + the fixpoint stemmer; three cases re-pointed at genuinely better specific answers (see their note fields), the fabric stemming xfail promoted to a pass, and four new cases added covering the new kinds (widget, skill, connector, sense). Updated 2026-07-05 (fix/atlas-data-accuracy-and-relevance): nine cases added pinning the data-accuracy + relevance fixes — the /settings/billing, /deep-work, and /security surfaces (new/repointed authored entries), the 'user' member-card vocabulary, the IDF name-weight damper that stops a destructive card ranking first, the five new instruction-filler stopwords, and the orientation query. Each case maps a REAL user intent to the expected top-hit atlas entry id. rank_within: 1 = expected id must be the top result (strict hit), 3 = must appear in the top 3. xfail (optional string): a known ranking miss kept on purpose — never delete a case to go green; the reason documents the weakness for the ranking-upgrade task. note (optional string): reasoning for a re-pointed expectation or measured behavior. Consumed by tests/atlas/test_eval.py.",
+  "_comment": "eval_cases.json — atlas intent→capability eval cases (AT-2). Created 2026-07-02. Updated 2026-07-03: re-baselined against the full compiled model (237 entries: widgets, skills, connectors, senses — was the 31-entry hand seed) + the fixpoint stemmer; three cases re-pointed at genuinely better specific answers (see their note fields), the fabric stemming xfail promoted to a pass, and four new cases added covering the new kinds (widget, skill, connector, sense). Updated 2026-07-05 (fix/atlas-data-accuracy-and-relevance): nine cases added pinning the data-accuracy + relevance fixes — the /settings/billing, /deep-work, and /security surfaces (new/repointed authored entries), the 'user' member-card vocabulary, the IDF name-weight damper that stops a destructive card ranking first, the five new instruction-filler stopwords, and the orientation query. Each case maps a REAL user intent to the expected top-hit atlas entry id. rank_within: 1 = expected id must be the top result (strict hit), 3 = must appear in the top 3. xfail (optional string): a known ranking miss kept on purpose — never delete a case to go green; the reason documents the weakness for the ranking-upgrade task. note (optional string): reasoning for a re-pointed expectation or measured behavior. Consumed by tests/atlas/test_eval.py. Updated 2026-08-17 (feat/ast-1-atlas-primitives, AST-1): eight cases added — the model grew to 267 entries (two authored primitives, primitive:source-truth + primitive:verify-loop, and two member-level fabric capability cards). Four pin source-truth #1 on provenance / dispute / freshness / which-source-wins intents, three pin verify-loop #1 on outcome-verification intents, and one regression pin ('what is fabric') proves the new neighbours do not steal primitive:fabric's definitional intent (the instinct pins 'I want a human to approve what the agent does' / 'how do I approve what the agent does' already cover the other guarded primitive and are not duplicated).",
   "cases": [
     {
       "intent": "build me an app to track tasks",
@@ -204,6 +204,54 @@
       "expected_id": "primitive:instinct",
       "rank_within": 2,
       "note": "Added 2026-07-05 (round 2, Finding A): Instinct measures rank 2 here, behind the owner-only 'Set the Instinct approval level' capability (which legitimately co-answers the query and is overlay-hidden from non-owners). The kind bias is deliberately small — it protects the primitive on ties/near-ties but never overpowers a real margin, so this case is pinned rank_within 2 rather than forcing a regression on genuine specific-kind answers elsewhere in the eval."
+    },
+    {
+      "intent": "where did this number come from",
+      "expected_id": "primitive:source-truth",
+      "rank_within": 1,
+      "note": "Added 2026-08-17 (AST-1): pins the provenance primitive on the canonical 'where did this come from' question. Before, widget:number-input ranked first on a bare 'number' name hit; the authored keyword phrase now scores three content tokens (where / number / come) and the member-level provenance_read capability lands second."
+    },
+    {
+      "intent": "is this fact disputed",
+      "expected_id": "primitive:source-truth",
+      "rank_within": 1,
+      "note": "Added 2026-08-17 (AST-1): pins the dispute intent on the primitive. Two content tokens (fact / disputed) — the primitive's ceiling is two keyword hits, so the sibling capability 'See where a Fabric fact came from' carries 'disputed' only in its narrative (its summary says 'contested') and stays behind by the kind scale; the steward card's name deliberately avoids both tokens."
+    },
+    {
+      "intent": "is this value stale",
+      "expected_id": "primitive:source-truth",
+      "rank_within": 1,
+      "note": "Added 2026-08-17 (AST-1): pins read-time freshness on the primitive ('competing values' + 'stale'); provenance_read co-answers second, held behind by the kind scale."
+    },
+    {
+      "intent": "which source wins for this field",
+      "expected_id": "primitive:source-truth",
+      "rank_within": 1,
+      "note": "Added 2026-08-17 (AST-1): pins the trust-ladder question; the widget:source-card / sources-bar name hits that used to win are outscored by the authored phrase."
+    },
+    {
+      "intent": "how does the OS verify outcomes",
+      "expected_id": "primitive:verify-loop",
+      "rank_within": 1,
+      "note": "Added 2026-08-17 (AST-1): pins the verify loop on its definitional question ('verify' at name weight + 'outcome')."
+    },
+    {
+      "intent": "did the task actually get done",
+      "expected_id": "primitive:verify-loop",
+      "rank_within": 1,
+      "note": "Added 2026-08-17 (AST-1): pins the outcome-verdict intent; before, skill:code / surface:belt ranked first on 'done'/'task' narrative hits."
+    },
+    {
+      "intent": "what is a verdict",
+      "expected_id": "primitive:verify-loop",
+      "rank_within": 1,
+      "note": "Added 2026-08-17 (AST-1): 'what' is an Instinct keyword token (from 'approve what the agent does'), so a bare 'verdict' keyword only TIED instinct and lost on id order; 'what is a verdict' is now an authored verify-loop phrase (same precedent as the Instinct governance phrases)."
+    },
+    {
+      "intent": "what is fabric",
+      "expected_id": "primitive:fabric",
+      "rank_within": 1,
+      "note": "Added 2026-08-17 (AST-1): regression pin — the two new fabric capability cards must not steal the Fabric primitive's definitional intent. Only ONE of them carries 'Fabric' in its name on purpose: the name-IDF damper thins the primitive's own name hit per extra name sharing the token, and a second one would drop fabric below surface:foresight's 'what-if' keyword hit."
     }
   ]
 }
