@@ -67,6 +67,9 @@ search dropped a 3N sqlite N+1. SECURITY (separate PRs): the role-aware
 provider now re-resolves per turn (a warm shared client had leaked owner
 cards to a member), and the admin path gained an OWNER guard on owner-grants
 + an atomic approve.
+Updated: 2026-08-17 (feat/ast-3-atlas-flag-aware, AST-3) — flag-aware
+`available` + tri-state `mode` for primitive:source-truth / primitive:verify-loop
+in the overlay section; `mode?` on search cards.
 -->
 
 # Atlas — the OS self-model
@@ -242,6 +245,19 @@ the calling workspace's reality:
   listing. No "upgrade to see this" leakage in v1. If
   `connected_connector_names` raises, every connector is annotated
   `available: false` (unavailable, not filtered).
+- **Flag-aware primitives (AST-3)** — `primitive:source-truth` and
+  `primitive:verify-loop` ship behind rollout flags that default off. They are
+  ALWAYS described (discoverable — hiding them would misdirect the agent), but
+  the overlay stamps `available` (flag not `off`) plus a tri-state `mode`
+  (`off` | `shadow` | `enforce`), read from live settings on every pass:
+  source-truth from `fabric_source_truth_mode`
+  (`POCKETPAW_FABRIC_SOURCE_TRUTH_MODE`); verify-loop from the HIGHER of
+  `effective_deep_work_verify_mode()` / `effective_cloud_plan_verify_mode()`
+  (`POCKETPAW_DEEP_WORK_VERIFY_MODE` / `POCKETPAW_CLOUD_PLAN_VERIFY_MODE`).
+  Search cards and describe carry `mode`; an off primitive's describe adds
+  `enable_hint` (the env-flag pointer) instead of the connector `connect_hint`,
+  and it demotes below available entries at equal relevance exactly like an
+  unavailable connector. Discovery hints only — never an enforcement gate.
 - **Re-ranking** — search results get a stable re-sort so an available
   connector ranks above an unavailable one at EQUAL relevance; the store's
   base scoring is untouched (an unavailable-but-more-relevant entry still
@@ -333,7 +349,7 @@ path), so it is ambient on every agent run. Two tools:
 - **Args:** `intent` (string, required) — what the agent is trying to do,
   e.g. `"approve agent actions"` or `"publish a website"`.
 - **Returns:** ranked capability cards as JSON —
-  `{"results": [{id, kind, name, summary, surface?, available?}, ...]}`
+  `{"results": [{id, kind, name, summary, surface?, available?, mode?}, ...]}`
   (top 5). Simple lexical scoring over name / keywords / summary /
   narrative with suffix normalization (see "Search ranking rules"); name
   and keyword hits rank highest. `available` appears on

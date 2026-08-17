@@ -43,6 +43,24 @@
 #   ``ws:<workspace_id>`` scope instead. Nothing is entitlement-gated in
 #   OSS — ``is_granted`` is always True, so OS-level entries (primitives,
 #   surfaces, senses) are never filtered by default.
+#
+# Updated: 2026-08-17 (feat/ast-3-atlas-flag-aware, AST-3) — flag-aware
+# ``available`` for the two rollout-flagged primitives. ``primitive:source-truth``
+# and ``primitive:verify-loop`` ship behind flags that default OFF; atlas must
+# stay DISCOVERABLE (always describe them — hiding them recreates the known
+# misdirection bug) and HONEST (say whether they are live for THIS deployment).
+# ``_overlay_one`` now stamps ``available = (mode != "off")`` plus an additive
+# tri-state ``OverlaidEntry.mode`` ("off" | "shadow" | "enforce") on exactly
+# those two ids, read from live settings once per overlay pass (``_flag_modes``,
+# never cached at import): source-truth reads ``fabric_source_truth_mode``;
+# verify-loop reads the HIGHER of ``effective_deep_work_verify_mode()`` /
+# ``effective_cloud_plan_verify_mode()`` (enforce > shadow > off). Because it is
+# stamped in ``_overlay_one`` (provider-independent), every provider — the OSS
+# default and the EE role-aware one — gets identical mode/availability for free.
+# ``available`` stays a bool so the EXISTING equal-score demotion re-sort in
+# ``search`` applies unchanged. ``FLAG_ENABLE_HINTS`` carries the "how to enable"
+# pointer describe renders when off. DISCOVERY HINTS ONLY — never an
+# enforcement gate (``is_granted`` is untouched by the flags).
 
 from __future__ import annotations
 
@@ -73,6 +91,31 @@ ROLE_REQUIRE_PREFIX = "role:"
 # ``pocketpaw_ee.guards.rbac._ROLE_LEVELS`` (owner > admin > member) so the EE
 # provider and this core module agree without an EE import at core scope.
 ROLE_LEVELS: dict[str, int] = {"member": 1, "admin": 2, "owner": 3}
+
+# Rollout-flagged primitives (AST-3): always DESCRIBED (discoverable), but
+# their ``available`` + tri-state ``mode`` come from the deployment's rollout
+# flags, read from live settings once per overlay pass (see ``_flag_modes``).
+FLAGGED_PRIMITIVE_IDS: tuple[str, ...] = ("primitive:source-truth", "primitive:verify-loop")
+
+# The one-line "how to enable" pointer describe renders when a flagged
+# primitive is off — same shape as the unavailable-connector ``connect_hint``,
+# different pointer (env flag instead of the integrations surface).
+FLAG_ENABLE_HINTS: dict[str, str] = {
+    "primitive:source-truth": (
+        "Source-truth is off in this deployment — set "
+        "POCKETPAW_FABRIC_SOURCE_TRUTH_MODE=shadow|enforce to enable it "
+        "(see docs/atlas.md)."
+    ),
+    "primitive:verify-loop": (
+        "The verify loop is off in this deployment — set deep_work_verify_mode "
+        "and/or cloud_plan_verify_mode (POCKETPAW_DEEP_WORK_VERIFY_MODE / "
+        "POCKETPAW_CLOUD_PLAN_VERIFY_MODE) to shadow|enforce to enable it "
+        "(see docs/atlas.md)."
+    ),
+}
+
+# Tri-state ordering for the verify-loop mode fold (enforce > shadow > off).
+_MODE_RANK: dict[str, int] = {"off": 0, "shadow": 1, "enforce": 2}
 
 
 def entry_role_requirement(entry: AtlasEntry) -> str | None:
@@ -117,14 +160,22 @@ class EntitlementProvider(Protocol):
 class OverlaidEntry:
     """A store entry viewed through one context's overlay.
 
-    ``available`` is a connector-only annotation: True/False for
-    ``kind="connector"`` entries (connected in this context or not), None
-    for every other kind. The wrapped ``entry`` is the shared store's
-    object — treat it as read-only.
+    ``available`` is True/False for ``kind="connector"`` entries (connected
+    in this context or not) and for the rollout-flagged primitives in
+    ``FLAGGED_PRIMITIVE_IDS`` (flag not ``"off"`` for this deployment), None
+    for everything else. ``mode`` is the flagged primitives' tri-state
+    rollout mode (``"off"`` | ``"shadow"`` | ``"enforce"``), None for every
+    other entry.
+
+    Both are DISCOVERY HINTS ONLY (ranking + describe wording) — never an
+    enforcement gate. Nothing may authorize on them; grants come from
+    ``EntitlementProvider.is_granted`` alone. The wrapped ``entry`` is the
+    shared store's object — treat it as read-only.
     """
 
     entry: AtlasEntry
     available: bool | None = None
+    mode: str | None = None
 
 
 def _connector_name(entry: AtlasEntry) -> str:
@@ -156,10 +207,45 @@ def _is_granted(provider: EntitlementProvider, entry: AtlasEntry) -> bool:
         return False
 
 
-def _overlay_one(entry: AtlasEntry, connected: set[str] | None) -> OverlaidEntry:
+def _flag_modes() -> dict[str, str]:
+    """Resolve the rollout mode of each flagged primitive from LIVE settings.
+
+    Called once per overlay pass (never at import) so a mid-session flag flip
+    — or a monkeypatched setting — is reflected on the next atlas call.
+    ``primitive:verify-loop`` folds its two flags to the HIGHER one
+    (enforce > shadow > off): the loop is live if EITHER terminal runs it, and
+    the strongest position is the honest headline. Fail-closed: a settings
+    failure reports ``"off"`` for both — the entry is still described, just
+    marked not live.
+    """
+    try:
+        from pocketpaw.config import get_settings
+
+        settings = get_settings()
+        verify_modes = (
+            settings.effective_deep_work_verify_mode(),
+            settings.effective_cloud_plan_verify_mode(),
+        )
+        return {
+            "primitive:source-truth": settings.fabric_source_truth_mode,
+            "primitive:verify-loop": max(verify_modes, key=lambda m: _MODE_RANK.get(m, 0)),
+        }
+    except Exception as exc:  # noqa: BLE001 — fail closed to "off", never break the tool
+        logger.warning("atlas overlay: rollout-flag resolution failed: %s", exc)
+        return dict.fromkeys(FLAGGED_PRIMITIVE_IDS, "off")
+
+
+def _overlay_one(
+    entry: AtlasEntry, connected: set[str] | None, modes: dict[str, str]
+) -> OverlaidEntry:
     if entry.kind == "connector":
         available = connected is not None and _connector_name(entry) in connected
         return OverlaidEntry(entry=entry, available=available)
+    mode = modes.get(entry.id)
+    if mode is not None:
+        # Flag-aware primitive (AST-3): a discovery hint, never a grant —
+        # the entry is always returned, only marked live or not.
+        return OverlaidEntry(entry=entry, available=mode != "off", mode=mode)
     return OverlaidEntry(entry=entry, available=None)
 
 
@@ -179,7 +265,12 @@ class AtlasOverlay:
         is wanted on scored results.
         """
         connected = _connected_names(provider)
-        return [_overlay_one(entry, connected) for entry in entries if _is_granted(provider, entry)]
+        modes = _flag_modes()
+        return [
+            _overlay_one(entry, connected, modes)
+            for entry in entries
+            if _is_granted(provider, entry)
+        ]
 
     @staticmethod
     def search(
@@ -198,11 +289,12 @@ class AtlasOverlay:
         if limit <= 0:
             return []
         connected = _connected_names(provider)
+        modes = _flag_modes()
         ranked: list[tuple[float, int, OverlaidEntry]] = []
         for score, entry in store.search_scored(query):
             if not _is_granted(provider, entry):
                 continue
-            overlaid = _overlay_one(entry, connected)
+            overlaid = _overlay_one(entry, connected, modes)
             demoted = 1 if overlaid.available is False else 0
             ranked.append((score, demoted, overlaid))
         # Stable sort: score desc, then available-before-unavailable; ties
@@ -222,7 +314,7 @@ class AtlasOverlay:
         entry = store.describe(entry_id)
         if entry is None or not _is_granted(provider, entry):
             return None
-        return _overlay_one(entry, _connected_names(provider))
+        return _overlay_one(entry, _connected_names(provider), _flag_modes())
 
     @staticmethod
     def visible_ids(store: AtlasStore, provider: EntitlementProvider) -> list[str]:
@@ -320,6 +412,8 @@ def build_role_aware_provider(scope_key: str) -> EntitlementProvider | None:
 
 __all__ = [
     "DEFAULT_SCOPE_KEY",
+    "FLAG_ENABLE_HINTS",
+    "FLAGGED_PRIMITIVE_IDS",
     "ROLE_LEVELS",
     "ROLE_REQUIRE_PREFIX",
     "AtlasOverlay",
