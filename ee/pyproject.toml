@@ -69,7 +69,31 @@ classifiers = [
 
 dependencies = [
     # OSS core — compatible-release pin within 0.4.x (see versioning note above).
-    "pocketpaw~=0.4.16",
+    #
+    # The `pydantic-ai` extra is NOT optional for this package, despite being
+    # optional for the core. `cloud/agents/defaults.py` sets
+    # CLOUD_DEFAULT_AGENT_BACKEND = "pydantic_ai", so every new cloud agent that
+    # does not name a backend gets that one — a wheel that installs the cloud
+    # without its SDK is a wheel whose default agent cannot run. It failed
+    # quietly rather than loudly: the registry maps a backend name to a module
+    # path without importing it, and PydanticAIBackend._initialize catches the
+    # ImportError and logs a WARNING, so the estate booted clean and every run
+    # died one log line deep. Pinned by
+    # tests/test_cloud_backend_default.py::test_the_ee_wheel_requests_the_cloud_default_backends_extra.
+    #
+    # CAVEAT, and it is why `uv lock` here prints "does not have an extra named
+    # `pydantic-ai`": this extra is UNRELEASED. Published pocketpaw 0.4.18 on
+    # PyPI declares 39 extras and this is not one of them — it was added to the
+    # source tree after that release. So:
+    #   * `Dockerfile.enterprise` is FIXED NOW. It never resolves the core from
+    #     PyPI: it runs `pip install '.[all]'` against this source tree, whose
+    #     `all` extra now covers pydantic-ai too, and only then installs the
+    #     locally built EE wheel.
+    #   * `pip install pocketpaw-ee` FROM PyPI stays broken until a core release
+    #     carrying the extra ships. pip warns and installs nothing extra rather
+    #     than failing, so watch for it on the next release.
+    # Drop this note once a published core provides the extra.
+    "pocketpaw[pydantic-ai]~=0.4.16",
     # --- Persistence (MongoDB async ODM; beanie pulls motor + pymongo) ---
     "motor>=3.3.0",
     "beanie>=1.26.0",
@@ -341,6 +365,18 @@ annotation_typing = false
 # ee/pyproject.toml (workspace-local source). See
 # ee/pocketpaw_ee/foresight/substrate/oasis/README-FORK.md for the
 # vendoring rationale and the openai/psutil cap audit.
+[tool.uv]
+# The same install-time supply-chain floor as the root pyproject.toml, repeated
+# here because ee/ carries its OWN uv.lock and therefore resolves on its own
+# whenever `uv lock` runs against this file. Settings do not inherit from the
+# parent directory, so without this line the enterprise layer's resolution is
+# the bare one the root's floor was added to fix.
+#
+# Read the root pyproject.toml's `[tool.uv]` comment before touching this: the
+# value is an absolute DATE, not a rolling duration, and the two must be
+# bumped together or the two locks drift to different floors.
+exclude-newer = "2026-08-10T00:00:00Z"
+
 [tool.uv.sources]
 camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d0a38277e421ea9aca34904b4dc37" }
 

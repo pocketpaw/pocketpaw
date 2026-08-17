@@ -1,0 +1,129 @@
+[
+  {
+    "label": "the refine fork reads meta.engine instead of the pocket — every refine gets the create default, so a react site is handed html's branch while the fork looks implemented",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            engine = await _refine_engine(meta.pocket_id, user_id, workspace_id)",
+    "replace": "            engine = meta.engine",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_refine_reads_the_engine_off_the_pocket"
+    ]
+  },
+  {
+    "label": "the react branch points at the ripple specialist again — the tool merges a rippleSpec a react pocket does not have",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            \"Call `mcp__pocketpaw_sites_manager__edit_react_component` with \"",
+    "replace": "            \"Call `mcp__pocketpaw_pocket_specialist__edit` with \"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_react_refine_does_not_command_the_ripple_edit_path"
+    ]
+  },
+  {
+    "label": "the html branch names a create tool as its apply path — the agent mints a SECOND site and reports the edit done",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            \"- the create tools take no pocket id: each one creates a NEW pocket \"",
+    "replace": "            \"- apply the change with `mcp__pocketpaw_sites_manager__create_html_site` \"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_html_refine_admits_it_has_no_edit_tool"
+    ]
+  },
+  {
+    "label": "publish is described as synchronous on every engine — react's queued build gets reported as a live url (empty on a first publish, the PREVIOUS deploy on a re-publish)",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        return build_runs_async(engine)",
+    "replace": "        return False",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_react_refine_does_not_promise_a_live_url_on_publish"
+    ]
+  },
+  {
+    "label": "the engine lookup's tenancy guard is dropped — a pocket stamped from another workspace picks the edit tool for this chat",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "    if pocket.get(\"workspace\") != workspace_id:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_refine_does_not_read_an_engine_from_another_workspace"
+    ]
+  },
+  {
+    "label": "an unreadable pocket guesses ripple instead of admitting it cannot tell — the agent is handed an edit tool that will reject the pocket",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            engine = await _refine_engine(meta.pocket_id, user_id, workspace_id)",
+    "replace": "            engine = await _refine_engine(meta.pocket_id, user_id, workspace_id) or \"ripple\"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_refine_on_an_unreadable_pocket_commands_no_edit_tool"
+    ]
+  },
+  {
+    "label": "the per-engine rules block is dropped from the render — every branch loses the funnel, real-copy, anchor-CTA and flat-form rules",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        f\"{rules}\"",
+    "replace": "        \"\"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_every_refine_branch_keeps_what_transfers"
+    ]
+  },
+  {
+    "label": "the ripple branch loses a widget rule — the fork silently rewrote the one engine that was already correct",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            \"2. `pricing-table` uses `tiers` (never `plans`/`columns`).\\n\"",
+    "replace": "            \"\"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_ripple_refine_is_unchanged_apart_from_the_publish_claim"
+    ]
+  },
+  {
+    "label": "refine answers a meta key again — two engines' instructions hash alike, so a cache keyed on it serves one site's prompt for another's engine",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "                cache_key=content_key(\"sites\", refine_text),",
+    "replace": "                cache_key=meta_key(\"sites\", meta.pocket_id),",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_refine_cache_key_is_the_rendered_digest"
+    ]
+  },
+  {
+    "label": "the svelte branch calls its staged draft a publish — the agent tells the user a change is live that nothing has built",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            \"THE EDIT IS A DRAFT PREVIEW, NOT A DEPLOY. The tool returns \"",
+    "replace": "            \"THE EDIT REPUBLISHES THE SITE. The tool returns \"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_svelte_refine_names_its_own_tool_and_calls_the_edit_a_draft"
+    ]
+  },
+  {
+    "label": "a source-map branch inherits the ripple widget rules again (the original bug: five rules about widget shapes on a page with no widgets)",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "    \"form, and never replace it with a widget that does.\\n\"",
+    "replace": "    \"form. Keep the 5 static-site (SSR) rules: `pricing-table` uses `tiers`.\\n\"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_source_map_refine_drops_the_ripple_widget_rules"
+    ]
+  },
+  {
+    "label": "the publish step gates 'it is live' on `deployed` instead of `is_live` — a rebuild keeps the previous deploy's true `deployed`, so the agent calls the pre-change page live",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        \"`url` only when `is_live` is true. Never report a site as live off \"",
+    "replace": "        \"`url` whenever `deployed` is true. A rebuild keeps \"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_react_refine_does_not_promise_a_live_url_on_publish",
+      "tests/cloud/surface/test_sites_handler.py::test_ripple_refine_is_unchanged_apart_from_the_publish_claim"
+    ]
+  },
+  {
+    "label": "the async branch stops naming the build-status tool, so nothing can ever tell the agent how a react build ended",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        \"`mcp__pocketpaw_sites_manager__get_site_build_status` with pocket_id \"",
+    "replace": "        \"the site's build status in the app with pocket_id \"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_react_refine_does_not_promise_a_live_url_on_publish"
+    ]
+  },
+  {
+    "label": "the write scope is retyped as prose instead of read from react_paths.py, dropping paw-prerender.mjs — the agent writes it, the tool rejects it, and the prompt never said so",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "    reserved = \", \".join(f\"`{path}`\" for path in REACT_RESERVED_FILES)",
+    "replace": "    reserved = \"`index.html`, `package.json`, `vite.config.ts`\"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_react_refine_states_the_write_scope_the_tool_enforces"
+    ]
+  }
+]

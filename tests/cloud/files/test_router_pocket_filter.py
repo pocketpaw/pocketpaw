@@ -150,3 +150,37 @@ async def test_acl_lookup_failure_treated_as_denial(monkeypatch, beanie_files_db
         headers={"x-user": "u1", "x-workspace": "w1"},
     )
     assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_files_offset_pagination(monkeypatch, beanie_files_db):
+    """GET /files returns total + has_more and honours offset/limit."""
+    for i in range(5):
+        await _seed("w1", name=f"f{i}.pdf")
+
+    async def is_member(**_kwargs):
+        return False
+
+    client = _build_app(monkeypatch, member_check=is_member)
+
+    first = client.get(
+        "/api/v1/files?source=chat&limit=2&offset=0",
+        headers={"x-user": "u1", "x-workspace": "w1"},
+    )
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert len(body["files"]) == 2
+    assert body["total"] == 5
+    assert body["has_more"] is True
+    assert body["offset"] == 0
+    assert body["limit"] == 2
+
+    last = client.get(
+        "/api/v1/files?source=chat&limit=2&offset=4",
+        headers={"x-user": "u1", "x-workspace": "w1"},
+    )
+    assert last.status_code == 200, last.text
+    last_body = last.json()
+    assert len(last_body["files"]) == 1
+    assert last_body["total"] == 5
+    assert last_body["has_more"] is False

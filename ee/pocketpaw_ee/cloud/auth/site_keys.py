@@ -159,6 +159,51 @@ async def lookup_site_by_key(key: str) -> _SiteDoc:
     return site
 
 
+def concierge_available(site: _SiteDoc) -> bool:
+    """May this site serve its concierge right now — owner's switch AND its plan?
+
+    The ONE question every public paw-bar seam asks, so the rule lives here instead
+    of being re-expressed at each of them. Before this existed, the seams read
+    ``site.concierge_enabled`` directly and no plan was consulted anywhere, so a free
+    site served a concierge indefinitely.
+
+    Gated on ``billing_enforced``, matching the workspace caps
+    (``PocketLimitError`` / ``ConnectorLimitError`` / the credit guards): with billing
+    off — OSS, self-host, and every in-repo deploy today — only the owner's switch
+    applies, exactly as before.
+
+    Worth knowing that this is NOT universal: the badge stamper
+    (``sites.service._stamp_free_badge``) resolves the same per-site entitlements and
+    does not check the flag, so it badges a free site regardless. That is an
+    inconsistency in the per-site family, not a rule this function is breaking, and
+    the two should converge — but silently 403ing a visitor's chat is a harsher
+    failure than stamping a badge, so the safer of the two defaults is the one taken
+    here. Flipping it is a product decision, not a refactor.
+
+    Synchronous and passed the loaded doc: the gate already holds the Site, and
+    ``resolve_site_entitlements`` is pure and may not import ``models.site``
+    (EE cloud rule 2). No extra query on a path that runs for every visitor message.
+    """
+    if not site.concierge_enabled:
+        return False
+
+    from pocketpaw.config import get_settings
+
+    if not get_settings().billing_enforced:
+        return True
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = entitlements_service.resolve_site_entitlements(
+        site_id=str(site.id),
+        workspace_id=site.workspace,
+        plan_tier=site.plan_tier,
+        subscription_status=site.subscription_status,
+        concierge_enabled=True,  # already checked above; this asks the PLAN
+    )
+    return ent.concierge_entitled
+
+
 def _context_from_site(site: _SiteDoc, customer_ref: str) -> RequestContext:
     """Build the CONCIERGE ``RequestContext`` a resolved embed key stands for.
 
@@ -278,6 +323,14 @@ async def resolve_site_key_with_site(
     if not site.concierge_enabled:
         raise HTTPException(status_code=403, detail="concierge_disabled")
 
+    # Billing gate (feat/sites-concierge-entitlement): the site's PLAN, asked right
+    # after the owner's switch and refused the same way. Same 403 and the same
+    # silence to a visitor — only the detail differs, because an owner who switched
+    # it off and an owner whose subscription lapsed need different remedies. A
+    # no-op unless ``billing_enforced``.
+    if not concierge_available(site):
+        raise HTTPException(status_code=403, detail="concierge_not_entitled")
+
     # Dual-mode origin gate. Frame mode (request Origin == our frame origin) means
     # the embedder was already gated by the frame CSP, so we accept; otherwise the
     # request Origin is the embedder itself and must be on the Site's fail-closed
@@ -290,4 +343,9 @@ async def resolve_site_key_with_site(
     return _context_from_site(site, customer_ref), site
 
 
-__all__ = ["lookup_site_by_key", "resolve_site_key", "resolve_site_key_with_site"]
+__all__ = [
+    "concierge_available",
+    "lookup_site_by_key",
+    "resolve_site_key",
+    "resolve_site_key_with_site",
+]

@@ -8,6 +8,9 @@ resolution-markers = [
     "python_full_version < '3.12'",
 ]
 
+[options]
+exclude-newer = "2026-08-10T00:00:00Z"
+
 [[package]]
 name = "aiofile"
 version = "3.11.1"
@@ -5125,6 +5128,7 @@ all = [
     { name = "langchain-mcp-adapters" },
     { name = "langchain-ollama" },
     { name = "langchain-openai" },
+    { name = "logfire" },
     { name = "matrix-nio" },
     { name = "mcp" },
     { name = "mem0ai" },
@@ -5134,6 +5138,9 @@ all = [
     { name = "playwright" },
     { name = "psutil" },
     { name = "pyautogui" },
+    { name = "pydantic-ai-harness" },
+    { name = "pydantic-ai-skills" },
+    { name = "pydantic-ai-slim", extra = ["mcp", "openai"] },
     { name = "pytesseract" },
     { name = "python-telegram-bot" },
     { name = "sarvamai" },
@@ -5149,7 +5156,11 @@ all-backends = [
     { name = "langchain-ollama" },
     { name = "langchain-openai" },
     { name = "litellm" },
+    { name = "logfire" },
     { name = "openai-agents" },
+    { name = "pydantic-ai-harness" },
+    { name = "pydantic-ai-skills" },
+    { name = "pydantic-ai-slim", extra = ["mcp", "openai"] },
 ]
 all-channels = [
     { name = "botbuilder-core" },
@@ -5517,7 +5528,8 @@ requires-dist = [
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.50.0" },
     { name = "playwright", marker = "extra == 'dev'", specifier = ">=1.50.0" },
     { name = "playwright", marker = "extra == 'recommended'", specifier = ">=1.50.0" },
-    { name = "pocketpaw", extras = ["openai-agents", "google-adk", "copilot-sdk", "deep-agents", "litellm"], marker = "extra == 'all-backends'" },
+    { name = "pocketpaw", extras = ["openai-agents", "google-adk", "copilot-sdk", "deep-agents", "litellm", "pydantic-ai"], marker = "extra == 'all-backends'" },
+    { name = "pocketpaw", extras = ["pydantic-ai"], marker = "extra == 'all'" },
     { name = "psutil", marker = "extra == 'all'", specifier = ">=5.9.0" },
     { name = "psutil", marker = "extra == 'all-tools'", specifier = ">=5.9.0" },
     { name = "psutil", marker = "extra == 'desktop'", specifier = ">=5.9.0" },
@@ -5645,7 +5657,7 @@ dependencies = [
     { name = "livekit-api" },
     { name = "livekit-plugins-deepgram" },
     { name = "motor" },
-    { name = "pocketpaw" },
+    { name = "pocketpaw", extra = ["pydantic-ai"] },
     { name = "pwdlib", extra = ["argon2"] },
     { name = "py-vapid" },
     { name = "pyotp" },
@@ -5682,7 +5694,7 @@ requires-dist = [
     { name = "livekit-api", specifier = ">=0.6.0" },
     { name = "livekit-plugins-deepgram", specifier = ">=1.5.9" },
     { name = "motor", specifier = ">=3.3.0" },
-    { name = "pocketpaw", specifier = "~=0.4.16" },
+    { name = "pocketpaw", extras = ["pydantic-ai"], specifier = "~=0.4.16" },
     { name = "pwdlib", extras = ["argon2"], specifier = ">=0.2.0" },
     { name = "py-vapid", specifier = ">=1.9.0" },
     { name = "pymupdf", marker = "extra == 'extraction'", specifier = ">=1.24.0,<2.0" },

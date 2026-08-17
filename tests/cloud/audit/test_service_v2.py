@@ -68,6 +68,24 @@ async def _seed_user(email: str = "owner@x.c") -> _UserDoc:
     return doc
 
 
+async def _paid_workspace(owner: _UserDoc) -> Any:
+    """Create a workspace on a paid plan so invites are allowed.
+
+    Since feat/billing-rbac-member-caps a Free workspace (max_seats=0) can't
+    invite anyone; the invite audit-row tests need a plan with seats, so these
+    run on Paw Pro (10 seats)."""
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
+
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    doc = await _WorkspaceDoc.get(ws.id)
+    if doc is not None:
+        doc.plan = "pro"
+        await doc.save()
+    return ws
+
+
 @pytest.fixture(autouse=True)
 def _resolver_mock(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Stub the realtime resolver — same shape as workspace tests."""
@@ -161,9 +179,7 @@ async def test_remove_member_writes_audit_row(_legacy_bus) -> None:
 
 async def test_create_invite_writes_audit_row() -> None:
     owner = await _seed_user("o@x.c")
-    ws = await workspace_service.create(
-        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
-    )
+    ws = await _paid_workspace(owner)
     invite = await workspace_service.create_invite(
         _ctx(str(owner.id)),
         ws.id,
@@ -177,9 +193,7 @@ async def test_create_invite_writes_audit_row() -> None:
 
 async def test_bulk_create_invites_writes_per_email_rows() -> None:
     owner = await _seed_user("o@x.c")
-    ws = await workspace_service.create(
-        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
-    )
+    ws = await _paid_workspace(owner)
     await workspace_service.bulk_create_invites(
         _ctx(str(owner.id)),
         ws.id,
@@ -193,9 +207,7 @@ async def test_bulk_create_invites_writes_per_email_rows() -> None:
 async def test_accept_invite_writes_audit_row() -> None:
     owner = await _seed_user("o@x.c")
     invitee = await _seed_user("i@x.c")
-    ws = await workspace_service.create(
-        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
-    )
+    ws = await _paid_workspace(owner)
     invite = await workspace_service.create_invite(
         _ctx(str(owner.id)),
         ws.id,
@@ -209,9 +221,7 @@ async def test_accept_invite_writes_audit_row() -> None:
 
 async def test_revoke_invite_writes_audit_row() -> None:
     owner = await _seed_user("o@x.c")
-    ws = await workspace_service.create(
-        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
-    )
+    ws = await _paid_workspace(owner)
     invite = await workspace_service.create_invite(
         _ctx(str(owner.id)),
         ws.id,
@@ -225,9 +235,7 @@ async def test_revoke_invite_writes_audit_row() -> None:
 
 async def test_decline_invite_writes_audit_row() -> None:
     owner = await _seed_user("o@x.c")
-    ws = await workspace_service.create(
-        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
-    )
+    ws = await _paid_workspace(owner)
     invite = await workspace_service.create_invite(
         _ctx(str(owner.id)),
         ws.id,

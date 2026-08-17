@@ -1,0 +1,290 @@
+[
+  {
+    "label": "the artifact is packed from the project root, so node_modules ships to the edge and a 30 KB site becomes a 500 MB upload",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    output_dir = f\"{project_dir.rstrip('/')}/{rel}\"",
+    "replace": "    output_dir = project_dir.rstrip('/')",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the include-list becomes an exclude-list that forgets node_modules, which is the regression that silently ships the whole dependency tree",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    return (\n        f\"tar -czf {shlex.quote(dest_path)} -C {shlex.quote(output_dir)} \"\n        f\"--exclude={shlex.quote(_EXCLUDED_MEMBER)} .\"\n    )",
+    "replace": "    return (\n        f\"tar -czf {shlex.quote(dest_path)} --exclude=.git \"\n        f\"-C {shlex.quote(project_dir.rstrip('/'))} .\"\n    )",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "an engine whose output is the project root is packed anyway, so an html site's node_modules is uploaded with it",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    rel = static_output_rel(engine)\n    if rel == \".\":",
+    "replace": "    rel = static_output_rel(engine)\n    if False:",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a lost sandbox counts as deployable, so a publish ships from an artifact no build ever proved it produced",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        return self.outcome == \"completed_ok\"",
+    "replace": "        return self.outcome != \"build_failed\"",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "an OOM kill is read as a broken build, so a capacity problem is reported to the user as their fault",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "_INFRA_EXIT_CODES = frozenset({_EXIT_SIGKILL, _EXIT_SIGTERM})",
+    "replace": "_INFRA_EXIT_CODES: frozenset[int] = frozenset()",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "an in-sandbox timeout is reported as a build failure, so a slow site is told its code is broken",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        if code == _EXIT_TIMEOUT:",
+    "replace": "        if False and code == _EXIT_TIMEOUT:",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a build that left no proof is blamed on the user, which is the exact mis-report the sentinel design exists to prevent",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        return BuildClassification(\n            outcome=\"infra_lost\",\n            reason=\"no_sentinel_before_timeout\",\n            retryable=True,\n            blames_user=False,\n        )",
+    "replace": "        return BuildClassification(\n            outcome=\"build_failed\",\n            reason=\"no_sentinel_before_timeout\",\n            retryable=True,\n            blames_user=True,\n        )",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a sentinel written by an unknown future version is trusted anyway, so field meanings are guessed and a failed build can read as a success",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    if parsed.get(\"schema\") != SENTINEL_SCHEMA:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a missing exit code reads as a success, so a build that never ran deploys an empty site",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    if install_exit is None or build_exit is None:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "an unconfigured Daytona returns a result instead of raising, so a missing credential is reported to the user as a failed build",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "        if client is None:\n            raise RuntimeError(\n                \"Daytona is not configured (DAYTONA_API_URL / DAYTONA_API_KEY unset)\"\n            )",
+    "replace": "        if client is None:\n            raise RuntimeError(\"build unavailable\")",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a build row with no stamp reads as fresh, so a half-completed enqueue makes the site permanently unpublishable",
+    "file": "ee/pocketpaw_ee/sites/build_state.py",
+    "find": "    if stamp is None:\n        return True",
+    "replace": "    if stamp is None:\n        return False",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the staleness window becomes a constant, so a healthy long build gets a second billed sandbox opened on top of it",
+    "file": "ee/pocketpaw_ee/sites/build_state.py",
+    "find": "    return timedelta(seconds=max(0, timeout_seconds)) + STALE_MARGIN",
+    "replace": "    return STALE_MARGIN",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a terminal failure keeps blocking new builds, so one bad build wedges the site until someone edits the database",
+    "file": "ee/pocketpaw_ee/sites/build_state.py",
+    "find": "    if status not in IN_FLIGHT_STATUSES:\n        return True",
+    "replace": "    if status == \"none\":\n        return True",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a Cloudflare outage is swallowed, so the row flips to deployed and the dashboard claims a deploy that never uploaded",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        await cf.put_worker(script_name=site_id, bundle=bundle, bindings=bindings)",
+    "replace": "        try:\n            await cf.put_worker(script_name=site_id, bundle=bundle, bindings=bindings)\n        except Exception:\n            pass",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_deploy.py"
+    ]
+  },
+  {
+    "label": "a failed workers deploy is swallowed, so the site's URL is re-stamped for a deploy that never happened",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        url = await deploy_w(site_id, build.project_dir, engine=engine)",
+    "replace": "        try:\n            url = await deploy_w(site_id, build.project_dir, engine=engine)\n        except Exception:\n            url = \"\"",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_deploy.py"
+    ]
+  },
+  {
+    "label": "a failed thumbnail render fails the whole publish, so a site that is already live and serving reports an error to its owner",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    try:\n        from pocketpaw_ee.sites.screenshot import schedule_site_screenshot\n\n        schedule_site_screenshot(site)\n    except Exception:  # noqa: BLE001 — never fail a live publish over a screenshot",
+    "replace": "    if True:\n        from pocketpaw_ee.sites.screenshot import schedule_site_screenshot\n\n        schedule_site_screenshot(site)\n    if False:  # noqa: BLE001 — never fail a live publish over a screenshot",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_deploy.py"
+    ]
+  },
+  {
+    "label": "the node_modules exclusion is dropped, so a build that copies dependencies into its output ships them to the edge",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        f\"--exclude={shlex.quote(_EXCLUDED_MEMBER)} .\"",
+    "replace": "        \".\"",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the exclusion pattern stops matching what tar actually records, so it silently protects nothing [re-anchored 2026-08-10: the constant lost its './' prefix when GNU tar's anchoring was fixed, and mutate.py aborts the WHOLE plan on one stale anchor — so these two had silently disabled all 19 entries]",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "_EXCLUDED_MEMBER = \"node_modules\"",
+    "replace": "_EXCLUDED_MEMBER = \"nodemodules\"",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the exclusion is widened to a substring, so a site with a legitimately-named node_modules_report.html silently loses that file",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "_EXCLUDED_MEMBER = \"node_modules\"",
+    "replace": "_EXCLUDED_MEMBER = \"*node_modules*\"",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a transfer that delivered nothing is called permanent, so a network blip burns the publish instead of retrying",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    if got == 0:\n        return ArtifactRejection(\"artifact_empty\", retryable=True)",
+    "replace": "    if got == 0:\n        return ArtifactRejection(\"artifact_empty\", retryable=False)",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a half-arrived artifact is called permanent, so a dropped connection costs the user their publish",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        return ArtifactRejection(\"artifact_truncated\", retryable=True)",
+    "replace": "        return ArtifactRejection(\"artifact_truncated\", retryable=False)",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a truncated transfer is misread as a complete one, so half a site is accepted as whole",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    if promised is not None and got < promised:",
+    "replace": "    if promised is not None and got > promised:",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a build that produced garbage is retried, spending a fresh sandbox to reproduce the identical failure",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        return ArtifactRejection(\"artifact_unreadable\", retryable=promised is None)",
+    "replace": "        return ArtifactRejection(\"artifact_unreadable\", retryable=True)",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a leaked node_modules is retried, so every attempt re-packs the same 500 MB artifact and bills for it",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "            return ArtifactRejection(\"artifact_contains_node_modules\", retryable=False)",
+    "replace": "            return ArtifactRejection(\"artifact_contains_node_modules\", retryable=True)",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "an empty artifact download counts as one byte, so nothing-arrived is misread as a short transfer and the empty rung never fires",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    got = len(payload) if payload else 0",
+    "replace": "    got = len(payload) if payload else 1",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the substring check comes back, so a site with a legitimately-named node_modules_report.html is rejected as if it shipped the dependency tree",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        if _FORBIDDEN_SEGMENT in name.replace(\"\\\\\", \"/\").split(\"/\"):",
+    "replace": "        if _FORBIDDEN_SEGMENT in name.replace(\"\\\\\", \"/\"):",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "our own transfer or packaging failure is reported to the user as their build being broken",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "                        reason=rejection.reason,\n                        retryable=rejection.retryable,\n                        blames_user=False,",
+    "replace": "                        reason=rejection.reason,\n                        retryable=rejection.retryable,\n                        blames_user=True,",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the retryable split is discarded at the wiring, so a truncated transfer becomes a permanent failure anyway",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "                        retryable=rejection.retryable,",
+    "replace": "                        retryable=False,",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the artifact is never checked, so whatever the build produced deploys unverified",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "                rejection = verify_artifact(\n                    artifact, expected_bytes=promised_artifact_bytes(sentinel)\n                )",
+    "replace": "                rejection = None",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the promised size never reaches the check, so a truncated transfer is indistinguishable from a bad build",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "                    artifact, expected_bytes=promised_artifact_bytes(sentinel)",
+    "replace": "                    artifact, expected_bytes=None",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a rejected artifact is still handed back, so a caller can deploy bytes the gate refused",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "                    artifact = None\n        t_extracted = time.monotonic()",
+    "replace": "        t_extracted = time.monotonic()",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a boolean promised size is coerced instead of rejected, so artifact_bytes=True reads as a one-byte promise and every real artifact looks oversized rather than short",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    if isinstance(value, bool) or not isinstance(value, int):\n        return None\n    return value if value > 0 else None",
+    "replace": "    if not isinstance(value, int):\n        return None\n    return value if value > 0 else None",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  }
+]

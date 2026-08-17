@@ -13,6 +13,16 @@
 # Updated 2026-07-26 (concierge transcripts): a fifth layer covers the
 #   transcript-retention toggle — exposed on GET, writable via PATCH, defaults on,
 #   and fully independent of the kill switch in both directions.
+# Updated 2026-08-16 (fix/paw-bar-role-gates): the two admin settings routes moved
+#   off ``require_scope("admin")`` onto the ``paw_bar.read`` / ``paw_bar.manage``
+#   ROLE gate, so the app fixture now pins the caller's workspace ROLE (admin) and
+#   a sixth layer covers the gate itself: admin/owner can PATCH the kill switch
+#   (the reported bug — a cloud workspace admin used to get 403 "Missing required
+#   scope: admin", because the scope gate only accepts a full-access dashboard
+#   session / pp_ API key / ppat_ token and a workspace admin holds none of them),
+#   a member is refused on both the PATCH and the GET with nothing written, and a
+#   widget DELETE shows the same split even when the caller holds the per-widget
+#   owner token.
 
 from __future__ import annotations
 
@@ -72,24 +82,33 @@ def _widget(**ov: Any) -> PawBarWidget:
     return PawBarWidget(**d)
 
 
+def _build_app(role: str = "admin") -> FastAPI:
+    """Mount the paw_bar router with the caller's workspace ROLE pinned to ws-1.
+
+    The two admin settings routes gate on ``paw_bar.read`` (GET) /
+    ``paw_bar.manage`` (PATCH), so the role stand-in is what decides 200 vs 403;
+    the public frame/chat/action routes on the same router ignore it entirely.
+    """
+    from pocketpaw_ee.paw_bar.router import router
+
+    from tests.cloud.conftest import override_workspace_role
+
+    app = FastAPI()
+    app.include_router(router)
+    override_workspace_role(app, role=role, workspace_id="ws-1")
+    return app
+
+
 @pytest_asyncio.fixture
 async def client(tmp_path, mongo_db):
     """One public+admin app client for every D1 endpoint, backed by a tmp paw_bar
-    store (widget) + Beanie (Site). ``current_workspace_id`` is pinned to ws-1 for
-    the admin settings routes; the public frame/chat/action routes ignore it.
-    Yields ``(client, store)``.
+    store (widget) + Beanie (Site). The caller is a ws-1 ADMIN, so the admin
+    settings routes clear their role gate; the public frame/chat/action routes
+    ignore both the role and the workspace. Yields ``(client, store)``.
     """
     from unittest.mock import patch
 
-    from pocketpaw_ee.cloud._core.deps import current_workspace_id
-    from pocketpaw_ee.cloud._core.http import add_error_handler
-    from pocketpaw_ee.paw_bar.router import router
-
-    app = FastAPI()
-    add_error_handler(app)
-    app.include_router(router)
-    app.dependency_overrides[current_workspace_id] = lambda: "ws-1"
-
+    app = _build_app(role="admin")
     store = PawBarStore(tmp_path / "settings.db")
     with patch("pocketpaw_ee.paw_bar.router._store", return_value=store):
         transport = ASGITransport(app=app)
@@ -349,6 +368,139 @@ async def test_settings_patch_can_turn_transcript_retention_off(client):
     assert res.json()["concierge_store_transcripts"] is False
     got = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
     assert got.json()["concierge_store_transcripts"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Layer 6 — the settings routes are ROLE-gated (fix/paw-bar-role-gates)
+#
+# The reported bug: PATCH /paw-bar/admin/site/{id}/settings answered a workspace
+# ADMIN with 403 "Missing required scope: admin". The route gated on
+# ``require_scope("admin")``, an OSS single-tenant primitive that only accepts
+# request.state.full_access / a pp_ API key / a ppat_ OAuth token — a cloud
+# workspace admin presents none of the three, so the site kill switch was
+# unreachable for the person who owns it. These pin the fix from both sides:
+# the intended caller gets in, and the caller the old gate wrongly admitted on
+# self-hosted (any signed-in session, member included) does not.
+# --------------------------------------------------------------------------- #
+
+
+@pytest_asyncio.fixture
+async def member_client(tmp_path, mongo_db):
+    """Same app, but the caller's ws-1 role is MEMBER (below the ADMIN the
+    paw_bar actions require). Yields ``(client, store)``."""
+    from unittest.mock import patch
+
+    app = _build_app(role="member")
+    store = PawBarStore(tmp_path / "settings_member.db")
+    with patch("pocketpaw_ee.paw_bar.router._store", return_value=store):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            yield c, store
+
+
+@pytest.mark.enforce_scope
+@pytest.mark.parametrize("role", ["admin", "owner"])
+@pytest.mark.asyncio
+async def test_admin_role_can_patch_the_kill_switch(role, tmp_path, mongo_db):
+    """THE REPORTED BUG. A workspace admin PATCHes their own site's concierge
+    settings and the write lands — no 403, no scope check.
+
+    ``enforce_scope`` matters here even though this route no longer calls
+    ``require_scope``: it turns OFF the root conftest's ``_TESTING_FULL_ACCESS``
+    bypass, which makes ``require_scope`` a no-op that admits every caller. With
+    the bypass on, this test would pass against the OLD gate too and prove
+    nothing — which is exactly how the bug reached production with the settings
+    surface fully covered. The role gate never reads that flag, so the marker is
+    inert against the fixed code and lethal against a regression to the old one.
+    """
+    from unittest.mock import patch
+
+    site = await _site()
+    app = _build_app(role=role)
+    store = PawBarStore(tmp_path / f"settings_{role}.db")
+    with patch("pocketpaw_ee.paw_bar.router._store", return_value=store):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            res = await c.patch(
+                f"/paw-bar/admin/site/{site.id}/settings",
+                json={"concierge_enabled": False},
+            )
+            assert res.status_code == 200, f"{role}: {res.status_code} {res.text}"
+            assert res.json()["concierge_enabled"] is False
+
+    # The switch actually moved on the stored doc, not just in the response.
+    await site.sync()
+    assert site.concierge_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_member_role_cannot_patch_the_kill_switch(member_client, mongo_db):
+    """A MEMBER is refused (403) on the same PATCH, and the site is untouched.
+
+    Under ``require_scope("admin")`` on a self-hosted deploy this succeeded: the
+    session cookie sets ``full_access``, which the scope gate accepts outright.
+    """
+    c, _store = member_client
+    site = await _site()
+    res = await c.patch(
+        f"/paw-bar/admin/site/{site.id}/settings",
+        json={"concierge_enabled": False},
+    )
+    assert res.status_code == 403, res.text
+    assert "workspace.insufficient_role" in res.text
+
+    await site.sync()
+    assert site.concierge_enabled is True  # nothing was written
+
+
+@pytest.mark.asyncio
+async def test_admin_role_can_read_the_settings(client):
+    """The GET takes ``paw_bar.read`` — an admin sees the toggle state."""
+    c, _store = client
+    site = await _site(concierge_greeting="Back at 9am")
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    assert res.json()["concierge_greeting"] == "Back at 9am"
+
+
+@pytest.mark.asyncio
+async def test_member_role_cannot_read_the_settings(member_client, mongo_db):
+    """A MEMBER is refused (403) on the GET too — the reads and writes on this
+    surface are both ADMIN, so a member learns nothing about the site's config."""
+    c, _store = member_client
+    site = await _site(concierge_greeting="Back at 9am")
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 403, res.text
+    assert "Back at 9am" not in res.text
+
+
+@pytest.mark.asyncio
+async def test_member_role_cannot_delete_a_widget(member_client, mongo_db):
+    """A widget MUTATION refuses a member as well — the role gate covers the
+    whole admin surface of this router, not just the site settings."""
+    c, store = member_client
+    widget = await store.create_widget(_widget())
+    res = await c.delete(
+        f"/paw-bar/widgets/{widget.id}",
+        headers={"X-Paw-Bar-Token": widget.access_token},
+    )
+    assert res.status_code == 403, res.text
+    # The role gate runs BEFORE the handler, so the row is still there even
+    # though the caller held the correct per-widget owner token.
+    assert await store.get_widget(widget.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_admin_role_can_delete_a_widget(client):
+    """The same DELETE succeeds for an admin holding the owner token (204)."""
+    c, store = client
+    widget = await store.create_widget(_widget())
+    res = await c.delete(
+        f"/paw-bar/widgets/{widget.id}",
+        headers={"X-Paw-Bar-Token": widget.access_token},
+    )
+    assert res.status_code == 204, res.text
+    assert await store.get_widget(widget.id) is None
 
 
 @pytest.mark.asyncio

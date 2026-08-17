@@ -1,3 +1,11 @@
+# audience.py — resolves an Event into the user_ids that should receive it.
+# Updated: 2026-08-15 (HTN-5) — agent.plan_updated joins the agent runtime
+#   stream branch, scoped to the group's members like agent.tool_use.
+# Updated: 2026-08-11 — call.participant_joined / call.participant_left now
+#   resolve to the call's group members (they previously fell through to [],
+#   so InProcessBus skipped fan-out and the frontend's pre-join "who's in the
+#   call" chip went stale). Removed an unreachable duplicate call.started /
+#   call.ended branch that sat below the live one.
 """Resolves an Event into the list of user_ids that should receive it."""
 
 from __future__ import annotations
@@ -192,6 +200,9 @@ class AudienceResolver:
             "agent.stream_end",
             "agent.stream_start",
             "agent.tool_use",
+            # HTN-5: the plan panel is chat furniture, so it is scoped exactly
+            # like the tool chips it replaces — group members, never a broadcast.
+            "agent.plan_updated",
         }:
             return await self._group(d["group_id"])
 
@@ -224,7 +235,18 @@ class AudienceResolver:
         # panel needs to light up for the receiver and clear for everyone on
         # end. Notes posting also fans out so peer tabs can scroll to the
         # newly-created meeting-notes message without a manual refetch.
-        if t in {"call.started", "call.ended", "call.notes_posted"}:
+        # participant_joined / participant_left keep the pre-join roster chip
+        # ("who's already in the call") honest for members who haven't joined
+        # yet. The joiner is NOT excluded: their own tab needs the roster too,
+        # and ``identity`` may be a guest id minted by livekit/invites.py
+        # rather than a workspace user_id, so it is not an audience key.
+        if t in {
+            "call.started",
+            "call.ended",
+            "call.notes_posted",
+            "call.participant_joined",
+            "call.participant_left",
+        }:
             if gid := d.get("group_id"):
                 return await self._group(gid)
             return []
@@ -324,14 +346,6 @@ class AudienceResolver:
         if t in {"presence.online", "presence.offline"}:
             return await self._peers(d["user_id"])
 
-        # --- Calls ---------------------------------------------------------------
-        if t in {"call.started", "call.ended"}:
-            # Fan out to all group members so they see incoming/join notifications
-            gid = d.get("group_id")
-            if not gid:
-                return []
-            return await self._group(gid)
-
         # --- Meetings ----------------------------------------------------------
         if t in {"meeting.scheduled", "meeting.updated", "meeting.cancelled", "meeting.started"}:
             # Fan out to all group members so they see meeting schedule/updates
@@ -340,15 +354,18 @@ class AudienceResolver:
                 return []
             return await self._group(gid)
 
-        # --- Sites (published site lifecycle) -----------------------------------
-        # Workspace-scoped: the /sites gallery is a per-workspace view, and a
-        # publish lands asynchronously relative to the chat turn that started it
-        # (the agent creates + publishes server-side). Fan out to every workspace
-        # member so an open gallery flips the new site to Live on its own — no
-        # poll, no manual refresh. Payload carries {workspace_id, site_id,
-        # pocket_id, owner, plan_tier}; the client keys the gallery row off
-        # site_id / pocket_id.
-        if t == "site.published":
+        # --- Sites (site lifecycle: draft created, then published) ---------------
+        # Workspace-scoped: the /sites gallery is a per-workspace view, and BOTH
+        # halves of the lifecycle land asynchronously relative to the chat turn that
+        # started them (the agent creates, then publishes, server-side). Fan out to
+        # every workspace member so an open gallery gains the new card
+        # (``site.created``) and flips it to Live (``site.published``) on its own —
+        # no poll, no manual refresh. The per-run ``pocket_created`` SSE cannot do
+        # this job: it reaches only the tab that owns that chat stream, so a create
+        # from a second tab / a teammate / an import is invisible without the bus.
+        # Payloads carry {workspace_id, site_id, pocket_id, owner, ...}; the client
+        # keys the gallery row off site_id / pocket_id.
+        if t in {"site.created", "site.published"}:
             if wid := d.get("workspace_id"):
                 return await self._workspace(wid)
             return []

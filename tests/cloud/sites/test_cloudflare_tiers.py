@@ -169,6 +169,10 @@ def _cf_client(handler) -> CloudflareClient:
         api_token="tok_1",
         zone_id="zone_1",
         dispatch_namespace="paw-sites",
+        # Required since 2026-08-12: the target is the one thing a customer pastes, so
+        # an unconfigured one is refused rather than derived into a name with no DNS
+        # records. Any value does here — these tests are about the ssl payload.
+        cname_target="sites.pawzone.test",
         _transport=httpx.MockTransport(handler),
     )
 
@@ -194,7 +198,18 @@ def _hostname_ok_response(request: httpx.Request, seen: dict) -> httpx.Response:
 @pytest.mark.asyncio
 async def test_create_custom_hostname_premium_features_inject_ssl_settings():
     """With premium features the CF request body carries an ``ssl.settings`` block
-    (strict TLS for waf, http2 for edge_cache) + records the resold feature set."""
+    (strict TLS for waf, http2 for edge_cache).
+
+    The ``custom_metadata`` half of BC-10 is GONE, and this test used to require it.
+    Per-hostname metadata is not generally available — Cloudflare's own doc says "only
+    certain customers have access to this feature… contact your account team" — so
+    sending it 403s (1413) on an ordinary zone. The effect in production was that
+    custom domains worked on FREE sites and failed on PAID ones, because only a tier
+    with ``cloudflare_features`` attached the block. The 2026-06-25 resale research had
+    already marked these SKUs DEFER; asserting the block here is what kept the
+    contradiction alive. The entitlement-free ``ssl.settings`` half is unchanged and is
+    still checked exactly.
+    """
     seen: dict = {}
     client = _cf_client(lambda req: _hostname_ok_response(req, seen))
 
@@ -210,8 +225,8 @@ async def test_create_custom_hostname_premium_features_inject_ssl_settings():
     assert ssl["settings"]["min_tls_version"] == "1.2"
     assert ssl["settings"]["tls_1_3"] == "on"
     assert ssl["settings"]["http2"] == "on"
-    # The resold set is recorded on the hostname (sorted, deterministic).
-    assert ssl["custom_metadata"]["resold_features"] == ("analytics,custom_domain,edge_cache,waf")
+    # And nothing entitlement-gated rides along, on any tier.
+    assert "custom_metadata" not in ssl
 
 
 @pytest.mark.asyncio

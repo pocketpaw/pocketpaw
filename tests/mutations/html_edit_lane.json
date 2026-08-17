@@ -1,0 +1,100 @@
+[
+  {
+    "label": "the persist is a no-op (the edit never reaches the pocket)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    await pockets_service.set_html_source_file(\n        pocket_id,\n        user_id,\n        file_path=file_path,\n        new_source=new_source,\n        create=create,\n    )",
+    "replace": "    _ = (pockets_service, new_source, create)",
+    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  },
+  {
+    "label": "the path guard is skipped entirely",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if (reason := html_path_rejection(file_path)) is not None:",
+    "replace": "    if False and (reason := html_path_rejection(file_path)) is not None:",
+    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  },
+  {
+    "label": "the reserved namespace loses its trailing slash (prefix-matches siblings)",
+    "file": "ee/pocketpaw_ee/sites/html_paths.py",
+    "find": "HTML_RESERVED_PREFIX = \"_paw/\"",
+    "replace": "HTML_RESERVED_PREFIX = \"_paw\"",
+    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  },
+  {
+    "label": "the path is not normalized before matching (a trivial spelling escapes)",
+    "file": "ee/pocketpaw_ee/sites/html_paths.py",
+    "find": "    return posixpath.normpath(path.replace(\"\\\\\", \"/\"))",
+    "replace": "    return path",
+    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  },
+  {
+    "label": "escape detection drops the leading-.. check",
+    "file": "ee/pocketpaw_ee/sites/html_paths.py",
+    "find": "    return norm == \"..\" or norm.startswith(\"../\") or posixpath.isabs(norm)",
+    "replace": "    return posixpath.isabs(norm)",
+    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  },
+  {
+    "label": "escape detection drops the absolute-path check",
+    "file": "ee/pocketpaw_ee/sites/html_paths.py",
+    "find": "    return norm == \"..\" or norm.startswith(\"../\") or posixpath.isabs(norm)",
+    "replace": "    return norm == \"..\" or norm.startswith(\"../\")",
+    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  },
+  {
+    "label": "the write uses the raw path, so ./index.html shadows index.html",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    file_path = normalize_html_path(file_path)",
+    "replace": "    file_path = file_path",
+    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  },
+  {
+    "label": "create no longer requires new_source",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if create and new_source is None:\n        raise ValidationError(\n            \"site_edit.create_needs_source\",\n            \"Creating a new file needs `new_source` — the full contents of the new \"\n            \"file. There is nothing for `edits` to search against.\",\n        )",
+    "replace": "    pass",
+    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  },
+  {
+    "label": "a diff against a missing file crashes with KeyError instead of 404",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not create and file_path not in source_map:\n        raise NotFound(\"site_component\", file_path)",
+    "replace": "    pass",
+    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  },
+  {
+    "label": "the engine gate accepts any source-map pocket",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if (pocket.get(\"engine\") or \"ripple\") != \"html\" or not isinstance(pocket.get(\"source\"), dict):\n        raise ValidationError(\n            \"pocket.not_html_site\",",
+    "replace": "    if not isinstance(pocket.get(\"source\"), dict):\n        raise ValidationError(\n            \"pocket.not_html_site\",",
+    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  },
+  {
+    "label": "the exactly-one-edit-shape check is dropped",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if (edits is None) == (new_source is None):\n        raise ValidationError(\n            \"site_edit.invalid_args\",\n            \"edit_html_file requires exactly one of `edits` (a targeted \"\n            \"search/replace diff) or `new_source` (a full file rewrite).\",\n        )",
+    "replace": "    pass",
+    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  },
+  {
+    "label": "create overwrites an existing file at the pockets-service chokepoint",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if create and exists:\n        raise ValidationError(\n            \"pocket.html_file_exists\",",
+    "replace": "    if False and exists:\n        raise ValidationError(\n            \"pocket.html_file_exists\",",
+    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  },
+  {
+    "label": "the pockets-service engine gate accepts a non-html pocket",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if getattr(doc, \"engine\", \"ripple\") != \"html\" or not isinstance(doc.source, dict):\n        raise ValidationError(\n            \"pocket.not_html_site\",",
+    "replace": "    if not isinstance(doc.source, dict):\n        raise ValidationError(\n            \"pocket.not_html_site\",",
+    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  },
+  {
+    "label": "the edit republishes (pushes unvalidated markup live)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return {\"pocket_id\": pocket_id, \"file_path\": file_path, \"created\": create}",
+    "replace": "    await publish_pocket(workspace_id=\"\", user_id=user_id, pocket_id=pocket_id, name=\"\")\n    return {\"pocket_id\": pocket_id, \"file_path\": file_path, \"created\": create}",
+    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  }
+]

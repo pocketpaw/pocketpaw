@@ -31,12 +31,22 @@
 #   three SMB caps (``max_seats`` / ``max_pockets`` / ``max_connectors``), populated
 #   from the resolved tier exactly as ``monthly_ceiling`` is. The defensive
 #   base-floor branch sets the Free values (5 / 200 / 50) so every path fails closed.
+# Updated 2026-08-08 (feat/billing-rbac-member-caps): the Free base-floor
+#   ``max_seats`` is now 0 — a workspace with no/unknown plan resolves to the Free
+#   tier, which cannot invite ANY members (Paw Go = 5, Paw Pro = 25; Pro Max and
+#   Enterprise = None). Fails closed to the most restrictive tier. Also added
+#   ``max_call_seconds_per_day`` — the daily LiveKit call budget (Free = 0 → no
+#   calls) surfaced to the LiveKit room-create gate; fail-closed to 0.
+# Updated 2026-08-08 (feat/billing-storage-caps): also added
+#   ``max_storage_bytes`` — the workspace S3 storage cap (Free = 5 GB) surfaced
+#   to the uploads gate and the /storage/usage read; fail-closed to 5 GB.
 
 from __future__ import annotations
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.billing import plans as plan_catalog
-from pocketpaw_ee.cloud.entitlements.domain import Entitlements
+from pocketpaw_ee.cloud.billing import site_plans as site_plan_catalog
+from pocketpaw_ee.cloud.entitlements.domain import Entitlements, SiteEntitlements
 
 
 async def resolve_entitlements(workspace_id: str) -> Entitlements:
@@ -74,11 +84,14 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
                 # Fail closed: the Free trial cap, never None/uncapped — even when
                 # the catalog itself is somehow missing the base tier.
                 monthly_ceiling=1_000,
-                # Fail closed on the SMB caps too: the Free values (max_seats == the
-                # Workspace.seats default so no workspace regresses), never uncapped.
-                max_seats=5,
+                # Fail closed on the SMB caps too: the Free values (max_seats = 0
+                # → a fallback workspace cannot invite any members; call budget 0
+                # → no LiveKit calls; storage = 5 GB), never uncapped.
+                max_seats=0,
                 max_pockets=200,
                 max_connectors=50,
+                max_call_seconds_per_day=0,
+                max_storage_bytes=5_000_000_000,
                 features=frozenset(),
             )
 
@@ -90,5 +103,78 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
         max_seats=tier.max_seats,
         max_pockets=tier.max_pockets,
         max_connectors=tier.max_connectors,
+        max_call_seconds_per_day=tier.max_call_seconds_per_day,
+        max_storage_bytes=tier.max_storage_bytes,
         features=tier.features,
+    )
+
+
+# The per-site subscription states that count as PAYING. Everything else —
+# ``none`` (no subscription, including the paid-tier-recorded-but-never-charged
+# case a missing Dodo product produces), ``pending`` (created, not yet confirmed;
+# such a site is not deployed yet) and ``cancelled`` (which LEAVES ``plan_tier``
+# on the paid key) — resolves to no paid capability.
+_ACTIVE_SITE_SUBSCRIPTION_STATUSES = frozenset({"active"})
+
+
+def resolve_site_entitlements(
+    *,
+    site_id: str,
+    workspace_id: str,
+    plan_tier: str | None,
+    subscription_status: str | None,
+    concierge_enabled: bool,
+) -> SiteEntitlements:
+    """Resolve ONE site to what it may do, from its own per-site plan.
+
+    PURE and synchronous, taking the site's billing fields rather than reading
+    them: ``entitlements`` may not import ``models.site`` (EE cloud rule 2 — only
+    ``sites/service.py`` owns that document), so the caller that owns the doc
+    passes what it owns. That also makes every branch here testable without a
+    database.
+
+    Every paid capability is gated on the tier granting it AND the subscription
+    being active. Reading the tier alone is the bug this function exists to
+    prevent: cancellation never resets ``plan_tier``, and an unconfigured Dodo
+    product records a paid tier with no charge at all.
+
+    Fails closed on every unknown: an absent/unknown tier resolves to the base
+    (badged, no custom domain) rather than raising or substituting a paid tier.
+    """
+    tier = site_plan_catalog.get_site_plan(plan_tier)
+    # ``get_site_plan`` deliberately does not substitute a floor, so an unknown or
+    # missing key lands here as None — the fail-closed default.
+    resolved_key = tier.key if tier is not None else site_plan_catalog.BASE_SITE_PLAN_KEY
+
+    subscription_active = (subscription_status or "none") in _ACTIVE_SITE_SUBSCRIPTION_STATUSES
+
+    # Both paid capabilities collapse to False unless the tier grants them AND the
+    # subscription is paying. Written as an explicit branch rather than
+    # ``paid and tier.x`` so the None-narrowing is visible to the type checker
+    # instead of resting on short-circuit evaluation.
+    badge_removal = False
+    custom_domain = False
+    concierge_entitled = False
+    if tier is not None and subscription_active:
+        badge_removal = tier.badge_removal
+        custom_domain = "custom_domain" in tier.cloudflare_features
+        # Any tier ABOVE the free floor sells the concierge. Deliberately derived
+        # from the floor rather than a per-tier catalog flag like ``badge_removal``:
+        # no tier grants concierge today, and the tier that will (``staff``) does not
+        # exist until the pricing-spec rekey, which is blocked on an open decision.
+        # A flag would need a basic/pro/business mapping invented now and rewritten
+        # then. "Paid and paying" needs no mapping and survives the rekey untouched.
+        concierge_entitled = tier.key != site_plan_catalog.BASE_SITE_PLAN_KEY
+
+    return SiteEntitlements(
+        site_id=site_id,
+        workspace_id=workspace_id,
+        plan_tier=resolved_key,
+        subscription_active=subscription_active,
+        badge_required=not badge_removal,
+        custom_domain=custom_domain,
+        # Echoed unchanged — the owner's switch is not a billing question. The
+        # AND of the two is ``concierge_available``, which is what seams ask.
+        concierge_enabled=bool(concierge_enabled),
+        concierge_entitled=concierge_entitled,
     )

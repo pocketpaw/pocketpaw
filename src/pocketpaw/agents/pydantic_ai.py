@@ -248,11 +248,35 @@ with a pydantic-ai that can place a per-run string ahead of capability
 instructions WITHOUT replacing the ones it resolves per run —
 ``test_capability_instructions_are_still_contributed_at_run_time`` in
 tests/test_prompt_backend_digest.py is the tripwire for that day.
+
+Updated 2026-08-15 (HTN-9, fix/pydantic-ai-tool-args) — **this backend never
+delivered its tool arguments.** Every ``tool_use`` it emitted carried
+``input={}``, so anything rendering a call's arguments ("Searching the web for
+{query}") degraded to the bare tool name. Two independent defects, either
+sufficient on its own:
+
+1. ``_announce_tool`` deduped on ``tool_call_id`` alone, and the early
+   ``PartStartEvent`` signal claims that id first with a placeholder ``{}`` — so
+   the authoritative ``FunctionToolCallEvent`` was returned early and discarded.
+   The dedupe is now qualified by phase.
+2. pydantic-ai types ``ToolCallPart.args`` as ``str | dict | None`` and the
+   STREAMED path — the only one used here — delivers JSON **text**. The metadata
+   builder kept it only ``if isinstance(args, dict)``, coercing every real
+   streamed call to ``{}``. ``_tool_args_as_dict`` decodes it.
+
+Fixing only the dedupe still ships ``{}``, which is why the guard test asserts
+the exact argument dict rather than a mere event count.
+
+One call now emits TWO ``tool_use`` events — provisional then resolved — under
+the ``input_pending`` contract documented on ``AgentEvent`` in ``protocol.py``
+and shared with ``claude_sdk``. A consumer that APPENDS per event must skip
+``input_pending is True``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections import OrderedDict
@@ -843,6 +867,23 @@ class PydanticAIBackend:
         if provider == "auto":
             provider = "litellm"
         return provider, model_str
+
+    def _resolve_max_output_tokens(self) -> int | None:
+        """The ``max_tokens`` this run should send, or None to send none.
+
+        Resolved from the SAME ``_parse_provider_model`` output that built the
+        model, so the cap and the model can never disagree. Never raises — the
+        helper fails open to None, which is the no-cap behaviour this backend
+        had before the setting existed.
+        """
+        try:
+            from pocketpaw.agents.model_limits import resolve_max_output_tokens
+
+            provider, model = self._parse_provider_model()
+            return resolve_max_output_tokens(provider, model, self.settings)
+        except Exception:  # noqa: BLE001 — a token cap must never break a run
+            logger.debug("Could not resolve a max output token cap", exc_info=True)
+            return None
 
     def _build_model(self, model_spec: str | None = None) -> Any:
         """Build the pydantic-ai model client for the configured provider."""
@@ -1962,8 +2003,10 @@ class PydanticAIBackend:
         handle = _RunHandle()
         self._active.add(handle)
 
-        # Tool ids already announced, so the early PartStartEvent signal and the
-        # authoritative FunctionToolCallEvent don't double-announce one call.
+        # Tool calls already announced, keyed "<phase>:<call_id>". Phase-qualified
+        # so the early PartStartEvent signal and the authoritative
+        # FunctionToolCallEvent each get through once for one call — see
+        # ``_announce_tool`` for why the id alone was the wrong key.
         announced: set[str] = set()
 
         try:
@@ -2010,6 +2053,16 @@ class PydanticAIBackend:
                 from pydantic_ai.usage import UsageLimits
 
                 kwargs["usage_limits"] = UsageLimits(request_limit=max_turns)
+
+            # Per-RUN like ``usage_limits`` above, and for the same reason: the
+            # cached agent is shared across runs, while the cap is a property of
+            # the model THIS run resolved. The fast-model path builds its own
+            # model and is unaffected.
+            max_output = self._resolve_max_output_tokens()
+            if max_output:
+                from pydantic_ai.settings import ModelSettings
+
+                kwargs["model_settings"] = ModelSettings(max_tokens=max_output)
 
             async with agent.run_stream_events(message, **kwargs) as stream:
                 async for event in stream:
@@ -2106,8 +2159,10 @@ class PydanticAIBackend:
                 out.append(AgentEvent(type="thinking", content=part.content))
             elif isinstance(part, ToolCallPart):
                 # Early signal so the UI flips from "Thinking..." to
-                # "Using <tool>..." before the args finish streaming.
-                self._announce_tool(part, announced, out, args={})
+                # "Using <tool>..." before the args finish streaming. Flagged
+                # provisional: the args are not final yet, and the resolved
+                # event below is the one that carries them.
+                self._announce_tool(part, announced, out, args={}, pending=True)
 
         elif isinstance(event, PartDeltaEvent):
             delta = event.delta
@@ -2117,7 +2172,8 @@ class PydanticAIBackend:
                 out.append(AgentEvent(type="thinking", content=delta.content_delta))
 
         elif isinstance(event, FunctionToolCallEvent):
-            self._announce_tool(event.part, announced, out, args=event.part.args)
+            # Authoritative: the arguments the tool is actually invoked with.
+            self._announce_tool(event.part, announced, out, args=event.part.args, pending=False)
 
         elif isinstance(event, FunctionToolResultEvent):
             part = event.part
@@ -2139,21 +2195,82 @@ class PydanticAIBackend:
         return out
 
     @staticmethod
-    def _announce_tool(part: Any, announced: set[str], out: list[AgentEvent], *, args: Any) -> None:
-        """Emit a ``tool_use`` for *part* unless its call id was already announced."""
+    def _tool_args_as_dict(args: Any) -> dict:
+        """Normalize ``ToolCallPart.args`` to the dict the ``input`` contract promises.
+
+        pydantic-ai types ``args`` as ``str | dict | None`` and the STREAMED path
+        — the only one this backend uses — delivers the JSON **text**, not the
+        decoded mapping. A plain ``isinstance(args, dict)`` guard therefore
+        discards the arguments of every real streamed call.
+
+        Anything that does not decode to a JSON object becomes ``{}``. Consumers
+        index this (``input["query"]``), so a non-mapping is worse than empty;
+        ``ToolCallPart.args_as_dict()`` is deliberately not used here because it
+        answers malformed input with an ``{"INVALID_JSON": ...}`` sentinel that
+        would reach the UI as if the model had passed an argument by that name.
+        """
+        if isinstance(args, dict):
+            return args
+        if isinstance(args, str):
+            try:
+                decoded = json.loads(args)
+            except (ValueError, TypeError):
+                return {}
+            return decoded if isinstance(decoded, dict) else {}
+        return {}
+
+    @staticmethod
+    def _announce_tool(
+        part: Any,
+        announced: set[str],
+        out: list[AgentEvent],
+        *,
+        args: Any,
+        pending: bool,
+    ) -> None:
+        """Emit a ``tool_use`` for *part*, deduped per call id AND per phase.
+
+        ONE tool call legitimately produces TWO events here, and the difference
+        between them is what ``input_pending`` exists to state:
+
+        * ``pending=True`` — the PROVISIONAL announcement, emitted the moment the
+          name is known so the UI can leave "Thinking...". Its ``input`` is a
+          placeholder and is NOT what the tool will run with.
+        * ``pending=False`` — the RESOLVED event, carrying the final arguments.
+
+        The dedupe is qualified by phase rather than by id alone. Keying on the
+        id alone made the provisional event suppress the resolved one, so
+        ``input`` was permanently ``{}`` on this backend and a caller rendering
+        "Searching the web for {query}" had nothing to interpolate. Keeping the
+        id in the key still stops a repeat of either phase from stacking a
+        duplicate row for one call.
+
+        The canonical statement of this contract lives on ``AgentEvent`` in
+        ``agents/protocol.py``; ``claude_sdk`` announces the same way, and
+        ``deep_agents`` emits once already-resolved (an ABSENT flag reads as
+        resolved, so a single-event backend needs no flag). Consumers that APPEND
+        per event — a log, an activity feed, a pending-call list — must skip
+        ``input_pending is True`` or they record a phantom call carrying no
+        arguments.
+        """
         name = getattr(part, "tool_name", None)
         if not name:
             return
         call_id = getattr(part, "tool_call_id", None)
         if call_id:
-            if call_id in announced:
+            key = f"{'pending' if pending else 'final'}:{call_id}"
+            if key in announced:
                 return
-            announced.add(call_id)
+            announced.add(key)
         out.append(
             AgentEvent(
                 type="tool_use",
                 content=f"Using {name}...",
-                metadata={"name": name, "input": args if isinstance(args, dict) else {}},
+                metadata={
+                    "name": name,
+                    "input": PydanticAIBackend._tool_args_as_dict(args),
+                    "input_pending": pending,
+                },
             )
         )
 

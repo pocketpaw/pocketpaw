@@ -47,6 +47,21 @@ leaf domain module) and is imported here. This lets ``pockets.dto`` import the
 same class from ``surface.domain`` instead of from ``models.pocket``, which
 the OSS-EE boundary contract forbids. No schema change — the embedded BSON
 shape is identical, so no Mongo migration.
+Updated: 2026-08-08 (feat/sites-js-by-default) — ``Pocket.keeps_client_bundle``
+became TRI-STATE (``bool | None``, default ``None``). ``None`` means the author
+declared nothing, and publish resolves it from the new
+``sites_keep_client_bundle_default`` setting (``True``: sites ship their client
+JS unless told otherwise); ``True``/``False`` stay explicit authorial choices
+that override the setting in BOTH directions. The old two-state ``bool`` could
+not express "undeclared", so a default could only ever have been one-way. Still
+additive with no Mongo migration — the key is simply absent on legacy docs,
+which now reads back as the undeclared state rather than as a decision.
+Updated: 2026-08-07 (MT-1 — an interactive site keeps its own JavaScript) —
+added ``Pocket.keeps_client_bundle`` beside ``engine``. It declares that the
+site's hand-written client JS is load-bearing, so the generator emits
+``csr = true`` instead of the static default and the ripple prune step leaves
+the hydration bundle in place. It sits on the pocket for the same reason
+``engine`` does — it describes the authored artifact, not the deploy.
 Updated: 2026-06-21 (DSV-5 — dynamic svelte sites write-side) — loosened
 ``Pocket.source`` from ``dict[str, str] | None`` to ``dict[str, Any] | None``
 so a DYNAMIC svelte site's ``source`` envelope can carry its live-data bindings
@@ -164,6 +179,21 @@ class Pocket(TimestampedDocument):
     # pockets; a STATIC svelte pocket carries only the str->str file map (a
     # subset of the looser type — no behaviour change).
     source: dict[str, Any] | None = None
+    # MT-1 — this site's own client JavaScript is load-bearing (an onMount, a
+    # ``use:`` action, an IntersectionObserver scroll-reveal, a WebGL canvas). A
+    # site generated with ``csr = false`` has its emitted hydration bundle pruned
+    # after the build (on ripple), so that code never runs. Lives on the pocket
+    # (beside ``engine``) because it describes the AUTHORED artifact, not the
+    # deployment.
+    # TRI-STATE since feat/sites-js-by-default: ``None`` (the default, and what
+    # every legacy pocket reads back as) means the author declared NOTHING, so
+    # publish resolves it from ``sites_keep_client_bundle_default``. ``True`` /
+    # ``False`` are explicit authorial choices and BOTH win over that config
+    # default — declaring ``False`` is how a pure-static page opts out. Same
+    # "None = no declaration, use the default" shape as ``surface_profile``
+    # below. Still additive with no Mongo migration: the key is simply absent on
+    # legacy docs, which is exactly the undeclared state.
+    keeps_client_bundle: bool | None = None
     # Default "workspace": new pockets are visible to every workspace member.
     # Owner can tighten to "private" (owner-only + explicit shared_with) via
     # the visibility toggle in the pocket UI.

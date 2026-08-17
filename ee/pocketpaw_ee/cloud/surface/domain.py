@@ -163,11 +163,15 @@ class SurfaceMeta:
     # site's source pocket) so the handler routes to the refine/edit path
     # instead of the create-a-new-site path. Absent on the /sites gallery.
     site_id: str | None = None
-    # Sites create hint — set by the /sites create UI's "Use Svelte pages"
-    # toggle: "ripple" (default) | "svelte". On the create branch the handler
-    # branches on this to prefer the svelte-track authoring skill when
-    # "svelte"; absent / "ripple" keeps the default marketing brain. Does not
-    # affect the refine branch (keyed on ``pocket_id``).
+    # Sites create hint — which engine authors a brand-new site:
+    # "html" (the DEFAULT when absent) | "svelte" | "react" | "ripple". On the
+    # create branch the handler forks its BUILD step on this, and
+    # ``surface_registry._sites_profile`` forks the ripple mode + authoring skill
+    # on it: the hand-authored component engines (svelte, react) drop inline
+    # ripple and surface their own skill; html/ripple keep ripple. Unknown values
+    # normalize to html, mirroring ``sites/engines.py::normalize_engine``'s
+    # never-raise policy on the publish side. Does not affect the refine branch
+    # (keyed on ``pocket_id``), which wins over engine.
     engine: str | None = None
     # Sites refine hint — the Build/Chat toggle in the /sites/[siteId] refine chat.
     # ``"chat"`` answers questions about the existing site with NO mutation; ``"build"``

@@ -18,6 +18,14 @@
 #     the built ``captureSignedKey`` matches the persisted doc (lead capture works on
 #     the first publish) — the create-side twin of ``test_republish_reuses_signed_key``.
 #   * BILLING-SAFE: a draft carries no subscription and opens no checkout.
+#
+# Updated: 2026-08-11 (fix/sites-draft-realtime) — added the realtime block at the
+# bottom. Listable was only half of visible: the mint emitted NOTHING (an explicit
+# ``# no-event`` opt-out) and ``site.published`` was the only site event that
+# existed, so a gallery that was already open never learned a draft had appeared.
+# The new tests pin the ``site.created`` emit, its idempotence on the wire, its
+# silence over an already-live doc, and that a failed push never costs the user the
+# site. See the block comment there for the full failure.
 
 from __future__ import annotations
 
@@ -251,3 +259,113 @@ async def test_draft_carries_no_billing(beanie_test_db):
 
     cards = await sites_service.list_for_workspace("ws1")
     assert cards[0].checkout_url is None
+
+
+# ---------------------------------------------------------------------------
+# Realtime: a draft must REACH an already-open gallery (fix/sites-draft-realtime)
+# ---------------------------------------------------------------------------
+# The draft-first fix above made a draft LISTABLE. It did not make it ARRIVE: the
+# mint carried a ``# no-event`` opt-out, and ``site.published`` was the only site
+# event in the catalog — so a gallery that was already open learned nothing when a
+# draft appeared and showed it only after a manual Refresh or an F5. The bounded
+# create poll covers the ONE tab that ran the create (it is armed by the per-run
+# ``pocket_created`` SSE, so it is per-stream by construction); a draft created from
+# the main chat, a second tab, a teammate's session, or an import reached nobody.
+#
+# These pin the emit itself. The workspace fan-out is pinned next to the publish
+# routing in tests/cloud/realtime/test_audience.py.
+
+
+def _site_created(bus) -> list:
+    """The ``site.created`` events the recording bus saw, newest last."""
+    return [e for e in bus.events if e.type == "site.created"]
+
+
+async def test_create_draft_site_emits_site_created(beanie_test_db, _recording_bus_for_sites):
+    """THE BUG: minting a draft emitted nothing, so an open gallery never heard about
+    it. A fresh mint must emit ``site.created`` carrying the ids the client keys the
+    gallery row off (``site_id`` / ``pocket_id``) plus the ``workspace_id`` the
+    audience resolver fans out on.
+
+    Mutation that must break this: delete the ``emit(SiteCreated(...))`` call in
+    ``create_draft_site`` (i.e. restore the ``# no-event`` opt-out)."""
+    doc = await sites_service.create_draft_site(
+        workspace_id="ws1", user_id="u1", pocket_id="pk_evt", name="Fresh Draft"
+    )
+
+    events = _site_created(_recording_bus_for_sites)
+    assert len(events) == 1, "a fresh draft mint must emit exactly one site.created"
+    data = events[0].data
+    assert data["workspace_id"] == "ws1"
+    assert data["site_id"] == str(doc.id)
+    assert data["pocket_id"] == "pk_evt"
+    assert data["owner"] == "u1"
+    # ``deployed`` rides along so a client can tell this apart from a publish without
+    # a second read — a draft is never live.
+    assert data["deployed"] is False
+
+
+async def test_repeat_create_draft_does_not_re_emit(beanie_test_db, _recording_bus_for_sites):
+    """IDEMPOTENT ON THE WIRE, not just in Mongo. The mint already returns the existing
+    doc untouched on a repeat create (``test_create_draft_is_idempotent``); the event
+    must follow it. Emitting per CALL rather than per INSERT would push a duplicate
+    "new site" at every open gallery each time a create tool retried.
+
+    Mutation that must break this: move the emit ABOVE the idempotent early return."""
+    await sites_service.create_draft_site(
+        workspace_id="ws1", user_id="u1", pocket_id="pk_evt_once", name="Once"
+    )
+    await sites_service.create_draft_site(
+        workspace_id="ws1", user_id="u1", pocket_id="pk_evt_once", name="Twice"
+    )
+
+    assert len(_site_created(_recording_bus_for_sites)) == 1
+
+
+async def test_create_draft_over_live_doc_does_not_emit(
+    beanie_test_db, monkeypatch, _recording_bus_for_sites
+):
+    """A stray re-create against an ALREADY-LIVE site must stay silent. The doc is
+    returned unchanged (``test_create_draft_never_clobbers_a_live_doc``), so an event
+    here would tell every open gallery a live site had just been created — the same
+    early return covers both, and this pins that it does."""
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("PAW_SITES_LOCAL", raising=False)
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "local")
+
+    await sites_service.create_draft_site(
+        workspace_id="ws1", user_id="u1", pocket_id="pk_evt_live", name="Live One"
+    )
+    await _publish_local("pk_evt_live", name="Live One")
+    before = len(_site_created(_recording_bus_for_sites))
+
+    await sites_service.create_draft_site(
+        workspace_id="ws1", user_id="u1", pocket_id="pk_evt_live", name="Live One"
+    )
+
+    assert len(_site_created(_recording_bus_for_sites)) == before
+
+
+async def test_emit_failure_does_not_fail_the_create(
+    beanie_test_db, monkeypatch, _recording_bus_for_sites
+):
+    """The draft doc is the primary contract; the push is a courtesy. A realtime
+    failure must not lose the site the user just asked for — the same discipline the
+    thumbnail capture and the ``pocket_created`` push already follow.
+
+    Mutation that must break this: drop the try/except around the emit."""
+
+    async def _boom(_event):
+        raise RuntimeError("bus is down")
+
+    # raising=True (the default) on purpose: if the helper is renamed away, this test
+    # must fail loudly rather than pass against an attribute monkeypatch invented.
+    monkeypatch.setattr(sites_service, "_emit_site_created", _boom)
+
+    doc = await sites_service.create_draft_site(
+        workspace_id="ws1", user_id="u1", pocket_id="pk_evt_boom", name="Still Mine"
+    )
+
+    assert doc.deployed is False
+    docs = await _SiteDoc.find({"workspace": "ws1", "pocket_id": "pk_evt_boom"}).to_list()
+    assert len(docs) == 1

@@ -2,7 +2,13 @@
 
 **Status:** Shipped 2026-05-14 via PR for `feat/pocket-creator-skill`.
 **Lives at:** `src/pocketpaw/bundled_skills/` (the Python installer) and
-`src/pocketpaw/bundled_skills/_bundled/<skill-name>/` (the skill content).
+`src/pocketpaw/bundled_skills/_bundled/skills/<skill-name>/` (the skill content).
+
+**Updated 2026-08-07 (RX-2):** added `pocketpaw-create-react-site` to the
+Currently-bundled table, and corrected the content path above. Skills have lived
+under `_bundled/skills/<name>/` since the local-plugin route landed
+(`installer.py::_SKILLS_DIR`); several `_bundled/<name>/` spellings further down
+this file predate that move and are still stale.
 
 ## What this is
 
@@ -134,6 +140,12 @@ primitive.
 | --- | --- |
 | `pocketpaw-create-pocket` | Pattern-first pocket creation workflow with 150-widget catalog reference, rich-widgets-by-pattern map, and the canonical invocation flow. |
 | `pocketpaw-edit-pocket` | READ / EDIT / CHAT path-selection + the Type A / B / C edit decision tree for delegating to `pocket_specialist__edit`. Routes simple state edits, structural edits, and open-ended redesigns through the right shape of specialist call. |
+| `pocketpaw-create-svelte-site` | Paw Sites **svelte track** — authoring SvelteKit components, the §4.3 source-map contract, and the prerender resting-state rule. |
+| `pocketpaw-create-react-site` | Paw Sites **react track** (RX-2) — authoring React components, the `src/App.tsx` source-map contract, the reserved build-shell paths, and the `interactive` flag that decides whether the site keeps its client bundle. |
+| `pocketpaw-design-taste` | The engine-agnostic creative-director system every site track composes with. Owns taste; the per-engine skills own their contract and never restate it. |
+
+*(The table lists the skills whose design is documented here; `_bundled/skills/`
+is the authoritative list, since discovery is directory iteration.)*
 
 Planned (not yet shipped):
 - `pocketpaw-audit-pocket` — review an existing pocket for design issues

@@ -30,7 +30,6 @@ import base64
 import io
 import zipfile
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -90,7 +89,6 @@ def _build_app(workspace_id: str, monkeypatch) -> FastAPI:
     deps, stub the workspace plan to one that unlocks Sites, mount the router."""
     from datetime import UTC, datetime
 
-    import pocketpaw_ee.cloud.workspace.service as ws_svc
     from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
     from pocketpaw_ee.cloud._core.deps import current_workspace_id
     from pocketpaw_ee.cloud._core.http import add_error_handler
@@ -98,7 +96,9 @@ def _build_app(workspace_id: str, monkeypatch) -> FastAPI:
     from pocketpaw_ee.cloud.license import require_license
     from pocketpaw_ee.sites.router import router as sites_router
 
-    monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="go"))
+    # No plan patch: the tree conftest already defaults this to "go" for every test
+    # here. Patching it again nests two patches on one attribute and leaks the mock
+    # past teardown — see the conftest note.
 
     fake_user = _FakeUser(workspace_id)
     app = FastAPI()

@@ -1,5 +1,29 @@
 # tests/ee/sites/conftest.py
 # Created: 2026-06-18 (feat/sites-dedupe-migration, PERF-2).
+# Updated 2026-08-11 (fix/tests-ignore-operator-env): added the autouse
+#   ``_operator_env_cleared`` fixture. Nothing in this tree isolated the test process
+#   from the developer's own environment: ``config.py`` declares ``env_file=".env"`` and
+#   ``security/url_validators.py`` calls ``load_dotenv(override=False)`` at IMPORT time,
+#   and dotenv searches upward from the CWD — so a gitignored ``.env`` in the checkout
+#   root silently became test input. With one present, ``PAW_CF_DEPLOY_MODE`` alone
+#   flipped 89 tests red (98 failed / 909 passed, against 5 / 1005 on a clean tree) by
+#   sending them down the real Cloudflare Workers path with the operator's live API
+#   token in the environment. CI never catches it (no ``.env`` there — green by
+#   construction), so it only bites locally, where "tests broken" reads as "branch
+#   broken". This deletes the variables that SELECT a code path or SUPPLY a credential
+#   before every test. Delete-only and function-scoped on purpose: a test that wants one
+#   set does so in its own body, after this has run. Deleting alone was NOT enough —
+#   ``pocketpaw.uploads.factory.build_adapter`` calls ``load_dotenv()`` lazily, so it
+#   re-read the file mid-test and put the variables back (a non-overriding load happily
+#   sets a var this fixture has just removed); three test_preview_refresh.py tests were
+#   still reaching the live path. So the fixture also neuters ``load_dotenv`` per test.
+#   test_env_isolation.py proves both legs, so neither can quietly stop working.
+# Updated 2026-08-08 (capture readiness): added the autouse ``_site_pages_are_serving``
+#   fixture. Screenshot capture now polls the site's url before rendering it, so
+#   without this every existing capture test would fire a real request at a hostname
+#   that does not resolve and then wait out the retry schedule. It defaults the probe
+#   to ready and zeroes both delay schedules; test_capture_readiness.py patches the
+#   same attributes to exercise the gate itself.
 # Updated 2026-07-17 (feat/sites-native-artifact-no-build): added two autouse fixtures
 #   for the native-artifact read-through cache — ``_artifact_store_tmp`` points
 #   PAW_SITES_ARTIFACT_DIR at a temp dir so a cache MISS never writes the real home, and
@@ -80,6 +104,84 @@ async def _sites_beanie_settings() -> Any:
     yield
 
 
+# The ambient variables an operator's own ``.env`` leaks into the test process. Each one
+# either SELECTS a code path (``PAW_CF_DEPLOY_MODE`` picks the real Workers deploy over
+# the local one), SUPPLIES a credential that path would then use for real, or overrides a
+# default the tests assert against (``PAW_CF_SITES_DOMAIN``, ``PAW_CF_WRANGLER_CMD``).
+# The whole family is listed rather than only the variables observed failing: CI runs
+# with none of them set, so anything green there is green with all of them absent, which
+# makes deleting the rest free and stops the same leak reappearing through a sibling
+# variable. Kept module-level so test_env_isolation.py asserts against this exact list
+# instead of a copy that can drift.
+OPERATOR_ENV_VARS: tuple[str, ...] = (
+    "PAW_CF_DEPLOY_MODE",
+    "PAW_CF_ZONE_ID",
+    "PAW_CF_ACCOUNT_ID",
+    "PAW_CF_API_TOKEN",
+    "PAW_CF_CNAME_TARGET",
+    "PAW_CF_WORKERS_SUBDOMAIN",
+    "PAW_CF_DISPATCH_NAMESPACE",
+    "PAW_CF_SITES_DOMAIN",
+    "PAW_CF_WRANGLER_CMD",
+    "PAW_CF_MIGRATE_TIMEOUT_SEC",
+    "DAYTONA_API_KEY",
+    "DAYTONA_API_URL",
+)
+
+
+@pytest.fixture(autouse=True)
+def _operator_env_cleared(monkeypatch):
+    """Remove the operator's own Cloudflare / Daytona environment from every sites test
+    (fix/tests-ignore-operator-env).
+
+    ``config.py`` sets ``env_file=".env"`` and ``security/url_validators.py`` calls
+    ``load_dotenv(override=False)`` at import time, which searches UPWARD from the CWD.
+    So a gitignored ``.env`` in the checkout root is test input, and the suite's result
+    depends on who is running it: with one present ``PAW_CF_DEPLOY_MODE`` alone took the
+    tree from 5 failures to 98, because the deploy tests took the real Workers path with
+    a live API token sitting in the environment. The observed failures died early on a
+    missing build output, but nothing structural was stopping a less-mocked test from
+    reaching Cloudflare for real.
+
+    Deleting, not setting, is the point: it makes each test's behaviour a property of
+    the code under test rather than of the machine. Function-scoped so a test that WANTS
+    one of these sets it in its own body, after this fixture has already run —
+    test_service.py, test_fault_ladder_deploy.py and test_workers_deploy.py all do
+    exactly that, and are unaffected.
+
+    DELETING IS NOT ENOUGH ON ITS OWN, which is the part worth remembering. Some call
+    sites load the file LAZILY, inside the function, so they re-read it DURING the test —
+    ``pocketpaw.uploads.factory.build_adapter`` is the one that bit here (its own comment
+    reasons that ``load_dotenv`` "won't override vars already in env", which is true and
+    beside the point: this fixture has just made the var ABSENT, so a non-overriding load
+    is free to set it again). Three of test_preview_refresh.py's tests store a screenshot,
+    reach ``build_adapter``, and were still taking the live Workers path with the
+    variables deleted. So the second leg neuters ``load_dotenv`` for the duration of each
+    test: the ambient file is not test input, whenever it is read from."""
+    for name in OPERATOR_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    def _refuse_to_load_dotenv(*_args: Any, **_kwargs: Any) -> bool:
+        """Stand in for ``dotenv.load_dotenv``. Returns False, its "loaded nothing"
+        value, so a caller that checks the result sees an empty file rather than an
+        error."""
+        return False
+
+    try:
+        import dotenv
+        import dotenv.main
+    except Exception:  # pragma: no cover — dotenv is only an indirect dep
+        pass
+    else:
+        # Both spellings: callers use ``from dotenv import load_dotenv`` today, and the
+        # lazy import resolves the attribute at CALL time, so patching the module object
+        # is what catches them. ``dotenv.main`` is patched too so a future
+        # ``from dotenv.main import load_dotenv`` cannot quietly reopen the hole.
+        monkeypatch.setattr(dotenv, "load_dotenv", _refuse_to_load_dotenv)
+        monkeypatch.setattr(dotenv.main, "load_dotenv", _refuse_to_load_dotenv)
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _artifact_store_tmp(tmp_path, monkeypatch):
     """Redirect the native-artifact cache root (PAW_SITES_ARTIFACT_DIR) to a per-test
@@ -113,6 +215,32 @@ def _captured_prewarms(monkeypatch):
     yield captured
     for coro in captured:
         coro.close()
+
+
+@pytest.fixture(autouse=True)
+def _site_pages_are_serving(monkeypatch):
+    """Default the screenshot readiness probe to "the page is up", with no waits.
+
+    A capture now polls the site's own url before spending a Browser Rendering call
+    (a deploy is live at Cloudflare before it is live at the edge, and a screenshot
+    of the 404 in between is a valid PNG that lands on the card forever). Left
+    un-stubbed, every existing capture test would make a REAL request to
+    ``brew.example.test`` / ``*.paw-sites.test``, get nothing, and then sit through
+    the retry schedule before failing — slow, flaky, and offline-hostile.
+
+    Defaulting the gate OPEN is the right default here: these tests are about what
+    happens once there is a page. The tests that are about the GATE
+    (test_capture_readiness.py) patch the same two attributes themselves, and an
+    inner patch of the same target wins while it is active."""
+    from pocketpaw_ee.sites import screenshot as screenshot_mod
+
+    async def _serving(_url: str, **_kw) -> bool:
+        return True
+
+    monkeypatch.setattr(screenshot_mod, "_url_is_serving", _serving)
+    monkeypatch.setattr(screenshot_mod, "_READY_DELAYS", ())
+    monkeypatch.setattr(screenshot_mod, "_READY_DELAYS_MANUAL", ())
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -151,8 +279,27 @@ def _default_sites_plan(request: pytest.FixtureRequest):
     sites mechanics tests, so the new service-level plan gate doesn't reject their
     synthetic workspace ids. test_plan_gate.py patches the same target per-test to
     exercise the denial paths."""
-    # The gate test owns the plan itself — don't double-patch under it.
-    if request.module.__name__.endswith("test_plan_gate"):
+    # Modules that patch this target THEMSELVES must not be patched under, because two
+    # patches on one attribute unwind in the wrong order: this fixture starts first and
+    # saves the REAL function, the module's own patch then saves OUR MOCK as its
+    # "original", and whichever restores last wins. When that is the module's, the mock
+    # is put back after this fixture has correctly removed it — and then outlives every
+    # fixture in the run.
+    #
+    # Measured 2026-08-12: it escaped this whole tree and broke
+    # tests/cloud/sites/test_site_billing.py's entitlement test, where a `free` workspace
+    # read back as `go` and a publish that should have been Forbidden was allowed. The
+    # failure named a test and a subsystem that had nothing to do with it.
+    #
+    # So a module either takes this default or owns the target outright — never both.
+    # Add a module here ONLY if it genuinely needs a different plan than "go"; if it just
+    # wants Sites unlocked, delete its patch and take this default instead.
+    _OWNS_ITS_OWN_PLAN_PATCH = (
+        "test_plan_gate",  # exercises the DENIAL paths, so it needs several plans
+        "test_request_publish",  # one case needs "enterprise", not "go"
+        "test_html_e2e",  # module-scoped fixture of its own
+    )
+    if request.module.__name__.rsplit(".", 1)[-1] in _OWNS_ITS_OWN_PLAN_PATCH:
         yield
         return
     from unittest.mock import patch

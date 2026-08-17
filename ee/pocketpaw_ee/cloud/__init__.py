@@ -1,5 +1,10 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-08-06 (feat/coupling-lead-captured, T-6) — Registers the leads
+    notification bridge (``leads.bridges.notifications``) alongside the meeting
+    bridges, after ``init_realtime``. It subscribes to the new ``lead.captured``
+    event and notifies the workspace owner/admins, so a form submitted on a
+    published Paw Site is heard instead of waiting to be polled for.
 Modified: 2026-07-28 (feat/growth-api-scale) — The growth router's list route
     changed shape: ``GET /growth/prospects`` returns
     ``{items, next_cursor, total}`` instead of a bare array (BREAKING), and
@@ -280,6 +285,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.rules.router import router as rules_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
+    from pocketpaw_ee.cloud.storage.router import router as storage_router
     from pocketpaw_ee.cloud.websandbox.router import router as websandbox_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router
 
@@ -348,6 +354,9 @@ def mount_cloud(app: FastAPI) -> None:
     # credit allotment). The plan CATALOG read (GET /billing/plans) is on the
     # billing router above; this router carries only the per-workspace resolve.
     app.include_router(entitlements_router, prefix="/api/v1")
+    # Storage (feat/billing-storage-caps) — the workspace-scoped S3 usage read
+    # (GET /storage/usage -> used_bytes / max_bytes / remaining / percent).
+    app.include_router(storage_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
     app.include_router(pocket_chat_router, prefix="/api/v1")
@@ -967,12 +976,23 @@ def mount_cloud(app: FastAPI) -> None:
     register_meeting_notification_listeners()
     register_meeting_calendar_listeners()
 
-    # Push notifications fan-out (#1393) — v1 product events
-    # (agent.stream_end / instinct.approval.created / meeting.started) →
-    # ``dispatch.notify``, which forks WS-vs-Web-Push so a user with both the
-    # desktop app and a browser tab open is notified exactly once. Same
-    # constraint as the other bus subscribers: register AFTER init_realtime
-    # installed the singleton bus.
+    # Leads bridge — lead.captured → an in-app notification for the workspace
+    # owner/admins. A form submitted on a published Paw Site used to be silent
+    # (the Leads view polled and nobody was told); this is the first link in the
+    # site-lead → outreach funnel.
+    from pocketpaw_ee.cloud.leads.bridges.notifications import (
+        register_lead_notification_listeners,
+    )
+
+    register_lead_notification_listeners()
+
+    # Push notifications fan-out (#1393) — ``notification.new`` (every
+    # persisted notification, so the OS surface can't drift from the bell)
+    # plus ``agent.stream_end`` (the one product event that persists no
+    # notification row) → ``dispatch.notify``, which forks WS-vs-Web-Push so a
+    # user with both the desktop app and a browser tab open is notified exactly
+    # once. Same constraint as every other bus subscriber: register AFTER
+    # init_realtime installed the singleton bus.
     from pocketpaw_ee.cloud.push.listeners import register_push_event_listeners
 
     register_push_event_listeners()

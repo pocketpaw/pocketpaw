@@ -325,7 +325,7 @@ all-tools = [
     "soul-protocol[engine]>=0.3.0",
 ]
 all-backends = [
-    "pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm]",
+    "pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm,pydantic-ai]",
 ]
 # NOTE: the `enterprise` extra was removed in the OSS-EE split (Phase 4).
 # Enterprise features now ship as the separate `pocketpaw-ee` package
@@ -372,6 +372,14 @@ all = [
     "langchain-litellm>=0.6.4,<0.6.5",
     # Local / bring-your-own-model (Ollama) provider path — see deep-agents extra.
     "langchain-ollama>=1.0,<2.0",
+    # A SELF-REFERENCE rather than the four inlined specs the rest of this list
+    # uses, and deliberately: the `pydantic-ai` extra above pins three packages
+    # EXACTLY, with a written justification per pin, so a copy here would be a
+    # second place to bump and the first one to go stale. This entry was missing
+    # entirely until 2026-08-11 — `Dockerfile.enterprise` builds the production
+    # image with `pip install '.[all]'`, so "all" omitting the CLOUD DEFAULT
+    # agent backend is how the enterprise image shipped without it.
+    "pocketpaw[pydantic-ai]",
 ]
 dev = [
     # all deps (flattened from [all])
@@ -542,6 +550,47 @@ dev = [
 # development environment. Plain `uv sync --dev` stays OSS-only (that is what
 # the Test (OSS-only) CI job relies on).
 ee = ["pocketpaw-ee"]
+
+[tool.uv]
+# Install-time supply-chain floor for this repo's own Python resolution.
+#
+# WHY THIS IS HERE. The workspace policy is a 7-day minimum release age: a
+# version has to sit on the index for a week before we will resolve it, which
+# is the one control that catches a compromised fresh publish of a package we
+# already vetted (an allowlist pins WHICH package, and a ranged pin still
+# floats the VERSION). That policy was documented as living in the developer's
+# home directory — and those files do not exist on any machine we checked.
+# `npm config get min-release-age` returns null; there is no ~/.config/uv/
+# uv.toml and no UV_EXCLUDE_NEWER in the environment. So every `uv lock` /
+# `uv sync` in this repo, including the CI jobs, resolved straight off PyPI
+# with no age gate at all. Enforcement now lives per-repo instead: the Daytona
+# build sandbox got its bun floor (#1897), paw-enterprise got its npm floor
+# (#768), and this is pocketpaw's.
+#
+# THE UNIT IS A DATE, NOT A DURATION — this is the trade-off, and it is the
+# whole reason this block needs a comment. bun's `minimumReleaseAge` is
+# seconds and npm's `min-release-age` is days, so both roll forward on their
+# own. uv's `exclude-newer` is an absolute timestamp: it does not move, so it
+# needs a human to bump it. Keep it roughly ONE DAY behind today when you do.
+# Set it too recent and there is no floor left; set it too far back and it
+# starts refusing releases that have legitimately aged past the window, which
+# also breaks first-party packages on a fast cadence (soul-protocol has hit
+# exactly this). Bumping it is a deliberate act, not a chore to automate away.
+#
+# WHAT IT DOES AND DOES NOT GATE. It applies at RESOLUTION time. `uv sync`
+# against the committed uv.lock still installs what the lock pins — the lock
+# is the record of what was already vetted, and this stops a NEW resolve from
+# reaching for something the index published yesterday. If a bump makes a
+# needed dependency unresolvable, pin the previous satisfying version or raise
+# it with the captain. Do not lower this date to make a resolve pass, and
+# never work around it with a bypass flag.
+#
+# It lives in `[tool.uv]` rather than a `uv.toml` on purpose. This repo
+# already keeps its uv config in pyproject.toml (`[tool.uv.sources]` below,
+# and the same in ee/pyproject.toml), and adding an adjacent uv.toml makes uv
+# ignore the settings fields in `[tool.uv]` entirely — verified on uv 0.10.4,
+# which warns and then drops them. One config home, no split brain.
+exclude-newer = "2026-08-10T00:00:00Z"
 
 [tool.uv.sources]
 pocketpaw-ee = { path = "ee", editable = true }

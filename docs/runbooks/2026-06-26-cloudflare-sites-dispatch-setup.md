@@ -168,10 +168,40 @@ opens) or via the API (`GET /sites`).
 | `502 Site error` | the user worker threw at runtime |
 | TLS error | step 5 cert does not cover the wildcard — fix the cert |
 
-## Follow-up — custom domains
+## Custom domains
 
-v1 is **subdomain routing only**. When a site connects its own custom hostname
-(`create_custom_hostname` / Cloudflare for SaaS), the inbound `hostname` is no
-longer `<site_id>.<domain>`, so the dispatch worker's leftmost-label trick 404s it.
-Custom domains need a `hostname → site_id` map in the dispatch worker — a routing
-KV populated at domain-connect time, or a backend lookup. Tracked as a follow-up.
+**Updated 2026-08-12.** Custom domains now work — but only in `workers` deploy mode
+(`PAW_CF_DEPLOY_MODE=workers`), not on the dispatch-worker path this runbook sets up.
+
+In `workers` mode each site is deployed as its own Worker (`paw-site-<site_id>`), so
+connecting a domain writes a Cloudflare Worker **route** scoped to that one hostname
+(`<hostname>/*` → that site's Worker) alongside the custom hostname. Two API calls
+from the control plane, no dispatcher, and nothing to do in the dashboard per site.
+
+### One-time setup, required before the first domain connects
+
+1. **Enable Cloudflare for SaaS** on the zone named by `PAW_CF_ZONE_ID`.
+2. **Create a proxied fallback-origin record** on that zone. Cloudflare's own example
+   of an originless record is `service.example.com AAAA 100::`; it must be proxied.
+3. **Set it as the fallback origin**:
+   `PUT /zones/{zone}/custom_hostnames/fallback_origin {"origin": "<that hostname>"}`.
+4. **Set `PAW_CF_CNAME_TARGET`** to the hostname customers should paste at their own
+   registrar — normally the same record. There is no default, and connecting a domain
+   **fails closed** without it: the value was previously derived as
+   `<zone_id>.cdn.cloudflare.net`, which resolves to nothing, so every customer who
+   pasted it waited forever on a hostname that could never validate.
+5. **The API token needs `Zone → Workers Routes: Edit`** in addition to SSL and
+   Certificates, or the route call 403s after the hostname is created (the add rolls
+   the hostname back and reports the Cloudflare error).
+
+### Still a follow-up — custom domains on the WfP dispatch path
+
+Unchanged for `wfp` mode, which is what this runbook configures. The inbound
+`hostname` is no longer `<site_id>.<domain>`, so the dispatch worker's leftmost-label
+trick 404s it — and in practice the request never reaches the dispatch worker at all,
+because its route is `*.<PAW_CF_SITES_DOMAIN>/*` and nothing matches `example.com/*`;
+it falls through to the fallback origin. Connecting a domain to a wfp-deployed site
+therefore still does not serve that site. It needs a `hostname → site_id` map in the
+dispatch worker (a routing KV populated at domain-connect time, or a backend lookup).
+The control plane deliberately writes **no** route for a wfp site rather than one
+naming a script Cloudflare cannot find.

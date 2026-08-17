@@ -1,6 +1,189 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-08-12 (sites Settings consolidation): added ``get_site_client`` /
+# ``update_site_client`` / ``record_site_invoice`` — the owner's record of who a
+# site is FOR and what they have billed them. Two decisions worth knowing before
+# editing them. (1) The PATCH is THREE-WAY: absent means "leave alone", explicit
+# "" means "clear", read off ``model_fields_set``. A two-way patch would let an
+# autosaving form blank the fields the user did not touch. (2) Both writers use a
+# targeted ``set()``, not ``save()`` — this is a human-paced edit against a
+# document the BUILD lane also writes, so a full-document save could push a stale
+# snapshot back and roll ``build_status`` backwards while an owner types notes.
+#
+# Updated 2026-08-11 (RX-4 — the agent can tell whether a site is actually live): added
+# ``build_wire_state`` (pure) and ``site_build_status`` (a read). ``_to_response``
+# already gave the frontend ``build_status`` / ``build_reason`` / ``build_job_id``, and
+# the frontend polls them next to ``url`` knowing a site can be live and simultaneously
+# mid-rebuild. The chat agent had neither the fields nor that knowledge, and on react —
+# the only engine where ``build_runs_async`` is True — that meant a first publish handed
+# it ``url=""`` and a re-publish handed it the PREVIOUS deploy's url, both reported as
+# success. ``build_wire_state`` derives ``build_in_progress`` and ``is_live`` from the
+# row once, so the publish response and the status tool cannot disagree; the raw status
+# still passes through verbatim. ``build_in_progress`` reads an unknown status as IN
+# PROGRESS, deliberately the OPPOSITE of ``build_state.should_enqueue`` (a redundant
+# build costs one sandbox; a spurious "your site is live" costs trust), and is derived
+# from ``TERMINAL_STATUSES`` so a new state defaults to in-progress here for free.
+# ``site_build_status`` exists because an async publish returns before the build starts:
+# without a later read, "queued" is a dead end.
+#
+# Updated 2026-08-11 (RX-3 — the react track gets an EDIT lane): added
+# ``edit_react_component``, the react peer of ``edit_svelte_component``. Until this
+# existed there was no way to change a react site: this module's edit entry points
+# are svelte-gated, so the chat agent's only response to "shorten the hero
+# headline" was a second ``create_react_site``, which mints a SECOND site pocket.
+# Two contracts differ from the svelte peer on purpose, and both are argued in the
+# function's own docstring so a reader who only opens that one does not have to
+# guess:
+#   * DRAFT-ONLY — it does NOT republish and does NOT enqueue a build. It cannot:
+#     ``build_runs_async("react")`` is True, so a react publish enqueues a Daytona
+#     build and returns before any outcome exists. There is nothing synchronous to
+#     roll back from, and a rollback fired on enqueue-success would revert a good
+#     edit. Persisting the draft IS the job (the shape ``apply_leaf_edits`` already
+#     documents). Publishing stays the user's call.
+#   * A ``create`` flag for a NEW component file, because "add a testimonials
+#     section" needs one plus an ``src/App.tsx`` edit. It INVERTS the existence
+#     check rather than relaxing it.
+# The path guard is shared with create through the new
+# ``sites/react_paths.py`` — an edit that could write ``package.json`` would be a
+# way around the generator's dependency allowlist, and with it the supply-chain
+# release-age floor that manifest is what enforces.
+#
+# Updated 2026-08-10 (SL-3 — the build lane reaches the wire): ``_to_response`` and
+# ``pocket_status`` now populate ``build_status`` / ``build_reason`` / ``build_job_id``
+# from the Site row. They were declared on the DTOs by SG-9i and never passed here, so
+# every response carried the defaults — ``build_status`` frozen at "none" regardless of
+# the row — and the shipped build-status UI was polling a field that could not change.
+# Read via ``getattr`` defaults like every other field, so a pre-SG-9i row reads as "no
+# build" instead of raising, and a pocket with no Site doc reads "none" rather than null
+# (a draft that was never published has no build, which is not the same as a failed one).
+#
+# ``build_status`` is passed through VERBATIM, never normalised against a known set: the
+# wire's contract is that a client treats an unrecognised status as IN-PROGRESS, and
+# folding an unknown value into "none" here would break that from the server side.
+#
+# THE PUBLISH PATH IS UNCHANGED BY SL-3. ``_deploy_site_doc`` still builds and deploys
+# inline for a static site. Flipping it to enqueue-and-return is blocked on a
+# prerequisite that does not exist yet: the ephemeral lane's artifact is a tar of the
+# static output only, ``sites/build_job.py`` never persists it, and no deploy target
+# accepts one — ``local_server.deploy_local`` and ``workers_deploy.deploy_workers`` both
+# want a project DIR, and the wfp path wants a worker bundle read out of one. Worse, for
+# ripple and dynamic svelte the artifact cannot serve at all: its pages come from a
+# ``_worker.js`` whose imports sit OUTSIDE the tarred directory, which is precisely why
+# ``truth_lane`` refuses to even preview one (``REASON_WORKER_RENDERED``). Flipping today
+# would take those sites from "publishes and works" to "queues a build nothing can
+# deploy".
+#
+# Updated 2026-08-10 (SL-2 slice 2 — the ephemeral-build lane gets a job): added the
+# four seams the site-build arq job (``sites/build_job.py``) writes its lifecycle
+# through — ``load_build_site``, ``claim_build_queued``, ``mark_build_running``,
+# ``record_build_outcome`` — at the bottom of the DP0-3 seam block, which they are
+# modelled on. This module stays the sole owner of Site writes; the build lane never
+# touches the Beanie doc.
+#
+# THE PUBLISH PATH IS UNCHANGED BY THAT SLICE, deliberately. ``publish`` /
+# ``_deploy_site_doc`` still build synchronously through the local generator and do not
+# enqueue anything. Flipping publish to enqueue-and-return is a later slice, gated on a
+# frontend that can render a queued build — ship the flip first and every publisher sees
+# a finished-looking page for a site that has not built yet.
+#
+# Unlike every other write in this module, the four build seams use a TARGETED ``set``
+# rather than ``save()``: a build runs for minutes next to a publish that may be writing
+# ``url`` / ``deployed`` on the same row, and a full save from a stale doc would roll
+# those back. See the seam block for the full note.
+#
+# Updated 2026-08-07 (SC-1 — a site's card shows its own screenshot): the tail of
+# a SUCCESSFUL deploy now also schedules a screenshot of the page it just put
+# live (``_schedule_site_screenshot``, next to the knowledge sync it is modelled
+# on), and ``_to_response`` / ``pocket_status`` surface the resulting
+# ``preview_image_url`` on both DTOs so the gallery card can render the page
+# instead of a title and three pills. Both live-deploy paths schedule it —
+# ``_deploy_site_doc`` (static / inline publish) and ``finalize_provisioned_site``
+# (the durable dynamic provision job) — because those are the two places a site
+# actually becomes reachable. The scheduling call is wrapped exactly like the KB
+# sync: a screenshot is a picture of a site that is ALREADY deployed and serving,
+# so nothing about it may fail, delay, or block the publish. On any failure the
+# field stays empty and the card falls back to its text layout.
+#
+# Updated 2026-08-07 (SC-2 — drafts get art too): ``create_draft_site`` now schedules
+# a capture of its own (``_schedule_draft_screenshot``). A draft has no url, so that
+# capture shoots the pocket's MARKUP rather than a page (``sites.draft_markup`` +
+# the Browser Rendering ``html`` body). It fires ONLY on a fresh mint — the mint is
+# idempotent, so a repeat create re-shoots nothing and an already-live doc never
+# gets a draft picture — and it is wrapped for a reason the live path does not have:
+# ``create_draft_site`` is called from the zip/from-url import tail WITHOUT a
+# swallow of its own, so an escaping error there would fail an import whose files
+# are already safely persisted.
+# The PREVIEW branch of ``publish`` schedules one too
+# (``_schedule_draft_screenshot_for_pocket``), for a cost reason: a preview has just
+# built the pocket, so the markup is on disk and the capture is a file read instead
+# of a ~16s build. That is what fills in a ripple/svelte draft's card, since the
+# create-time capture deliberately refuses to build one. It goes by POCKET because a
+# preview's return value is a transient doc nobody persists, and it is still not a
+# way to photograph a live site: the resolved doc has a url, which the draft capture
+# declines.
+#
+# Updated 2026-08-07 (SC-3 — the card stops lying after a republish). The
+# deploy-time capture SC-1 added already fires on a republish, and the republish
+# path was verified end to end rather than assumed: ``_deploy_site_doc`` upserts the
+# EXISTING doc (so ``preview_image_url`` survives the republish and is overwritten,
+# not reset), nothing short-circuits on a preview already being present, and each
+# capture stores under a fresh uploads id — so the field takes a new value the card
+# has never fetched, and no cache can serve the old bytes behind it. New
+# ``refresh_site_preview`` adds the manual half of the policy: an explicit,
+# synchronous re-capture that ROUTES itself (live page vs draft markup) the same way
+# the automatic path does, and — unlike every deploy-triggered capture — reports
+# failure to its caller. That asymmetry is the point: ``safe_take_*`` exists so a
+# picture can never cost anyone a publish, while a person who pressed "refresh
+# preview" needs to be told when it did not work rather than handed back the stale
+# url they were trying to replace.
+#
+# Updated 2026-08-08 (feat/sites-js-by-default): ``publish_pocket`` is now the ONE
+# place the tri-state ``keepsClientBundle`` collapses to a bool. The pocket field
+# became ``bool | None``, so publish can finally tell "the author declared
+# nothing" (``None`` — every legacy pocket) from an explicit ``False``. Undeclared
+# resolves to the ``sites_keep_client_bundle_default`` setting, which ships TRUE:
+# a Paw Site now keeps its own JavaScript by default. An explicit declaration
+# still wins in BOTH directions, so a site that says ``False`` gets no bundle
+# regardless of the setting. Everything downstream (``publish``,
+# ``_deploy_site_doc``, ``generator.build``, the deferred-activation snapshot)
+# still receives a plain resolved ``bool`` — no other signature moved. Note the
+# cost this buys: the build-time resting-visibility smoke gate keys off whether
+# the built artifact ships JS, so with the default on it stops firing for
+# undeclared sites, and the "content hidden until JS reveals it" class of bug is
+# no longer caught before deploy.
+#
+# Updated 2026-08-08 (a preview is never a photograph of a page that was not serving
+# yet). ``refresh_site_preview`` gained the READINESS branch: a deploy is live at
+# Cloudflare before it is live at the edge, so the capture path now polls the site's
+# url before spending a render (see ``sites.screenshot`` — that module's header holds
+# the full reasoning). This function runs the same gate on a SHORT budget, because
+# unlike the deploy-time capture it has somebody waiting on it, and raises its own
+# ``sites.preview_not_serving`` rather than reusing ``preview_unavailable``: the two
+# declines need opposite advice ("publish it" vs "it is published, try again in a
+# moment"), and the wrong one surfaces verbatim in the dashboard. This endpoint is
+# also the recovery path when the deploy-time gate times out and deliberately leaves
+# the card without a picture.
+#
+# Updated 2026-08-07 (MT-1 — an interactive site keeps its own JavaScript):
+# ``publish_pocket`` now reads the pocket's ``keepsClientBundle`` declaration and
+# threads it through ``publish`` -> ``_deploy_site_doc`` -> ``generator.build``, so a
+# site whose hand-written client JS is load-bearing is generated with ``csr = true``
+# instead of the static ``csr = false`` default (and the ripple prune step then leaves
+# the hydration bundle alone). Two things make it survive the paths that historically
+# lose per-site facts:
+#   * It lives on the POCKET, not on the Site doc, so a republish — an
+#     ``edit_svelte_component`` or a ``make_site_editable``, both of which route back
+#     through ``publish_pocket`` — re-reads it rather than needing to carry it. That
+#     is the failure mode ``builder_origin`` had to be taught to recover from.
+#   * It is captured in ``pending_deploy_inputs`` alongside engine/source/pattern, so
+#     the charge-first deferred deploy replays it at ``subscription.active``. That
+#     snapshot IS the definition of what a deferred publish can reproduce; a field
+#     missing from it is silently dropped, and a PAID interactive site would go live
+#     with its JavaScript stripped. Pending docs written before this field read the
+#     key as absent -> False -> the prior behaviour.
+# Defaults False everywhere, so an ordinary static site is byte-identical.
+#
 # Updated 2026-08-02 (draft render): the PREVIEW deploy in ``publish`` is now
 # engine-aware, closing the half of HE-4 that was missed. HE-4 taught the LIVE
 # deploy that a built site's servable files live somewhere different per engine
@@ -654,8 +837,10 @@ from typing import Any
 from bson import ObjectId
 from bson.errors import InvalidId
 
+from pocketpaw.sites_capture.contact_form import CONTACT_FORM_TYPE, default_event_mapping
 from pocketpaw_ee.cloud._core.errors import (
     CloudError,
+    CustomDomainNotEntitled,
     Forbidden,
     Internal,
     NotFound,
@@ -664,21 +849,34 @@ from pocketpaw_ee.cloud._core.errors import (
 )
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
+from pocketpaw_ee.cloud.models.site import SiteInvoice as _SiteInvoiceDoc
+from pocketpaw_ee.sites.build_state import claim_precondition
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
     AuditFinding,
     AuditResponse,
     DevPreviewResponse,
     DomainStatusResponse,
+    SiteClientResponse,
+    SiteClientUpdate,
     SiteDataRowsResponse,
     SiteDataTableInfo,
     SiteDataTablesResponse,
+    SiteInvoiceCreate,
+    SiteInvoiceOut,
+    SitePreviewRefreshResponse,
     SitePreviewResponse,
     SiteResponse,
     SiteStatusResponse,
 )
-from pocketpaw_ee.sites.engines import content_key, is_source_engine
-from pocketpaw_ee.sites.generator_client import GeneratorClient
+from pocketpaw_ee.sites.engines import content_key, is_source_engine, normalize_engine
+from pocketpaw_ee.sites.generator_client import BuildResult, GeneratorClient
+from pocketpaw_ee.sites.html_paths import (
+    html_path_rejection,
+    is_reserved_html_path,
+    normalize_html_path,
+)
+from pocketpaw_ee.sites.react_paths import is_reserved_react_path, react_path_rejection
 
 logger = logging.getLogger(__name__)
 
@@ -1311,24 +1509,22 @@ def _builder_origin() -> str:
 # The default logical form type. The generated /api/submit endpoint sends this
 # constant as ``form_type`` (the static page wraps the whole spec in one form, so
 # there is no per-form id at submit time), so the seeded mapping must key on it.
-_DEFAULT_FORM_TYPE = "lead"
+#
+# Updated 2026-08-13: both this and the mapping below are now DERIVED from
+# ``sites_capture.contact_form``, the single declaration of what a contact form
+# is. They used to be restated here, and the restatement drifted from the form
+# ``landing_assembler`` actually generates — the assembler emitted ``name="name"``
+# while this mapping read ``{{ payload.full_name }}``, so every lead captured
+# through the deterministic landing path stored an empty name and threw away the
+# value the visitor typed. Nothing compared the two files, so nothing caught it.
+# Derivation is the fix: a field rename is now one edit in one tuple.
+_DEFAULT_FORM_TYPE = CONTACT_FORM_TYPE
 
 # Default event mapping seeded at publish so a basic contact lead lands with NO
-# manual Mongo edit. Maps the common lead fields a marketing form collects; the
-# interpolator drops any ``{{ payload.X }}`` whose key is absent from the
-# submission (resolves to None), so a form that only sends {full_name, phone}
-# still produces a Lead — the extra fields simply come back empty.
-_DEFAULT_EVENT_MAPPING: dict[str, Any] = {
-    _DEFAULT_FORM_TYPE: {
-        "creates": "Lead",
-        "fields": {
-            "full_name": "{{ payload.full_name }}",
-            "phone": "{{ payload.phone }}",
-            "email": "{{ payload.email }}",
-            "message": "{{ payload.message }}",
-        },
-    }
-}
+# manual Mongo edit. The interpolator drops any ``{{ payload.X }}`` whose key is
+# absent from the submission (resolves to None), so a form that only sends
+# {full_name, phone} still produces a Lead — the extra fields come back empty.
+_DEFAULT_EVENT_MAPPING: dict[str, Any] = default_event_mapping()
 
 
 def _default_allowed_origins() -> list[str]:
@@ -1368,6 +1564,11 @@ def _cf_client():
         api_token=api_token,
         zone_id=zone_id,
         dispatch_namespace=os.environ.get("PAW_CF_DISPATCH_NAMESPACE", "paw-sites"),
+        # The name a customer pastes at their own registrar. NOT defaulted here: it
+        # must be a proxied record on our zone, only the operator knows which one, and
+        # the value this used to derive from the zone id had no DNS records at all.
+        # ``create_custom_hostname`` refuses when it is unset — see cloudflare_client.
+        cname_target=os.environ.get("PAW_CF_CNAME_TARGET", ""),
     )
 
 
@@ -1503,6 +1704,27 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # SI-4: the persisted import summary for an imported site; None for every
         # non-imported site (empty dict on the doc reads as None on the wire).
         import_report=getattr(doc, "import_report", None) or None,
+        # SC-1: the screenshot of the site's live page the gallery card renders.
+        # None until a capture lands (empty string on the doc, and every pre-SC-1
+        # row via the getattr default, read as None on the wire).
+        preview_image_url=getattr(doc, "preview_image_url", "") or None,
+        # SL-3: the build lane's state, straight off the persisted row. These three
+        # were declared on the DTO by SG-9i and never populated here, so every
+        # response carried the DEFAULTS — ``build_status`` frozen at "none" no matter
+        # what the row said. A client polling a build therefore watched a field that
+        # could not change, which is indistinguishable from a build that never starts.
+        #
+        # Read with ``getattr`` defaults like every field above, so a pre-SG-9i row
+        # reads as "no build" rather than raising.
+        #
+        # ``build_status`` is passed through VERBATIM — never normalised against a
+        # known set. The wire's contract is that a client treats an unrecognised status
+        # as in-progress, and mapping an unknown value to "none" here would break that
+        # from the server side: it would tell a client "nothing is building" about a
+        # build that is running under a status this deploy predates.
+        build_status=getattr(doc, "build_status", "none"),
+        build_reason=getattr(doc, "build_reason", None),
+        build_job_id=getattr(doc, "build_job_id", None),
     )
 
 
@@ -1544,6 +1766,31 @@ async def require_sites_plan(workspace_id: str) -> None:
         )
 
 
+async def _emit_site_created(doc: _SiteDoc) -> None:
+    """Publish ``SiteCreated`` for a freshly minted DRAFT Site doc.
+
+    Deliberately UNGUARDED — the caller owns the try/except, so patching this in a
+    test exercises that guard rather than replacing it. Lazy imports keep the sites
+    service free of a hard cloud-realtime dependency, matching ``publish_pocket``.
+    """
+    from pocketpaw_ee.cloud._core.realtime.emit import emit
+    from pocketpaw_ee.cloud._core.realtime.events import SiteCreated
+
+    await emit(
+        SiteCreated(
+            data={
+                "workspace_id": doc.workspace,
+                "site_id": str(doc.id),
+                "pocket_id": doc.pocket_id,
+                "owner": doc.owner,
+                # Always False on a fresh draft. Sent anyway so a listener can tell a
+                # draft from a publish off the payload alone, with no second read.
+                "deployed": False,
+            }
+        )
+    )
+
+
 async def create_draft_site(
     *,
     workspace_id: str,
@@ -1579,6 +1826,17 @@ async def create_draft_site(
     publish. ``publish`` reuses a stored non-empty ``signed_key``, so minting one here is
     what keeps the built key and the doc in sync (the same invariant
     ``test_republish_reuses_signed_key`` pins for a re-publish).
+
+    REALTIME (fix/sites-draft-realtime): a FRESH mint emits ``SiteCreated`` so an
+    already-open gallery gains the card on its own. This used to carry a
+    ``# no-event`` opt-out reasoning that nothing downstream keys on a draft doc —
+    true of the search index and soul memory, but the gallery is a listener too, and
+    it was left with no signal at all. The per-run ``pocket_created`` SSE does not
+    cover this: it reaches only the tab that owns that chat stream, so a draft
+    created from /chat, a second tab, a teammate's session, or a zip/url import was
+    invisible until someone pressed Refresh. The emit sits AFTER the idempotent early
+    return above, so it fires once per real insert — a repeat create, or one against
+    an already-live doc, stays silent.
     """
     oid = _live_object_id(workspace_id, pocket_id)
     # Idempotent + dedupe-safe: never mint a second doc for a pocket, and never reset
@@ -1608,10 +1866,29 @@ async def create_draft_site(
         allowed_origins=_default_allowed_origins(),
         event_mapping=_DEFAULT_EVENT_MAPPING,
     )
-    # no-event: a DRAFT is not a published/deployed mutation — nothing downstream
-    # (search index, soul memory, ripple invalidation) keys on a draft Site doc;
-    # publish emits SitePublished when the site actually goes live.
     await doc.insert()
+    # The gallery IS a downstream listener, and a draft is the moment its card
+    # appears — so this emits, where it used to carry a ``# no-event`` opt-out.
+    # Guarded like every other post-insert side effect below: the Site doc is the
+    # primary contract, and a realtime failure must never cost the user the site
+    # they just asked for. ``emit`` already swallows publish errors; this also
+    # catches the "no bus initialised" AssertionError, so a create that runs outside
+    # a booted cloud (a script, a test tree without the bus fixture) still succeeds.
+    try:
+        await _emit_site_created(doc)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "create_draft_site: site.created emit failed (non-fatal) for pocket %s",
+            pocket_id,
+            exc_info=True,
+        )
+    # SC-2: this is the moment the draft becomes a card in the gallery, so it is the
+    # moment to try to give that card a picture. A draft has no url, so the capture
+    # shoots its MARKUP instead. Only on a fresh mint — the idempotent early return
+    # above means a repeat create never re-shoots, and a live doc never gets a draft
+    # picture. Wrapped like every other publish-tail side effect: a create must not
+    # fail because a thumbnail could not be taken.
+    _schedule_draft_screenshot(doc)
     return doc
 
 
@@ -1731,6 +2008,7 @@ async def publish(
     assets: dict[str, str] | None = None,
     pattern: str | None = None,
     builder_origin: str | None = None,
+    keeps_client_bundle: bool = False,
     preview: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
@@ -1855,6 +2133,7 @@ async def publish(
             engine=engine,
             source=source,
             builder_origin=builder_origin,
+            keeps_client_bundle=keeps_client_bundle,
             pocket_id=pocket_id,
             # A preview/edit/arm build skips only the SSR fail-gate (smoke=False); a
             # live publish keeps it (see _deploy_site_doc). It still BUILDS fresh +
@@ -1900,6 +2179,16 @@ async def publish(
                 pocket_id,
                 preview_url,
             )
+        # SC-2: this build just put the pocket's current markup on disk, so a draft
+        # capture here costs a file read rather than the 16s build the create-time
+        # capture declines to spend — this is what fills in a ripple/svelte draft's
+        # card at all. By POCKET, not by this object: a preview returns a transient,
+        # never-persisted doc with nothing to record a picture on, while the real
+        # draft doc is in Mongo under the stable per-pocket id. An already-LIVE site
+        # resolves a doc WITH a url, which the draft capture declines — so previewing
+        # a live site can never replace the picture of the page visitors see with a
+        # picture of an unapproved edit.
+        _schedule_draft_screenshot_for_pocket(workspace_id=workspace_id, pocket_id=pocket_id)
         return _SiteDoc(
             id=ObjectId(site_id),
             workspace=workspace_id,
@@ -1949,6 +2238,7 @@ async def publish(
         assets=assets,
         pattern=pattern,
         builder_origin=builder_origin,
+        keeps_client_bundle=keeps_client_bundle,
         generator=generator,
         cloudflare=_cloudflare,
         bundle_reader=_bundle_reader,
@@ -1972,6 +2262,7 @@ async def _deploy_site_doc(
     assets: dict[str, str] | None = None,
     pattern: str | None = None,
     builder_origin: str | None = None,
+    keeps_client_bundle: bool = False,
     generator: GeneratorClient | None = None,
     cloudflare: Any | None = None,
     bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -1979,6 +2270,13 @@ async def _deploy_site_doc(
     # HE-4: the workers deployer is engine-aware (``deploy_workers(site_id,
     # project_dir, *, engine=..., d1_database_id=...)``), so the seam takes kwargs.
     workers_deploy: Callable[..., Any] | None = None,
+    # SL-3: an ALREADY-BUILT project dir. When given, the inline build is SKIPPED and
+    # everything after it (concierge embed → deploy → upsert → sync/screenshot) runs
+    # verbatim. This is how the ephemeral build lane finishes a publish: the worker
+    # built in a sandbox, materialised the artifact, and calls back in here rather than
+    # growing a second copy of the deploy tail. One deploy path, two places the build
+    # can have happened.
+    prebuilt_project_dir: str | None = None,
 ) -> _SiteDoc:
     """Generate, smoke-gate, deploy, and UPSERT the LIVE canonical Site doc.
 
@@ -2034,6 +2332,27 @@ async def _deploy_site_doc(
             builder_origin=builder_origin,
         )
 
+    # SL-3: fork to the EPHEMERAL BUILD LANE for the engines whose artifact can
+    # actually be deployed from it. A prebuilt dir means the worker already ran this
+    # build and is calling back in to finish the publish, so it must NOT re-fork.
+    if prebuilt_project_dir is None and build_runs_async(engine):
+        return await _enqueue_static_build(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            site_id=site_id,
+            signed_key=signed_key,
+            site_name=site_name,
+            ripple_spec=ripple_spec,
+            theme=theme,
+            engine=engine,
+            source=source,
+            assets=assets,
+            pattern=pattern,
+            builder_origin=builder_origin,
+            keeps_client_bundle=keeps_client_bundle,
+        )
+
     gen = generator or GeneratorClient()
     # DEP-3: map a generator/install/smoke failure (missing toolchain, non-zero
     # build, SSR fail-gate) to a clean CloudError (sites.generator_failed → 5xx)
@@ -2044,27 +2363,36 @@ async def _deploy_site_doc(
     # non-import publish's build call (and every injected fake's expected kwargs)
     # stays byte-identical to before the assets seam existed.
     _asset_kwargs: dict[str, Any] = {"assets": assets} if assets else {}
-    build = await _build_or_cloud_error(
-        gen,
-        ripple_spec=ripple_spec,
-        theme=theme,
-        site_id=site_id,
-        title=site_name,
-        capture_api_base=_capture_base(),
-        capture_signed_key=signed_key,
-        engine=engine,
-        source=source,
-        builder_origin=builder_origin,
-        **_asset_kwargs,
-        # PERF-3: build into the STABLE per-pocket working dir so node_modules
-        # persists and `bun install` is cached across builds, cutting the dominant
-        # per-edit cost.
-        pocket_id=pocket_id,
-        # A live deploy keeps the SSR fail-gate (smoke=True) so the gate + the
-        # rollback in edit_svelte_component are unchanged — a broken edit never
-        # reaches the live deploy.
-        smoke=True,
-    )
+    if prebuilt_project_dir is not None:
+        # SL-3: the worker already built this site in a sandbox and materialised the
+        # artifact on disk. Skip the build and reuse everything below it verbatim —
+        # ``BuildResult`` carries only what the tail reads (``project_dir``), and the
+        # SSR smoke gate does not apply because this artifact came back from a build
+        # that already ran the engine's own gate inside the sandbox.
+        build = BuildResult(project_dir=prebuilt_project_dir, ripple_version=None)
+    else:
+        build = await _build_or_cloud_error(
+            gen,
+            ripple_spec=ripple_spec,
+            theme=theme,
+            site_id=site_id,
+            title=site_name,
+            capture_api_base=_capture_base(),
+            capture_signed_key=signed_key,
+            engine=engine,
+            source=source,
+            builder_origin=builder_origin,
+            keeps_client_bundle=keeps_client_bundle,
+            **_asset_kwargs,
+            # PERF-3: build into the STABLE per-pocket working dir so node_modules
+            # persists and `bun install` is cached across builds, cutting the dominant
+            # per-edit cost.
+            pocket_id=pocket_id,
+            # A live deploy keeps the SSR fail-gate (smoke=True) so the gate + the
+            # rollback in edit_svelte_component are unchanged — a broken edit never
+            # reaches the live deploy.
+            smoke=True,
+        )
 
     # Grow the concierge onto the built pages BEFORE they deploy, so the artifact
     # that goes live already carries the bar. This is a LIVE-publish-only step: a
@@ -2081,6 +2409,20 @@ async def _deploy_site_doc(
         # pass the two fields provisioning needs to stand one up in memory.
         user_id=user_id,
         site_name=site_name,
+    )
+
+    # Stamp the free-tier attribution badge onto the same built tree, also before
+    # the deploy. Ordered AFTER the concierge so the bar is present when the badge
+    # walks the pages (both are idempotent, so the order only decides which one
+    # logs the rewrite — but a fixed order keeps re-publishes byte-stable).
+    #
+    # NOT failure-soft, unlike the concierge above: this raises and the publish
+    # aborts rather than deploying an unbadged free site. See ``_stamp_free_badge``.
+    await _stamp_free_badge(
+        workspace_id=workspace_id,
+        site_id=site_id,
+        project_dir=build.project_dir,
+        engine=engine,
     )
 
     # DS-2: a DYNAMIC site (pattern == "dynamic", or a spec carrying live
@@ -2138,8 +2480,9 @@ async def _deploy_site_doc(
         from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
 
         deploy_w = workers_deploy or workers_deploy_mod.deploy_workers
-        # HE-4: pass the engine so an html site deploys as an assets-only Worker
-        # (no server script), while ripple/svelte keep the SvelteKit-worker config.
+        # HE-4 / RX-1: pass the engine so an html OR react site deploys as an
+        # assets-only Worker (no server script — react builds, but to a prerendered
+        # static dist/), while ripple/svelte keep the SvelteKit-worker config.
         url = await deploy_w(site_id, build.project_dir, engine=engine)
     else:  # "wfp"
         cf = cloudflare or _cf_client()
@@ -2195,6 +2538,10 @@ async def _deploy_site_doc(
             script_name=site_id,
             deployed=True,
             deployed_at=now,
+            # Record WHICH target this deploy used, not which one was configured. The
+            # custom-domain lane needs "does this site have its own route-addressable
+            # Worker", and PAW_CF_DEPLOY_MODE cannot answer it at request time.
+            deploy_target=mode,
             signed_key=signed_key,
             url=url,
             # DS-2: persist the D1 id this dynamic site is bound to ("" for static)
@@ -2220,6 +2567,7 @@ async def _deploy_site_doc(
         doc.script_name = site_id
         doc.deployed = True
         doc.deployed_at = now
+        doc.deploy_target = mode
         doc.url = url
         # The deploy may have moved (local → workers, or a new sites domain), so
         # re-assert the site's own host on every publish. Idempotent and additive:
@@ -2244,6 +2592,11 @@ async def _deploy_site_doc(
     # the concierge catches up a moment later. A preview publish never reaches here
     # (it returns earlier), so a draft never rewrites the live KB.
     _schedule_site_knowledge_sync(doc)
+    # SC-1: the page the gallery card shows is now a different page, so re-shoot
+    # it. Same placement and the same rule as the sync above — the site is
+    # already live, so a screenshot may never fail or delay the publish. A
+    # preview publish never reaches here, so a draft is never photographed.
+    _schedule_site_screenshot(doc)
     return doc
 
 
@@ -2279,10 +2632,63 @@ async def _embed_concierge_bar(
     """
     try:
         from pocketpaw_ee.paw_bar import embed
-        from pocketpaw_ee.sites.engines import static_output_rel
+        from pocketpaw_ee.sites.engines import resolve_static_output_rel
 
         doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
         concierge_enabled = True if doc is None else bool(doc.concierge_enabled)
+
+        # Does this site's PLAN sell a concierge (feat/sites-concierge-entitlement)?
+        # Resolved here rather than inside ``concierge_snippet`` because this is the
+        # function that owns the Site doc — ``entitlements`` may not import
+        # ``models.site`` (EE cloud rule 2), and ``embed`` has no business loading it.
+        #
+        # A no-op unless ``billing_enforced``: with billing off (OSS / self-host, and
+        # every in-repo deploy today) this stays True and the publish path is byte
+        # for byte what it was.
+        #
+        # Fail-closed on a FIRST publish, the same way the badge stamper does: no doc
+        # means no ``plan_tier``, which resolves to the free floor and ships the page
+        # bar-less. The opposite default would embed a bar on every brand-new site
+        # regardless of plan, and that bar would 403 every visitor — a broken
+        # concierge is worse than none.
+        #
+        # ``pending`` IS ENTITLED HERE, and only here — belt and braces beside the
+        # ordering fix in ``activate_site``.
+        #
+        # That fix (flip the status BEFORE ``_deploy_site_doc``) closes the
+        # charge-first window this function used to land in. This mapping covers the
+        # OTHER direction the publish path can produce it: ``_apply_site_plan``
+        # stamps ``plan_tier`` / ``subscription_status`` AFTER ``publish()`` has
+        # already deployed, and a republish onto a paid tier resets a live site to
+        # "pending" until the new sub confirms. Both mean a paying customer can
+        # reach this line with "pending" on the doc.
+        #
+        # Getting it wrong here is expensive and silent: the page ships with no
+        # loader script, and NOTHING re-runs this embed afterwards, so it stays
+        # bar-less until some unrelated publish. Found by review before it shipped.
+        #
+        # It does not weaken the RUNTIME gate, which is what actually enforces:
+        # ``auth.site_keys.concierge_available`` still refuses "pending" on every
+        # visitor request, and a test pins that. A site deployed with a bar but not
+        # yet activated serves a bar that declines until the webhook lands — seconds,
+        # and self-correcting in the right direction. The inverse (refuse at publish,
+        # allow at runtime) does not self-correct at all.
+        concierge_entitled = True
+        from pocketpaw.config import get_settings
+
+        if get_settings().billing_enforced:
+            from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+            status = getattr(doc, "subscription_status", None)
+            concierge_entitled = entitlements_service.resolve_site_entitlements(
+                site_id=site_id,
+                workspace_id=workspace_id,
+                plan_tier=getattr(doc, "plan_tier", None),
+                # See above: the charge-first deploy runs while the status is still
+                # "pending". Read it as active for the EMBED decision only.
+                subscription_status="active" if status == "pending" else status,
+                concierge_enabled=True,  # asking the PLAN; the switch is read above
+            ).concierge_entitled
 
         # Publish-time provisioning (the third trigger): an agent-created site
         # published in the same conversation has passed through NEITHER
@@ -2327,13 +2733,30 @@ async def _embed_concierge_bar(
             # only one env var to move when the deploy moves.
             api_base=_capture_base(),
             concierge_enabled=concierge_enabled,
+            concierge_entitled=concierge_entitled,
         )
         if not snippet:
+            # Say WHY when the reason is billing. This early return is the exact
+            # shape of the 2026-07-30 provisioning bug documented above ("with no
+            # log line, because the empty snippet returns early") — a page ships
+            # bar-less and nothing anywhere records it. The other four gates are
+            # ordinary states a reader can infer from the site; "the plan does not
+            # sell this" is the one nobody would think to check, and it is the one
+            # a support ticket will be about.
+            if not concierge_entitled:
+                logger.info(
+                    "sites: site %s published without its concierge — the plan does "
+                    "not include one",
+                    site_id,
+                )
             return
 
         # HE-4: where the deployable pages live differs by engine — the SvelteKit
-        # adapter output for ripple/svelte, the project dir itself for html.
-        root = Path(project_dir, static_output_rel(engine))
+        # adapter output for ripple and dynamic svelte, ``build`` for a STATIC svelte
+        # site (SL-1, adapter-static), the project dir itself for html. Resolved off
+        # the artifact because the svelte answer is a property of the site, not the
+        # engine name — and injecting into the wrong root silently embeds nothing.
+        root = Path(project_dir, resolve_static_output_rel(project_dir, engine))
         changed = embed.inject_into_tree(root, snippet)
         logger.info(
             "sites: embedded the concierge bar into %d page(s) of site %s",
@@ -2346,6 +2769,72 @@ async def _embed_concierge_bar(
             site_id,
             exc_info=True,
         )
+
+
+async def _stamp_free_badge(
+    *,
+    workspace_id: str,
+    site_id: str,
+    project_dir: str,
+    engine: str,
+) -> None:
+    """Stamp the attribution badge onto the built pages, before they deploy.
+
+    The sibling of ``_embed_concierge_bar`` — same seam (between build and deploy,
+    so the artifact that lands is already right), same output-root resolution —
+    with the OPPOSITE failure posture, which is the entire point.
+
+    ``_embed_concierge_bar`` swallows everything because a site going live matters
+    more than its bar. This one swallows NOTHING. The badge is what the paid
+    per-site tier sells the removal of, so a badge that fails open is not an
+    enforcement mechanism: the exploit is to make injection fail and keep the free
+    unbadged site. ``BadgeInjectionError`` therefore propagates and the publish
+    aborts before deploy — a site that cannot be badged does not ship.
+
+    The site's billing fields are read off its EXISTING doc and resolved by
+    ``entitlements.resolve_site_entitlements``, which is where the "may this site
+    drop its badge" rule lives — NOT here, and not off ``plan_tier`` alone. A paid
+    tier whose subscription is cancelled, pending, or was never charged at all
+    keeps its ``plan_tier``, so reading the tier by itself hands those sites a
+    free badge removal.
+
+    A FIRST publish reaches here BEFORE the Site doc is inserted, exactly as the
+    concierge embed above documents, so "no doc" must mean "free" rather than
+    "skip" — the opposite default would ship every brand-new site unbadged, which
+    is the bug this whole module exists to prevent.
+    """
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+    from pocketpaw_ee.sites import badge
+    from pocketpaw_ee.sites.engines import resolve_static_output_rel
+
+    doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+    # ``getattr`` carries the no-doc case on its own: a first publish has no Site
+    # row yet, and ``getattr(None, "plan_tier", None)`` is already the fail-closed
+    # answer. The defaults here ARE the first-publish contract — an absent tier and
+    # an absent subscription resolve to free-and-badged.
+    ent = entitlements_service.resolve_site_entitlements(
+        site_id=site_id,
+        workspace_id=workspace_id,
+        plan_tier=getattr(doc, "plan_tier", None),
+        subscription_status=getattr(doc, "subscription_status", None),
+        concierge_enabled=bool(getattr(doc, "concierge_enabled", True)),
+    )
+
+    if not ent.badge_required:
+        logger.info(
+            "sites: site %s is on paid tier %s with an active subscription — badge not required",
+            site_id,
+            ent.plan_tier,
+        )
+        return
+
+    root = Path(project_dir, resolve_static_output_rel(project_dir, engine))
+    changed = badge.inject_into_tree(root)
+    logger.info(
+        "sites: stamped the attribution badge onto %d page(s) of site %s",
+        len(changed),
+        site_id,
+    )
 
 
 def _with_deployed_host(allowed_origins: list[str], url: str) -> list[str]:
@@ -2397,6 +2886,149 @@ def _schedule_site_knowledge_sync(site: _SiteDoc) -> None:
             getattr(site, "id", "?"),
             exc_info=True,
         )
+
+
+def _schedule_site_screenshot(site: _SiteDoc) -> None:
+    """Fire the background screenshot of a freshly-deployed site (SC-1). Non-async,
+    never blocks, never raises. Looked up through the module so tests can patch it,
+    mirroring ``_schedule_site_knowledge_sync`` directly above.
+
+    The try/except is the whole point, and it is a stronger requirement here than
+    for the KB sync: this is called from the tail of a LIVE deploy, so anything
+    escaping would fail a publish of a site that is already deployed and serving —
+    and unlike a sync, the work behind it is a paid, quota'd, remote browser render
+    that WILL time out or 400 sooner or later. A card with no picture is not a
+    problem worth failing a publish over.
+    """
+    try:
+        from pocketpaw_ee.sites.screenshot import schedule_site_screenshot
+
+        schedule_site_screenshot(site)
+    except Exception:  # noqa: BLE001 — never fail a live publish over a screenshot
+        logger.warning(
+            "sites.screenshot: could not schedule capture for site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
+
+
+def _schedule_draft_screenshot(site: _SiteDoc) -> None:
+    """Fire the background screenshot of a freshly minted DRAFT site (SC-2). Non-async,
+    never blocks, never raises. Looked up through the module so tests can patch it,
+    mirroring ``_schedule_site_screenshot`` directly above.
+
+    The try/except matters just as much here as on the live path, for a different
+    reason: ``create_draft_site`` is called from the tail of a site CREATE and from
+    the tail of a zip/from-url IMPORT, and the import call site does NOT wrap it. An
+    escaping error would fail an import whose files are already safely persisted, in
+    exchange for a picture on a gallery card.
+    """
+    try:
+        from pocketpaw_ee.sites.screenshot import schedule_draft_screenshot
+
+        schedule_draft_screenshot(site)
+    except Exception:  # noqa: BLE001 — never fail a create over a thumbnail
+        logger.warning(
+            "sites.screenshot: could not schedule draft capture for site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
+
+
+def _schedule_draft_screenshot_for_pocket(*, workspace_id: str, pocket_id: str) -> None:
+    """Fire the background draft capture for a pocket's Site doc (SC-2), from the tail
+    of a PREVIEW build. Non-async, never blocks, never raises.
+
+    By pocket rather than by doc because a preview's return value is transient and
+    never persisted — the doc worth recording a picture on is the draft minted at
+    create, which the capture resolves for itself. The try/except keeps a preview
+    (the builder's inner loop, run on every edit) from ever failing over a thumbnail.
+    """
+    try:
+        from pocketpaw_ee.sites.screenshot import schedule_draft_screenshot_for_pocket
+
+        schedule_draft_screenshot_for_pocket(workspace_id=workspace_id, pocket_id=pocket_id)
+    except Exception:  # noqa: BLE001 — never fail a preview over a thumbnail
+        logger.warning(
+            "sites.screenshot: could not schedule draft capture for pocket %s",
+            pocket_id,
+            exc_info=True,
+        )
+
+
+async def refresh_site_preview(*, workspace_id: str, site_id: str) -> SitePreviewRefreshResponse:
+    """Re-capture a site's card image NOW, and report what happened (SC-3).
+
+    The manual half of the preview policy. Automatic capture fires on every
+    successful deploy, which covers the case that matters (the design changed), but
+    it cannot cover a capture that FAILED — Cloudflare unconfigured at the time,
+    quota exhausted, a render that timed out — or a draft whose markup only became
+    buildable after it was minted. Without this the only way to fix a card was to
+    republish an unchanged site.
+
+    Deliberately the mirror image of the deploy path on the one axis that matters:
+    **this one raises.** ``safe_take_*`` exists so a picture can never cost anybody
+    a publish; here a person pressed a button and is waiting, so a Cloudflare
+    failure must reach them as an error rather than a 200 carrying the same stale
+    url they were trying to replace. The unsafe forms are called on purpose.
+
+    Also deliberately SYNCHRONOUS. A remote browser render takes seconds, which is
+    too long to block a publish and exactly right for a request whose entire
+    purpose is the answer.
+
+    Routes itself the same way the automatic path does: a site with a url is
+    photographed live, a draft is photographed from its own markup. Tenant-scoped
+    via ``_load``, so another workspace's site is a 404, never a render.
+
+    Runs the same readiness gate the deploy path does, on a SHORT budget, and reports
+    a page that is not serving as its own ``sites.preview_not_serving`` — see the
+    comment at the branch. This is also the recovery path for a capture the deploy
+    path DECLINED: when an edge takes longer than the post-deploy budget to come up,
+    the card is deliberately left without a picture, and this is what fills it in.
+    """
+    from pocketpaw_ee.sites.screenshot import (
+        _READY_DELAYS_MANUAL,
+        take_draft_screenshot,
+        take_site_screenshot,
+        wait_until_serving,
+    )
+
+    site = await _load(workspace_id, site_id)
+
+    url = (getattr(site, "url", "") or "").strip()
+    if url:
+        # The readiness gate, run HERE as well as inside the capture, purely so this
+        # path can name what went wrong. ``take_site_screenshot`` reports every
+        # decline the same way — with "" — and the two declines need opposite
+        # advice: a site with nothing renderable yet should be published, while a
+        # site that IS published and merely still coming up should just be retried.
+        # On a short budget, because a person is watching a spinner: the deploy
+        # path's minute is right for a background task and wrong for a request.
+        if not await wait_until_serving(url, delays=_READY_DELAYS_MANUAL):
+            raise ValidationError(
+                "sites.preview_not_serving",
+                "The site isn't answering yet. A deploy can take a moment to go "
+                "live at the edge — try the refresh again shortly.",
+            )
+        # A single confirming probe immediately before the paid render, so the gate
+        # has no bypass path: every call into ``take_site_screenshot`` is gated.
+        image_url = await take_site_screenshot(site, ready_delays=())
+    else:
+        image_url = await take_draft_screenshot(site)
+
+    if not image_url:
+        # The capture declined rather than failed: a draft with nothing renderable
+        # yet, or a build this deployment has not opted into (see
+        # ``draft_markup.build_allowed``). Returning 200 with the previous url would
+        # report success for a refresh that did not happen, and a 500 would blame
+        # the server for a site that simply has no page to photograph.
+        raise ValidationError(
+            "sites.preview_unavailable",
+            "There's nothing to photograph yet — publish the site, or open its "
+            "preview once so there's a page to capture.",
+        )
+
+    return SitePreviewRefreshResponse(site_id=site_id, preview_image_url=image_url)
 
 
 # How long a Site may sit in ``provision_status="provisioning"`` before a new
@@ -2546,6 +3178,200 @@ async def _provision_dynamic_site(
     return doc
 
 
+# ---------------------------------------------------------------------------
+# SL-3 — the async static publish.
+# ---------------------------------------------------------------------------
+
+
+def build_runs_async(engine: str | None) -> bool:
+    """Does publishing this engine ENQUEUE its build instead of running it inline?
+
+    True for exactly the engines whose ephemeral-lane artifact can actually be
+    DEPLOYED, which today is react alone. This is a narrow answer to a broad-sounding
+    question, and the narrowness is the whole content of the predicate:
+
+    * ``html`` runs no build at all (``needs_node_build`` is False), so there is
+      nothing to enqueue. Flipping it would add a queue wait to the one engine that
+      never needed one.
+    * ``ripple`` and DYNAMIC ``svelte`` build on adapter-cloudflare, whose output's
+      pages are rendered by a ``_worker.js`` whose imports sit OUTSIDE the tarred
+      directory. The artifact therefore cannot serve — which is not a guess: it is why
+      ``truth_lane`` refuses to even PREVIEW one (``REASON_WORKER_RENDERED``). Queueing
+      those builds would replace a working publish with one nothing can deploy.
+    * STATIC ``svelte`` (adapter-static) IS self-sufficient, and is still excluded,
+      because which adapter ran is a property of the built SITE and is not knowable at
+      enqueue time — only after the build. A gate has to decide before it spends the
+      queue, so svelte stays inline until the artifact question is settled for the
+      whole track.
+    * ``react`` emits a prerendered, assets-only ``dist`` with no server entry, so the
+      tar is the whole deployable site.
+
+    Widen this ONLY together with the artifact: the moment an adapter-cloudflare
+    artifact can serve, ripple and svelte belong here too, and this predicate is the
+    one place that changes.
+    """
+    return normalize_engine(engine) == "react"
+
+
+async def _enqueue_static_build(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    site_id: str,
+    signed_key: str,
+    site_name: str,
+    ripple_spec: dict[str, Any] | None,
+    theme: dict[str, Any],
+    engine: str,
+    source: dict[str, str] | None,
+    assets: dict[str, str] | None,
+    pattern: str | None,
+    builder_origin: str | None,
+    keeps_client_bundle: bool,
+) -> _SiteDoc:
+    """Enqueue a static site's build and return immediately (SL-3).
+
+    The async half of ``_deploy_site_doc``. It ensures the ONE canonical Site doc for
+    ``(workspace, pocket_id)`` exists, stamps the build lifecycle onto it, and hands the
+    build to the ephemeral lane. The worker calls back into
+    :func:`deploy_prebuilt_site` when the artifact is ready, so the deploy, the upsert
+    and the post-deploy scheduling all still happen exactly once, in one place.
+
+    A RE-PUBLISH DOES NOT TAKE THE LIVE SITE DOWN, and that is the important difference
+    from ``_provision_dynamic_site``, which sets ``deployed=False`` / ``url=""`` while
+    its job runs. Here the previous deploy is still serving the moment a rebuild is
+    queued, so clearing those fields would report a working site as not-live for the
+    length of a build. ``build_status`` carries the in-flight state instead — the wire
+    contract the frontend already codes to ("a site can be live and simultaneously
+    mid-rebuild").
+
+    Returns the doc carrying ``build_status`` / ``build_started_at`` / ``build_job_id``,
+    which ``_to_response`` surfaces so the client has something to poll. On a
+    single-flight no-op (a build is genuinely already in flight) the doc comes back
+    unchanged, still carrying the in-flight build's own job id — the caller is watching
+    the right build, just not a new one.
+    """
+    # Lazy import: keeps the sites service free of an eager arq/Redis dependency at
+    # module load, and breaks the cycle (``build_job`` imports this module).
+    from pocketpaw_ee.sites import build_job
+    from pocketpaw_ee.sites.generator_client import build_generator_input
+
+    oid = ObjectId(site_id)
+    doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        doc = _SiteDoc(
+            id=oid,
+            workspace=workspace_id,
+            pocket_id=pocket_id,
+            owner=user_id,
+            name=site_name,
+            script_name=site_id,
+            # A first publish has nothing serving yet, so this is honest rather than
+            # pessimistic: the worker flips both when the deploy succeeds.
+            deployed=False,
+            url="",
+            signed_key=signed_key,
+            builder_origin=builder_origin or "",
+            allowed_origins=_default_allowed_origins(),
+            event_mapping=_DEFAULT_EVENT_MAPPING,
+        )
+        await doc.insert()
+    else:
+        # Refresh only the identity fields a re-publish legitimately changes. NOT
+        # ``deployed`` / ``url`` (the prior deploy is still live), NOT
+        # ``allowed_origins`` / ``domains`` / ``signed_key`` (a connected domain and the
+        # capture key must survive a rebuild).
+        doc.pocket_id = pocket_id
+        doc.owner = user_id
+        doc.name = site_name
+        doc.script_name = site_id
+        await doc.save()
+
+    generator_input = build_generator_input(
+        engine=engine,
+        theme=theme,
+        site_id=site_id,
+        title=site_name,
+        capture_api_base=_capture_base(),
+        capture_signed_key=signed_key,
+        ripple_spec=ripple_spec,
+        source=source,
+        assets=assets,
+        builder_origin=builder_origin,
+        keeps_client_bundle=keeps_client_bundle,
+    )
+    # The inputs the worker hands back to ``deploy_prebuilt_site`` so the deploy tail
+    # runs with exactly what this publish captured, not with whatever the pocket's
+    # draft has become by the time the build finishes.
+    deploy_inputs = {
+        "workspace_id": workspace_id,
+        "user_id": user_id,
+        "pocket_id": pocket_id,
+        "site_id": site_id,
+        "signed_key": signed_key,
+        "site_name": site_name,
+        "engine": engine,
+        "pattern": pattern,
+        "builder_origin": builder_origin,
+    }
+
+    # An enqueue failure PROPAGATES. The helper rolls the row to a terminal status
+    # first, so the site stays republishable, and the raise becomes the 5xx the user
+    # sees. Returning success for a build that was never queued is the one outcome
+    # worse than a failed publish: the row would read in-progress forever and the UI
+    # would poll a job that does not exist.
+    job_id = await build_job.enqueue_site_build(
+        doc,
+        engine=engine,
+        generator_input=generator_input,
+        deploy_inputs=deploy_inputs,
+    )
+    logger.info(
+        "sites: queued the build for site %s (pocket %s, engine %s) as job %s",
+        site_id,
+        pocket_id,
+        engine,
+        job_id,
+    )
+    # Re-read so the response carries what the enqueue just wrote (the helper stamps
+    # through a targeted ``set``, so the in-memory doc this function holds is stale).
+    fresh = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+    return fresh if fresh is not None else doc
+
+
+async def deploy_prebuilt_site(
+    *,
+    project_dir: str,
+    deploy_inputs: dict[str, Any],
+    _local_deploy: Callable[[str, str], str] | None = None,
+    _workers_deploy: Callable[..., Any] | None = None,
+) -> _SiteDoc:
+    """Finish a publish whose build already happened elsewhere (SL-3).
+
+    The seam the build worker calls once it has materialised the artifact. It runs
+    ``_deploy_site_doc``'s tail — concierge embed → deploy → canonical upsert →
+    knowledge sync + screenshot — against the prebuilt tree, so there is exactly ONE
+    implementation of "what happens after a site is built" and the async path cannot
+    drift from the inline one.
+
+    ``deploy_inputs`` is the dict ``_enqueue_static_build`` put in the job payload, so
+    the deploy uses what the PUBLISH captured. The worker passes no injection seams, so
+    ``PAW_CF_DEPLOY_MODE`` selects the target exactly as it does inline (local mode still
+    serves from ``local_server.deploy_local``); the two underscore-prefixed parameters
+    exist only so a test can drive this seam without a real deploy target, mirroring
+    ``publish``'s own ``_local_deploy`` / ``_workers_deploy``.
+    """
+    return await _deploy_site_doc(
+        ripple_spec=None,
+        theme={},
+        prebuilt_project_dir=project_dir,
+        local_deploy=_local_deploy,
+        workers_deploy=_workers_deploy,
+        **deploy_inputs,
+    )
+
+
 async def _load(workspace_id: str, site_id: str) -> _SiteDoc:
     # Guard the cast: a malformed site_id is not a 500. bson raises InvalidId
     # (TypeError for non-str/bytes inputs); both mean "no such site".
@@ -2626,6 +3452,109 @@ async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | N
     return next((d for d in docs if d.url), docs[0])
 
 
+def build_wire_state(doc: _SiteDoc | None) -> dict[str, Any]:
+    """The build fields an AGENT-facing tool reports, derived in ONE place (RX-4).
+
+    ``_to_response`` already surfaces ``build_status`` / ``build_reason`` /
+    ``build_job_id`` to the frontend, which polls them alongside ``url`` and knows
+    that a site can be live and simultaneously mid-rebuild. The chat agent has no
+    such knowledge and cannot poll, so it needs the same three fields PLUS the
+    conclusion drawn from them. This function is that conclusion, and it lives here
+    rather than in the two calling handlers because the publish response and the
+    build-status tool disagreeing about whether a site is live is worse than either
+    being wrong on its own.
+
+    The three raw fields pass through VERBATIM, matching ``_to_response``: a
+    ``build_status`` this deploy predates must never be normalised against a known
+    set, because mapping it to "none" would tell a caller nothing is building about
+    a build that is running.
+
+    ``build_in_progress`` reads an unknown status as IN PROGRESS. That is the WIRE
+    direction and it is deliberately the OPPOSITE of ``build_state.should_enqueue``,
+    which treats an unknown status as terminal — both are right on their own axis
+    (see ``build_state``'s header: a redundant build costs one sandbox, while a
+    spurious "your site is live" costs the user's trust). Derived from
+    ``TERMINAL_STATUSES`` rather than from ``IN_FLIGHT_STATUSES`` so a state added
+    to the machine defaults to in-progress here without anyone remembering to
+    update this function.
+
+    ``is_live`` is the only field an agent should gate "show the user this url" on.
+    It requires a real url AND a successful deploy AND no build in flight, because
+    each of the three is individually insufficient:
+
+      * a FIRST async publish creates the Site doc with ``url=""`` and
+        ``deployed=False`` (``_enqueue_static_build`` — honest, nothing is serving
+        yet), so ``url`` alone is an empty string the agent would hand over;
+      * a RE-publish deliberately KEEPS the previous deploy's ``url`` and
+        ``deployed=True`` so a rebuild never reports a working site as down, so
+        those two alone say "live" while serving the pre-change page;
+      * ``build_status`` alone cannot tell a never-built pocket ("none") from a
+        finished one.
+
+    Pure and I/O-free, so it is directly unit-testable, and it takes ``None`` for a
+    pocket with no Site doc at all (never published) rather than making every caller
+    write the same empty shape.
+    """
+    from pocketpaw_ee.sites.build_state import TERMINAL_STATUSES
+
+    if doc is None:
+        return {
+            "url": "",
+            "deployed": False,
+            "build_status": "none",
+            "build_reason": None,
+            "build_job_id": None,
+            "build_in_progress": False,
+            "is_live": False,
+        }
+    status = getattr(doc, "build_status", "none")
+    in_progress = status != "none" and status not in TERMINAL_STATUSES
+    url = doc.url or ""
+    return {
+        "url": url,
+        "deployed": bool(doc.deployed),
+        "build_status": status,
+        "build_reason": getattr(doc, "build_reason", None),
+        "build_job_id": getattr(doc, "build_job_id", None),
+        "build_in_progress": in_progress,
+        "is_live": bool(url) and bool(doc.deployed) and not in_progress,
+    }
+
+
+async def site_build_status(*, workspace_id: str, pocket_id: str) -> dict[str, Any]:
+    """Read a pocket's current build + live state. READ-ONLY (RX-4).
+
+    The answer to "is it up yet?" on a turn AFTER the publish. Without it the queued
+    state a react publish returns is a dead end: the agent learns a build was
+    enqueued and then has no way to ever discover it finished, because
+    ``build_runs_async("react")`` means the publish call returned before the build
+    even started.
+
+    Resolves the ONE canonical Site doc for the pocket through
+    ``canonical_site_for_pocket``, which is tenant-scoped on ``workspace_id`` and
+    dedupe-aware — the same resolution ``pocket_status`` uses, so the two cannot
+    report different sites for one pocket.
+
+    A pocket with no Site doc returns ``published=False`` rather than raising. From
+    the agent's side "this was never published" is the useful answer and is correct
+    whether the pocket has no site or does not exist; the read cannot leak across
+    tenants either way, because the query is filtered on ``workspace``.
+
+    No plan gate: nothing is mutated, and a workspace that has lost the Sites
+    feature reading its own build state changes nothing it could not already see in
+    the /sites UI. The tenancy filter IS the access check here.
+    """
+    doc = await canonical_site_for_pocket(workspace_id, pocket_id)
+    state = build_wire_state(doc)
+    return {
+        "pocket_id": pocket_id,
+        "site_id": str(doc.id) if doc is not None else None,
+        "name": doc.name if doc is not None else "",
+        "published": doc is not None,
+        **state,
+    }
+
+
 async def canonical_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
     """Public: the ONE canonical Site doc for (workspace, pocket_id), or None.
 
@@ -2673,9 +3602,17 @@ async def provision_deploy(
     bundle: bytes,
     d1_database_id: str,
     cloudflare: Any = None,
-) -> str:
+) -> tuple[str, str]:
     """Deploy a PROVISIONED dynamic site to whichever target ``_deploy_mode()`` names,
-    and return its public URL. The one seam the provision job deploys through.
+    and return ``(public_url, resolved_target)``. The one seam the provision job
+    deploys through.
+
+    The RESOLVED target is returned, not left for the caller to re-derive, because this
+    function is the only place that knows it: ``local`` degrades to ``workers`` below,
+    so re-reading ``PAW_CF_DEPLOY_MODE`` afterwards gives an answer that disagrees with
+    what was actually deployed. The custom-domain lane keys a site's Worker route off
+    that answer, so a disagreement there writes the route against the wrong target — or
+    silently writes none.
 
     Before this existed the job always called ``cf.put_worker``, which only uploads
     into a Workers-for-Platforms dispatch namespace. WfP is a PAID add-on, so an
@@ -2700,9 +3637,10 @@ async def provision_deploy(
     if mode == "workers":
         from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
 
-        return await workers_deploy_mod.deploy_workers(
+        url = await workers_deploy_mod.deploy_workers(
             site_id, project_dir, d1_database_id=d1_database_id
         )
+        return url, "workers"
 
     cf = cloudflare or _cf_client()
     await cf.put_worker(
@@ -2710,7 +3648,7 @@ async def provision_deploy(
         bundle=bundle,
         bindings=provision_d1_bindings(d1_database_id),
     )
-    return provision_site_url(site_id)
+    return provision_site_url(site_id), "wfp"
 
 
 def provision_site_url(site_id: str) -> str:
@@ -2743,19 +3681,32 @@ async def persist_provision_d1_id(site: _SiteDoc, d1_database_id: str) -> None:
     await site.save()
 
 
-async def finalize_provisioned_site(site: _SiteDoc, *, url: str) -> None:
+async def finalize_provisioned_site(site: _SiteDoc, *, url: str, deploy_target: str = "") -> None:
     """Mark a Site doc fully provisioned after migrate + deploy succeed (DP0-3):
     ``provision_status="provisioned"``, ``deployed=True``, stamp the live URL +
-    ``deployed_at``. The last write of the durable job's happy path."""
+    ``deployed_at``. The last write of the durable job's happy path.
+
+    ``deploy_target`` is the target ``provision_deploy`` RESOLVED — which is not the
+    configured mode, because it degrades ``local`` to ``workers`` for a dynamic site.
+    Passed in rather than re-derived here: re-reading the env would ask the question a
+    second time and could get a different answer, which is the whole class of bug this
+    field exists to end. Defaulted to "" so an older caller writes nothing rather than
+    something wrong."""
     site.provision_status = "provisioned"
     site.deployed = True
     site.deployed_at = datetime.now(UTC)
     site.url = url
+    if deploy_target:
+        site.deploy_target = deploy_target
     await site.save()
     # A dynamic site stands up through this job rather than through
     # ``_deploy_site_doc``, so it needs its own knowledge sync or its concierge
     # would be the only one left knowing nothing about the business.
     _schedule_site_knowledge_sync(site)
+    # SC-1: and its own screenshot, for the same reason — this is the moment a
+    # dynamic site becomes reachable, so it is the moment there is a page to
+    # photograph. The url was stamped a few lines above.
+    _schedule_site_screenshot(site)
 
 
 async def mark_provision_failed(site: _SiteDoc) -> None:
@@ -2813,6 +3764,254 @@ async def build_provision_bundle(
     return build.project_dir, bundle
 
 
+# ---------------------------------------------------------------------------
+# SL-2 — the ephemeral-build lane's Site-doc seams.
+#
+# ``sites/build_job.py`` owns the build (scaffold → sandbox → classify → settle); this
+# module owns the Site document, the same split DP0-3's seams above make for the provision
+# job. The build lane never imports the Beanie doc.
+#
+# EVERY WRITE HERE IS A TARGETED ``set``, NOT A ``save()``, and that is the one thing not
+# to change. A build runs for minutes alongside a publish that may be writing ``url`` /
+# ``deployed`` / ``name`` on the same row; a full ``save()`` from a doc loaded before that
+# publish would silently roll those fields back to their pre-publish values. The build
+# lane has no business writing anything but its own four fields. (``preview_image_url``
+# is written the same way, for the same reason.)
+# ---------------------------------------------------------------------------
+
+
+async def load_build_site(workspace_id: str, site_id: str) -> _SiteDoc | None:
+    """The Site row a build job operates on, or ``None``.
+
+    Scoped to ``workspace_id`` like ``_load``: the job is handed an id, and a read that
+    ignored the workspace would let a bad payload move another tenant's row. Returns None
+    rather than raising for a deleted site or a malformed id — the job then no-ops, which
+    is the only sane response to "there is nothing to record on".
+    """
+    try:
+        oid = ObjectId(site_id)
+    except (InvalidId, TypeError):
+        return None
+    return await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+
+
+async def claim_build_queued(
+    site: _SiteDoc,
+    *,
+    job_id: str,
+    timeout_seconds: int,
+    now: datetime | None = None,
+) -> bool:
+    """CLAIM the build slot for ``site`` and stamp it ``queued``. False means lost.
+
+    One write, all four fields, CONDITIONAL on the row still being claimable.
+    ``build_started_at`` is what bounds the single-flight guard — without it the row reads
+    as stale immediately and a second publish opens a second sandbox. ``build_job_id`` is
+    persisted (not a transient PrivateAttr like DP0-4's) because a queued build is exactly
+    when a user reloads. ``build_reason`` is cleared so a new attempt never shows the
+    previous attempt's rung.
+
+    Rewritten 2026-08-11 from ``mark_build_queued``, which wrote unconditionally. Reading
+    ``should_enqueue`` and then stamping is two steps with an await between them, and every
+    publish arriving inside that window read the same pre-stamp row, passed the gate
+    correctly, and opened its own sandbox: 8 concurrent publishes of one site produced 8
+    sandboxes. The precondition moves the decision into the write, so the DATABASE picks
+    one winner. Unlike the other three build seams this is the one write that must NOT be
+    a blind ``set``.
+
+    THE PRECONDITION IS ``build_state.claim_precondition`` AND NOT A LOCAL REPHRASING.
+    It has to permit exactly what ``should_enqueue`` permits, staleness included: a
+    precondition that refused a stale in-flight row would recreate the one-way door and
+    leave the site permanently unpublishable. The same ``now`` is used for the window test
+    and the stamp, so the row is never tested against a window it was not written with.
+
+    Returns True when this caller owns the build and False when another publish claimed it
+    first. False is not an error — it is the same "a build is already in flight" answer the
+    caller returned before, and it is the losing publish's cue to write nothing at all.
+    """
+    stamp = now or datetime.now(UTC)
+    values: dict[str, Any] = {
+        "build_status": "queued",
+        "build_started_at": stamp,
+        "build_job_id": job_id,
+        "build_reason": None,
+    }
+    collection = type(site).get_pymongo_collection()
+    won = await collection.find_one_and_update(
+        {"_id": site.id, **claim_precondition(timeout_seconds, now=stamp)},
+        {"$set": values},
+    )
+    if won is None:
+        return False
+    # The write went to the DB, so the in-memory doc is now behind it. Every later step
+    # of the enqueue reads this object (the log line, the rollback), and a caller that
+    # won the claim but still saw a stale local row would report the pre-claim status.
+    for field, value in values.items():
+        setattr(site, field, value)
+    return True
+
+
+async def mark_build_running(site: _SiteDoc) -> None:
+    """Flip a queued build to ``building`` and RE-STAMP the clock.
+
+    Re-stamping is deliberate: ``build_started_at`` means "when the current attempt
+    started", and the attempt's real clock begins when a worker picks the job up. Leaving
+    the enqueue's stamp would spend the site's staleness window on queue wait, so a build
+    that waited behind the cap could be declared stale while it was still running — and
+    re-enqueued on top of itself, which is the expensive direction.
+    """
+    await site.set({"build_status": "building", "build_started_at": datetime.now(UTC)})
+
+
+async def record_build_outcome(site: _SiteDoc, *, status: str, reason: str) -> None:
+    """Record a finished attempt's terminal status and the rung that produced it.
+
+    ``reason`` is a fixed ``"<rung>:<cause>"`` identifier from ``build_job``, NEVER build
+    stderr — see ``Site.build_reason`` and ``build_job``'s header. This seam does not
+    enforce that (a string is a string); the vocabulary is owned and tested where it is
+    produced, and the mutation plan is what keeps stderr out of it.
+
+    ``build_job_id`` is left in place: a client that polled with that handle must still
+    find the row it was watching once the build ends.
+    """
+    await site.set({"build_status": status, "build_reason": reason})
+
+
+def _normalize_hostname(hostname: str) -> str:
+    """One spelling for a hostname, applied on every path that names one.
+
+    DNS is case-insensitive and the trailing FQDN dot is optional, so ``Example.com``,
+    ``example.com.`` and ``example.com`` are the same name — but Python string equality
+    is not, and this module finds a stored domain with ``==``. Cloudflare echoes back a
+    lowercased hostname, which is what gets stored, so without this
+    ``DELETE .../domains/Example.com`` 404s a domain that is plainly connected, and
+    adding ``Example.com`` after ``example.com`` slips the dedupe guard into a
+    Cloudflare 1406 instead of the friendly early return.
+
+    The DTO validator already strips whitespace and the trailing dot on the ADD path;
+    this is the shared spelling every path uses, so the two cannot drift."""
+    return (hostname or "").strip().rstrip(".").lower()
+
+
+def _route_pattern(hostname: str) -> str:
+    """The Worker-route pattern for a custom hostname: every path on that host.
+
+    Cloudflare route patterns are ``<host>/<path>``; a bare host matches only the
+    root, which would serve the home page and 404 everything else — a failure that
+    looks like a broken site rather than a broken route."""
+    return f"{hostname}/*"
+
+
+def _route_target(site: Any) -> str:
+    """The Worker name a custom domain's route should point at, or ``""`` when nothing
+    route-addressable was deployed for this site.
+
+    A route is meaningful only where the site was deployed as its OWN addressable
+    Worker (``paw-site-<id>``, via ``workers_deploy``). ``wfp`` uploads into a dispatch
+    namespace, where the script is not route-addressable at all and the namespace's own
+    dispatch Worker routes; ``local`` serves from localhost. Those keep the prior
+    hostname-only behaviour rather than writing a route naming a script Cloudflare
+    cannot find.
+
+    **This asks the SITE what was deployed, never the environment what is configured.**
+    Two earlier versions of this function read ``PAW_CF_DEPLOY_MODE`` and both were
+    wrong, in opposite directions, because the mode is read at request time while the
+    Worker was made at deploy time:
+
+    * ``provision_deploy`` degrades ``local`` to ``workers`` for a dynamic site, so a
+      dynamic site on a local-mode box has a real Worker the mode denies.
+    * ``provision_status`` (the second attempt) records that *a* deploy finished, not
+      which target it used, and a REPUBLISH resets it to ``"provisioning"`` while last
+      deploy's Worker is still live and serving. That window is the ordinary lifecycle
+      of any site that has been up for a while — and worse than the first-provision
+      case, because afterwards the status returns to ``"provisioned"`` and the row looks
+      healthy while permanently missing its route.
+    * Nothing in this codebase ever deletes a Worker, so a site published under
+      ``workers`` keeps its ``paw-site-<id>`` Worker after the env moves to ``wfp`` —
+      and a wfp-provisioned site never had one, whatever the env says now.
+
+    ``deploy_target`` is stamped after a deploy RETURNS, so it is the only value that
+    describes what actually exists. Same "ask the artifact, not the intent" move
+    ``workers_deploy`` made for engines in SL-1, one level up.
+
+    **Rows that predate the field.** ``deploy_target`` is new, so every site deployed
+    before it shipped carries ``""`` — which is indistinguishable, by the field alone,
+    from "never deployed". Reading it strictly would mean no already-live site could
+    connect a domain until it was republished, and the failure would be the silent kind:
+    a hostname created, no route written, the fallback origin served. So a row that is
+    ``deployed`` but unstamped falls back to the deploy MODE, which is exactly the answer
+    this code used before the field existed — not a regression, and self-healing, because
+    the next publish stamps the real value and this branch stops being reached.
+
+    The fallback is deliberately NOT extended to unstamped rows that are not
+    ``deployed``: there, "" really does mean no Worker.
+
+    The name comes from ``workers_deploy.worker_name`` rather than being rebuilt here:
+    a route naming a script that does not exist is rejected, so the deploy's answer and
+    this one have to be the same function."""
+    target = site.deploy_target
+    if not target and site.deployed:
+        # Migration bridge for pre-field rows. Mirrors provision_deploy's local->workers
+        # degradation for a provisioned (dynamic) site, the same way the pre-field code
+        # had to.
+        target = _deploy_mode() or ""
+        if target == "local" and site.provision_status == "provisioned":
+            target = "workers"
+    if target != "workers":
+        return ""
+    from pocketpaw_ee.sites.workers_deploy import worker_name
+
+    return worker_name(str(site.id))
+
+
+def _assert_entitled_to_custom_domain(site: Any) -> None:
+    """Refuse the attach unless this site's own plan grants a custom domain.
+
+    Delegates the RULE to ``entitlements.resolve_site_entitlements`` rather than
+    reading ``plan_tier`` here, for the reason that resolver exists: cancellation
+    never resets the tier, and an unconfigured Dodo product records a paid tier with
+    no charge, so tier-alone hands a free custom domain to sites that have never
+    paid. That resolver had exactly one caller (the badge stamper); this is the
+    second, and both paid per-site capabilities now answer to the same function.
+
+    Gated on ``billing_enforced``, matching every other cap in this codebase: OSS /
+    self-host has no billing and must not acquire a paywall. The lazy ``get_settings``
+    import mirrors the connector cap — it keeps the billing posture off this module's
+    import path.
+
+    Synchronous and passed the loaded doc, because the resolver is pure and
+    ``entitlements`` may not import ``models.site`` (EE cloud rule 2): the caller
+    that owns the document passes what it owns.
+    """
+    from pocketpaw.config import get_settings
+
+    if not get_settings().billing_enforced:
+        return
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = entitlements_service.resolve_site_entitlements(
+        site_id=str(site.id),
+        workspace_id=site.workspace,
+        plan_tier=site.plan_tier,
+        subscription_status=site.subscription_status,
+        concierge_enabled=bool(getattr(site, "concierge_enabled", True)),
+    )
+    if ent.custom_domain:
+        return
+
+    logger.info(
+        "sites: refused a custom domain for site %s — tier %s, subscription active: %s",
+        site.id,
+        ent.plan_tier,
+        ent.subscription_active,
+    )
+    raise CustomDomainNotEntitled(
+        plan_tier=ent.plan_tier,
+        subscription_active=ent.subscription_active,
+    )
+
+
 async def add_domain(
     *,
     workspace_id: str,
@@ -2820,8 +4019,35 @@ async def add_domain(
     hostname: str,
     _cloudflare: Any | None = None,
 ) -> DomainStatusResponse:
-    """Register a custom hostname with Cloudflare for SaaS and store it on the
-    site. Returns the ONE CNAME the client pastes at their registrar."""
+    """Register a custom hostname with Cloudflare and route it to this site.
+
+    Two calls, and the second is the one that was missing. ``create_custom_hostname``
+    only gets Cloudflare to ACCEPT traffic for the domain; a Worker route scoped to
+    ``<hostname>/*`` is what decides that THIS site answers it. Without the route the
+    domain validates, goes green in the panel, and serves an error page from the
+    fallback origin — the worst kind of broken, because every signal says it worked.
+
+    Returns the ONE CNAME the client pastes at their registrar.
+
+    **A site must be published first.** A route can only name a Worker that exists, and
+    an unpublished site has none. Refusing here costs the user one ordering hint;
+    allowing it produces a domain that is live-looking and dead, with nothing in the UI
+    able to explain the difference.
+
+    **A failed route is rolled back.** If the route call fails after the hostname was
+    created, the hostname is deleted again before the error propagates. Cloudflare
+    rejects a duplicate hostname (1406), so leaving the half-made pair behind would
+    make the user's obvious next move — press Add again — fail with an error about a
+    conflict they cannot see or clear.
+
+    **Re-adding a connected domain REPAIRS a missing route.** Every domain connected
+    before this lane shipped has no route and is silently serving the fallback origin,
+    and Cloudflare reports those hostnames ``active``, so the panel shows them green.
+    Without this, the one self-service action available — press Add again — became a
+    no-op that returned the stored row, so nothing a user could do would fix them. The
+    repair is the same call the first add makes, so it costs nothing to reach and it
+    also recovers a route lost to a partial failure.
+    """
     # BC-10: a higher site-plan tier resells Cloudflare paid features (WAF /
     # edge-cache / strict TLS). Lazy import mirrors publish_pocket's site_plans
     # use — keeps the billing catalog off the module-import path.
@@ -2829,18 +4055,97 @@ async def add_domain(
 
     cf = _cloudflare or _cf_client()
     site = await _load(workspace_id, site_id)
+
+    # Already connected → return what we have, without touching Cloudflare. Adding
+    # the same hostname twice used to append a SECOND row (only allowed_origins was
+    # de-duped), which under routing means two routes for one pattern and a teardown
+    # that removes half of it. Cloudflare would reject the duplicate hostname anyway
+    # (1406); answering from the stored row turns "you pressed Add twice" into the
+    # same CNAME instruction rather than an error about a conflict with itself.
+    hostname = _normalize_hostname(hostname)
+    existing = next((d for d in site.domains if _normalize_hostname(d.hostname) == hostname), None)
+    if existing is not None:
+        # ...but repair a MISSING route first. Domains connected before this lane
+        # shipped all have ``cf_route_id == ""`` and no route, so they serve the
+        # fallback origin while Cloudflare reports the hostname active and the panel
+        # shows them green. Pressing Add again is the only self-service action there is;
+        # without this it returned the stored row and changed nothing. Also recovers a
+        # route lost to a partial failure.
+        script = _route_target(site)
+        if script and not existing.cf_route_id:
+            existing.cf_route_id = await cf.create_worker_route(
+                pattern=_route_pattern(existing.hostname), script=script
+            )
+            await site.set({"domains": [d.model_dump() for d in site.domains]})
+        return DomainStatusResponse(
+            hostname=existing.hostname,
+            cname_target=existing.cname_target,
+            status=existing.status,
+        )
+
+    script = _route_target(site)
+    if script and not site.deployed:
+        raise ValidationError(
+            "sites.domain_needs_publish",
+            "Publish the site before connecting a domain — a custom domain has to "
+            "point at a published site, and this one hasn't been published yet.",
+        )
+
+    # A custom domain is a PAID per-site capability, so ask whether this site is
+    # entitled to one BEFORE anything is created. Until 2026-08-15 nothing asked:
+    # the tier was resolved just below, but only to pass ``cloudflare_features`` to
+    # provisioning (BC-10 resale), and no branch anywhere read whether the tier
+    # granted the domain itself. The endpoint's only gate was RBAC, which is
+    # permission rather than billing, so a base-tier site attached a custom domain
+    # and kept it — as did a paid site whose subscription was cancelled or, with no
+    # Dodo product configured, never charged at all.
+    #
+    # Placed HERE, and the position is the contract:
+    #   * AFTER the already-connected branch above returns, so this is never
+    #     retroactive. A site that loses its entitlement keeps a live domain, and
+    #     the re-Add route repair — the only self-service fix for a domain that
+    #     silently serves the fallback origin — stays reachable. Detaching on
+    #     downgrade happens at period end, which is not this seam.
+    #   * BEFORE ``create_custom_hostname``. Refusing afterwards would leave a
+    #     hostname on the shared zone with no Site row pointing at it: invisible to
+    #     the product, and it makes the customer's next legitimate attach fail on a
+    #     1406 duplicate they can neither see nor clear.
+    _assert_entitled_to_custom_domain(site)
+
     # Resolve the site's tier → its cloudflare_features and provision them on the
     # custom hostname. A base-tier (or unknown) site resolves to an empty set, so
     # create_custom_hostname stays on the basic path.
     plan = site_plans.get_site_plan(site.plan_tier)
     features = set(plan.cloudflare_features) if plan else set()
     ch = await cf.create_custom_hostname(hostname, features=features)
+
+    route_id = ""
+    if script:
+        try:
+            route_id = await cf.create_worker_route(
+                pattern=_route_pattern(ch.hostname), script=script
+            )
+        except Exception:
+            # Compensate, then re-raise the ORIGINAL failure: the rollback is
+            # housekeeping, and reporting its outcome instead would replace the real
+            # reason the domain could not be added with a second, less useful one.
+            try:
+                await cf.delete_custom_hostname(ch.id)
+            except Exception:  # noqa: BLE001 — best effort; the original error wins
+                logger.exception(
+                    "sites: could not roll back custom hostname %s after a failed "
+                    "route create — it may need removing by hand",
+                    ch.hostname,
+                )
+            raise
+
     site.domains.append(
         _SiteDomainDoc(
             hostname=ch.hostname,
             cf_hostname_id=ch.id,
             cname_target=ch.cname_target,
             status=ch.status.value,
+            cf_route_id=route_id,
         )
     )
     # Authorize the site's own origin for capture: the deployed form posts from
@@ -2848,10 +4153,74 @@ async def add_domain(
     # here so connecting a domain needs no separate "allow this origin" step.
     if ch.hostname not in site.allowed_origins:
         site.allowed_origins.append(ch.hostname)
-    await site.save()
+    # Targeted ``set``, not ``save()`` — this module's own header (the build-lane note)
+    # warns why: a build runs for MINUTES beside a publish writing ``url`` / ``deployed``
+    # / ``build_status`` on the same row, and a full save from a doc loaded before those
+    # writes rolls them back. Land after the terminal build write and ``build_status``
+    # reverts to in-flight permanently, at which point ``build_state.should_enqueue``
+    # refuses to republish that site ever again. Only these two fields changed here.
+    await site.set(
+        {
+            "domains": [d.model_dump() for d in site.domains],
+            "allowed_origins": list(site.allowed_origins),
+        }
+    )
     return DomainStatusResponse(
         hostname=ch.hostname, cname_target=ch.cname_target, status=ch.status.value
     )
+
+
+async def remove_domain(
+    *,
+    workspace_id: str,
+    site_id: str,
+    hostname: str,
+    _cloudflare: Any | None = None,
+) -> None:
+    """Disconnect a custom domain: drop its route, its hostname, and its origin.
+
+    There was no teardown path at all before this, and its absence is not cosmetic.
+    A hostname left on the zone counts against the account's quota forever, keeps
+    pointing at a Worker that may no longer exist, and — because Cloudflare rejects
+    duplicates — permanently blocks anyone from connecting that domain to a different
+    site.
+
+    Ordering is deliberate: the ROUTE goes first, so the domain stops being served
+    before it stops being recognised. The reverse order leaves a window where
+    Cloudflare no longer knows the hostname while a route still claims it.
+
+    Both deletes treat a Cloudflare 404 as success (see ``cloudflare_client``): the
+    goal is a state, not an event, and a teardown that cannot finish leaves exactly the
+    orphan it was called to remove. The local row is dropped even if Cloudflare has
+    already forgotten both — otherwise a partially-torn-down domain would be
+    un-removable from the UI forever.
+    """
+    cf = _cloudflare or _cf_client()
+    site = await _load(workspace_id, site_id)
+    hostname = _normalize_hostname(hostname)
+    dom = next((d for d in site.domains if _normalize_hostname(d.hostname) == hostname), None)
+    if dom is None:
+        raise NotFound("domain", hostname)
+
+    if dom.cf_route_id:
+        await cf.delete_worker_route(dom.cf_route_id)
+    if dom.cf_hostname_id:
+        await cf.delete_custom_hostname(dom.cf_hostname_id)
+
+    site.domains = [d for d in site.domains if _normalize_hostname(d.hostname) != hostname]
+    # The origin was authorized by add_domain purely so this domain's forms could
+    # post; with the domain gone it is a standing grant to a host we no longer serve.
+    site.allowed_origins = [o for o in site.allowed_origins if _normalize_hostname(o) != hostname]
+    # Targeted ``set`` for the same reason ``add_domain`` uses one — see there.
+    await site.set(
+        {
+            "domains": [d.model_dump() for d in site.domains],
+            "allowed_origins": list(site.allowed_origins),
+        }
+    )
+    # no-event: no SiteDomain event type exists — add_domain does not emit one either,
+    # and inventing a half of the pair here would leave connects silent and
+    # disconnects loud. Both belong in the reconciler work the design defers.
 
 
 async def domain_status(
@@ -2864,7 +4233,8 @@ async def domain_status(
     """Poll Cloudflare for the hostname's current status and persist it."""
     cf = _cloudflare or _cf_client()
     site = await _load(workspace_id, site_id)
-    dom = next((d for d in site.domains if d.hostname == hostname), None)
+    hostname = _normalize_hostname(hostname)
+    dom = next((d for d in site.domains if _normalize_hostname(d.hostname) == hostname), None)
     if dom is None:
         raise NotFound("domain", hostname)
     status: HostnameStatus = await cf.get_hostname_status(dom.cf_hostname_id)
@@ -2885,6 +4255,121 @@ async def list_domains(*, workspace_id: str, site_id: str) -> list[DomainStatusR
         DomainStatusResponse(hostname=d.hostname, cname_target=d.cname_target, status=d.status)
         for d in site.domains
     ]
+
+
+# How many manual receipts one site's client record retains, newest first. A site
+# billed monthly for a decade is 120 rows, so this is generous enough that no real
+# owner meets it — it exists to bound the document, not to ration the feature.
+_INVOICE_KEEP = 500
+
+
+def _client_response(site: _SiteDoc) -> SiteClientResponse:
+    """Project a Site doc onto the client-record wire shape. ``issued_at`` is
+    serialized here rather than by the DTO so the wire always carries a plain ISO
+    string, matching every other timestamp the sites surface returns."""
+    return SiteClientResponse(
+        site_id=str(site.id),
+        name=site.client_name,
+        contact=site.client_contact,
+        notes=site.client_notes,
+        invoices=[
+            SiteInvoiceOut(
+                id=inv.id,
+                issued_at=inv.issued_at.isoformat(),
+                amount_cents=inv.amount_cents,
+                currency=inv.currency,
+                paid=inv.paid,
+                note=inv.note,
+            )
+            for inv in site.client_invoices
+        ],
+    )
+
+
+async def get_site_client(*, workspace_id: str, site_id: str) -> SiteClientResponse:
+    """Return the owner's client record for a site (name / contact / notes and the
+    manual receipts recorded against it). Tenant-scoped via ``_load``, so a missing
+    or cross-tenant site is a 404.
+
+    A site that has never had a client recorded returns a BLANK record, not a 404:
+    "no client yet" is the ordinary starting state of every site, and the Settings
+    form renders the same fields either way. Reserving 404 for "no such site" keeps
+    the two genuinely different failures distinguishable at the edge.
+    """
+    site = await _load(workspace_id, site_id)
+    return _client_response(site)
+
+
+async def update_site_client(
+    *, workspace_id: str, site_id: str, body: SiteClientUpdate
+) -> SiteClientResponse:
+    """Patch the owner's client record. THREE-WAY: a field absent from the body is
+    left alone, while an explicitly-sent empty string clears it — which is how the
+    form deletes a value without a separate endpoint. ``model_fields_set`` is what
+    tells the two apart, so this must read the un-dumped model.
+
+    Writes through a targeted ``set()`` rather than ``save()`` on purpose. This is a
+    human-paced edit against a document a BUILD also writes to: an owner typing
+    notes while a publish settles would, under ``save()``, push their whole stale
+    snapshot back and silently roll ``build_status`` backwards. A field-scoped
+    update cannot.
+    """
+    body = SiteClientUpdate.model_validate(body)
+    site = await _load(workspace_id, site_id)
+
+    updates: dict[str, Any] = {}
+    if "name" in body.model_fields_set:
+        updates["client_name"] = (body.name or "").strip()
+    if "contact" in body.model_fields_set:
+        updates["client_contact"] = (body.contact or "").strip()
+    if "notes" in body.model_fields_set:
+        updates["client_notes"] = body.notes or ""
+
+    # An empty PATCH is a no-op read, not an error — a form that autosaves on blur
+    # will send one, and failing it would surface as a spurious error toast.
+    if updates:
+        await site.set(updates)
+
+    # no-event: the client record is the owner's own bookkeeping. Nothing
+    # downstream (search index, soul memory, ripple invalidation, the deploy lane)
+    # reads it, and it never reaches a generated page.
+    return _client_response(site)
+
+
+async def record_site_invoice(
+    *, workspace_id: str, site_id: str, body: SiteInvoiceCreate
+) -> SiteClientResponse:
+    """Append one manual receipt to the site's client record and return the whole
+    updated record (so the caller re-renders from one authoritative response rather
+    than splicing the new row in locally).
+
+    Nothing here charges anyone — it is the owner writing down that their client
+    paid. The list is capped at ``_INVOICE_KEEP`` newest-first entries so a site
+    that is billed monthly for years cannot grow a document without bound; the cap
+    drops the OLDEST, which is the only end that can be dropped without losing the
+    balance the owner is actually looking at.
+    """
+    body = SiteInvoiceCreate.model_validate(body)
+    site = await _load(workspace_id, site_id)
+
+    entry = _SiteInvoiceDoc(
+        id=f"inv_{secrets.token_hex(8)}",
+        issued_at=datetime.now(UTC),
+        amount_cents=body.amount_cents,
+        currency=body.currency,
+        paid=body.paid,
+        note=body.note.strip(),
+    )
+    kept = [entry, *site.client_invoices][:_INVOICE_KEEP]
+    # Beanie's ``set()`` merges the updated document back onto ``site``, so the
+    # response below is built from the list INCLUDING this receipt. That is
+    # load-bearing and not obvious at the call site: an explicit local mirror was
+    # written here first, then mutation-tested away as dead.
+    await site.set({"client_invoices": [inv.model_dump() for inv in kept]})
+
+    # no-event: see update_site_client. Recording a receipt moves no money and
+    # nothing downstream subscribes to it.
+    return _client_response(site)
 
 
 async def publish_pocket(
@@ -2984,6 +4469,31 @@ async def publish_pocket(
     # (stamped by the create-dynamic-site tool) tells ``publish`` the site is
     # backed by a per-tenant D1, so its deployed Worker gets a D1 binding.
     pattern = pocket.get("pattern")
+    # MT-1: the pocket's authored declaration that its own client JS is
+    # load-bearing. Rides ``siteConfig.keepsClientBundle`` to the generator, which
+    # then emits ``csr = true`` instead of the static default. camelCase because
+    # that is the pocket WIRE dict (``keeps_client_bundle`` is the Beanie/domain
+    # name).
+    #
+    # THIS IS THE ONE PLACE the tri-state collapses to a bool
+    # (feat/sites-js-by-default). ``None`` — the author declared nothing, which
+    # includes every legacy pocket — resolves to the
+    # ``sites_keep_client_bundle_default`` setting, ``True`` by default: sites
+    # ship their own JavaScript unless told otherwise. An EXPLICIT ``True`` or
+    # ``False`` is an authorial decision and beats the setting in both
+    # directions, so a site that declares ``False`` still gets no bundle no
+    # matter how the default is set. Everything downstream — ``publish``,
+    # ``generator_client.build``, the deferred-activation snapshot — keeps
+    # receiving a plain resolved ``bool``, so no other signature changes.
+    # Local import, matching this module's existing ``get_settings`` use in
+    # ``_billing_provider`` — the top of the file deliberately imports no
+    # ``pocketpaw.config``.
+    from pocketpaw.config import get_settings
+
+    _declared = pocket.get("keepsClientBundle")
+    keeps_client_bundle = (
+        get_settings().sites_keep_client_bundle_default if _declared is None else bool(_declared)
+    )
 
     # charge-first: a PREVIEW publish never persists a Site doc and never bills, so
     # it stays the unchanged Branch-primitive preview path — build + smoke-gate +
@@ -3000,6 +4510,7 @@ async def publish_pocket(
             pattern=pattern,
             name=name or pocket.get("name", ""),
             builder_origin=builder_origin,
+            keeps_client_bundle=keeps_client_bundle,
             preview=True,
             _generator=_generator,
             _cloudflare=_cloudflare,
@@ -3045,6 +4556,7 @@ async def publish_pocket(
             pattern=pattern,
             name=name or pocket.get("name", ""),
             builder_origin=builder_origin,
+            keeps_client_bundle=keeps_client_bundle,
             tier=tier,
             provider=_billing_provider,
         )
@@ -3061,6 +4573,7 @@ async def publish_pocket(
         pattern=pattern,
         name=name or pocket.get("name", ""),
         builder_origin=builder_origin,
+        keeps_client_bundle=keeps_client_bundle,
         preview=False,
         _generator=_generator,
         _cloudflare=_cloudflare,
@@ -3140,9 +4653,31 @@ async def _apply_site_plan(
     # Resolve the tier; fall back to the base tier for a None / unknown key so a
     # publish is never blocked by a bad tier string (the entitlement gate is the
     # one that matters and already ran).
-    tier = site_plans.get_site_plan(site_plan_key) or site_plans.get_site_plan(
-        site_plans.BASE_SITE_PLAN_KEY
-    )
+    #
+    # ...but NEVER let that fallback DOWNGRADE a site that already holds a tier.
+    # ``site_plan_key`` is an optional client-supplied field, so an ordinary
+    # republish that simply omits it used to rewrite a paying site's ``plan_tier``
+    # to the base key and its ``subscription_status`` to "none". Nothing restores
+    # either — only the ``subscription.active`` webhook writes "active", and no path
+    # rewrites the tier — so the site silently lost every paid capability for good.
+    # That was survivable while nothing read the fields; the custom-domain gate on
+    # ``add_domain`` reads them, which turns it into a permanent 402 telling a
+    # paying customer to upgrade a plan they already bought.
+    #
+    # An EXPLICIT key still wins in both directions: a real downgrade is a request
+    # carrying the target tier, not the absence of one. Only the None/unknown case
+    # is treated as "leave it as it is".
+    tier = site_plans.get_site_plan(site_plan_key)
+    if tier is None:
+        existing_tier = site_plans.get_site_plan(getattr(doc, "plan_tier", None))
+        tier = existing_tier or site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)
+        if existing_tier is not None:
+            logger.info(
+                "sites: publish for site %s carried no site_plan_key — keeping its "
+                "existing tier %s rather than resetting to the base",
+                str(doc.id),
+                existing_tier.key,
+            )
     plan_key = tier.key if tier is not None else site_plans.BASE_SITE_PLAN_KEY
 
     site_id = str(doc.id)
@@ -3177,11 +4712,24 @@ async def _apply_site_plan(
 
     # Stamp the per-site plan on the (already persisted) canonical Site doc.
     doc.plan_tier = plan_key
-    doc.subscription_id = subscription_id
     # A live sub starts pending until Dodo posts a verified subscription.active;
     # an unconfigured (no-charge) tier has no live sub to activate, so it stays
     # "none". The per-site webhook advances "pending" → "active".
-    doc.subscription_status = "pending" if subscription_id else "none"
+    #
+    # The ACTIVE case is carved out, for the same reason the tier fallback above is:
+    # a republish of a site that is already paying opened no new subscription
+    # (``subscription_id`` is None on this pass because no fresh checkout was made),
+    # and writing "none" over "active" silently strips every paid capability from a
+    # customer who is still being charged. Nothing restores it — only the webhook
+    # writes "active", and it has already fired for this subscription. Keep what the
+    # site has; a genuine cancellation arrives as a webhook, never as the absence of
+    # a checkout during an unrelated republish.
+    if subscription_id:
+        doc.subscription_id = subscription_id
+        doc.subscription_status = "pending"
+    elif doc.subscription_status != "active":
+        doc.subscription_id = subscription_id
+        doc.subscription_status = "none"
     await doc.save()
 
     await emit(
@@ -3210,6 +4758,7 @@ async def _publish_pending_site(
     pattern: str | None,
     name: str,
     builder_origin: str | None,
+    keeps_client_bundle: bool,
     tier: Any,
     provider: Any | None,
 ) -> _SiteDoc:
@@ -3271,6 +4820,11 @@ async def _publish_pending_site(
         "source": source,
         "pattern": pattern,
         "builder_origin": builder_origin,
+        # MT-1 — MUST be captured here. This dict is the complete record of what a
+        # deferred deploy replays; anything the publish path reads that is missing
+        # here is silently lost when the ``subscription.active`` webhook deploys,
+        # and a paid interactive site would go live with its JavaScript stripped.
+        "keeps_client_bundle": keeps_client_bundle,
         "name": site_name,
     }
 
@@ -3420,6 +4974,34 @@ async def activate_site(
     pocket_id = doc.pocket_id
     # Deploy live using the inputs captured at publish time (NOT a fresh pocket read
     # — the webhook has no pocket scope, and the pocket's draft may have advanced).
+    # Mark the subscription ACTIVE BEFORE the deploy, not after.
+    #
+    # This call only happens on the ``subscription.active`` webhook — the payment is
+    # already confirmed — so "active" is true the moment we get here, and the old
+    # ordering made it true only after the artifact had been built. That mattered
+    # because the deploy stamps the site's PAID capabilities off this very field:
+    # ``_embed_concierge_bar`` and ``_stamp_free_badge`` both re-read the doc mid-
+    # deploy and resolve entitlements from it. With the flip afterwards, both read
+    # "pending", so a customer who had just paid got a page with the FREE
+    # attribution badge stamped on it and no concierge loader — and nothing
+    # re-runs either stamper, so the page stayed that way until some unrelated
+    # publish. A republish makes it recur: ``_publish_pending_site`` resets the
+    # status to "pending" every time.
+    #
+    # Saved separately from the post-deploy save below so the value is on the doc
+    # the deploy re-reads (both stampers ``find_one`` it fresh rather than taking
+    # the in-memory object).
+    #
+    # Safe on the failure path: if the deploy raises, this row is "active" with
+    # ``deployed=False`` for the duration of the retry. The webhook is at-least-once
+    # and the idempotency guard above keys on ``deployed AND active``, so a retry
+    # still re-enters and re-deploys rather than short-circuiting. That is the same
+    # exposure the pre-existing ``no captured inputs`` branch reasons about, in the
+    # opposite direction, and it is the lesser of the two: a paid site that retries
+    # its deploy beats a paid site permanently branded as free.
+    doc.subscription_status = "active"
+    await doc.save()
+
     deployed = await _deploy_site_doc(
         workspace_id=workspace_id,
         user_id=doc.owner,
@@ -3433,15 +5015,21 @@ async def activate_site(
         source=inputs.get("source"),
         pattern=inputs.get("pattern"),
         builder_origin=inputs.get("builder_origin"),
+        # MT-1 — replay the authored declaration. A pending doc captured before
+        # this field existed has no key and reads False (the prior behaviour).
+        keeps_client_bundle=bool(inputs.get("keeps_client_bundle")),
         generator=_generator,
         cloudflare=_cloudflare,
         bundle_reader=_bundle_reader,
         local_deploy=_local_deploy,
     )
 
-    # The deploy flipped ``deployed=True`` and cleared pending_deploy_inputs; now
-    # mark the per-site sub active and advance the annual renewal date (one year out
-    # — the next charge cycle), mirroring the renewed path.
+    # The deploy flipped ``deployed=True`` and cleared pending_deploy_inputs; advance
+    # the annual renewal date (one year out — the next charge cycle), mirroring the
+    # renewed path. ``subscription_status`` was already set above, BEFORE the deploy,
+    # so the paid capabilities were stamped correctly; re-asserted here because
+    # ``deployed`` is a separately-loaded doc and this save must not write back a
+    # stale value it read before that flip landed.
     deployed.subscription_status = "active"
     deployed.annual_renewal_date = datetime.now(UTC) + timedelta(days=365)
     await deployed.save()
@@ -3952,6 +5540,337 @@ async def edit_svelte_component(
         _generator=_generator,
     )
     return doc
+
+
+async def edit_react_component(
+    *,
+    user_id: str,
+    pocket_id: str,
+    component_path: str,
+    new_source: str | None = None,
+    edits: list[dict[str, str]] | None = None,
+    create: bool = False,
+    _pockets: Any = None,
+) -> dict[str, Any]:
+    """Write ONE file of a react Paw Site pocket and leave it as a reviewable DRAFT.
+
+    The chat-agent entry point for a targeted react edit (RX-3). Before this
+    existed the react track had no edit path: ``edit_svelte_component`` rejects a
+    react pocket, so the agent's only move on "shorten the hero headline" was a
+    second ``create_react_site`` — a SECOND site pocket instead of a change to the
+    one the user is looking at.
+
+    The edit is expressed one of two ways (exactly one is required), the same
+    contract ``edit_svelte_component`` uses so the agent's instinct transfers:
+
+      * ``edits`` — a list of ``[{old_string, new_string}, ...]`` search/replace
+        blocks applied to the file's CURRENT contents via the shared
+        :func:`apply_edits`, which requires each ``old_string`` to match exactly
+        once and raises a clear, retry-able ``ValidationError`` otherwise. PREFERRED
+        for small changes: the agent emits only the diff.
+      * ``new_source`` — the FULL new file contents, used as-is. For large rewrites,
+        and the ONLY form accepted with ``create=True`` (there is nothing to diff
+        against a file that does not exist yet).
+
+    ``create=True`` mints a NEW path instead of editing an existing one. It exists
+    because "add a testimonials section" needs a new component file PLUS an edit to
+    ``src/App.tsx``, and without it the agent cannot add a section at all. It
+    INVERTS the existence check rather than relaxing it — ``create=False`` requires
+    the path to exist (a typo is never a silent create), ``create=True`` requires it
+    NOT to (an accidental overwrite of a real component is worse than a rejected
+    call).
+
+    **DRAFT-ONLY. This does NOT republish and does NOT enqueue a build**, and that
+    is a deliberate departure from ``edit_svelte_component``, which republishes and
+    rolls the source back when the workerd smoke gate rejects the edit. That
+    contract cannot transfer: ``build_runs_async("react")`` is True, so a react
+    publish ENQUEUES a Daytona build and returns before any build outcome exists —
+    there is nothing synchronous to roll back from, and a rollback fired on an
+    enqueue-success would revert a good edit. So persisting the edited draft IS the
+    whole job, the same shape ``apply_leaf_edits`` already documents. Publishing
+    stays the user's call (what ``pocketpaw-create-react-site`` STEP 4 promises).
+    A future reader looking at this and reaching for the missing republish should
+    read this paragraph first.
+
+    The path guard is load-bearing, not hygiene. ``create_react_site`` refuses
+    generator-owned paths, and an edit that did not would be a way around that
+    allowlist: ``edit_react_component(component_path="package.json", create=True)``
+    writes the dependency manifest, defeating the generator's dependency allowlist
+    and with it the supply-chain release-age floor the manifest is what enforces.
+    Both guards call the SAME
+    :func:`pocketpaw_ee.sites.react_paths.react_path_rejection` — normalized, so
+    ``./package.json`` and ``src/paw/../paw/entry.tsx`` cannot spell their way past
+    it — and it also requires the resolved path to land under ``src/`` or
+    ``public/``.
+
+    Raises, all BEFORE anything is written:
+      * ``ValidationError("site_edit.invalid_args")`` — not exactly one of
+        ``edits`` / ``new_source``;
+      * ``ValidationError("site_edit.create_needs_source")`` — ``create=True``
+        without ``new_source``;
+      * ``ValidationError("site_edit.reserved_path")`` — a generator-owned path;
+      * ``ValidationError("site_edit.path_outside_source")`` — outside
+        ``src/`` / ``public/``;
+      * ``ValidationError("pocket.not_react_site")`` — not a react site pocket;
+      * ``NotFound("site_component")`` — ``create=False`` and the path is absent;
+      * ``ValidationError("pocket.react_component_exists")`` — ``create=True`` and
+        the path is present;
+      * whatever :func:`apply_edits` raises on a 0-match / ambiguous ``old_string``.
+
+    ``_pockets`` is an injectable seam for the pockets service so the orchestration
+    is unit-testable with no Bun / workerd / Cloudflare in sight — there is nothing
+    else to inject, because there is no build.
+
+    Takes NO ``workspace_id``, unlike its siblings: tenancy is resolved by the
+    pockets service off ``user_id`` (its public ``get`` raises Forbidden itself), and
+    ``edit_svelte_component`` only needs the workspace to look up the Site doc whose
+    builder origin its republish must re-apply — a republish this lane does not do.
+
+    Returns ``{pocket_id, component_path, created}``.
+    """
+    if _pockets is not None:
+        pockets_service = _pockets
+    else:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service  # type: ignore[no-redef]
+
+    # Exactly one of the two edit shapes (mirrors edit_svelte_component).
+    if (edits is None) == (new_source is None):
+        raise ValidationError(
+            "site_edit.invalid_args",
+            "edit_react_component requires exactly one of `edits` (a targeted "
+            "search/replace diff) or `new_source` (a full file rewrite).",
+        )
+    if create and new_source is None:
+        raise ValidationError(
+            "site_edit.create_needs_source",
+            "Creating a new component needs `new_source` — the full contents of the "
+            "new file. There is nothing for `edits` to search against.",
+        )
+
+    # The reserved-path guard. FIRST, before the pocket is even read: a call that
+    # names a generator-owned path is rejected on the path alone, so no amount of
+    # pocket state can make it land.
+    if (reason := react_path_rejection(component_path)) is not None:
+        code = (
+            "site_edit.reserved_path"
+            if is_reserved_react_path(component_path)
+            else "site_edit.path_outside_source"
+        )
+        raise ValidationError(code, reason)
+
+    # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
+    # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if (pocket.get("engine") or "ripple") != "react" or not isinstance(pocket.get("source"), dict):
+        raise ValidationError(
+            "pocket.not_react_site",
+            "This pocket is not a react Paw Site — it has no component source map to edit.",
+        )
+    source_map = pocket["source"]
+    # The MISSING-path half of the inversion is enforced here as well as at the write,
+    # because the ``edits`` branch below indexes the map: without it a typo'd path is a
+    # KeyError instead of the NotFound the caller has to relay. The EXISTING-path half
+    # (``create`` onto a live component) is deliberately NOT duplicated — nothing here
+    # reads the file on the create path, so the check would only be a second copy of a
+    # rule the write chokepoint already owns for every caller. Proven rather than
+    # assumed: with the duplicate present, the mutation that deleted it ESCAPED, because
+    # the chokepoint caught the write anyway.
+    if not create and component_path not in source_map:
+        raise NotFound("site_component", component_path)
+
+    if edits is not None:
+        # apply_edits raises ValidationError (clear, retry-able) on any match-count
+        # violation, BEFORE anything is persisted.
+        new_source = apply_edits(source_map[component_path], edits)
+
+    assert new_source is not None  # narrowing: the arg checks above guarantee it
+    await pockets_service.set_react_source_file(
+        pocket_id,
+        user_id,
+        component_path=component_path,
+        new_source=new_source,
+        create=create,
+    )
+
+    # NO publish, NO enqueue, NO native pre-warm. The pre-warm serves the svelte
+    # native editor's shadow-render, which reads a SvelteKit build; react has no
+    # such artifact, so warming one here would build a site nothing reads.
+    return {"pocket_id": pocket_id, "component_path": component_path, "created": create}
+
+
+async def edit_html_file(
+    *,
+    user_id: str,
+    pocket_id: str,
+    file_path: str,
+    new_source: str | None = None,
+    edits: list[dict[str, str]] | None = None,
+    create: bool = False,
+    _pockets: Any = None,
+) -> dict[str, Any]:
+    """Write ONE file of an html Paw Site pocket and leave it as a reviewable DRAFT.
+
+    The chat-agent entry point for a targeted html edit (HE-10), and the third and
+    last engine to get one. Before this the html track had NO chat edit path at
+    all: ``edit_svelte_component`` raises ``pocket.not_svelte_site`` on an html
+    pocket and ``edit_react_component`` raises ``pocket.not_react_site``, so the
+    agent's only move on "change the phone number in the footer" was a second
+    ``create_html_site`` — a SECOND site pocket, at a second URL, instead of a
+    change to the one the user is looking at. That is the exact hole RX-3 closed
+    for react, reopened one engine over.
+
+    **This is a FILE edit, not a component edit, and the name says so.** svelte and
+    react both have a component model, so their tools take a ``component_path``. An
+    html site has none: ``html-scaffold.ts`` writes the author's map verbatim into
+    the directory the edge serves, so what exists is files — ``index.html``,
+    ``css/site.css``, ``about/index.html``. Calling the parameter
+    ``component_path`` here would have been consistency bought by lying about the
+    content model.
+
+    The edit is expressed one of two ways (exactly one is required), the same
+    contract both siblings use so the agent's instinct transfers:
+
+      * ``edits`` — a list of ``[{old_string, new_string}, ...]`` search/replace
+        blocks applied to the file's CURRENT contents via the shared
+        :func:`apply_edits`, which requires each ``old_string`` to match exactly
+        once and raises a clear, retry-able ``ValidationError`` otherwise. PREFERRED
+        for small changes: the agent emits only the diff. On this track that saving
+        is at its largest — an html page is one flat document with no component
+        decomposition, so a "full rewrite" means re-emitting the entire site page.
+      * ``new_source`` — the FULL new file contents, used as-is. For large rewrites,
+        and the ONLY form accepted with ``create=True`` (there is nothing to diff
+        against a file that does not exist yet).
+
+    ``create=True`` mints a NEW path instead of editing an existing one — "add an
+    about page" needs ``about.html`` PLUS a link from ``index.html``. It INVERTS the
+    existence check rather than relaxing it (``create=False`` requires the path to
+    exist, ``create=True`` requires it not to), so exactly one of the two mistakes
+    is impossible in each mode.
+
+    **DRAFT-ONLY. This does NOT republish**, matching ``edit_react_component`` and
+    ``apply_leaf_edits`` rather than ``edit_svelte_component``. The svelte tool
+    republishes because it has a workerd smoke gate to catch a broken edit and a
+    rollback to run when the gate fires. html has NEITHER: ``needs_node_build``
+    is False for html, so there is no build, no smoke render, and nothing that can
+    reject an edit before it deploys. A republish here would therefore push
+    unvalidated markup straight to a live customer site with no gate in between —
+    strictly worse than leaving it as a draft the user publishes deliberately. So
+    persisting the edited draft IS the whole job, and publishing stays the user's
+    call. A future reader looking at this and reaching for the missing republish
+    should read this paragraph first.
+
+    The path guard is load-bearing, not hygiene, and it is html's own — see
+    :mod:`pocketpaw_ee.sites.html_paths` for why react's rules could not be reused
+    (an html site's files legitimately live at the project ROOT, which react's
+    ``src/``-or-``public/`` rule would reject outright). Two rejections: a path that
+    escapes the site directory, and the generator-owned ``_paw/`` namespace, where
+    ``_paw/edit-manifest.json`` maps each editable element to a byte range. An
+    author who could shadow that manifest would not break anything loudly — the
+    next NATIVE editor edit would splice at wrong offsets, landing mid-tag.
+
+    Raises, all BEFORE anything is written:
+      * ``ValidationError("site_edit.invalid_args")`` — not exactly one of
+        ``edits`` / ``new_source``;
+      * ``ValidationError("site_edit.create_needs_source")`` — ``create=True``
+        without ``new_source``;
+      * ``ValidationError("site_edit.reserved_path")`` — the ``_paw/`` namespace;
+      * ``ValidationError("site_edit.path_outside_source")`` — escapes the site dir;
+      * ``ValidationError("pocket.not_html_site")`` — not an html site pocket;
+      * ``NotFound("site_component")`` — ``create=False`` and the path is absent;
+      * ``ValidationError("pocket.html_file_exists")`` — ``create=True`` and the
+        path is present;
+      * whatever :func:`apply_edits` raises on a 0-match / ambiguous ``old_string``.
+
+    ``_pockets`` is an injectable seam for the pockets service so the orchestration
+    is unit-testable with no Bun / Cloudflare in sight — there is nothing else to
+    inject, because there is no build.
+
+    Takes NO ``workspace_id``, for the same reason ``edit_react_component`` does
+    not: tenancy is resolved by the pockets service off ``user_id`` (its public
+    ``get`` raises Forbidden itself), and the workspace is only needed to look up
+    the Site doc whose builder origin a REPUBLISH must re-apply — which this lane
+    does not do.
+
+    Returns ``{pocket_id, file_path, created}``.
+    """
+    if _pockets is not None:
+        pockets_service = _pockets
+    else:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service  # type: ignore[no-redef]
+
+    # Exactly one of the two edit shapes (mirrors both siblings).
+    if (edits is None) == (new_source is None):
+        raise ValidationError(
+            "site_edit.invalid_args",
+            "edit_html_file requires exactly one of `edits` (a targeted "
+            "search/replace diff) or `new_source` (a full file rewrite).",
+        )
+    if create and new_source is None:
+        raise ValidationError(
+            "site_edit.create_needs_source",
+            "Creating a new file needs `new_source` — the full contents of the new "
+            "file. There is nothing for `edits` to search against.",
+        )
+
+    # The path guard. FIRST, before the pocket is even read: a call that names an
+    # unwritable path is rejected on the path alone, so no amount of pocket state
+    # can make it land.
+    if (reason := html_path_rejection(file_path)) is not None:
+        code = (
+            "site_edit.reserved_path"
+            if is_reserved_html_path(file_path)
+            else "site_edit.path_outside_source"
+        )
+        raise ValidationError(code, reason)
+
+    # Store under the NORMALIZED key, not the one the agent spelled. The generator
+    # normalizes before it writes (``assertSafeRelPath`` → ``join(outDir, rel)``), so
+    # two keys that normalize to the same path are ONE file on disk. Persisting the
+    # raw spelling would let ``create=True`` on ``./index.html`` pass the
+    # not-already-present check, land a SECOND map entry, and then have both entries
+    # materialize onto ``index.html`` — leaving the live home page decided by dict
+    # iteration order. Normalizing here also makes ``./index.html`` and
+    # ``img\\logo.svg`` resolve to the existing file the author meant, instead of
+    # 404ing on a path that is present under its canonical spelling.
+    file_path = normalize_html_path(file_path)
+
+    # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
+    # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if (pocket.get("engine") or "ripple") != "html" or not isinstance(pocket.get("source"), dict):
+        raise ValidationError(
+            "pocket.not_html_site",
+            "This pocket is not an html Paw Site — it has no raw source map to edit.",
+        )
+    source_map = pocket["source"]
+    # The MISSING-path half of the inversion is enforced here as well as at the
+    # write, because the ``edits`` branch below indexes the map: without it a typo'd
+    # path is a KeyError instead of the NotFound the caller has to relay. The
+    # EXISTING-path half is deliberately NOT duplicated — nothing here reads the
+    # file on the create path, so the check would only be a second copy of a rule
+    # the write chokepoint already owns for every caller. (Same reasoning, and the
+    # same proven-by-mutation result, as ``edit_react_component``.)
+    if not create and file_path not in source_map:
+        raise NotFound("site_component", file_path)
+
+    if edits is not None:
+        # apply_edits raises ValidationError (clear, retry-able) on any match-count
+        # violation, BEFORE anything is persisted.
+        new_source = apply_edits(source_map[file_path], edits)
+
+    assert new_source is not None  # narrowing: the arg checks above guarantee it
+    await pockets_service.set_html_source_file(
+        pocket_id,
+        user_id,
+        file_path=file_path,
+        new_source=new_source,
+        create=create,
+    )
+
+    # NO publish, NO enqueue, NO native pre-warm — see the DRAFT-ONLY paragraph
+    # above. The pre-warm serves the svelte native editor's shadow-render, which
+    # reads a SvelteKit build; html has no such artifact.
+    return {"pocket_id": pocket_id, "file_path": file_path, "created": create}
 
 
 async def _latest_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
@@ -4556,6 +6475,23 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
         pattern=pattern,
         engine=engine,
+        # SC-1: the same screenshot the list row carries, so a by-pocket status
+        # read can show the page too. None when there is no deployed site, no
+        # capture has landed yet, or the doc predates the field.
+        preview_image_url=(getattr(doc, "preview_image_url", "") or None)
+        if doc is not None
+        else None,
+        # SL-3: the build lane's state on the read a builder polls BY POCKET. This is
+        # the only GET keyed on a pocket id, so a client watching a build it just
+        # triggered has nowhere else to look — without these it would have to fetch the
+        # whole gallery list to find one site's build state.
+        #
+        # A pocket with NO Site doc reads the "no build" defaults rather than null: a
+        # draft that has never been published has not got a failed build, it has got no
+        # build, and those must not look the same to a badge.
+        build_status=getattr(doc, "build_status", "none") if doc is not None else "none",
+        build_reason=getattr(doc, "build_reason", None) if doc is not None else None,
+        build_job_id=getattr(doc, "build_job_id", None) if doc is not None else None,
     )
 
 
@@ -4886,6 +6822,7 @@ __all__ = [
     "make_site_editable",
     "require_sites_plan",
     "add_domain",
+    "remove_domain",
     "domain_status",
     "list_domains",
     "list_for_workspace",

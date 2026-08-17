@@ -242,6 +242,108 @@ async def test_html_deploy_passes_config_flag(tmp_path, monkeypatch):
     assert captured["cwd"] == project
 
 
+# ── react engine: builds, yet still assets-only (RX-1) ───────────────────────
+#
+# The section that exists because "runs a Node build" stopped implying "emits a
+# server entry". A react project has a package.json and a real Vite build, so under
+# the old ``needs_node_build`` condition it would have taken the SvelteKit branch —
+# writing ``main: "dist/_worker.js"`` for a file no react build produces, which
+# wrangler rejects. The deploy shape now reads ``emits_server_worker``.
+
+
+def _build_react_project(tmp_path: Path) -> str:
+    """Create a minimal BUILT react project: the Vite client output at ``dist/``
+    (``static_output_rel("react")``) holding the PRERENDERED index.html, plus the
+    project-root package.json a react project genuinely carries — the file whose
+    presence would tempt a deploy path into assuming a server worker exists.
+
+    Deliberately writes NO ``_worker.js`` anywhere: that is the fact under test."""
+    (tmp_path / "package.json").write_text('{"name":"paw-site-x","private":true}')
+    out = tmp_path / "dist"
+    (out / "assets").mkdir(parents=True)
+    (out / "index.html").write_text("<!doctype html><div id=root><main><h1>hi</h1></main></div>")
+    (out / "assets" / "index-abc.css").write_text("h1{color:#111}")
+    return str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_react_deploy_is_assets_only_no_main(tmp_path, monkeypatch):
+    """A react site builds to a PRERENDERED static tree with no server worker, so its
+    wrangler config is assets-only — despite the engine needing a full Node build.
+
+    This is the assertion that separates the two capabilities: ``main`` must be
+    absent even though ``needs_node_build("react")`` is True."""
+    project = _build_react_project(tmp_path)
+    site_id = "507f1f77bcf86cd799439011"
+    proc = _FakeProc(0, b"https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev\n", b"")
+    _patch_subprocess(monkeypatch, proc)
+
+    url = await workers_deploy.deploy_workers(site_id, project, engine="react")
+
+    cfg = json.loads(Path(project, "wrangler.jsonc").read_text())
+    assert cfg["name"] == f"paw-site-{site_id}"
+    assert cfg["workers_dev"] is True
+    # Vite's client output, NOT the SvelteKit adapter path.
+    assert cfg["assets"] == {"directory": "dist"}
+    # The assets-only shape drops every server-worker key. A ``main`` here would
+    # point at a dist/_worker.js that react never writes, and wrangler would fail.
+    assert "main" not in cfg
+    assert "compatibility_flags" not in cfg
+    assert "d1_databases" not in cfg
+    assert url == "https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev"
+
+
+@pytest.mark.asyncio
+async def test_react_deploy_never_names_a_worker_entry(tmp_path, monkeypatch):
+    """Belt-and-braces on the same fact, stated as the failure it prevents: nothing
+    in the emitted config may reference a ``_worker.js`` on the react track."""
+    project = _build_react_project(tmp_path)
+    proc = _FakeProc(0, b"https://x.y.workers.dev\n", b"")
+    _patch_subprocess(monkeypatch, proc)
+
+    await workers_deploy.deploy_workers("507f1f77bcf86cd799439011", project, engine="react")
+
+    raw = Path(project, "wrangler.jsonc").read_text()
+    assert "_worker.js" not in raw
+    assert ".svelte-kit" not in raw
+
+
+@pytest.mark.asyncio
+async def test_react_assetsignore_lands_in_dist_and_excludes_itself(tmp_path, monkeypatch):
+    """``.assetsignore`` is written INSIDE the asset dir on every engine, so on react
+    it lands in ``dist/`` — where wrangler would otherwise serve it as a public
+    asset. It must exclude itself, and must NOT list the Pages worker entry (there is
+    no ``_worker.js`` to hide on this track)."""
+    project = _build_react_project(tmp_path)
+    proc = _FakeProc(0, b"https://x.y.workers.dev\n", b"")
+    _patch_subprocess(monkeypatch, proc)
+
+    await workers_deploy.deploy_workers("507f1f77bcf86cd799439011", project, engine="react")
+
+    assetsignore = Path(project, "dist", ".assetsignore").read_text().splitlines()
+    assert ".assetsignore" in assetsignore
+    assert "_worker.js" not in assetsignore
+    # The prerendered page is still there to serve — the deploy scaffold did not
+    # clobber the build output.
+    assert Path(project, "dist", "index.html").read_text().startswith("<!doctype html>")
+
+
+@pytest.mark.asyncio
+async def test_react_deploy_without_a_build_fails_cleanly(tmp_path, monkeypatch):
+    """react needs its build to have RUN — unlike html, generate alone leaves no
+    servable tree. A missing ``dist/`` must raise the clean ValidationError before
+    any subprocess, not produce a config pointing at a directory that isn't there."""
+    (tmp_path / "package.json").write_text('{"name":"paw-site-x"}')
+    proc = _FakeProc(0, b"https://x.y.workers.dev\n", b"")
+    captured = _patch_subprocess(monkeypatch, proc)
+
+    with pytest.raises(ValidationError):
+        await workers_deploy.deploy_workers(
+            "507f1f77bcf86cd799439011", str(tmp_path), engine="react"
+        )
+    assert captured.get("argv") is None
+
+
 @pytest.mark.asyncio
 async def test_static_svelte_config_unchanged_by_engine_default(tmp_path, monkeypatch):
     """Regression guard: the default engine (ripple/svelte) keeps the exact

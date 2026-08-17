@@ -101,3 +101,29 @@ A custom job runs under the same boundary as a built-in: writeback is **state-on
 | `jobs/builtin/` | Built-in jobs (`score_applications`) + `register_builtins()`. |
 
 The worker entrypoint is registered into the shared `chat/runs/worker.py` `WorkerSettings.functions` with its own per-function timeout, so it runs in the same worker process as chat runs without sharing their timeout.
+
+## When durable work should NOT be a pocket job
+
+Not every background task belongs in this registry, and the site-build lane
+(`sites/build_job.py`, `run_site_build`) is the worked example of one that does not. It is
+a plain arq function registered alongside `execute_workspace_job` in the same
+`WorkerSettings`. Three properties pushed it out, and they are the ones to check against a
+new candidate:
+
+- **Its result is not a pocket-spec partial.** `execute_workspace_job` validates a job's
+  return as state-only and merges it into the pocket's rippleSpec, then stamps
+  `<action>_status`. A build's outcome belongs on the `Site` row (`build_status` /
+  `build_reason`), so riding the registry would mean inventing a pocket partial nobody
+  wants in order to satisfy the contract.
+- **It needs its own failure vocabulary.** `_safe_failure_message` deliberately collapses
+  an uncontrolled raise to `"job failed"`, because a workspace-custom job's exception text
+  is untrusted. A lane whose whole point is recording *which* rung failed cannot use a
+  generic message.
+- **It needs its own timeout.** Every registry job shares
+  `POCKETPAW_JOB_TIMEOUT_SECONDS` (900s). A site build's budget is derived from the
+  per-engine build timeout and is larger than that at the defaults; an arq cancellation
+  before the in-sandbox timeout fires would destroy the evidence the lane classifies from.
+
+A candidate that has none of those (a pocket-triggered task whose result is pocket state
+and whose failure is fine as a generic message) belongs in the registry — that is what it
+is for, and it comes with dispatch, status polling, tenancy re-checks and audit for free.

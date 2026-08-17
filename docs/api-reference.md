@@ -2,6 +2,26 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-4) — documented the build-lane
+fields now on the `publish` tool response and the new read-only
+`get_site_build_status` tool, in the same MCP section. Both are recorded here
+because the *reason* they exist is not visible from their field lists: `url` and
+`deployed` are individually insufficient to answer "is this site live", and on
+react they actively mislead (a first publish returns `url: ""`, a re-publish
+returns the previous deploy's url). Anyone reading only the field names would
+reasonably use `url` directly, which is the defect.
+
+Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — added the "Sites —
+Agent Editing Tools (in-process MCP)" section documenting `edit_react_component`
+and the per-engine split that decides which editing tool a site gets. This is
+the first MCP tool documented in this file, which is otherwise REST-only, and it
+belongs here for a specific reason: the react edit lane has no REST route at all
+(it is chat-only), so a reader who checks the reference for "how do I change a
+react site" would otherwise find the svelte native-editing endpoints above and
+reasonably conclude nothing exists. The section also records WHY this tool does
+not publish, because the missing republish looks like an omission next to
+`edit_svelte_component` and is not one.
+
 Created: 2026-05-21 (RFC 04 alpha) — documents the per-pocket backend
 binding + read-only source-run endpoints. The rest of the cloud pockets
 API is described in the auto-generated wiki article
@@ -196,6 +216,13 @@ Ship — Managed Deploys section: the workspace-scoped /ship surface for
 provisioning a box, registering and deploying an app, routing a domain,
 creating a linked database, and reading logs + box health. The two DELETE
 routes PARK a teardown for human approval and never destroy anything.
+Updated: 2026-08-04 (feat/knowledge-wiki-api) — documented the Knowledge —
+Living Wiki API section: the enriched GET /knowledge/articles rows, the new
+GET /knowledge/articles/{id}, GET /knowledge/stats, GET /knowledge/uploads,
+and the two reingest routes (POST /knowledge/reingest,
+POST /knowledge/reingest-upload) that re-run content through the hardened
+KnowledgeService ingest funnel. Design doc:
+docs/design/drafts/2026-08-04-knowledge-wiki-redesign.md (workspace repo).
 -->
 
 # Cloud REST API Reference
@@ -1577,6 +1604,127 @@ an agent acting on their behalf, which is why the prod deploy splits. Both paths
 converge on the same Instinct gate for teardowns: the tool returns
 `{"status": "proposed", "proposal_id": "…"}` and the agent is instructed never to
 report a destroy as done.
+## Sites — Agent Editing Tools (in-process MCP)
+
+Editing a Paw Site from chat does not go over HTTP. The chat agent reaches it
+through the in-process MCP server `pocketpaw_sites_manager`
+(`ee/pocketpaw_ee/agent/mcp_servers/sites.py`), whose tools are namespaced
+`mcp__pocketpaw_sites_manager__<tool>`. Two editing tools live there, one per
+hand-authored engine, and they are **not interchangeable** — each rejects the
+other's pockets.
+
+| Tool | Engine | Publishes? |
+|------|--------|-----------|
+| `edit_svelte_component` | `engine: "svelte"` | Builds a draft **preview** (workerd smoke gate; rolls the source back if it fails) |
+| `edit_react_component` | `engine: "react"` | **No.** Persists the draft and stops — no build, no deploy |
+
+A ripple or dynamic site is edited through the pocket specialist's rippleSpec
+merge instead; an html site is edited by uid splice via the leaf-edits route
+above.
+
+### `edit_react_component`
+
+Write ONE file of a react site's `source` map as a reviewable draft.
+
+| Arg | Type | Notes |
+|-----|------|-------|
+| `pocket_id` | string | Required. The react site pocket. |
+| `component_path` | string | Required. Project-relative, e.g. `src/components/Hero.tsx`. Must already exist unless `create` is true. |
+| `edits` | array | A list of `{old_string, new_string}` blocks applied to the file's current contents. Each `old_string` must match **exactly once**. Exactly one of `edits` / `new_source`. |
+| `new_source` | string | The full new file contents (replaces the whole file). Required with `create`. |
+| `create` | boolean | Default `false`. Create a NEW file at `component_path`; the path must **not** already exist. |
+
+Returns `{ok: true, status: "draft", is_live: false, pocket_id, component_path,
+created, message}`. To **add a section**, call it twice: once with `create: true`
+for `src/components/<Name>.tsx`, then again with `edits` on `src/App.tsx` to
+import and render it.
+
+**It does not publish and does not enqueue a build**, and that is a deliberate
+divergence from the svelte tool rather than an omission. `build_runs_async("react")`
+is true: a react publish enqueues a Daytona build and returns before any build
+outcome exists, so there is no synchronous result to gate on and nothing to roll
+back from — a rollback fired on enqueue-success would revert a good edit.
+Persisting the draft is the whole job (the same shape the leaf-edits route
+documents). Publishing stays an explicit `publish` call the user asks for.
+
+**Write scope is enforced, not advisory.** The generator owns the build shell, so
+`index.html`, `package.json`, `vite.config.ts`, `paw-prerender.mjs` and everything
+under `src/paw/` are rejected, and the resolved path must land under `src/` or
+`public/`. Paths are normalized (backslashes, `.`/`..`) before the check, so
+`./package.json` and `src/paw/../paw/entry.tsx` are rejected too. This is the same
+policy `create_react_site` applies, shared through
+`ee/pocketpaw_ee/sites/react_paths.py` — an edit that could write `package.json`
+would be writing the dependency manifest, which is where the supply-chain
+release-age floor is enforced.
+
+Errors (relayed to the agent as `is_error` with the code, so it can fix and retry):
+
+| Code | When |
+|------|------|
+| `site_edit.invalid_args` | Not exactly one of `edits` / `new_source`. |
+| `site_edit.create_needs_source` | `create` without `new_source`. |
+| `site_edit.reserved_path` | The resolved path is generator-owned. |
+| `site_edit.path_outside_source` | The resolved path is outside `src/` and `public/`. |
+| `site_edit.no_match` / `site_edit.ambiguous_match` | An `old_string` matched 0 or >1 times. Make it more specific and retry. |
+| `pocket.not_react_site` | The pocket is not a react Paw Site. |
+| `pocket.react_component_exists` | `create` on a path that already exists. |
+| `site_component.not_found` | `create` is false and the path is not in the source map. |
+| `plan.feature_denied` | The workspace's plan lacks the `sites` feature. |
+
+Every write goes through `pockets_service.set_react_source_file`, which emits
+`PocketUpdated` and records a draft `ArtifactVersion` snapshotting the full edited
+source map — so an edit is a reviewable Branch draft a later publish promotes.
+
+### Build state on the `publish` response
+
+`publish` returns `{ok, message, site: {...}}`. The `site` object carries the five
+original keys (`id`, `pocket_id`, `name`, `url`, `deployed`) plus the build lane's
+state:
+
+| Key | Notes |
+|-----|-------|
+| `build_status` | `none` \| `queued` \| `building` \| `built` \| `failed`. Passed through **verbatim** — an unrecognised value is never normalised. |
+| `build_reason` | `"<rung>:<cause>"` explaining how the build settled. `null` until one does. A `failed` status without this is unactionable. |
+| `build_job_id` | Handle for the queued build. Persisted, so it survives a reload. |
+| `build_in_progress` | Derived. `true` while a build is running, **and for any unrecognised `build_status`**. |
+| `is_live` | Derived. The only field to gate "show the user the url" on. |
+
+`is_live` requires a non-empty `url` **and** `deployed` **and** no build in flight,
+because each is individually insufficient. This matters on **react**, the only engine
+where `build_runs_async(engine)` is true:
+
+- On a **first** publish, `_enqueue_static_build` creates the Site doc with `url: ""`
+  and `deployed: false`. That is honest — nothing is serving yet, and the worker flips
+  both when the deploy succeeds — but it means `url` alone is an empty string.
+- On a **re-publish**, `url` and `deployed` deliberately keep the *previous* deploy's
+  values so a rebuild never reports a working site as down. Both say "live" while the
+  url serves the pre-change page.
+- `build_status` alone cannot tell a never-built pocket (`none`) from a finished one.
+
+`build_in_progress` reads an unknown status as in-progress, which is the wire contract
+and the deliberate **opposite** of `build_state.should_enqueue`, which treats an
+unknown status as terminal. Both are correct on their own axis: a redundant build costs
+one sandbox, while a spurious "your site is live" costs the user's trust.
+
+The derivation lives in `sites.service.build_wire_state` and is shared with the status
+tool below, so the two surfaces cannot disagree about whether a site is live.
+
+### `get_site_build_status`
+
+Read-only. Takes `pocket_id` and returns `{ok, message, pocket_id, site_id, name,
+published, url, deployed, build_status, build_reason, build_job_id, build_in_progress,
+is_live}`.
+
+This exists because a react publish is **asynchronous**: the `publish` call returns
+before the build starts, so its response can never report how the build ended. Without
+a later read, `queued` is a dead end — the agent learns a build was enqueued and has no
+way to discover it finished.
+
+A pocket with no Site doc returns `published: false` rather than an error; from the
+caller's side "this was never published" is the useful answer, and it is correct whether
+the pocket has no site or does not exist. The read resolves the canonical Site doc
+through `canonical_site_for_pocket`, which is tenant-scoped on the workspace — that
+filter is the access check, and there is no plan gate because nothing is mutated.
 
 ## Fabric — Transform Mappings (source→Fabric ingest)
 
@@ -2100,6 +2248,22 @@ the upsert-by-domain seam:
   recorded — the rest of the batch proceeds. No all-or-nothing abort;
   upserts are idempotent, so re-posting the same payload is safe and reports
   every row as updated.
+## Knowledge — Living Wiki API
+
+The workspace knowledge browser (`/api/v1/knowledge/*`) is the read/reingest
+surface the living-wiki frontend renders. It aggregates the workspace kb-go
+scope (`workspace:{wid}`) with every agent scope in the workspace
+(`agent:{aid}`). All routes require a valid license plus `kb.read`
+(`kb.write` for the reingest POSTs) on the active workspace; routes that
+accept a `scope` bind it to the caller through the same allowlist the `/kb`
+router uses (own workspace + visible pockets + workspace agents + the
+caller's own `user:` scope) and answer `403 kb.scope_forbidden` otherwise.
+Errors use the standard envelope `{"error": {"code", "message"}}`.
+
+### `GET /knowledge/articles`
+
+Query params: `workspace_id` (optional, must match the active workspace),
+`agent_id` (optional filter; `"workspace"` = workspace-only).
 
 Response:
 
@@ -2696,3 +2860,155 @@ tiers mirror the HTTP routes, and the ADMIN tier on the propose verbs is
 load-bearing: `growth.executor` re-checks `growth.manage` against the
 proposer's **current** role at approve time, so a proposal filed below that
 tier could only ever clog the Tray.
+  "articles": [
+    {
+      "id": "deploy-runbook",
+      "title": "Deploy runbook",
+      "source": "",
+      "scope": "workspace:w1",
+      "agent_id": null,
+      "updated_at": "2026-08-01T12:00:00Z",
+      "summary": "How we deploy.",
+      "word_count": 250,
+      "compiled_with": "claude-haiku-4-5",
+      "version": 3,
+      "categories": ["Ops"],
+      "concepts": ["deploys", "rollbacks"],
+      "compiled_at": "2026-08-01T12:00:00Z"
+    }
+  ],
+  "total": 1,
+  "agent_ids": ["agent-1"]
+}
+```
+
+The first six keys are the pre-2026-08-04 row shape, unchanged. The wiki
+metadata after them comes from `kb list --json` plus the article's wiki
+frontmatter (kb list doesn't emit categories/concepts/compiled_at);
+`updated_at` falls back to `compiled_at`. Orphan raw docs — ingested files
+whose compile never completed — still appear as synthetic rows with
+`compiled_with: null` and `version: null`.
+
+### `GET /knowledge/articles/{article_id}?scope=`
+
+Full article for the reader view. `scope` defaults to the active workspace.
+Response is the row shape above plus `content` (markdown), `backlinks`
+(list of article ids), `source_docs` (raw-doc ids), `scope`, and `orphan`.
+An orphan raw-doc id returns `orphan: true` with the raw text as `content`
+and `compiled_with: null`. Unknown id or an id outside the scope →
+`404 article.not_found`. A kb failure that is NOT a genuine miss (timeout,
+missing binary, transient error) → `500 knowledge.kb_unavailable` — a kb
+outage never reads as "the article vanished".
+
+### `GET /knowledge/stats`
+
+Per-scope `kb stats` rollup across the workspace scope and every agent
+scope. A scope whose stats call fails is skipped, never a 500.
+
+```json
+{
+  "stats": [
+    {
+      "scope": "workspace:w1",
+      "agent_id": null,
+      "articles": 4,
+      "words": 1000,
+      "raw_docs": 5,
+      "concepts": 12,
+      "categories": 3
+    }
+  ],
+  "agent_ids": ["agent-1"]
+}
+```
+
+### `POST /knowledge/reingest`
+
+Body: `{"article_id": "<id>", "scope": "<scope>" | null}`.
+
+Re-runs an article's linked raw doc through the hardened
+`KnowledgeService.ingest_text_to_scope` funnel (agent-backend compile on
+keyless boxes, verbatim-fallback rejection). `article_id` may be a compiled
+article (its frontmatter's first `source_docs` entry names the raw doc) or
+an orphan raw-doc id. Response:
+
+```json
+{
+  "scope": "workspace:w1",
+  "article_id": "deploy-runbook",
+  "new_article_id": "deploy-runbook-v2",
+  "raw_doc_id": "raw-1",
+  "source": "notes.txt",
+  "result": { "article": "deploy-runbook-v2", "title": "...", "words": 250, "compiled_with": "llm" }
+}
+```
+
+`result` is kb-go's ingest receipt passed through verbatim — note the id key
+is `article` (finishIngest's shape), not `id`. `new_article_id` is the
+server-extracted id of the article the recompile produced; when it differs
+from `article_id` (the compile landed under a new slug) the FL-11b tracking
+on any upload row pointing at the old id is re-pointed automatically.
+
+Errors: `404 article.not_found` / `404 raw_doc.not_found`,
+`422 knowledge.empty_raw_doc`, `500 knowledge.reingest_failed`.
+
+### `POST /knowledge/reingest-upload`
+
+Body: `{"upload_id": "<file id>", "scope": "<scope>" | null}`.
+
+Synchronous counterpart of the FileReady auto-index listener, one upload per
+call: resolves the uploaded blob (local or S3 via a temp file), extracts
+text through the configured extraction chain, funnels it through
+`ingest_text_to_scope` with the original filename as source, and stamps the
+FL-11b `kb_article_id`/`kb_scope` tracking on the upload row. Response:
+
+```json
+{
+  "scope": "workspace:w1",
+  "upload_id": "up-1",
+  "filename": "report.pdf",
+  "article_id": "report-pdf",
+  "result": { "article": "report-pdf", "title": "...", "words": 300, "compiled_with": "llm" }
+}
+```
+
+`article_id` is the server-extracted id from kb-go's receipt (whose own id
+key is `article`, not `id`) — clients should read the top-level field.
+Pocket-scoped uploads are refused on this workspace surface: ingesting them
+into workspace KB would lift pocket-private content across the pocket ACL
+boundary; reingest those from the pocket surface instead.
+
+Errors: `404 upload.not_found`, `403 knowledge.upload_hidden`
+(`hide_from_ai` files are not ingestable),
+`403 knowledge.upload_pocket_scoped` (pocket files belong to the pocket
+surface), `422 knowledge.extraction_empty`,
+`500 knowledge.extraction_failed` / `knowledge.upload_unreadable` /
+`knowledge.reingest_failed`.
+
+### `GET /knowledge/uploads?scope=`
+
+The WORKSPACE's uploaded files eligible for ingest. Excluded: soft-deleted
+rows, `hide_from_ai` rows, and any pocket-scoped upload (pocket files are
+ACL-gated on the pocket surface and never list here). `has_article` is
+derived cheaply: primarily the FL-11b tracking column matched against the
+resolved scope; untracked rows fall back to a filename-vs-article-sources
+match that only counts when the upload predates the matching article's
+`compiled_at` — a fresh re-upload of a same-named file reads as pending,
+not compiled.
+
+```json
+{
+  "uploads": [
+    {
+      "id": "up-1",
+      "filename": "report.pdf",
+      "mime": "application/pdf",
+      "size": 12345,
+      "uploaded_at": "2026-08-01T10:00:00+00:00",
+      "has_article": true
+    }
+  ],
+  "total": 1,
+  "scope": "workspace:w1"
+}
+```

@@ -1,4 +1,12 @@
 # PR quality gate — enforces contribution standards and security checks.
+# Updated: 2026-08-10 — Secret scan moved out of inline grep into
+#   scripts/scan_secrets.py. The old bash-array loop fed each pattern to
+#   `grep -qE "$pattern"`; the PEM private-key pattern begins with a hyphen,
+#   so grep parsed it as an option, exited 2, and the enclosing `if` read that
+#   error as "no match" — the private-key check had never run. Also: the step
+#   now fails closed when the base ref will not resolve (it used to swallow a
+#   failed `git diff` and report a clean scan), only added lines are scanned,
+#   and the dangerous-pattern step no longer discards grep's error status.
 # Updated: 2026-03-05 — Fixed duplicate const bug, added security scan, dependency alerts, sensitive file alerts, PR size gate.
 name: PR Quality Gate
 
@@ -325,7 +333,17 @@ jobs:
               continue
             fi
             for pattern in "${PATTERNS[@]}"; do
-              MATCHES=$(grep -nE "$pattern" "$file" 2>/dev/null || true)
+              # -e stops a pattern from being parsed as an option, and the
+              # status is inspected rather than discarded: grep returns 1 for
+              # "no match" but 2+ for a real error, and collapsing the two is
+              # what kept the secrets scan below dead for months. Errors used
+              # to go to /dev/null here, which would have hidden the same bug.
+              GREP_STATUS=0
+              MATCHES=$(grep -nE -e "$pattern" "$file") || GREP_STATUS=$?
+              if [ "$GREP_STATUS" -gt 1 ]; then
+                echo "::error::grep failed with status $GREP_STATUS on pattern: $pattern"
+                exit 1
+              fi
               if [ -n "$MATCHES" ]; then
                 FOUND=1
                 REPORT+="### $file\n"
@@ -365,53 +383,66 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # The pattern list used to live inline here as a bash array fed to
+      # `grep -qE "$pattern"`. The PEM private-key pattern starts with a
+      # hyphen, so grep read it as an option, exited 2, and the enclosing
+      # `if` scored that hard error as "no match" — the check never ran.
+      # Patterns now live in scripts/scan_secrets.py, where they are regex
+      # data rather than argv, and the exit status is explicit:
+      # 0 clean / 1 findings / 2 scanner error. The self-test runs first so a
+      # pattern that goes dead fails the gate instead of passing every PR.
       - name: Check for secrets in diff
         run: |
-          DIFF=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- . ':!uv.lock' ':!*.lock' ':!src/pocketpaw/security/redact.py' ':!tests/test_redact.py' ':!tests/test_pii.py' ':!tests/test_logging_scrub.py' 2>/dev/null || true)
-          if [ -z "$DIFF" ]; then
-            echo "No diff to scan."
-            exit 0
-          fi
+          python3 scripts/scan_secrets.py --self-test
 
-          FOUND=0
-          # Common secret patterns
-          PATTERNS=(
-            'AKIA[0-9A-Z]{16}'                           # AWS Access Key
-            'sk-[a-zA-Z0-9]{20,}'                        # OpenAI/Anthropic API key
-            'ghp_[a-zA-Z0-9]{36}'                        # GitHub PAT
-            'gho_[a-zA-Z0-9]{36}'                        # GitHub OAuth
-            'xoxb-[0-9]+-[a-zA-Z0-9]+'                   # Slack bot token
-            'xoxp-[0-9]+-[a-zA-Z0-9]+'                   # Slack user token
-            'sk_live_[a-zA-Z0-9]+'                        # Stripe secret key
-            '-----BEGIN .*PRIVATE KEY-----'                 # Private keys
-          )
-
-          for pattern in "${PATTERNS[@]}"; do
-            if echo "$DIFF" | grep -qE "$pattern"; then
-              FOUND=1
-              echo "::error::Potential secret detected matching pattern: $pattern"
-            fi
-          done
-
-          if [ "$FOUND" -eq 1 ]; then
-            gh pr comment ${{ github.event.pull_request.number }} \
-              --body "<!-- security-scan-secrets -->
-          ## Security scan: potential secrets detected
-
-          This PR diff appears to contain secrets or API keys. Please remove them immediately and rotate any exposed credentials.
-
-          If these are false positives (e.g., placeholder patterns in tests), a maintainer will verify." \
-              --edit-last 2>/dev/null || \
-            gh pr comment ${{ github.event.pull_request.number }} \
-              --body "<!-- security-scan-secrets -->
-          ## Security scan: potential secrets detected
-
-          This PR diff appears to contain secrets or API keys. Please remove them immediately and rotate any exposed credentials.
-
-          If these are false positives (e.g., placeholder patterns in tests), a maintainer will verify."
+          BASE="origin/${{ github.event.pull_request.base.ref }}"
+          if ! git rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
+            echo "::error::Cannot resolve $BASE, so the secret scan cannot run. Failing closed."
             exit 1
           fi
 
-          echo "No secrets detected in diff."
+          git diff "$BASE...HEAD" -- . \
+            ':!uv.lock' ':!*.lock' \
+            ':!src/pocketpaw/security/redact.py' \
+            ':!tests/test_redact.py' \
+            ':!tests/test_pii.py' \
+            ':!tests/test_logging_scrub.py' \
+            > pr.diff
+          echo "Scanning $(wc -l < pr.diff) diff lines for secrets."
+
+          SCAN_STATUS=0
+          python3 scripts/scan_secrets.py --report findings.txt < pr.diff || SCAN_STATUS=$?
+
+          if [ "$SCAN_STATUS" -eq 0 ]; then
+            echo "No secrets detected in diff."
+            exit 0
+          fi
+          if [ "$SCAN_STATUS" -ne 1 ]; then
+            echo "::error::Secret scanner exited $SCAN_STATUS (scanner error, not a clean result)."
+            exit 1
+          fi
+
+          COMMENT_BODY=$(cat <<'COMMENT_EOF'
+          <!-- security-scan-secrets -->
+          ## Security scan: potential secrets detected
+
+          This PR diff appears to contain secrets or API keys. Remove them and rotate any exposed credential. Force-pushing is not enough on its own; treat the value as compromised.
+
+          Matches below list the location and the credential shape only, never the value.
+
+          COMMENT_EOF
+          )
+          COMMENT_BODY+=$'\n```\n'
+          COMMENT_BODY+=$(cat findings.txt)
+          COMMENT_BODY+=$'\n```\n'
+          COMMENT_BODY+=$'\nIf these are false positives (for example a placeholder in a test), a maintainer will verify.'
+
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "$COMMENT_BODY" \
+            --edit-last 2>/dev/null || \
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "$COMMENT_BODY"
+
+          exit 1
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

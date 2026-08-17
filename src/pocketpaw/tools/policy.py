@@ -17,6 +17,13 @@ Updated: 2026-05-21 — Added ``is_mcp_server_explicitly_allowed`` so built-in
   added ``OPT_IN_MCP_SERVERS`` — the single source of truth for which
   in-process servers are opt-in, imported by AgentPool and ClaudeSDKBackend.
 
+Updated: 2026-08-15 (HTN-2) — a policy carries the ``ToolRegistry`` built under
+  it (``_bridged_registry``), so a caller holding an agent can reach that
+  agent's OWN live tool instances. Humanized tool narration reads a tool's
+  declared phrase off the instance the registry holds rather than constructing
+  the tool. The policy is the anchor because its lifetime is already the
+  agent's; see the field's comment for why a module-level map would leak.
+
 Inspired by OpenClaw's tool-policy.ts.
 """
 
@@ -24,6 +31,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +145,21 @@ class ToolPolicy:
         # Pre-resolve for fast lookups
         self._allowed_set = self._resolve()
         self._denied_set = self._expand_names(self._deny_raw)
+
+        # The ToolRegistry built under this policy, attached by
+        # ``agents.tool_bridge._build_tool_registry`` and read back through
+        # ``agents.tool_bridge.narration_registry_for``. Declared here so it is
+        # a field of the object rather than an attribute that appears from
+        # another module, and typed loosely because ``ToolRegistry`` imports
+        # this module — naming the type here would be a cycle.
+        #
+        # This is where the registry's LIFETIME comes from: it is exactly this
+        # policy's, which is the agent's. The pool evicts an idle
+        # ``AgentInstance``, the backend and its policy go, and the registry and
+        # its tool instances go with them. Holding it in a module-level map
+        # instead would leak — the registry references this policy, so a
+        # weak-keyed entry would keep its own key alive forever.
+        self._bridged_registry: Any = None
 
     # ------------------------------------------------------------------
     # Public API

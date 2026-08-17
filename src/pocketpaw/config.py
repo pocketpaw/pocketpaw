@@ -20,6 +20,15 @@ Changes:
     POST /fabric/query). Off (default): an aggregation query is rejected
     fail-loud with FabricAnalystDisabledError -> HTTP 422
     fabric.analyst_disabled; plain queries are unaffected either way.
+  - 2026-08-08 (feat/sites-js-by-default): Added
+    ``sites_keep_client_bundle_default`` (default True) — a published Paw Site
+    now ships its own client JavaScript UNLESS it declares otherwise. The
+    per-site ``keepsClientBundle`` declaration became tri-state (``None`` =
+    undeclared → this default; ``True``/``False`` = the author's explicit
+    choice, honoured in both directions), resolved at exactly one place,
+    ``sites/service.py:publish_pocket``. Note the default silences the
+    build-time resting-visibility smoke gate for undeclared sites — see the
+    Field description for the full tradeoff.
   - 2026-07-11 (feat/external-alerting-c2c3): Added ``automation_evaluator_autostart``
     (default True, env POCKETPAW_AUTOMATION_EVALUATOR_AUTOSTART) — the OSS
     always-on automation switch. When on (default), the background
@@ -670,6 +679,24 @@ class Settings(BaseSettings):
             "this cannot raise."
         ),
     )
+    agent_max_output_tokens: int = Field(
+        default=0,
+        description=(
+            "Max output tokens an agent run may request. 0 (default) sends "
+            "8192, lowered to the model's documented ceiling when the pinned "
+            "litellm metadata knows it; a positive value replaces the 8192; a "
+            "negative value sends no cap at all. Sending nothing is not "
+            "neutral — OpenRouter prices its pre-flight credit check against "
+            "max_tokens and substitutes the model's own ceiling when none is "
+            "given, so a short reply is refused with a 402 over a reservation "
+            "nobody asked for. The metadata is a clamp rather than the source: "
+            "deepseek-v4-flash advertised 8192 and then 393216 on the same day, "
+            "and sending the larger number would have made that 402 six times "
+            "worse. Distinct from litellm_max_tokens, which only reaches the "
+            "plain-completion provider (chat titles and the like), never an "
+            "agent backend."
+        ),
+    )
     pydantic_ai_max_turns: int = Field(
         default=100,
         description=(
@@ -1118,6 +1145,26 @@ class Settings(BaseSettings):
             "`handlers/sites.py`, so nothing reads this setting anymore. Kept only "
             "so an existing ``POCKETPAW_SITES_CREW_ENABLED`` env var / config entry "
             "doesn't fail validation. Safe to remove once no deploy sets it."
+        ),
+    )
+    sites_keep_client_bundle_default: bool = Field(
+        default=True,
+        description=(
+            "Default for a published Paw Site's ``keepsClientBundle`` (MT-1) — "
+            "does the site ship and run its OWN client JavaScript. Applies ONLY "
+            "when the site made no declaration either way; a site that declares "
+            "the flag explicitly wins in BOTH directions, so an author can still "
+            "opt a pure-static page out by declaring ``false``. This is NOT the "
+            "site's ``mode`` — a site with client JS is still ``mode='static'`` "
+            "unless it binds live data, and prerendering stays on either way, so "
+            "pages still serve finished HTML before any JS runs (additive "
+            "hydration, not client rendering). "
+            "TRADEOFF of the ``true`` default: every site ships a client bundle, "
+            "including pure-static marketing pages that have no use for one, and "
+            "the build-time resting-visibility smoke gate — which refuses a page "
+            "whose content is invisible until JS reveals it — stops firing by "
+            "default, because a site that ships JS is no longer presumed unable "
+            "to reveal itself."
         ),
     )
     sdk_load_bundled_skills: bool = Field(

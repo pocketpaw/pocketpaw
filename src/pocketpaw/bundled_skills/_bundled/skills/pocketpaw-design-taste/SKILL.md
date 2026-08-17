@@ -37,14 +37,14 @@ You must explicitly declare these 5 parameters in a single, compact `<!-- Creati
 5. **The Art Director's Critique:** Self-correct the most obvious layout trap before rendering.
 
 ### 1.B The Visual DNA Token
-Generate a one-line Design Read following this exact pattern. Example:
+Generate a one-line Design Read on this exact pattern:
 > **"Reading this as: an advanced cloud IDE for software engineers, aiming for an Immersive Technology feel, driving an Innovation emotional palette via Dark Kinetic with a WebGL fluid background and a geometric sans-serif typography pairing."**
 
 ### 1.C Read these signals (feed the Ledger)
 Infer the Ledger from what the business actually is:
 1. **Business kind** — SaaS / dev-tool, agency / studio, premium consumer or DTC, local service (dentist, bakery, gym), event, portfolio, editorial.
-2. **Vibe words the user used** — "minimal", "calm", "Linear-style", "bold", "premium", "Apple-y", "playful", "serious B2B", "editorial", "brutalist", "warm", "luxury".
-3. **Reference signals** — any URL, screenshot, or brand they named or want to compete with. If they linked something, that is the strongest signal in the room; match its family, don't override it.
+2. **Vibe words the user used** — "minimal", "premium", "Apple-y", "playful", "brutalist", "warm". They map onto the dial table in 1.D.
+3. **Reference signals** — any URL, screenshot, or brand they named or want to compete with. A link is the strongest signal in the room; match its family, don't override it.
 4. **Audience** — a procurement buyer, a design-conscious consumer, a local walk-in, a recruiter. The audience picks the aesthetic, not your taste.
 5. **Existing brand assets** — a named color, a logo, a font. Honour them.
 6. **Quiet constraints** — trust-first / regulated / accessibility-critical audiences OVERRIDE aesthetic preference toward calm and legible.
@@ -52,7 +52,7 @@ Infer the Ledger from what the business actually is:
 ### 1.D The three dials
 After the read, set three dials. Every layout, motion, and density decision below is gated by them.
 - **DESIGN_VARIANCE: 7** — 1 = perfect symmetry, 10 = artsy chaos. A selling page wants confident asymmetry.
-- **MOTION_INTENSITY: 5** — 1 = fully static, 10 = cinematic. Held moderate: the page paints before JS, so baseline motion is CSS-first and never load-bearing (Module 3.C).
+- **MOTION_INTENSITY: 5** — 1 = fully static, 10 = cinematic. Held moderate: the page paints before JS, so baseline motion is CSS-first and never load-bearing (Module 3.E).
 - **VISUAL_DENSITY: 3** — 1 = art gallery / airy, 10 = cockpit. Landing pages breathe; generous whitespace reads as "expensive".
 
 **Dial inference (read → values):**
@@ -64,7 +64,7 @@ After the read, set three dials. Every layout, motion, and density decision belo
 | landing / marketing site (default) | 7 | 5 | 3 |
 | trust-first / regulated / accessibility-critical | 4 | 3 | 4 |
 
-**What the dials mean:** VARIANCE 4-7 → offset overlaps, mixed aspect ratios, left-aligned headers, asymmetric fractional grids (`grid-template-columns: 2fr 1fr`), deliberate empty zones (any asymmetry collapses to one clean column below 768px). MOTION 4-7 → CSS transitions + reveal cascades on `transform`/`opacity`, still degrading. DENSITY 1-3 → big section gaps (`padding: 6rem 0` to `9rem 0`); 4-7 → standard (`4rem`-`6rem`). Honour an explicit user request that moves a dial.
+**What the dials mean:** VARIANCE 4-7 → offset overlaps, mixed aspect ratios, left-aligned headers, asymmetric fractional grids (`grid-template-columns: 2fr 1fr`), deliberate empty zones. MOTION 4-7 → CSS transitions + reveal cascades on `transform`/`opacity`, still degrading. DENSITY 1-3 → big section gaps (`padding: 6rem 0` to `9rem 0`); 4-7 → standard (`4rem`-`6rem`). Honour an explicit user request that moves a dial.
 
 ### 1.E Do NOT ask the user what look to use — infer it
 Choosing the visual direction is YOUR expertise; infer it and go. Only ask the user about real-world FACTS you genuinely cannot know and cannot sensibly placeholder (a specific offering list, real contact details, real pricing), and even then prefer to proceed with a clearly-flagged placeholder over blocking. Never ask "what style / theme / colors do you want?" — that is the one question forbidden here.
@@ -80,32 +80,30 @@ Select exactly **ONE** primary visual identity to rule the system assets. Do not
 
 *   **Dark Kinetic (Terminal / Tech):** Deep near-black OLED grounds, heavily utilizing CSS noise/film grain filters, subtle scanlines, and one neon accent (cyan or emerald) used sparingly.
 *   **Tactile Brutalism (The 2026 Elite):** Sharp geometric layouts, 1px solid borders, and stark typography to project engineered precision. Zero drop shadows.
-*   **Immersive WebGL:** Interactive GLSL shaders, 3D particle swarms, or raymarched glass geometries sitting behind high-contrast typography.
+*   **Immersive WebGL:** Interactive GLSL shaders or raymarched glass geometries sitting behind high-contrast typography.
 *   **Aurora Mesh:** Multi-layered, deeply soft color fields smoothly warping into each other.
 *   **Liquid Glass:** Refractive glass paneling displaying dynamic light bending and extreme specular edges.
 *   **Frosted Editorial:** Oversized classic serif headlines layered delicately over deeply blurred, muted tones.
 
 ### 2.B Background Intelligence (Mandatory Grounding)
-Plain `#fff` or `#000` solid pages are completely forbidden. Every page must map a distinct background architecture. Select a structural layout from below:
+Plain `#fff` or `#000` pages are forbidden. Every page must map a distinct background architecture. Select one:
 
 | Background Identity | Execution Architecture |
 | :--- | :--- |
-| **WebGL / Shader Canvas** | High-fidelity interactive fluid simulations or custom GLSL shaders (See Section 2.C). |
+| **WebGL / Shader Canvas** | Hand-written GLSL: fluid simulation, noise, gradient flow (See Section 2.C). |
 | **Mesh/Liquid Aurora** | Multi-stop `radial-gradient` patterns shifting positions slowly via an infinite CSS `@keyframes` looping animation. |
 | **Architectural Lines** | Ultra-faint `linear-gradient` repetition grids mimicking blueprint lines or technical structures. |
 | **Tactile Grain Overlay** | A permanent SVG noise filter or high-frequency dark/light noise utilizing `mix-blend-mode: overlay`. |
-| **Radial Spotlight** | A highly-focused, massive viewport gradient that keeps readable areas illuminated while darkening edges. |
+| **Radial Spotlight** | A massive viewport gradient keeping readable areas lit while the edges darken. |
 
-### 2.C WebGL & Interactive Canvas Engines
-For top-tier "Immersive" visual richness targets, deploy canvas-based backgrounds. Use the appropriate library based on the engine track:
+### 2.C WebGL & Interactive Canvas
+For "Immersive" richness targets, deploy a canvas background — hand-written, **no library**. A Paw Site's `package.json` is generator-owned and your source map supplies FILES ONLY, so `three`, `ogl`, `threlte`, `gsap` and every other npm import NEVER resolve.
 
-*   **Three.js** (`https://threejs.org/`) — The standard for complex particle systems, floating 3D primitives, and orbital mechanics.
-*   **OGL** (`https://github.com/oframe/ogl`) — A minimal WebGL framework. Best for high-performance, lightweight GLSL shader planes (e.g., fluid color mixing, noise shaders) directly in static HTML.
-*   **Threlte** (`https://threlte.xyz/`) — The absolute standard for declarative 3D on the Svelte track. Use this to orchestrate Three.js scenes cleanly within Svelte components.
-*   *THE CANVAS GUARDRAIL:* Because JS may be disabled or slow to hydrate, the `<canvas>` element MUST sit on top of a highly polished CSS fallback (e.g., a static CSS mesh gradient). The page must look premium *before* the WebGL context ever initializes.
+*   **Raw WebGL, ~40 lines.** `canvas.getContext('webgl')`, a pass-through vertex shader and one fragment shader over a full-screen quad (`gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)`), animated from `u_time` / `u_resolution` in a `requestAnimationFrame` loop, buffer capped at 2x DPR and the loop stopped off-screen. That buys what sells: fluid color mixing, noise fields, gradient flow, aurora warping. Scene graphs and particle swarms are what the library bought you; skip them.
+*   *THE CANVAS GUARDRAIL:* Because JS may be disabled, pruned, or slow, the `<canvas>` element MUST sit on top of a highly polished CSS fallback (e.g., a static CSS mesh gradient). The page must look premium *before* the WebGL context ever initializes. A canvas also needs a site that keeps its client bundle (3.E); without that, ship the CSS background alone.
 
 ### 2.D Typography Pairings 2.0
-Never isolate a single font family. Systematically cycle through distinct display-to-body pairings:
+Never isolate a single font family. Cycle through distinct display-to-body pairings:
 
 1.  **The Engineering Elite:** `Space Grotesk` or `Cabinet Grotesk` (Display) + `General Sans` (Body) + `Fira Code` (Numbers)
 2.  **The High-Energy Consumer:** `Clash Display` (Display) + `Satoshi` (Body) + `Geist Mono` (Numbers)
@@ -149,7 +147,7 @@ The Trend Engine primitive sets the surface; the family below sets the whole tok
 ## MODULE 3: LAYOUT & MOTION ENGINE
 
 ### 3.A Section Composition Diversification
-**The Default AI Sequence (Hero → 3 Cards → CTA → FAQ → Footer) is strictly banned.** No two consecutive sections may employ the same design pattern. Alternate composition archetypes:
+**The Default AI Sequence (Hero → 3 Cards → CTA → FAQ → Footer) is strictly banned.** No two consecutive sections use the same design pattern. Alternate composition archetypes:
 
 *   **Magazine Split:** Massive multi-column text block with hard rule columns framing raw typography and imagery.
 *   **Asymmetric Bento:** Highly unequal fractional sizing layouts (`grid-template-columns: 1.6fr 0.8fr 1.2fr`).
@@ -176,59 +174,38 @@ A marketing page is a *sequence* of sections; give them different shapes so the 
 - **Real glass, not just blur.** Add a 1px inner-light border (`border: 1px solid color-mix(in srgb, white 12%, transparent)`) and an inset highlight (`box-shadow: inset 0 1px 0 rgba(255,255,255,0.08)`) so the edge refracts. Solid fallback under `prefers-reduced-transparency`.
 - **Shape-consistency lock.** Pick ONE radius scale and apply it everywhere (or a documented rule: buttons pill, cards 16px, inputs 8px, followed consistently). Round buttons on a sharp-cornered layout is broken.
 
-**3.C.A The double-bezel (soft-premium family).** Never place a card flatly on the background — nest it like machined hardware: an **outer shell** (faint fill `rgba(255,255,255,0.05)`, hairline border, small padding `0.375rem`-`0.5rem`, large radius `2rem`) wrapping an **inner core** (its own background, inner highlight `box-shadow: inset 0 1px 1px rgba(255,255,255,0.15)`, concentric smaller radius `calc(2rem - 0.375rem)`). The CTA is a **button-in-button**: a trailing arrow inside its own circular wrapper flush with the button's right padding.
+**3.C.A The double-bezel (soft-premium family).** Never place a card flatly on the background — nest it like machined hardware: an **outer shell** (faint fill `rgba(255,255,255,0.05)`, hairline border, padding `0.375rem`, radius `2rem`) wrapping an **inner core** (its own background, inner highlight `inset 0 1px 1px rgba(255,255,255,0.15)`, concentric radius `calc(2rem - 0.375rem)`). The CTA is a **button-in-button**: a trailing arrow in its own circular wrapper, flush with the button's right padding.
 
 ### 3.D Premium Motion Vocabulary (Tier-0 Framework)
-All baseline UI animations must remain fully native to CSS or SVG paths so they look flawless instantly upon paint.
+All baseline UI animation must stay native to CSS or SVG paths, so it looks flawless instantly upon paint.
 *   **Kinetic Type Masking:** Headlines utilizing `clip-path` bounding boxes to reveal letters gracefully via cubic-bezier timings.
 *   **Self-Drawing Vectors:** Core decorative shapes running `stroke-dasharray` loops to dynamically draw themselves.
 *   **Micro-Interactions (Magnetic UI):** Buttons scaling subtly, shifting internal arrows on hover, or running controlled internal light sweeps via moving linear gradients.
 *   **Organic Drifting:** Decorative elements executing minor non-linear floating paths via CSS keyframes.
 
 ```css
-/* Example Tier-0 Kinetic Shifting for Fallback Backgrounds */
-@keyframes auroraDrift {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
-}
+/* Tier-0 kinetic drift for a fallback background */
+@keyframes auroraDrift { 0%, 100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
 @media (prefers-reduced-motion: no-preference) {
-  .kinetic-fallback-bg {
-    background-size: 200% 200%;
-    animation: auroraDrift 20s ease infinite;
-  }
+  .kinetic-fallback-bg { background-size: 200% 200%; animation: auroraDrift 20s ease infinite; }
 }
 ```
 
 ### 3.E Motion principles + engine tracks
+**Motion vocabulary is gated by one fact: does this site keep its client bundle?** Default NO — the page prerenders with `csr = false` and on ripple the bundle is pruned, so `onMount`, `use:` actions, IntersectionObserver and WebGL NEVER run. Only the per-site `keepsClientBundle` flag keeps them, off unless this site declared it.
+- **Bundle off (assume this):** all motion is CSS — 3.D's vocabulary plus `animation-timeline: view()` for scroll reveal and `<details>` for accordions. Cap MOTION_INTENSITY at 4.
+- **Bundle on:** those JS paths run, and still only ENHANCE markup that already renders correctly (3.F).
 - **Motion must be motivated.** Name what it communicates (hierarchy, sequence, feedback, state change) before adding it. "It looked cool" is not a reason.
-- **Motion claimed = motion shown.** If MOTION_INTENSITY > 4 the page actually moves (hero entrance, scroll-reveal on key sections, CTA hover). If you can't ship working motion, drop the dial to 3 and ship a clean static page — never half-built motion.
+- **Motion claimed = motion shown.** If MOTION_INTENSITY > 4 the page actually moves (hero entrance, scroll-reveal on key sections, CTA hover). Motion that needs JS this site doesn't keep is a claim, not a page: rebuild it in CSS or confirm the bundle. If you can't ship working motion, drop the dial to 3 and ship a clean static page — never half-built motion.
 - **Hardware-accelerate.** Animate only `transform` and `opacity` — never `top`/`left`/`width`/`height`. `will-change` sparingly. No `window.addEventListener('scroll')` (re-runs every frame) — use IntersectionObserver, a `use:` action, or CSS scroll-driven animations. No custom cursors, scroll-hijacking, or mouse-follow. Blur/noise only on fixed, `pointer-events: none` overlays.
 - **Custom easing = premium.** For soft-premium use `cubic-bezier(0.32, 0.72, 0, 1)` and 600-800ms fade-up, not `linear`/`ease`.
 
-**Svelte-track specifics** (only on the Svelte engine): Scroll reveal → a `use:` action + CSS class (a tiny `reveal` action adds `.in` when the element enters the viewport; CSS transitions `opacity`/`transform`; reveal immediately under `prefers-reduced-motion`). State → runes (`let open = $state(false)`, `let active = $state(0)`, `const total = $derived(...)`) with the resting value set in the initializer so it prerenders. Count-ups → `tweened`/`spring` seeded from the FINAL value (markup bakes the real total), then in `onMount` reset to 0 and animate up client-only:
-```svelte
-<script>
-  import { tweened } from 'svelte/motion';
-  import { cubicOut } from 'svelte/easing';
-  import { onMount } from 'svelte';
-  const total = 3850;
-  const n = tweened(total, { duration: 900, easing: cubicOut }); // resting = real
-  onMount(() => {
-    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    n.set(0, { duration: 0 });
-    n.set(total);            // animate up, client-only
-  });
-</script>
-<span>{$n.toLocaleString()}</span>   <!-- prerenders as 3,850 -->
-```
-Enter/leave within a section → Svelte `transition:`/`in:`/`out:` on elements whose *content* is already present — polish an existing frame, never gate it. Ambient motion → CSS keyframes (no JS, free at prerender).
+**Svelte-track specifics** (only on the Svelte engine): State → runes (`let open = $state(false)`, `const total = $derived(...)`) with the resting value set in the initializer so it prerenders — free either way. **The next two need the bundle kept:** scroll reveal → a `use:` action adding `.in` on viewport entry (CSS transitions `opacity`/`transform`; reveal immediately under `prefers-reduced-motion`). Count-ups → `tweened` seeded from the FINAL value so the markup prerenders the real total, then reset to 0 and animated up in `onMount` behind a `prefers-reduced-motion` check. Enter/leave within a section → Svelte `transition:`/`in:`/`out:` on elements whose *content* is already present — polish an existing frame, never gate it. Ambient motion → CSS keyframes (no JS, free at prerender).
 
 ### 3.F The static / prerender guardrail (non-negotiable, every engine)
 These pages render to HTML before any JS runs. Taste must never depend on JS to look finished:
 - **Resting state lives in MARKUP.** Every animated/interactive default's final visual state is rendered in the DOM. Never set the resting state only in `onMount` — the prerendered HTML would bake the *start* frame (the empty hero, the `$0` counter, the collapsed accordion). Ask: *"with all JS off, does this section look done?"* If not, move the final state into markup.
-- **Tier-0 = CSS-only motion is the default.** Reveal-on-scroll, hovers, gradient drift, marquees — done in CSS run at paint with no JS.
-- **JS motion (and the WebGL canvas) is opt-in and degrades.** It may ENHANCE a resting state already correct in markup — never CREATE it. The WebGL `<canvas>` always sits over a polished CSS fallback (Module 2.C guardrail).
+- **Tier-0 = CSS-only motion is the default, and the only option without the client bundle (3.E).** JS motion may ENHANCE a resting state already correct in markup, never CREATE it, and the `<canvas>` always sits over a polished CSS fallback (2.C).
 - **Respect `prefers-reduced-motion`.** Wrap non-essential motion in `@media (prefers-reduced-motion: no-preference)`, or reveal immediately on opt-out. Never trap content behind an animation.
 - **No layout shift.** Set `width`/`height` (or `aspect-ratio`) on every image and media element so the page doesn't jump as assets load.
 - **Support light AND dark** where the family allows: use `prefers-color-scheme` and design both variants so hierarchy and contrast hold in each.
@@ -267,9 +244,9 @@ These pages render to HTML before any JS runs. Taste must never depend on JS to 
 
 Before finalizing any section output, you must strictly pass this checklist:
 - [ ] **Vision Ledger Declared:** the `<!-- Creative Direction Declaration -->` block is at the absolute top; a one-line **Design Read** (Visual DNA Token) is stated; a **family** (2.E) and ONE Trend Engine identity (2.A) are picked — inferred, not defaulted, and not asked of the user. **Dials** set from the read (1.D).
-- [ ] **Background Identity Established:** the background architecture is explicitly styled and contextualized (with a CSS fallback if WebGL is active); no plain `#fff`/`#000` page. No layout shift (media has width/height/aspect-ratio).
+- [ ] **Background Identity Established:** the background architecture is explicitly styled (with a CSS fallback if WebGL is active); no plain `#fff`/`#000` page. No layout shift (media has width/height/aspect-ratio).
 - [ ] **Zero Component Repetition:** no two sections use the identical layout composition; no three-equal-card feature row; ≥ 4 different layout families; no 3rd consecutive image+text split. Eyebrow count ≤ `ceil(sectionCount / 3)`; no section-number eyebrows.
-- [ ] **No JavaScript Reliance for UI:** aside from the WebGL canvas, every asset, interaction, state transformation, and mask functions flawlessly with all client JS disabled — resting state in markup, not `onMount` (3.F).
+- [ ] **No JavaScript Reliance for UI:** every asset, interaction, state transformation, and mask functions flawlessly with all client JS disabled — resting state in markup, not `onMount` (3.F). Without the client bundle (3.E), zero author JS: no `onMount`, no `use:`, no observer, no canvas.
 - [ ] **Hero discipline:** not centered-over-gradient; ≤ 2-line headline, ≤ 20-word subtext, CTA above the fold, ≤ 4 text elements, `min-height: 100dvh`.
 - [ ] **Color:** one accent < 80% saturation, no purple/neon glow; color-consistency lock holds; highest contrast reserved for the primary CTA; premium-consumer palette not the banned beige+brass default; off-black not `#000`, off-white not `#fff`.
 - [ ] **Type:** distinctive display face (not Inter for premium); serif only if the family/brief justifies it and it isn't Fraunces/Instrument; body measure-capped at ~62ch. **Shape-consistency lock:** one radius system throughout.

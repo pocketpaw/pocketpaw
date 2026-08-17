@@ -6,6 +6,17 @@ and streams AgentEvent responses back to channels.
 
 PII scanning before memory storage is opt-in via pii_scan_enabled + pii_scan_memory settings.
 
+Updated: 2026-08-15 (HTN-4, feat/claude-sdk-tool-args) — the ``tool_use`` branch
+correlates ONE pending call per real tool call, not one per event. The claude_sdk
+backend now announces a streamed call twice (provisional when the tool block
+opens, then resolved with the assembled arguments), and this branch appended a
+``pending_tool_calls`` entry per EVENT — so every streamed call left a stale entry
+that ``tool_result``'s name-match never popped, and the ``pop(0)`` fallback then
+handed later results an id belonging to an earlier call. It also published two
+``tool_start`` events per call, the first carrying no real arguments. The branch
+now skips the provisional announcement (``metadata["input_pending"] is True``).
+Backends that never set the flag read None and are untouched.
+
 Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the channel turn
 carries its prompt's ``stable_digest`` to the backend. ``_process_message_inner``
 calls ``AgentContextBuilder.assemble_system_prompt`` (which returns the digest
@@ -1444,9 +1455,38 @@ class AgentLoop:
                             except Exception:
                                 logger.debug("Failed to evaluate budget state", exc_info=True)
 
-                    elif etype == "tool_use":
+                    # ``input_pending`` marks a PROVISIONAL announcement: the
+                    # backend knows the tool's name but its arguments are still
+                    # streaming (claude_sdk emits one when the tool block opens,
+                    # then a resolved event with the assembled arguments). Only
+                    # the resolved event may be correlated here — this branch
+                    # appends one pending entry per event, so honouring both
+                    # would leak an entry per call and corrupt every later
+                    # ``tool_call_id`` via the ``pop(0)`` fallback below. It is
+                    # skipped rather than merged because the ``tool_start`` this
+                    # publishes is APPENDED by its consumers (the dashboard
+                    # transparency log and the client activity store both render
+                    # ``params`` as a new row), so a provisional row is a junk
+                    # row with no arguments, not a placeholder that gets
+                    # upgraded. The fast-indicator role the provisional event
+                    # exists for is served on the chat ``tool_use`` path, which
+                    # replaces a status line instead of appending. Backends that
+                    # never set the flag (pydantic_ai, deep_agents, ...) read
+                    # None here and behave exactly as before.
+                    elif etype == "tool_use" and meta.get("input_pending") is not True:
                         tool_name = meta.get("name") or meta.get("tool", "unknown")
-                        tool_input = meta.get("input") or meta
+                        # A tool called with NO arguments reports ``input={}``,
+                        # which is falsy — an ``or meta`` fallback here published
+                        # the whole metadata dict as the call's parameters, so the
+                        # transparency log rendered ``{'input': {}, 'name':
+                        # 'get_system_status'}`` where the arguments belong. No
+                        # backend ever put arguments outside ``input`` (opencode
+                        # omits the key entirely and simply has none to give), so
+                        # the fallback never recovered anything real. Absent or
+                        # malformed now reads as "no arguments", which is true.
+                        tool_input = meta.get("input")
+                        if not isinstance(tool_input, dict):
+                            tool_input = {}
                         tool_call_seq += 1
                         tool_call_id = f"{trace_id}:{tool_call_seq}"
                         pending_tool_calls.append({"id": tool_call_id, "name": tool_name})

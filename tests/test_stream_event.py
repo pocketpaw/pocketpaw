@@ -1,5 +1,15 @@
 # Tests for StreamEvent token-by-token streaming integration
 # Created: 2026-02-06
+# Updated: 2026-08-15 (HTN-4, feat/claude-sdk-tool-args) — the two tool_use tests
+# now pin the TWO-event contract for a streamed call. They previously asserted
+# that the AssistantMessage emission was suppressed once the streaming branch had
+# announced the tool by name; that suppression was the bug, because the
+# AssistantMessage is the only place the assembled arguments exist, so every
+# streamed tool call reached consumers with ``input={}``. ``test_no_duplicate_
+# tool_use`` was renamed to ``test_streamed_tool_use_resolves_to_real_args``
+# since it now guarantees the opposite of what its name promised. Nothing else in
+# this file changed — the text-dedup tests still assert single emission, which is
+# untouched.
 # Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the stub builder
 # returns an ``AssembledPrompt`` from ``assemble_system_prompt`` and the fake
 # router declares ``system_prompt_digest``, because ``AgentLoop`` now carries the
@@ -163,9 +173,11 @@ class TestStreamEventHandling:
 
         events = await _collect(sdk)
         tool_events = [e for e in events if e.type == "tool_use"]
-        # Should only get ONE tool_use (from StreamEvent), not a duplicate from AssistantMessage
-        assert len(tool_events) == 1
+        # The announcement fires as the block opens, before any argument has
+        # streamed — that promptness is the reason this emission exists.
         assert tool_events[0].metadata["name"] == "Bash"
+        assert tool_events[0].metadata["input_pending"] is True
+        assert tool_events[0].metadata["input"] == {}
 
     async def test_no_duplicate_text(self):
         """When StreamEvent deltas sent, AssistantMessage text is skipped."""
@@ -183,8 +195,16 @@ class TestStreamEventHandling:
         assert len(messages) == 1
         assert messages[0].content == "Hi"
 
-    async def test_no_duplicate_tool_use(self):
-        """When StreamEvent announced tool, AssistantMessage tool_use is skipped."""
+    async def test_streamed_tool_use_resolves_to_real_args(self):
+        """A streamed tool call surfaces TWICE: the provisional announcement, then
+        the AssistantMessage carrying the assembled arguments.
+
+        This test used to assert the opposite — that the AssistantMessage emission
+        was skipped once the announcement had named the tool. That guard was the
+        HTN-4 bug: the suppressed emission is the only one that ever holds the
+        arguments, so on the default backend every consumer saw ``input={}``. The
+        pair is intended; consumers key off ``input_pending`` (loop.py correlates
+        only the resolved one; chat surfaces replace their status line)."""
         sdk = _make_sdk()
 
         async def fake_query(**kw):
@@ -200,7 +220,12 @@ class TestStreamEventHandling:
 
         events = await _collect(sdk)
         tool_events = [e for e in events if e.type == "tool_use"]
-        assert len(tool_events) == 1
+        assert len(tool_events) == 2
+        provisional, resolved = tool_events
+        assert provisional.metadata["input_pending"] is True
+        assert provisional.metadata["input"] == {}
+        assert resolved.metadata["input_pending"] is False
+        assert resolved.metadata["input"] == {"file": "foo.py"}
 
     async def test_fallback_without_stream_event(self):
         """With _StreamEvent = None, AssistantMessage text yields normally."""

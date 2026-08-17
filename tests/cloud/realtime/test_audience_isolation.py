@@ -17,6 +17,11 @@ DB-resolved membership, these tests fail loudly.
 The companion membership checks for *inbound* client → server messages
 (``room.join``, ``typing.*``, ``read.ack``) live in
 ``tests/cloud/chat/test_room_scoped.py``.
+
+The file also carries the positive half of that contract for the LiveKit
+call-participant events: ``if audience:`` in ``publish`` means an unresolved
+event is silently delivered to nobody, so those two pins assert on the
+``send_to_user`` calls rather than on the resolver's return value.
 """
 
 from __future__ import annotations
@@ -27,6 +32,8 @@ import pytest
 from pocketpaw_ee.cloud._core.realtime.audience import AudienceResolver
 from pocketpaw_ee.cloud._core.realtime.bus import InProcessBus
 from pocketpaw_ee.cloud._core.realtime.events import (
+    CallParticipantJoined,
+    CallParticipantLeft,
     MessageNew,
     WorkspaceUpdated,
 )
@@ -443,3 +450,72 @@ async def test_cookie_path_still_works(monkeypatch):
     mgr.connect.assert_awaited_once()
     assert mgr.connect.await_args.args[1] == "cookie-user"
     ws.close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_call_participant_joined_reaches_every_group_member():
+    """End-to-end pin: emit -> resolver -> ConnectionManager.send_to_user.
+
+    This is the regression that matters. The resolver had no branch for
+    ``call.participant_joined``, so it returned ``[]``, and ``InProcessBus``
+    guards its fan-out with ``if audience:`` — the event was published and
+    delivered to nobody. Asserting on the resolver alone would not have
+    caught the skipped fan-out, so assert on the socket calls.
+    """
+    members_by_group = {"g1": ["u-alice", "u-bob"]}
+
+    async def group_members(gid: str) -> list[str]:
+        return list(members_by_group.get(gid, []))
+
+    resolver = AudienceResolver(group_members=group_members)
+    conn = AsyncMock()
+    bus = InProcessBus(resolver=resolver, conn_manager=conn)
+
+    await bus.publish(
+        CallParticipantJoined(
+            data={
+                "group_id": "g1",
+                "room_name": "group-call-g1",
+                "identity": "u-alice",
+                "name": "Alice",
+            }
+        )
+    )
+
+    assert conn.send_to_user.await_count == 2, "fan-out was skipped (audience resolved to [])"
+    recipients = {call.args[0] for call in conn.send_to_user.await_args_list}
+    assert recipients == {"u-alice", "u-bob"}
+    assert "u-mallory" not in recipients
+
+    payload = conn.send_to_user.await_args.args[1]
+    assert payload.type == "call.participant_joined"
+    assert payload.data["identity"] == "u-alice"
+
+
+@pytest.mark.asyncio
+async def test_call_participant_left_reaches_every_group_member():
+    """Same pin for the leave half — the roster chip clears on both edges."""
+    members_by_group = {"g1": ["u-alice", "u-bob"]}
+
+    async def group_members(gid: str) -> list[str]:
+        return list(members_by_group.get(gid, []))
+
+    resolver = AudienceResolver(group_members=group_members)
+    conn = AsyncMock()
+    bus = InProcessBus(resolver=resolver, conn_manager=conn)
+
+    await bus.publish(
+        CallParticipantLeft(
+            data={
+                "group_id": "g1",
+                "room_name": "group-call-g1",
+                "identity": "u-bob",
+                "name": "Bob",
+            }
+        )
+    )
+
+    assert conn.send_to_user.await_count == 2, "fan-out was skipped (audience resolved to [])"
+    recipients = {call.args[0] for call in conn.send_to_user.await_args_list}
+    assert recipients == {"u-alice", "u-bob"}
+    assert conn.send_to_user.await_args.args[1].type == "call.participant_left"

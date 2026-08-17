@@ -176,12 +176,56 @@ Conversion essentials the page should carry:
   is an **anchor** (`href="#book"` / `#pricing`) — not an `on:click`
   button (a dead button on a static page).
 - A **pricing** section with real tiers and a highlighted recommended tier.
-- A **lead form** so the published site captures leads out of the box. Use
-  plain `<input>` / `<textarea>` / `<button type="submit">` with real
-  `name`s, POSTing to the skeleton's `/api/submit` endpoint (e.g.
-  `<form method="POST" action="/api/submit">`). The skeleton provides
-  `api/submit` → Lead; it is track-agnostic and already wired.
+- A **lead form** so the published site captures leads out of the box — see
+  "Lead capture" below. It posts natively to the shared capture endpoint.
+  There is **no** `/api/submit` route on this track any more; see below for
+  why, and do not author one.
 - Every CTA is an anchor (`#book`, `tel:`, `mailto:`).
+
+### Lead capture (there is no `/api/submit` on this track)
+
+Earlier versions of this skill told you to POST to a generated `/api/submit`
+route. **That route no longer exists**, and on a static site it never really
+did: `adapter-static` cannot prerender a POST handler, so the scaffold deleted
+`src/routes/api` and every lead those sites collected went to a 404. The form
+now posts straight to the shared capture API, which is the same endpoint the
+html and react tracks use — one capture path for every engine.
+
+```svelte
+<form method="POST" action="__CAPTURE_API_BASE__/capture/form">
+  <input type="hidden" name="paw_site_id" value="__SITE_ID__" />
+  <input type="hidden" name="paw_key" value="__CAPTURE_SIGNED_KEY__" />
+  <input type="hidden" name="paw_redirect" value="/thank-you" />
+
+  <label>Your name<input name="full_name" required /></label>
+  <label>Email<input type="email" name="email" required /></label>
+  <label>Phone<input type="tel" name="phone" /></label>
+  <label>How can we help?<textarea name="message"></textarea></label>
+
+  <button type="submit">Send</button>
+</form>
+```
+
+**Write the three `__TOKENS__` exactly as shown.** They are placeholders that
+publish substitutes with the real capture URL, site id and signed key. You do
+not have those values while authoring, so never invent one or leave `action`
+empty.
+
+**The visible field names are fixed**: `full_name`, `email`, `phone`,
+`message`. A field named anything else is stored empty and the business never
+sees what the visitor typed.
+
+**`paw_redirect` must be a relative path on this site** — an absolute URL is
+rejected with a 400 — so add the route it names to your source map:
+
+```
+src/routes/thank-you/+page.svelte    a short confirmation: "Thanks — we got your request."
+src/routes/thank-you/+page.ts        export const prerender = true;
+```
+
+No `use:enhance`, no `on:submit`, no `fetch`. This is a plain native browser
+POST so the lead is captured whether or not JavaScript ran — which on a
+prerendered page is the whole point.
 
 ### Sourcing photography (real images, not placeholders)
 
@@ -217,9 +261,10 @@ strings. The generator writes these files onto the paw-sites skeleton and
 prerenders.
 
 **The skeleton provides** everything infrastructural — `package.json`,
-`svelte.config.js`, `vite.config`, the adapter, `app.html`, and the
-`api/submit` lead endpoint. **You provide only** the route + component +
-style files. **Required keys:**
+`svelte.config.js`, `vite.config`, the adapter, and `app.html`. It does
+**not** provide a lead endpoint: the form posts straight to the shared
+capture API (see "Lead capture"). **You provide only** the route +
+component + style files. **Required keys:**
 
 ```
 src/routes/+page.svelte      the composition root — imports + renders the sections in order
@@ -484,7 +529,9 @@ D1 + wires the read/write layer. Done.
    (imports `app.css`), `+page.ts` (prerender), `app.css`, and the
    `src/lib/components/*.svelte` sections — every import resolvable.
 4. **It converts + captures.** CTAs are anchors, there's a real priced
-   pricing section, and a flat lead form POSTing to `/api/submit`.
+   pricing section, and a flat lead form posting to
+   `__CAPTURE_API_BASE__/capture/form` with its three hidden `paw_*`
+   inputs and a `thank-you` route for `paw_redirect` to land on.
 5. **You stopped at the draft (or published only if asked).** By default the
    user got a pointer to the in-app Preview under /sites and an offer to
    publish — not an auto-publish. If they explicitly asked to go live, they got
