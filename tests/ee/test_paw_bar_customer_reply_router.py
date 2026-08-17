@@ -1,5 +1,11 @@
 # tests/ee/test_paw_bar_customer_reply_router.py — B0 H2 (four-path tenancy gate).
 #
+# Updated: 2026-08-05 (integration/growth-v1 rebase) — the harness now seeds the
+# ``_customer_reply`` Action via ``store.propose`` directly (production parity
+# with ``decision_loop.propose_customer_decision``) instead of over
+# ``POST /instinct/actions``: growth's F2 hardening makes the generic propose
+# route refuse every reserved gated-blob key, ``_customer_reply`` included.
+#
 # Created: 2026-07-15 (fix/paw-bar-decision-loop-tenancy). The security gate on
 # the paw-bar ``_customer_reply`` Instinct proposal type. Clones the
 # cross-workspace-403 discipline of ``tests/ee/test_instinct_rule_router.py``
@@ -118,19 +124,35 @@ def _make_client(user: _FakeUser, monkeypatch) -> TestClient:
     return TestClient(_make_app(user, monkeypatch))
 
 
-def _propose_customer_reply(client: TestClient, *, workspace_id: str, name: str = "reply") -> str:
-    """Seed a pending Action carrying a ``_customer_reply`` blob over HTTP."""
-    resp = client.post(
-        "/instinct/actions",
-        json={
-            "pocket_id": "pocket-1",
-            "title": f"customer request {name}",
-            "trigger": TRIGGER,
-            "parameters": _customer_reply_params(workspace_id),
-        },
+def _propose_customer_reply(store: InstinctStore, *, workspace_id: str, name: str = "reply") -> str:
+    """Seed a pending Action carrying a ``_customer_reply`` blob IN-PROCESS.
+
+    Mirrors production: ``decision_loop.propose_customer_decision`` calls
+    ``store.propose`` directly. Seeding over ``POST /instinct/actions`` stopped
+    being possible when F2 landed — the generic propose route now REFUSES any
+    reserved gated-blob key (422 ``instinct.reserved_parameter_key``), and
+    ``_customer_reply`` is one of them. That refusal is the fix working, not a
+    regression, so the harness seeds the way the owning surface does.
+    """
+    import asyncio
+
+    from pocketpaw.instinct.models import ActionTrigger
+
+    action = asyncio.run(
+        store.propose(
+            pocket_id="pocket-1",
+            title=f"customer request {name}",
+            description="",
+            recommendation="",
+            trigger=ActionTrigger.model_validate(TRIGGER),
+            parameters=_customer_reply_params(workspace_id),
+            # The ROW is stamped with the proposing caller's workspace (ws-A),
+            # exactly as the old HTTP seeding did; the BLOB carries the target
+            # workspace — the mismatch is the forged scenario under test.
+            workspace_id="ws-A",
+        )
     )
-    assert resp.status_code == 201, resp.text
-    return resp.json()["id"]
+    return action.id
 
 
 def _status_of(client: TestClient, action_id: str) -> str:
@@ -152,7 +174,7 @@ class TestCustomerReplyCrossWorkspace403:
     ) -> None:
         client = _make_client(_FakeUser("user-A", "ws-A"), monkeypatch)
         with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
-            action_id = _propose_customer_reply(client, workspace_id="ws-B")
+            action_id = _propose_customer_reply(router_store, workspace_id="ws-B")
             resp = client.post(f"/instinct/actions/{action_id}/approve")
             assert resp.status_code == 403, resp.text
             assert resp.json()["error"]["code"] == "instinct.cross_workspace_approval"
@@ -163,8 +185,8 @@ class TestCustomerReplyCrossWorkspace403:
     ) -> None:
         client = _make_client(_FakeUser("user-A", "ws-A"), monkeypatch)
         with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
-            own = _propose_customer_reply(client, workspace_id="ws-A", name="own")
-            foreign = _propose_customer_reply(client, workspace_id="ws-B", name="foreign")
+            own = _propose_customer_reply(router_store, workspace_id="ws-A", name="own")
+            foreign = _propose_customer_reply(router_store, workspace_id="ws-B", name="foreign")
             resp = client.post("/instinct/actions/bulk-approve", json={"ids": [own, foreign]})
             assert resp.status_code == 403, resp.text
             assert resp.json()["error"]["code"] == "instinct.cross_workspace_approval"
@@ -176,7 +198,7 @@ class TestCustomerReplyCrossWorkspace403:
     ) -> None:
         client = _make_client(_FakeUser("user-A", "ws-A"), monkeypatch)
         with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
-            action_id = _propose_customer_reply(client, workspace_id="ws-B")
+            action_id = _propose_customer_reply(router_store, workspace_id="ws-B")
             resp = client.post(f"/instinct/actions/{action_id}/reject", json={"reason": "nope"})
             assert resp.status_code == 403, resp.text
             assert resp.json()["error"]["code"] == "instinct.cross_workspace_approval"
@@ -187,8 +209,8 @@ class TestCustomerReplyCrossWorkspace403:
     ) -> None:
         client = _make_client(_FakeUser("user-A", "ws-A"), monkeypatch)
         with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
-            own = _propose_customer_reply(client, workspace_id="ws-A", name="own")
-            foreign = _propose_customer_reply(client, workspace_id="ws-B", name="foreign")
+            own = _propose_customer_reply(router_store, workspace_id="ws-A", name="own")
+            foreign = _propose_customer_reply(router_store, workspace_id="ws-B", name="foreign")
             resp = client.post(
                 "/instinct/actions/bulk-reject",
                 json={"ids": [own, foreign], "reason": "batch nope"},
@@ -208,7 +230,7 @@ class TestCustomerReplyCrossWorkspace403:
         """
         client = _make_client(_FakeUser("user-A", "ws-A"), monkeypatch)
         with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
-            action_id = _propose_customer_reply(client, workspace_id="ws-A")
+            action_id = _propose_customer_reply(router_store, workspace_id="ws-A")
             resp = client.post(f"/instinct/actions/{action_id}/approve")
             # The tenancy gate must not fire; the action flips to approved.
             assert resp.status_code == 200, resp.text

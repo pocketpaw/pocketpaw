@@ -98,6 +98,7 @@ from pocketpaw_ee.agent.mcp_servers.external_actions import (
 )
 from pocketpaw_ee.agent.mcp_servers.fabric import SERVER_NAME as _FABRIC_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.growth import SERVER_NAME as _GROWTH_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.icons import SERVER_NAME as _ICONS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.instinct import SERVER_NAME as _INSTINCT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.loom import SERVER_NAME as _LOOM_MCP_SERVER_NAME
@@ -109,6 +110,7 @@ from pocketpaw_ee.agent.mcp_servers.planner import (
 )
 from pocketpaw_ee.agent.mcp_servers.planner import SERVER_NAME as _PLANNER_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.ship import SERVER_NAME as _SHIP_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME as _SITES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.stock_images import SERVER_NAME as _STOCK_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
@@ -208,6 +210,17 @@ def _strip_builtin_servers(result: dict) -> dict:
     # the RBAC gate on each tool is the security boundary, not registration
     # (WA-1, feat/workspace-admin-tools).
     out.pop(_WORKSPACE_ADMIN_MCP_SERVER_NAME, None)
+    # ``pocketpaw_growth`` is always-on too — the /growth rail's agent surface
+    # (prospect + draft reads, authoring writes, and the PROPOSE verbs). It
+    # sends nothing; the Instinct gate is the security boundary, not
+    # registration. Same regime as belt / ship / workspace_admin.
+    out.pop(_GROWTH_MCP_SERVER_NAME, None)
+    # ``pocketpaw_code`` (CD-3) and ``pocketpaw_ship`` (SHIP-4) are always-on as
+    # well and were never added here when they landed — every assertion in this
+    # class has been failing on their names since. Stripped now so the file
+    # measures what it claims to measure: EXTERNAL config.
+    out.pop(_CODE_MCP_SERVER_NAME, None)
+    out.pop(_SHIP_MCP_SERVER_NAME, None)
     return out
 
 

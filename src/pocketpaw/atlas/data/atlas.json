@@ -882,6 +882,23 @@
     },
     {
       "gist": "",
+      "how": "list_connector_actions / connector_execute over the 'mailtrap' connector once it is bound",
+      "id": "connector:mailtrap",
+      "keywords": [
+        "mailtrap",
+        "email"
+      ],
+      "kind": "connector",
+      "name": "Mailtrap",
+      "narrative": "The Mailtrap connector (email) wires Mailtrap data into the workspace. ACTIONS: .",
+      "requires": [
+        "primitive:connector"
+      ],
+      "summary": "Mailtrap (email) connector — 0 actions: .",
+      "surface": "/settings/workspace/integrations"
+    },
+    {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'mongodb' connector once it is bound",
       "id": "connector:mongodb",
       "keywords": [
@@ -1160,6 +1177,23 @@
         "primitive:connector"
       ],
       "summary": "SharePoint (knowledge) connector — 10 actions: list_sites, get_site, list_drives, list_files, +6 more.",
+      "surface": "/settings/workspace/integrations"
+    },
+    {
+      "gist": "",
+      "how": "list_connector_actions / connector_execute over the 'ship' connector once it is bound",
+      "id": "connector:ship",
+      "keywords": [
+        "ship",
+        "infrastructure"
+      ],
+      "kind": "connector",
+      "name": "Ship",
+      "narrative": "The Ship connector (infrastructure) wires Ship data into the workspace. ACTIONS: .",
+      "requires": [
+        "primitive:connector"
+      ],
+      "summary": "Ship (infrastructure) connector — 0 actions: .",
       "surface": "/settings/workspace/integrations"
     },
     {
@@ -2031,6 +2065,20 @@
       "narrative": "Apply a rippleSpec edit to a PocketPaw pocket via the server-side merge endpoint. Invoke when the pocket_specialist subagent is asked to mutate a live pocket — add a widget, change props, patch state, redesign a section. The skill teaches the agent the rippleSpec shape, the four interactivity conventions (client-side push, value/label split, lowercase column ids, validate-push-clear-increment hygiene), and the single ``POST /api/v1/pockets/<id>/spec/merge`` endpoint that replaces the 17-tool LangChain edit surface.",
       "requires": [],
       "summary": "Apply a rippleSpec edit to a PocketPaw pocket via the server-side merge endpoint.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /ship in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:ship",
+      "keywords": [
+        "ship"
+      ],
+      "kind": "skill",
+      "name": "ship",
+      "narrative": "Deploy and run apps on real infrastructure from inside a pocket/room that has the Ship connector bound. Invoke when the user wants something built to actually RUN — \"deploy this app\", \"put it on a server\", \"point my domain at it\", \"give it a database\", \"why is it down\", \"show me the logs\", \"how much is this box costing\". This skill teaches the /ship verb surface (provision a box, register and deploy an app, route a domain with TLS, attach a database, read logs and metrics) and the safety rule that governs it: reads and reversible writes run immediately, but tearing anything down only ever files a proposal for a human to approve. Auto-surfaced into a room when the Ship connector is bound to that pocket, so you only see it when /ship is actually available.",
+      "requires": [],
+      "summary": "Deploy and run apps on real infrastructure from inside a pocket/room that has the Ship connector bound.",
       "surface": ""
     },
     {

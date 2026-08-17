@@ -127,3 +127,77 @@ def _isolate_audit_log(tmp_path):
         patch("pocketpaw.tools.registry.get_audit_logger", return_value=temp_logger),
     ):
         yield temp_logger
+
+
+# ---------------------------------------------------------------------------
+# Gated-proposal test seam (feat/growth-g4, security review F2)
+# ---------------------------------------------------------------------------
+
+
+def seed_gated_action(client, payload: dict):
+    """Seed a PENDING Action carrying a gated blob, the way a real proposer does.
+
+    ``POST /instinct/actions`` is the GENERIC propose route, open to any MEMBER.
+    It now REFUSES reserved gated-blob parameter keys (``_ship_action``,
+    ``_growth_send``, ``_admin_action``, …) with
+    ``422 instinct.reserved_parameter_key`` — a member could otherwise file an
+    innocuous Tray card whose blob dispatches a privileged executor the moment
+    someone clicks Approve. Only the in-process helper that owns each kind
+    (``ee.cloud.ship.propose``, ``ee.cloud.growth.propose``, …) may mint one;
+    those call ``store.propose`` directly and never cross this route.
+
+    Gate tests still need such an Action in the store. This helper reproduces
+    the state the real helper leaves behind: POST the payload with the plain
+    parameters, then write the gated blob onto the stored row. The write is a
+    plain synchronous sqlite UPDATE (not ``store.update_parameters``) so the
+    helper works identically inside and outside a running event loop.
+
+    Returns the propose response, so a call site keeps reading
+    ``resp.json()["id"]`` / ``resp.status_code`` exactly as before.
+    """
+    import json as _json
+    import sqlite3
+
+    from pocketpaw_ee.instinct import router as _instinct_router
+    from pocketpaw_ee.instinct.router import RESERVED_GATED_PARAM_KEYS
+
+    parameters = dict(payload.get("parameters") or {})
+    gated = {k: v for k, v in parameters.items() if k in RESERVED_GATED_PARAM_KEYS}
+    plain = {k: v for k, v in parameters.items() if k not in gated}
+
+    resp = client.post("/instinct/actions", json={**payload, "parameters": plain})
+    if not gated or resp.status_code != 201:
+        return resp
+
+    store = _instinct_router._store(payload.get("workspace_id") or "")
+    with sqlite3.connect(store._db_path) as db:
+        db.execute(
+            "UPDATE instinct_actions SET parameters = ? WHERE id = ?",
+            (_json.dumps(parameters), resp.json()["id"]),
+        )
+    return resp
+
+
+async def aseed_gated_action(client, payload: dict):
+    """``seed_gated_action`` for an httpx ``AsyncClient``. Same contract."""
+    import json as _json
+    import sqlite3
+
+    from pocketpaw_ee.instinct import router as _instinct_router
+    from pocketpaw_ee.instinct.router import RESERVED_GATED_PARAM_KEYS
+
+    parameters = dict(payload.get("parameters") or {})
+    gated = {k: v for k, v in parameters.items() if k in RESERVED_GATED_PARAM_KEYS}
+    plain = {k: v for k, v in parameters.items() if k not in gated}
+
+    resp = await client.post("/instinct/actions", json={**payload, "parameters": plain})
+    if not gated or resp.status_code != 201:
+        return resp
+
+    store = _instinct_router._store(payload.get("workspace_id") or "")
+    with sqlite3.connect(store._db_path) as db:
+        db.execute(
+            "UPDATE instinct_actions SET parameters = ? WHERE id = ?",
+            (_json.dumps(parameters), resp.json()["id"]),
+        )
+    return resp

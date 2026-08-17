@@ -86,6 +86,97 @@ rebuild — dynamic-source split + input-keyspace confinement) and GET
 /sites/by-pocket/{id}/native-artifact (serve the armed build's body_html + css
 for shadow render — per-GET arm-build cost, path-traversal-guarded CSS reader).
 
+Updated: 2026-07-27 (feat/growth-g1) — documented the Growth — Prospects
+section: workspace-scoped prospect store under /growth/prospects (create /
+get / list with tier|status|source filters / update), domain-deduped per
+workspace, cross-tenant ids 404. First slice of the /growth outbound engine.
+
+Updated: 2026-07-27 (feat/growth-g2) — added POST /growth/prospects/bulk to
+the Growth — Prospects section: batch ingestion (max 500 rows) via the
+upsert-by-domain seam, per-row errors, idempotent re-runs.
+
+Updated: 2026-07-27 (feat/growth-g3) — added the Growth — Drafts section:
+per-channel outreach drafts on a prospect (POST /growth/prospects/{id}/drafts,
+GET /growth/drafts with prospect|channel|status filters, POST
+/growth/drafts/{id}/status) with the enforced lifecycle
+draft→proposed→approved→sent, sent→replied, non-terminal→rejected; illegal
+moves 422 draft.illegal_transition.
+
+Updated: 2026-07-27 (feat/growth-g5) — documented email dispatch: the
+growth.dispatch job's email branch now sends through the per-workspace
+Mailtrap connector, re-checks that the draft is still approved before any
+provider call, writes a MessageLog audit row per attempt, and flips the draft
+to sent through the existing gate seam. Also documented the retryable failure
+path (failed row, draft stays approved, nothing raises) and the required
+GROWTH_SENDING_DOMAIN config plus why outreach never rides the apex.
+
+Updated: 2026-07-27 (feat/growth-g6) — documented the Growth — WhatsApp
+dispatch section: the growth.dispatch job's channel="whatsapp" branch sends via
+MSG91 behind a HARD prospect.opted_in guard (not opted in ⇒ no provider call at
+all, typed error, blocked send-log row, draft left approved), the guard order,
+the per-attempt WhatsAppSendLog compliance record, connector-state credential
+resolution (no env fallback for the authkey), the fail-closed inbound webhook
+POST /growth/webhooks/msg91, and the GROWTH_WHATSAPP_MAX_PER_HOUR /
+GROWTH_MSG91_WEBHOOK_SECRET environment variables.
+
+Updated: 2026-07-27 (feat/growth-g4) — documented the Instinct send gate:
+POST /growth/drafts/{id}/propose files a gated _growth_send proposal and
+flips the draft to proposed; the status route now refuses the gate-owned
+approved/sent targets with 403 draft.gate_required. Approve (single or bulk)
+flips the draft to approved and enqueues growth.dispatch on the growth arq
+queue; reject flips it to rejected. Nothing sends without an approval.
+Security review follow-up: documented per-route growth RBAC
+(growth.read / growth.write MEMBER, growth.manage ADMIN on the propose verb)
+and the fact that a _growth_send blob can only be minted by this route —
+the generic POST /instinct/actions refuses reserved gated parameter keys.
+
+Updated: 2026-07-28 (feat/growth-mcp) — added the Growth — the agent surface
+section: the nine pocketpaw_growth in-process MCP tools the chat agent on the
+/growth rail drives, the table of how that surface is narrower than the HTTP
+one, and why the agent's reach ends at proposed (no send tool, no status
+argument, no route to gate_transition). Also added PATCH /growth/drafts/{id}
+— edit a draft's copy while it is still `draft`; anything past that is
+403 draft.not_editable, because from proposed on the stored body is what the
+Tray shows and what the worker sends.
+
+Updated: 2026-07-28 (feat/growth-api-scale) — the prospect list grew a scale
+surface. BREAKING: GET /growth/prospects now returns
+{items, next_cursor, total} instead of a bare array. Added q search across
+name/company/domain/research_brief, four sort modes (tier ordering is the
+declared rank a-b-c-unqualified, not lexicographic), keyset cursor
+pagination, GET /growth/prospects/facets (per-tier/status/source counts,
+each block excluding its own filter), and POST /growth/drafts/propose-batch
+(<=100 ids, each proposed through the existing Instinct gate, per-draft
+error entries, growth.manage).
+
+Updated: 2026-07-28 (feat/growth-projects) — a prospect can now be just a
+domain: name and company are optional on create and on a bulk row, defaulting
+to "" (not yet known), and nothing renders an empty value as "unknown".
+domain stays required and still normalises. Added project_id — the client
+container from cloud/projects — on create, on PATCH (three-valued: omit to
+leave alone, an id to reassign, "" to clear) and as an optional filter on the
+list, the facets and the search; a foreign project is 404 project.not_found.
+The email dispatcher resolves a per-project sender identity (from-name /
+from-address / reply-to, per-field fallback to the workspace default) via the
+MAILTRAP_PROJECT_SENDERS and MAILTRAP_REPLY_TO connector keys, and the daily
+follow-up sweep works one client's threads at a time so their nudges go out
+under that identity.
+
+Updated: 2026-07-27 (feat/growth-g8) — added the Growth — LinkedIn Queue
+section: GET /growth/linkedin/queue (proposed/approved linkedin drafts joined
+with prospect context, ?format=md for a paste-ready markdown export) and
+POST /growth/linkedin/{draft_id}/mark-sent (record a manual send via the G-3
+machine). Deliberately manual — no LinkedIn API. Integration note: mark-sent
+rides the gate seam (sent is gate-owned since G-4) and takes growth.manage.
+
+Updated: 2026-07-27 (feat/growth-g7) — added the Growth — Follow-ups section:
+the daily `growth.followup_sweep` arq cron on the `growth` queue turns a send
+that went quiet into a `variant: "follow_up"` draft filed back through the
+same `_growth_send` gate (proposed, never approved or sent), capped at
+GROWTH_FOLLOWUP_MAX per prospect+channel after which the prospect is retired
+to `dead`. Documented both env knobs (GROWTH_FOLLOWUP_DELAY_DAYS,
+GROWTH_FOLLOWUP_MAX).
+
 Updated: 2026-07-11 (feat/real-pipeline-s1) — documented the Fabric — Transform
 Mappings section: GET/POST/DELETE /fabric/ingest/mappings (author the
 workspace's source→Fabric mappings, now with a "connector" source_kind that
@@ -114,6 +205,17 @@ so a new cloud route needs its own guard; and localhost_auth_bypass defaults to
 TRUE, so verifying an auth change with curl from your own machine cannot tell
 you whether the guard is there.
 
+Updated: 2026-07-22 (SHIP-4, feat/ship-4-agent-surface) — the two DELETE routes
+now file REAL Instinct proposals (kind `_ship_action`), executed on approval by
+``ship.executor`` with an execute-time `ship.manage` re-check; documented the
+`pocketpaw_ship` MCP agent surface and how it is narrower than the HTTP one (a
+prod deploy proposes rather than deploys).
+
+Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — documented the
+Ship — Managed Deploys section: the workspace-scoped /ship surface for
+provisioning a box, registering and deploying an app, routing a domain,
+creating a linked database, and reading logs + box health. The two DELETE
+routes PARK a teardown for human approval and never destroy anything.
 Updated: 2026-08-04 (feat/knowledge-wiki-api) — documented the Knowledge —
 Living Wiki API section: the enriched GET /knowledge/articles rows, the new
 GET /knowledge/articles/{id}, GET /knowledge/stats, GET /knowledge/uploads,
@@ -1334,6 +1436,174 @@ Errors:
 | 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
 | 500 | `sites.generator_failed` | The arm build failed (missing toolchain, non-zero build, or smoke-gate failure). |
 
+## Ship — Managed Deploys
+
+SHIP-3. The `/api/v1/ship` surface behind the /ship console: a workspace
+provisions a **box** (a VPS running Dokku), registers **apps** on it, and
+deploys them. Every route is license-gated and scoped to the caller's active
+workspace — the workspace never travels in a body or query param, and an id
+belonging to another tenant reads as `404`, never `403` (existence does not
+leak).
+
+Long work never blocks the request. `POST /ship/boxes` and
+`POST /ship/apps/{id}/deploy` enqueue an ARQ job and return immediately with a
+pollable record; the engine-backed routes (domains, database, logs, metrics)
+run inline over SSH and answer `409` with `code: ship.*_failed` when the deploy
+engine refuses.
+
+**Secrets never cross this surface.** A box's SSH key is decrypted only inside
+the engine session and shredded with it. App env **names** are accepted and
+stored (`env_refs`); env **values** are not. A database's connection string
+stays on the box — `POST /ship/apps/{id}/db` returns the NAME of the variable
+holding it.
+
+### `POST /ship/boxes`
+
+Provision a box. Body: `{"provider": "hcloud"}`. `server_type` and `region` are
+optional; they default to `cx22` / `fsn1` (Hetzner: 2 vCPU / 4 GB / 40 GB in
+Falkenstein — the cheapest shape that comfortably runs Dokku plus a couple of
+app containers), overridable per deployment via `POCKETPAW_SHIP_SERVER_TYPE` /
+`POCKETPAW_SHIP_REGION`.
+
+Returns the box in `provisioning`; poll `GET /ship/boxes` until it is `ready`:
+
+```json
+{"id": "…", "provider": "hcloud", "ip": "", "status": "provisioning", "price_monthly": null}
+```
+
+`status` is one of `provisioning` | `ready` | `degraded` | `destroyed`.
+
+### `GET /ship/boxes`
+
+The workspace's boxes, newest first — a list of the object above.
+
+### `GET /ship/boxes/{box_id}/metrics`
+
+Live box health, read over SSH. Three percentages, `0.0`–`100.0`:
+
+```json
+{"cpu": 21.0, "mem": 37.5, "disk": 23.0}
+```
+
+`cpu` is derived from the 1-minute load average over the core count and capped
+at 100. A box that is not `ready` answers `409 ship.box_not_ready`.
+
+### `DELETE /ship/boxes/{box_id}`
+
+**Parks** a teardown for human approval. Nothing is destroyed, no engine command
+runs, and the box keeps its current `status`:
+
+```json
+{"status": "pending_approval", "proposal_id": "<instinct-action-id>"}
+```
+
+The `proposal_id` is a real Instinct Action id: the teardown lands in The Tray
+for a human to approve or reject. Only on approval does
+`ship.executor.execute_approved_ship_action` touch the box — the request path
+never calls the engine's destroy verb. Repeating the call returns the same
+`proposal_id` rather than filing a duplicate.
+
+The executor re-checks `ship.manage` against the proposer's **current** role
+before it runs, so an approval for a since-demoted proposer fails closed, and
+re-approving an already-executed action never fires twice.
+
+### `POST /ship/apps`
+
+Register an app on a box. Body: `{"name": "demo", "box_id": "…"}`. Optional:
+`image` (the container image reference the deploy ships), `git_ref`,
+`build_path` (`dockerfile` | `nixpacks`), `prod`, and `env_refs` (variable
+NAMES only). Returns:
+
+```json
+{"id": "…", "name": "demo", "box_id": "…", "status": "created", "urls": []}
+```
+
+`status` walks `created` → `deploying` → `live` | `failed`. A duplicate name on
+the same box is `409 ship.app_exists`; a `box_id` from another workspace is
+`404`.
+
+### `GET /ship/apps?box_id=<id>`
+
+The workspace's apps, newest first, optionally narrowed to one box.
+
+### `POST /ship/apps/{app_id}/deploy`
+
+Enqueue a deploy. Takes **no body** — the app already carries its image, and the
+attempt pins that image so a later app edit cannot rewrite what is in flight. An
+app with no image is `422 ship.app_no_image`; a box that is not `ready` is
+`409 ship.box_not_ready`. Returns the attempt immediately:
+
+```json
+{"id": "…", "app_id": "…", "status": "queued", "started_at": "2026-07-22T…Z", "finished_at": null}
+```
+
+### `GET /ship/apps/{app_id}/deploys`
+
+The app's deploy attempts, newest first. `status` walks
+`queued` → `building` → `releasing` → `live`, or lands on `failed`;
+`finished_at` is set on a terminal state. Poll this to follow a deploy.
+
+### `POST /ship/apps/{app_id}/domains`
+
+Route a domain to the app and (by default) issue a certificate for it. Body:
+`{"domain": "demo.example.com", "enable_tls": true}`. Returns
+`{"domain": "…", "tls_enabled": true}` and adds the resulting URL to the app's
+`urls`.
+
+### `GET /ship/apps/{app_id}/domains`
+
+`{"domains": [{"domain": "…", "tls_enabled": true}]}` — the domains recorded at
+add time.
+
+### `POST /ship/apps/{app_id}/db`
+
+Create a database service and link it to the app. Body is optional; `service`
+defaults to `<app-name>-db`. Returns:
+
+```json
+{"service": "demo-db", "linked_app": "demo", "env_var": "MONGO_URL"}
+```
+
+`env_var` is the NAME of the variable the link injected. The connection string
+is a secret and never crosses the wire.
+
+### `GET /ship/apps/{app_id}/logs?num=<n>`
+
+Recent app log lines, newest last (`num` defaults to 100, max 1000). The engine
+redacts them before they leave the box:
+
+```json
+{"lines": ["2026-07-22T…Z app[web.1]: GET /health 200"]}
+```
+
+### `DELETE /ship/apps/{app_id}`
+
+**Parks** an app teardown for human approval, exactly like the box DELETE above.
+Nothing is destroyed.
+
+### The agent surface (`pocketpaw_ship` MCP)
+
+A chat agent in a room whose pocket has the **Ship connector** bound reaches the
+same service layer through ten in-process MCP tools — `ship_list_boxes`,
+`ship_provision_box`, `ship_list_apps`, `ship_create_app`, `ship_deploy_app`,
+`ship_add_domain`, `ship_create_db`, `ship_logs`, `ship_metrics`, and
+`ship_request_destroy`. Binding the connector also auto-surfaces the bundled
+`ship` skill into that room.
+
+The agent's surface is deliberately **narrower than the HTTP one**:
+
+| Verb | Operator over HTTP | Agent over MCP |
+|------|--------------------|----------------|
+| reads, provision, create app, domain, db | runs | runs |
+| deploy to a non-prod app | runs | runs |
+| deploy to a **prod-flagged** app | runs | **proposes** |
+| destroy a box or an app | proposes | proposes |
+
+An operator calling the API with their own credentials is a different actor from
+an agent acting on their behalf, which is why the prod deploy splits. Both paths
+converge on the same Instinct gate for teardowns: the tool returns
+`{"status": "proposed", "proposal_id": "…"}` and the agent is instructed never to
+report a destroy as done.
 ## Sites — Agent Editing Tools (in-process MCP)
 
 Editing a Paw Site from chat does not go over HTTP. The chat agent reaches it
@@ -1880,6 +2150,104 @@ Owner replies are stored in their own table rather than as chat runs, because
 the metering sweeper bills every terminal run and would otherwise charge the
 owner credits for typing their own sentence.
 
+---
+
+## Growth — Prospects
+
+First slice of the `/growth` outbound engine (G-1): a workspace-scoped
+prospect store. All routes are license-gated and carry the canonical
+`request_context`; every read is workspace-scoped inside the service, so a
+prospect id from another workspace returns an identical 404 (existence never
+leaks). The company website `domain` is the dedupe key — normalised to a bare
+lowercase hostname (scheme, `www.`, path, and port stripped) — unique per
+workspace. G-2 adds the bulk-ingestion route below; later slices add drafts
+and Instinct-gated sends on the dedicated `growth` arq queue
+(`pocketpaw_ee.cloud.growth.worker.WorkerSettings`).
+
+**RBAC (G-4).** Every `/growth` route carries a workspace-role guard on top of
+the license gate. Reads (`GET /growth/prospects`, `GET /growth/drafts`, …)
+require `growth.read` (MEMBER); authoring writes — create/update a prospect,
+bulk ingest, create a draft, non-gated lifecycle moves — require `growth.write`
+(MEMBER); and the outbound verbs — `POST /growth/drafts/{id}/propose` and
+`POST /growth/drafts/propose-batch` — require `growth.manage` (ADMIN). The propose route sits at the ADMIN tier deliberately:
+`growth.executor` re-checks that same action against the proposer's *current*
+role at dispatch time, so a member-filed proposal would always fail closed at
+approve. A caller below the required tier gets
+`403 workspace.insufficient_role`.
+
+### `POST /api/v1/growth/prospects`
+
+Create a prospect. Body:
+
+```json
+{
+  "name": "Sam Founder",
+  "company": "Acme Dental",
+  "domain": "acme-dental.com",
+  "source": "manual",
+  "tier": "unqualified",
+  "research_brief": "",
+  "emails": [],
+  "linkedin_url": null,
+  "whatsapp_number": null,
+  "opted_in": false,
+  "status": "new"
+}
+```
+
+Only `domain` and `source` are required. `name` and `company` default to
+`""` — **not yet known**, which is the honest shape an import arrives in: a
+pasted list of bare domains, enriched by research later on the same
+`(workspace, domain)` identity. Nothing renders an empty value as the word
+"unknown". The agent surface is stricter: `growth_upsert_prospect` refuses to
+CREATE a row without a name and a company.
+
+`project_id` (optional) assigns the prospect to a client project
+(`cloud/projects`). It is validated against the caller's workspace — another
+tenant's project is `404 project.not_found`. Nullable throughout: a workspace
+not using projects is unaffected.
+
+Enums: `source` is
+`clay | directory | manual`; `tier` is `a | b | c | unqualified` (default
+`unqualified`); `status` is
+`new | qualified | drafted | in_sequence | replied | dead` (default `new`).
+A duplicate `(workspace, domain)` returns `409 prospect.domain_taken` —
+create-or-update callers use the service's `upsert_by_domain` seam instead.
+
+Returns the prospect envelope: all fields above plus `id`, `workspace_id`,
+and ISO `created_at` / `updated_at`.
+
+### `POST /api/v1/growth/prospects/bulk`
+
+Batch create-or-update — the ingestion endpoint for Clay exports and
+partner-directory scrapes (G-2). Body:
+
+```json
+{
+  "rows": [
+    {
+      "name": "Sam Founder",
+      "company": "Acme Dental",
+      "domain": "acme-dental.com",
+      "source": "clay",
+      "emails": ["sam@acme-dental.com"]
+    }
+  ]
+}
+```
+
+Each row is `CreateProspectRequest`-shaped (same fields, defaults, and enums
+as the single-create route above). Max **500 rows** — an oversized payload is
+a 422 before any row is processed. Rows are processed individually through
+the upsert-by-domain seam:
+
+- a **new** `(workspace, domain)` inserts → counted in `created`;
+- an **existing** one updates in place (all fields overwritten except
+  `source`, which keeps first-capture provenance) → counted in `updated`;
+- an **invalid** row (bad enum, missing field, empty domain) is skipped and
+  recorded — the rest of the batch proceeds. No all-or-nothing abort;
+  upserts are idempotent, so re-posting the same payload is safe and reports
+  every row as updated.
 ## Knowledge — Living Wiki API
 
 The workspace knowledge browser (`/api/v1/knowledge/*`) is the read/reingest
@@ -1901,6 +2269,597 @@ Response:
 
 ```json
 {
+  "created": 18,
+  "updated": 1,
+  "errors": [
+    {"index": 4, "code": "prospect.invalid_row", "message": "source: Input should be 'clay', 'directory' or 'manual'"}
+  ]
+}
+```
+
+`index` is the row's position in the submitted `rows` array. Rows land only
+in the caller's workspace — the same domains ingested by another workspace
+create independent rows.
+
+### `GET /api/v1/growth/prospects`
+
+One page of the workspace's prospects. **The response is an envelope, not a
+bare array** — it changed shape in G-10a:
+
+```json
+{
+  "items": [ { ...prospect envelope }, ... ],
+  "next_cursor": "newest:2026-07-28T09:14:02+00:00|66a1...f3",
+  "total": 3182
+}
+```
+
+`total` counts every row matching the current filters (not the page), so the
+UI can say "showing 40 of 3,182". `next_cursor` is `null` on the last page.
+
+Query parameters:
+
+| Param | Default | Notes |
+|---|---|---|
+| `tier`, `status`, `source` | — | Validated against the enums above; an unknown value is a 422, not an empty list. |
+| `project_id` | — | Scope to one client's pipeline. Omitted means every project (the whole view for a workspace not using them); an empty string means the rows with no client assigned. |
+| `q` | — | Case-insensitive substring search across `name`, `company`, `domain` and `research_brief`. Regex metacharacters are escaped, so `.*` matches nothing rather than everything. Max 200 chars. |
+| `sort` | `newest` | `newest` \| `oldest` \| `company` \| `tier`. |
+| `cursor` | — | The previous page's `next_cursor`, passed back unchanged. |
+| `limit` | 100 | Max 500. |
+
+**Tier sort order is the declared rank `a → b → c → unqualified`**, not a
+lexicographic comparison. Today's tier names happen to sort the same way
+lexicographically; that is an accident, and renaming a tier would break it
+silently. The rank lives in `growth/domain.py` as `TIER_SORT_ORDER` and the
+query walks those buckets in order.
+
+**Pagination is keyset**, so a page never skips or repeats a row when the
+collection is written to mid-scroll. The cursor is opaque — do not parse or
+construct it — and carries the sort mode it was issued under: reusing a
+cursor after changing `sort` is a `422 prospect.bad_cursor` rather than a
+silently wrong page. Any malformed cursor is the same 422.
+
+**Search scale ceiling.** `q` is an unanchored regex `$or` across four
+fields, which Mongo cannot serve from an index — it is a collection scan
+bounded by the workspace filter. Fine at the scale this surface targets (tens
+of thousands of rows per workspace); past ~100k it needs a real text index or
+an external search index. No text index was added here: `models/prospect.py`
+carries a unique `(workspace, domain)` index plus a `(workspace, createdAt)`
+list cursor, and a Mongo text index is a per-collection singleton that has to
+be designed against those rather than bolted on.
+
+### `GET /api/v1/growth/prospects/facets`
+
+Counts behind the filter chips. Takes the same `tier` / `status` / `source` /
+`project_id` / `q` filters as the list route and returns:
+
+```json
+{
+  "tier":   { "a": 12, "b": 40, "c": 8, "unqualified": 300 },
+  "status": { "new": 210, "qualified": 90, "drafted": 40, "in_sequence": 12, "replied": 6, "dead": 2 },
+  "source": { "clay": 180, "directory": 140, "manual": 40 }
+}
+```
+
+Each block respects every active filter **except its own**. With
+`status=new` on, the tier counts describe the new rows rather than
+collapsing to whichever tier is selected — otherwise the selected chip reads
+`n` and every sibling reads `0`, which tells the user nothing about where to
+go next. `q` constrains all three blocks (it is not a facet of its own), and so does
+`project_id` — it is not a chip the user toggles inside the list, it is
+*which client's list* they are looking at, so the other three counts have to
+be scoped to it.
+
+Every legal value appears, zeros included, so the chip row keeps a stable
+shape as the user filters. Served by one workspace-scoped `$facet`
+aggregation — three separate queries would be three chances for the counts to
+disagree with each other.
+
+### `GET /api/v1/growth/prospects/{prospect_id}`
+
+Fetch one prospect. Cross-tenant or unknown ids: `404 prospect.not_found`.
+
+### `PATCH /api/v1/growth/prospects/{prospect_id}`
+
+Partial update — send only the fields to change. `domain` (the dedupe
+identity) and `source` (capture-time provenance) are immutable; the other
+fields (`name`, `company`, `tier`, `research_brief`, `emails`,
+`linkedin_url`, `whatsapp_number`, `opted_in`, `status`) patch in place.
+Returns the updated envelope.
+
+`project_id` is three-valued here: omitting it leaves the assignment alone,
+an id reassigns the prospect to that client (validated against the workspace
+— a foreign project is `404 project.not_found`), and `""` clears it.
+Un-assigning is deliberately explicit: a bulk upsert only ever *sets* the
+project, so an enrichment pass that carries no project can never orphan a
+client's prospect.
+
+## Growth — Drafts
+
+Third slice of the `/growth` outbound engine (G-3): per-channel outreach
+drafts attached to a prospect, with an enforced status lifecycle. Same gates
+as prospects — license + `request_context`, every read workspace-scoped
+(cross-tenant ids 404). The lifecycle is the object the send-gate slice
+(G-4) proposes and dispatches on top of:
+
+```
+draft → proposed → approved → sent → replied
+  └────────┴──────────┴─────────┴──→ rejected   (any non-terminal)
+```
+
+`replied` and `rejected` are terminal. Any other move — skipping ahead,
+going backwards, leaving a terminal state — is a
+`422 draft.illegal_transition`. Transitions are mechanism-only: no side
+effects, no sending.
+
+**G-4 — the Instinct send gate owns the `approved` and `sent` edges.** The
+public status route refuses those targets with `403 draft.gate_required`
+even though they are legal per the table: `approved` is only ever set after
+a human approves the draft's `_growth_send` Instinct proposal (which also
+enqueues the `growth.dispatch` arq job on the dedicated `growth` queue),
+and `sent` only by the dispatch worker (G-5/G-6 — a logging stub in G-4).
+Structural, like /ship's destroy gate: nothing sends without an approval.
+
+### `POST /api/v1/growth/prospects/{prospect_id}/drafts`
+
+Attach one channel's copy to a prospect. Body:
+
+```json
+{
+  "channel": "email",
+  "subject": "Quick idea for Acme Dental's booking flow",
+  "body": "Saw your online booking stops at a contact form — here's a live demo.",
+  "variant": "first_touch",
+  "demo_url": null
+}
+```
+
+`channel` (`email | linkedin | whatsapp`) and `body` (non-empty, max 10 000
+chars) are required. `subject` is **email-only** — sending it on another
+channel is a 422. `variant` is `first_touch | follow_up` (default
+`first_touch`). Drafts are always born in `status: "draft"` — there is no
+status field here; lifecycle moves go through the transition route.
+
+The prospect must exist in the caller's workspace (`404 prospect.not_found`
+otherwise). A prospect still in `new` / `qualified` flips to `drafted` on
+its first draft; later prospect statuses are never regressed.
+
+Returns the draft envelope: the fields above plus `id`, `workspace_id`,
+`prospect_id`, `status`, and ISO `created_at` / `updated_at`.
+
+### `GET /api/v1/growth/drafts`
+
+List the workspace's drafts, newest first. Optional query filters:
+`prospect_id`, `channel`, `status` (enum-validated — an unknown value is a
+422) and `limit` (default 100, max 500).
+
+### `PATCH /api/v1/growth/drafts/{draft_id}`
+
+Edit a draft's copy. Body: any subset of `subject`, `body`, `demo_url`
+(an empty body object is a 422 — there is nothing to change). No `status`
+field exists on this request: a lifecycle move dressed as an edit would be a
+second, unreviewed road to `approved`.
+
+**Only while the draft is still `draft`.** From `proposed` on, the stored body
+is what a human is reading in the Tray and what the dispatch worker puts on
+the wire, so an edit there would send copy nobody approved — refused with
+`403 draft.not_editable`. Revise by rejecting the draft and writing a new one.
+`subject` stays email-only (`422 draft.subject_not_allowed` on a linkedin /
+whatsapp draft). Cross-tenant or unknown ids: `404 draft.not_found`. Requires
+`growth.write` (MEMBER) — editing copy is authoring, not an outbound verb.
+
+### `POST /api/v1/growth/drafts/{draft_id}/status`
+
+Move a draft along the lifecycle. Body: `{"status": "proposed"}` (any
+`DraftStatus`). Legal moves per the machine above; anything else is a
+`422 draft.illegal_transition` and the draft is unchanged. Cross-tenant or
+unknown ids: `404 draft.not_found`. Returns the updated envelope.
+
+The gate-owned targets `approved` and `sent` are refused here with
+`403 draft.gate_required` (see the G-4 note above) — approval happens only
+in the Instinct Tray, and only the approved dispatch path may send.
+
+### `POST /api/v1/growth/drafts/{draft_id}/propose`
+
+File a gated `_growth_send` Instinct proposal for a draft (G-4). Requires
+`growth.manage` (ADMIN). No body.
+
+This route is the **only** way a `_growth_send` proposal comes into existence:
+the generic `POST /instinct/actions` (open to any member holding
+`instinct.propose`) refuses reserved gated parameter keys with
+`422 instinct.reserved_parameter_key`, so nobody can hand-craft a Tray card
+that dispatches a send on approval. Approving with edits cannot re-point one
+either — the blob's tenancy, proposer, target draft and channel are pinned back
+from the stored proposal.
+
+The draft must be able to legally move to `proposed`
+(`422 draft.illegal_transition` otherwise — so re-proposing an already
+proposed draft is refused and no duplicate proposal is filed); cross-tenant
+or unknown ids `404 draft.not_found`.
+
+Flips the draft to `proposed` and files an Instinct `Action` whose
+`_growth_send` blob carries the draft/prospect ids, the channel, the
+prospect's name + company, and the **rendered preview** (subject + body) —
+the human approves the exact copy that was staged. Returns:
+
+```json
+{ "proposal_id": "<instinct action id>", "draft": { ...draft envelope, "status": "proposed" } }
+```
+
+NOTHING is sent by this route. On **approve** (single or bulk, in the
+Instinct Tray) the growth executor flips the draft to `approved` and
+enqueues the `growth.dispatch` job `{draft_id, channel}` on the dedicated
+`growth` arq queue — with an execute-time re-check that the proposer STILL
+holds `growth.manage` (a since-demoted proposer's approved send fails
+closed), and `mark_failed` on the Action if the enqueue fails. On
+**reject** the draft flips to `rejected` and nothing is enqueued. The
+`email` branch is live (below) and the `whatsapp` branch is live (*Growth —
+WhatsApp dispatch*); `linkedin` keeps the logging stub on purpose — it is
+sent by hand from the LinkedIn queue.
+
+### `POST /api/v1/growth/drafts/propose-batch`
+
+Propose a selection of drafts in one call. Requires `growth.manage` (ADMIN)
+— the same tier as the single propose, so batching is not a cheaper route to
+the outbound verb.
+
+```json
+{ "draft_ids": ["66a1...f3", "66a1...f4", "66a1...f5"] }
+```
+
+Max 100 ids; an oversized payload is a `422` at the boundary, before a single
+proposal is filed. The cap is 100 rather than bulk ingest's 500 because each
+id costs a proposal a human then has to triage in the Tray.
+
+Each id goes through the **same** `propose_send` path as the single-draft
+route: one gated `_growth_send` Instinct proposal per draft, each approved or
+rejected individually. There is no batch proposal object, no batch approval,
+and no shortcut into the gate — a "batch" here is a UI convenience over N
+gated proposals. Nothing is sent by this route.
+
+Partial success, like bulk ingest — a draft that cannot be proposed (missing,
+cross-tenant, already proposed, terminal) records an indexed error entry and
+the remaining ids still go:
+
+```json
+{
+  "proposed": 2,
+  "failed": [
+    { "index": 1, "draft_id": "not-an-object-id", "code": "draft.not_found", "message": "..." },
+    { "index": 2, "draft_id": "66a1...f5", "code": "draft.illegal_transition", "message": "..." }
+  ]
+}
+```
+
+`index` is the id's position in the submitted `draft_ids` array. Nothing is
+rolled back on partial failure — the proposals already filed are legitimate
+and a human can reject them in the Tray.
+
+### Dispatch — how an approved email actually sends (G-5)
+
+The `growth.dispatch` job's `email` branch is live. It is not an HTTP route —
+there is no "send this now" endpoint, by design — but its behaviour is part of
+the contract the propose/approve routes above promise.
+
+1. **Load and re-check.** The job re-reads the draft and refuses anything that
+   is not `approved`. A job whose draft was rejected while queued, or a
+   redelivered job for a draft already `sent`, logs a warning and makes **no**
+   provider call. This is the dispatcher's half of the send gate.
+2. **Send.** Delivery goes through the workspace's **Mailtrap** connector
+   (`connectors/mailtrap.yaml`) over the Email Sending API. The token is a
+   per-workspace credential held in that workspace's connector row and read
+   through the connector state store — never an inlined process credential,
+   and never logged, returned, or put on a DTO. Disabling the connector
+   revokes sending immediately (the state store only resolves enabled rows).
+   The connector declares **no actions**, so no agent or connector-execute
+   call can reach a send: the approved-draft path is the only one.
+3. **Record, then flip.** A `MessageLog` row is written first (the audit row
+   proves a message physically left even if the following write fails), then
+   the draft moves `approved → sent` through the same gate seam the executor
+   uses. No second status path is introduced.
+
+**Failure is retryable, not fatal.** A provider rejection, a transport error,
+an unconfigured connector, a prospect with no email address, or a
+subject-less draft all produce `MessageLog(outcome="failed", error=...)` and
+leave the draft `approved` — the human approval still stands, only delivery
+failed, so a re-run needs no second approval. Nothing raises out of the job:
+the growth worker runs `max_tries=1` precisely so outbound work is never
+auto-retried into a double-send, and the `MessageLog` row is the durable
+failure record.
+
+**`MessageLog`** (collection `growth_message_logs`, one row per delivery
+**attempt**): `workspace`, `draft_id`, `prospect_id`, `channel`, `provider`
+(`"mailtrap"`), `provider_message_id`, `to_address`, `sent_at`, `outcome`
+(`sent | failed`), `error`. Written only by the growth service.
+
+**Config — `GROWTH_SENDING_DOMAIN` (required to send).** The secondary
+sending domain outreach rides. Unset means nothing goes out; the dispatcher
+fails closed rather than guessing. The from-address (default
+`outreach@<GROWTH_SENDING_DOMAIN>`, overridable per workspace via the
+connector's `MAILTRAP_FROM_EMAIL`) is validated against it at send time, and
+the value may not equal the deployment's own host (`POCKETPAW_PUBLIC_BASE_URL`).
+Cold outreach draws spam complaints at rates transactional mail never sees,
+and every complaint lands on the sending domain's reputation — a burnt
+secondary domain costs a DNS record and a warm-up, while a burnt apex takes
+password resets, invoices, and receipts down with it.
+
+## Growth — LinkedIn Queue
+
+The manual send surface for LinkedIn outreach (G-8). **Deliberately manual**:
+there is no LinkedIn API integration and no automation — the captain
+copy-pastes each note by hand (account-ban avoidance is the feature). Same
+gates as the rest of `/growth` — license + `request_context`, every read
+workspace-scoped.
+
+### `GET /api/v1/growth/linkedin/queue`
+
+The workspace's linkedin-channel drafts in `proposed` / `approved`, newest
+first, each joined with its prospect's targeting context. Query:
+`limit` (default 100, max 500) and `format` (`json` default, `md`).
+
+JSON items:
+
+```json
+{
+  "draft": { "id": "…", "body": "…", "variant": "first_touch", "status": "approved", "…": "…" },
+  "prospect_name": "Sam Founder",
+  "prospect_company": "Acme Dental",
+  "linkedin_url": "https://linkedin.com/in/sam-founder",
+  "research_brief": "Books via a contact form; no online scheduling.",
+  "tier": "a"
+}
+```
+
+`?format=md` returns `text/markdown` instead — a paste-ready export, one
+section per prospect (no tables, no HTML): name + company heading, the
+profile URL as a link, tier + the brief's first line, the connect note
+(`first_touch` body, with a char count against LinkedIn's 300-char connect
+limit), the after-accept message (`follow_up` body, when queued), and each
+draft's id for the mark-sent call.
+
+### `POST /api/v1/growth/linkedin/{draft_id}/mark-sent`
+
+Record that a queued LinkedIn draft was manually sent. The draft must be
+linkedin-channel (`422 draft.wrong_channel` otherwise) and `approved` — the
+move rides the G-3 machine, so anything but approved→sent is a
+`422 draft.illegal_transition`. Cross-tenant or unknown ids:
+`404 draft.not_found`. Returns the updated draft envelope (`status: "sent"`);
+the draft leaves the queue and continues the normal lifecycle
+(sent→replied / rejected).
+
+Requires `growth.manage` (ADMIN) — it is an OUTBOUND verb, the same tier as
+propose. Because G-4 made `sent` a gate-owned target, this route walks the
+gate seam rather than the public status route; the structural guarantee is
+unchanged (only an `approved` draft can move, and `approved` is reachable
+only through an approved `_growth_send` proposal). The queue read requires
+`growth.read` (MEMBER).
+
+## Growth — Follow-ups
+
+Final slice of the `/growth` v1 outbound engine (G-7): the loop that closes
+the cycle. A draft that went out and got no reply produces a **second draft**
+— a short nudge — which is filed straight back into the Instinct Tray through
+the same `_growth_send` gate. There is **no new API surface** here and no new
+authority: the sweep's terminal state is a `proposed` draft plus a pending
+Action a human decides on, exactly like a first touch typed by hand. Nothing
+auto-approves and nothing auto-sends.
+
+**Where it runs.** `growth.followup_sweep`, a daily arq **cron** at 13:00 UTC
+on the dedicated `growth` queue
+(`pocketpaw_ee.cloud.growth.worker.WorkerSettings.cron_jobs`, `unique=True`
+so a horizontally-scaled worker fleet runs one tick, not N). Deploy it with
+the same process that already serves `growth.dispatch`:
+
+```bash
+arq pocketpaw_ee.cloud.growth.worker.WorkerSettings
+```
+
+**What it does**, per (workspace, prospect, channel) thread:
+
+1. Finds the thread's most recent `sent` draft and checks it is older than
+   `GROWTH_FOLLOWUP_DELAY_DAYS`. The clock starts at the LAST touch, not the
+   first — a thread that already had a nudge waits the full delay again.
+2. Skips the thread when the prospect is `replied` (they answered) or `dead`
+   (already retired), or when any draft in the thread is `replied`.
+3. Skips the thread when a follow-up is already **open** in it (`draft`,
+   `proposed` or `approved`) — that one is the human's move. This is also
+   what makes the sweep idempotent: the follow-up it filed on the last pass
+   blocks the next one, so re-running a pass creates nothing.
+4. Counts the thread's non-rejected follow-ups. At `GROWTH_FOLLOWUP_MAX` the
+   prospect is retired to `status: "dead"` and nothing further is created —
+   the sweep never touches them again. (A follow-up a human **rejected**
+   doesn't burn a cap slot.)
+5. Otherwise: creates a `variant: "follow_up"` draft (copy templated in code
+   from the thread's first touch — a placeholder the `/growth` crew skill
+   replaces; on email the subject is the original's, `Re:`-prefixed, so the
+   nudge threads under it) and immediately runs it through the existing
+   propose path — filing the `_growth_send` Action and flipping the draft to
+   `proposed`.
+
+**Who proposes.** A cron has no user, but the gate re-checks the proposer's
+*current* `growth.manage` role at execute time, so a "system"-proposed
+follow-up would be approvable and then fail closed at dispatch. The sweep
+therefore **inherits the human** who proposed the thread's last send, read off
+that draft's own `_growth_send` Action — they become the follow-up's trigger
+source, its Tray assignee, and the identity the execute-time re-check runs
+against. When no proposer can be resolved (a draft that reached `sent` with no
+Tray record) the thread is skipped: a proposal nobody can execute is worse
+than none.
+
+**Config.** Both read from the environment at sweep time, so a change takes
+effect on the next tick without a redeploy. An unparseable or out-of-range
+value logs a warning and falls back to the default — a typo must not take the
+outbound loop down.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `GROWTH_FOLLOWUP_DELAY_DAYS` | `4` | Days of silence after a send before its follow-up comes due. Minimum `1`. |
+| `GROWTH_FOLLOWUP_MAX` | `2` | Follow-ups allowed per (prospect, channel). On the pass where a capped thread comes due again, the prospect is set to `dead` instead. |
+
+**Send timestamp.** The age check reads the draft's `sent_at` when the
+dispatch worker's send record supplies one, and otherwise falls back to
+`updated_at` — which, for a draft sitting in `sent`, is the moment of the
+`sent` transition, since the status flip is the last write to that row.
+
+---
+
+## Growth — WhatsApp dispatch (MSG91)
+
+Sixth slice of the `/growth` outbound engine (G-6): the `channel="whatsapp"`
+branch of the `growth.dispatch` arq job actually sends, through MSG91 (an
+official Meta WhatsApp Business Solution Provider).
+
+**The opt-in guard is a service-level invariant, not a UI convention.** Meta
+bans WhatsApp Business Accounts that send business-initiated template messages
+to numbers that never consented — the quality rating collapses, then the number
+gets restricted, then banned, for the whole tenant. So dispatch refuses any
+draft whose prospect has `opted_in = false`: it makes **no provider call at
+all**, raises `growth.whatsapp_opt_in_required`, records a `blocked` row, and
+leaves the draft in `approved` so the refusal is visible instead of silent.
+
+Because business-initiated messages must be pre-approved templates, the draft
+`body` is sent as the template's first body variable, never as free-form text.
+
+**Guard order** (each refusal writes its own send-log row and raises):
+
+| # | Guard | Error code | Blocked reason |
+|---|---|---|---|
+| 1 | Draft still `approved` (the G-4 gate owns that status) | `growth.draft_not_approved` | `draft_not_approved` |
+| 2 | Prospect still exists in the draft's workspace | `growth.prospect_unavailable` | `prospect_missing` |
+| 3 | **`prospect.opted_in`** | `growth.whatsapp_opt_in_required` | `not_opted_in` |
+| 4 | Prospect has a WhatsApp number | `growth.prospect_unavailable` | `no_number` |
+| 5 | Hourly rate cap | `growth.whatsapp_rate_capped` | `rate_capped` |
+| 6 | Resolvable MSG91 credentials | `growth.whatsapp_not_configured` | `not_configured` |
+
+On success the job writes a `sending` row, calls MSG91, finalises the row to
+`sent` (or `failed`), and flips the draft `approved → sent` through the gate's
+own `service.gate_transition` seam. The growth worker runs with `max_tries = 1`,
+so a refusal lands as a failed arq job for operator review — an outbound message
+is never retried automatically.
+
+Every attempt — including refused ones — writes a row to
+`growth_whatsapp_send_logs` (`WhatsAppSendLog`): workspace, draft, prospect,
+recipient number, status, blocked reason, provider message id, and
+`opted_in_at_attempt` (the consent fact *as of* the send, which a later prospect
+edit cannot rewrite).
+
+### Credentials
+
+The MSG91 authkey is resolved per workspace through the **connector state
+pattern** — the workspace's `msg91` `WorkspaceConnector` row, read via
+`CloudConnectorStateStore` with the `ws:<workspace_id>` scope key. There is
+deliberately **no env-var fallback for the authkey**: a deployment-global
+provider key would let one tenant's outbound traffic burn another tenant's WABA
+quality rating. No row, no send.
+
+Config keys on that row:
+
+| Key | Required | Notes |
+|---|---|---|
+| `authkey_enc` | yes* | The authkey as a `_core.crypto` Fernet ciphertext (needs `CLOUD_ENCRYPTION_KEY`). Preferred — keeps the plaintext out of Mongo and out of the connectors entity's own `config` echo. |
+| `authkey` | yes* | Plaintext fallback for installs with no encryption key. Warns on every resolve. |
+| `integrated_number` | yes | The WABA business number messages are sent from. |
+| `template_name` | yes | The pre-approved Meta template. |
+| `language_code` | no | Defaults to `en`. |
+| `namespace` | no | WABA template namespace, when the account requires one. |
+| `base_url` | no | Defaults to `https://api.msg91.com`. Per-workspace override for regional mirrors. |
+
+\* one of `authkey_enc` / `authkey`.
+
+The authkey is never logged, never returned by any DTO, and never persisted into
+the send log. `Msg91Credentials.__repr__` redacts it, so a traceback or a `%r`
+format cannot spill it either.
+
+### `POST /api/v1/growth/webhooks/msg91`
+
+Inbound MSG91 WhatsApp events. **Unauthenticated by nature** (MSG91 is the
+caller) — mounted separately from the licensed `/growth` router, with no license
+gate, no RBAC and no `RequestContext`.
+
+**Fails closed.** Trust rests entirely on the signature: HMAC-SHA256 over the
+raw request body, keyed by `GROWTH_MSG91_WEBHOOK_SECRET`, hex-encoded, in
+`X-Msg91-Signature` (an optional `sha256=` prefix is tolerated). A bad
+signature, a missing header, **and an unset secret** all return
+`403 growth.webhook_signature_invalid` / `growth.webhook_unsigned` /
+`growth.webhook_unverifiable`. Unlike the Recall webhook there is no
+accept-while-you-wire-it-up mode — a forged inbound reply would flip
+`opted_in` and thereby unlock business-initiated sends to a number that never
+consented.
+
+On a verified inbound reply the handler sets `prospect.opted_in = true`, moves
+the prospect to `replied`, and walks any `sent` WhatsApp draft for that prospect
+to `replied` (through the gate seam). Under Meta's rules a user-initiated
+message both opens the 24-hour service window and *is* the opt-in signal for
+that number.
+
+Delivery-status callbacks (`status` / `delivered` / `read` / …) are accepted and
+ignored — a receipt is not consent. A number no workspace holds is a 200 no-op.
+
+The response body is a constant `{"ok": true}` for every accepted request —
+processed, ignored, or unknown number — so the endpoint cannot be used as a
+membership oracle over phone numbers.
+
+Tenancy: the payload carries no workspace, so the lookup starts from the number
+and is immediately re-narrowed — when any workspace has actually WhatsApp'd that
+number, only those workspaces' rows are touched, so a tenant that merely holds
+the same prospect never learns someone else's outreach got a reply.
+
+### Environment
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GROWTH_WHATSAPP_MAX_PER_HOUR` | `20` | Per-workspace outbound WhatsApp ceiling per rolling hour. WhatsApp quality rating is computed over a rolling window of recent business-initiated messages, and a burst (bulk approval, retry storm, mis-scoped follow-up cron) is exactly the shape that trips it — with the damage landing on the WABA, not the individual send. The cap bounds the blast radius of a bug. Attempts that reached the provider (`sending` / `sent` / `failed`) consume the window; refused attempts do not. There is no "disabled" value — `0` refuses every send rather than meaning unlimited, and a non-numeric or negative value falls back to the default, so a fat-fingered setting fails closed. |
+| `GROWTH_MSG91_WEBHOOK_SECRET` | *(unset)* | Shared secret for the inbound webhook HMAC. **Required** — while unset, `POST /growth/webhooks/msg91` rejects every request with 403. |
+| `CLOUD_ENCRYPTION_KEY` | *(unset)* | Existing deployment-wide Fernet key. Needed to store the MSG91 authkey as `authkey_enc` rather than plaintext. |
+
+## Growth — the agent surface (`pocketpaw_growth` MCP)
+
+The chat agent on the `/growth` rail reaches the same service layer through
+nine in-process MCP tools. It is the operator's assistant on that page: it can
+research and file a prospect, write and revise the copy, and put a send in
+front of a human. It cannot send.
+
+| Tool | RBAC | What it does |
+|---|---|---|
+| `growth_list_prospects` | `growth.read` | Compact rows + the filter-scoped `total`; `tier` / `status` / `source` / `q` / `sort` / `cursor` / `limit` |
+| `growth_get_prospect` | `growth.read` | One prospect in full, with every draft written for it |
+| `growth_list_drafts` | `growth.read` | Drafts with truncated body previews; filters by prospect / channel / status |
+| `growth_linkedin_queue` | `growth.read` | The manual LinkedIn queue with its prospect context |
+| `growth_upsert_prospect` | `growth.write` | Create-or-enrich keyed on `domain`; omitted fields keep their stored values |
+| `growth_create_draft` | `growth.write` | Write one channel's copy — born `draft` |
+| `growth_update_draft` | `growth.write` | Revise copy, only while the draft is still `draft` |
+| `growth_propose_send` | `growth.manage` | Files one `_growth_send` Instinct proposal; returns `{status: "proposed", proposal_id}` |
+| `growth_propose_send_batch` | `growth.manage` | The same, over up to 100 draft ids — one proposal each |
+
+The agent's surface is deliberately **narrower than the HTTP one**:
+
+| Verb | Operator over HTTP | Agent over MCP |
+|------|--------------------|----------------|
+| reads, upsert a prospect, write a draft | runs | runs |
+| edit a draft's copy (while `draft`) | runs | runs |
+| propose a send | runs | runs |
+| move a draft to `approved` or `sent` | **refused** (gate-owned) | **no tool exists** |
+| mark a LinkedIn draft sent | runs | **no tool exists** |
+
+**The agent's reach ends at `proposed`.** No tool sends; no tool takes a
+`status` argument (the legal move is exposed as the named verb
+`growth_propose_send`, so there is no shape of argument that could ask for
+`approved`); and `service.gate_transition` — the seam the executor and the
+dispatch worker walk — is not reachable from the MCP module at all. The two
+`status` fields that do appear are read filters on the list tools.
+`growth_update_draft` stops at `draft` for the same reason: from `proposed`
+on, the stored body is what the Tray shows and what goes on the wire, so an
+edit past that point would be a send bypass wearing an edit's clothes. Tests
+assert all of this against the tool list and schemas, so a tool added later
+trips them before it ships.
+
+Tenancy comes from the chat stream's identity — no tool accepts a
+`workspace_id`, and every schema sets `additionalProperties: false`. The RBAC
+tiers mirror the HTTP routes, and the ADMIN tier on the propose verbs is
+load-bearing: `growth.executor` re-checks `growth.manage` against the
+proposer's **current** role at approve time, so a proposal filed below that
+tier could only ever clog the Tray.
   "articles": [
     {
       "id": "deploy-runbook",

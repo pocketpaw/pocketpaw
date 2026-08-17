@@ -387,6 +387,19 @@ wheels = [
 ]
 
 [[package]]
+name = "asyncssh"
+version = "2.23.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a4/95/212d3d394f2a6ccb3f95056d3b9a7ce13c2f58503cbd6a38d037ef48cb13/asyncssh-2.23.1.tar.gz", hash = "sha256:d9dc3bc0206f3e4b5d80d1c0e6a24af2b4ad4beb556884c41fb2ad1c7ca3f44f", size = 542883, upload-time = "2026-06-07T14:15:18.832Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/94/9aa81bde40627af70388d634152e7c53e7533788e662b8093047501a1473/asyncssh-2.23.1-py3-none-any.whl", hash = "sha256:f68e55476d41253d785bcac9a90834ae5fdea0f417bd6d7182608bda248de88e", size = 376054, upload-time = "2026-06-07T14:15:17.375Z" },
+]
+
+[[package]]
 name = "attrs"
 version = "26.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2376,6 +2389,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/1d/17/afa56379f94ad0fe8defd37d6eb3f89a25404ffc71d4d848893d270325fc/h2-4.3.0.tar.gz", hash = "sha256:6c59efe4323fa18b47a632221a1888bd7fde6249819beda254aeca909f221bf1", size = 2152026, upload-time = "2025-08-23T18:12:19.778Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/69/b2/119f6e6dcbd96f9069ce9a2665e0146588dc9f88f29549711853645e736a/h2-4.3.0-py3-none-any.whl", hash = "sha256:c438f029a25f7945c69e0ccf0fb951dc3f73a5f6412981daee861431b70e2bdd", size = 61779, upload-time = "2025-08-23T18:12:17.779Z" },
+]
+
+[[package]]
+name = "hcloud"
+version = "2.23.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9f/b0/f3a2e44ad8c295df58275585aecb979fb0829f0ac7d36d41db958dd85c65/hcloud-2.23.0.tar.gz", hash = "sha256:c12dce3f14404ea342d79236292a15fbc4ceeb7861724a09dd3fe60cef513e0b", size = 154918, upload-time = "2026-07-21T12:32:35.679Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/ae/bb107bd26049627c63da41868616533c004da69113cb2747e6a4e4eda949/hcloud-2.23.0-py3-none-any.whl", hash = "sha256:5a3fa1bbd1f87bfc5f0c726caebe041b9e1119b4361aafabc12fad284a2c445a", size = 111603, upload-time = "2026-07-21T12:32:34.025Z" },
 ]
 
 [[package]]
@@ -5608,6 +5634,7 @@ version = "0.4.16"
 source = { editable = "ee" }
 dependencies = [
     { name = "arq" },
+    { name = "asyncssh" },
     { name = "beanie" },
     { name = "boto3" },
     { name = "camel-ai" },
@@ -5624,6 +5651,7 @@ dependencies = [
     { name = "google-auth" },
     { name = "google-auth-oauthlib" },
     { name = "google-cloud-storage" },
+    { name = "hcloud" },
     { name = "igraph" },
     { name = "livekit-agents", extra = ["codecs"] },
     { name = "livekit-api" },
@@ -5642,6 +5670,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "arq", specifier = ">=0.26.0" },
+    { name = "asyncssh", specifier = ">=2.14.2" },
     { name = "beanie", specifier = ">=1.26.0" },
     { name = "boto3", specifier = ">=1.34.0" },
     { name = "camel-ai", git = "https://github.com/qbtrix/camel-ai.git?rev=76ff78e8c78d0a38277e421ea9aca34904b4dc37" },
@@ -5659,6 +5688,7 @@ requires-dist = [
     { name = "google-auth-oauthlib", specifier = ">=1.2.0" },
     { name = "google-cloud-firestore", marker = "extra == 'firestore'", specifier = ">=2.27.0" },
     { name = "google-cloud-storage", specifier = ">=2.14.0" },
+    { name = "hcloud", specifier = ">=2.23.0" },
     { name = "igraph", specifier = ">=0.11" },
     { name = "livekit-agents", extras = ["codecs"], specifier = ">=1.5.9" },
     { name = "livekit-api", specifier = ">=0.6.0" },

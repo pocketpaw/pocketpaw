@@ -10,6 +10,26 @@
 #   Without it, a ws-A admin could approve/reject a ws-B ``_customer_reply`` action
 #   and ``deliver_customer_decision`` would flip a decision row in ws-B (it routes
 #   by the blob's ``workspace_id``). The other kinds are unchanged.
+
+# Updated: 2026-07-27 (feat/growth-g4 — _growth_send proposal type) — wired the
+#   /growth outbound-send gate kind into the dispatch, mirroring ``_ship_action``
+#   exactly. ``_growth_send_blob`` + ``_assert_growth_workspace`` are the peers
+#   of the ship blob accessor + tenancy guard (the guard runs at all four
+#   assertion sites — approve / bulk-approve / reject / bulk-reject — and fails
+#   closed on an empty workspace claim). The blob
+#   (``Action.parameters._growth_send``, filed by ``ee.cloud.growth.propose``)
+#   carries {draft_id, prospect_id, channel, prospect name/company, rendered
+#   preview, workspace_id, chain ids}. On APPROVE (single AND bulk) the router
+#   emits ``human.corrected`` then fires
+#   ``growth.executor.execute_approved_growth_send`` — which flips the draft
+#   proposed→approved through the service's gate seam and enqueues the
+#   ``growth.dispatch`` arq job (a logging STUB until G-5/G-6), and OWNS the
+#   chain close. On REJECT the router emits ``human.corrected`` +
+#   ``decision.completed(rejected)`` itself, then best-effort flips the draft
+#   proposed→rejected via ``_mark_growth_send_rejected_safe`` (the executor
+#   never runs on reject — nothing is enqueued, nothing sends). This gate is
+#   the ONLY path to a draft's ``approved``/``sent`` statuses — the public
+#   /growth status route refuses those targets (``draft.gate_required``).
 # Updated: 2026-07-10 (FST-6 — _fabric_conflict proposal type) — wired the
 #   conflict-stewardship gate kind into the FOUR-path dispatch.
 #   ``_fabric_conflict_blob`` + ``_assert_fabric_conflict_workspace`` are the
@@ -964,6 +984,297 @@ def _assert_fabric_objects_workspace(action: Any, current_workspace: str) -> Non
         )
 
 
+def _ship_action_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_ship_action`` blob on an Action, or ``None``.
+
+    The blob is the gated /ship infrastructure payload
+    ``ee.cloud.ship.propose`` stores under ``Action.parameters._ship_action``
+    (verb / box_id / app_id / params / params_hash / idempotency_key + the
+    originating ``workspace_id``). This is a peer gated proposal kind — the
+    approve path dispatches the apply-on-approve executor on its presence,
+    exactly as it dispatches the external-action executor on ``_external_action``.
+    A /ship action is the only path that may destroy a box or an app. Anything
+    that is not a dict is treated as "no ship action".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_ship_action")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_ship_action_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting a /ship action from another workspace.
+
+    Mirror of ``_assert_external_action_workspace`` for the ``_ship_action``
+    blob. ``require_action_any_workspace("instinct.approve")`` only proves the
+    caller holds the role SOMEWHERE; this binds the /ship Action to the caller's
+    active workspace. A /ship action carries no pocket, so its tenancy lives
+    entirely on the blob's ``workspace_id``. A mismatch → 403 on BOTH the approve
+    and the reject side (asymmetric tenant scope is no tenant scope). An empty
+    workspace claim fails closed.
+    """
+    blob = _ship_action_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This /ship action has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This /ship action belongs to a different workspace",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Reserved gated-blob keys (security review F1 + F2)
+# ---------------------------------------------------------------------------
+
+# Every ``Action.parameters`` key that DISPATCHES an executor on approval. These
+# are not ordinary parameters: each one is a standing instruction to perform a
+# privileged side effect (destroy a box, send outbound mail, change a member's
+# role, publish a version, run a connector call) the moment a human clicks
+# Approve. Only the in-process propose helpers that own each kind may mint them
+# — they call ``store.propose`` DIRECTLY, never over HTTP.
+#
+# Two invariants are enforced off this set:
+#   F2 — ``POST /instinct/actions`` (the GENERIC propose route, open to any
+#        MEMBER via ``instinct.propose``) REFUSES a payload carrying any of
+#        these keys. Without it a member could file an innocuous-looking Tray
+#        card whose ``parameters._growth_send`` targets a real draft, and the
+#        approve path would dispatch it.
+#   F1 — ``POST /instinct/actions/{id}/approve`` PINS a gated blob's identity
+#        fields (tenancy, proposer, target, verb, schema, chain ids) back from
+#        the stored proposal before applying a ``parameters`` edit, and drops a
+#        reserved key the stored Action never carried. The approve-time tenancy
+#        asserts run on the PRE-edit Action while the executor reads the
+#        POST-edit blob, so an unpinned edit could re-point the operation at
+#        another tenant AFTER the gate had cleared. Content stays editable —
+#        the mandates plan resolution legitimately filters a ``_belt_plan``'s
+#        task list while approving. Same discipline the structured PATCH
+#        ``/instinct/actions/{id}/proposal`` route already applies.
+RESERVED_GATED_PARAM_KEYS: frozenset[str] = frozenset(
+    {
+        "_pocket_write",
+        "_code_change",
+        "_external_action",
+        "_fabric_objects",
+        "_ship_action",
+        "_growth_send",
+        "_pocket_create",
+        "_instinct_rule",
+        "_fabric_conflict",
+        "_belt_plan",
+        "_artifact_change",
+        "_admin_action",
+        "_customer_reply",
+    }
+)
+
+
+def _reserved_gated_keys(parameters: Any) -> set[str]:
+    """Return the reserved gated-blob keys present in a ``parameters`` dict."""
+    if not isinstance(parameters, dict):
+        return set()
+    return {key for key in parameters if key in RESERVED_GATED_PARAM_KEYS}
+
+
+# The blob fields an approve-time edit may NEVER move — the union across every
+# gated kind. They answer "who proposed this, in which tenant, against which
+# target, under which chain" — the questions the tenancy gate and each
+# executor's re-validation are built on. Everything else in a blob is content
+# (a plan's task list, a rule's CEL, an ontology's links) and stays editable, so
+# the legitimate approve-with-edits flows keep working.
+_GATED_IMMUTABLE_FIELDS: frozenset[str] = frozenset(
+    {
+        # discriminator + version
+        "kind",
+        "schema",
+        # tenancy (``workspace`` is the artifact-change spelling)
+        "workspace_id",
+        "workspace",
+        # proposer / owner — the identity executors re-check RBAC against
+        "requested_by",
+        "user_id",
+        "proposer_user_id",
+        # Decision-Graph chain + terminal record
+        "correlation_id",
+        "proposed_event_id",
+        "parked_policy_event_id",
+        "outcome",
+        # integrity / replay guards
+        "params_hash",
+        "args_hash",
+        "idempotency_key",
+        # the TARGET and the VERB — a human approved a SPECIFIC operation on a
+        # SPECIFIC object; an edit must never re-point either
+        "verb",
+        "action",
+        "draft_id",
+        "prospect_id",
+        "channel",
+        "box_id",
+        "app_id",
+        "pocket_id",
+        "scope_id",
+        "scope_type",
+        "object_id",
+        "property",
+        "mandate_id",
+        "shift_id",
+        "from_version_id",
+        "to_version_id",
+        "branch",
+        "repo",
+        "base_branch",
+        "connector_name",
+    }
+)
+
+
+def _pin_gated_blobs(stored_parameters: Any, incoming_parameters: dict[str, Any]) -> dict[str, Any]:
+    """Pin a gated blob's immutable identity fields back from the STORED blob.
+
+    SECURITY (security review F1) — ``ApproveRequest.parameters`` replaces the
+    parameters dict wholesale, and the approve route's tenancy sweep runs on the
+    PRE-edit Action. Without this, an approver who had cleared the gate for
+    their OWN workspace could rewrite the blob in the same call — changing
+    ``workspace_id`` / ``draft_id`` / ``requested_by`` — and the executor, which
+    reads the POST-edit blob, would act on ANOTHER tenant's object.
+
+    This is the approve-path twin of what ``EditProposalRequest`` already does
+    on the structured PATCH route: content stays editable (the mandates plan
+    resolution legitimately filters a ``_belt_plan``'s task list while
+    approving), identity does not. Three rules, applied to EVERY reserved kind
+    so a new gated kind inherits them:
+
+      * a reserved key the STORED action does not carry is DROPPED — an edit
+        may never ADD a gated blob to an Action that was proposed without one
+        (that would mint a dispatch out of an innocuous Tray card);
+      * a reserved key the stored action DOES carry is never removed or
+        replaced by a non-dict — the stored blob is restored instead;
+      * every immutable field is forced back from the stored blob (and an
+        immutable field the stored blob lacks is stripped, so an edit cannot
+        introduce one).
+    """
+    stored = stored_parameters if isinstance(stored_parameters, dict) else {}
+    result = dict(incoming_parameters)
+
+    for key in RESERVED_GATED_PARAM_KEYS:
+        stored_blob = stored.get(key)
+        if not isinstance(stored_blob, dict):
+            result.pop(key, None)
+            continue
+        incoming_blob = result.get(key)
+        if not isinstance(incoming_blob, dict):
+            result[key] = stored_blob
+            continue
+        pinned = dict(incoming_blob)
+        for field in _GATED_IMMUTABLE_FIELDS:
+            if field in stored_blob:
+                pinned[field] = stored_blob[field]
+            else:
+                pinned.pop(field, None)
+        result[key] = pinned
+
+    return result
+
+
+def _assert_gated_workspaces(action: Any, current_workspace: str) -> None:
+    """Run EVERY gated kind's tenancy guard on one Action.
+
+    The single chokepoint the four dispatch paths (approve / bulk-approve /
+    reject / bulk-reject) call, so a new gated kind inherits the tenancy gate on
+    all four the moment its guard joins this list — and so F1's post-edit
+    re-check covers every kind rather than just the one that surfaced the bug.
+    Each guard is a no-op for an Action that doesn't carry its blob.
+    """
+    _assert_pocket_write_workspace(action, current_workspace)
+    _assert_code_change_workspace(action, current_workspace)
+    _assert_external_action_workspace(action, current_workspace)
+    _assert_fabric_objects_workspace(action, current_workspace)
+    _assert_ship_action_workspace(action, current_workspace)
+    _assert_growth_workspace(action, current_workspace)
+    _assert_pocket_create_workspace(action, current_workspace)
+    _assert_instinct_rule_workspace(action, current_workspace)
+    _assert_fabric_conflict_workspace(action, current_workspace)
+    _assert_belt_plan_workspace(action, current_workspace)
+    _assert_artifact_change_workspace(action, current_workspace)
+    _assert_admin_action_workspace(action, current_workspace)
+    # ``_customer_reply`` (paw-bar, B0 H2) — added on dev after this chokepoint
+    # was written; folded in at the growth-v1 rebase so the chokepoint keeps its
+    # every-gated-kind guarantee.
+    _assert_customer_reply_workspace(action, current_workspace)
+
+
+def _growth_send_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_growth_send`` blob on an Action, or ``None``.
+
+    The blob is the gated /growth outbound-send payload
+    ``ee.cloud.growth.propose`` stores under ``Action.parameters._growth_send``
+    (draft_id / prospect_id / channel / prospect name+company / rendered
+    preview / idempotency_key + the originating ``workspace_id``). This is a
+    peer gated proposal kind — the approve path dispatches the apply-on-approve
+    executor on its presence, exactly as it dispatches the ship executor on
+    ``_ship_action``. A growth send is the ONLY path that may flip a draft to
+    ``approved`` (and, downstream, ``sent``). Anything that is not a dict is
+    treated as "no growth send".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_growth_send")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_growth_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting a growth send from another workspace.
+
+    Mirror of ``_assert_ship_action_workspace`` for the ``_growth_send`` blob.
+    ``require_action_any_workspace("instinct.approve")`` only proves the caller
+    holds the role SOMEWHERE; this binds the growth-send Action to the caller's
+    active workspace. A growth send carries no pocket, so its tenancy lives
+    entirely on the blob's ``workspace_id``. A mismatch → 403 on BOTH the
+    approve and the reject side (asymmetric tenant scope is no tenant scope —
+    pocketpaw#1183 / #1250). An empty workspace claim fails closed — approving
+    it would dispatch an outbound message whose tenancy cannot be verified.
+    """
+    blob = _growth_send_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This growth send has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This growth send belongs to a different workspace",
+        )
+
+
+async def _mark_growth_send_rejected_safe(action: Any, reason: str) -> None:
+    """Best-effort draft flip (proposed→rejected) for a rejected growth send.
+
+    The router owns the CHAIN close on reject (the executor never runs, so no
+    dispatch job is enqueued and nothing sends); this lazy-imported hook only
+    reflects the rejection onto the draft's status so the /growth views read
+    it — the ``_mark_plan_rejected_safe`` shape. Never breaks the reject
+    response."""
+    try:
+        from pocketpaw_ee.cloud.growth import executor as growth_executor
+
+        await growth_executor.mark_growth_send_rejected(action, reason)
+    except Exception:  # noqa: BLE001 — read-model nudge must never break reject
+        logger.debug("growth: mark_growth_send_rejected hook failed (non-fatal)", exc_info=True)
+
+
 def _pocket_create_blob(action: Any) -> dict[str, Any] | None:
     """Return the ``_pocket_create`` blob on an Action, or ``None``.
 
@@ -1350,7 +1661,26 @@ async def propose_action(
     behaves exactly as before. The hook is fail-safe and best-effort: any
     triager failure escalates to the human, and a wiring failure can never
     break this propose response.
+
+    SECURITY (security review F2) — this route is open to any MEMBER
+    (``instinct.propose``) and its ``parameters`` were previously handed to the
+    store VERBATIM. A member could therefore file an innocuous-looking Tray card
+    whose ``parameters._growth_send`` (or ``._ship_action`` / ``._admin_action``
+    / …) pointed at a real target, and the approve path would dispatch that
+    kind's executor for it. Reserved gated-blob keys are now REFUSED here with a
+    422: they may only be minted by the in-process propose helper that owns each
+    kind (``ee.cloud.growth.propose``, ``ee.cloud.ship.propose``, …), which
+    calls ``store.propose`` directly and never crosses this route.
     """
+    reserved = _reserved_gated_keys(req.parameters)
+    if reserved:
+        raise ValidationError(
+            "instinct.reserved_parameter_key",
+            f"{', '.join(sorted(reserved))} is reserved for gated proposals and "
+            "cannot be set through this route — file the proposal through the "
+            "surface that owns that action kind",
+        )
+
     action = await _store(workspace_id).propose(
         pocket_id=req.pocket_id,
         title=req.title,
@@ -1471,17 +1801,11 @@ async def bulk_approve_actions(
     for action_id in req.ids:
         action = await store.get_action(action_id)
         if action is not None:
-            _assert_pocket_write_workspace(action, workspace_id)
-            _assert_code_change_workspace(action, workspace_id)
-            _assert_external_action_workspace(action, workspace_id)
-            _assert_fabric_objects_workspace(action, workspace_id)
-            _assert_pocket_create_workspace(action, workspace_id)
-            _assert_instinct_rule_workspace(action, workspace_id)
-            _assert_fabric_conflict_workspace(action, workspace_id)
-            _assert_belt_plan_workspace(action, workspace_id)
-            _assert_artifact_change_workspace(action, workspace_id)
-            _assert_admin_action_workspace(action, workspace_id)
-            _assert_customer_reply_workspace(action, workspace_id)
+            # One chokepoint runs every gated kind's tenancy guard
+            # (``_assert_gated_workspaces``) so a new kind can never be wired
+            # into three of the four dispatch paths and silently miss the
+            # fourth.
+            _assert_gated_workspaces(action, workspace_id)
 
     approved, missing, bulk_id = await store.bulk_approve(
         list(req.ids), approver=approver_id, note=req.note
@@ -1599,6 +1923,68 @@ async def bulk_approve_actions(
             except Exception:
                 logger.exception(
                     "bulk-approve fabric-objects execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # A bulk-approved gated ``_ship_action`` Action runs its approved
+        # infrastructure verb (destroy / rollback / prod deploy) against the live
+        # box. Mirrors the Fabric-objects branch above: per-item
+        # ``human.corrected(accepted)``, the ``agent.proposed`` event id off the
+        # blob as causation, then the executor (which owns the chain close). This
+        # is the ONLY path that may destroy a box or an app — the tool call and
+        # the HTTP DELETE only ever propose.
+        ship_action_blob = _ship_action_blob(action)
+        if ship_action_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=ship_action_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(ship_action_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.ship import executor as ship_executor
+
+                await ship_executor.execute_approved_ship_action(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve ship-action execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # G-4 — a bulk-approved gated ``_growth_send`` Action flips its draft to
+        # ``approved`` and enqueues the outbound dispatch job on the ``growth``
+        # queue. Mirrors the ship branch above: per-item
+        # ``human.corrected(accepted)``, the ``agent.proposed`` event id off the
+        # blob as causation, then the executor (which owns the chain close).
+        # This is the ONLY path that may approve a draft for sending — the
+        # public /growth status route refuses the edge.
+        growth_send_blob = _growth_send_blob(action)
+        if growth_send_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=growth_send_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(growth_send_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.growth import executor as growth_executor
+
+                await growth_executor.execute_approved_growth_send(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve growth-send execution failed for %s (non-fatal)",
                     action.id,
                 )
             continue
@@ -1862,17 +2248,11 @@ async def bulk_reject_actions(
     for action_id in req.ids:
         action = await store.get_action(action_id)
         if action is not None:
-            _assert_pocket_write_workspace(action, workspace_id)
-            _assert_code_change_workspace(action, workspace_id)
-            _assert_external_action_workspace(action, workspace_id)
-            _assert_fabric_objects_workspace(action, workspace_id)
-            _assert_pocket_create_workspace(action, workspace_id)
-            _assert_instinct_rule_workspace(action, workspace_id)
-            _assert_fabric_conflict_workspace(action, workspace_id)
-            _assert_belt_plan_workspace(action, workspace_id)
-            _assert_artifact_change_workspace(action, workspace_id)
-            _assert_admin_action_workspace(action, workspace_id)
-            _assert_customer_reply_workspace(action, workspace_id)
+            # One chokepoint runs every gated kind's tenancy guard
+            # (``_assert_gated_workspaces``) so a new kind can never be wired
+            # into three of the four dispatch paths and silently miss the
+            # fourth.
+            _assert_gated_workspaces(action, workspace_id)
 
     rejected, missing, bulk_id = await store.bulk_reject(
         list(req.ids), reason=req.reason, rejector=rejector_id
@@ -2145,6 +2525,32 @@ async def bulk_reject_actions(
             )
             continue
 
+        # G-4 — a bulk-rejected gated ``_growth_send`` Action closes its chain
+        # HERE (the dispatch executor never runs on reject — nothing is
+        # enqueued, nothing sends). Mirrors the admin-action reject branch
+        # above, plus the best-effort draft flip proposed→rejected.
+        growth_send_blob = _growth_send_blob(action)
+        if growth_send_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=growth_send_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(growth_send_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=growth_send_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            await _mark_growth_send_rejected_safe(action, req.reason)
+            continue
+
     return BulkActionResponse(bulk_id=bulk_id, affected=rejected, missing=missing)
 
 
@@ -2176,60 +2582,39 @@ async def approve_action(
     if not before:
         raise HTTPException(404, "Action not found")
 
-    # BLOCKER 1 — reject a cross-workspace parked-write approval before
-    # any state mutation. ``require_action_any_workspace`` only proved the
-    # caller holds ``instinct.approve`` somewhere; this binds the Action
-    # to the caller's workspace.
-    _assert_pocket_write_workspace(before, workspace_id)
-    # Same tenancy gate for a Belt code-change Action (BS-3) — its
-    # ``_code_change`` blob carries the workspace, not a pocket.
-    _assert_code_change_workspace(before, workspace_id)
-    # Same tenancy gate for a gated external-action Action — its
-    # ``_external_action`` blob carries the workspace, not a pocket.
-    _assert_external_action_workspace(before, workspace_id)
-    # Same tenancy gate for a gated Fabric-objects Action — its
-    # ``_fabric_objects`` blob carries the workspace, not a pocket. Approving it
-    # writes typed objects into the tenant's Fabric, so the cross-workspace gate
-    # is mandatory here.
-    _assert_fabric_objects_workspace(before, workspace_id)
-    # Same tenancy gate for a gated Pocket-create Action — its ``_pocket_create``
-    # blob carries the workspace (and owner) on SEPARATE top-level fields, not a
-    # pocket. Approving it creates a Pocket in the tenant's workspace, so the
-    # cross-workspace gate is mandatory here.
-    _assert_pocket_create_workspace(before, workspace_id)
-    # Same tenancy gate for a gated governed-rule-create Action — its
-    # ``_instinct_rule`` blob carries the workspace (and owner) on SEPARATE
-    # top-level fields, not a pocket. Approving it creates an active governed rule
-    # in the tenant's workspace, so the cross-workspace gate is mandatory here.
-    _assert_instinct_rule_workspace(before, workspace_id)
-    # FST-6 — same tenancy gate for a conflict-stewardship Action — its
-    # ``_fabric_conflict`` blob carries the workspace on a SEPARATE top-level
-    # field. Approving it PINs a statement in the tenant's Fabric, so the
-    # cross-workspace gate is mandatory here.
-    _assert_fabric_conflict_workspace(before, workspace_id)
-    # Same tenancy gate for a mandate shift-plan Action (belt_plan) — its
-    # ``_belt_plan`` blob carries the workspace.
-    _assert_belt_plan_workspace(before, workspace_id)
-    # BP-3 — same tenancy gate for an artifact-change merge (its
-    # ``_artifact_change`` blob carries the workspace). Approving it moves the
-    # published pointer + deploys, so the cross-workspace gate is mandatory here.
-    _assert_artifact_change_workspace(before, workspace_id)
-    # WA-2 — same tenancy gate for a gated workspace-admin Action — its
-    # ``_admin_action`` blob carries the workspace, not a pocket. Approving it
-    # fires a workspace-admin write (e.g. a member role change) after an
-    # execute-time RBAC re-check, so the cross-workspace gate is mandatory here.
-    _assert_admin_action_workspace(before, workspace_id)
-    # ``_customer_reply`` (paw-bar) — the delivery hook routes the reply to the
-    # blob's workspace, so a cross-workspace approve would deliver a decision into
-    # another tenant's paw-bar surface. Gate it like every other blob kind.
-    _assert_customer_reply_workspace(before, workspace_id)
+    # BLOCKER 1 — reject a cross-workspace gated approval before any state
+    # mutation. ``require_action_any_workspace`` only proved the caller holds
+    # ``instinct.approve`` somewhere; this binds the Action to the caller's
+    # workspace. ``_assert_gated_workspaces`` runs EVERY gated kind's guard, so
+    # a kind can never be wired into the dispatch but missed here.
+    _assert_gated_workspaces(before, workspace_id)
 
     req = req or ApproveRequest()
+
+    # SECURITY (security review F1) — pin a gated blob's identity fields back
+    # from the STORED proposal before the edit is applied. The tenancy sweep
+    # above ran on the PRE-edit Action, and the executor reads the POST-edit
+    # blob, so an unpinned ``parameters`` edit let a cleared approver re-point
+    # the operation at another tenant's object. Content stays editable (the
+    # mandates plan resolution filters a ``_belt_plan``'s task list while
+    # approving); tenancy, proposer, target, verb and chain ids do not. See
+    # ``_pin_gated_blobs``.
+    if req.parameters is not None:
+        req = req.model_copy(
+            update={"parameters": _pin_gated_blobs(before.parameters, req.parameters)}
+        )
+
     # SHOULD-FIX 1 — the audit actor is the authenticated identity, not
     # the request body's free-text ``approver``. The body field may still
     # carry a display label, but it can never forge the audit trail.
     approver_id = str(user.id)
     after, edited_fields = _apply_edits(before, req)
+
+    # Defence in depth for F1 — re-run the full tenancy sweep on the POST-edit
+    # Action. The pinning above is the primary control; this makes the guarantee
+    # structural, so any future edit path that reaches ``_apply_edits`` can
+    # never smuggle a foreign workspace past a gate that already cleared.
+    _assert_gated_workspaces(after, workspace_id)
 
     correction: Correction | None = None
     if edited_fields:
@@ -2420,6 +2805,62 @@ async def approve_action(
             )
         except Exception:
             logger.exception("fabric-objects execution after approval failed (non-fatal)")
+
+    # When the approved Action carries a gated ``_ship_action`` blob, run the
+    # approved infrastructure verb against the live box. Same best-effort,
+    # lazy-import, never-break-the-approve-response shape as the hooks above; the
+    # executor owns the chain CLOSE and records success / failure on the Action.
+    # This is the ONLY path that may destroy a box or an app.
+    ship_action_blob = _ship_action_blob(approved)
+    if ship_action_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=ship_action_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(ship_action_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.ship import executor as ship_executor
+
+            await ship_executor.execute_approved_ship_action(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("ship-action execution after approval failed (non-fatal)")
+
+    # G-4 — when the approved Action carries a gated ``_growth_send`` blob, flip
+    # the draft to ``approved`` and enqueue its outbound dispatch job. Same
+    # best-effort, lazy-import, never-break-the-approve-response shape as the
+    # ship hook above; the executor owns the chain CLOSE and records success /
+    # failure on the Action. This is the ONLY path that may approve a draft for
+    # sending — the public /growth status route refuses the edge
+    # (``draft.gate_required``).
+    growth_send_blob = _growth_send_blob(approved)
+    if growth_send_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=growth_send_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(growth_send_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.growth import executor as growth_executor
+
+            await growth_executor.execute_approved_growth_send(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("growth-send execution after approval failed (non-fatal)")
 
     # When the approved Action carries a gated ``_pocket_create`` blob, create the
     # proposed starter Pocket via ``pockets.service.create`` (workspace-scoped,
@@ -2702,43 +3143,11 @@ async def reject_action(
     if not before:
         raise HTTPException(404, "Action not found")
 
-    # Touch-time security fix — same gate the approve path runs.
-    _assert_pocket_write_workspace(before, workspace_id)
-    _assert_code_change_workspace(before, workspace_id)
-    _assert_external_action_workspace(before, workspace_id)
-    # Same tenancy gate for a gated Fabric-objects Action on the REJECT side —
-    # asymmetric tenant scope is no tenant scope: a cross-workspace reject must
-    # 403 before any mutation, exactly like the approve side.
-    _assert_fabric_objects_workspace(before, workspace_id)
-    # Same tenancy gate for a gated Pocket-create Action on the REJECT side —
-    # asymmetric tenant scope is no tenant scope: a cross-workspace reject must
-    # 403 before any mutation, exactly like the approve side.
-    _assert_pocket_create_workspace(before, workspace_id)
-    # Same tenancy gate for a gated governed-rule-create Action on the REJECT side —
-    # asymmetric tenant scope is no tenant scope: a cross-workspace reject must
-    # 403 before any mutation, exactly like the approve side.
-    _assert_instinct_rule_workspace(before, workspace_id)
-    # FST-6 — same tenancy gate for a conflict-stewardship Action on the REJECT
-    # side. Asymmetric tenant scope is no tenant scope: a cross-workspace reject
-    # (which would dismiss another tenant's conflict) must 403 before any
-    # mutation, exactly like the approve side.
-    _assert_fabric_conflict_workspace(before, workspace_id)
-    # Same tenancy gate for a mandate shift-plan Action (belt_plan) — its
-    # ``_belt_plan`` blob carries the workspace.
-    _assert_belt_plan_workspace(before, workspace_id)
-    # BP-3 — same tenancy gate for an artifact-change merge on the REJECT side.
-    # Asymmetric tenant scope is no tenant scope: a cross-workspace reject (which
-    # would discard another tenant's candidate) must 403 before any mutation,
-    # exactly like the approve side (pocketpaw#1183 / #1250).
-    _assert_artifact_change_workspace(before, workspace_id)
-    # WA-2 — same tenancy gate for a gated workspace-admin Action on the REJECT
-    # side. Asymmetric tenant scope is no tenant scope: a cross-workspace reject
-    # must 403 before any mutation, exactly like the approve side.
-    _assert_admin_action_workspace(before, workspace_id)
-    # ``_customer_reply`` (paw-bar) — same tenancy gate on the REJECT side: a
-    # cross-workspace reject would deliver a DECLINED decision into another
-    # tenant's paw-bar surface. Asymmetric tenant scope is no tenant scope.
-    _assert_customer_reply_workspace(before, workspace_id)
+    # Touch-time security fix — the reject path runs the SAME full tenancy
+    # sweep as approve. Asymmetric tenant scope is no tenant scope: a
+    # cross-workspace reject must 403 before any mutation
+    # (pocketpaw#1183 / #1250).
+    _assert_gated_workspaces(before, workspace_id)
 
     reason = req.reason if req else ""
     rejector_id = str(user.id)
@@ -3018,6 +3427,33 @@ async def reject_action(
             reason=reason,
             causation_override=human_event_id,
         )
+
+    # G-4 — a rejected gated ``_growth_send`` Action closes its chain HERE (the
+    # dispatch executor never runs on reject — nothing is enqueued, nothing
+    # sends). ``human.corrected(rejected)`` cites the ``agent.proposed`` event
+    # (off the blob's ``proposed_event_id``); ``decision.completed(rejected)``
+    # cites the human event. The draft itself flips proposed→rejected via the
+    # best-effort hook so the /growth views reflect the decision.
+    growth_send_blob = _growth_send_blob(action)
+    if growth_send_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=growth_send_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(growth_send_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=growth_send_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+        await _mark_growth_send_rejected_safe(action, reason)
 
     # gap2 — a rejected ``_customer_reply`` Action delivers a DECLINED decision
     # (carrying the rejection reason) back to the customer surface. Same
