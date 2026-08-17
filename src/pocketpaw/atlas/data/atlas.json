@@ -1552,7 +1552,7 @@
     },
     {
       "gist": "per-property provenance for Fabric facts — a trust ladder ranks sources, flags disputes",
-      "how": "fabric_query with include_provenance=true returns the winner, is_disputed, freshness, and the competing statements' sources per object",
+      "how": "fabric_query with include_provenance=true returns the winner, is_disputed, freshness, and the competing statements' sources per object (where an EE fabric MCP server is bound; the OSS builtin fabric tools have no provenance flag)",
       "id": "primitive:source-truth",
       "keywords": [
         "provenance",

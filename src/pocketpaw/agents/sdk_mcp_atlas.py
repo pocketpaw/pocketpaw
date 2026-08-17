@@ -69,6 +69,13 @@
 # pointer — and NEVER the integrations-surface hint. Discovery hints only; the
 # ``provider is None`` global path is unchanged (production always passes a
 # provider — claude_sdk.py builds one per run).
+#
+# Updated: 2026-08-17 (AST-5a — review fix V9) — no code change here: the
+# ``mode``/``enable_hint`` rendering keys on ``overlaid.mode``, so the two
+# ``capability:fabric.*`` cards the overlay now flag-marks (they inherit
+# ``primitive:source-truth``'s mode via ``overlay.FLAGGED_CAPABILITY_MODES``)
+# render exactly like the primitive — mode on search cards and describe, the
+# source-truth ``enable_hint`` when off.
 
 from __future__ import annotations
 

@@ -15,6 +15,16 @@
 # (still described); describe renders ``mode`` + an ``enable_hint`` (env-var
 # pointer, NOT the connector ``connect_hint``) when off and no hint when live;
 # search cards carry ``mode`` for the two primitives.
+#
+# Updated: 2026-08-17 (AST-5a — review fix V9) — the two member-level
+# ``capability:fabric.*`` cards derive from ``fabric_source_truth_mode`` and
+# now inherit ``primitive:source-truth``'s mode: mode off → both cards
+# ``available False`` + ``mode "off"`` + the same ``enable_hint`` on describe,
+# and they demote at equal score exactly like the primitive; the exact review
+# repro (``"where did this value come from"``, member-grants-all provider, mode
+# off) no longer yields an UN-MARKED fabric card above the demoted primitive —
+# every fabric card in the answer is marked off (a marked card may still win on
+# score; that is the sort logic, which is untouched).
 
 import json
 
@@ -27,6 +37,8 @@ from pocketpaw.agents.sdk_mcp_atlas import (
 from pocketpaw.atlas.model import AtlasEntry, AtlasModel
 from pocketpaw.atlas.overlay import (
     FLAG_ENABLE_HINTS,
+    FLAGGED_CAPABILITY_MODES,
+    FLAGGED_IDS,
     FLAGGED_PRIMITIVE_IDS,
     AtlasOverlay,
     DefaultEntitlementProvider,
@@ -37,6 +49,8 @@ from pocketpaw.config import get_settings
 
 SOURCE_TRUTH = "primitive:source-truth"
 VERIFY_LOOP = "primitive:verify-loop"
+PROVENANCE_READ = "capability:fabric.provenance_read"
+CONFLICT_STEWARD = "capability:fabric.conflict_steward"
 
 
 # ── fixtures ────────────────────────────────────────────────────────────
@@ -88,6 +102,20 @@ def _synthetic_store() -> AtlasStore:
             entries=[
                 _entry(SOURCE_TRUTH, "primitive", "Source-truth", keywords=["provenance"]),
                 _entry(VERIFY_LOOP, "primitive", "Verify loop", keywords=["verdict"]),
+                _entry(
+                    PROVENANCE_READ,
+                    "capability",
+                    "See where a fact came from",
+                    keywords=["lineage"],
+                    requires=["role:member"],
+                ),
+                _entry(
+                    "capability:other",
+                    "capability",
+                    "Other member card",
+                    keywords=["lineage"],
+                    requires=["role:member"],
+                ),
                 _entry(
                     "primitive:pocket", "primitive", "Pocket", keywords=["provenance", "verdict"]
                 ),
@@ -245,8 +273,15 @@ class TestDiscoveryOnly:
 
     def test_flagged_ids_and_hints_are_paired(self):
         assert set(FLAGGED_PRIMITIVE_IDS) == {SOURCE_TRUTH, VERIFY_LOOP}
-        assert set(FLAG_ENABLE_HINTS) == set(FLAGGED_PRIMITIVE_IDS)
+        assert FLAGGED_CAPABILITY_MODES == {
+            PROVENANCE_READ: SOURCE_TRUTH,
+            CONFLICT_STEWARD: SOURCE_TRUTH,
+        }
+        assert set(FLAGGED_IDS) == set(FLAGGED_PRIMITIVE_IDS) | set(FLAGGED_CAPABILITY_MODES)
+        assert set(FLAG_ENABLE_HINTS) == set(FLAGGED_IDS)
         assert "POCKETPAW_FABRIC_SOURCE_TRUTH_MODE" in FLAG_ENABLE_HINTS[SOURCE_TRUTH]
+        for card_id in FLAGGED_CAPABILITY_MODES:
+            assert FLAG_ENABLE_HINTS[card_id] == FLAG_ENABLE_HINTS[SOURCE_TRUTH]
         assert "deep_work_verify_mode" in FLAG_ENABLE_HINTS[VERIFY_LOOP]
         assert "cloud_plan_verify_mode" in FLAG_ENABLE_HINTS[VERIFY_LOOP]
 
@@ -306,4 +341,77 @@ class TestDescribeRendering:
         cards = {c["id"]: c for c in json.loads(_text_of(out))["results"]}
         assert cards[SOURCE_TRUTH]["available"] is True
         assert cards[SOURCE_TRUTH]["mode"] == "enforce"
-        assert all("mode" not in c for i, c in cards.items() if i not in FLAGGED_PRIMITIVE_IDS)
+        assert all("mode" not in c for i, c in cards.items() if i not in FLAGGED_IDS)
+
+
+# ── AST-5a (V9): the derived capability:fabric.* cards inherit the mode ────
+
+
+class TestFabricCapabilityCardsInheritMode:
+    """``capability:fabric.provenance_read`` / ``conflict_steward`` derive from
+    ``fabric_source_truth_mode`` exactly like ``primitive:source-truth`` — the
+    overlay must mark them the same way (a member-grants-all provider stands
+    in for the primed EE member provider; the role gate itself is untouched)."""
+
+    @pytest.mark.parametrize("mode", ["off", "shadow", "enforce"])
+    def test_cards_carry_the_primitive_mode(self, flags, mode):
+        flags(fabric=mode)
+        by_id = _by_id(_synthetic_store(), FakeProvider())
+        assert by_id[PROVENANCE_READ].mode == mode == by_id[SOURCE_TRUTH].mode
+        assert by_id[PROVENANCE_READ].available is (mode != "off")
+        # A member card that does NOT derive from a flag stays untouched.
+        assert by_id["capability:other"].mode is None
+        assert by_id["capability:other"].available is None
+
+    def test_off_card_demotes_at_equal_score_like_the_primitive(self, flags):
+        store = _synthetic_store()
+        base = [e.id for e in store.search("lineage", limit=10)]
+        assert base.index(PROVENANCE_READ) < base.index("capability:other")  # seed order
+        ids = [o.entry.id for o in AtlasOverlay.search(store, "lineage", FakeProvider())]
+        assert ids.index("capability:other") < ids.index(PROVENANCE_READ)
+        assert PROVENANCE_READ in ids, "demoted, NEVER hidden"
+        flags(fabric="shadow")
+        ids = [o.entry.id for o in AtlasOverlay.search(store, "lineage", FakeProvider())]
+        assert ids.index(PROVENANCE_READ) < ids.index("capability:other")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("card_id", [PROVENANCE_READ, CONFLICT_STEWARD])
+    async def test_describe_off_card_renders_mode_and_enable_hint(self, flags, card_id):
+        payload = json.loads(
+            _text_of(await _atlas_describe_handler({"id": card_id}, FakeProvider()))
+        )
+        assert payload["available"] is False
+        assert payload["mode"] == "off"
+        assert payload["enable_hint"] == FLAG_ENABLE_HINTS[SOURCE_TRUTH]
+        assert "connect_hint" not in payload
+        flags(fabric="enforce")
+        payload = json.loads(
+            _text_of(await _atlas_describe_handler({"id": card_id}, FakeProvider()))
+        )
+        assert payload["available"] is True and payload["mode"] == "enforce"
+        assert "enable_hint" not in payload
+
+    @pytest.mark.asyncio
+    async def test_review_repro_no_unmarked_fabric_card_above_the_primitive(self, flags):
+        """The exact V9 repro on the REAL compiled atlas: mode off, a member
+        provider, intent "where did this value come from". Before: #1 was
+        ``capability:fabric.provenance_read`` with available None / mode None
+        (un-marked) above the demoted primitive. Now every fabric card in the
+        answer is marked off (available False, mode "off"); whichever ranks
+        first, the agent can no longer read the capability as live."""
+        out = await _atlas_search_handler(
+            {"intent": "where did this value come from"}, FakeProvider()
+        )
+        cards = json.loads(_text_of(out))["results"]
+        ids = [c["id"] for c in cards]
+        assert SOURCE_TRUTH in ids and PROVENANCE_READ in ids, ids
+        for card in cards:
+            if card["id"] in FLAGGED_CAPABILITY_MODES or card["id"] == SOURCE_TRUTH:
+                assert card["available"] is False, card
+                assert card["mode"] == "off", card
+        unmarked_above_primitive = [
+            c["id"]
+            for c in cards[: ids.index(SOURCE_TRUTH)]
+            if c["id"].startswith("capability:fabric.") and "mode" not in c
+        ]
+        assert unmarked_above_primitive == []

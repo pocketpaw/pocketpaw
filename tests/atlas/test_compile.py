@@ -17,6 +17,10 @@
 # connector-knowledge pin checks limit=10 because the ripple invoice widgets
 # legitimately occupy top name-weight slots (see the test docstring).
 # Widget/skill extraction itself is pinned in test_widgets_skills.py.
+# Updated: 2026-08-17 (AST-5a — review fix V7) — pins the hedged ``how`` on
+# ``primitive:source-truth`` ("where an EE fabric MCP server is bound", the
+# same hedge ``primitive:fabric`` carries) so the card can't imply the OSS
+# builtin has ``include_provenance``.
 # Updated: 2026-07-05 (fix/atlas-data-accuracy-and-relevance) — new
 # ``TestFactualClaimGuard``: the fidelity check only proves the artifact was
 # recompiled, not that a narrative is TRUE. Two false narratives had shipped
@@ -157,6 +161,20 @@ class TestFactualClaimGuard:
             "widgets') — approximations drift silently past the fidelity-only "
             "check. Use a verified exact count or an open-ended '150+':\n" + "\n".join(offenders)
         )
+
+    def test_source_truth_how_is_hedged_to_where_the_ee_fabric_server_is_bound(self):
+        """AST-5a (V7): ``include_provenance`` exists only on the EE MCP
+        ``fabric_query`` (OSS claude_sdk has no fabric_query and the OSS builtin
+        rejects the kwarg), so the authored ``how`` must hedge like
+        ``primitive:fabric``'s does instead of implying every deployment has
+        the read. Authoring only — availability semantics are untouched."""
+        store = AtlasStore.load()
+        fabric = store.describe("primitive:fabric")
+        source_truth = store.describe("primitive:source-truth")
+        assert fabric is not None and source_truth is not None
+        assert "where a fabric server is bound" in fabric.how
+        assert "include_provenance=true" in source_truth.how
+        assert "where an EE fabric MCP server is bound" in source_truth.how
 
     # AST-3: the rollout-flagged primitives default OFF. Their authored prose
     # describes what the subsystem DOES; only the overlay can say whether it is
