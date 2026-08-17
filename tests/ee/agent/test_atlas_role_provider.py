@@ -23,6 +23,13 @@
 # ``resolve_workspace_role`` reads (``.workspace`` / ``.role``). ``prime()`` is
 # awaited exactly as the sdk_mcp_atlas handler awaits it before the sync grant
 # filter.
+# Updated: 2026-08-17 (feat/ast-3-atlas-flag-aware, AST-3) — ``TestFlagAwareParity``:
+# the role-aware provider produces the SAME ``available`` / ``mode`` for the two
+# rollout-flagged primitives as the OSS default (the stamp lives in the shared
+# core overlay, so parity is structural, proven here rather than duplicated);
+# ``is_granted`` for those primitives is unaffected by the flags (discovery
+# hints only); the ``capability:fabric.*`` cards stay ``role:member``-gated
+# regardless of mode.
 
 from __future__ import annotations
 
@@ -38,8 +45,12 @@ from pocketpaw_ee.cloud.chat.agent_service import (  # noqa: E402
 )
 
 from pocketpaw.atlas.model import AtlasEntry, AtlasModel  # noqa: E402
-from pocketpaw.atlas.overlay import AtlasOverlay  # noqa: E402
-from pocketpaw.atlas.store import AtlasStore  # noqa: E402
+from pocketpaw.atlas.overlay import (  # noqa: E402
+    FLAGGED_PRIMITIVE_IDS,
+    AtlasOverlay,
+    DefaultEntitlementProvider,
+)
+from pocketpaw.atlas.store import AtlasStore, get_atlas_store  # noqa: E402
 
 WS = "w1"
 SCOPE = f"ws:{WS}"
@@ -363,3 +374,72 @@ class TestConstructionAndDelegation:
         )
         # No prime needed — a role-blind entry delegates to the default (grant).
         assert provider.is_granted(primitive) is True
+
+
+# ── AST-3: flag-aware availability parity with the OSS default ──────────────
+
+
+class TestFlagAwareParity:
+    """The rollout-flagged primitives' ``available`` / ``mode`` are stamped in the
+    shared core overlay (``_overlay_one``), so the role-aware provider gets them
+    identically to the OSS default — no EE duplication. Pinned per mode."""
+
+    @pytest.fixture
+    def _flags(self, monkeypatch):
+        from pocketpaw.config import get_settings
+
+        def _set(*, fabric="off", deep_work="off", cloud_plan="off"):
+            settings = get_settings()
+            monkeypatch.setattr(settings, "fabric_source_truth_mode", fabric)
+            monkeypatch.setattr(settings, "deep_work_verify_mode", deep_work)
+            monkeypatch.setattr(settings, "cloud_plan_verify_mode", cloud_plan)
+            monkeypatch.setattr(settings, "deep_work_verify_loop_enabled", False)
+            monkeypatch.setattr(settings, "cloud_plan_verify_loop_enabled", False)
+
+        _set()
+        return _set
+
+    @staticmethod
+    def _flagged(provider) -> dict[str, tuple[bool | None, str | None]]:
+        store = get_atlas_store()
+        entries = [store.describe(i) for i in FLAGGED_PRIMITIVE_IDS]
+        return {o.entry.id: (o.available, o.mode) for o in AtlasOverlay.apply(entries, provider)}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("fabric", "deep_work", "cloud_plan"),
+        [("off", "off", "off"), ("shadow", "shadow", "off"), ("enforce", "off", "enforce")],
+    )
+    async def test_same_available_and_mode_as_default(
+        self, _flags, _patch_user, fabric, deep_work, cloud_plan
+    ):
+        _flags(fabric=fabric, deep_work=deep_work, cloud_plan=cloud_plan)
+        _patch_user("member")
+        with _identity():
+            role_aware = await _primed(RoleAwareEntitlementProvider(scope_key=SCOPE))
+            via_role = self._flagged(role_aware)
+        via_default = self._flagged(DefaultEntitlementProvider(scope_key=SCOPE))
+        assert via_role == via_default
+        assert via_role["primitive:source-truth"] == (fabric != "off", fabric)
+        expected_verify = "enforce" if "enforce" in (deep_work, cloud_plan) else deep_work
+        assert via_role["primitive:verify-loop"] == (expected_verify != "off", expected_verify)
+
+    @pytest.mark.asyncio
+    async def test_flags_never_touch_is_granted(self, _flags, _patch_user):
+        """Discovery hints only: the flagged primitives are granted at EVERY
+        mode, and the role:member fabric capability cards keep their role gate
+        (granted to a member, hidden when the role is unresolved) at every mode."""
+        store = get_atlas_store()
+        flagged = [store.describe(i) for i in FLAGGED_PRIMITIVE_IDS]
+        fabric_caps = [e for e in store.entries if e.id.startswith("capability:fabric.")]
+        assert fabric_caps and all("role:member" in e.requires for e in fabric_caps)
+        for mode in ("off", "shadow", "enforce"):
+            _flags(fabric=mode, deep_work=mode)
+            _patch_user("member")
+            with _identity():
+                member = await _primed(RoleAwareEntitlementProvider(scope_key=SCOPE))
+                assert all(member.is_granted(e) is True for e in flagged), mode
+                assert all(member.is_granted(e) is True for e in fabric_caps), mode
+            unresolved = RoleAwareEntitlementProvider(scope_key=SCOPE)  # never primed
+            assert all(unresolved.is_granted(e) is True for e in flagged), mode
+            assert all(unresolved.is_granted(e) is False for e in fabric_caps), mode
