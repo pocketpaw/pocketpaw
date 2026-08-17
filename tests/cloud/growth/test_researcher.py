@@ -269,6 +269,7 @@ class TestTheReviewFindings:
         answer = _response([{"domain": "realclinic.co.uk"}])
         result = parse_research_response(f"Shape:{preamble}\nResults:{answer}", max_results=5)
         assert [c.domain for c in result.companies] == ["realclinic.co.uk"]
+        # Mutation: "extractor takes the FIRST companies object again".
 
     @pytest.mark.parametrize(
         "address",
@@ -277,17 +278,41 @@ class TestTheReviewFindings:
             "a@b@c.com",
             "@x.com",
             "a b@x.com",
-            "a@localhost",
+            "a@localhost",  # no dot in the host
+            "a@b.",  # trailing dot, no TLD
+            "a@.com",  # empty label
+            "a@b..com",  # empty middle label
+            "a@b.com.",  # trailing dot after a valid host
+            '"drop"@b.com',  # quoted local part
+            "a<b>@c.com",  # angle brackets — the one that could alter a header
+            "a@b.c1",  # non-alphabetic TLD
+            "a" * 300 + "@b.com",  # over the RFC 5321 ceiling
         ],
     )
     def test_a_malformed_address_is_never_storable(self, address: str) -> None:
         """recordable_emails checks provenance, not syntax — so the shape check
         has to happen at the parse, before a two-line string reaches a
-        provider as a recipient."""
+        provider as a recipient.
+
+        Mutations that must break this (growth_review_gates.json): "email shape
+        check removed", "host dotted-ness no longer required", "host label check
+        relaxed", "header-bearing characters allowed back into the local part".
+        """
         result = parse_research_response(
-            _response([{"domain": "x.com", "emails": [
-                {"address": address, "confidence": "observed", "source_url": "https://x.com"}
-            ]}]),
+            _response(
+                [
+                    {
+                        "domain": "x.com",
+                        "emails": [
+                            {
+                                "address": address,
+                                "confidence": "observed",
+                                "source_url": "https://x.com",
+                            }
+                        ],
+                    }
+                ]
+            ),
             max_results=5,
         )
         assert recordable_emails(result.companies[0].emails) == ()

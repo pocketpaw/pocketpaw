@@ -1757,12 +1757,12 @@ async def prospect_exists_by_domain(workspace_id: str, domain: str) -> bool:
 
     1. Finding a company you already have is not a discovery. Filing it again
        would spend the run's ``max_per_run`` budget on nothing.
-    2. ``upsert_by_domain`` overwrites ``status`` on an existing row — correct
-       for a human re-importing a list, wrong for a DAILY CRON. A prospect
-       sitting at ``in_sequence`` with two sent drafts would be reset to
-       ``new`` by a re-find, and the follow-up sweep would lose the thread.
-       Skipping known domains means discovery only ever INSERTS, so no
-       automated pass can walk a live prospect backwards.
+    2. Discovery only ever INSERTS, so no automated pass touches a live
+       prospect at all. ``upsert_by_domain`` no longer walks ``status``
+       backwards on its own (it is set-only since the review fixes), so this
+       is now defence in depth rather than the sole protection — but the
+       property worth keeping is the stronger one: a daily cron should not be
+       able to edit a prospect a human is working, by any route.
 
     Normalises the domain the same way the DTO does, so a research result
     naming ``https://www.Acme.com/about`` matches the stored ``acme.com``.

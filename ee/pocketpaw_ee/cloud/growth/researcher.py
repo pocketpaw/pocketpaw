@@ -271,8 +271,25 @@ def _evidence_from(raw: Any) -> EmailEvidence | None:
     # as a recipient. Exactly one @, no whitespace, something on each side.
     if any(ch.isspace() for ch in address) or address.count("@") != 1:
         return None
+    if len(address) > 254:  # RFC 5321 ceiling; anything longer is not an address
+        return None
     local, _, host = address.partition("@")
-    if not local or "." not in host:
+    if not local or len(local) > 64:
+        return None
+    # Angle brackets and quotes are the ones that MATTER here: the rest of the
+    # malformed forms simply bounce, but a local part carrying <> or " can
+    # alter a constructed header rather than merely fail. The others are still
+    # refused because a preventable bounce lands on the shared sending
+    # domain's reputation, which is the whole reason this guard exists.
+    if any(ch in address for ch in '<>"\\,;:()[]'):
+        return None
+    # Host must be label-wise well formed: every dot-separated label non-empty,
+    # and a real alphabetic TLD. `"." in host` alone admitted `a@b.`, `a@.com`
+    # and `a@b..com`.
+    labels = host.split(".")
+    if len(labels) < 2 or not all(labels):
+        return None
+    if not labels[-1].isalpha() or len(labels[-1]) < 2:
         return None
     return EmailEvidence(address=address, confidence=confidence, seen_at_url=source_url)
 

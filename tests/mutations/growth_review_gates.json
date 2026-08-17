@@ -7,16 +7,16 @@
     "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_preamble_object_cannot_shadow_the_answer"
   },
   {
-    "label": "email shape check removed — a two-line address becomes storable",
+    "label": "email shape check removed \u2014 a two-line address becomes storable",
     "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
     "find": "    if any(ch.isspace() for ch in address) or address.count(\"@\") != 1:\n        return None",
     "replace": "    if False:\n        return None",
     "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_malformed_address_is_never_storable"
   },
   {
-    "label": "host dotted-ness no longer required — a@localhost becomes storable",
+    "label": "local part unbounded \u2014 a 300-char local part becomes storable",
     "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
-    "find": "    if not local or \".\" not in host:\n        return None",
+    "find": "    if not local or len(local) > 64:\n        return None",
     "replace": "    if not local:\n        return None",
     "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_malformed_address_is_never_storable"
   },
@@ -54,5 +54,19 @@
     "find": "                \"max_per_run\": {\"type\": \"integer\", \"minimum\": 1, \"maximum\": 100},",
     "replace": "                \"max_per_run\": {\"type\": \"integer\", \"minimum\": 1, \"maximum\": 100},\n                \"cadence\": {\"type\": \"string\"},",
     "tests": "tests/cloud/growth/test_mcp_server.py::TestTheGateHolds::test_no_tool_can_switch_a_hunt_on"
+  },
+  {
+    "label": "host label check relaxed \u2014 a@b.. and a@.com become storable",
+    "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
+    "find": "    if len(labels) < 2 or not all(labels):\n        return None",
+    "replace": "    if len(labels) < 2:\n        return None",
+    "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_malformed_address_is_never_storable"
+  },
+  {
+    "label": "header-bearing characters allowed back into the local part",
+    "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
+    "find": "    if any(ch in address for ch in '<>\"\\\\,;:()[]'):\n        return None",
+    "replace": "    if False:\n        return None",
+    "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_malformed_address_is_never_storable"
   }
 ]
