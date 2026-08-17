@@ -55,6 +55,20 @@ _OUTBOUND_PATH = "/api/v5/whatsapp/whatsapp-outbound-message/bulk/"
 _REQUEST_TIMEOUT_SECONDS = 30
 
 
+def _scrub(text: str, secret: str) -> str:
+    """Remove the authkey from provider text before it is raised or stored.
+
+    Mirrors ``connector._scrub`` and exists for the same reason: an MSG91
+    error body can echo the request headers back, and an authkey that took a
+    round trip through their error path is still an authkey. Without this, a
+    401 whose body quotes the submitted key landed verbatim in a durable
+    MessageLog row (``whatsapp.py`` writes ``exc.message`` as ``error``).
+    """
+    if secret and secret in text:
+        text = text.replace(secret, "***")
+    return text
+
+
 class Msg91Error(Exception):
     """The provider refused or failed the send.
 
@@ -256,12 +270,12 @@ class Msg91WhatsAppClient:
         if resp.status_code >= 400:
             raise Msg91Error(
                 "msg91.http_error",
-                f"MSG91 returned {resp.status_code}: {resp.text[:300]}",
+                f"MSG91 returned {resp.status_code}: {_scrub(resp.text[:300], creds.authkey)}",
             )
-        return _extract_message_id(resp)
+        return _extract_message_id(resp, creds.authkey)
 
 
-def _extract_message_id(resp: Any) -> str:
+def _extract_message_id(resp: Any, authkey: str = "") -> str:
     """Best-effort provider message id out of an MSG91 2xx response.
 
     MSG91 has shipped several 2xx envelopes over the v5 lifetime; the id is not
@@ -277,7 +291,9 @@ def _extract_message_id(resp: Any) -> str:
         return ""
     status = str(data.get("status") or data.get("type") or "").lower()
     if status in ("error", "fail", "failure"):
-        raise Msg91Error("msg91.rejected", f"MSG91 rejected the send: {str(data)[:300]}")
+        raise Msg91Error(
+            "msg91.rejected", f"MSG91 rejected the send: {_scrub(str(data)[:300], authkey)}"
+        )
     inner = data.get("data")
     if isinstance(inner, dict):
         for key in ("message_id", "messageId", "request_id", "requestId", "id"):

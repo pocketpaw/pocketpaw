@@ -73,6 +73,10 @@ from pocketpaw_ee.cloud.shared.db import close_cloud_db, init_cloud_db
 
 logger = logging.getLogger(__name__)
 
+# 30 minutes. arq's own default is 300s, which cancels the discovery sweep
+# after the first two or three ICPs — see the note on ``job_timeout`` below.
+_DEFAULT_JOB_TIMEOUT_SECONDS = 1800
+
 
 async def dispatch(ctx: dict[str, Any], draft_id: str, channel: str) -> None:
     """Dispatch an APPROVED outbound draft.
@@ -147,6 +151,26 @@ def _redis_settings() -> RedisSettings:
     return RedisSettings.from_dsn(url)
 
 
+def _job_timeout_seconds() -> int:
+    """Per-job ceiling for the growth queue, in seconds.
+
+    Default 30 minutes: the discovery sweep works ICPs sequentially and each
+    one is a real agent run. Override with ``GROWTH_JOB_TIMEOUT_SECONDS`` when
+    a deployment runs more hunts than that comfortably fits.
+    """
+    raw = os.environ.get("GROWTH_JOB_TIMEOUT_SECONDS", "").strip()
+    if raw:
+        try:
+            return max(int(raw), 60)
+        except ValueError:
+            logger.warning(
+                "growth worker: GROWTH_JOB_TIMEOUT_SECONDS=%r is not an integer — using %d",
+                raw,
+                _DEFAULT_JOB_TIMEOUT_SECONDS,
+            )
+    return _DEFAULT_JOB_TIMEOUT_SECONDS
+
+
 class WorkerSettings:
     """arq worker configuration for the ``growth`` queue.
 
@@ -195,6 +219,16 @@ class WorkerSettings:
             run_at_startup=False,
         ),
     ]
+    # arq's default job_timeout is 300s, which is far too short for the
+    # discovery sweep: each ICP awaits a full WebSearch/WebFetch agent run, so
+    # a fleet of tenants is cancelled mid-loop after the first two or three.
+    # Worse, the cancellation is invisible — CancelledError is a BaseException,
+    # so none of the sweep's careful `except Exception` handling catches it,
+    # the closing summary log never fires, and max_tries=1 means no retry. The
+    # chat-runs worker already learned this (POCKETPAW_CLOUD_RUN_JOB_TIMEOUT
+    # exists for the same reason); this is the growth queue's version.
+    job_timeout = _job_timeout_seconds()
+
     on_startup = _startup
     on_shutdown = _shutdown
     # Crash policy mirrors the chat-runs worker: no auto-retry. Outbound work
