@@ -743,22 +743,41 @@ async def upsert_by_domain(
         # no-event: growth has no realtime subscriber in v1.
         return _to_response(_to_domain(doc))
 
-    # Fields a re-import may OVERWRITE. Everything omitted from this tuple is
-    # deliberate, not forgotten.
-    for field in ("name", "company", "tier", "research_brief", "whatsapp_number"):
+    # Descriptive fields a re-import may OVERWRITE. Everything omitted from
+    # this tuple is deliberate, not forgotten.
+    for field in ("name", "company", "tier", "research_brief"):
         setattr(doc, field, getattr(body, field))
 
-    # ``status`` and ``opted_in`` are LIFECYCLE, not import data, and the DTO
-    # defaults them to "new" / False. Overwriting them meant re-uploading last
-    # month's CSV to the bulk route — the one whose docstring calls a re-run
-    # safe — revived every prospect the sweep had retired to ``dead`` and every
-    # one that had ``replied``, then the sweep re-entered the sequence on
-    # people it had deliberately given up on, including anyone marked dead for
-    # asking not to be contacted. A re-import must never resurrect.
-    if body.status != "new":
-        doc.status = body.status
-    if body.opted_in:
-        doc.opted_in = True
+    # LIFECYCLE IS NOT IMPORT DATA. ``status`` and ``opted_in`` are never
+    # written here at all — an import describes who someone is, it does not
+    # decide where they sit in a sequence or whether they consented. Both move
+    # only through PATCH (an explicit human act) or the gate.
+    #
+    # A first attempt at this let a non-default status through
+    # (``if body.status != "new"``), which protected only a sheet with no
+    # status column — and an operator's working sheet is exactly the one that
+    # carries a stale ``in_sequence``. Re-uploading it lifted rows back out of
+    # the terminal set and the follow-up sweep re-entered the sequence on
+    # people it had retired, including anyone marked dead for asking not to be
+    # contacted.
+
+    # THE NUMBER AND THE CONSENT MOVE TOGETHER, and this is the one that
+    # actually reaches a stranger. Consent is given by a PERSON on a NUMBER,
+    # never by a domain: if a re-import points the row at a different number,
+    # whatever opt-in was recorded belonged to whoever held the old one.
+    #
+    # An earlier version of this fix overwrote ``whatsapp_number``
+    # unconditionally while making ``opted_in`` sticky-True — so a sheet
+    # carrying a new SDR's mobile and no opt-in column inherited the founder's
+    # consent, cleared the dispatch guard, and put a business-initiated
+    # template in front of someone who never agreed to it. The blanket
+    # overwrite it replaced did NOT have that hole, because it reset
+    # ``opted_in`` on the same import. A fix must not be more dangerous than
+    # the bug.
+    incoming_number = body.whatsapp_number
+    if incoming_number is not None and incoming_number != doc.whatsapp_number:
+        doc.whatsapp_number = incoming_number
+        doc.opted_in = False
 
     # ``emails`` / ``linkedin_url`` are set-only for the same reason
     # ``project_id`` is below: a row that says nothing about them must not

@@ -1,15 +1,8 @@
 [
   {
-    "label": "extractor takes the FIRST companies object again (the template-echo bug)",
-    "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
-    "find": "    for obj in reversed(objects):",
-    "replace": "    for obj in objects:",
-    "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_preamble_object_cannot_shadow_the_answer"
-  },
-  {
     "label": "email shape check removed \u2014 a two-line address becomes storable",
     "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
-    "find": "    if any(ch.isspace() for ch in address) or address.count(\"@\") != 1:\n        return None",
+    "find": "    if address.count(\"@\") != 1:\n        return None",
     "replace": "    if False:\n        return None",
     "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_malformed_address_is_never_storable"
   },
@@ -67,6 +60,41 @@
     "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
     "find": "    if any(ch in address for ch in '<>\"\\\\,;:()[]'):\n        return None",
     "replace": "    if False:\n        return None",
+    "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_malformed_address_is_never_storable"
+  },
+  {
+    "label": "answer picked by position again (first) \u2014 a leading echo wins",
+    "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
+    "find": "    scored = [(o, _answer_score(o)) for o in objects]\n    best = max(scored, key=lambda pair: pair[1])",
+    "replace": "    scored = [(o, _answer_score(o)) for o in objects]\n    best = (objects[0], _answer_score(objects[0]))",
+    "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings"
+  },
+  {
+    "label": "answer picked by position again (last) \u2014 a trailing recap wins",
+    "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
+    "find": "    best = max(scored, key=lambda pair: pair[1])",
+    "replace": "    best = (objects[-1], _answer_score(objects[-1]))",
+    "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings"
+  },
+  {
+    "label": "consent survives a number change on re-import",
+    "file": "ee/pocketpaw_ee/cloud/growth/service.py",
+    "find": "        doc.whatsapp_number = incoming_number\n        doc.opted_in = False",
+    "replace": "        doc.whatsapp_number = incoming_number",
+    "tests": "tests/cloud/growth/test_upsert_lifecycle.py"
+  },
+  {
+    "label": "a re-import can write status again (resurrects the dead)",
+    "file": "ee/pocketpaw_ee/cloud/growth/service.py",
+    "find": "    for field in (\"name\", \"company\", \"tier\", \"research_brief\"):",
+    "replace": "    doc.status = body.status\n    for field in (\"name\", \"company\", \"tier\", \"research_brief\"):",
+    "tests": "tests/cloud/growth/test_upsert_lifecycle.py"
+  },
+  {
+    "label": "zero-width characters allowed back into an address",
+    "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
+    "find": "    if any(ch.isspace() or unicodedata.category(ch) in (\"Cf\", \"Cc\") for ch in address):",
+    "replace": "    if any(ch.isspace() for ch in address):",
     "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_malformed_address_is_never_storable"
   }
 ]

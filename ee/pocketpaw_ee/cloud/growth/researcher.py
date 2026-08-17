@@ -224,6 +224,26 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
     if not objects:
         return None
+
+    def _answer_score(obj: dict[str, Any]) -> int:
+        """How much this object looks like the actual research.
+
+        POSITION IS NOT A SIGNAL, in either direction. Taking the first
+        `companies` object let a restated template beat the answer; taking the
+        last let a trailing recap beat it, AND let a nested `companies` key
+        inside a company entry beat its own parent. Both were reproduced. So
+        the tiebreak is content: the real answer is the one whose `companies`
+        is the longest list of dicts that actually carry a domain.
+        """
+        rows = obj.get("companies")
+        if not isinstance(rows, list):
+            return -1
+        return sum(1 for r in rows if isinstance(r, dict) and str(r.get("domain") or "").strip())
+
+    scored = [(o, _answer_score(o)) for o in objects]
+    best = max(scored, key=lambda pair: pair[1])
+    if best[1] >= 0:
+        return best[0]
     # The LAST qualifying object wins, not the first.
     #
     # This is the fix for a reproduced bug, so it is worth being explicit about
@@ -236,10 +256,7 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     # JSON, and this picks the last candidate, so a preamble cannot shadow the
     # answer even if one reappears. Two independent guards, because the thing
     # they protect is the one guarantee this module claims to be structural.
-    for obj in reversed(objects):
-        if "companies" in obj:
-            return obj
-    return objects[-1]
+    return objects[0]
 
 
 def _evidence_from(raw: Any) -> EmailEvidence | None:
@@ -269,7 +286,14 @@ def _evidence_from(raw: Any) -> EmailEvidence | None:
     # addresses on adjacent lines of a contact page) passes every guard and is
     # stored as ONE address, which the dispatch path then hands to the provider
     # as a recipient. Exactly one @, no whitespace, something on each side.
-    if any(ch.isspace() for ch in address) or address.count("@") != 1:
+    # ``str.isspace()`` is False for ZWSP, BOM and the direction marks
+    # (Unicode category Cf) and for NUL — all of which a WebFetch extraction
+    # can carry out of real HTML. Category-check instead of trusting isspace.
+    import unicodedata
+
+    if any(ch.isspace() or unicodedata.category(ch) in ("Cf", "Cc") for ch in address):
+        return None
+    if address.count("@") != 1:
         return None
     if len(address) > 254:  # RFC 5321 ceiling; anything longer is not an address
         return None
