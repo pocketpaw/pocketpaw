@@ -764,6 +764,26 @@ class TestSourceTruthAggregate:
         assert "source_truth" not in plain
 
     @pytest.mark.asyncio
+    async def test_sync_aggregate_is_folded_in_not_silently_dropped(self):
+        """A SYNC ``entity_type_source_truth`` returning a dict is folded in.
+
+        Mutation that breaks this: replace the ``inspect.isawaitable`` branch
+        with an unconditional ``await`` — a sync method's dict then raises
+        TypeError inside the blanket except and the field silently vanishes,
+        indistinguishable from "no store bound" (review finding V4).
+        """
+        canned = {"mode": "shadow", "live": True, "tracked": False, "properties": {}}
+
+        class SyncIntrospector(FakeIntrospector):
+            def entity_type_source_truth(self, name):  # deliberately NOT async
+                assert name == "Customer"
+                return canned
+
+        payload = await describe_fabric_id_async(SyncIntrospector(), "fabric:Customer")
+        assert payload is not None
+        assert payload["source_truth"] == canned
+
+    @pytest.mark.asyncio
     async def test_sample_cap_marks_sampled(self, tmp_path, monkeypatch, capsys):
         """More tracked keys than the cap → sampled=True, the walk stops at
         the cap, and the per-property ``objects`` totals stay EXACT (uncapped

@@ -86,9 +86,16 @@
 #     appears on later object_ids can't vanish; disputed / stale / aging /
 #     winner mix come from the walked keys, ``sampled_keys`` says how many,
 #     and ``sampled=True`` carries a ``note`` saying so.
+# Updated: 2026-08-17 (AST-5b — review hygiene) — ``describe_fabric_id_async``
+#   accepts a SYNC ``entity_type_source_truth`` too (``inspect.isawaitable``
+#   guard): a sync impl returning a dict used to raise TypeError on ``await``,
+#   swallowed by the blanket except, and vanish indistinguishably from "no
+#   store bound". The new gates on this seam and the AST-3 flag overlay are
+#   proven by ``tests/mutations/atlas_flags.json`` (5 mutations, all caught).
 
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 from typing import Any, Protocol, runtime_checkable
@@ -361,7 +368,12 @@ async def describe_fabric_id_async(
     if not callable(aggregate):
         return payload
     try:
-        source_truth = await aggregate(payload["name"])
+        # Accept both an async (documented) and a plain sync implementation:
+        # a sync method returning a dict must not be silently dropped by an
+        # ``await`` on a non-awaitable (that TypeError would be swallowed
+        # below and look exactly like "no store bound").
+        result = aggregate(payload["name"])
+        source_truth = await result if inspect.isawaitable(result) else result
         if isinstance(source_truth, dict):
             payload["source_truth"] = source_truth
     except Exception as exc:  # noqa: BLE001 — additive field, never break the tool
