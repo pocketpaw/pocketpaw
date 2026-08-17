@@ -266,7 +266,19 @@ class TestTheReviewFindings:
                 }
             ]
         )
-        answer = _response([{"domain": "realclinic.co.uk"}])
+        # A real finding carries the brief and the pages it was read from; an
+        # echoed shape does not. That difference is the signal — see
+        # _answer_score's honest-limit note for what it cannot separate.
+        answer = _response(
+            [
+                {
+                    "domain": "realclinic.co.uk",
+                    "company": "Real Clinic",
+                    "research_brief": "two-chair practice, phone-only bookings",
+                    "source_urls": ["https://realclinic.co.uk/contact"],
+                }
+            ]
+        )
         result = parse_research_response(f"Shape:{preamble}\nResults:{answer}", max_results=5)
         assert [c.domain for c in result.companies] == ["realclinic.co.uk"]
         # Mutation: "extractor takes the FIRST companies object again".

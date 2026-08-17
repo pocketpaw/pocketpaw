@@ -224,22 +224,49 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
     if not objects:
         return None
-    # The LAST qualifying object wins, not the first.
-    #
-    # This is the fix for a reproduced bug, so it is worth being explicit about
-    # why. The prompt used to carry a fully-valid JSON example — complete with
-    # an "observed" email on example.com — and this loop took the FIRST object
-    # with a ``companies`` key. A model that restated the shape before
-    # answering therefore had its own template parsed as the research: the real
-    # findings were discarded and a fabricated prospect was filed carrying an
-    # address nobody had ever seen. The prompt no longer contains parseable
-    # JSON, and this picks the last candidate, so a preamble cannot shadow the
-    # answer even if one reappears. Two independent guards, because the thing
-    # they protect is the one guarantee this module claims to be structural.
-    for obj in reversed(objects):
-        if "companies" in obj:
-            return obj
-    return objects[-1]
+
+    def _answer_score(obj: dict[str, Any]) -> int:
+        """How much this object looks like the actual research.
+
+        POSITION IS NOT A SIGNAL, in either direction. Taking the first
+        `companies` object let a restated template beat the answer; taking the
+        last let a trailing recap beat it, AND let a nested `companies` key
+        inside a company entry beat its own parent. Both were reproduced. So
+        the tiebreak is content: the real answer is the one whose `companies`
+        is the longest list of dicts that actually carry a domain, weighted by
+        how much each row actually says.
+
+        HONEST LIMIT: two candidates of identical shape and richness cannot be
+        told apart by content, and this falls back to the first. The real
+        protection against an echoed template is that the prompt no longer
+        contains parseable JSON to echo — this scoring is defence in depth,
+        not a proof.
+        """
+        rows = obj.get("companies")
+        if not isinstance(rows, list):
+            return -1
+        score = 0
+        for r in rows:
+            if not isinstance(r, dict) or not str(r.get("domain") or "").strip():
+                continue
+            # A real finding is RICHER than an echoed shape: it carries the
+            # brief and the pages that were read. Counting rows alone ties a
+            # one-row echo against a one-row answer.
+            score += 1
+            score += sum(
+                1
+                for field in ("company", "name", "research_brief")
+                if str(r.get(field) or "").strip()
+            )
+            urls = r.get("source_urls")
+            score += len(urls) if isinstance(urls, list) else 0
+        return score
+
+    scored = [(o, _answer_score(o)) for o in objects]
+    best = max(scored, key=lambda pair: pair[1])
+    if best[1] >= 0:
+        return best[0]
+    return objects[0]
 
 
 def _evidence_from(raw: Any) -> EmailEvidence | None:
@@ -269,7 +296,14 @@ def _evidence_from(raw: Any) -> EmailEvidence | None:
     # addresses on adjacent lines of a contact page) passes every guard and is
     # stored as ONE address, which the dispatch path then hands to the provider
     # as a recipient. Exactly one @, no whitespace, something on each side.
-    if any(ch.isspace() for ch in address) or address.count("@") != 1:
+    # ``str.isspace()`` is False for ZWSP, BOM and the direction marks
+    # (Unicode category Cf) and for NUL — all of which a WebFetch extraction
+    # can carry out of real HTML. Category-check instead of trusting isspace.
+    import unicodedata
+
+    if any(ch.isspace() or unicodedata.category(ch) in ("Cf", "Cc") for ch in address):
+        return None
+    if address.count("@") != 1:
         return None
     if len(address) > 254:  # RFC 5321 ceiling; anything longer is not an address
         return None

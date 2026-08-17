@@ -69,6 +69,12 @@ def _scrub(text: str, secret: str) -> str:
     return text
 
 
+# ORDER MATTERS AT EVERY CALL SITE: scrub the WHOLE body, then truncate. Slicing
+# first can cut a key in half across the boundary, so ``secret in text`` misses
+# and the prefix survives into a durable MessageLog row — which is precisely the
+# leak this function exists to stop.
+
+
 class Msg91Error(Exception):
     """The provider refused or failed the send.
 
@@ -270,7 +276,7 @@ class Msg91WhatsAppClient:
         if resp.status_code >= 400:
             raise Msg91Error(
                 "msg91.http_error",
-                f"MSG91 returned {resp.status_code}: {_scrub(resp.text[:300], creds.authkey)}",
+                f"MSG91 returned {resp.status_code}: {_scrub(resp.text, creds.authkey)[:300]}",
             )
         return _extract_message_id(resp, creds.authkey)
 
@@ -292,7 +298,7 @@ def _extract_message_id(resp: Any, authkey: str = "") -> str:
     status = str(data.get("status") or data.get("type") or "").lower()
     if status in ("error", "fail", "failure"):
         raise Msg91Error(
-            "msg91.rejected", f"MSG91 rejected the send: {_scrub(str(data)[:300], authkey)}"
+            "msg91.rejected", f"MSG91 rejected the send: {_scrub(str(data), authkey)[:300]}"
         )
     inner = data.get("data")
     if isinstance(inner, dict):

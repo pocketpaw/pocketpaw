@@ -77,6 +77,9 @@ logger = logging.getLogger(__name__)
 # after the first two or three ICPs — see the note on ``job_timeout`` below.
 _DEFAULT_JOB_TIMEOUT_SECONDS = 1800
 
+# One template/email POST. Unchanged from arq's default on purpose.
+_DISPATCH_TIMEOUT_SECONDS = 300
+
 
 async def dispatch(ctx: dict[str, Any], draft_id: str, channel: str) -> None:
     """Dispatch an APPROVED outbound draft.
@@ -151,17 +154,25 @@ def _redis_settings() -> RedisSettings:
     return RedisSettings.from_dsn(url)
 
 
-def _job_timeout_seconds() -> int:
+def _job_timeout_seconds() -> int | None:
     """Per-job ceiling for the growth queue, in seconds.
 
     Default 30 minutes: the discovery sweep works ICPs sequentially and each
     one is a real agent run. Override with ``GROWTH_JOB_TIMEOUT_SECONDS`` when
     a deployment runs more hunts than that comfortably fits.
     """
+    # ``0`` DISABLES the ceiling, matching this package's own convention
+    # (``discovery.py``'s monthly max, and the agent-jail knobs in CLAUDE.md).
+    # An earlier version ran it through ``max(int(raw), 60)``, so an operator
+    # setting 0 to mean "no limit" got 60s — a 30x TIGHTENING, and one whose
+    # cancellations are invisible because CancelledError is a BaseException.
     raw = os.environ.get("GROWTH_JOB_TIMEOUT_SECONDS", "").strip()
     if raw:
         try:
-            return max(int(raw), 60)
+            parsed = int(raw)
+            if parsed <= 0:
+                return None
+            return max(parsed, 60)
         except ValueError:
             logger.warning(
                 "growth worker: GROWTH_JOB_TIMEOUT_SECONDS=%r is not an integer — using %d",
@@ -181,7 +192,12 @@ class WorkerSettings:
     # ``func(..., name=...)`` pins the job's wire name to the explicit dotted
     # constant so the executor's ``enqueue_job(GROWTH_DISPATCH_JOB_NAME, ...)``
     # always matches, independent of the Python function's name.
-    functions = [func(dispatch, name=GROWTH_DISPATCH_JOB_NAME)]
+    # The dispatch job keeps arq's 300s. The long ``job_timeout`` below exists
+    # for the discovery sweep, which works ICPs sequentially; applying it here
+    # too would let ten hung provider sockets hold every worker slot for half
+    # an hour with human-approved outbound queued behind them, and max_tries=1
+    # means no recovery.
+    functions = [func(dispatch, name=GROWTH_DISPATCH_JOB_NAME, timeout=_DISPATCH_TIMEOUT_SECONDS)]
     # G-7 — one daily tick at 13:00 UTC (business hours across US/EU, and well
     # clear of the midnight batch traffic every other scheduler piles onto).
     # ``unique=True`` (arq's default, explicit here because it is the property
