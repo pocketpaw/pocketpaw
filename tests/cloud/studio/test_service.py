@@ -68,8 +68,9 @@ def proxy_env(monkeypatch):
 
 @pytest.fixture
 def studio_env(tmp_path, monkeypatch):
-    """Redirect media storage + history persistence into tmp dirs so tests never
-    touch the real ~/.pocketpaw, and resolve the tenant key to a fixed value.
+    """Redirect media storage + history persistence + flow-project persistence
+    into tmp dirs so tests never touch the real ~/.pocketpaw, and resolve the
+    tenant key to a fixed value.
 
     The media storage adapter is swapped for a tmp-backed LOCAL adapter, so a
     generated PNG lands at ``<media_root>/generated/<name>`` — the same layout
@@ -82,6 +83,9 @@ def studio_env(tmp_path, monkeypatch):
     history = tmp_path / "studio" / "generations.jsonl"
     history.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(service, "_history_path", lambda: history)
+    projects = tmp_path / "studio" / "flow-projects.jsonl"
+    projects.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(service, "_projects_path", lambda: projects)
 
     async def _tenant_key(workspace_id):
         return "sk-tenant-ws"
@@ -302,3 +306,83 @@ def test_suggest_prompt_heuristic() -> None:
     assert "highly detailed" in image.prompt
     video = service.suggest_prompt("a clip of waves moving")
     assert video.kind == "video"
+
+
+# ── Flow projects (JSONL persistence, workspace-scoped) ─────────────────────
+
+def _node(node_id: str = "text_1") -> schemas.FlowNode:
+    return schemas.FlowNode(
+        id=node_id,
+        type="text",
+        position={"x": 40.0, "y": 120.0},
+        data={"status": "idle", "text": "hello"},
+    )
+
+
+def _edge() -> schemas.FlowEdge:
+    return schemas.FlowEdge(id="e-1", source="text_1", target="image_1")
+
+
+def test_save_flow_project_upserts(studio_env) -> None:
+    """PUT semantics: an unknown id creates the project, a known id updates it
+    in place (nodes/edges replaced, createdAt preserved, updatedAt bumped)."""
+    saved = service.save_flow_project(
+        "proj_1", "ws-1", name="Posters", nodes=[_node()], edges=[]
+    )
+    assert saved.id == "proj_1"
+    assert saved.name == "Posters"
+    assert saved.nodes[0].data["text"] == "hello"
+    assert saved.createdAt > 0
+
+    # Update — nodes replaced, name kept when omitted, createdAt stable.
+    moved = service.save_flow_project(
+        "proj_1", "ws-1", name=None, nodes=[_node("text_2"), _node("image_2")], edges=[_edge()]
+    )
+    assert moved.id == "proj_1"
+    assert moved.name == "Posters"  # preserved when name omitted
+    assert moved.createdAt == saved.createdAt
+    assert moved.updatedAt >= saved.updatedAt
+    assert [n.id for n in moved.nodes] == ["text_2", "image_2"]
+    assert moved.edges[0].source == "text_1"
+    assert service.get_flow_project("proj_1", "ws-1").nodes[0].id == "text_2"
+
+
+def test_save_flow_project_blank_name_falls_back(studio_env) -> None:
+    """A blank name defaults to 'Flow' rather than persisting an empty title."""
+    saved = service.save_flow_project("proj_2", "ws-1", name="   ", nodes=[], edges=[])
+    assert saved.name == "Flow"
+
+
+def test_list_flow_projects_workspace_scoped(studio_env, monkeypatch) -> None:
+    """list_flow_projects returns only the caller's workspace, newest-first."""
+    # Deterministic timestamps so ordering is asserted, not racy (saves that land
+    # in the same millisecond would otherwise stay in insertion order).
+    ticks = iter([100, 200, 300])
+    monkeypatch.setattr(service, "time_now_ms", lambda: next(ticks))
+    service.save_flow_project("a", "ws-1", name="A", nodes=[_node()], edges=[])
+    service.save_flow_project("b", "ws-1", name="B", nodes=[_node()], edges=[])
+    service.save_flow_project("c", "ws-2", name="C", nodes=[_node()], edges=[])
+
+    mine = service.list_flow_projects("ws-1")
+    assert {p.id for p in mine} == {"a", "b"}
+    # Most-recently-updated first (b was saved last).
+    assert mine[0].id == "b"
+
+    other = service.list_flow_projects("ws-2")
+    assert [p.id for p in other] == ["c"]
+
+
+def test_get_flow_project_scoped(studio_env) -> None:
+    """get_flow_project returns the record only when it belongs to the workspace."""
+    service.save_flow_project("proj_1", "ws-1", name="Posters", nodes=[_node()], edges=[])
+    assert service.get_flow_project("proj_1", "ws-1") is not None
+    assert service.get_flow_project("proj_1", "ws-2") is None
+    assert service.get_flow_project("nope", "ws-1") is None
+
+
+def test_delete_flow_project(studio_env) -> None:
+    """Delete removes the record and reports False for an unknown id."""
+    service.save_flow_project("proj_1", "ws-1", name="Posters", nodes=[_node()], edges=[])
+    assert service.delete_flow_project("proj_1", "ws-1") is True
+    assert service.get_flow_project("proj_1", "ws-1") is None
+    assert service.delete_flow_project("proj_1", "ws-1") is False

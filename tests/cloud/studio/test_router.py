@@ -230,3 +230,77 @@ def test_license_gate_403_when_denied(monkeypatch):
     app.dependency_overrides[require_license] = _deny
     resp = TestClient(app, raise_server_exceptions=False).get("/api/v1/studio/models")
     assert resp.status_code == 403
+
+
+# ── Flow projects ────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def flow_env(tmp_path, monkeypatch):
+    """Point the service's flow-project JSONL at a tmp dir so the CRUD round-trip
+    (real service, real file) never touches the developer's ~/.pocketpaw."""
+    projects = tmp_path / "studio" / "flow-projects.jsonl"
+    projects.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(studio_service, "_projects_path", lambda: projects)
+    return projects
+
+
+def _flow_node(node_id="text_1"):
+    return {
+        "id": node_id,
+        "type": "text",
+        "position": {"x": 40, "y": 120},
+        "data": {"status": "idle", "text": "hello"},
+    }
+
+
+def test_flow_projects_crud_roundtrip(client, flow_env):
+    """GET list → PUT (upsert create) → GET shows it → PUT (update) → DELETE.
+    Runs the REAL service + JSONL persistence through the router seam."""
+    # Fresh workspace: empty list.
+    resp = client.get("/api/v1/studio/flow-projects")
+    assert resp.status_code == 200
+    assert resp.json() == {"projects": []}
+
+    # PUT creates (upsert) a project.
+    resp = client.put(
+        "/api/v1/studio/flow-projects/proj_1",
+        json={"name": "Posters", "nodes": [_flow_node()], "edges": []},
+    )
+    assert resp.status_code == 200
+    created = resp.json()
+    assert created["id"] == "proj_1"
+    assert created["name"] == "Posters"
+    assert created["nodes"][0]["data"]["text"] == "hello"
+
+    # GET lists it (wire keys camelCase, opaque node payload preserved).
+    resp = client.get("/api/v1/studio/flow-projects")
+    assert resp.status_code == 200
+    listed = resp.json()["projects"]
+    assert [p["id"] for p in listed] == ["proj_1"]
+
+    # PUT updates in place; name preserved when omitted.
+    resp = client.put(
+        "/api/v1/studio/flow-projects/proj_1",
+        json={
+            "name": None,
+            "nodes": [_flow_node("text_2")],
+            "edges": [
+                {
+                    "id": "e-1",
+                    "source": "text_2",
+                    "target": "img_1",
+                    "sourceHandle": None,
+                    "targetHandle": None,
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Posters"
+    assert resp.json()["nodes"][0]["id"] == "text_2"
+    assert resp.json()["edges"][0]["source"] == "text_2"
+
+    # DELETE removes it; a second delete is 404.
+    assert client.delete("/api/v1/studio/flow-projects/proj_1").status_code == 204
+    assert client.get("/api/v1/studio/flow-projects").json()["projects"] == []
+    assert client.delete("/api/v1/studio/flow-projects/proj_1").status_code == 404

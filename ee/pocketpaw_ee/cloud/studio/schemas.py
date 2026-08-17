@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 # ── Model / style catalog ───────────────────────────────────────────────────
@@ -132,6 +134,52 @@ class SuggestPromptRequest(BaseModel):
     sentence: str
 
 
+# ── Flow projects (persisted server-side, workspace-scoped) ─────────────────
+# These mirror paw-enterprise ``core/studio/flow.svelte.ts``'s StudioFlowProject.
+# ``data`` / ``position`` on a node are OPAQUE — the backend stores whatever the
+# @xyflow/svelte canvas needs and never inspects it, so the node schema can grow
+# without a backend change.
+
+class FlowNode(BaseModel):
+    """A @xyflow/svelte node snapshot (id, kind, position, and its data bag)."""
+
+    id: str
+    type: str
+    position: dict[str, Any]
+    data: dict[str, Any]
+
+
+class FlowEdge(BaseModel):
+    """A @xyflow/svelte edge snapshot (source → target handles)."""
+
+    id: str
+    source: str
+    target: str
+    sourceHandle: str | None = None
+    targetHandle: str | None = None
+
+
+class FlowProject(BaseModel):
+    """A saved flow canvas — its name plus the full node/edge graph."""
+
+    id: str
+    name: str
+    createdAt: int
+    updatedAt: int
+    nodes: list[FlowNode] = Field(default_factory=list)
+    edges: list[FlowEdge] = Field(default_factory=list)
+
+
+class FlowProjectSave(BaseModel):
+    """Body of ``PUT /studio/flow-projects/{id}`` — the full project state.
+    The endpoint UPSERTS (creates the project if ``{id}`` is unknown), so the
+    frontend can fire-and-forget a debounced save without tracking existence."""
+
+    name: str | None = None
+    nodes: list[FlowNode] = Field(default_factory=list)
+    edges: list[FlowEdge] = Field(default_factory=list)
+
+
 # ── Envelopes ───────────────────────────────────────────────────────────────
 
 class StudioModelsResponse(BaseModel):
@@ -144,6 +192,13 @@ class StudioStylesResponse(BaseModel):
 
 class GenerationsResponse(BaseModel):
     generations: list[Generation]
+
+
+class FlowProjectsResponse(BaseModel):
+    """Response of ``GET /studio/flow-projects`` — every project in the
+    workspace, most-recently-updated first."""
+
+    projects: list[FlowProject]
 
 
 # ── Media list (reuses the /media router's shape) ───────────────────────────
@@ -173,6 +228,11 @@ __all__ = [
     "StudioModelsResponse",
     "StudioStylesResponse",
     "GenerationsResponse",
+    "FlowNode",
+    "FlowEdge",
+    "FlowProject",
+    "FlowProjectSave",
+    "FlowProjectsResponse",
     "MediaFile",
     "MediaListResponse",
 ]

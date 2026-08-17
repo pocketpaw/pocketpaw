@@ -112,3 +112,46 @@ async def suggest_prompt(req: schemas.SuggestPromptRequest) -> schemas.PromptSug
     """Enrich a plain sentence into a generation prompt + inferred media kind.
     Heuristic mirror of the mock (no LLM call)."""
     return service.suggest_prompt(req.sentence)
+
+
+# ── Flow projects (persisted server-side, workspace-scoped) ─────────────────
+# The /studio flow editor's canvases. The frontend keeps a debounced save of the
+# active canvas and calls PUT (an UPSERT — create-or-update), so an offline-first
+# cache plus a server round-trip keeps every project across devices. Node/edge
+# payloads are opaque (the backend never inspects them).
+
+@router.get("/flow-projects", response_model=schemas.FlowProjectsResponse)
+async def list_flow_projects(
+    workspace_id: str = Depends(current_workspace_id),
+) -> schemas.FlowProjectsResponse:
+    """Return the workspace's flow projects, most-recently-updated first."""
+    return schemas.FlowProjectsResponse(
+        projects=service.list_flow_projects(workspace_id),
+    )
+
+
+@router.put("/flow-projects/{project_id}", response_model=schemas.FlowProject)
+async def save_flow_project(
+    project_id: str,
+    req: schemas.FlowProjectSave,
+    workspace_id: str = Depends(current_workspace_id),
+) -> schemas.FlowProject:
+    """Create-or-update a flow project (UPSERT). ``name`` is preserved when
+    omitted, so a canvas-only save never wipes the title."""
+    return service.save_flow_project(
+        project_id,
+        workspace_id,
+        name=req.name,
+        nodes=req.nodes,
+        edges=req.edges,
+    )
+
+
+@router.delete("/flow-projects/{project_id}", status_code=204)
+async def delete_flow_project(
+    project_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> None:
+    """Delete one flow project, or 404 if it doesn't exist in this workspace."""
+    if not service.delete_flow_project(project_id, workspace_id):
+        raise HTTPException(404, f"Flow project '{project_id}' not found")

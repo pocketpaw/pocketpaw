@@ -289,6 +289,121 @@ def tracked_generation_filenames() -> set[str]:
     return names
 
 
+# ── Flow projects (JSONL persistence, workspace-scoped) ─────────────────────
+# Same file-based pattern as the generation history, but update-in-place: flow
+# projects are mutable (save = upsert, delete = remove), so the whole set is
+# rewritten on each write. The set is tiny (a handful of canvases per
+# workspace), so a full rewrite is fine and keeps the file trivially debuggable.
+
+def _projects_path() -> Path:
+    """Get (and create) the flow-projects JSONL path under ``~/.pocketpaw/studio``
+    so flow canvases survive restarts AND round-trip across devices (the /studio
+    page pushes saves here via PUT /studio/flow-projects/{id})."""
+    d = get_config_dir() / "studio"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "flow-projects.jsonl"
+
+
+def _load_projects() -> list[dict[str, Any]]:
+    """Read the persisted flow-project records (best-effort — a corrupt/missing
+    file degrades to an empty list, never a crash)."""
+    path = _projects_path()
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except ValueError:
+                logger.warning("studio: skipping corrupt flow-project line")
+    except OSError:
+        logger.warning("studio: could not read flow projects", exc_info=True)
+    return records
+
+
+def _rewrite_projects(records: list[dict[str, Any]]) -> None:
+    """Full rewrite of the flow-projects JSONL (best-effort)."""
+    try:
+        with _projects_path().open("w") as fh:
+            for record in records:
+                fh.write(json.dumps(record) + "\n")
+    except OSError:
+        logger.warning("studio: could not rewrite flow projects", exc_info=True)
+
+
+def list_flow_projects(workspace_id: str) -> list[schemas.FlowProject]:
+    """Return the workspace's flow projects, most-recently-updated first. Records
+    are tagged with the owning workspace so multi-tenant deployments never leak."""
+    mine = [
+        r for r in _load_projects() if r.get("_workspace") == workspace_id
+    ]
+    mine.sort(key=lambda r: r.get("updatedAt", 0), reverse=True)
+    return [schemas.FlowProject.model_validate(r) for r in mine]
+
+
+def get_flow_project(project_id: str, workspace_id: str) -> schemas.FlowProject | None:
+    """Return one flow project (scoped to the workspace), or None."""
+    for r in _load_projects():
+        if r.get("id") == project_id and r.get("_workspace") == workspace_id:
+            return schemas.FlowProject.model_validate(r)
+    return None
+
+
+def save_flow_project(
+    project_id: str,
+    workspace_id: str,
+    *,
+    name: str | None,
+    nodes: list[schemas.FlowNode],
+    edges: list[schemas.FlowEdge],
+) -> schemas.FlowProject:
+    """Create-or-update a flow project (UPSERT). ``name`` falls back to the
+    existing name (or 'Flow') when omitted so a canvas-only save never wipes the
+    title. Returns the saved project."""
+    records = _load_projects()
+    now = time_now_ms()
+    prior = next(
+        (r for r in records if r.get("id") == project_id and r.get("_workspace") == workspace_id),
+        None,
+    )
+    record = {
+        "id": project_id,
+        "name": (name or (prior or {}).get("name") or "Flow").strip() or "Flow",
+        "createdAt": (prior or {}).get("createdAt", now),
+        "updatedAt": now,
+        "nodes": [n.model_dump() for n in nodes],
+        "edges": [e.model_dump() for e in edges],
+        "_workspace": workspace_id,
+    }
+    remaining = [
+        r
+        for r in records
+        if not (r.get("id") == project_id and r.get("_workspace") == workspace_id)
+    ]
+    remaining.append(record)
+    _rewrite_projects(remaining)
+    return schemas.FlowProject.model_validate(record)
+
+
+def delete_flow_project(project_id: str, workspace_id: str) -> bool:
+    """Delete one flow project (scoped to the workspace). Returns False if the
+    project didn't exist (the router maps that to a 404)."""
+    records = _load_projects()
+    remaining = [
+        r
+        for r in records
+        if not (r.get("id") == project_id and r.get("_workspace") == workspace_id)
+    ]
+    if len(remaining) == len(records):
+        return False
+    _rewrite_projects(remaining)
+    return True
+
+
 # ── LiteLLM proxy transport (REUSED from the catalog entity) ────────────────
 
 def _proxy_base() -> str:
