@@ -1,4 +1,53 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-08-16 (fix/paw-bar-role-gates) — the last nine ``require_scope`` gates
+#   in this router become ROLE gates, so the ``require_scope`` import is gone. The
+#   two admin site-settings routes (the concierge kill switch) and the seven widget
+#   CRUD routes now take ``_require_paw_bar_read`` on the two GETs and
+#   ``_require_paw_bar_manage`` on every mutation — the same pair the D2 reads and
+#   the knowledge endpoints already used, so the whole admin surface of this router
+#   is finally gated one way. ``_require_paw_bar_manage`` moved up beside its read
+#   sibling because widget CRUD is now its first caller.
+#   ``require_scope("admin")`` is an OSS SINGLE-TENANT primitive: it accepts
+#   ``request.state.full_access`` (master token / session cookie / localhost, and in
+#   cloud only an ``is_superuser`` platform admin), a file-backed ``pp_`` API key, or
+#   a ``ppat_`` OAuth token. A CLOUD workspace admin presents none of those, so
+#   PATCH /paw-bar/admin/site/{site_id}/settings answered its intended caller with
+#   403 "Missing required scope: admin" — the kill switch was unreachable for the
+#   owner it belongs to. The same line failed the opposite way on self-hosted: a
+#   session cookie sets ``full_access``, so ANY signed-in dashboard user, member
+#   role included, could rotate a widget's token or delete it. One swap closes both.
+#   No new actions: ``paw_bar.read`` / ``paw_bar.manage`` already sit at ADMIN in
+#   guards/actions.py.
+# Updated: 2026-08-01 (AL-2, paw-bar emitters) — three conversation write paths
+#   now record their agent-ledger beats through ``paw_bar/ledger.py`` (fail-soft,
+#   never raises, ~4 lines each):
+#     ~ POST /paw-bar/chat — ``paw.conversation.started``. Fired on every turn
+#       and deduped by the ledger on ``widget:customer`` rather than gated on the
+#       handler's ``is_new_conversation`` flag: that flag comes from a read this
+#       handler is explicitly allowed to lose (the fail-closed mute arm), and a
+#       "conversations started" count that drops those is worse than one absorbed
+#       insert per turn.
+#     ~ PATCH .../conversations/{ref} and POST .../conversations/{ref}/reply —
+#       both hand the BEFORE and AFTER rows to
+#       ``ledger.emit_conversation_transition``, which records
+#       ``paw.conversation.takeover`` when the mute goes on and
+#       ``paw.handoff.resolved`` when the thread leaves ``needs_human``. Read as
+#       a row diff, not from the request body, so the two endpoints cannot record
+#       the same transition differently and a no-op patch records nothing.
+#   All three route the ledger FILE by ``workspace_id`` / ``ctx.workspace_id`` —
+#   the authenticated tenant these handlers already scope every other store read
+#   by, and a store-path-safe token (the widget OWNER label is not).
+# Updated: 2026-07-31 (in-thread approvals) — the admin transcript now carries
+#   ``pending_actions`` (this visitor's still-PENDING decisions, mapped to the
+#   same DecisionItem shape the decisions tab serves) and ``bot_paused``, and
+#   DecisionItem gains ``customer_ref``. The dashboard's ConversationThread has
+#   had the approval card since slices 2+4, with TWO wire sources — transcript
+#   ``pending_actions`` preferred, decisions-list-filtered-by-ref as fallback —
+#   and this deployment served NEITHER, so a real approval sat behind the
+#   "approve it from Decisions" notice (found live 2026-07-31). Both new reads
+#   are failure-soft: a broken decisions read costs the thread its cards, never
+#   the transcript. Settled decisions stay absent from pending_actions on
+#   purpose — the card list is a to-do, not a log.
 # Updated: 2026-07-31 (owner inbox, slice 3) — THE ESCAPE HATCH. A visitor can
 #   always reach a person, and the owner is told when it happens:
 #     + POST /paw-bar/request-human — {key, w, customer_ref, message?, contact?}
@@ -376,7 +425,6 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from pocketpaw.api.deps import require_scope
 from pocketpaw.paw_bar.models import (
     MAX_PAYLOAD_BYTES,
     ConversationState,
@@ -402,6 +450,12 @@ logger = logging.getLogger(__name__)
 # path-sourced dep would read an attacker-suppliable query param), the SAME
 # workspace the reads scope their data to.
 _require_paw_bar_read = require_action("paw_bar.read", workspace_dep=current_workspace_id)
+
+# The write half of the same pair (ADMIN, same session-workspace binding). Declared
+# here beside its read sibling because the widget CRUD routes — the first routes in
+# the file — now gate on it; it used to sit next to the knowledge-sync routes that
+# introduced it, several hundred lines below its first use.
+_require_paw_bar_manage = require_action("paw_bar.manage", workspace_dep=current_workspace_id)
 
 router = APIRouter(tags=["PawBar"])
 
@@ -889,7 +943,7 @@ async def frame(
     the real controls stay the rate-limit + injection screen + the zero-authority
     CONCIERGE scope. CSP does not close the curl path.
     """
-    from pocketpaw_ee.cloud.auth.site_keys import lookup_site_by_key
+    from pocketpaw_ee.cloud.auth.site_keys import concierge_available, lookup_site_by_key
 
     # (1) Authenticate the embed key. A missing/blank ``key`` query param is a
     # too-short key → 401 (never a 422), so the refusal is uniform with the chat path.
@@ -906,7 +960,14 @@ async def frame(
     # Distinct from ``revoked`` (which cuts the KEY at 401 inside
     # lookup_site_by_key — an api-shaped JSON 401 stays correct there: a revoked
     # key means the embed script itself is stale/removed on next publish).
-    if not site.concierge_enabled:
+    #
+    # (1c) The BILLING gate rides the same branch (feat/sites-concierge-entitlement):
+    # a site whose plan does not sell the concierge refuses identically. Deliberately
+    # the SAME response, not a distinct one — the visitor must not be able to tell a
+    # lapsed subscription from an owner's choice by looking at the page, and the
+    # loader already knows how to remove an iframe that says ``pawbar:dead``. The
+    # reason is surfaced to the OWNER through the dashboard, and to logs, never here.
+    if not concierge_available(site):
         return _dead_frame_response(po, site.allowed_origins)
 
     # (2) The embedder gate: the CSP frame-ancestors header. Fail closed when no
@@ -1028,12 +1089,22 @@ class EventsListResponse(BaseModel):
 # Auth model (W0b): these routes are mounted under /api/v1, which the
 # dashboard AuthMiddleware treats as auth-OPTIONAL — it populates request.state
 # but does NOT 401. So management routes MUST gate themselves at the route
-# level. require_scope("admin") is fail-closed: it accepts a full-access
-# dashboard session (master/session-cookie/localhost) or an admin-scoped
-# API-key / OAuth token, and 403s everyone else (including unauthenticated
-# callers). The per-widget access_token (X-Paw-Bar-Token) is a SECOND factor
-# on read/mutate of a specific widget — it is not a substitute for being a
-# signed-in dashboard user, which is why create/list need this guard.
+# level. They gate on the caller's WORKSPACE ROLE — ``_require_paw_bar_manage``
+# (``paw_bar.manage``, ADMIN) for every mutation, ``_require_paw_bar_read``
+# (``paw_bar.read``, ADMIN) for the list — bound to the SESSION's active
+# workspace, the same one every handler below scopes its store calls to.
+# The per-widget access_token (X-Paw-Bar-Token) is a SECOND factor on
+# read/mutate of a specific widget — it is not a substitute for being a
+# signed-in workspace admin, which is why create/list need this guard.
+#
+# These used to gate on ``require_scope("admin")``, which is an OSS
+# SINGLE-TENANT primitive: it admits a full-access dashboard session, an
+# admin-scoped file-backed API key, or a ppat_ OAuth token. A cloud workspace
+# admin holds NONE of those, so the gate was unsatisfiable for the caller it
+# was meant for (403 on their own site's settings); on self-hosted it was the
+# opposite problem — any signed-in dashboard session sets ``full_access``, so
+# it admitted members too. The role gate fixes both directions at once, and
+# matches what the D2 reads below already did.
 # ---------------------------------------------------------------------------
 
 
@@ -1041,7 +1112,7 @@ class EventsListResponse(BaseModel):
     "/paw-bar/widgets",
     response_model=PawBarWidget,
     status_code=201,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def create_widget(
     req: CreateWidgetRequest,
@@ -1078,7 +1149,7 @@ async def create_widget(
 @router.get(
     "/paw-bar/widgets",
     response_model=WidgetListResponse,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_read)],
 )
 async def list_widgets(
     pocket_id: str | None = Query(None),
@@ -1113,7 +1184,7 @@ async def get_widget(
 @router.patch(
     "/paw-bar/widgets/{widget_id}/spec",
     response_model=PawBarWidgetPublic,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def update_spec(
     widget_id: str,
@@ -1136,7 +1207,7 @@ async def update_spec(
 @router.patch(
     "/paw-bar/widgets/{widget_id}",
     response_model=PawBarWidgetPublic,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def update_widget(
     widget_id: str,
@@ -1173,7 +1244,7 @@ async def update_widget(
 @router.post(
     "/paw-bar/widgets/{widget_id}/spec/rollback",
     response_model=PawBarWidgetPublic,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def rollback_spec(
     widget_id: str,
@@ -1201,7 +1272,7 @@ async def rollback_spec(
 @router.post(
     "/paw-bar/widgets/{widget_id}/rotate-token",
     response_model=PawBarWidget,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def rotate_token(
     widget_id: str,
@@ -1226,7 +1297,7 @@ async def rotate_token(
 @router.delete(
     "/paw-bar/widgets/{widget_id}",
     status_code=204,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def delete_widget(
     widget_id: str,
@@ -1261,9 +1332,10 @@ async def list_events(
 #
 # The kill switch + greeting live on the SITE doc (not the widget), so the owner
 # read/update is keyed on ``site_id``, not a widget id. Auth mirrors the widget
-# admin CRUD above: ``require_scope("admin")`` (a signed-in dashboard session) +
-# the caller's ACTIVE workspace via ``current_workspace_id``. The lookup is
-# workspace-scoped, so another tenant's site id resolves to 404 and never leaks or
+# admin CRUD above: the caller's WORKSPACE ROLE must clear ``paw_bar.read`` on the
+# GET and ``paw_bar.manage`` on the PATCH (both ADMIN), bound to their ACTIVE
+# workspace via ``current_workspace_id``. The lookup is workspace-scoped, so
+# another tenant's site id resolves to 404 and never leaks or
 # mutates. Reads/writes touch ONLY the concierge fields (the kill switch, the
 # greeting, and the transcript-retention toggle) — the site's publish / billing /
 # capture config is out of scope here. Co-located with the paw-bar
@@ -1325,7 +1397,7 @@ async def _load_site_scoped(site_id: str, workspace_id: str) -> Any:
 @router.get(
     "/paw-bar/admin/site/{site_id}/settings",
     response_model=ConciergeSettingsResponse,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_read)],
 )
 async def get_site_concierge_settings(
     site_id: str,
@@ -1345,7 +1417,7 @@ async def get_site_concierge_settings(
 @router.patch(
     "/paw-bar/admin/site/{site_id}/settings",
     response_model=ConciergeSettingsResponse,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_manage)],
 )
 async def update_site_concierge_settings(
     site_id: str,
@@ -1404,7 +1476,8 @@ async def update_site_concierge_settings(
 # ADMIN). The sync is a mutation that spends compute, so it does not ride the read.
 # ---------------------------------------------------------------------------
 
-_require_paw_bar_manage = require_action("paw_bar.manage", workspace_dep=current_workspace_id)
+# ``_require_paw_bar_manage`` is now declared beside ``_require_paw_bar_read`` near
+# the top of the file — the widget CRUD routes above use it too.
 
 
 class ConciergeKnowledgeResponse(BaseModel):
@@ -1911,6 +1984,17 @@ class ConversationTranscriptResponse(BaseModel):
     customer_ref: str
     messages: list[TranscriptMessage] = Field(default_factory=list)
     count: int
+    # The Instinct proposals parked in THIS conversation, still waiting on a
+    # human (slice 4 — the in-thread approval card). The dashboard's thread
+    # prefers this over the site-wide decisions fallback because it is already
+    # scoped to one visitor: with neither source, the UI can only show the
+    # "approve it from Decisions" notice a real approval sat behind (found live
+    # 2026-07-31). Settled decisions are deliberately absent — an approved
+    # booking is history, and the card list is a to-do, not a log.
+    pending_actions: list[DecisionItem] = Field(default_factory=list)
+    # The conversation row's mute flag, so the thread's takeover banner state
+    # arrives with the SAME read that renders the timeline.
+    bot_paused: bool | None = None
 
 
 class DecisionItem(BaseModel):
@@ -1919,6 +2003,12 @@ class DecisionItem(BaseModel):
     summary: str
     status: str
     created_at: str
+    # Which visitor raised it. The site-wide decisions list serves EVERY
+    # visitor, so without this the thread's fallback source cannot attribute a
+    # card to the open conversation and must refuse to guess (a stranger's
+    # booking approved into the wrong thread is the failure mode). "" on a
+    # legacy row.
+    customer_ref: str = ""
 
 
 class DecisionsResponse(BaseModel):
@@ -2123,10 +2213,27 @@ async def patch_site_conversation(
         conversation = await store.ensure_conversation(widget.id, customer_ref, workspace_id)
 
     if fields:
+        before = conversation
         updated = await store.update_conversation(
             widget.id, customer_ref, workspace_id=workspace_id, **fields
         )
         conversation = updated or conversation
+        # AL-2 — record whichever ledger beats this patch actually crossed
+        # (takeover if the mute went on, handoff.resolved if the thread left
+        # ``needs_human``). Read from the before/after ROWS rather than from
+        # ``fields``, so a no-op patch records nothing and a patch that crosses
+        # both records both. This is the ONLY path in the product that takes a
+        # conversation out of ``needs_human``, which is why the resolved half of
+        # the handoff vocabulary fires here rather than in handoff.py.
+        from pocketpaw_ee.paw_bar import ledger
+
+        await ledger.emit_conversation_transition(
+            widget=widget,
+            workspace_id=workspace_id,
+            customer_ref=customer_ref,
+            before=before,
+            after=updated,
+        )
     # Resolve the display email the same way the LIST does, so a client that
     # re-renders a row from this echo doesn't watch a named visitor turn back into
     # an anonymous handle.
@@ -2222,10 +2329,24 @@ async def post_site_conversation_reply(
         # A reopened thread forgets its snooze deadline, the same way a visitor's
         # return does — it is live again, not merely due back later.
         fields["snooze_until"] = ""
+    before = conversation
     updated = await store.update_conversation(
         widget.id, customer_ref, workspace_id=workspace_id, **fields
     )
     conversation = updated or conversation
+    # AL-2 — typing IS taking over, so this is where ``paw.conversation.takeover``
+    # is earned. Same before/after diff as the PATCH path, through the same
+    # helper, so the two ways an owner can mute the bot cannot record it
+    # differently. Never raises: an owner's reply must not depend on the ledger.
+    from pocketpaw_ee.paw_bar import ledger
+
+    await ledger.emit_conversation_transition(
+        widget=widget,
+        workspace_id=workspace_id,
+        customer_ref=customer_ref,
+        before=before,
+        after=updated,
+    )
 
     _pending, emails = await _decision_side_data(widget, [customer_ref])
     return ConversationReplyResponse(
@@ -2366,8 +2487,48 @@ async def get_site_conversation_transcript(
         # No concierge run for this (pocket, customer_ref) — the ref has no
         # conversation on this site's widget.
         raise HTTPException(404, "conversation_not_found")
+
+    # Slice 4: the approvals parked in THIS conversation ride with the thread.
+    # Filtered in-handler off the same widget-scoped read the decisions tab
+    # uses (widget_id is the cross-site isolation seam), narrowed to this
+    # visitor + still-pending. Failure-soft: a broken decisions read costs the
+    # thread its cards, never the transcript.
+    pending: list[DecisionItem] = []
+    try:
+        from pocketpaw.paw_bar.models import DecisionState
+
+        decisions = await _store().list_decisions_for_widget(widget.id, limit=200)
+        pending = [
+            DecisionItem(
+                id=d.instinct_action_id or d.id,
+                verb_or_kind=_decision_verb_or_kind(d.event_type),
+                summary=_decision_summary(d),
+                status=d.state.value,
+                created_at=d.created_at.isoformat(),
+                customer_ref=d.customer_ref,
+            )
+            for d in decisions
+            if d.customer_ref == customer_ref and d.state == DecisionState.PENDING
+        ]
+    except Exception:  # noqa: BLE001 — cards degrade, the transcript never 500s
+        logger.warning("transcript pending_actions read failed (non-fatal)", exc_info=True)
+
+    bot_paused: bool | None = None
+    try:
+        conversation = await _store().get_conversation(
+            widget.id, customer_ref, workspace_id=workspace_id
+        )
+        if conversation is not None:
+            bot_paused = bool(conversation.bot_paused)
+    except Exception:  # noqa: BLE001 — same degrade rule
+        logger.warning("transcript conversation read failed (non-fatal)", exc_info=True)
+
     return ConversationTranscriptResponse(
-        customer_ref=customer_ref, messages=messages, count=len(messages)
+        customer_ref=customer_ref,
+        messages=messages,
+        count=len(messages),
+        pending_actions=pending,
+        bot_paused=bot_paused,
     )
 
 
@@ -2402,6 +2563,7 @@ async def get_site_decisions(
             summary=_decision_summary(d),
             status=d.state.value,
             created_at=d.created_at.isoformat(),
+            customer_ref=d.customer_ref,
         )
         for d in decisions
     ]
@@ -3722,7 +3884,27 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
             body=body.message,
             widget_id=body.widget_id,
             customer_ref=body.customer_ref,
+            # Passed rather than left to the resolver: the widget is already in
+            # hand here, and this await sits inside the visitor's turn.
+            agent_id=str(getattr(widget, "agent_id", "") or ""),
         )
+
+    # AL-2 — the conversation's first beat. Fired on EVERY turn and deduped by
+    # the ledger's UNIQUE(kind, ref) on ``widget:customer``, deliberately NOT
+    # gated on ``is_new_conversation`` above: that flag is derived from a read
+    # that is allowed to fail (the fail-closed mute arm), and a "started" count
+    # that silently drops the conversations whose state read hiccuped is worse
+    # than one extra absorbed insert per turn. Never raises (paw_bar/ledger.py).
+    from pocketpaw_ee.paw_bar import ledger
+
+    await ledger.emit_conversation_started(
+        widget=widget,
+        # ``ctx.workspace_id`` is the REAL tenant (the same token this handler
+        # scopes its conversation reads and its run dispatch by) — a store-path
+        # -safe value, unlike the widget owner label.
+        workspace_id=ctx.workspace_id,
+        customer_ref=body.customer_ref,
+    )
 
     # (7c) THE MUTE. A human is holding this conversation, so the bot does not
     # answer over them — double-answering is the single loudest complaint about

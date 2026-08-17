@@ -1,8 +1,42 @@
-# ee/pocketpaw_ee/cloud/leads/router.py — capture ingest (public, origin-pinned,
-# signed-key-gated; the edge Queue drains here) + authed tenant-scoped reads.
+# ee/pocketpaw_ee/cloud/leads/router.py — capture ingest (public, signed-key-gated,
+# origin-ATTRIBUTED; the edge Queue drains here) + authed tenant-scoped reads.
 # The public capture endpoint deliberately has NO auth dependency: it is called
-# by the deployed site's Queue consumer, authenticated by the per-site signed
-# key + origin pin, not a user session.
+# by the deployed site's own pages / Queue consumer, authenticated by the per-site
+# signed key, not a user session.
+#
+# Updated 2026-08-13 (fix/sites-capture-origin-posture): the origin pin STOPPED
+# BEING A GATE by default and became a recorded signal plus a per-site opt-in
+# (``Site.enforce_origin``, default False) — the Formspree/Basin posture. Reported
+# from a live run: a site published to ``*.workers.dev`` submitted its contact form
+# and the VISITOR was shown ``{"detail":"Origin not allowed for this site"}``.
+#
+# The pin was never buying what it looked like it was buying. It guards a
+# credential that is ALREADY PUBLIC on three of the four engines — html, react and
+# static svelte all ship ``paw_key`` as a hidden input in the page source — and
+# ``Origin`` binds browsers only, so any script forges it in one flag. What it did
+# reliably was 403 legitimate submissions whenever the stored allowlist and the
+# serving host disagreed, which has several routine causes (a draft/preview publish
+# that returns before the deploy stamp, an async react build inserted with
+# ``url=""``, apex vs ``www.``, a preview URL, a ``file://`` open sending no Origin
+# at all). Every one fails CLOSED, and on the native-form path the person who sees
+# the failure is the customer's prospect, not the owner — who sees only an absence
+# of leads.
+#
+# Three pieces make the new posture safe, and they ship together:
+#   * ``_effective_origins`` derives the known-host set from the site's own ``url``
+#     and attached ``domains`` instead of trusting the stamped field alone, so a
+#     site's own traffic is never foreign to it — for the flag AND for the opt-in
+#     gate, which would otherwise 403 its own pages.
+#   * ``_redirect_base`` no longer echoes the request Origin unconditionally. That
+#     was safe ONLY because the origin had just been pinned; without the pin it
+#     would be an open redirect. It now prefers an allowlisted origin, falls back to
+#     the site's own url, and never emits a host the caller chose.
+#   * every lead records ``origin`` + ``origin_unrecognized`` (evaluated at capture,
+#     against the derived set) so an owner can judge an unexpected submission
+#     instead of us silently refusing it.
+# The controls that actually work on a public endpoint with a public key are
+# untouched: honeypot, atomic per-(scope, minute) rate limit, injection screen at
+# HIGH, payload cap, constant-time key compare, open-redirect guard.
 #
 # Created 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.4): the Sites
 # capture surface. Public POST /sites/{site_id}/capture (site-exists → origin
@@ -67,6 +101,90 @@ def _rate_key(request: Request) -> str:
     return hashlib.sha256(host.encode("utf-8")).hexdigest() if host else ""
 
 
+def _origin_of(request: Request) -> str:
+    """The submitting page's ``Origin`` header, trimmed ("" when absent)."""
+    return (request.headers.get("origin") or "").strip()
+
+
+def _effective_origins(site: _SiteDoc) -> list[str]:
+    """The hosts a submission may legitimately come FROM, derived rather than only
+    read off ``allowed_origins``.
+
+    ``allowed_origins`` is STAMPED at publish (``_with_deployed_host``) and grown by
+    ``add_domain``, which means it is only as good as the write paths that maintain
+    it — and they have gaps. A draft/preview publish returns before the deploy stamp
+    runs, an async (react) build inserts its Site row with ``url=""`` and fills the
+    url in later from the worker, and any row created before the stamping landed
+    still carries just the localhost seed. In every one of those the site's OWN
+    deployed host is missing from its own allowlist, so its own visitors read as
+    foreign.
+
+    That was survivable only while nobody looked at the answer. Now that origin is
+    recorded on each lead, a stale allowlist would mark a site's genuine traffic
+    ``origin_unrecognized`` — a flag that fires on the normal case teaches an owner
+    to ignore it, which is worse than not having it. And for a site that opts INTO
+    enforcement it would be a live 403 on its own pages.
+
+    So the site's canonical ``url`` host and every attached custom ``domains``
+    hostname are folded in here. Both are values WE wrote from a deploy we
+    performed, never caller input, so this widens the set only to hosts the site
+    demonstrably owns.
+    """
+    hosts = list(site.allowed_origins)
+    candidates = [site.url or ""]
+    candidates.extend(d.hostname for d in (site.domains or []) if d.hostname)
+    for candidate in candidates:
+        host = candidate.strip().lower()
+        if "://" in host:
+            host = host.split("://", 1)[1]
+        host = host.split("/", 1)[0].split(":", 1)[0]
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def _origin_gate(site: _SiteDoc, origin: str) -> None:
+    """Enforce the origin pin ONLY for a site that opted into it.
+
+    Formspree posture (see ``Site.enforce_origin`` for the full reasoning): by
+    default a submission from an unrecognized host is ACCEPTED and attributed on
+    the Lead rather than 403'd. The pin guards a credential that is already public
+    in the page source on three of the four engines, and ``Origin`` constrains
+    browsers only — so as a gate it mostly turned real submissions into a JSON 403
+    the customer's prospect had to look at.
+
+    A site that flips ``enforce_origin`` gets the old fail-closed behaviour back
+    verbatim, including on an empty allowlist and a missing header.
+    """
+    if site.enforce_origin and not origin_allowed(_effective_origins(site), origin or None):
+        raise HTTPException(403, "Origin not allowed for this site")
+
+
+def _redirect_base(site: _SiteDoc, origin: str) -> str:
+    """Absolute prefix for the native-form 303, chosen so it can NEVER be an
+    attacker-controlled host.
+
+    This used to be the request ``Origin`` unconditionally, which was safe only
+    because the origin had just been pinned. With the pin now opt-in, that would be
+    an open redirect: anyone could POST with ``Origin: https://evil.test`` and be
+    sent there. So the base is resolved in a strict order:
+
+      1. the request Origin, but ONLY when it is on the site's allowlist — the
+         common case, and the one that keeps a visitor on the custom domain they
+         are actually browsing rather than bouncing them to a workers.dev URL;
+      2. the site's own canonical ``url`` — correct whenever the origin is absent,
+         unrecognized, or forged;
+      3. "" — a relative Location, when the site has no url yet (a draft, or an
+         async build whose worker has not filled it in).
+
+    Every branch is a value WE control or have already validated, so an unvalidated
+    origin cannot reach the ``Location`` header under any input.
+    """
+    if origin and origin_allowed(_effective_origins(site), origin):
+        return origin.rstrip("/")
+    return (site.url or "").rstrip("/")
+
+
 @router.post("/sites/{site_id}/capture", response_model=CaptureResponse)
 async def capture_lead(site_id: str, body: CaptureRequest, request: Request) -> CaptureResponse:
     """Public ingest. Order: site exists → origin pinned → signed key → payload
@@ -76,8 +194,8 @@ async def capture_lead(site_id: str, body: CaptureRequest, request: Request) -> 
     if site is None:
         raise HTTPException(404, "Site not found")
 
-    if not origin_allowed(site.allowed_origins, request.headers.get("origin")):
-        raise HTTPException(403, "Origin not allowed for this site")
+    origin = _origin_of(request)
+    _origin_gate(site, origin)
 
     # H1: constant-time compare so the key check can't be probed via timing.
     if not secrets.compare_digest(body.signed_key, site.signed_key):
@@ -95,6 +213,8 @@ async def capture_lead(site_id: str, body: CaptureRequest, request: Request) -> 
         payload=body.payload,
         submitter_ref=body.submitter_ref or "anon",
         rate_key=_rate_key(request),  # server-derived; the real per-IP limiter key
+        origin=origin,
+        known_origins=_effective_origins(site),
     )
     if lead is None:
         return CaptureResponse(ok=False, reason="dropped")
@@ -105,8 +225,17 @@ def _safe_relative_redirect(path: str) -> bool:
     """Open-redirect guard for the native-form 303: the redirect target must be a
     RELATIVE path on the submitting site. Rejects absolute URLs (no leading "/"),
     protocol-relative ("//host"), backslash tricks, embedded schemes, and CR/LF
-    (header injection). The accepted value is later prefixed with the VALIDATED
-    request Origin, so the browser can only ever land back on the pinned site."""
+    (header injection).
+
+    This carries MORE weight since the origin pin became opt-in (2026-08-13). It
+    used to be the second of two locks — the accepted path was prefixed with an
+    Origin that had already been pinned, so a bad path still could not leave the
+    site. Now ``_redirect_base`` resolves to "" for a site with no canonical url
+    yet (a draft, or an async build whose worker has not reported back), and on
+    that branch THIS FUNCTION IS THE ONLY LOCK: the accepted value becomes the
+    whole ``Location``. The ``//host`` and ``://`` rejections are what stop a
+    protocol-relative or absolute target there, so neither may be relaxed on the
+    grounds that something downstream re-checks the host. Nothing does."""
     if not path.startswith("/") or path.startswith("//"):
         return False
     if "\\" in path or "\r" in path or "\n" in path or "://" in path:
@@ -143,8 +272,8 @@ async def capture_form(request: Request) -> Response:
     if site is None:
         raise HTTPException(404, "Site not found")
 
-    if not origin_allowed(site.allowed_origins, request.headers.get("origin")):
-        raise HTTPException(403, "Origin not allowed for this site")
+    origin = _origin_of(request)
+    _origin_gate(site, origin)
 
     # H1 (same as the JSON path): constant-time compare — no timing side channel.
     if not secrets.compare_digest(key, site.signed_key):
@@ -173,14 +302,16 @@ async def capture_form(request: Request) -> Response:
         # a limiter key). Truncated: paw_page is caller-controlled text.
         submitter_ref=f"form:{page}"[:256] if page else "form",
         rate_key=_rate_key(request),  # server-derived; the real per-IP limiter key
+        origin=origin,
+        known_origins=_effective_origins(site),
     )
 
-    # 303 back to the site. The Location is the VALIDATED Origin (already pinned
-    # against site.allowed_origins above) + the RELATIVE redirect path, so the
-    # browser can only land back on the submitting site. origin_allowed fails
-    # closed on a missing Origin, so it is always present here.
-    origin = (request.headers.get("origin") or "").rstrip("/")
-    return Response(status_code=303, headers={"Location": f"{origin}{redirect}"})
+    # 303 back to the site. The base is resolved by ``_redirect_base`` — an
+    # allowlisted Origin, else the site's own canonical url, else relative — so the
+    # Location is never a host the caller chose. The redirect path itself already
+    # passed ``_safe_relative_redirect`` above.
+    location = f"{_redirect_base(site, origin)}{redirect}"
+    return Response(status_code=303, headers={"Location": location})
 
 
 # Leads is a Sites surface, so its plan gate is the "sites" feature (go+) — the

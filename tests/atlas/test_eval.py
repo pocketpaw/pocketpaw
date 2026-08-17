@@ -32,6 +32,14 @@
 # equal overlap). The fifth ("approval gate") is pinned rank_within 2 — Instinct
 # co-answers behind the owner-only approval-LEVEL capability, which the small
 # kind bias deliberately does not overpower. Strict-hit baseline 30/31 → 34/36.
+# Updated: 2026-08-17 (feat/ast-1-atlas-primitives, AST-1) — the model grew to
+# 267 entries: two authored primitives (primitive:source-truth, the per-property
+# provenance / trust-ladder layer under Fabric; primitive:verify-loop, the
+# verify-on-completion outcome verdicts) and two member-level fabric capability
+# cards (provenance_read, conflict_steward). Eight cases added: four pin
+# source-truth #1, three pin verify-loop #1, one ("what is fabric") is a
+# regression pin proving the new neighbours do not steal primitive:fabric. All
+# eight measure rank 1; strict-hit baseline 35/36 → 43/44.
 
 from __future__ import annotations
 
@@ -44,17 +52,24 @@ from pocketpaw.atlas.store import AtlasStore
 
 _CASES_PATH = Path(__file__).parent / "eval_cases.json"
 
-# Measured baseline (2026-07-05, full compiled model of 256 entries, fixpoint
-# stemmer + IDF name-weight damper + round-2 kind-priority bias): 34 of 36
-# cases put the expected id at rank 1. The two non-rank-1: "review the agent's
-# edit before it goes live" ranks branch #3 behind instinct and the edit-pocket
-# skill (generic review/approve vocabulary overlaps instinct's core keywords —
-# known weakness), and "approval gate" ranks instinct #2 behind the owner-only
-# approval-LEVEL capability (a legitimate co-answer the small kind bias does not
-# overpower). Both are within their rank_within budgets.
+# Measured baseline (2026-08-10, full compiled model of 263 entries, fixpoint
+# stemmer + IDF name-weight damper + round-2 kind-priority bias): 35 of 36
+# cases put the expected id at rank 1. Was 34 until the react site-edit skill
+# landed: adding a SECOND skill with "edit" in its name pushed branch from #3 to
+# #4 on "review the agent's edit before it goes live", which exposed the real
+# cause — branch's keywords carried "changes" but never "edit", so the primitive
+# for reviewing an edit did not match the word "edit" at all. Adding it to
+# ``authored/primitives.json`` took branch to #1, so the corpus growth ended up
+# fixing the weakness instead of widening it.
+# The one remaining non-rank-1: "approval gate" ranks instinct #2 behind the
+# owner-only approval-LEVEL capability (a legitimate co-answer the small kind
+# bias does not overpower), within its rank_within budget.
+# Re-measured 2026-08-17 (AST-1, 267 entries): 43 of 44 — the eight new
+# source-truth / verify-loop / fabric-regression cases all rank 1; "approval
+# gate" is still the single non-rank-1.
 # If a ranking change LOWERS the strict-hit count below this, the summary
 # test fails; if it raises it, bump the constant in the same PR.
-STRICT_HIT_BASELINE = 34
+STRICT_HIT_BASELINE = 43
 
 # Search depth for the eval: at least as deep as the largest rank_within,
 # generous enough that "not found at all" is a ranking fact, not a limit

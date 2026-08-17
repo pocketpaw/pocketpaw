@@ -43,6 +43,36 @@ delivered-artifact collector around ``pool.run`` and drains it into a
 so a group/DM agent that delivers a file persists the structured signal too.
 This path has no run-transport SSE stream, so it emits no ``artifact`` event —
 that applies only to the streaming ``run_core`` path.
+
+Updated 2026-08-15 (HTN-11): the phrasing function moved to
+``shared/tool_narration.py`` as ``narrate_tool_use`` and this module imports it.
+It was private here while exactly one surface narrated; the streaming
+``run_core`` path now calls the same function, and a second copy is how the two
+surfaces would drift apart. Same arrangement as ``plan_normalizer``.
+
+Updated 2026-08-15 (HTN-2): ``narrate_tool_use`` takes the running agent and
+resolves that agent's OWN ``ToolRegistry`` (``tool_bridge.narration_registry_for``),
+so a tool's declared phrase is read off the live instance the registry holds
+rather than from a hardcoded name->class map that constructed the tool. Tools
+that declare nothing now derive a phrase from their name, so an unannotated
+tool reaches the wire as "Publishing the site" instead of no narration at all.
+
+Updated 2026-08-15 (HTN-1): the ``tool_use`` branch reads ``event.metadata``
+(name + input) with ``event.content`` as fallback — the precedence ``run_core``
+already uses — and adds an additive ``narration`` field to ``agent.tool_use``
+carrying the tool's plain-language phrase ("Searching the web for quarterly
+filings"). ``tool`` still carries the tool name, so clients keyed on it are
+unaffected; a tool with no ``Narration`` emits no ``narration`` field.
+
+Updated 2026-08-15 (HTN-5): the ``tool_use`` branch routes a recognized plan tool
+(``write_plan`` today) through ``shared/plan_normalizer.py`` and emits
+``agent.plan_updated`` INSTEAD of ``agent.tool_use`` — the panel is the narration,
+so "Using write_plan..." alongside it is bookkeeping noise. The substitution is
+fail-open: a plan call whose arguments cannot be read falls back to the ordinary
+``agent.tool_use``, so the surface degrades to today's behaviour rather than
+going silent. A per-run ``PlanTracker`` supplies the monotonic ``seq`` and
+suppresses re-emits of an unchanged plan (``write_plan`` fires at both the start
+and the end of every step and resends the whole list each time).
 """
 
 from __future__ import annotations
@@ -57,12 +87,15 @@ from typing import Any
 from pocketpaw_ee.cloud.realtime.emit import emit
 from pocketpaw_ee.cloud.realtime.events import (
     AgentError,
+    AgentPlanUpdated,
     AgentStreamChunk,
     AgentStreamEnd,
     AgentStreamStart,
     AgentToolUse,
 )
 from pocketpaw_ee.cloud.shared.events import event_bus
+from pocketpaw_ee.cloud.shared.plan_normalizer import PlanTracker
+from pocketpaw_ee.cloud.shared.tool_narration import narrate_tool_use
 
 logger = logging.getLogger(__name__)
 
@@ -540,6 +573,12 @@ async def _run_agent_response(
     # text, so a coalesced chunk is a lossless UX compromise.
     full_text = ""
     saw_error_event = False
+    # HTN-5: per-run plan state (monotonic ``seq`` + change fingerprint). It
+    # lives on this stack and dies with the run, so there is no registry to
+    # leak. ``temp_msg_id`` is the bridge's only per-run identity and already
+    # rides ``agent.stream_start`` as ``message_id``, so reusing it as
+    # ``run_id`` gives the panel a join key it already holds.
+    plan_tracker = PlanTracker(run_id=temp_msg_id)
     error_summary = ""
     last_emit_ts = 0.0
     STREAM_CHUNK_THROTTLE_S = 0.2
@@ -580,22 +619,66 @@ async def _run_agent_response(
                         )
                     )
             elif event.type == "tool_use":
-                # Notify clients which tool the agent is using
+                # Notify clients which tool the agent is using, and — when the
+                # tool declares a Narration — what it is doing in plain language.
+                #
+                # Precedence matches the SSE path (``chat/runs/run_core.py``):
+                # ``metadata`` first because every backend puts the bare tool
+                # name and the call's args there, while ``content`` carries a
+                # prose string ("Using web_search..."). Reading content first
+                # gave clients that prose as the ``tool`` value, which no
+                # name-keyed client could match.
                 tool_name = ""
-                if isinstance(event.content, dict):
-                    tool_name = event.content.get("tool") or event.content.get("name") or ""
-                elif isinstance(event.content, str):
-                    tool_name = event.content
-                await emit(
-                    AgentToolUse(
-                        data={
-                            "group_id": group_id,
-                            "agent_id": agent_id,
-                            "agent_name": instance.agent_name,
-                            "tool": tool_name,
-                        },
-                    )
-                )
+                tool_input: dict[str, Any] = {}
+                meta = getattr(event, "metadata", None)
+                meta = meta if isinstance(meta, dict) else {}
+                if meta:
+                    tool_name = meta.get("name") or meta.get("tool") or ""
+                    raw_input = meta.get("input")
+                    tool_input = raw_input if isinstance(raw_input, dict) else {}
+                if not tool_name:
+                    if isinstance(event.content, dict):
+                        tool_name = event.content.get("tool") or event.content.get("name") or ""
+                    elif isinstance(event.content, str):
+                        tool_name = event.content
+                # HTN-5: a plan tool is not a tool chip. ``write_plan`` restates
+                # the agent's whole ordered plan; rendering that as "Using
+                # write_plan..." next to a live plan panel is noise, so a
+                # recognized plan call emits ``agent.plan_updated`` INSTEAD of
+                # ``agent.tool_use``. The swap only happens when the arguments
+                # actually normalize — an unreadable plan call reports itself
+                # unrecognized and falls through to the ordinary chip below, so
+                # the surface never goes silent.
+                observation = plan_tracker.observe(tool_name, tool_input)
+                if observation.recognized:
+                    # ``payload is None`` means the plan did not change (the
+                    # tool fires at both the start and the end of each step);
+                    # emitting nothing is what keeps the panel from flickering.
+                    if observation.payload is not None:
+                        await emit(
+                            AgentPlanUpdated(
+                                data={
+                                    "group_id": group_id,
+                                    "agent_id": agent_id,
+                                    "agent_name": instance.agent_name,
+                                    **observation.payload,
+                                },
+                            )
+                        )
+                    continue
+
+                payload: dict[str, Any] = {
+                    "group_id": group_id,
+                    "agent_id": agent_id,
+                    "agent_name": instance.agent_name,
+                    "tool": tool_name,
+                }
+                # Purely additive: a tool with no narration emits no field, and
+                # the bridge never invents a fallback phrase.
+                narration = narrate_tool_use(tool_name, tool_input, instance)
+                if narration:
+                    payload["narration"] = narration
+                await emit(AgentToolUse(data=payload))
             elif event.type == "thinking":
                 await emit(
                     AgentToolUse(

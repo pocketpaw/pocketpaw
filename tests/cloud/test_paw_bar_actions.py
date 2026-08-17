@@ -489,15 +489,17 @@ class TestActionEndpoint:
 
 @pytest.fixture
 def admin_client(tmp_path, monkeypatch):
-    """TestClient with the admin CRUD routes' workspace dep pinned (like the
-    decision-loop test), backed by a tmp store."""
-    from pocketpaw_ee.cloud._core.deps import current_workspace_id
+    """TestClient with the admin CRUD routes' workspace + ROLE deps pinned (like
+    the decision-loop test), backed by a tmp store. The role is ADMIN because
+    those routes gate on ``paw_bar.read`` / ``paw_bar.manage``."""
     from pocketpaw_ee.paw_bar.router import router
+
+    from tests.cloud.conftest import override_workspace_role
 
     pp_store = PawBarStore(tmp_path / "admin.db")
     app = FastAPI()
     app.include_router(router)
-    app.dependency_overrides[current_workspace_id] = lambda: "ws-1"
+    override_workspace_role(app, role="admin", workspace_id="ws-1")
     monkeypatch.setattr("pocketpaw_ee.paw_bar.router._store", lambda *a, **k: pp_store)
     return TestClient(app), pp_store
 

@@ -1,5 +1,23 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-08-06 (feat/coupling-lead-captured, T-6) — Registers the leads
+    notification bridge (``leads.bridges.notifications``) alongside the meeting
+    bridges, after ``init_realtime``. It subscribes to the new ``lead.captured``
+    event and notifies the workspace owner/admins, so a form submitted on a
+    published Paw Site is heard instead of waiting to be polled for.
+Modified: 2026-07-28 (feat/growth-api-scale) — The growth router's list route
+    changed shape: ``GET /growth/prospects`` returns
+    ``{items, next_cursor, total}`` instead of a bare array (BREAKING), and
+    gained ``q`` / ``sort`` / ``cursor``. Two new routes on the same mount:
+    ``GET /growth/prospects/facets`` and ``POST /growth/drafts/propose-batch``.
+Modified: 2026-07-27 (feat/growth-g3) — The growth router now also carries
+    drafts (``/growth/prospects/{id}/drafts``, ``/growth/drafts``,
+    ``/growth/drafts/{id}/status``); its prefix widened to ``/growth`` with
+    final prospect URLs unchanged.
+Modified: 2026-07-27 (feat/growth-g1) — Mounts the growth prospect-store
+    router (``/growth/prospects`` create / get / list / update) under
+    ``/api/v1``. License gate + ``request_context`` on every route;
+    workspace-scoped reads inside the service (cross-tenant ids 404).
 Modified: 2026-07-11 (feat/real-pipeline-s1) — Mounts the fabric_ingest
     transform-surface router (``/fabric/ingest/mappings`` CRUD +
     ``/fabric/ingest/run`` run-now) next to the fabric router under
@@ -267,6 +285,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.rules.router import router as rules_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
+    from pocketpaw_ee.cloud.storage.router import router as storage_router
     from pocketpaw_ee.cloud.websandbox.router import router as websandbox_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router
 
@@ -335,6 +354,9 @@ def mount_cloud(app: FastAPI) -> None:
     # credit allotment). The plan CATALOG read (GET /billing/plans) is on the
     # billing router above; this router carries only the per-workspace resolve.
     app.include_router(entitlements_router, prefix="/api/v1")
+    # Storage (feat/billing-storage-caps) — the workspace-scoped S3 usage read
+    # (GET /storage/usage -> used_bytes / max_bytes / remaining / percent).
+    app.include_router(storage_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
     app.include_router(pocket_chat_router, prefix="/api/v1")
@@ -409,6 +431,8 @@ def mount_cloud(app: FastAPI) -> None:
 
     from pocketpaw_ee.cloud.decisions.router import router as decisions_router
     from pocketpaw_ee.cloud.fabric_ingest.router import router as fabric_ingest_router
+    from pocketpaw_ee.cloud.growth.router import router as growth_router
+    from pocketpaw_ee.cloud.growth.webhooks import router as growth_webhooks_router
     from pocketpaw_ee.cloud.instinct_approvals.router import router as instinct_approvals_router
     from pocketpaw_ee.cloud.kb.router import router as kb_router
     from pocketpaw_ee.cloud.leads.router import router as leads_router
@@ -474,6 +498,20 @@ def mount_cloud(app: FastAPI) -> None:
     # drains here) and authed GET /sites/{id}/leads (plan-gated + RBAC +
     # workspace-scoped) for the Leads view.
     app.include_router(leads_router, prefix="/api/v1")
+    # Growth — G-1 prospect store (/growth outbound engine, first slice).
+    # License-gated, workspace-scoped CRUD under /growth/prospects; cross-tenant
+    # ids 404 inside the service. Later slices add ingestion, drafts, and
+    # Instinct-gated sends (the dedicated ``growth`` arq queue seam lives in
+    # ``growth/worker.py``).
+    app.include_router(growth_router, prefix="/api/v1")
+    # Growth inbound webhooks (G-6) — POST /growth/webhooks/msg91. Mounted
+    # SEPARATELY from growth_router because MSG91 is the caller: no license
+    # gate, no RBAC, no RequestContext. Trust is the shared-secret HMAC in
+    # ``growth/webhooks.py``, which FAILS CLOSED (bad, missing, or
+    # unconfigured signature ⇒ 403) — a forged inbound reply would flip
+    # ``prospect.opted_in`` and unlock business-initiated sends to a number
+    # that never consented.
+    app.include_router(growth_webhooks_router, prefix="/api/v1")
     # Sites control plane — RFC 12 Task 3.5. POST /sites/publish (compile +
     # smoke-gate + WfP deploy), GET /sites, and the custom-domain pair
     # (Cloudflare for SaaS) the Domains panel drives.
@@ -788,6 +826,15 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_agent_bridge()
 
+    # Wire the /growth discovery cron's research loop. Until this call the
+    # seam is empty and the sweep is a deliberate no-op — see
+    # ``growth/discovery.py``. The agent itself still has to be seeded per
+    # workspace; a workspace without it stays idle rather than failing.
+    from pocketpaw_ee.cloud.growth.discovery import set_production_research_fn
+    from pocketpaw_ee.cloud.growth.researcher import agent_research
+
+    set_production_research_fn(agent_research)
+
     # NOTE: Composio is wired per-backend via ``pocketpaw_ee.cloud.composio.providers``
     # — each agent backend (claude_sdk, openai_agents, google_adk,
     # deep_agents) calls ``build_tools_for_backend()`` in its own tool-build
@@ -929,12 +976,23 @@ def mount_cloud(app: FastAPI) -> None:
     register_meeting_notification_listeners()
     register_meeting_calendar_listeners()
 
-    # Push notifications fan-out (#1393) — v1 product events
-    # (agent.stream_end / instinct.approval.created / meeting.started) →
-    # ``dispatch.notify``, which forks WS-vs-Web-Push so a user with both the
-    # desktop app and a browser tab open is notified exactly once. Same
-    # constraint as the other bus subscribers: register AFTER init_realtime
-    # installed the singleton bus.
+    # Leads bridge — lead.captured → an in-app notification for the workspace
+    # owner/admins. A form submitted on a published Paw Site used to be silent
+    # (the Leads view polled and nobody was told); this is the first link in the
+    # site-lead → outreach funnel.
+    from pocketpaw_ee.cloud.leads.bridges.notifications import (
+        register_lead_notification_listeners,
+    )
+
+    register_lead_notification_listeners()
+
+    # Push notifications fan-out (#1393) — ``notification.new`` (every
+    # persisted notification, so the OS surface can't drift from the bell)
+    # plus ``agent.stream_end`` (the one product event that persists no
+    # notification row) → ``dispatch.notify``, which forks WS-vs-Web-Push so a
+    # user with both the desktop app and a browser tab open is notified exactly
+    # once. Same constraint as every other bus subscriber: register AFTER
+    # init_realtime installed the singleton bus.
     from pocketpaw_ee.cloud.push.listeners import register_push_event_listeners
 
     register_push_event_listeners()

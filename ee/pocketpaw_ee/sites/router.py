@@ -3,10 +3,36 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# Updated 2026-08-12 (the custom-domain routing lane): added DELETE
+# ``/sites/{site_id}/domains/{hostname}``. Domains could be connected and never
+# disconnected, so a removed or re-pointed domain left its Cloudflare custom hostname
+# on the zone permanently — consuming quota, pointing at a Worker that might no longer
+# exist, and (because Cloudflare rejects duplicate hostnames) blocking that domain from
+# ever being connected to a different site. Gated on ``fabric.write`` like ``add_domain``:
+# it releases a name on the shared zone that anyone may then claim.
+#
+# Updated 2026-08-12 (sites Settings consolidation): three endpoints for the
+# owner's client record — GET + PATCH ``/sites/{site_id}/client`` and POST
+# ``/sites/{site_id}/invoices``. They exist because the builder's Settings surface
+# had shipped a Client panel and a "Record payment" button backed by nothing:
+# component state with a comment saying persistence was a later task, so every
+# value typed there was lost on reload. Gated by the same fabric.read /
+# fabric.write actions as the domain ops above, tenant-scoped through the
+# service's ``_load``. NONE OF THIS CHARGES ANYONE — recording a receipt is the
+# owner writing down that their client paid, and is unrelated to the owner's own
+# subscription with us (``/sites/publish``'s ``site_plan_key``).
+#
 # Pocket read: uses pockets_service.get(pocket_id, user_id) — the real
 # single-pocket reader, which returns a wire DICT (camelCase keys: rippleSpec,
 # name) and RAISES NotFound when missing / access-denied (it does not return
 # None). theme is pulled from the rippleSpec subtree.
+#
+# Updated 2026-08-07 (SC-3 — the card stops lying after a republish): new
+# POST /sites/{site_id}/preview-refresh, the manual half of the preview policy
+# (automatic capture on every successful deploy + an explicit refresh). It is the
+# one capture in this subsystem that REPORTS failure rather than swallowing it —
+# every other one hangs off a publish, which it may never endanger; this one hangs
+# off a button press, whose whole value is the answer.
 #
 # Updated 2026-07-17 (fix/sites-prewarm-origin): ``publish_site`` and
 # ``apply_leaf_edits_by_pocket`` now thread the request ``Origin`` header into the
@@ -189,8 +215,12 @@ from pocketpaw_ee.sites.dto import (
     NativeArtifactResponse,
     PublishRequest,
     RequestPublishResponse,
+    SiteClientResponse,
+    SiteClientUpdate,
     SiteDataRowsResponse,
     SiteDataTablesResponse,
+    SiteInvoiceCreate,
+    SitePreviewRefreshResponse,
     SitePreviewResponse,
     SiteResponse,
     SiteStatusResponse,
@@ -660,6 +690,36 @@ async def revert_version_by_pocket(
     )
 
 
+@router.post("/sites/{site_id}/preview-refresh", response_model=SitePreviewRefreshResponse)
+async def refresh_site_preview(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SitePreviewRefreshResponse:
+    """Re-photograph the site's gallery card image on demand (SC-3).
+
+    Capture is automatic on every successful deploy, which handles the case that
+    matters — the design changed — so this exists for the ones a deploy cannot fix:
+    a capture that failed at the time (Cloudflare unconfigured, quota, a render that
+    timed out), or a draft whose markup only became buildable later. Without it, the
+    only way to correct a card was to republish an unchanged site.
+
+    A POST because it spends a paid remote render and rewrites the Site, and
+    ``fabric.write`` for the same reason. Named ``preview-refresh`` rather than
+    ``preview`` deliberately: on this router ``by-pocket/{id}/preview`` already means
+    the draft CONTENT the builder renders, and two different meanings of "preview"
+    one path segment apart is how a client ends up calling the wrong one.
+
+    SYNCHRONOUS, and it can fail. Every other capture in this subsystem is
+    fire-and-forget behind a swallow, because a picture may never cost anyone a
+    publish. This one was asked for by a person who is watching a spinner, so it
+    waits for the render (seconds) and surfaces a real error instead of a 200
+    carrying the same stale url they pressed the button to replace. A site in
+    another workspace is a 404; nothing renderable yet is a 422.
+    """
+    return await sites_service.refresh_site_preview(workspace_id=ctx.workspace_id, site_id=site_id)
+
+
 @router.post("/sites/{site_id}/domains", response_model=DomainStatusResponse)
 async def add_domain(
     site_id: str,
@@ -669,6 +729,24 @@ async def add_domain(
 ) -> DomainStatusResponse:
     return await sites_service.add_domain(
         workspace_id=ctx.workspace_id, site_id=site_id, hostname=body.hostname
+    )
+
+
+@router.delete("/sites/{site_id}/domains/{hostname}", status_code=204)
+async def remove_domain(
+    site_id: str,
+    hostname: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> None:
+    """Disconnect a custom domain — delete its Worker route and its Cloudflare
+    custom hostname, then drop it from the site.
+
+    Gated on ``fabric.write`` like ``add_domain``: this releases a hostname on the
+    shared zone, and once released anyone may claim it. 204 because there is nothing
+    left to describe; a hostname this site does not have is a 404."""
+    await sites_service.remove_domain(
+        workspace_id=ctx.workspace_id, site_id=site_id, hostname=hostname
     )
 
 
@@ -691,4 +769,46 @@ async def domain_status(
 ) -> DomainStatusResponse:
     return await sites_service.domain_status(
         workspace_id=ctx.workspace_id, site_id=site_id, hostname=hostname
+    )
+
+
+@router.get("/sites/{site_id}/client", response_model=SiteClientResponse)
+async def get_site_client(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteClientResponse:
+    """The owner's record of who this site is for, plus the receipts they have
+    logged against that client. A site with nothing recorded returns a blank
+    record; only a missing or cross-tenant site is a 404."""
+    return await sites_service.get_site_client(workspace_id=ctx.workspace_id, site_id=site_id)
+
+
+@router.patch("/sites/{site_id}/client", response_model=SiteClientResponse)
+async def update_site_client(
+    site_id: str,
+    body: SiteClientUpdate,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteClientResponse:
+    """Patch the client record. Omitting a field leaves it untouched; sending it
+    empty clears it. Returns the whole updated record."""
+    return await sites_service.update_site_client(
+        workspace_id=ctx.workspace_id, site_id=site_id, body=body
+    )
+
+
+@router.post("/sites/{site_id}/invoices", response_model=SiteClientResponse)
+async def record_site_invoice(
+    site_id: str,
+    body: SiteInvoiceCreate,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteClientResponse:
+    """Log one manual receipt against the site's client. This records that the
+    owner was paid — it does NOT charge anyone, and it is unrelated to the owner's
+    own subscription with us. Returns the whole updated client record so the caller
+    re-renders from one response instead of splicing the new row in locally."""
+    return await sites_service.record_site_invoice(
+        workspace_id=ctx.workspace_id, site_id=site_id, body=body
     )

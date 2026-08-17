@@ -1,0 +1,29 @@
+[
+  {
+    "label": "budget: the skill grows past its ceiling and nothing notices",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/pocketpaw-design-taste/SKILL.md",
+    "find": "# 2026 Creative Director System for Paw Sites",
+    "replace": "# 2026 Creative Director System for Paw Sites\n\n### 0.A Section Rhythm Calibration (added without measuring the budget)\nBefore composing, score the page's vertical rhythm so no two adjacent bands\nshare a silhouette. Assign each section a weight from 1 (a hairline stat row)\nto 5 (a full-bleed media band), then read the sequence aloud as a number\nstring. A good page reads 3-1-4-2-5-1-3; a slop page reads 3-3-3-3-3. If two\nneighbours share a weight, change one of them: swap a card grid for a divided\nlist, or promote a quote to a full-width band. Weight is not height. A tall\nsection of body copy is still a 1 if its silhouette is a single column, and a\nshort asymmetric bento is a 4 because the eye has to travel. Score the hero\nlast, since it inherits whatever contrast the second section fails to provide.\n\nCalibrate the rhythm against the density dial: at DENSITY 1-3 the string should\naverage below 3, at 4-7 it may average above. A page whose weights climb\nmonotonically reads as a pitch deck rather than a site, so plant at least one\ndescent before the final CTA. When a section resists scoring, that is the\nsignal it is doing two jobs and should be split. Re-score after every layout\nedit, because a single swap changes both neighbours.\n\n### 0.B Optical Alignment Pass (also unmeasured)\nMathematical alignment is not optical alignment. Circular and triangular marks\nread as misaligned when their bounding boxes agree, so nudge a play triangle\nright by about 8% of its width and let a circular badge overshoot a flat edge\nslightly. Punctuation hangs outside the measure: an opening quote sits in the\nmargin, not on the text edge. Uppercase tracking opens as size drops, so an\neyebrow at 12px wants more letter-spacing than the same words at 32px, and a\ndisplay headline usually wants negative tracking instead.\n\nCheck alignment against the strongest edge in the composition rather than the\ncontainer. If a section has a full-bleed image on the left, the text column\naligns to the image's optical edge, not to the page gutter. Baselines matter\nmore than boxes: two adjacent cards whose text baselines disagree read as\nbroken even when their tops match exactly.\n",
+    "tests": [
+      "tests/test_bundled_skill_budget.py"
+    ]
+  },
+  {
+    "label": "budget: the ceiling is measured in decoded chars, not wc -c bytes",
+    "file": "tests/test_bundled_skill_budget.py",
+    "find": "    return path.stat().st_size",
+    "replace": "    return len(path.read_text(encoding=\"utf-8\"))",
+    "tests": [
+      "tests/test_bundled_skill_budget.py"
+    ]
+  },
+  {
+    "label": "budget: the fixture reads a path that does not exist",
+    "file": "tests/test_bundled_skill_budget.py",
+    "find": "    return plugin_dir / \"skills\" / \"pocketpaw-design-taste\" / \"SKILL.md\"",
+    "replace": "    return plugin_dir / \"skills\" / \"pocketpaw-design-taste\" / \"SKILL.markdown\"",
+    "tests": [
+      "tests/test_bundled_skill_budget.py"
+    ]
+  }
+]

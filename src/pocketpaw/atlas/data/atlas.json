@@ -367,6 +367,49 @@
     },
     {
       "gist": "",
+      "how": "propose via the Instinct gate; approve/reject at /decisions",
+      "id": "capability:fabric.conflict_steward",
+      "keywords": [
+        "resolve conflict",
+        "pin",
+        "ignore",
+        "disputed value",
+        "which is right",
+        "arbitrate",
+        "steward",
+        "competing sources"
+      ],
+      "kind": "capability",
+      "name": "Arbitrate a source conflict",
+      "narrative": "When two equally-trusted, fresh sources disagree on a Fabric property, atlas / agents PROPOSE a resolution and a human approves it in the Instinct tray — PIN a statement (it wins) or IGNORE a source (deprecate it). NEVER applied from chat: the approval executes as a Fabric statement operation, and losing statements stay as ranked history. Reach for it when the user asks which competing value is right and wants it settled; tell the user it needs approval, do not claim it is done.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Resolve two equally-trusted, fresh Fabric sources that disagree: propose PIN or IGNORE, a human approves it in the Instinct tray. Member-level, human-gated.",
+      "surface": "/decisions"
+    },
+    {
+      "gist": "",
+      "how": "call fabric_query with include_provenance=true",
+      "id": "capability:fabric.provenance_read",
+      "keywords": [
+        "provenance",
+        "where did this come from",
+        "source of this value",
+        "is this stale",
+        "who wrote this"
+      ],
+      "kind": "capability",
+      "name": "See where a Fabric fact came from",
+      "narrative": "Reads the provenance behind any Fabric object's properties: the resolver's winner value, whether it is disputed, its freshness (fresh / aging / stale), and every competing statement with its source, writer_class, and observed_at. A MEMBER-level read that runs directly (reads are not human-gated). Reach for it when the user asks where a value came from, who wrote it, or how old it is; arbitrating a dispute is a separate, human-gated stewardship action.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Read a Fabric object's winner value, whether it is contested, its freshness, and the competing statements with their sources. A member-level read.",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'airtable' connector once it is bound",
       "id": "connector:airtable",
       "keywords": [
@@ -835,6 +878,23 @@
         "primitive:connector"
       ],
       "summary": "Linear (project-management) connector — 8 actions: list_issues, list_my_issues, list_teams, list_projects, +4 more.",
+      "surface": "/settings/workspace/integrations"
+    },
+    {
+      "gist": "",
+      "how": "list_connector_actions / connector_execute over the 'mailtrap' connector once it is bound",
+      "id": "connector:mailtrap",
+      "keywords": [
+        "mailtrap",
+        "email"
+      ],
+      "kind": "connector",
+      "name": "Mailtrap",
+      "narrative": "The Mailtrap connector (email) wires Mailtrap data into the workspace. ACTIONS: .",
+      "requires": [
+        "primitive:connector"
+      ],
+      "summary": "Mailtrap (email) connector — 0 actions: .",
       "surface": "/settings/workspace/integrations"
     },
     {
@@ -1333,7 +1393,8 @@
         "rollback",
         "roll back",
         "history",
-        "changes"
+        "changes",
+        "edit"
       ],
       "kind": "primitive",
       "name": "Branch",
@@ -1522,6 +1583,75 @@
       "requires": [],
       "summary": "Persistent agent identity/memory (.soul files, OCEAN personality, 5-tier memory: core/episodic/semantic/procedural/…).",
       "surface": ""
+    },
+    {
+      "gist": "per-property provenance for Fabric facts — a trust ladder ranks sources, flags disputes",
+      "how": "fabric_query with include_provenance=true returns the winner, is_disputed, freshness, and the competing statements' sources per object (where an EE fabric MCP server is bound; the OSS builtin fabric tools have no provenance flag)",
+      "id": "primitive:source-truth",
+      "keywords": [
+        "provenance",
+        "disputed",
+        "is this disputed",
+        "is this fact disputed",
+        "which source wins",
+        "which source wins for this field",
+        "trust",
+        "trust ladder",
+        "source of truth",
+        "where did this number come from",
+        "where did this value come from",
+        "who said this",
+        "stale",
+        "fresh",
+        "freshness",
+        "aging",
+        "conflict",
+        "competing values",
+        "pin",
+        "ignore",
+        "steward",
+        "statement",
+        "writer class",
+        "observed at"
+      ],
+      "kind": "primitive",
+      "name": "Source-truth",
+      "narrative": "Source-truth is the provenance primitive under Fabric: every property value is a statement — the value plus its source, a writer_class (human | connector | mirror | agent | inferred), and an observed_at. When sources disagree, ONE resolver ranks the statements on the trust ladder human-pin > human > connector > mirror > agent > inferred, then recency on observed_at, then a deterministic tiebreak, and computes the winner plus an is_disputed flag. Freshness (fresh / aging / stale) is computed at read time from observed_at + a per-type TTL — never stored. Reach for it when a user or agent asks where a value came from, whether it is disputed, or how stale it is. Un-rankable conflicts (same tier, both fresh, materially different values) open a stewardship proposal through the Instinct gate — resolved at /decisions — with the steward verbs PIN (this statement wins) and IGNORE (deprecate a source); CHANGE / CORRECT never hard-delete, so losing statements stay as ranked history. The flat properties dict is a resolver-computed cache, so every existing reader keeps working unchanged. It pairs with Fabric (the objects whose properties it ranks) and Instinct (which gates the stewardship decisions). NOT a knowledge base and NOT a fact-checker — it ranks SOURCES, it does not judge truth.",
+      "requires": [
+        "primitive:fabric"
+      ],
+      "summary": "Per-property provenance, trust, and conflict resolution for Fabric facts: every value carries its source, a trust ladder picks the winner, and disputes go to a human steward.",
+      "surface": ""
+    },
+    {
+      "gist": "outcome verdicts on task completion — SOLVED/PARTIAL/NOT_SOLVED/UNKNOWN, bounded retry",
+      "how": "the deep_work_verify_mode / cloud_plan_verify_mode settings turn it on; verdicts surface on the task (verify_verdict; TaskResponse.verify)",
+      "id": "primitive:verify-loop",
+      "keywords": [
+        "verify",
+        "verification",
+        "verdict",
+        "what is a verdict",
+        "outcome",
+        "did it work",
+        "did the task actually get done",
+        "solved",
+        "not solved",
+        "partial",
+        "requeue",
+        "retry",
+        "judge",
+        "llm judge",
+        "convergence",
+        "self-verifying",
+        "verify loop"
+      ],
+      "kind": "primitive",
+      "name": "Verify loop",
+      "narrative": "The Verify loop is the OS's self-verifying outcome check: when a task completes, a VerdictProvider computes an OutcomeVerdict — SOLVED / PARTIAL / NOT_SOLVED / UNKNOWN — against the task's success criteria. On PARTIAL or NOT_SOLVED the task is requeued with diagnostic feedback, bounded by a retry budget, and a convergence guard escalates no-progress or oscillation early instead of burning the budget. SOLVED and UNKNOWN go to DONE — a passing result is never mutated. An LLM-as-judge provider runs in SHADOW mode: its verdict is recorded (\"judge: shadow\") but does not yet drive requeue. It runs at two terminals — the OSS deep-work executor and the cloud planner. Reach for it when a user asks whether a task actually got done, why it was retried, or how the OS checks its own work. It pairs with Instinct (humans approve ACTIONS at the gate; the loop verifies OUTCOMES afterwards) and Deep Work (/deep-work, where a task's verdict shows). NOT a test runner and NOT the Instinct approval gate — it verifies OUTCOMES after the fact; humans still approve ACTIONS through Instinct.",
+      "requires": [],
+      "summary": "Verify-on-completion: a finished task gets an outcome verdict (SOLVED / PARTIAL / NOT_SOLVED / UNKNOWN) against its success criteria, with bounded retry on a miss.",
+      "surface": "/deep-work"
     },
     {
       "gist": "the durable async-work primitive — ARQ-backed long-running jobs that survive restarts and write back under a system identity",
@@ -1827,6 +1957,20 @@
     },
     {
       "gist": "",
+      "how": "a user invokes it as /pocketpaw-create-react-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:pocketpaw-create-react-site",
+      "keywords": [
+        "pocketpaw-create-react-site"
+      ],
+      "kind": "skill",
+      "name": "pocketpaw-create-react-site",
+      "narrative": "Build a marketing landing page as a Paw Site on the REACT TRACK — a real, standalone website you author as hand-written React components, PRERENDERED to static HTML at build time and deployed to the edge. Decide by the REQUIREMENT: reach for this when the user EXPLICITLY asks for React (\"build it in React\", \"use React\", \"a React landing page\") or when the page genuinely needs React-shaped client interactivity. Do NOT default to it for a plain static marketing page (\"build a dentist landing page\", \"a marketing page for my bakery\") — that is the common case and belongs to the html track (create_html_site) or pocketpaw-create-paw-site. When you DO use it: YOU write the React components (Hero, Pricing, Faq, ...) at the quality bar set by pocketpaw-design-taste, assemble them into a source map rooted at src/App.tsx, and a deterministic tool persists the pocket stamped type=\"site\" + pattern=\"landing\" + engine=\"react\". You do NOT compose a rippleSpec, do NOT call get_widget_spec, do NOT use the pocket specialist. Sites ship their client JavaScript by default, so a React page with client state (a menu toggle, tabs, a counter) hydrates and works; still pass interactive=true to record the intent, and interactive=false to opt a purely static page out of shipping a bundle it never uses. Loading this skill keeps the chat agent's always-on system prompt small while still delivering the full React authoring brain when a site actually needs React.",
+      "requires": [],
+      "summary": "Build a marketing landing page as a Paw Site on the REACT TRACK — a real, standalone website you author as hand-written React components, PRERENDERED to static HTML at build time and deployed to the…",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "a user invokes it as /pocketpaw-create-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:pocketpaw-create-site",
       "keywords": [
@@ -1879,6 +2023,20 @@
       "narrative": "Edit an existing PocketPaw pocket — add / remove / rename / move / redesign widgets, or mutate state — by delegating to the pocket edit specialist. Invoke when the user asks to change something on the canvas they're currently looking at: \"add a chart\", \"remove that card\", \"mark task 1 as done\", \"filter to overdue\", \"rebuild this as a kanban\", \"make this less cluttered\". The chat agent decides WHAT and WHERE; the specialist applies the granular mutations via ``pocket_specialist__edit``. The skill body sits outside the chat agent's system prompt until invoked, keeping always-on context lean.",
       "requires": [],
       "summary": "Edit an existing PocketPaw pocket — add / remove / rename / move / redesign widgets, or mutate state — by delegating to the pocket edit specialist.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /pocketpaw-edit-react-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:pocketpaw-edit-react-site",
+      "keywords": [
+        "pocketpaw-edit-react-site"
+      ],
+      "kind": "skill",
+      "name": "pocketpaw-edit-react-site",
+      "narrative": "CHANGE an EXISTING react-track Paw Site — edit a component, restyle a section, rewrite copy, add a new section — by editing its source map in place. Invoke when the user asks for a change to a site that already exists and whose pocket is stamped engine=\"react\": \"shorten the hero headline\", \"make the nav sticky\", \"change the pricing copy\", \"add a testimonials section\", \"drop the FAQ\". Decide by TWO facts, both checkable: (1) the site ALREADY EXISTS — if there is no site yet, this is a create and belongs to pocketpaw-create-react-site, NOT here; (2) the pocket's engine is \"react\" — a svelte site is edited with edit_svelte_component, and a ripple / dynamic / html site is not this track at all (see \"When NOT to use this skill\"). The edit is a TARGETED diff against one file: you send only the change, the tool applies it and stages a DRAFT — it does not publish. NEVER answer an edit request by calling create_react_site again; that mints a SECOND site pocket and leaves the one the user is looking at untouched. Loading this skill keeps the chat agent's always-on system prompt small while still delivering the full react edit contract when a react site actually needs changing.",
+      "requires": [],
+      "summary": "CHANGE an EXISTING react-track Paw Site — edit a component, restyle a section, rewrite copy, add a new section — by editing its source map in place.",
       "surface": ""
     },
     {

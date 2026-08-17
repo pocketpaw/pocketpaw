@@ -447,3 +447,75 @@ async def test_paid_tier_without_dodo_product_publishes_live(mongo_db):
     assert doc.subscription_id is None  # no charge opened
     assert getattr(doc, "_checkout_url", None) is None
     assert sites_service._to_response(doc).checkout_url is None
+
+
+# ---------------------------------------------------------------------------
+# The paid capabilities are stamped DURING the activation deploy, so the
+# subscription has to read "active" before that deploy runs — not after it.
+#
+# Added 2026-08-15 (feat/sites-concierge-entitlement) after review found the
+# original ordering shipped a paying customer a site branded as free:
+# ``_embed_concierge_bar`` and ``_stamp_free_badge`` both re-read the Site doc
+# mid-deploy and resolve entitlements off ``subscription_status``. With the flip
+# afterwards, both saw "pending" — so the page went live with the free
+# attribution badge stamped on it and no concierge loader, and nothing re-runs
+# either stamper. A republish makes it recur (``_publish_pending_site`` resets
+# the status to "pending" every time).
+# ---------------------------------------------------------------------------
+
+
+async def test_the_subscription_reads_active_before_the_activation_deploy_runs(
+    mongo_db, monkeypatch
+):
+    """Pins the ORDERING, by observing what the deploy could see while it ran.
+
+    Asserting the final state cannot catch this — ``subscription_status`` is
+    "active" at the end either way. The only way to tell the two orderings apart
+    is to look at the doc AT DEPLOY TIME, which is what the stampers do.
+    """
+    monkeypatch.setattr(
+        site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
+    )
+    ws = await _make_workspace(plan="pro")
+    pocket_id = await _make_pocket(workspace_id=ws)
+    doc = await sites_service.publish_pocket(
+        workspace_id=ws,
+        user_id="u1",
+        pocket_id=pocket_id,
+        site_plan_key="pro",
+        _generator=_RecordingGenerator(),
+        _cloudflare=_RecordingCF(),
+        _bundle_reader=lambda d: b"x",
+        _billing_provider=_RecordingBillingProvider(),
+    )
+    site_id = str(doc.id)
+    assert doc.subscription_status == "pending"
+
+    # Read the PERSISTED doc the moment the deploy starts — the same read the
+    # concierge embed and the badge stamper each make from inside it.
+    seen: list[str] = []
+    real_deploy = sites_service._deploy_site_doc
+
+    async def _observing_deploy(**kw):
+        from pocketpaw_ee.cloud.models.site import Site
+
+        mid = await Site.get(kw["site_id"])
+        seen.append(getattr(mid, "subscription_status", "") or "")
+        return await real_deploy(**kw)
+
+    monkeypatch.setattr(sites_service, "_deploy_site_doc", _observing_deploy)
+
+    activated = await sites_service.activate_site(
+        workspace_id=ws,
+        site_id=site_id,
+        _generator=_RecordingGenerator(),
+        _cloudflare=_RecordingCF(),
+        _bundle_reader=lambda d: b"x",
+    )
+
+    assert seen == ["active"], (
+        f"the activation deploy saw subscription_status={seen!r}; a paid site is "
+        "stamped free when this is not 'active'"
+    )
+    assert activated.subscription_status == "active"
+    assert activated.deployed is True

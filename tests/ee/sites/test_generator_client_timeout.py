@@ -47,7 +47,41 @@ def _patch_hang(monkeypatch) -> dict[str, object]:
 
 
 def _pid_alive(pid: int) -> bool:
-    """True if pid is still a live process (signal 0 probes without killing)."""
+    """True if pid is still a live process.
+
+    **``os.kill(pid, 0)`` does not answer this on Windows**, which is what made these
+    four tests fail there while the code under test was working correctly. CPython
+    emulates signal 0 with ``OpenProcess``, and a process that has EXITED but whose
+    handle is still open — which is exactly the state ``proc.wait()`` leaves it in —
+    opens fine. So the probe reported "alive" for a process that had been killed and
+    reaped, and the assertion blamed the timeout handler for a bug in the assertion.
+    Measured 2026-08-12: kill via ``taskkill /F /T``, ``wait()`` returns 1, and
+    ``os.kill(pid, 0)`` still succeeds.
+
+    The honest Windows question is the process's EXIT CODE: ``STILL_ACTIVE`` (259) means
+    genuinely running, anything else means exited. POSIX keeps signal 0, where it means
+    what it says.
+
+    (259 is also a legal real exit code, so a process that exits with 259 reads as alive
+    here. It cannot happen in these tests — the child is killed, never exits normally —
+    and there is no way to distinguish the two through this API.)
+    """
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        _STILL_ACTIVE = 259
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False  # pid is gone entirely
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False  # cannot ask — treat as gone rather than assert on it
+            return code.value == _STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -129,26 +163,49 @@ async def test_generate_bounds_a_wedged_generator(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_process_group_kill_reaps_a_leaked_child(tmp_path, monkeypatch):
-    """Group-kill proof: start_new_session=True + os.killpg means a CHILD the
-    wedged build leaked (the workerd analogue) dies too, not just the parent.
+    """Group-kill proof: a CHILD the wedged build leaked (the workerd analogue) dies
+    too, not just the parent.
 
-    The faked parent spawns a grandchild that ignores SIGTERM and sleeps; only a
-    process-GROUP SIGKILL takes it down. After the timeout fires, the grandchild's
-    pid must be gone."""
+    This is the one test that exercises the actual reason the kill is not just
+    ``proc.kill()``: adapter-cloudflare's prerender boots a workerd child that the bun
+    parent never reaps, so killing only the parent leaves the real hang in place.
+
+    **Portable, because the production code has TWO implementations and both are load-
+    bearing.** It used to spawn its grandchild with ``os.fork()``, which does not exist
+    on Windows — the child died instantly, printed nothing, and the test failed parsing
+    an empty pid. That left ``_kill_process_tree_windows`` (the ``taskkill /F /T``
+    branch, added precisely because ``os.killpg`` raised AttributeError there and
+    masked the timeout as an unhandled 500) with no coverage at all on the platform it
+    exists for. ``subprocess.Popen`` spawns a grandchild on both, and the grandchild is
+    reached by the process-GROUP SIGKILL on POSIX and by ``taskkill``'s ``/T`` recursion
+    on Windows.
+
+    On POSIX the grandchild also ignores SIGTERM, so a polite terminate cannot account
+    for its death. Windows ``taskkill /F`` is unconditional, so there is no equivalent
+    knob — the grandchild simply has to be reached through the tree."""
     monkeypatch.setenv("PAW_SITES_BUILD_TIMEOUT_SEC", "1")
 
-    # A child that forks a grandchild (the leaked-workerd analogue), prints the
-    # grandchild pid, then both sleep. The grandchild ignores SIGTERM, so only a
-    # SIGKILL to the whole group reaps it.
-    child_src = (
-        "import os, sys, time, signal\n"
-        "pid = os.fork()\n"
-        "if pid == 0:\n"
-        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "    time.sleep(999)\n"
-        "else:\n"
-        "    sys.stdout.write(str(pid) + '\\n'); sys.stdout.flush()\n"
-        "    time.sleep(999)\n"
+    # The grandchild: ignores SIGTERM where that is meaningful, then sleeps far longer
+    # than the test. Only a group SIGKILL (POSIX) or a tree kill (Windows) stops it.
+    grandchild_src = "\n".join(
+        (
+            "import time",
+            "try:",
+            "    import signal",
+            "    signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+            "except (AttributeError, ValueError, OSError):",
+            "    pass",
+            "time.sleep(999)",
+        )
+    )
+    # The child (the "bun" analogue): spawns that grandchild, prints its pid, sleeps.
+    child_src = "\n".join(
+        (
+            "import subprocess, sys, time",
+            f"gc = subprocess.Popen([sys.executable, '-c', {grandchild_src!r}])",
+            "print(gc.pid, flush=True)",
+            "time.sleep(999)",
+        )
     )
     child_argv = [sys.executable, "-c", child_src]
 
@@ -163,24 +220,30 @@ async def test_process_group_kill_reaps_a_leaked_child(tmp_path, monkeypatch):
             cwd=kwargs.get("cwd"),
             start_new_session=kwargs.get("start_new_session", False),
         )
-        # Read the grandchild pid the child prints before either sleeps.
-        line = await asyncio.wait_for(proc.stdout.readline(), timeout=5)
-        grandchild_pid["pid"] = int(line.decode().strip())
+        # Read the grandchild pid the child prints before either sleeps. A blank line
+        # here means the child itself failed to start — assert on that rather than
+        # letting int() raise a ValueError that names nothing.
+        line = await asyncio.wait_for(proc.stdout.readline(), timeout=10)
+        raw = line.decode().strip()
+        assert raw.isdigit(), f"child never reported a grandchild pid (got {raw!r})"
+        grandchild_pid["pid"] = int(raw)
         return proc
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
     runner = _SubprocessRunner()
 
-    ok, msg = await asyncio.wait_for(runner.build_static(str(tmp_path), gate=False), timeout=10)
+    ok, msg = await asyncio.wait_for(runner.build_static(str(tmp_path), gate=False), timeout=15)
     assert ok is False
     assert "timed out" in msg
 
     gc_pid = grandchild_pid["pid"]
-    # Give the group SIGKILL a beat to land, then confirm the leaked child is gone.
+    # Give the kill a beat to land, then confirm the leaked child is gone.
     deadline = time.monotonic() + 5
     while _pid_alive(gc_pid) and time.monotonic() < deadline:
         await asyncio.sleep(0.05)
-    assert not _pid_alive(gc_pid), "leaked child survived — process-group kill failed"
-    # Reap the now-dead grandchild's zombie if it became ours (best-effort).
-    with contextlib.suppress(ChildProcessError, OSError):
-        os.waitpid(gc_pid, os.WNOHANG)
+    assert not _pid_alive(gc_pid), "leaked child survived — the tree/group kill failed"
+    # Reap the now-dead grandchild's zombie if it became ours (POSIX only; Windows has
+    # no zombies and no waitpid).
+    if sys.platform != "win32":
+        with contextlib.suppress(ChildProcessError, OSError):
+            os.waitpid(gc_pid, os.WNOHANG)

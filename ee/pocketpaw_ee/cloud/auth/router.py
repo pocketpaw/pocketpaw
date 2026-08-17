@@ -321,9 +321,11 @@ router.include_router(
 
 router.include_router(api_keys_router)
 
+from pocketpaw_ee.cloud.auth.social import router as social_router  # noqa: E402
 from pocketpaw_ee.cloud.auth.sso import router as sso_router  # noqa: E402
 
 router.include_router(sso_router)
+router.include_router(social_router)
 
 
 # ---------------------------------------------------------------------------

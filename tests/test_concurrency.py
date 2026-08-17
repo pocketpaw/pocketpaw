@@ -1,14 +1,27 @@
-"""Tests for concurrency controls: session locks, global semaphore, async clients."""
+"""Tests for concurrency controls: session locks, global semaphore, async clients.
+
+Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the stub builders
+return an ``AssembledPrompt`` from ``assemble_system_prompt`` and the fake routers
+declare ``system_prompt_digest``, because ``AgentLoop`` now carries the assembled
+prompt's stable digest through the router to the backend. Nothing about what
+these tests prove changed; only the shape of the two things they fake.
+"""
 
 import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from pocketpaw.bus import Channel, InboundMessage
+from pocketpaw.prompt import AssembledPrompt
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _assembled(text: str = "system") -> AssembledPrompt:
+    """What ``AgentContextBuilder.assemble_system_prompt`` hands the loop back."""
+    return AssembledPrompt(text=text, stable_digest="0123456789abcdef")
 
 
 def _make_inbound(chat_id: str, content: str = "hi") -> InboundMessage:
@@ -25,7 +38,9 @@ def _make_slow_router(delay: float = 0.1):
     """Return a mock router whose run() sleeps for *delay* seconds."""
     router = MagicMock()
 
-    async def mock_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def mock_run(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
         await asyncio.sleep(delay)
         yield {"type": "message", "content": "ok", "metadata": {}}
         yield {"type": "done", "content": ""}
@@ -81,7 +96,7 @@ async def test_session_lock_serialises_same_session(
     mock_get_mem.return_value = mem
 
     ctx = MagicMock()
-    ctx.build_system_prompt = AsyncMock(return_value="system")
+    ctx.assemble_system_prompt = AsyncMock(return_value=_assembled("system"))
     mock_ctx_cls.return_value = ctx
 
     scanner = MagicMock()
@@ -94,7 +109,9 @@ async def test_session_lock_serialises_same_session(
     order = []
     delay = 0.05
 
-    async def slow_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def slow_run(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
         order.append(f"start:{message}")
         await asyncio.sleep(delay)
         order.append(f"end:{message}")
@@ -167,7 +184,7 @@ async def test_cross_session_runs_in_parallel(
     mock_get_mem.return_value = mem
 
     ctx = MagicMock()
-    ctx.build_system_prompt = AsyncMock(return_value="system")
+    ctx.assemble_system_prompt = AsyncMock(return_value=_assembled("system"))
     mock_ctx_cls.return_value = ctx
 
     scanner = MagicMock()
@@ -179,7 +196,9 @@ async def test_cross_session_runs_in_parallel(
 
     order = []
 
-    async def slow_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def slow_run(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
         order.append(f"start:{message}")
         await asyncio.sleep(0.05)
         order.append(f"end:{message}")
@@ -256,7 +275,7 @@ async def test_global_semaphore_caps_concurrency(
     mock_get_mem.return_value = mem
 
     ctx = MagicMock()
-    ctx.build_system_prompt = AsyncMock(return_value="system")
+    ctx.assemble_system_prompt = AsyncMock(return_value=_assembled("system"))
     mock_ctx_cls.return_value = ctx
 
     scanner = MagicMock()
@@ -268,7 +287,9 @@ async def test_global_semaphore_caps_concurrency(
 
     order = []
 
-    async def slow_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def slow_run(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
         order.append(f"start:{message}")
         await asyncio.sleep(0.05)
         order.append(f"end:{message}")

@@ -17,6 +17,10 @@
 # connector-knowledge pin checks limit=10 because the ripple invoice widgets
 # legitimately occupy top name-weight slots (see the test docstring).
 # Widget/skill extraction itself is pinned in test_widgets_skills.py.
+# Updated: 2026-08-17 (AST-5a — review fix V7) — pins the hedged ``how`` on
+# ``primitive:source-truth`` ("where an EE fabric MCP server is bound", the
+# same hedge ``primitive:fabric`` carries) so the card can't imply the OSS
+# builtin has ``include_provenance``.
 # Updated: 2026-07-05 (fix/atlas-data-accuracy-and-relevance) — new
 # ``TestFactualClaimGuard``: the fidelity check only proves the artifact was
 # recompiled, not that a narrative is TRUE. Two false narratives had shipped
@@ -25,12 +29,22 @@
 # hedged numeric counts in authored prose so they can't silently pass a
 # fidelity-only drift check. Surface count assertion bumped 21 → 23 for the
 # new /settings/billing and /security authored surfaces.
+# Updated: 2026-08-17 (feat/ast-1-atlas-primitives, AST-1) — primitive count
+# assertion bumped 10 → 12 for the new authored primitive:source-truth and
+# primitive:verify-loop entries.
+# Updated: 2026-08-17 (feat/ast-3-atlas-flag-aware, AST-3) — TestFactualClaimGuard
+# gains a LIVENESS guard: the two rollout-flagged primitives default OFF, so a
+# describe payload must never read as live source-truth / verification when the
+# mode is off — the rendered text has to carry ``mode: off`` + the enable
+# pointer, and the ``available``/``mode`` overlay hints must be present.
 
 import json
 import logging
 import os
 import re
 from pathlib import Path
+
+import pytest
 
 from pocketpaw.atlas.compile import (
     AUTHORED_FILES,
@@ -83,7 +97,7 @@ class TestAuthoredFiles:
         surfs = AtlasModel.model_validate(json.loads(AUTHORED_FILES[1].read_text(encoding="utf-8")))
         assert {e.kind for e in prims.entries} == {"primitive"}
         assert {e.kind for e in surfs.entries} == {"surface"}
-        assert len(prims.entries) == 10
+        assert len(prims.entries) == 12
         assert len(surfs.entries) == 23
 
     def test_authored_entries_survive_compile_unchanged(self):
@@ -147,6 +161,58 @@ class TestFactualClaimGuard:
             "widgets') — approximations drift silently past the fidelity-only "
             "check. Use a verified exact count or an open-ended '150+':\n" + "\n".join(offenders)
         )
+
+    def test_source_truth_how_is_hedged_to_where_the_ee_fabric_server_is_bound(self):
+        """AST-5a (V7): ``include_provenance`` exists only on the EE MCP
+        ``fabric_query`` (OSS claude_sdk has no fabric_query and the OSS builtin
+        rejects the kwarg), so the authored ``how`` must hedge like
+        ``primitive:fabric``'s does instead of implying every deployment has
+        the read. Authoring only — availability semantics are untouched."""
+        store = AtlasStore.load()
+        fabric = store.describe("primitive:fabric")
+        source_truth = store.describe("primitive:source-truth")
+        assert fabric is not None and source_truth is not None
+        assert "where a fabric server is bound" in fabric.how
+        assert "include_provenance=true" in source_truth.how
+        assert "where an EE fabric MCP server is bound" in source_truth.how
+
+    # AST-3: the rollout-flagged primitives default OFF. Their authored prose
+    # describes what the subsystem DOES; only the overlay can say whether it is
+    # live for THIS deployment. When the flag is off, the rendered describe must
+    # carry the mode + enable pointer so the payload cannot be read as "live
+    # source-truth / verification is running here" — the same misdirection
+    # class as a false route claim, at the deployment level.
+    _FLAGGED = {
+        "primitive:source-truth": "POCKETPAW_FABRIC_SOURCE_TRUTH_MODE",
+        "primitive:verify-loop": "deep_work_verify_mode",
+    }
+
+    @pytest.mark.asyncio
+    async def test_off_flagged_primitive_describe_declares_mode_and_enable_pointer(
+        self, monkeypatch
+    ):
+        from pocketpaw.agents.sdk_mcp_atlas import _atlas_describe_handler
+        from pocketpaw.atlas.overlay import DefaultEntitlementProvider
+        from pocketpaw.config import get_settings
+
+        settings = get_settings()
+        for name in ("fabric_source_truth_mode", "deep_work_verify_mode", "cloud_plan_verify_mode"):
+            monkeypatch.setattr(settings, name, "off")
+        for name in ("deep_work_verify_loop_enabled", "cloud_plan_verify_loop_enabled"):
+            monkeypatch.setattr(settings, name, False)
+
+        provider = DefaultEntitlementProvider(registry=type("R", (), {"status": lambda *_: []})())
+        for entry_id, pointer in self._FLAGGED.items():
+            out = await _atlas_describe_handler({"id": entry_id}, provider)
+            assert not out.get("is_error"), f"{entry_id} must stay DESCRIBABLE when off"
+            text = out["content"][0]["text"]
+            payload = json.loads(text)
+            assert payload["available"] is False, entry_id
+            assert payload["mode"] == "off", entry_id
+            # Rendered text carries the honesty markers an agent will read.
+            assert '"mode": "off"' in text, f"{entry_id}: describe must declare mode off"
+            assert pointer in text, f"{entry_id}: describe must say how to enable it"
+            assert "docs/atlas.md" in payload["enable_hint"], entry_id
 
 
 class TestConnectorExtraction:

@@ -53,7 +53,9 @@ async def resolve_delegate(
         user_id,
         body.corrId,
     )
-    delegates.resolve_pending(workspace_id, body.corrId, body.result)
+    # Cross-process aware: in the deployed stack this request lands on the web
+    # container while the turn is parked in the arq worker.
+    await delegates.resolve_pending_anywhere(workspace_id, body.corrId, body.result)
     return DelegateResolveResponse(accepted=True)
 
 

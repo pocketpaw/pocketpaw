@@ -3,6 +3,28 @@
 Every agent backend (Claude SDK, OpenAI Agents, Gemini CLI, OpenCode CLI)
 must expose a ``info()`` staticmethod and an async ``run()`` generator.
 
+Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the two signature
+guards that decide who RECEIVES ``system_prompt_digest`` moved here from
+``AgentPool``, plus a ``forward_prompt_digest`` helper for callers holding a
+backend instance. The channel path now has a digest too, and it reaches backends
+through ``AgentRouter`` (both its own fallback loop and the failover runner's
+chain) rather than through the pool — three call sites for one question. Keeping
+the definition next to the ``run`` signature it inspects is what stops a second
+copy appearing that counts ``**kwargs``; ``pool`` re-imports the names so its own
+callers and tests are unmoved.
+
+Updated: 2026-08-02 (PA-1, feat/prompt-assembler-seam) — the shared ``run``
+signature grows ``system_prompt_digest: str = ""``: a hash over the layers of
+the assembled system prompt that declared themselves cacheable (see
+``pocketpaw.prompt``). A backend that caches an agent/graph/client object with
+the prompt baked in folds this into its cache key, so an object built under one
+identity can never answer for another — the bug PR #1842 fixed three times, once
+per backend. It is the only kwarg here that does NOT ride the
+withhold-when-empty contract (it is set on every run), so ``AgentPool.run``
+gates it on the backend's signature: a backend receives the digest by declaring
+the parameter. ``pydantic_ai`` does today; the rest keep the narrower signature
+and are unaffected.
+
 Updated: 2026-07-08 (CS-13, feat/per-send-model-override) — the shared ``run``
 signature grows an optional ``model_override: str | None = None`` keyword: the
 client's per-send model choice. It rides the same withhold-when-empty contract as
@@ -61,9 +83,11 @@ replaying Mongo history into the prompt). ``None`` is the unchanged legacy path.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Flag, auto
+from functools import cache
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -78,6 +102,71 @@ from pocketpaw.agents.protocol import AgentEvent  # re-export for convenience
 _DEFAULT_IDENTITY = (
     "You are PocketPaw, a helpful AI assistant running locally on the user's computer."
 )
+
+
+@cache
+def _accepts_prompt_digest(backend_cls: type) -> bool:
+    """Does this backend's ``run`` take a ``system_prompt_digest`` keyword?
+
+    The digest (PA-1) is non-empty on every run, so the withhold-when-empty
+    idiom the other per-run kwargs use cannot gate it — passing it to a backend
+    with the narrower signature would raise TypeError. Asking the signature is
+    the same answer ``_accepts_policy`` gives: a backend opts in by accepting
+    the argument, and the backends that have not been ported yet are untouched.
+    ``**kwargs`` does NOT count — a backend that swallows the digest silently
+    would look ported without keying on anything.
+
+    Cached because this runs once per turn, and a backend class's signature
+    cannot change at runtime.
+
+    LIVES HERE, NOT IN ``AgentPool`` (moved at PA-7b). Three call sites now ask
+    it — the pool, ``AgentRouter`` and ``BackendFailoverRunner`` — and the
+    question is a fact about the BACKEND PROTOCOL, which is this module. A
+    second copy in the router would be the failure this guard exists to prevent:
+    two definitions of "declares the digest" drifting apart, one of them
+    counting ``**kwargs``. ``pool`` re-imports both names, so
+    ``from pocketpaw.agents.pool import _accepts_prompt_digest`` still resolves.
+    """
+    run = getattr(backend_cls, "run", None)
+    if run is None:  # pragma: no cover - not a backend
+        return False
+    return _accepts_prompt_digest_kwarg(run)
+
+
+def _accepts_prompt_digest_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``system_prompt_digest`` in its signature?
+
+    Split out of ``_accepts_prompt_digest`` at PA-6 because ``prewarm`` needs the
+    same question asked of a BOUND METHOD rather than of a backend class. Not
+    cached: a bound method is a fresh object per access, so a cache keyed on it
+    would grow without ever hitting, and the check is one ``inspect.signature``
+    on a path that already builds SDK options.
+    """
+    try:
+        return "system_prompt_digest" in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
+def forward_prompt_digest(backend: Any, run_kwargs: dict[str, Any], digest: str) -> dict[str, Any]:
+    """Return ``run_kwargs`` carrying ``digest`` iff ``backend`` declares it.
+
+    The one-line form of the rule above, for the callers that hold a backend
+    INSTANCE rather than a class: ``AgentRouter.run`` (primary + each generic
+    fallback) and ``BackendFailoverRunner.run`` (each harness in the chain).
+    Returns the SAME dict when the backend does not declare the parameter, so a
+    caller can build one kwargs dict and hand it to several backends of
+    different vintages — which is exactly what the failover chain does.
+
+    Sent whenever the signature accepts it, INCLUDING an empty digest, matching
+    ``AgentPool.run``'s rule rather than inventing a second one. An empty digest
+    is not a silent no-op either: every consumer branches on truthiness and
+    falls back to hashing what it can see, so ``""`` means "this caller has no
+    digest" in exactly one place per backend.
+    """
+    if not _accepts_prompt_digest(type(backend)):
+        return run_kwargs
+    return {**run_kwargs, "system_prompt_digest": digest}
 
 
 class Capability(Flag):
@@ -152,10 +241,16 @@ class LeasedClient:
       supervisor can hold it without importing the concrete SDK type, mirroring
       ``SessionHandle.session_store``'s opaque pass-through.
     * ``options_key`` — the backend's ``_client_cache_key`` for the options the
-      client was connected with (session + cwd + model + tools + system-prompt
-      behavioral-prefix digest + plugin-identity digest). The backend recomputes
-      THIS turn's key and reuses the leased client ONLY on an exact match; a
-      mismatch routes to a fresh build (and the supervisor rebinds the new slot).
+      client was connected with (session + cwd + model + tools + the prompt's
+      identity + plugin-identity digest). The backend recomputes THIS turn's key
+      and reuses the leased client ONLY on an exact match; a mismatch routes to a
+      fresh build (and the supervisor rebinds the new slot). The key is minted by
+      the backend on both sides — the supervisor stores what ``on_client_built``
+      handed it — so the two can never disagree about how it was computed. That
+      matters as of PA-6, where the prompt slot has two forms: a lease minted
+      under ``t:`` (a behavioural-prefix hash) mismatches a ``d:`` turn (the
+      assembler's digest) and costs one rebuild across the deploy that ports a
+      caller, which is the intended reading of a changed prompt identity.
     * ``busy`` — set by the backend while it is driving a query on ``client`` so a
       second concurrent turn never drives two queries on one subprocess. A busy
       lease makes the second turn fall back to a fresh stateless client for that
@@ -196,6 +291,12 @@ class AgentBackend(Protocol):
         # accept it (the Claude SDK backend) let it win over their own model
         # selection; any other backend that grows the kwarg may simply ignore it.
         model_override: str | None = None,
+        # PA-1 — the assembled system prompt's stable digest. The ONE kwarg here
+        # that does not ride the withhold-when-empty contract: it is set on every
+        # run, so ``AgentPool.run`` gates it on the backend's SIGNATURE instead
+        # (``_accepts_prompt_digest``). Declaring the parameter is how a backend
+        # opts in; the ones that have not been ported are untouched.
+        system_prompt_digest: str = "",
     ) -> AsyncIterator[AgentEvent]: ...
 
     async def stop(self) -> None: ...

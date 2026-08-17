@@ -12,6 +12,27 @@
 #   3. An empty workspace (no widgets pinned yet) still produces a
 #      usable preamble naming surface=home — the home dashboard is
 #      always present, even before the user adds anything.
+#
+# Updated: 2026-08-11 (fix/sites-refine-preamble-engine-fork) — repaired guarantee
+# 3, which had been RED on dev. ``ensure_home_pocket`` stopped provisioning an
+# empty pocket when built-in home widgets moved to the DB
+# (``feat(pockets): built-in home widgets from DB``): it now auto-seeds every
+# ``auto_seed=True`` builtin, so a fresh user has "Intent of the Day" pinned and the
+# ``count="0"`` assertion was measuring that change rather than the handler. The
+# empty branch is still reachable — unpin what was seeded — so the test unpins
+# instead of dropping the assertion, and a second test covers the grid a real new
+# user gets, which nothing had asserted.
+#
+# That second test also records a LIVE DEFECT it would otherwise have papered over:
+# every pinned row renders ``id=?`` because ``format_widget_line`` reads
+# ``widget.id`` while the wire dict carries ``_id``
+# (``pockets/dto.py::_widget_to_wire``) and ``_AttrDict`` answers a missing key with
+# ``None``. That is pocketpaw/CLAUDE.md's "Prompt rows must carry the id the tools
+# take" reintroduced by a key-name mismatch — invisible to the AST gate, since the
+# row does go through ``entity_line``, and invisible to the cap test, whose fixture
+# is built from objects that DO have ``.id``. It affects the pocket surface too. Not
+# fixed here (this PR owns the sites preamble); filed as its own task so the fix
+# lands with the handler.
 
 from __future__ import annotations
 
@@ -78,7 +99,7 @@ async def test_home_handler_lists_pinned_widgets() -> None:
         ],
     )
 
-    preamble = await home_handler.build_preamble(WORKSPACE, user_id, SurfaceMeta())
+    preamble = (await home_handler.build_preamble(WORKSPACE, user_id, SurfaceMeta())).text
 
     assert '<surface kind="home"' in preamble
     assert "<pinned-widgets" in preamble
@@ -108,20 +129,68 @@ async def test_home_handler_marks_broken_spec_widget() -> None:
         ],
     )
 
-    preamble = await home_handler.build_preamble(WORKSPACE, user_id, SurfaceMeta())
+    preamble = (await home_handler.build_preamble(WORKSPACE, user_id, SurfaceMeta())).text
 
     assert "Broken tile" in preamble
     assert "BROKEN" in preamble
 
 
 async def test_home_handler_empty_workspace_returns_minimal_preamble() -> None:
-    """An empty workspace gets a usable preamble naming surface=home."""
-    user_id = await _seed_user("owner-empty@surface.test")
-    # No widgets seeded — ensure_home_pocket provisions an empty pocket.
+    """A home grid with nothing pinned gets a usable preamble naming surface=home.
 
-    preamble = await home_handler.build_preamble(WORKSPACE, user_id, SurfaceMeta())
+    ``ensure_home_pocket`` no longer provisions an EMPTY pocket: since
+    ``feat(pockets): built-in home widgets from DB`` it auto-seeds every
+    ``auto_seed=True`` builtin, which today is "Intent of the Day"
+    (``tests/cloud/test_home_pocket.py`` pins that as intended). The empty branch
+    is still reachable — a user can unpin what was seeded — so this test now
+    UNPINS it rather than asserting a zero that provisioning stopped producing.
+    Without that the assertion was measuring the seeding change, not the handler.
+    """
+    user_id = await _seed_user("owner-empty@surface.test")
+    pocket, _ = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
+    # ``_id``, not ``id`` — the widget wire dict is the legacy shape
+    # (``dto._widget_to_wire``). That mismatch is also why these rows render
+    # ``id=?``; see test_home_handler_lists_the_auto_seeded_builtin.
+    for widget in pocket["widgets"]:
+        await pockets_service.remove_widget(pocket["_id"], widget["_id"], user_id)
+
+    preamble = (await home_handler.build_preamble(WORKSPACE, user_id, SurfaceMeta())).text
 
     assert '<surface kind="home"' in preamble
     # The pinned-widgets block exists with count=0 and an empty marker.
     assert '<pinned-widgets count="0"' in preamble
     assert "empty" in preamble.lower()
+
+
+async def test_home_handler_lists_the_auto_seeded_builtin() -> None:
+    """The state a real new user is actually in: one auto-seeded builtin pinned.
+
+    Added with the test above, because that one was the only coverage of a freshly
+    provisioned home grid and it had to stop describing one to keep testing the
+    empty block. Nothing asserted what the handler renders for the grid every new
+    user gets.
+
+    IT ALSO RECORDS A LIVE DEFECT rather than asserting the row is addressable,
+    because it is not: ``format_widget_line`` reads ``widget.id`` while the wire
+    dict this handler passes it carries the id under ``_id``
+    (``pockets/dto.py::_widget_to_wire``), and ``_AttrDict.__getattr__`` returns
+    ``None`` for a missing key — so every pinned row on the home AND pocket
+    surfaces renders ``id=?`` even though ``update_widget`` requires
+    ``widget_id``. That is the bug pocketpaw/CLAUDE.md's "Prompt rows must carry
+    the id the tools take" exists for, reintroduced by a key-name mismatch instead
+    of a hand-rolled row — which is why the AST gate cannot see it (the row does go
+    through ``entity_line``) and why the cap fixture, built from objects with a real
+    ``.id``, measures rows production never renders. Left as an assertion of what
+    ships, with its own task, so the fix lands with the handler and not here.
+    """
+    user_id = await _seed_user("owner-seeded@surface.test")
+    pocket, created = await pockets_service.ensure_home_pocket(WORKSPACE, user_id)
+    assert created is True
+
+    preamble = (await home_handler.build_preamble(WORKSPACE, user_id, SurfaceMeta())).text
+
+    assert '<surface kind="home"' in preamble
+    assert f'<pinned-widgets count="{len(pocket["widgets"])}"' in preamble
+    for widget in pocket["widgets"]:
+        assert widget["name"] in preamble
+    assert "id=?" in preamble

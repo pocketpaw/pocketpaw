@@ -81,7 +81,7 @@ async def test_handler_renders_events_into_snapshot(
 
     monkeypatch.setattr(calendar_service, "list_upcoming", _fake_list_upcoming)
 
-    preamble = await calendar_handler.build_preamble("ws_acme", "user_test", SurfaceMeta())
+    preamble = (await calendar_handler.build_preamble("ws_acme", "user_test", SurfaceMeta())).text
 
     # Surface tag is always present.
     assert '<surface kind="calendar"' in preamble
@@ -109,7 +109,7 @@ async def test_handler_renders_time_of_day_for_timed_events(
 
     monkeypatch.setattr(calendar_service, "list_upcoming", _fake)
 
-    preamble = await calendar_handler.build_preamble("ws_acme", "user_test", SurfaceMeta())
+    preamble = (await calendar_handler.build_preamble("ws_acme", "user_test", SurfaceMeta())).text
 
     assert "10:30 AM" in preamble
     assert "Sync" in preamble
@@ -137,7 +137,7 @@ async def test_handler_renders_empty_snapshot_when_composio_enabled_but_no_event
     monkeypatch.setattr(calendar_service, "list_upcoming", _fake)
     monkeypatch.setattr(composio_service, "is_enabled", lambda *a, **kw: True)
 
-    preamble = await calendar_handler.build_preamble("ws_acme", "user_test", SurfaceMeta())
+    preamble = (await calendar_handler.build_preamble("ws_acme", "user_test", SurfaceMeta())).text
 
     assert '<surface kind="calendar"' in preamble
     assert "(no upcoming events)" in preamble
@@ -162,7 +162,7 @@ async def test_handler_renders_hint_when_composio_disabled(
     monkeypatch.setattr(calendar_service, "list_upcoming", _fake)
     monkeypatch.setattr(composio_service, "is_enabled", lambda *a, **kw: False)
 
-    preamble = await calendar_handler.build_preamble("ws_acme", "user_test", SurfaceMeta())
+    preamble = (await calendar_handler.build_preamble("ws_acme", "user_test", SurfaceMeta())).text
 
     assert '<surface kind="calendar"' in preamble
     assert "GOOGLECALENDAR_LIST_EVENTS" in preamble
@@ -191,7 +191,7 @@ async def test_handler_falls_back_when_service_raises(
 
     monkeypatch.setattr(calendar_service, "list_upcoming", _boom)
 
-    preamble = await calendar_handler.build_preamble("ws_acme", "user_test", SurfaceMeta())
+    preamble = (await calendar_handler.build_preamble("ws_acme", "user_test", SurfaceMeta())).text
 
     # Surface tag still present.
     assert '<surface kind="calendar"' in preamble

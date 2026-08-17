@@ -77,7 +77,7 @@
 # `go install` on the host. Pinned (not @latest) for reproducible builds; bump
 # KB_GO_VERSION to upgrade.
 FROM golang:1.25-bookworm AS kb
-ARG KB_GO_VERSION=v0.1.0
+ARG KB_GO_VERSION=v0.2.0
 # Produces /go/bin/kb-go; we expose it as `kb` (the name the resolver prefers).
 RUN go install github.com/qbtrix/kb-go@${KB_GO_VERSION} && \
     cp /go/bin/kb-go /usr/local/bin/kb

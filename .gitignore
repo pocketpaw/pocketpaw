@@ -78,6 +78,8 @@ private.key
 
 # Backups and secrets
 .env.bak
+.env.backup*
+.env.backup-*
 *.bak
 
 output.txt
@@ -97,3 +99,17 @@ output.txt
 
 # Load-test artifacts (scripts/loadtest)
 out/
+
+# SG-1 sites proving harness — build outputs, not source.
+# .build/ holds a machine-resolved package.json, node_modules, and the ~6.5MB
+# SSR bundle; evidence/ holds generated reports and rendered HTML artifacts.
+tests/harness/sites_proving/node/.build/
+tests/harness/sites_proving/evidence/
+
+# SR-1 per-engine cost measurement — generated evidence, not source.
+tests/harness/engine_cost/evidence/
+# scripts/mutate.py writes this while a sweep is live so a concurrent reader
+# knows a test failure is a deliberate mutation, not a regression. Ignored because
+# a sweep artifact must never be committable; discovery is via pytest's report
+# header (tests/conftest.py), which is the path a reader actually takes anyway.
+.mutation-sweep-active

@@ -31,6 +31,13 @@ Changed 2026-07-08 (feat/billing-smb-caps): added ``PocketLimitError`` (402,
 ``SeatLimitError``. Same 402 money-adjacent family; distinct codes so the UI can
 prompt a plan upgrade. Both enforce at create/enable time only (never retroactive)
 and only when ``billing_enforced`` is on.
+
+Changed 2026-08-15 (fix/sites-custom-domain-entitlement): added
+``CustomDomainNotEntitled`` (402, ``billing.custom_domain_not_entitled``) — the
+domain-attach sibling of the two above, and the first of this family keyed to a
+PER-SITE plan rather than the workspace one. Not a count limit: it reports a
+capability the site's tier does not resell, or a paid tier whose subscription is
+not paying. Attach-time only, gated on ``billing_enforced``.
 """
 
 from __future__ import annotations
@@ -147,6 +154,92 @@ class ConnectorLimitError(CloudError):
         super().__init__(402, "billing.connector_limit", f"Connector limit of {limit} reached")
 
 
+class CustomDomainNotEntitled(CloudError):
+    """A site tried to attach a custom domain its per-site plan does not grant (402).
+
+    Sibling of ``PocketLimitError`` / ``ConnectorLimitError`` for the domain-attach
+    seam, and the same money-adjacent 402 family, with a distinct
+    ``billing.custom_domain_not_entitled`` code so the UI prompts a per-SITE plan
+    upgrade rather than a workspace one.
+
+    The distinction from its siblings is that this is not a COUNT limit: there is no
+    ceiling to report, only a capability the site's tier either resells or does not.
+    Two different failures land here and the message separates them, because the
+    remedies differ — a free site upgrades its plan, while a paid site whose
+    subscription lapsed fixes its billing and keeps the tier it already chose.
+
+    Enforced at ATTACH time only — never retroactive. A downgrade does not rip a
+    live domain off a deployed site, and re-adding an already-connected domain
+    (the only self-service repair for a missing Worker route) stays reachable. The
+    spec's period-end detach is a different lane. Gated on ``billing_enforced``,
+    so OSS / self-host never sees it.
+    """
+
+    def __init__(self, *, plan_tier: str, subscription_active: bool) -> None:
+        if subscription_active:
+            detail = (
+                f"the {plan_tier} plan does not include a custom domain — "
+                "upgrade this site's plan to connect one"
+            )
+        else:
+            detail = (
+                f"this site is on {plan_tier} without an active subscription — "
+                "renew it to connect a custom domain"
+            )
+        super().__init__(402, "billing.custom_domain_not_entitled", f"Custom domain: {detail}")
+
+
+class CallLimitError(CloudError):
+    """Workspace hit its plan's daily LiveKit call-time cap (402).
+
+    Sibling of ``SeatLimitError`` for the LiveKit room-create seam: Free has no
+    call minutes at all (``max_call_seconds_per_day`` == 0), and a paid tier
+    blocks a NEW call once today's cumulative call time would exceed its daily
+    budget. 402 with a distinct ``billing.call_limit`` code so the UI can prompt
+    a plan upgrade. Enforced at CALL-START time only — an already-running call is
+    force-ended at its budget deadline rather than removed.
+    """
+
+    def __init__(self, limit_seconds: int | None) -> None:
+        if limit_seconds == 0:
+            label = "no call minutes on your plan"
+        elif limit_seconds is not None:
+            label = f"daily call limit of {limit_seconds // 60} minutes reached"
+        else:  # pragma: no cover - uncapped plans never raise
+            label = "daily call limit reached"
+        super().__init__(402, "billing.call_limit", f"Call limit: {label}")
+
+
+def _human_bytes(n: int) -> str:
+    """Format a byte count the way storage products do (GB for this scale)."""
+    if n % 1_000_000_000 == 0:
+        return f"{n // 1_000_000_000} GB"
+    if n % 1_000_000 == 0:
+        return f"{n // 1_000_000} MB"
+    if n % 1_000 == 0:
+        return f"{n // 1_000} KB"
+    return f"{n} bytes"
+
+
+class StorageLimitError(CloudError):
+    """Workspace hit its plan's S3 storage cap (402).
+
+    Sibling of ``SeatLimitError`` for the UPLOAD seam: the sum of the workspace's
+    live ``FileUpload`` blob sizes (the Files → Knowledge Base store) is at its
+    plan's ``max_storage_bytes`` and the new upload would push it over. 402 with
+    a distinct ``billing.storage_limit`` code so the UI can prompt a plan
+    upgrade. Enforced at UPLOAD time only — never deletes an existing blob — and
+    only when ``billing_enforced`` is on.
+    """
+
+    def __init__(self, limit_bytes: int | None) -> None:
+        if limit_bytes is None:  # pragma: no cover - uncapped plans never raise
+            label = "storage limit reached"
+        else:
+            label = f"storage limit of {_human_bytes(limit_bytes)} reached"
+        super().__init__(402, "billing.storage_limit", f"Storage limit: {label}")
+
+
 class InsufficientCredits(CloudError):
     """Credit wallet has too few credits for the requested debit (402)."""
 
@@ -227,6 +320,7 @@ def with_cause(error: CloudError, cause: BaseException) -> CloudError:
 
 __all__ = [
     "BadRequest",
+    "CallLimitError",
     "CloudError",
     "ConflictError",
     "ConnectorLimitError",
@@ -240,6 +334,7 @@ __all__ = [
     "QuotaExceeded",
     "RateLimited",
     "SeatLimitError",
+    "StorageLimitError",
     "ValidationError",
     "with_cause",
 ]

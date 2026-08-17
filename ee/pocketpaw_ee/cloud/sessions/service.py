@@ -526,11 +526,67 @@ async def _active_run_for_session(session: _SessionDoc) -> dict | None:
     return None
 
 
-async def get_history(session_id: str, user_id: str, limit: int = 100) -> dict:
+def _encode_history_cursor(created_at: datetime, oid: str) -> str:
+    """Opaque keyset cursor for history paging — ``{createdAt}|{_id}``.
+
+    Same ``{field}|{oid}`` shape as the session-list cursor
+    (:func:`_encode_session_cursor`) so the frontend can page a transcript
+    backward by handing back the oldest message's ``createdAt`` + ``_id``.
+    """
+    return f"{created_at.isoformat()}|{oid}"
+
+
+def _decode_history_cursor(cursor: str) -> tuple[datetime, PydanticObjectId]:
+    """Inverse of :func:`_encode_history_cursor`."""
+    try:
+        at_iso, oid_str = cursor.split("|", 1)
+        return datetime.fromisoformat(at_iso), PydanticObjectId(oid_str)
+    except (ValueError, TypeError) as exc:
+        raise NotFound("session.bad_cursor", "Invalid history cursor") from exc
+
+
+def _message_to_dict(m: Any, role: str) -> dict[str, Any]:
+    """Serialize a Message row the way the client expects (display path)."""
+    return {
+        "_id": str(m.id),
+        "role": role,
+        "content": m.content,
+        "sender": m.sender,
+        "senderType": m.sender_type,
+        "createdAt": iso_utc(m.createdAt),
+        "attachments": [a.model_dump() for a in (m.attachments or [])],
+    }
+
+
+def _wire_role(m: Any, *, group: bool) -> str:
+    """Display role for a wire message.
+
+    Session / pocket rows carry ``role`` directly (``m.role or "user"``);
+    group rows derive it from ``sender_type`` (agents render as
+    ``assistant``).
+    """
+    if group:
+        return "assistant" if m.sender_type == "agent" else "user"
+    return m.role or "user"
+
+
+async def get_history(
+    session_id: str,
+    user_id: str,
+    limit: int = 100,
+    before: str | None = None,
+) -> dict:
     """Return session chat history from the unified Mongo messages store.
 
     Spans three context types (session/group/pocket). Response includes
     ``active_run`` for frontend auto-resume of an in-flight agent reply.
+
+    Pagination: pages NEWEST-first under the hood (so a transcript opens on
+    the latest messages), then returns ``messages`` ASCENDING for display.
+    ``before`` is a ``{createdAt}|{_id}`` keyset cursor — hand back the
+    OLDEST message's cursor to fetch the previous (older) page. ``has_more``
+    tells the client whether any older pages remain, so scroll-up history
+    loading knows when to stop.
     """
     from pocketpaw_ee.cloud.models.message import Message
 
@@ -546,93 +602,60 @@ async def get_history(session_id: str, user_id: str, limit: int = 100) -> dict:
         # ``session.agent`` would miss those rows entirely — symptom: user
         # sees their optimistic message with no agent reply.
         prefix = f"cloud:session:{session.id}:"
-        messages = (
-            await Message.find(
+        clauses: list[dict[str, Any]] = [
+            {"context_type": "session"},
+            {"session_key": {"$regex": f"^{re.escape(prefix)}"}},
+        ]
+    elif session.context_type == "group" and session.group:
+        clauses = [
+            {"context_type": "group"},
+            {"group": session.group},
+            {"deleted": False},
+        ]
+    else:
+        # Pocket context — three writer paths land here with different
+        # session_key shapes; preserved verbatim from the legacy implementation.
+        pocket_candidate_keys = [session.sessionId]
+        if session.pocket and session.agent:
+            pocket_candidate_keys.append(f"cloud:pocket:{session.pocket}:{session.agent}")
+        or_clauses: list[dict[str, Any]] = [
+            {"context_type": "pocket", "session_key": {"$in": pocket_candidate_keys}}
+        ]
+        if session.agent:
+            or_clauses.append(
                 {
                     "context_type": "session",
-                    "session_key": {"$regex": f"^{re.escape(prefix)}"},
+                    "session_key": f"cloud:session:{session.id}:{session.agent}",
                 }
             )
-            .sort("createdAt")
-            .limit(limit)
-            .to_list()
-        )
-        return {
-            "messages": [
-                {
-                    "_id": str(m.id),
-                    "role": m.role or "user",
-                    "content": m.content,
-                    "sender": m.sender,
-                    "senderType": m.sender_type,
-                    "createdAt": iso_utc(m.createdAt),
-                    "attachments": [a.model_dump() for a in (m.attachments or [])],
-                }
-                for m in messages
-            ],
-            "active_run": active_run,
-        }
+        clauses = [{"$or": or_clauses}]
 
-    if session.context_type == "group" and session.group:
-        messages = (
-            await Message.find(
-                {
-                    "context_type": "group",
-                    "group": session.group,
-                    "deleted": False,
-                }
-            )
-            .sort("createdAt")
-            .limit(limit)
-            .to_list()
-        )
-        return {
-            "messages": [
-                {
-                    "_id": str(m.id),
-                    "role": "assistant" if m.sender_type == "agent" else "user",
-                    "content": m.content,
-                    "sender": m.sender,
-                    "senderType": m.sender_type,
-                    "createdAt": iso_utc(m.createdAt),
-                    "attachments": [a.model_dump() for a in (m.attachments or [])],
-                }
-                for m in messages
-            ],
-            "active_run": active_run,
-        }
-
-    # Pocket context — three writer paths land here with different
-    # session_key shapes; preserved verbatim from the legacy implementation.
-    pocket_candidate_keys = [session.sessionId]
-    if session.pocket and session.agent:
-        pocket_candidate_keys.append(f"cloud:pocket:{session.pocket}:{session.agent}")
-    or_clauses: list[dict[str, Any]] = [
-        {"context_type": "pocket", "session_key": {"$in": pocket_candidate_keys}}
-    ]
-    if session.agent:
-        or_clauses.append(
+    # Keyset cursor: strictly older than the given (createdAt, _id).
+    if before:
+        before_ts, before_oid = _decode_history_cursor(before)
+        clauses.append(
             {
-                "context_type": "session",
-                "session_key": f"cloud:session:{session.id}:{session.agent}",
+                "$or": [
+                    {"createdAt": {"$lt": before_ts}},
+                    {"createdAt": before_ts, "_id": {"$lt": before_oid}},
+                ]
             }
         )
 
-    messages = await Message.find({"$or": or_clauses}).sort("createdAt").limit(limit).to_list()
+    mongo_filter: dict[str, Any] = clauses[0] if len(clauses) == 1 else {"$and": clauses}
+    docs = (
+        await Message.find(mongo_filter)
+        .sort([("createdAt", -1), ("_id", -1)])  # type: ignore[list-item]
+        .limit(limit + 1)
+        .to_list()
+    )
+    is_group = session.context_type == "group" and bool(session.group)
+    has_more = len(docs) > limit
+    page = list(reversed(docs[:limit]))  # newest-first fetch → oldest→newest display
     return {
-        "messages": [
-            {
-                "_id": str(m.id),
-                "role": m.role or "user",
-                "content": m.content,
-                "sender": m.sender,
-                "senderType": m.sender_type,
-                "createdAt": iso_utc(m.createdAt),
-                "attachments": [a.model_dump() for a in (m.attachments or [])],
-            }
-            for m in messages
-        ],
+        "messages": [_message_to_dict(m, _wire_role(m, group=is_group)) for m in page],
         "active_run": active_run,
+        "has_more": has_more,
     }
 
 
@@ -949,16 +972,32 @@ async def set_title(session_id: str, title: str) -> bool:
     return True
 
 
-async def touch(session_id: str) -> None:
-    """Update lastActivity and increment messageCount.
+async def touch(session_id: str, user_id: str) -> None:
+    """Update lastActivity and increment messageCount, for the OWNER only.
 
-    Called by chat persistence bridges on the hot path; kept on Beanie.
+    ``user_id`` is required rather than optional (2026-08-01), so that an
+    unscoped write cannot be reintroduced simply by leaving the argument out.
+    The ownership check matters as much as the identity: this writes to the
+    document and emits a ``SessionUpdated`` naming its owner onto that owner's
+    realtime feed, neither of which belongs to a caller who cannot read it.
+
+    Callers that already hold the doc use ``touch_doc``, which is the path the
+    memory store's write hook takes — it has established ownership by having
+    loaded the doc through an owned lookup, so it is unaffected.
     """
     doc = await _SessionDoc.find_one(_SessionDoc.sessionId == session_id)
     if not doc and session_id.startswith("websocket_"):
         doc = await _SessionDoc.find_one(_SessionDoc.sessionId == session_id[10:])
     if not doc:
         return
+    if doc.owner != user_id:
+        # Deliberately the same shape as ``_fetch_owned``. Note the asymmetry
+        # with the missing-session case above, which returns quietly: a caller
+        # probing ids learns "exists and is not yours" here. That is already
+        # true of every other per-session route (GET / PATCH / DELETE all raise
+        # Forbidden on a live session they don't own), so staying silent here
+        # would not close an oracle, only make this one route inconsistent.
+        raise Forbidden("session.not_owner", "Not the session owner")
     doc.lastActivity = datetime.now(UTC)
     doc.messageCount += 1
     await doc.save()

@@ -88,20 +88,51 @@ def test_at_least_the_known_kinds_are_gated() -> None:
     assert len(helpers) >= 11, f"expected the full gated-kind set, got {sorted(helpers)}"
 
 
+def _calls_transitive(tree: ast.Module, func_name: str, _seen: set[str] | None = None) -> set[str]:
+    """Everything ``func_name`` calls, following module-local calls one level deep.
+
+    Needed because the gate now has TWO shapes: some handlers call each
+    ``_assert_<kind>_workspace`` directly, and some call an aggregate
+    (``_assert_gated_workspaces``) that calls them all. Both satisfy the rule, so
+    the guard resolves through the aggregate instead of demanding one shape.
+    """
+    seen = _seen if _seen is not None else set()
+    if func_name in seen:
+        return set()
+    seen.add(func_name)
+    direct = _calls_in(tree, func_name)
+    out = set(direct)
+    for callee in direct:
+        if callee.startswith("_assert") and callee.endswith("_workspace"):
+            continue  # a leaf assert, nothing further to resolve
+        try:
+            out |= _calls_transitive(tree, callee, seen)
+        except AssertionError:
+            continue  # not a module-local function (imported / builtin)
+    return out
+
+
 @pytest.mark.parametrize("handler", _HANDLERS)
 def test_every_tenancy_assert_runs_in_every_handler(handler: str) -> None:
     """The rule the router's header states, mechanically enforced.
 
     Approve and reject, single and bulk, must all gate the SAME set of kinds. A
     kind gated on only some of them is the exact shape of the SHIP-4 hole.
+
+    Resolved TRANSITIVELY: calling the ``_assert_gated_workspaces`` aggregate
+    counts, since it runs every per-kind assert. That aggregate is the structural
+    fix this guard was written to demand — one registration point instead of
+    eleven kinds x four call sites — so the guard has to recognise it rather than
+    insist on the old hand-copied shape.
     """
     tree = _tree()
     expected = _assert_helpers(tree)
-    called = _calls_in(tree, handler)
+    called = _calls_transitive(tree, handler)
     missing = sorted(expected - called)
     assert not missing, (
         f"{handler} does not run {missing} — a gated kind must be tenancy-checked "
-        "in ALL FOUR handlers (approve/reject x single/bulk). Asymmetric tenant "
-        "scope is no tenant scope: the unguarded handler lets a caller in another "
-        "workspace approve or reject this tenant's parked action."
+        "in ALL FOUR handlers (approve/reject x single/bulk), either directly or "
+        "through the aggregate. Asymmetric tenant scope is no tenant scope: the "
+        "unguarded handler lets a caller in another workspace approve or reject "
+        "this tenant's parked action."
     )

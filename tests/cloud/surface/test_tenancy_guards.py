@@ -96,9 +96,9 @@ async def test_pocket_handler_rejects_cross_workspace_id() -> None:
         CreatePocketRequest(name="Secret W2 Pocket"),
     )
 
-    preamble = await pocket_handler.build_preamble(
-        W1, user_id, SurfaceMeta(pocket_id=pocket["_id"])
-    )
+    preamble = (
+        await pocket_handler.build_preamble(W1, user_id, SurfaceMeta(pocket_id=pocket["_id"]))
+    ).text
 
     # The route tag is still rendered (the agent knows it's on a pocket
     # surface) but the W2 data MUST NOT appear.
@@ -135,15 +135,17 @@ async def test_pocket_widget_handler_rejects_cross_workspace_id() -> None:
     leaky_widget_id = "leaky-widget-id-from-w2"
     leaky_focus_id = "leaky-focus-node-from-w2"
 
-    preamble = await pocket_widget_handler.build_preamble(
-        W1,
-        user_id,
-        SurfaceMeta(
-            pocket_id=pocket["_id"],
-            widget_id=leaky_widget_id,
-            focus_node_id=leaky_focus_id,
-        ),
-    )
+    preamble = (
+        await pocket_widget_handler.build_preamble(
+            W1,
+            user_id,
+            SurfaceMeta(
+                pocket_id=pocket["_id"],
+                widget_id=leaky_widget_id,
+                focus_node_id=leaky_focus_id,
+            ),
+        )
+    ).text
 
     # Base preamble's tenancy guard still holds.
     assert "Secret W2 Widget Pocket" not in preamble
@@ -174,7 +176,9 @@ async def test_agent_handler_rejects_cross_workspace_agent_id() -> None:
         CreateAgentRequest(name="Secret W2 Agent", slug="secret-w2-agent"),
     )
 
-    preamble = await agent_handler.build_preamble(W1, user_id, SurfaceMeta(agent_id=agent.id))
+    preamble = (
+        await agent_handler.build_preamble(W1, user_id, SurfaceMeta(agent_id=agent.id))
+    ).text
 
     # Surface tag still present so the agent knows it's on /agents/[id].
     assert '<surface kind="agent"' in preamble
@@ -213,7 +217,7 @@ async def test_activity_handler_returns_placeholder_when_buffer_not_workspace_sc
         lambda: _UnscopedBuffer(),
     )
 
-    preamble = await activity_handler.build_preamble(W1, "u-irrelevant", SurfaceMeta())
+    preamble = (await activity_handler.build_preamble(W1, "u-irrelevant", SurfaceMeta())).text
 
     # Surface block still emits — the chat path needs a usable preamble.
     assert '<surface kind="activity"' in preamble
@@ -257,7 +261,7 @@ async def test_activity_handler_uses_workspace_scoped_buffer() -> None:
         )
     )
 
-    preamble = await activity_handler.build_preamble(W1, "u-irrelevant", SurfaceMeta())
+    preamble = (await activity_handler.build_preamble(W1, "u-irrelevant", SurfaceMeta())).text
 
     assert '<surface kind="activity"' in preamble
     assert "w1-event-marker" in preamble

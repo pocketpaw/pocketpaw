@@ -15,6 +15,11 @@
 # any authenticated dashboard user). ADMIN, mirroring ``audit.read``: a site's
 # concierge conversations, decisions, and handoffs carry visitor PII and owner
 # decision context, so they must not be visible to every workspace member.
+# Updated: 2026-07-27 (feat/growth-g4) — registered ``growth.read`` (MEMBER)
+# and ``growth.manage`` (ADMIN) for the /growth outbound engine, mirroring
+# ship.read/ship.manage: the manage tier gates the outbound send, which only
+# ever fires through an approved ``_growth_send`` Instinct proposal with an
+# execute-time re-check of the proposer's CURRENT role in ``growth.executor``.
 #
 # Updated: 2026-07-11 (feat/external-alerting-c2c3) — registered
 # ``automations.read`` (MEMBER) and ``automations.manage`` (ADMIN) for the
@@ -233,6 +238,22 @@ ACTIONS: dict[str, ActionRule] = {
     # owner-only tier that governs money or the human-in-the-loop switch itself.
     "ship.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "ship.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # /growth — outbound engine (prospects, drafts, gated sends).
+    # Reading prospects / drafts is MEMBER; authoring them (create / update /
+    # draft / non-gated lifecycle moves) is MEMBER too — the fabric.read /
+    # fabric.write split, because staging outreach copy is ordinary team work.
+    # ``growth.manage`` (ADMIN) gates the OUTBOUND verb — proposing a send.
+    # An approved send goes out under the company's name to a real prospect and
+    # cannot be unsent. Like ship.manage it never executes from a request: the
+    # send routes through a ``_growth_send`` Instinct proposal, and
+    # ``growth.executor`` RE-CHECKS this action against the proposer's CURRENT
+    # role at dispatch time, so a since-demoted proposer's approved send fails
+    # closed. The propose ROUTE therefore has to sit at the same ADMIN tier the
+    # executor re-checks, or every member-filed proposal would fail closed at
+    # approve time. (feat/growth-g4, mirroring /ship.)
+    "growth.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "growth.write": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "growth.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Instinct — human-in-the-loop decision pipeline.
     # Propose and read are MEMBER (agents and analysts can propose + view actions).
     # Approve/reject and audit are ADMIN — governance actions with downstream

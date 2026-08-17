@@ -1,4 +1,35 @@
 # ee/paw_bar/decision_loop.py — Close the customer decision loop via Instinct.
+# Updated: 2026-08-01 (AL-2, paw-bar emitters) — ``deliver_customer_decision``
+#   now records the DELIVERED beat (``paw.action.delivered``) through
+#   ``paw_bar/ledger.py``. AL-1 gave the funnel its proposal and its approval;
+#   without this the board could show that a human said yes but never that the
+#   visitor got the answer — which is the only step the customer experiences.
+#   Three deliberate choices, each of which was a way to get this wrong:
+#     * ONLY on the DELIVERED path. A decline already lands AL-1's
+#       ``paw.action.rejected`` row, so emitting on both would count one refusal
+#       twice and quietly inflate the funnel's last stage.
+#     * The FILE is routed by the widget's real ``workspace_id`` — the same token
+#       ``propose_customer_decision`` routes the instinct.db by — while the row's
+#       in-row scope is the blob's workspace (the Action's own scope). This file
+#       has kept those two values apart since the H1 fix for exactly this reason:
+#       the blob's value falls back to the colon-qualified OWNER label, which the
+#       store factory rejects, and a rejected route inside a fail-soft emitter is
+#       a row that vanishes with nobody told. Approved row and delivered row now
+#       land in the same file AND the same bucket.
+#     * The widget lookup moved OUT of the email block so both consumers share
+#       one read; the email path is otherwise untouched.
+# Updated: 2026-07-31 (AL-1, agent ledger spine) — both propose paths now stamp
+#   ``actor_agent_id`` on the Action from the widget's bound agent, via the new
+#   ``resolve_widget_agent`` helper. Until now the only trace of WHICH agent
+#   raised a paw-bar proposal was the ``paw_bar:<widget_id>`` trigger string:
+#   readable by a person, not joinable by a query. The ledger emitter keys every
+#   approval on the Action's ``actor_agent_id``, so an unstamped proposal would
+#   land in the unattributed bucket and the concierge's own value board would
+#   show nothing. The binding already existed on the widget (``widget.agent_id``,
+#   set by agent_provisioning) — all that was missing was carrying it across.
+#   The helper is fail-soft in the ``notify.py`` shape: a widget with no agent,
+#   or a duck-typed object without the attribute, yields "" and the proposal is
+#   raised exactly as before.
 # Updated: 2026-07-30 (async decision delivery) — deliver_customer_decision now
 #   closes the loop for a visitor who LEFT the page: if the flipped row carries
 #   a ``contact_email`` (attached via POST /paw-bar/decision-contact while the
@@ -147,6 +178,24 @@ def resolve_workspace_id(widget: Any) -> str:
     real ``workspace_id`` only — an owner label is never a store-path token.
     """
     return str(getattr(widget, "workspace_id", "") or "") or str(getattr(widget, "owner", "") or "")
+
+
+def resolve_widget_agent(widget: Any) -> str:
+    """The agent id bound to a Paw Bar widget, or "" when there isn't one (AL-1).
+
+    A site concierge IS a normal agent: ``agent_provisioning`` binds one and
+    stamps ``widget.agent_id``, which is the same key the agent-scoped inbox and
+    the notification deep-link already resolve by. This reads that binding so a
+    proposal can carry its proposer into the ledger.
+
+    Fail-soft by construction — ``getattr`` with a default, coerced through
+    ``str``. An unbound widget, a legacy widget written before the column, or a
+    duck-typed stand-in in a test all return "", and "" is a legal
+    ``actor_agent_id``: the proposal still gets raised, the approval still gets
+    recorded, and the row simply counts as unattributed. Attribution is worth
+    having, never worth failing a customer's request over.
+    """
+    return str(getattr(widget, "agent_id", "") or "")
 
 
 def _summarize_payload(payload: dict[str, Any]) -> str:
@@ -309,6 +358,12 @@ async def propose_customer_decision(
             # customer relationship), NOT the workspace — The Tray filters by
             # assignee to show an operator only the items they own.
             assignee=owner or None,
+            # AL-1 — the AGENT that raised this, so the approval lands on that
+            # concierge's ledger. Distinct from ``assignee`` (the human who
+            # decides) and from ``workspace_id`` (the tenant): three identities,
+            # three jobs, and conflating any two of them is what made the
+            # concierge funnel un-queryable in the first place.
+            actor_agent_id=resolve_widget_agent(widget),
         )
 
         # Park the PENDING decision row so the customer surface has something to
@@ -463,6 +518,11 @@ async def propose_customer_action(
             # owner; the two must agree, or the same visitor raises two
             # differently-routed proposals depending on which path caught them.
             assignee=str(getattr(widget, "owner", "") or "") or None,
+            # AL-1 — same attribution as the event path above. The two paths must
+            # agree here for the same reason they must agree on the assignee: one
+            # visitor should not produce two differently-attributed proposals
+            # depending on which entry point caught them.
+            actor_agent_id=resolve_widget_agent(widget),
         )
         decision = DecisionStatus(
             widget_id=widget_id,
@@ -588,6 +648,41 @@ async def deliver_customer_decision(action: Any, *, declined: bool = False) -> N
             updated.customer_ref,
         )
 
+        # The widget is resolved ONCE here and reused by both blocks below. It
+        # was previously loaded inside the email block; the ledger emit needs the
+        # same object (for the agent binding and, load-bearingly, for the real
+        # ``workspace_id`` that routes the ledger FILE), and reading the same row
+        # twice on an approve click would be waste. Its own guard, so a widget
+        # that has since been deleted degrades to "no widget" for both consumers
+        # instead of breaking the delivery that already landed.
+        widget: Any = None
+        try:
+            widget = await store.get_widget(updated.widget_id)
+        except Exception:  # noqa: BLE001 — the decision is already delivered
+            logger.debug("widget lookup failed for %s", updated.widget_id, exc_info=True)
+
+        # AL-2 — the delivered beat. Only on the DELIVERED path: this kind means
+        # "the approved answer reached the person waiting for it", and a decline
+        # is already counted by AL-1's ``paw.action.rejected`` row, so emitting
+        # here too would put one refusal in the funnel twice. A delivery whose
+        # widget no longer resolves records NOTHING rather than guessing a file
+        # to route it into — the visitor still got their answer, and a row in the
+        # wrong tenant's ledger is worse than an absent one. Fail-soft by
+        # construction (see paw_bar/ledger.py) — never raises into the approve.
+        if state == DecisionState.DELIVERED and widget is not None:
+            from pocketpaw_ee.paw_bar import ledger
+
+            await ledger.emit_action_delivered(
+                action=action,
+                widget=widget,
+                customer_ref=updated.customer_ref,
+                # In-row scope = the blob's workspace, i.e. EXACTLY the scope the
+                # Instinct Action carries, so the delivered row lands in the same
+                # bucket as its own approved row and AL-4 can compare the two.
+                row_workspace_id=blob_workspace or "",
+                decided_by=decided_by,
+            )
+
         # Async half of the loop: the visitor left the page and parked an email
         # on the pending row (POST /paw-bar/decision-contact). Send them the
         # SAME customer-facing reply the poll returns — approved or declined —
@@ -598,7 +693,6 @@ async def deliver_customer_decision(action: Any, *, declined: bool = False) -> N
             try:
                 from pocketpaw_ee.paw_bar import mailer
 
-                widget = await store.get_widget(updated.widget_id)
                 site_name = str(getattr(widget, "name", "") or "") or "the site"
                 await mailer.send_decision_email(
                     updated.contact_email,
@@ -627,5 +721,6 @@ __all__ = [
     "deliver_customer_decision",
     "propose_customer_action",
     "propose_customer_decision",
+    "resolve_widget_agent",
     "resolve_workspace_id",
 ]

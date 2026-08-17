@@ -101,6 +101,15 @@ ALWAYS-ON (not behind ``billing_enforced``), unchanged from before; the Free
 ``max_seats`` == the model default (5) means a free tenant sees the identical
 limit. ``raise_seats_for_plan`` (upgrade-only) keeps the stored ``doc.seats`` in
 step with the plan on a subscription.active.
+2026-08-08 (feat/billing-rbac-member-caps): the seat gate became plan-AUTHORITATIVE.
+``_effective_seat_limit`` now returns the resolved plan's ``max_seats`` directly
+(only an uncapped Enterprise plan defers to ``doc.seats``), so the approved
+CONSUMER member caps hold on downgrade too: Free = 0 (no invitations allowed),
+Paw Go = 5, Paw Pro = 10, Paw Pro Max = 50 total workspace members (owner
+included). A Free workspace — even one that still holds members from a cancelled
+plan — can no longer invite anyone new; existing members are never removed.
+``raise_seats_for_plan`` is unchanged (upgrade-only, keeps the persisted
+``doc.seats`` display ceiling in step).
 """
 
 from __future__ import annotations
@@ -1179,20 +1188,21 @@ async def _mint_invite_for_email(
 
 
 async def _effective_seat_limit(doc: _WorkspaceDoc) -> int:
-    """The seat ceiling to enforce for this workspace — plan-sourced.
+    """The seat ceiling to enforce for this workspace — the PLAN cap, authoritatively.
 
-    Sources the limit from the workspace's RESOLVED PLAN (``max_seats``) rather
-    than the flat ``doc.seats`` alone, so a plan upgrade lifts the cap. Enforced
-    as ``max(doc.seats, plan.max_seats)`` so a workspace that already carries a
-    higher custom ``doc.seats`` — a seeded enterprise box, or a legacy
-    hand-bumped seat count — never regresses below what it has today. An uncapped
-    plan (Enterprise, ``max_seats=None``) imposes no plan ceiling: the workspace's
-    own ``doc.seats`` stands.
+    Sources the limit from the workspace's RESOLVED PLAN (``max_seats``) — the
+    ABAC/RBAC member gate. The plan cap is AUTHORITATIVE (NOT ``max(doc.seats,
+    plan)``): a workspace's stored ``doc.seats`` is a legacy/display ceiling that
+    never overrides the plan, so the per-plan member limits hold on downgrade too.
+    This is what makes Free (``max_seats=0``) block ALL new invitations — even a
+    workspace that already has members (a downgraded Pro box) can invite nothing
+    more; existing members are never removed, only new invites/acceptances are
+    capped. An uncapped plan (Enterprise, ``max_seats=None``) imposes no plan
+    ceiling: the workspace's own ``doc.seats`` stands (a negotiated contract).
 
     ALWAYS-ON (NOT gated on ``billing_enforced``), mirroring the pre-existing seat
-    gate. Because the Free ``max_seats`` equals the ``Workspace.seats`` model
-    default (5), a free tenant sees byte-for-byte the same limit it had before
-    this became plan-sourced — no regression.
+    gate. Approved CONSUMER caps: Free = 0, Paw Go = 5, Paw Pro = 10, Paw Pro Max
+    = 50 total workspace members (owner included).
 
     The entitlements resolver is imported LAZILY to keep this module off the
     resolver's import graph (the resolver itself imports this service lazily);
@@ -1203,7 +1213,7 @@ async def _effective_seat_limit(doc: _WorkspaceDoc) -> int:
     ent = await entitlements_service.resolve_entitlements(str(doc.id))
     if ent.max_seats is None:
         return doc.seats
-    return max(doc.seats, ent.max_seats)
+    return ent.max_seats
 
 
 async def create_invite(

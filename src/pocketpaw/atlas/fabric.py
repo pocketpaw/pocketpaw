@@ -45,9 +45,57 @@
 #     ``(?<=[A-Z])(?=[A-Z][a-z])`` so consecutive-capital names split
 #     ("HTTPServer" → "HTTP Server", "APIKey" → "API Key"); "http server" /
 #     "api key" queries now match acronym-named entity types.
+#
+# Updated: 2026-08-17 (feat/ast-2-atlas-trust-aggregate, AST-2) — the describe
+#   view learns source-truth. The registry knows Customer HAS ``arr``; the OSS
+#   ``FabricStore`` (a different DB) knows whether ``arr`` is disputed / stale
+#   and who won. One optional, duck-typed, ASYNC read bridges them at the
+#   TYPE level:
+#   * ``RegistryFabricIntrospector.entity_type_source_truth(name)`` — NOT a
+#     Protocol member (same reasoning as ``list_entity_properties``). Resolves
+#     the type in the store, runs ONE indexed type-scoped
+#     ``list_statement_keys`` (LIMIT cap+1) — an untracked type stops there
+#     with zero further statement reads — then walks tracked keys through
+#     ``get_statements`` + the pure ``resolve()`` (mirroring
+#     ``get_object_provenance``), capped at ``SOURCE_TRUTH_SAMPLE_CAP`` keys
+#     (``sampled=True``). Rolls up per property: objects / disputed / stale /
+#     aging / winner_writer_mix, plus ``mode``, ``tracked``, ``object_count``
+#     and a pointer to ``fabric_query include_provenance=true``.
+#   * ``describe_fabric_id_async`` — the awaitable sibling the async
+#     ``atlas_describe`` handler now calls: sync describe + the aggregate folded
+#     in as the additive ``source_truth`` key. Any raise → key absent, registry
+#     payload intact. ``search_entity_types`` never touches it.
+#   * ``build_workspace_fabric_introspector`` also binds
+#     ``get_fabric_store(workspace_id=...)``; that binding degrades alone (the
+#     registry introspector still returns, only ``source_truth`` goes absent).
+#
+# Updated: 2026-08-17 (AST-5a — pre-merge review fixes on the aggregate) —
+#   ``entity_type_source_truth`` is now honest AND O(1) in store connections:
+#   * mode ``"off"`` short-circuits with ZERO store reads (``live=False``,
+#     ``tracked=False``, a ``note``) — off means no provenance is read anywhere
+#     else, so shadow-era leftovers must not read as "tracked" beside a
+#     primitive the overlay marks unavailable. ``live`` (mode != off) is in
+#     every payload.
+#   * the per-key ``get_statements`` walk (one aiosqlite connection per key —
+#     ~500 serial opens on a saturated type) is replaced by ONE bulk
+#     ``FabricStore.get_statements_for_type`` read (grouped by key, same
+#     per-key order) plus ``statement_coverage_for_type`` (uncapped
+#     ``COUNT(DISTINCT object_id)`` overall + per property).
+#   * the cap no longer hides data: ``object_count`` and every property's
+#     ``objects`` are the exact uncapped counts, so a property that only
+#     appears on later object_ids can't vanish; disputed / stale / aging /
+#     winner mix come from the walked keys, ``sampled_keys`` says how many,
+#     and ``sampled=True`` carries a ``note`` saying so.
+# Updated: 2026-08-17 (AST-5b — review hygiene) — ``describe_fabric_id_async``
+#   accepts a SYNC ``entity_type_source_truth`` too (``inspect.isawaitable``
+#   guard): a sync impl returning a dict used to raise TypeError on ``await``,
+#   swallowed by the blanket except, and vanish indistinguishably from "no
+#   store bound". The new gates on this seam and the AST-3 flag overlay are
+#   proven by ``tests/mutations/atlas_flags.json`` (5 mutations, all caught).
 
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 from typing import Any, Protocol, runtime_checkable
@@ -63,6 +111,19 @@ FABRIC_KIND = "fabric"
 # Cap on synthetic fabric cards appended to a search answer. Compiled-entry
 # results keep their own limit; fabric cards are extra, never displacing.
 MAX_FABRIC_RESULTS = 3
+
+# AST-2: hard cap on tracked (object_id, property) keys the type-level
+# source-truth aggregate walks per describe. Above it the roll-up reports
+# ``sampled=True`` and stops — a describe answer is a glance, not an audit;
+# the per-object truth is one fabric_query away (SOURCE_TRUTH_POINTER).
+SOURCE_TRUTH_SAMPLE_CAP = 500
+SOURCE_TRUTH_POINTER = "fabric_query include_provenance=true for the per-object answer"
+# AST-5a: what the aggregate says instead of reading anything when the
+# deployment's source-truth flag is off (see entity_type_source_truth).
+SOURCE_TRUTH_OFF_NOTE = (
+    "source-truth is off in this deployment; statement history from an earlier "
+    "shadow phase is not read"
+)
 
 # Entity-type names are commonly CamelCase ("CustomerAccount"); split on
 # case boundaries before stemming so "customer account" queries match. Two
@@ -110,6 +171,20 @@ class FabricIntrospector(Protocol):
     # ``isinstance`` check for introspectors (including test fakes) that only
     # implement the two required methods — so it stays a documented, duck-typed
     # extension rather than a Protocol member.
+    #
+    # OPTIONAL — a type-level source-truth aggregate for the DETAIL view (AST-2).
+    #
+    # An implementation MAY expose ``async entity_type_source_truth(name) ->
+    # dict | None`` — a live roll-up of the OSS FabricStore's statement
+    # provenance for objects of that type (per property: how many tracked
+    # objects, how many disputed / stale / aging, the winner writer-class mix;
+    # see ``RegistryFabricIntrospector.entity_type_source_truth`` for the exact
+    # shape). ONLY ``describe_fabric_id_async`` consumes it (via ``getattr`` +
+    # ``callable`` + ``await``), folded into the describe payload as the
+    # additive ``source_truth`` key; ``search_entity_types`` NEVER calls it —
+    # search stays properties-only (FINDING B). Any raise → the key is simply
+    # absent and the registry payload still answers. Same non-Protocol
+    # reasoning as ``list_entity_properties`` above.
 
 
 def _fabric_tokens(text: str) -> set[str]:
@@ -271,6 +346,41 @@ def describe_fabric_id(
         return None
 
 
+async def describe_fabric_id_async(
+    introspector: FabricIntrospector,
+    entry_id: str,
+) -> dict[str, Any] | None:
+    """:func:`describe_fabric_id` plus the optional live ``source_truth`` roll-up.
+
+    The async sibling the (already async) ``atlas_describe`` handler awaits.
+    It calls the sync registry describe unchanged, then — ONLY when the
+    introspector exposes the optional, duck-typed ``entity_type_source_truth``
+    (AST-2) — awaits it and folds a dict result in as ``source_truth``.
+    Fail-closed: a missing method, a ``None`` result, or ANY raise leaves the
+    key ABSENT and the registry payload untouched, so a broken FabricStore
+    can never take the schema answer down with it. Sync callers keep using
+    ``describe_fabric_id``.
+    """
+    payload = describe_fabric_id(introspector, entry_id)
+    if payload is None:
+        return None
+    aggregate = getattr(introspector, "entity_type_source_truth", None)
+    if not callable(aggregate):
+        return payload
+    try:
+        # Accept both an async (documented) and a plain sync implementation:
+        # a sync method returning a dict must not be silently dropped by an
+        # ``await`` on a non-awaitable (that TypeError would be swallowed
+        # below and look exactly like "no store bound").
+        result = aggregate(payload["name"])
+        source_truth = await result if inspect.isawaitable(result) else result
+        if isinstance(source_truth, dict):
+            payload["source_truth"] = source_truth
+    except Exception as exc:  # noqa: BLE001 — additive field, never break the tool
+        logger.debug("atlas fabric source-truth aggregate unavailable (%s): %s", entry_id, exc)
+    return payload
+
+
 class RegistryFabricIntrospector:
     """Adapter from the EE ``WorkspaceFabricRegistry`` read surface to
     :class:`FabricIntrospector`.
@@ -280,12 +390,28 @@ class RegistryFabricIntrospector:
     ``list_entity_links``) so tests can wrap a tmp-path store without
     importing ``pocketpaw_ee`` at module scope. The registry is already
     bound to one workspace — this adapter adds no scoping of its own.
+
+    ``source_truth`` (AST-2) is an OPTIONAL OSS ``FabricStore`` (the
+    per-property statement/provenance store — a different DB from the
+    registry) bound to the same workspace; with it,
+    :meth:`entity_type_source_truth` serves the live type-level trust
+    aggregate. ``None`` (the default, and the builder's fallback when the
+    store can't be bound) makes that method answer ``None`` — the describe
+    payload then simply lacks ``source_truth``.
     """
 
-    __slots__ = ("_registry",)
+    __slots__ = ("_registry", "_source_truth", "_workspace_id")
 
-    def __init__(self, registry: Any) -> None:
+    def __init__(
+        self,
+        registry: Any,
+        *,
+        source_truth: Any | None = None,
+        workspace_id: str | None = None,
+    ) -> None:
         self._registry = registry
+        self._source_truth = source_truth
+        self._workspace_id = workspace_id
 
     def list_entity_types(self) -> list[str]:
         return list(self._registry.list_entity_types())
@@ -312,6 +438,128 @@ class RegistryFabricIntrospector:
         """
         return sorted(self._registry.get_entity_properties(name))
 
+    async def entity_type_source_truth(self, name: str) -> dict | None:
+        """Live type-level source-truth roll-up for the describe view (AST-2,
+        reworked AST-5a).
+
+        Optional, duck-typed — NOT a ``FabricIntrospector`` Protocol member
+        (see the OPTIONAL note on the Protocol). ``None`` when no store is
+        bound. Otherwise::
+
+            {mode, live, tracked, sampled, sampled_keys, object_count,
+             properties: {<prop>: {objects, disputed, stale, aging,
+                                   winner_writer_mix: {<writer_class>: n}}},
+             pointer, note?}
+
+        ``mode == "off"`` short-circuits with ZERO store reads:
+        ``live=False, tracked=False`` plus a ``note`` — off means the store
+        records and reads no provenance (``config.py`` / ``store.py``), so
+        statement history left over from an earlier shadow phase must not be
+        reported as tracked beside a ``primitive:source-truth`` the overlay
+        marks unavailable. ``live`` (= ``mode != "off"``) is present in every
+        mode.
+
+        Cost is bounded by the TRACKED set, never the whole fabric, and by a
+        CONSTANT number of store connections, never one per key: the type
+        name resolves to the store's type row (``get_type_by_name``);
+        ``statement_coverage_for_type`` (one connection, two indexed
+        ``COUNT(DISTINCT object_id)`` aggregates) gives the HONEST uncapped
+        totals — no objects → ``tracked=False`` and it stops; then ONE bulk
+        ``get_statements_for_type`` read (type-scoped join, grouped by key,
+        ``key_cap=SOURCE_TRUTH_SAMPLE_CAP``) feeds the pure ``resolve()``
+        (mirroring ``FabricStore.get_object_provenance`` — dispute / freshness
+        / winner metadata are never persisted, so they are recomputed here).
+
+        Honesty under the cap: ``object_count`` is the true distinct count and
+        ``properties`` ALWAYS lists every tracked property with ``objects`` =
+        its true per-property object count, so a property that only appears on
+        later object_ids can never vanish. ``disputed`` / ``stale`` / ``aging``
+        / ``winner_writer_mix`` are computed from the walked keys only;
+        ``sampled_keys`` says how many were walked and, when ``sampled`` is
+        true (fewer walked than tracked), a ``note`` says those per-property
+        counts cover only the first ``sampled_keys`` keys by object_id.
+        ``winner_freshness`` is None on the pinned path, so a pinned winner
+        counts as neither stale nor aging.
+        """
+        store = self._source_truth
+        if store is None:
+            return None
+        from datetime import UTC, datetime
+
+        from pocketpaw.config import get_settings
+        from pocketpaw.fabric.resolver import resolve
+        from pocketpaw.fabric.trust import default_trust_rules
+
+        mode = get_settings().fabric_source_truth_mode
+        out: dict[str, Any] = {
+            "mode": mode,
+            "live": mode != "off",
+            "tracked": False,
+            "sampled": False,
+            "sampled_keys": 0,
+            "object_count": 0,
+            "properties": {},
+            "pointer": SOURCE_TRUTH_POINTER,
+        }
+        if mode == "off":
+            out["note"] = SOURCE_TRUTH_OFF_NOTE
+            return out
+        ws = self._workspace_id
+        obj_type = await store.get_type_by_name(name, workspace_id=ws)
+        if obj_type is None:
+            return out
+        coverage = await store.statement_coverage_for_type(obj_type.id, workspace_id=ws)
+        object_count = int(coverage.get("object_count") or 0)
+        per_property: dict[str, int] = dict(coverage.get("properties") or {})
+        if object_count == 0 or not per_property:
+            return out
+        out["tracked"] = True
+        out["object_count"] = object_count
+        properties: dict[str, dict[str, Any]] = {
+            prop: {
+                "objects": int(n),
+                "disputed": 0,
+                "stale": 0,
+                "aging": 0,
+                "winner_writer_mix": {},
+            }
+            for prop, n in sorted(per_property.items())
+        }
+        grouped = await store.get_statements_for_type(
+            obj_type.id, workspace_id=ws, key_cap=SOURCE_TRUTH_SAMPLE_CAP
+        )
+        now = datetime.now(UTC)
+        rules = default_trust_rules()
+        walked = 0
+        for (_object_id, prop), stmts in grouped.items():
+            if not stmts:
+                continue
+            walked += 1
+            resolution = resolve(stmts, rules, object_type=obj_type.name, now=now)
+            entry = properties.setdefault(
+                prop,
+                {"objects": 0, "disputed": 0, "stale": 0, "aging": 0, "winner_writer_mix": {}},
+            )
+            if resolution.is_disputed:
+                entry["disputed"] += 1
+            if resolution.winner_freshness in ("stale", "aging"):
+                entry[resolution.winner_freshness] += 1
+            winner = resolution.winner_statement
+            if winner is not None:
+                mix = entry["winner_writer_mix"]
+                mix[winner.writer_class] = mix.get(winner.writer_class, 0) + 1
+        total_keys = sum(per_property.values())
+        out["sampled_keys"] = walked
+        out["properties"] = properties
+        if walked < total_keys:
+            out["sampled"] = True
+            out["note"] = (
+                f"per-property disputed/stale/aging/winner counts cover only the first "
+                f"{walked} of {total_keys} tracked keys by object_id; object_count and "
+                f"each property's objects are exact"
+            )
+        return out
+
 
 def build_workspace_fabric_introspector(workspace_id: str) -> FabricIntrospector | None:
     """EE wiring hook: a live introspector bound to *workspace_id*, or None.
@@ -321,6 +569,12 @@ def build_workspace_fabric_introspector(workspace_id: str) -> FabricIntrospector
     state dir) — all DEBUG-logged, all degrade to "no introspector"
     (fail-closed). The returned introspector is constructed PER RUN with the
     run's workspace id — never cached process-globally.
+
+    AST-2: the same call also binds the workspace's OSS ``FabricStore``
+    (``get_fabric_store(workspace_id=...)``) as the introspector's optional
+    ``source_truth`` store. That binding degrades INDEPENDENTLY: if it fails
+    the registry introspector is still returned (schema answers keep
+    working) and only the ``source_truth`` describe field goes absent.
     """
     if not isinstance(workspace_id, str) or not workspace_id.strip():
         return None
@@ -330,9 +584,17 @@ def build_workspace_fabric_introspector(workspace_id: str) -> FabricIntrospector
         logger.debug("pocketpaw_ee.fabric not importable; atlas fabric introspection off")
         return None
     try:
+        ws = workspace_id.strip()
         store = WorkspaceFabricStore()
-        registry = WorkspaceFabricRegistry(store=store, workspace_id=workspace_id.strip())
-        return RegistryFabricIntrospector(registry)
+        registry = WorkspaceFabricRegistry(store=store, workspace_id=ws)
+        source_truth = None
+        try:
+            from pocketpaw.stores import get_fabric_store
+
+            source_truth = get_fabric_store(workspace_id=ws)
+        except Exception as exc:  # noqa: BLE001 — additive field degrades alone
+            logger.debug("atlas fabric source-truth store unavailable: %s", exc)
+        return RegistryFabricIntrospector(registry, source_truth=source_truth, workspace_id=ws)
     except Exception as exc:  # noqa: BLE001 — infra failure degrades, never crashes
         logger.debug("atlas fabric introspector construction failed: %s", exc)
         return None
@@ -342,9 +604,13 @@ __all__ = [
     "FABRIC_ID_PREFIX",
     "FABRIC_KIND",
     "MAX_FABRIC_RESULTS",
+    "SOURCE_TRUTH_OFF_NOTE",
+    "SOURCE_TRUTH_POINTER",
+    "SOURCE_TRUTH_SAMPLE_CAP",
     "FabricIntrospector",
     "RegistryFabricIntrospector",
     "build_workspace_fabric_introspector",
     "describe_fabric_id",
+    "describe_fabric_id_async",
     "search_entity_types",
 ]

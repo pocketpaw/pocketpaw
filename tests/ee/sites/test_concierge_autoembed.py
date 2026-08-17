@@ -173,6 +173,11 @@ async def _snippet_for(monkeypatch, *, widget, **ov):
         "site_key": _KEY,
         "api_base": _API_BASE,
         "concierge_enabled": True,
+        # Required since feat/sites-concierge-entitlement. These cases are about the
+        # OTHER gates (owner switch, key, widget, binding), so entitlement is granted
+        # and held constant; the billing gate has its own tree in
+        # tests/cloud/test_paw_bar_concierge_entitlement.py.
+        "concierge_entitled": True,
     }
     kwargs.update(ov)
     return await embed.concierge_snippet(**kwargs)
@@ -221,6 +226,7 @@ async def test_an_empty_pocket_never_widens_onto_a_sibling(monkeypatch):
         site_key=_KEY,
         api_base=_API_BASE,
         concierge_enabled=True,
+        concierge_entitled=True,
     )
 
     assert out == ""
@@ -344,4 +350,134 @@ async def test_a_broken_injection_never_costs_the_site_its_deploy(
     site = await _publish(tmp_path)
 
     assert site.deployed is True
+    assert all("paw-bar/widget.js" not in page for page in _built_pages(tmp_path))
+
+
+# --------------------------------------------------------------------------- #
+# The BILLING gate at the publish seam (feat/sites-concierge-entitlement).
+#
+# These exist because review found the publish-path resolver in
+# ``_embed_concierge_bar`` had no test at all: the entitlement tree calls
+# ``concierge_snippet`` directly, so deleting the whole
+# ``if get_settings().billing_enforced:`` block left the suite green. That block is
+# also exactly where the charge-first bug lived, which is why it went unnoticed.
+# --------------------------------------------------------------------------- #
+
+
+def _billing(monkeypatch, *, on: bool) -> None:
+    """Point the lazily-imported ``get_settings`` at a billing-posture stub."""
+    from types import SimpleNamespace
+
+    import pocketpaw.config as ppconfig
+
+    monkeypatch.setattr(
+        ppconfig,
+        "get_settings",
+        lambda: SimpleNamespace(billing_enforced=on, dodo_site_products=None),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_free_site_publishes_with_no_bar_when_billing_is_enforced(
+    beanie_test_db, tmp_path, monkeypatch
+):
+    """The publish-seam half of the billing gate. A first publish has no Site doc, so
+    no ``plan_tier``, which resolves to the free floor — the page ships bar-less
+    rather than carrying a bar that would 403 every visitor."""
+    monkeypatch.setenv("PAW_SITES_LOCAL", "1")
+    _billing(monkeypatch, on=True)
+    _fake_store(monkeypatch, _widget())
+
+    await _publish(tmp_path)
+
+    assert all("paw-bar/widget.js" not in page for page in _built_pages(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_with_billing_off_a_publish_is_byte_for_byte_what_it_was(
+    beanie_test_db, tmp_path, monkeypatch
+):
+    """OSS / self-host, and every in-repo deploy today. The gate must not take the
+    bar off a publish that never had billing."""
+    monkeypatch.setenv("PAW_SITES_LOCAL", "1")
+    _billing(monkeypatch, on=False)
+    _fake_store(monkeypatch, _widget())
+
+    await _publish(tmp_path)
+
+    pages = _built_pages(tmp_path)
+    assert len(pages) == 2
+    assert all("/paw-bar/widget.js" in page for page in pages)
+
+
+@pytest.mark.asyncio
+async def test_a_paying_site_mid_activation_still_gets_its_bar(
+    beanie_test_db, tmp_path, monkeypatch
+):
+    """THE CHARGE-FIRST REGRESSION, at the seam it actually broke.
+
+    ``activate_site`` runs on the ``subscription.active`` webhook — payment already
+    confirmed — and deploys the site. A republish onto a paid tier likewise parks a
+    live site at "pending" until the new sub confirms, and ``_apply_site_plan``
+    stamps the plan AFTER ``publish()`` has deployed. All three mean this seam can
+    see "pending" for someone who has paid.
+
+    Refusing there ships a page with no loader script, and nothing re-runs the embed
+    afterwards — it stays bar-less until some unrelated publish. So "pending" is read
+    as paid HERE, while the runtime gate keeps refusing it (pinned in
+    tests/cloud/test_paw_bar_concierge_entitlement.py).
+    """
+    from pocketpaw_ee.cloud.billing import site_plans
+    from pocketpaw_ee.cloud.models.site import Site
+
+    monkeypatch.setenv("PAW_SITES_LOCAL", "1")
+    _billing(monkeypatch, on=True)
+    _fake_store(monkeypatch, _widget())
+    paid = next(
+        t.key for t in site_plans.list_site_plans() if t.key != site_plans.BASE_SITE_PLAN_KEY
+    )
+
+    # First publish creates the doc; then put it in the exact mid-activation state.
+    site = await _publish(tmp_path)
+    doc = await Site.get(site.id)
+    doc.plan_tier = paid
+    doc.subscription_status = "pending"
+    await doc.save()
+
+    await _publish(tmp_path)
+
+    pages = _built_pages(tmp_path)
+    assert len(pages) == 2
+    assert all("/paw-bar/widget.js" in page for page in pages), (
+        "a paying customer's page shipped with no concierge loader"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_paid_site_loses_its_bar_on_the_next_publish(
+    beanie_test_db, tmp_path, monkeypatch
+):
+    """The control for the test above: leniency is scoped to "pending" alone.
+
+    Cancellation never resets ``plan_tier``, so a resolver reading the tier by itself
+    would keep serving this site forever.
+    """
+    from pocketpaw_ee.cloud.billing import site_plans
+    from pocketpaw_ee.cloud.models.site import Site
+
+    monkeypatch.setenv("PAW_SITES_LOCAL", "1")
+    _billing(monkeypatch, on=True)
+    _fake_store(monkeypatch, _widget())
+    paid = next(
+        t.key for t in site_plans.list_site_plans() if t.key != site_plans.BASE_SITE_PLAN_KEY
+    )
+
+    site = await _publish(tmp_path)
+    doc = await Site.get(site.id)
+    doc.plan_tier = paid
+    doc.subscription_status = "cancelled"
+    await doc.save()
+
+    await _publish(tmp_path)
+
     assert all("paw-bar/widget.js" not in page for page in _built_pages(tmp_path))

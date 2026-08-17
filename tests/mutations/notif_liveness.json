@@ -1,0 +1,107 @@
+[
+  {
+    "label": "is_online reverts to socket-present (the original zombie bug)",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "            if self._is_fresh(ws, now=now):\n                live = True",
+    "replace": "            if True:\n                live = True",
+    "tests": ["tests/cloud/test_ws.py::test_is_online_false_for_stale_ping_capable_socket"]
+  },
+  {
+    "label": "stale socket is never closed",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "            else:\n                self._close_stale(ws)",
+    "replace": "            else:\n                pass",
+    "tests": ["tests/cloud/test_ws.py::test_stale_socket_is_closed_best_effort"]
+  },
+  {
+    "label": "outbound success resurrects zombies (busy-workspace regression)",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "        last_inbound = self._ws_last_inbound.get(websocket)",
+    "replace": "        last_inbound = max(self._ws_last_inbound.get(websocket, 0), self._ws_last_outbound.get(websocket, 0)) or None",
+    "tests": ["tests/cloud/test_ws.py::test_outbound_send_does_not_resurrect_a_zombie"]
+  },
+  {
+    "label": "staleness applied to non-ping-capable sockets (old-bundle churn)",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "        if websocket not in self._ping_capable:\n            return True",
+    "replace": "        if websocket not in self._ping_capable:\n            pass",
+    "tests": [
+      "tests/cloud/test_ws.py::test_legacy_socket_stays_online_while_registered",
+      "tests/cloud/test_ws.py::test_legacy_socket_is_never_closed_by_a_liveness_check"
+    ]
+  },
+  {
+    "label": "ping frames no longer mark capability",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "        if websocket in self._ws_to_user:\n            self._ping_capable.add(websocket)",
+    "replace": "        if False:\n            self._ping_capable.add(websocket)",
+    "tests": ["tests/cloud/test_ws.py::test_ping_marks_capability_and_is_idempotent"]
+  },
+  {
+    "label": "duplicate close tasks pile up (no in-flight guard)",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "        if websocket in self._closing:\n            return  # A close is already in flight for this socket.",
+    "replace": "        if False:\n            return",
+    "tests": ["tests/cloud/test_ws.py::test_repeated_is_online_does_not_spawn_duplicate_closes"]
+  },
+  {
+    "label": "close task left unreferenced (GC can collect it mid-flight)",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "        self._close_tasks.add(task)",
+    "replace": "        pass",
+    "tests": ["tests/cloud/test_ws.py::test_close_task_is_strongly_referenced_until_done"]
+  },
+  {
+    "label": "send_to_user iterates the live set (concurrent-mutation RuntimeError)",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "        for ws in list(self.get_user_connections(user_id)):",
+    "replace": "        for ws in self.get_user_connections(user_id):",
+    "tests": ["tests/cloud/test_ws.py::test_send_to_user_survives_concurrent_disconnect"]
+  },
+  {
+    "label": "send_to_user reports delivery it never made",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "        delivered = 0\n        dead: list[WebSocket] = []",
+    "replace": "        delivered = 1\n        dead: list[WebSocket] = []",
+    "tests": ["tests/cloud/test_ws.py::test_send_to_user_returns_delivery_count"]
+  },
+  {
+    "label": "capability survives disconnect (stale marker on a reused socket)",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "        self._ping_capable.discard(websocket)\n        self._closing.discard(websocket)",
+    "replace": "        self._closing.discard(websocket)",
+    "tests": ["tests/cloud/test_ws.py::test_capability_is_cleared_on_disconnect"]
+  },
+  {
+    "label": "zombie dispatch drops the notification again (no push fallback)",
+    "file": "ee/pocketpaw_ee/cloud/push/dispatch.py",
+    "find": "        if delivered:\n            return NotifyResult(transport=\"ws\", ws_delivered=True)",
+    "replace": "        if True:\n            return NotifyResult(transport=\"ws\", ws_delivered=True)",
+    "tests": [
+      "tests/cloud/push/test_dispatch.py::test_zombie_socket_falls_back_to_web_push",
+      "tests/cloud/push/test_dispatch.py::test_real_seam_legacy_zombie_falls_back_to_push",
+      "tests/cloud/push/test_dispatch.py::test_real_seam_ping_capable_zombie_falls_back_to_push"
+    ]
+  },
+  {
+    "label": "inbox index points at the nonexistent created_at again",
+    "file": "ee/pocketpaw_ee/cloud/models/notification.py",
+    "find": "IndexModel([(\"recipient\", 1), (\"read\", 1), (\"createdAt\", -1)])",
+    "replace": "IndexModel([(\"recipient\", 1), (\"read\", 1), (\"created_at\", -1)])",
+    "tests": ["tests/cloud/notifications/test_model_indexes.py"]
+  },
+  {
+    "label": "recipient-only index dropped (default bell query unindexed)",
+    "file": "ee/pocketpaw_ee/cloud/models/notification.py",
+    "find": "            IndexModel([(\"recipient\", 1), (\"createdAt\", -1)]),",
+    "replace": "",
+    "tests": ["tests/cloud/notifications/test_model_indexes.py::test_default_list_query_has_a_recipient_only_index"]
+  },
+  {
+    "label": "TTL hangs off the dead expires_at field, expiring nothing",
+    "file": "ee/pocketpaw_ee/cloud/models/notification.py",
+    "find": "IndexModel([(\"createdAt\", 1)], expireAfterSeconds=86400 * 90)",
+    "replace": "IndexModel([(\"expires_at\", 1)], expireAfterSeconds=86400 * 90)",
+    "tests": ["tests/cloud/notifications/test_model_indexes.py::test_ttl_index_expires_rows_at_ninety_days"]
+  }
+]

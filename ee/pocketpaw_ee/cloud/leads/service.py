@@ -50,6 +50,27 @@
 # false-dropping legitimate lead text (e.g. "act as a guarantor" scans MEDIUM
 # persona_hijack), and a lost lead is the worst failure here, so only HIGH-or-
 # above verdicts now drop.
+#
+# Updated 2026-08-06 (feat/coupling-lead-captured, T-6): ``capture`` now EMITS
+# ``lead.captured`` on the cross-domain bus after the insert, replacing the
+# "no-event, the Leads view polls" comment that sat here. A staffed Paw Site is
+# the front of the funnel, so a submitted form is the hottest signal the product
+# has — leaving it silent meant nobody heard it until someone happened to open
+# the Leads view. The payload carries workspace_id / lead_id / site_id /
+# site_name / form_type and NOTHING from the submitted form: the properties are
+# untrusted visitor PII, subscribers that need them read the tenant-scoped Lead
+# by id. ``site_name`` rides along because ``site_id`` is ``script_name`` — a
+# 24-char hex id, not something to show a human; a subscriber writing display
+# text needs the name at hand rather than a second query.
+#
+# The emit is AWAITED INLINE on the public capture request, not fire-and-forget:
+# ``EventBus.emit`` runs each handler in sequence, so the visitor's POST does not
+# return until every subscriber finishes (today: one admin query, N notification
+# inserts, their WS emits, and any configured outbound webhook POSTs). Bounded
+# and small at present, and worth knowing before adding a slow subscriber — this
+# is the request path, not a background queue. Failures are contained, though:
+# ``emit`` logs and swallows a raising handler, so a broken subscriber can never
+# fail the capture endpoint or lose the persisted lead.
 
 from __future__ import annotations
 
@@ -61,13 +82,19 @@ from pocketpaw.security.injection_scanner import (
     ThreatLevel,
     get_injection_scanner,
 )
-from pocketpaw.sites_capture.ingest import interpolate_mapping, is_honeypot_tripped
+from pocketpaw.sites_capture import contact_form
+from pocketpaw.sites_capture.ingest import (
+    interpolate_mapping,
+    is_honeypot_tripped,
+    origin_allowed,
+)
 from pocketpaw.sites_capture.models import SiteEventMapping
 from pocketpaw_ee.cloud.leads.domain import Lead
 from pocketpaw_ee.cloud.models.lead import Lead as _LeadDoc
 from pocketpaw_ee.cloud.models.lead import LeadSource as _LeadSourceDoc
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter as _RateCounterDoc
+from pocketpaw_ee.cloud.shared.events import event_bus
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +107,8 @@ def _to_domain(doc: _LeadDoc) -> Lead:
         form_type=doc.form_type,
         properties=doc.properties,
         submitter_ref=doc.source.submitter_ref if doc.source else "",
+        origin=doc.source.origin if doc.source else "",
+        origin_unrecognized=bool(doc.source and doc.source.origin_unrecognized),
         created_at=getattr(doc, "createdAt", None),
     )
 
@@ -216,6 +245,8 @@ async def capture(
     payload: dict[str, Any],
     submitter_ref: str,
     rate_key: str = "",
+    origin: str = "",
+    known_origins: list[str] | None = None,
 ) -> Lead | None:
     """Harden + persist one submission as a tenant-scoped Lead. Returns None
     when the submission is dropped (honeypot / rate-limited / injection screen /
@@ -225,7 +256,21 @@ async def capture(
     the client host). ``submitter_ref`` is only an opaque label. An empty
     ``rate_key`` falls back to a fixed sentinel — never to ``submitter_ref`` —
     so a missing client host collapses to one shared bucket rather than handing
-    the caller a fresh bucket per request."""
+    the caller a fresh bucket per request.
+
+    ``origin`` is the submitting page's ``Origin`` header, recorded on the lead for
+    attribution. It is NOT a gate here: the router owns the (opt-in,
+    ``Site.enforce_origin``) enforcement decision, and by default a submission from
+    an unrecognized host is accepted and flagged rather than dropped. Passing it is
+    what lets an owner see that leads are arriving from somewhere they did not
+    expect — the visibility that replaces the old silent 403.
+
+    ``known_origins`` is the set the flag is judged against, and the router passes
+    its DERIVED set (``allowed_origins`` plus the site's own url host and attached
+    custom domains) rather than letting this re-read the stored field. The two must
+    agree: if the gate accepts a host the flag then marks unrecognized, the flag
+    fires on a site's own normal traffic and stops meaning anything. Defaults to the
+    stored field for a caller with nothing better."""
     effective_rate_key = rate_key or "unknown"
     if is_honeypot_tripped(payload, honeypot_field=site.honeypot_field):
         _emit_drop_audit(site=site, form_type=form_type, reason="honeypot")
@@ -237,6 +282,20 @@ async def capture(
     if not _passes_injection_screen(payload):
         _emit_drop_audit(site=site, form_type=form_type, reason="injection")
         return None
+
+    # CONTACT FORM ONLY — alias normalization + schema validation. Other form
+    # types have no declared schema, so they keep the previous behaviour exactly.
+    if form_type == contact_form.CONTACT_FORM_TYPE:
+        # Non-destructive: adds canonical keys, drops nothing. This is what makes
+        # a lead from an ALREADY-PUBLISHED site land — those Workers POST
+        # ``name=...`` and will until someone republishes them, which nobody does
+        # because the site looks fine. Also what lets an IMPORTED form's
+        # ``your-email`` / ``Phone Number`` reach the mapping at all.
+        payload = contact_form.normalize(payload)
+        reason = contact_form.validate(payload)
+        if reason is not None:
+            _emit_drop_audit(site=site, form_type=form_type, reason=reason)
+            return None
 
     raw_mapping = site.event_mapping.get(form_type)
     if raw_mapping is None:
@@ -255,10 +314,32 @@ async def capture(
             site_id=site.script_name,
             submitter_ref=submitter_ref,
             rate_key=effective_rate_key,
+            origin=origin,
+            # Evaluated NOW, against the allowlist as it stands at capture time, so
+            # the flag keeps meaning "unrecognized when it arrived" even after the
+            # owner later connects the domain it came from.
+            origin_unrecognized=bool(origin)
+            and not origin_allowed(
+                site.allowed_origins if known_origins is None else known_origins, origin
+            ),
         ),
     )
     await doc.insert()
-    # no-event: lead capture is a public ingest; the Leads view polls, no realtime subscriber yet
+    # Ring the workspace. Payload is identifiers only — never the form payload
+    # (untrusted visitor PII); a subscriber that needs the values reads the Lead.
+    await event_bus.emit(
+        "lead.captured",
+        {
+            "workspace_id": site.workspace,
+            "lead_id": str(doc.id),
+            "site_id": site.script_name,
+            # The site's DISPLAY name. site_id is the deploy script name (a hex
+            # id), so anything user-facing needs this; "" when the site was never
+            # named, and subscribers fall back to the id.
+            "site_name": site.name,
+            "form_type": form_type,
+        },
+    )
     return _to_domain(doc)
 
 

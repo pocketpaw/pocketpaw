@@ -44,13 +44,25 @@
 #   members), ``max_pockets`` (pockets per workspace), and ``max_connectors``
 #   (enabled connectors per workspace). Each is a tunable dict (``_MAX_SEATS`` /
 #   ``_MAX_POCKETS`` / ``_MAX_CONNECTORS``) mirroring ``_CEILING`` in shape, surfaced
-#   on ``PlanTier`` as ``int | None`` (None = uncapped, Enterprise only). The values
-#   are GENEROUS PLACEHOLDERS — the real per-tier numbers are a captain pricing
-#   open-question; the machinery is tier-agnostic and these ceilings are roomy
-#   enough that an active tenant under them never notices, while still protecting
-#   the shared PEE box from runaway growth. Free ``max_seats`` is pinned at 5 (==
-#   the ``Workspace.seats`` default) so no existing workspace regresses. The
-#   ``_build`` default for an unknown key FAILS CLOSED to the Free value, never None.
+#   on ``PlanTier`` as ``int | None`` (None = uncapped, Enterprise only).
+# Updated 2026-08-08 (feat/billing-rbac-member-caps) — LOCKED the approved CONSUMER
+#   member (seat) caps: Free = 0 (a Free workspace cannot invite ANY members),
+#   Paw Go = 5, Paw Pro = 25 total workspace members (owner included), Paw Pro Max
+#   and Enterprise = None (uncapped). These replace the earlier generous placeholders
+#   (5 / 10 / 25 / 100). The seat gate became plan-AUTHORITATIVE so Free=0 actually
+#   blocks invites (see ``workspace.service._effective_seat_limit``). The ``_build``
+#   default for an unknown key still FAILS CLOSED to the Free value, never None.
+# Updated 2026-08-08 (feat/billing-rbac-member-caps) — ADDED ``max_call_seconds_per_day``:
+#   the daily LiveKit CALL-TIME budget in seconds (Free = 0 → no calls, Go = 1_800
+#   = 30 min, Pro = 7_200 = 2 hrs, Pro Max = 28_800 = 8 hrs, Enterprise = None).
+#   Enforced at CALL-START time by ``livekit.service.create_room``; an over-budget
+#   in-progress call is force-ended at its budget deadline.
+# Updated 2026-08-08 (feat/billing-storage-caps) — ADDED ``max_storage_bytes``: the
+#   workspace S3 STORAGE cap in bytes (Free = 5 GB, Go = 15 GB, Pro = 50 GB,
+#   Pro Max = 100 GB, Enterprise = None = uncapped). Enforced at UPLOAD time by the
+#   uploads pipeline (``storage.service.storage_cap_exceeded``) against the sum of
+#   the workspace's live ``FileUpload`` blob sizes (the Files → Knowledge Base
+#   store). ``GET /storage/usage`` surfaces used vs cap for the Settings page.
 
 from __future__ import annotations
 
@@ -114,27 +126,34 @@ _CEILING: dict[str, int | None] = {
 # ---------------------------------------------------------------------------
 #
 # Three per-plan caps enforced at CREATE / INVITE / ENABLE time (never
-# retroactively): the max workspace SEATS, the max POCKETS a workspace may hold,
-# and the max ENABLED CONNECTORS. Same shape as ``_CEILING`` — an ``int`` ceiling,
-# or ``None`` for the one uncapped (Enterprise) tier. The ``_build`` default for an
-# unknown key FAILS CLOSED to the Free value (never None/uncapped).
+# retroactively): the max workspace SEATS (workspace members, owner included),
+# the max POCKETS a workspace may hold, and the max ENABLED CONNECTORS. Same
+# shape as ``_CEILING`` — an ``int`` ceiling, or ``None`` for an uncapped tier.
+# The ``_build`` default for an unknown key FAILS CLOSED to the Free value
+# (never None/uncapped).
 #
-# IMPORTANT: these are GENEROUS PLACEHOLDERS. The real per-tier numbers are a
-# captain pricing open-question; the enforcement machinery is deliberately
-# tier-agnostic so only these constants change when pricing lands. They are roomy
-# enough that an active tenant under the ceiling never notices, while still
-# protecting the shared PEE box from a single tenant's runaway growth.
+# SEATS ARE THE ABAC/RBAC MEMBER GATE: the seat ceiling is the plan ATTRIBUTE
+# the invite gates enforce (see ``workspace.service._effective_seat_limit``),
+# so a Free workspace (``max_seats=0``) cannot invite ANY members, while the
+# paid tiers allow exactly their seat count (owner included — e.g. Paw Go = 5
+# total members, so 4 invitations on top of the owner). These are the approved
+# CONSUMER numbers, not placeholders:
+#   * free      =  0 seats — no invitations allowed (the owner alone)
+#   * go        =  5 seats —  5 total members (owner + 4 invited)
+#   * pro       = 25 seats — 25 total members (owner + 24 invited)
+#   * pro_max   = None     — UNLIMITED seats (uncapped)
+#   * enterprise = None    — uncapped; negotiated contracts set their own limit.
 #
-# Free ``max_seats`` is pinned at 5 to EQUAL the ``Workspace.seats`` model default
-# — the seat gate enforces ``max(doc.seats, max_seats)`` so a free workspace sees
-# byte-for-byte the same limit it has today (no regression). The paid tiers step
-# up from there; Enterprise is uncapped (None) — negotiated contracts set their
-# own limits.
+# The seat gate is plan-AUTHORITATIVE (not ``max(doc.seats, plan)``): the stored
+# ``Workspace.seats`` field is a legacy/display ceiling that never overrides the
+# plan on downgrade, so a workspace that cancels Pro → Free immediately loses
+# the ability to invite (existing members are never removed — the gate only
+# blocks NEW invites / acceptances).
 _MAX_SEATS: dict[str, int | None] = {
-    "free": 5,
-    "go": 10,
+    "free": 0,
+    "go": 5,
     "pro": 25,
-    "pro_max": 100,
+    "pro_max": None,
     "enterprise": None,
 }
 
@@ -151,6 +170,48 @@ _MAX_CONNECTORS: dict[str, int | None] = {
     "go": 100,
     "pro": 250,
     "pro_max": 1_000,
+    "enterprise": None,
+}
+
+# The daily LiveKit CALL-TIME budget, in SECONDS per workspace per calendar day
+# (feat/billing-rbac-member-caps, 2026-08-08). The approved consumer numbers:
+#   * free      =        0 — no calls at all (a single-seat workspace has no one
+#                            to call); every room-create is blocked.
+#   * go        =    1_800 — 30 minutes of calls a day.
+#   * pro       =    7_200 —  2 hours of calls a day.
+#   * pro_max   =   28_800 —  8 hours of calls a day.
+#   * enterprise = None    — uncapped; negotiated contracts set their own limit.
+# Enforced at CALL-START time (``livekit.service.create_room``): the workspace's
+# today's cumulative LiveKit call duration (from the ``Meeting`` docs) is checked
+# against the cap, and an in-progress call is force-ended once it hits its budget
+# deadline. The ``_build`` default for an unknown key FAILS CLOSED to the Free
+# value (0), never None/uncapped.
+_MAX_CALL_SECONDS_PER_DAY: dict[str, int | None] = {
+    "free": 0,
+    "go": 1_800,
+    "pro": 7_200,
+    "pro_max": 28_800,
+    "enterprise": None,
+}
+
+# The workspace S3 STORAGE cap, in BYTES (feat/billing-storage-caps, 2026-08-08).
+# The approved consumer numbers — the Files → Knowledge Base / memory store a
+# workspace may hold (decimal GB, the SI convention Google/consumer storage uses):
+#   * free      =          5 GB — 5_000_000_000 bytes — a generous starter stash
+#   * go        =         15 GB — everyday file + KB usage
+#   * pro       =         50 GB — ~3.3× Go, for daily drivers
+#   * pro_max   =        100 GB — ~2× Pro, for power users
+#   * enterprise = None        — uncapped; negotiated contracts set their own limit.
+# Enforced at UPLOAD time by the uploads pipeline (``storage.service``): the
+# workspace's live ``FileUpload`` blob sizes are summed and a new upload is
+# blocked with ``StorageLimitError`` when it would push the total over the cap.
+# The ``_build`` default for an unknown key FAILS CLOSED to the Free value
+# (5 GB), never None/uncapped.
+_MAX_STORAGE_BYTES: dict[str, int | None] = {
+    "free": 5_000_000_000,
+    "go": 15_000_000_000,
+    "pro": 50_000_000_000,
+    "pro_max": 100_000_000_000,
     "enterprise": None,
 }
 
@@ -243,9 +304,21 @@ class PlanTier:
     credit-quota enforcement caps spend against (allotment × 1.5 for paid tiers;
     Free is the explicit 1000 trial cap; Enterprise is None). ``max_seats`` /
     ``max_pockets`` / ``max_connectors`` are the SMB resource ceilings enforced at
-    create/invite/enable time (integer, or None = uncapped for Enterprise);
-    Free's ``max_seats`` == the ``Workspace.seats`` default so no workspace
-    regresses. These are GENEROUS PLACEHOLDERS pending the captain's pricing call.
+    create/invite/enable time (integer, or None = uncapped).
+    ``max_seats`` is the approved CONSUMER member cap (Free = 0 → no invites,
+    Go = 5, Pro = 25 total members, owner included; Pro Max and Enterprise are
+    uncapped/None); it is plan-AUTHORITATIVE at the invite gate, so Free blocks
+    all new invitations.
+    ``max_call_seconds_per_day`` is the approved CONSUMER daily LiveKit call
+    budget in SECONDS (Free = 0 → no calls, Go = 1800 = 30 min, Pro = 7200 =
+    2 hrs, Pro Max = 28800 = 8 hrs; Enterprise = None = uncapped). The LiveKit
+    room-create gate enforces it at CALL-START time, and an over-budget single
+    call is force-ended at its budget deadline.
+    ``max_storage_bytes`` is the approved CONSUMER workspace S3 STORAGE cap in
+    BYTES (Free = 5 GB, Go = 15 GB, Pro = 50 GB, Pro Max = 100 GB, Enterprise =
+    None = uncapped). The uploads pipeline enforces it at UPLOAD time against the
+    sum of the workspace's live ``FileUpload`` blob sizes (the Files → Knowledge
+    Base store), and ``GET /storage/usage`` surfaces used vs cap.
     ``dodo_product_id`` is the recurring-product id, or None until BC-7 / config
     populates it.
 
@@ -262,6 +335,8 @@ class PlanTier:
     max_seats: int | None
     max_pockets: int | None
     max_connectors: int | None
+    max_call_seconds_per_day: int | None
+    max_storage_bytes: int | None
     dodo_product_id: str | None
     features: frozenset[str]
     display_name: str
@@ -303,9 +378,9 @@ def _build(key: str) -> PlanTier:
     from ``_PLAN_DISPLAY`` (a missing row degrades to ``_DISPLAY_FALLBACK`` rather
     than NPE-ing). An unknown ``key`` yields an empty feature set and a 0
     allotment — but callers go through ``get_plan`` / ``list_plans``, which only
-    ever pass known keys. ``monthly_ceiling`` and the three SMB caps
-    (``max_seats`` / ``max_pockets`` / ``max_connectors``) FAIL CLOSED: an unknown
-    key defaults to the Free value (the most restrictive tier), never
+    ever pass known keys. ``monthly_ceiling`` and the SMB caps (``max_seats`` /
+    ``max_pockets`` / ``max_connectors`` / ``max_storage_bytes``) FAIL CLOSED: an
+    unknown key defaults to the Free value (the most restrictive tier), never
     None/uncapped.
     """
     display = _PLAN_DISPLAY.get(key, _DISPLAY_FALLBACK)
@@ -319,6 +394,12 @@ def _build(key: str) -> PlanTier:
         max_seats=_MAX_SEATS.get(key, _MAX_SEATS["free"]),
         max_pockets=_MAX_POCKETS.get(key, _MAX_POCKETS["free"]),
         max_connectors=_MAX_CONNECTORS.get(key, _MAX_CONNECTORS["free"]),
+        # Daily LiveKit call budget — fail closed to Free (0 = no calls).
+        max_call_seconds_per_day=_MAX_CALL_SECONDS_PER_DAY.get(
+            key, _MAX_CALL_SECONDS_PER_DAY["free"]
+        ),
+        # S3 storage cap — fail closed to Free (5 GB), never None/uncapped.
+        max_storage_bytes=_MAX_STORAGE_BYTES.get(key, _MAX_STORAGE_BYTES["free"]),
         dodo_product_id=_dodo_product_for(key),
         features=frozenset(PLAN_FEATURES.get(key, set())),
         display_name=str(display["display_name"]),

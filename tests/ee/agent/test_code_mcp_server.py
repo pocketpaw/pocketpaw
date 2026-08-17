@@ -18,9 +18,12 @@
 # to say. So a timeout, a dead stream, and a missing workspace all come back as
 # ``is_error`` payloads carrying the channel's own message.
 #
-# THIRD, ``writeFile`` is honest about staging. It delegates the proposed content
-# and relays the browser's staged-change sentence; the response is what the model
-# reads, and it must not read as "the file was written".
+# THIRD, ``writeFile`` relays what the browser says it did. It delegates the
+# content and hands the browser's own sentence back verbatim; that sentence is
+# the model's only evidence of what happened, so the handler must not embellish
+# it in either direction. Until 2026-07-25 that meant guarding against a write
+# reading as done when it had only been staged for review; the review gate is
+# gone and the sentence is now a plain past-tense "Wrote …".
 #
 # The delegate channel itself is not re-tested here (see
 # tests/cloud/test_codeagent_delegates.py) — these drive the handlers against a
@@ -37,11 +40,13 @@ import pytest
 from pocketpaw_ee.agent.mcp_servers import code as code_mcp
 from pocketpaw_ee.agent.mcp_servers.code import (
     CODE_TOOL_IDS,
+    EDIT_FILE_TOOL_ID,
     LIST_DIR_TOOL_ID,
     READ_FILE_TOOL_ID,
     SEARCH_TOOL_ID,
     SERVER_NAME,
     WRITE_FILE_TOOL_ID,
+    _edit_file_handler,
     _list_dir_handler,
     _read_file_handler,
     _search_handler,
@@ -94,11 +99,13 @@ def test_tool_ids_match_the_literals_the_surface_profile_hardcodes():
     assert READ_FILE_TOOL_ID == "mcp__pocketpaw_code__readFile"
     assert SEARCH_TOOL_ID == "mcp__pocketpaw_code__search"
     assert LIST_DIR_TOOL_ID == "mcp__pocketpaw_code__listDir"
+    assert EDIT_FILE_TOOL_ID == "mcp__pocketpaw_code__editFile"
     assert WRITE_FILE_TOOL_ID == "mcp__pocketpaw_code__writeFile"
     assert set(CODE_TOOL_IDS) == {
         READ_FILE_TOOL_ID,
         SEARCH_TOOL_ID,
         LIST_DIR_TOOL_ID,
+        EDIT_FILE_TOOL_ID,
         WRITE_FILE_TOOL_ID,
     }
 
@@ -309,25 +316,97 @@ async def test_write_file_delegates_the_full_content(in_workspace, captured_dele
 
 
 @pytest.mark.asyncio
-async def test_write_file_relays_the_staged_sentence_as_success(in_workspace, monkeypatch):
-    """writeFile stages a proposal; the browser answers with a sentence
-    describing it. The handler relays that verbatim as a NON-error, so the model
-    can repeat it — 'I've proposed…', not 'I wrote…'."""
+async def test_write_file_relays_the_browsers_sentence_as_success(in_workspace, monkeypatch):
+    """The browser writes the file and answers with a sentence saying so. The
+    handler relays that verbatim as a NON-error, so the model repeats what
+    actually happened rather than a phrasing this layer invented."""
 
-    async def _staged(workspace_id, tool, tool_input):
+    async def _wrote(workspace_id, tool, tool_input):
         return DelegateOutcome(
             ok=True,
-            result={
-                "output": "Proposed 2 changes to `src/button.tsx` for review.",
-                "isError": False,
-            },
+            result={"output": "Wrote `src/button.tsx`.", "isError": False},
         )
 
-    monkeypatch.setattr("pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _staged)
+    monkeypatch.setattr("pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _wrote)
 
     response = await _write_file_handler({"path": "src/button.tsx", "content": "x"})
     assert not response.get("is_error")
-    assert "Proposed 2 changes" in _text(response)
+    assert "Wrote `src/button.tsx`." in _text(response)
+
+
+# ── readFile paging + editFile (fix/code-truncated-read-destroys-file) ──────
+#
+# The browser caps a read at 30_000 characters. Until 2026-07-28 that cap had no
+# counterpart on this side: ``writeFile`` asked for a file's ENTIRE new contents,
+# so on a larger file the model's only way to comply was to invent the part it
+# had not been shown — reported from a live session as the agent "fabricating".
+# ``offset`` lets it read the rest; ``editFile`` lets it change a file it never
+# held. The tests below pin what actually crosses to the browser, since that is
+# the half this module owns.
+
+
+@pytest.mark.asyncio
+async def test_read_file_forwards_a_positive_offset(in_workspace, captured_delegate):
+    await _read_file_handler({"path": "big.ts", "offset": 30000})
+    assert captured_delegate[0]["input"] == {"path": "big.ts", "offset": 30000}
+
+
+@pytest.mark.asyncio
+async def test_read_file_omits_offset_when_absent_or_zero(in_workspace, captured_delegate):
+    """A read from the start sends no ``offset`` at all, so the common call is
+    byte-identical to what it was before paging existed."""
+    await _read_file_handler({"path": "a.ts"})
+    await _read_file_handler({"path": "a.ts", "offset": 0})
+    assert captured_delegate[0]["input"] == {"path": "a.ts"}
+    assert captured_delegate[1]["input"] == {"path": "a.ts"}
+
+
+@pytest.mark.asyncio
+async def test_read_file_ignores_a_nonsense_offset_rather_than_failing(
+    in_workspace, captured_delegate
+):
+    """A bad offset must not cost the model a turn. It reads from the start —
+    the browser reports which window it actually returned, so the model can
+    correct itself from the answer instead of from an error."""
+    await _read_file_handler({"path": "a.ts", "offset": "banana"})
+    assert captured_delegate[0]["input"] == {"path": "a.ts"}
+
+
+@pytest.mark.asyncio
+async def test_edit_file_delegates_the_exact_span(in_workspace, captured_delegate):
+    await _edit_file_handler(
+        {"path": "big.ts", "oldString": "const a = 1;", "newString": "const a = 2;"}
+    )
+    assert captured_delegate == [
+        {
+            "workspace_id": WS,
+            "tool": "editFile",
+            "input": {
+                "path": "big.ts",
+                "oldString": "const a = 1;",
+                "newString": "const a = 2;",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_edit_file_allows_an_empty_new_string(in_workspace, captured_delegate):
+    """An empty ``newString`` is how a span is DELETED, so it is required-present
+    and allowed-empty — the same asymmetry ``writeFile``'s content has."""
+    await _edit_file_handler({"path": "a.ts", "oldString": "dead code\n", "newString": ""})
+    assert captured_delegate[0]["input"]["newString"] == ""
+
+
+@pytest.mark.asyncio
+async def test_edit_file_rejects_an_empty_old_string_before_the_browser(
+    in_workspace, captured_delegate
+):
+    """An empty ``oldString`` matches everywhere and nowhere. Refusing here keeps
+    a meaningless edit off the wire entirely."""
+    response = await _edit_file_handler({"path": "a.ts", "oldString": "", "newString": "x"})
+    assert response.get("is_error")
+    assert captured_delegate == []
 
 
 @pytest.mark.asyncio

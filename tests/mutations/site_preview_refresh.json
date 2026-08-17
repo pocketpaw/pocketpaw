@@ -1,0 +1,47 @@
+[
+  {
+    "label": "preview refresh: a site that already has a picture is never re-photographed",
+    "file": "ee/pocketpaw_ee/sites/screenshot.py",
+    "find": "    from pocketpaw_ee.sites.service import _cf_client\n\n    cf = cloudflare or _cf_client()\n    image = await cf.capture_screenshot(\n        # SC-3: cache-busted, so a republish is photographed as it is NOW and not\n        # as the edge last cached it. See ``_shot_url``.\n        url=_shot_url(url),",
+    "replace": "    if (getattr(site, \"preview_image_url\", \"\") or \"\").strip():\n        return \"\"\n\n    from pocketpaw_ee.sites.service import _cf_client\n\n    cf = cloudflare or _cf_client()\n    image = await cf.capture_screenshot(\n        url=_shot_url(url),",
+    "tests": [
+      "tests/ee/sites/test_preview_refresh.py"
+    ]
+  },
+  {
+    "label": "preview refresh: every capture asks the edge for the same cacheable url",
+    "file": "ee/pocketpaw_ee/sites/screenshot.py",
+    "find": "    sep = \"&\" if \"?\" in url else \"?\"\n    return f\"{url}{sep}{_SHOT_PARAM}={uuid.uuid4().hex}\"",
+    "replace": "    return url",
+    "tests": [
+      "tests/ee/sites/test_preview_refresh.py"
+    ]
+  },
+  {
+    "label": "preview refresh: the manual path swallows the failure it was asked to report",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        image_url = await take_site_screenshot(site, ready_delays=())",
+    "replace": "        from pocketpaw_ee.sites.screenshot import safe_take_site_screenshot\n\n        image_url = await safe_take_site_screenshot(site)",
+    "tests": [
+      "tests/ee/sites/test_preview_refresh.py"
+    ]
+  },
+  {
+    "label": "preview refresh: a refresh that captured nothing reports success with the stale url",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        raise ValidationError(\n            \"sites.preview_unavailable\",\n            \"There's nothing to photograph yet — publish the site, or open its \"\n            \"preview once so there's a page to capture.\",\n        )",
+    "replace": "        return SitePreviewRefreshResponse(\n            site_id=site_id,\n            preview_image_url=getattr(site, \"preview_image_url\", \"\") or \"\",\n        )",
+    "tests": [
+      "tests/ee/sites/test_preview_refresh.py"
+    ]
+  },
+  {
+    "label": "preview refresh: a cross-tenant site id is photographed instead of 404ing",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    site = await _load(workspace_id, site_id)\n\n    url = (getattr(site, \"url\", \"\") or \"\").strip()",
+    "replace": "    site = await _SiteDoc.find_one({\"_id\": ObjectId(site_id)})\n    if site is None:\n        raise NotFound(\"site\", site_id)\n\n    url = (getattr(site, \"url\", \"\") or \"\").strip()",
+    "tests": [
+      "tests/ee/sites/test_preview_refresh.py"
+    ]
+  }
+]

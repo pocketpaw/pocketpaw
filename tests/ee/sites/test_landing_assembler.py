@@ -192,12 +192,29 @@ class TestAssembleLandingSpec:
             )
 
         # Inputs must carry real ``name``s so the native form POST maps fields.
+        #
+        # Updated 2026-08-13: these names come from
+        # ``sites_capture.contact_form.CONTACT_FIELDS`` instead of being spelled out
+        # here. The literals this used to assert — ``{"name", "email"}`` — were
+        # copied from the assembler, so the test agreed with the code and both
+        # disagreed with the event mapping that reads the submission. It passed for
+        # the entire life of the bug where the visitor's name was projected away.
+        # A test that restates the thing it is checking cannot catch a drift; the
+        # cross-module contract is pinned in tests/ee/sites/test_contact_form_contract.py.
+        from pocketpaw.sites_capture import contact_form
+
+        expected_inputs = {f.name for f in contact_form.CONTACT_FIELDS if not f.multiline}
+        expected_textareas = {f.name for f in contact_form.CONTACT_FIELDS if f.multiline}
+
         input_names = {(n.get("props") or {}).get("name") for n in _nodes_of_type(spec, "input")}
-        assert {"name", "email"} <= input_names, f"lead inputs need name+email; got {input_names}"
+        assert expected_inputs <= input_names, (
+            f"lead inputs must POST the canonical names "
+            f"{sorted(expected_inputs)}; got {input_names}"
+        )
         textarea_names = {
             (n.get("props") or {}).get("name") for n in _nodes_of_type(spec, "textarea")
         }
-        assert "message" in textarea_names
+        assert expected_textareas <= textarea_names
 
     def test_pricing_uses_tiers_not_plans(self) -> None:
         from pocketpaw_ee.sites.landing_assembler import assemble_landing_spec

@@ -12,6 +12,20 @@
 # survive intact (Belt ends on "Instinct gate", Branch keeps "merge/publish"
 # and "revert", Soul keeps "5-tier memory") and that no gist-backed line ends
 # in the truncation ellipsis — the class of miss the fix targets.
+# Updated: 2026-08-03 (PA-7a, feat/prompt-assembler-channel) — the primer's
+# builder moved into ``pocketpaw.prompt.channel.environment`` so it renders
+# inside a layer and under the assembler's render guard;
+# ``AgentContextBuilder._build_atlas_primer`` is now a delegate and every call
+# below still reaches the same code. The cap assertion reads the layer's
+# ``max_chars`` because ``_INJECTION_CAPS`` is deleted. The resilience test is
+# the interesting one: it used to prove the builder's own try/except, and now
+# proves the render guard that replaced it.
+# Updated: 2026-08-17 (feat/ast-1-atlas-primitives, AST-1) — two authored
+# primitives joined the store (Source-truth, Verify loop), each with a gist. A
+# new assertion pins that BOTH gists render in the primer verbatim (the two
+# shipped subsystems the self-model had been missing) and that the block still
+# fits under the same 2000-char / ~500-token cap — the primer is now ~1990
+# chars, so any future primitive must trim gists rather than lift the cap.
 
 from __future__ import annotations
 
@@ -20,8 +34,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import pocketpaw.atlas.store as atlas_store_mod
-from pocketpaw.bootstrap.context_builder import _INJECTION_CAPS, AgentContextBuilder
+from pocketpaw.bootstrap.context_builder import AgentContextBuilder
 from pocketpaw.bootstrap.protocol import BootstrapContext
+from pocketpaw.prompt.channel import ChannelAtlasPrimerLayer
 
 pytestmark = pytest.mark.asyncio
 
@@ -75,7 +90,7 @@ class TestPrimerContent:
                 assert f"- {entry.name}:" in primer
 
     async def test_primer_excludes_surface_entries_from_the_list(self):
-        """Only the 10 primitives get a line; surface entries are pointed at
+        """Only the 12 primitives get a line; surface entries are pointed at
         via atlas_search, not enumerated (budget)."""
         primer = AgentContextBuilder._build_atlas_primer()
         assert "- Mission Control:" not in primer
@@ -93,6 +108,19 @@ class TestPrimerContent:
         assert "revert" in primer
         # Soul's line must keep the memory-architecture detail.
         assert "5-tier memory" in primer
+
+    async def test_primer_names_source_truth_and_verify_loop(self):
+        """AST-1: the two primitives the self-model had been missing render
+        their authored gists in the primer — an agent reading only the primer
+        learns that provenance and outcome verification exist — and the block
+        stays under the layer cap with them in."""
+        store = atlas_store_mod.get_atlas_store()
+        primer = AgentContextBuilder._build_atlas_primer()
+        for entry_id in ("primitive:source-truth", "primitive:verify-loop"):
+            entry = store.describe(entry_id)
+            assert entry is not None and entry.gist, f"{entry_id} must carry an authored gist"
+            assert f"- {entry.name}: {entry.gist}." in primer
+        assert len(primer) <= ChannelAtlasPrimerLayer.max_chars
 
     async def test_gist_backed_lines_do_not_end_in_ellipsis(self):
         """Every primitive carrying an authored gist renders a line that ends
@@ -121,8 +149,12 @@ class TestPrimerBudget:
         )
 
     async def test_injection_cap_matches_budget(self):
-        """The assembler-side cap must also enforce the ~500-token ceiling."""
-        cap = _INJECTION_CAPS.get("atlas_primer")
+        """The assembler-side cap must also enforce the ~500-token ceiling.
+
+        PA-7a moved this number off ``_INJECTION_CAPS['atlas_primer']`` and onto
+        the layer that renders the block. Same 2000, one owner.
+        """
+        cap = ChannelAtlasPrimerLayer.max_chars
         assert cap is not None
         assert cap <= _TOKEN_BUDGET * _CHARS_PER_TOKEN
 

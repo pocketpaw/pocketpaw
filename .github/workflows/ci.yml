@@ -24,6 +24,13 @@
 # gate (AT-4): the compiled atlas artifact (src/pocketpaw/atlas/data/
 # atlas.json) must match a fresh compile of authored entries + connector/
 # senses extraction, or the step fails with a diff summary.
+# Updated: 2026-08-10 — new `mutation-anchors` job (#1903). Nineteen mutation
+# plans lived under tests/mutations/ with nothing in this directory running any
+# of them, so a plan whose anchor had rotted applied ZERO mutations while still
+# reading as covered — two were found in that state on the same day. The job
+# runs `mutate.py --validate`, which counts substrings and exits: no mutation
+# applied, no tests run, no dependency install. A full sweep is deliberately
+# NOT here; see the job's own comment for why.
 name: CI
 
 on:
@@ -229,6 +236,68 @@ jobs:
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run agent plan + narration surface tests
+        # Same addopts escape as the two steps above. These four files are the
+        # ONLY coverage of the plan panel and tool narration, and both features
+        # ship on two independent transports (the group/DM bus and the SSE
+        # stream). Living in the tests/cloud blind spot is how HTN-2 merged
+        # green while breaking an assertion in HTN-5's own sibling file: no lane
+        # ran either one, so "CI is green" said nothing about this surface.
+        #
+        # test_run_core_narration.py in particular compares the two transports
+        # against each other, which is the check that catches a feature wired to
+        # one surface and silently not the other — the bug this step exists for.
+        run: >-
+          uv run pytest
+          tests/cloud/runs/test_run_core_narration.py
+          tests/cloud/runs/test_run_core_plan_surface.py
+          tests/cloud/shared/test_agent_bridge_plan.py
+          tests/cloud/shared/test_agent_bridge_narration.py
+          -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+  mutation-anchors:
+    # ANCHOR VALIDATION ONLY, NOT A SWEEP. `mutate.py --validate` reads each plan, counts
+    # its `find` string in the target file, and exits. It applies no mutation, runs no
+    # test and writes no marker — so this job needs no dependency install and finishes in
+    # seconds.
+    #
+    # WHY IT EXISTS (#1903). A plan's `find` is a substring of source, so any refactor can
+    # invalidate one. mutate.py handles that correctly on its own — it aborts before the
+    # first mutation and names the offender — but nothing ran it, so a rotted plan sat at
+    # ZERO applied mutations while still reading as covered. `fault_ladder.json` (19
+    # entries) and `site_preview_refresh.json` (5) were both found in that state on the
+    # same day, in unrelated subsystems. The tool was never the problem; nobody was
+    # listening.
+    #
+    # A FULL SWEEP IS DELIBERATELY NOT HERE. A sweep applies a mutation and runs a test
+    # subset per entry — minutes of compute across ~194 entries — and requiring that of
+    # every PR is probably the wrong trade. Real mutation signal still comes from running
+    # the plans, which stays a deliberate act. If it should become automatic, the shape is
+    # a scheduled or label-gated job, or one that runs only the plans whose covered files
+    # the PR touched. That is a separate decision, not something to bolt on here.
+    #
+    # NOT IN `deploy-coolify`'s `needs`, on purpose: a stale anchor is a hole in our
+    # verification, not a defect in the code being deployed, so it must not block a
+    # production deploy. It still shows red on the PR, which is where it is actionable.
+    name: Mutation plan anchors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # setup-python rather than uv: this runs stdlib-only code against JSON and source
+      # text, so there is nothing to resolve or sync. If this step ever needs dependencies,
+      # the validator has started doing more than counting substrings and should be
+      # reviewed rather than fed a `uv sync`.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate every mutation plan's anchors
+        run: python scripts/mutate.py --validate
 
   import-linter:
     name: OSS-EE boundary

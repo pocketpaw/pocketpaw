@@ -39,7 +39,9 @@ NOTIFY_VISITOR_REPLY = "paw_bar_visitor_reply"
 # The notification source ``type``, with ``id`` = "<widget_id>:<customer_ref>" —
 # the exact pair the owner inbox is keyed by, so a click can resolve the thread.
 # A compound id rather than borrowing ``pocket_id``/``room_id`` for something
-# they don't mean.
+# they don't mean. The source ALSO carries ``agent_id``: the compound id names
+# the conversation, but a client still needs somewhere to open it, and the
+# concierge inbox lives on an agent rather than in a chat room.
 NOTIFY_SOURCE_TYPE = "paw_bar_conversation"
 
 # How much of a visitor's line rides along as the notification body. Enough to
@@ -91,6 +93,32 @@ async def resolve_workspace_owner(workspace_id: str) -> str:
         return ""
 
 
+async def resolve_widget_agent(widget_id: str, workspace_id: str = "") -> str:
+    """The concierge agent bound to a widget, or "" when there isn't one.
+
+    Resolved HERE rather than at each call site on purpose. The three producers
+    differ in what they hold — the new-conversation path has the widget object,
+    the handoff path only has its id — and a notification that silently omits the
+    agent is not a visible failure: it degrades to a link the owner can't follow,
+    which is precisely the bug this field exists to fix. One resolver means a
+    fourth producer cannot forget. Workspace-scoped like every other widget read.
+
+    Returns "" for every failure mode (no widget, unbound widget, store error),
+    all of which mean "no agent to link to" — a normal answer on this path.
+    """
+    if not widget_id:
+        return ""
+    try:
+        from pocketpaw.stores import get_paw_bar_store
+
+        store = get_paw_bar_store(workspace_id=workspace_id or None)
+        widget = await store.get_widget(widget_id, workspace_id=workspace_id or None)
+        return str(getattr(widget, "agent_id", "") or "") if widget is not None else ""
+    except Exception:  # noqa: BLE001 — notification routing is never load-bearing
+        logger.debug("widget agent lookup failed for %s", widget_id, exc_info=True)
+        return ""
+
+
 async def notify_workspace_owner(
     *,
     workspace_id: str,
@@ -99,6 +127,7 @@ async def notify_workspace_owner(
     body: str = "",
     widget_id: str = "",
     customer_ref: str = "",
+    agent_id: str = "",
 ) -> bool:
     """Notify the workspace owner about one conversation. Never raises.
 
@@ -110,6 +139,10 @@ async def notify_workspace_owner(
         recipient = await resolve_workspace_owner(workspace_id)
         if not recipient:
             return False
+
+        # Caller-supplied wins (it already holds the widget — no second read);
+        # otherwise resolve it, so no producer can omit it by forgetting.
+        agent_id = agent_id or await resolve_widget_agent(widget_id, workspace_id)
 
         from pocketpaw_ee.cloud.notifications import service as notifications_service
         from pocketpaw_ee.cloud.notifications.domain import NotificationSource
@@ -123,6 +156,15 @@ async def notify_workspace_owner(
             source=NotificationSource(
                 type=NOTIFY_SOURCE_TYPE,
                 id=f"{widget_id}:{customer_ref}",
+                # The bound concierge agent. The compound id above says WHICH
+                # conversation; this says where that conversation can be opened.
+                # Without it a client has no id to build a link from and falls
+                # back to the chat surface — which is exactly what happened:
+                # the click landed on /chat/<widget_id>:<customer_ref>, a room
+                # that cannot exist, and the empty default agent rendered.
+                # "" (an unbound or legacy widget) stays None, and the client
+                # degrades to the agents list rather than a dead room.
+                agent_id=agent_id or None,
             ),
         )
         return True
@@ -142,6 +184,7 @@ __all__ = [
     "NOTIFY_SOURCE_TYPE",
     "NOTIFY_VISITOR_REPLY",
     "notify_workspace_owner",
+    "resolve_widget_agent",
     "resolve_workspace_owner",
     "safe_preview",
 ]

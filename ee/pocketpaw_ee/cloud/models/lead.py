@@ -32,6 +32,20 @@ class LeadSource(BaseModel):
     site_id: str
     submitter_ref: str = ""  # opaque, caller-supplied LABEL (not PII, not the limiter key)
     rate_key: str = ""  # server-derived host hash; the per-IP limiter buckets on this
+    # The submitting page's ``Origin``, as sent ("" when the browser sent none).
+    #
+    # Recorded rather than enforced: since ``Site.enforce_origin`` defaults off, a
+    # submission from an unexpected host is ACCEPTED and attributed instead of
+    # 403'd. That is the trade the default makes — an owner who wants to know where
+    # leads came from can read it here, and one who wants the old hard gate flips
+    # ``enforce_origin``. Server-derived (read off the request headers), never a
+    # body field, so a caller cannot forge the recorded value independently of the
+    # header the browser actually sent.
+    origin: str = ""
+    # True when an origin WAS sent and it is not on the site's allowlist. Precomputed
+    # at capture because the allowlist can change afterwards, and a lead's flag
+    # should mean "unrecognized when it arrived" rather than "unrecognized today".
+    origin_unrecognized: bool = False
 
 
 class Lead(TimestampedDocument):

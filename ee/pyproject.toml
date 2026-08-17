@@ -69,7 +69,31 @@ classifiers = [
 
 dependencies = [
     # OSS core — compatible-release pin within 0.4.x (see versioning note above).
-    "pocketpaw~=0.4.16",
+    #
+    # The `pydantic-ai` extra is NOT optional for this package, despite being
+    # optional for the core. `cloud/agents/defaults.py` sets
+    # CLOUD_DEFAULT_AGENT_BACKEND = "pydantic_ai", so every new cloud agent that
+    # does not name a backend gets that one — a wheel that installs the cloud
+    # without its SDK is a wheel whose default agent cannot run. It failed
+    # quietly rather than loudly: the registry maps a backend name to a module
+    # path without importing it, and PydanticAIBackend._initialize catches the
+    # ImportError and logs a WARNING, so the estate booted clean and every run
+    # died one log line deep. Pinned by
+    # tests/test_cloud_backend_default.py::test_the_ee_wheel_requests_the_cloud_default_backends_extra.
+    #
+    # CAVEAT, and it is why `uv lock` here prints "does not have an extra named
+    # `pydantic-ai`": this extra is UNRELEASED. Published pocketpaw 0.4.18 on
+    # PyPI declares 39 extras and this is not one of them — it was added to the
+    # source tree after that release. So:
+    #   * `Dockerfile.enterprise` is FIXED NOW. It never resolves the core from
+    #     PyPI: it runs `pip install '.[all]'` against this source tree, whose
+    #     `all` extra now covers pydantic-ai too, and only then installs the
+    #     locally built EE wheel.
+    #   * `pip install pocketpaw-ee` FROM PyPI stays broken until a core release
+    #     carrying the extra ships. pip warns and installs nothing extra rather
+    #     than failing, so watch for it on the next release.
+    # Drop this note once a published core provides the extra.
+    "pocketpaw[pydantic-ai]~=0.4.16",
     # --- Persistence (MongoDB async ODM; beanie pulls motor + pymongo) ---
     "motor>=3.3.0",
     "beanie>=1.26.0",
@@ -271,6 +295,7 @@ belt = "pocketpaw_ee.extensions:CloudBeltMcpProvider"
 code = "pocketpaw_ee.extensions:CloudCodeMcpProvider"
 external_actions = "pocketpaw_ee.extensions:CloudExternalActionsMcpProvider"
 ship = "pocketpaw_ee.extensions:CloudShipMcpProvider"
+growth = "pocketpaw_ee.extensions:CloudGrowthMcpProvider"
 fabric = "pocketpaw_ee.extensions:CloudFabricMcpProvider"
 instinct = "pocketpaw_ee.extensions:CloudInstinctMcpProvider"
 daytona = "pocketpaw_ee.extensions:CloudDaytonaMcpProvider"
@@ -340,6 +365,18 @@ annotation_typing = false
 # ee/pyproject.toml (workspace-local source). See
 # ee/pocketpaw_ee/foresight/substrate/oasis/README-FORK.md for the
 # vendoring rationale and the openai/psutil cap audit.
+[tool.uv]
+# The same install-time supply-chain floor as the root pyproject.toml, repeated
+# here because ee/ carries its OWN uv.lock and therefore resolves on its own
+# whenever `uv lock` runs against this file. Settings do not inherit from the
+# parent directory, so without this line the enterprise layer's resolution is
+# the bare one the root's floor was added to fix.
+#
+# Read the root pyproject.toml's `[tool.uv]` comment before touching this: the
+# value is an absolute DATE, not a rolling duration, and the two must be
+# bumped together or the two locks drift to different floors.
+exclude-newer = "2026-08-10T00:00:00Z"
+
 [tool.uv.sources]
 camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d0a38277e421ea9aca34904b4dc37" }
 
@@ -691,6 +728,15 @@ allow_indirect_imports = "true"
 # the turn-agent, which broke the run outright. `as_packages` defaults to true,
 # so naming the package covers every submodule — including the ones added after
 # this contract was written.
+#
+# Two branches fixed this independently (2026-07-28). The other one re-listed the
+# four surviving modules by name and explained the failure in more detail: an
+# unresolvable source module is a HARD error for import-linter, not a skip, so a
+# clean checkout died before evaluating a single contract — while a developer
+# machine stayed green because a stale ``__pycache__/domain.cpython-312.pyc`` was
+# enough for the graph builder to resolve the name. Worth keeping that detail;
+# the package form is kept as the fix, because a name list is what went stale in
+# the first place and would go stale again on the next module added.
 source_modules = ["pocketpaw_ee.cloud.codeagent"]
 forbidden_modules = [
     "pocketpaw_ee.cloud.daytona",
@@ -824,6 +870,65 @@ source_modules = [
     "pocketpaw_ee.cloud.cycles.scheduler",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.cycle"]
+
+[[tool.importlinter.contracts]]
+name = "Growth — Beanie writes only from service.py"
+# feat/growth-g1 — only ``growth.service`` owns the Prospect Beanie writes;
+# dto/domain/router/worker go through it. The worker is the dedicated
+# ``growth`` arq queue seam and must never touch the doc class directly.
+# feat/growth-g3 — the Draft doc joins the same boundary: writes only from
+# ``growth.service``.
+# feat/growth-g4 — the gate modules join the boundary: ``propose`` files the
+# Instinct Action and ``executor`` flips drafts ONLY through the service's
+# ``gate_transition`` seam, never the doc class directly.
+# feat/growth-g5 — the MessageLog audit doc joins the boundary (writes only
+# from ``growth.service.record_message_log``), and the dispatch modules join
+# the source list: ``email_dispatch`` records + flips through the service, and
+# ``connector`` only ever touches the provider's HTTP API.
+# feat/growth-g7 — ``followups`` (the daily cron sweep) joins too: it reads and
+# writes drafts/prospects ONLY through the service's system-identity seams
+# (``list_sent_drafts_for_followup`` / ``list_channel_drafts`` /
+# ``create_followup_draft`` / ``mark_prospect_dead``).
+# feat/growth-g6 — the WhatsApp dispatch modules join the boundary: ``whatsapp``
+# (the dispatch branch), ``msg91`` (the provider seam) and ``webhooks`` (the
+# inbound MSG91 endpoint) all read and write through ``growth.service``.
+# integration/growth-v1 — G-6's ``WhatsAppSendLog`` was folded into G-5's
+# ``MessageLog`` (one send record, not two), so only ``models.message_log``
+# stays on the forbidden list.
+# feat/growth-discovery — the ``Icp`` doc joins the forbidden list and
+# ``growth.discovery`` joins the source list. The discovery run reaches ICPs
+# and prospects ONLY through the service's system-identity seams, exactly as
+# ``followups`` does: it is the second cron on this queue, and a module that
+# files rows on a schedule is precisely where a direct doc write would be
+# least visible.
+type = "forbidden"
+allow_indirect_imports = "true"
+# feat/growth-mcp — the agent surface joins the boundary:
+# ``agent.mcp_servers.growth`` reaches prospects and drafts ONLY through
+# ``growth.service``, never a doc class. It is also the module where a stray
+# Beanie import would be least visible, so the contract is the check.
+source_modules = [
+    "pocketpaw_ee.agent.mcp_servers.growth",
+    "pocketpaw_ee.cloud.growth.router",
+    "pocketpaw_ee.cloud.growth.dto",
+    "pocketpaw_ee.cloud.growth.domain",
+    "pocketpaw_ee.cloud.growth.worker",
+    "pocketpaw_ee.cloud.growth.propose",
+    "pocketpaw_ee.cloud.growth.executor",
+    "pocketpaw_ee.cloud.growth.connector",
+    "pocketpaw_ee.cloud.growth.discovery",
+    "pocketpaw_ee.cloud.growth.email_dispatch",
+    "pocketpaw_ee.cloud.growth.followups",
+    "pocketpaw_ee.cloud.growth.whatsapp",
+    "pocketpaw_ee.cloud.growth.msg91",
+    "pocketpaw_ee.cloud.growth.webhooks",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.prospect",
+    "pocketpaw_ee.cloud.models.draft",
+    "pocketpaw_ee.cloud.models.message_log",
+    "pocketpaw_ee.cloud.models.icp",
+]
 
 [[tool.importlinter.contracts]]
 name = "LLM provisioning — Beanie writes only from service.py"

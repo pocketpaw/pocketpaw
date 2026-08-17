@@ -92,13 +92,13 @@ async def test_unified_list_includes_chat_and_drive_warning(beanie_files_db):
     await _seed_upload("w1", name="chat-attachment.pdf")
 
     svc = UnifiedFilesService()
-    files, warnings = await svc.list_unified("w1", source=None, limit=50)
+    page = await svc.list_unified("w1", source=None, limit=50)
 
-    assert [f.source for f in files] == ["chat"]
-    assert [f.filename for f in files] == ["chat-attachment.pdf"]
+    assert [f.source for f in page.files] == ["chat"]
+    assert [f.filename for f in page.files] == ["chat-attachment.pdf"]
     # Drive branch is stubbed — the service flags it so the FE can
     # render a "connect Drive" nudge without guessing.
-    assert any("drive.not_connected" in w for w in warnings)
+    assert any("drive.not_connected" in w for w in page.warnings)
 
 
 @pytest.mark.asyncio
@@ -106,19 +106,19 @@ async def test_unified_list_chat_only_has_no_drive_warning(beanie_files_db):
     await _seed_upload("w1", name="a.pdf")
 
     svc = UnifiedFilesService()
-    files, warnings = await svc.list_unified("w1", source="chat", limit=50)
+    page = await svc.list_unified("w1", source="chat", limit=50)
 
-    assert len(files) == 1
-    assert warnings == []
+    assert len(page.files) == 1
+    assert page.warnings == []
 
 
 @pytest.mark.asyncio
 async def test_unified_list_local_source_warns_client_only(beanie_files_db):
     svc = UnifiedFilesService()
-    files, warnings = await svc.list_unified("w1", source="local", limit=50)
+    page = await svc.list_unified("w1", source="local", limit=50)
 
-    assert files == []
-    assert any("local.client_only" in w for w in warnings)
+    assert page.files == []
+    assert any("local.client_only" in w for w in page.warnings)
 
 
 def test_dedupe_keeps_first_occurrence():
@@ -145,5 +145,47 @@ async def test_unified_list_respects_limit_cap(beanie_files_db):
         await _seed_upload("w1", name=f"f{i}.pdf")
 
     svc = UnifiedFilesService()
-    files, _ = await svc.list_unified("w1", source="chat", limit=3)
-    assert len(files) == 3
+    page = await svc.list_unified("w1", source="chat", limit=3)
+    assert len(page.files) == 3
+
+
+@pytest.mark.asyncio
+async def test_unified_list_offset_pagination(beanie_files_db):
+    """Offset paging walks the newest-first merged set and reports an
+    accurate total + has_more (total comes from a count, not the page)."""
+    for i in range(5):
+        await _seed_upload("w1", name=f"f{i}.pdf")
+
+    svc = UnifiedFilesService()
+
+    first = await svc.list_unified("w1", source="chat", limit=2, offset=0)
+    assert len(first.files) == 2
+    assert first.total == 5
+    assert first.has_more is True
+
+    second = await svc.list_unified("w1", source="chat", limit=2, offset=2)
+    assert len(second.files) == 2
+    assert second.total == 5
+    assert second.has_more is True
+
+    last = await svc.list_unified("w1", source="chat", limit=2, offset=4)
+    assert len(last.files) == 1
+    assert last.total == 5
+    assert last.has_more is False
+
+    # Pages don't overlap and cover every row exactly once (newest first).
+    names = [f.filename for f in first.files + second.files + last.files]
+    assert sorted(names) == [f"f{i}.pdf" for i in range(5)]
+
+
+@pytest.mark.asyncio
+async def test_unified_list_has_more_false_on_short_page(beanie_files_db):
+    """A page short of ``limit`` on the last batch never claims more rows."""
+    for i in range(3):
+        await _seed_upload("w1", name=f"f{i}.pdf")
+
+    svc = UnifiedFilesService()
+    page = await svc.list_unified("w1", source="chat", limit=10, offset=0)
+    assert len(page.files) == 3
+    assert page.total == 3
+    assert page.has_more is False

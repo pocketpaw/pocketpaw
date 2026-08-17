@@ -1,6 +1,16 @@
 # ee/pocketpaw_ee/paw_bar/agent_provisioning.py — auto-provision a DEDICATED
 # concierge agent per Paw Site.
 #
+# Updated 2026-08-01 (default booking action): a widget MINTED by
+# ``ensure_site_widget`` now declares one gated ``booking_request`` action
+# (``_default_booking_action``). An empty ``spec.actions`` means the concierge
+# preamble renders NO form-card instructions (see the concierge handler), so
+# every from-scratch published site shipped a chat-only concierge that declined
+# bookings — found live 2026-08-01 on a hosted deploy. MINT-ONLY: an existing
+# widget's actions are never touched (owners may have removed or customized
+# them), and the dashboard widget-create path is untouched too — its spec is
+# authored by the caller, never synthesized here.
+#
 # Updated 2026-07-30 (Paw Bar inbox D5): added ``widget_for_agent(agent_id,
 # workspace_id)`` — the REVERSE of the bind ``ensure_site_agent`` writes. D5 lets a
 # concierge run read its own ``agent:<id>`` knowledge scope, which makes "is this
@@ -380,6 +390,32 @@ async def widget_for_agent(agent_id: str, workspace_id: str) -> Any | None:
     return None
 
 
+def _default_booking_action() -> Any:
+    """The one action a MINTED site widget declares: a gated booking request.
+
+    A spec with no gated-with-args actions renders no form-card instructions in
+    the concierge preamble, leaving the agent unable to take a booking at all —
+    a service site's one job. ``gated`` never executes; it raises an Instinct
+    proposal for the owner (SS-2: ``auto`` is reserved for visitor-scoped
+    verbs). Applied ONLY when minting: an existing widget's actions belong to
+    its owner.
+    """
+    from pocketpaw.paw_bar.models import PawBarActionSpec
+
+    return PawBarActionSpec(
+        verb="booking_request",
+        policy="gated",
+        args={
+            "name": "str",
+            "phone": "str",
+            "address": "str",
+            "issue": "str",
+            "preferred_window": "str",
+        },
+        label="Book a service visit",
+    )
+
+
 async def ensure_site_widget(site: Any, workspace_id: str) -> Any | None:
     """Publish-time trigger: a concierge-enabled site must HAVE a paw-bar widget.
 
@@ -411,9 +447,15 @@ async def ensure_site_widget(site: Any, workspace_id: str) -> Any | None:
             owner=str(getattr(site, "owner", "") or "site"),
             workspace_id=workspace_id,
             name=f"{site_name} concierge",
-            # The glass bar renders its own chat surface; blocks stay empty and
-            # the spec is the same "pending" shell the dashboard flow starts from.
-            spec=PawBarSpec(widget_id="pending", pocket_id=site.pocket_id, blocks=[]),
+            # The glass bar renders its own chat surface; blocks stay empty. The
+            # spec ships with the default gated booking action — an empty
+            # ``actions`` yields a concierge that cannot take a booking.
+            spec=PawBarSpec(
+                widget_id="pending",
+                pocket_id=site.pocket_id,
+                blocks=[],
+                actions=[_default_booking_action()],
+            ),
         )
         created = await _store().create_widget(widget)
         logger.info(

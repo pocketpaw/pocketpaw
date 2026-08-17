@@ -15,6 +15,10 @@
 #   * Identity seeding: welcome_message/starters degrade gracefully because the
 #     ASG-1 identity fields are ABSENT on this branch (the created agent carries
 #     neither field); starters ride the frame config payload.
+#   * Default booking action (2026-08-01 live regression): a widget MINTED by
+#     ensure_site_widget carries one gated booking_request action (five str
+#     args, "Book a service visit" label); an EXISTING widget's actions are
+#     never modified by any ensure_site_widget pass (mint-only).
 
 from __future__ import annotations
 
@@ -130,14 +134,17 @@ async def client(tmp_path, mongo_db):
     the SAME tmp store. Yields ``(client, store)``."""
     from unittest.mock import patch
 
-    from pocketpaw_ee.cloud._core.deps import current_workspace_id
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.paw_bar.router import router
+
+    from tests.cloud.conftest import override_workspace_role
 
     app = FastAPI()
     add_error_handler(app)
     app.include_router(router)
-    app.dependency_overrides[current_workspace_id] = lambda: _WS
+    # The admin routes gate on the caller's workspace ROLE since
+    # fix/paw-bar-role-gates, so pin an ADMIN alongside the workspace.
+    override_workspace_role(app, role="admin", workspace_id=_WS)
 
     store = PawBarStore(tmp_path / "provisioning.db")
     with patch("pocketpaw_ee.api.get_paw_bar_store", return_value=store):
@@ -331,6 +338,63 @@ class TestPublishTimeTrigger:
 
         widget = await ap.ensure_site_widget(site, _WS)
         assert widget is not None and widget.id == existing_id
+
+    @pytest.mark.asyncio
+    async def test_minted_widget_carries_default_booking_action(self, client) -> None:
+        """A MINTED widget must declare the default gated booking action.
+
+        Live regression (2026-08-01, hosted deploy): the minted spec shipped with
+        ``actions=[]``, the concierge preamble rendered no form-card instructions
+        (widgets with no gated-with-args actions render none), and every
+        from-scratch published site got a concierge that could answer questions
+        but declined every booking request.
+        """
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        _c, _store = client
+        site = await _site()
+
+        widget = await ap.ensure_site_widget(site, _WS)
+        assert widget is not None
+        actions = widget.spec.actions
+        assert len(actions) == 1, "a minted widget must carry exactly the default action"
+        action = actions[0]
+        assert action.verb == "booking_request"
+        assert action.policy == "gated"
+        assert action.args == {
+            "name": "str",
+            "phone": "str",
+            "address": "str",
+            "issue": "str",
+            "preferred_window": "str",
+        }
+        assert action.label == "Book a service visit"
+
+    @pytest.mark.asyncio
+    async def test_existing_widget_actions_are_never_modified(self, client) -> None:
+        """The default is mint-only: an EXISTING widget's actions stay untouched.
+
+        An owner may have deliberately removed or customized the actions, so a
+        re-publish (a second ``ensure_site_widget`` pass, bound or unbound) must
+        never re-add or reshape them.
+        """
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        _c, store = client
+        site = await _site()
+        # Owner stripped the actions (spec has none) and the widget is unbound —
+        # the pass that DOES bind an agent must still leave actions alone.
+        existing = await store.create_widget(_widget(agent_id="", spec=_spec()))
+
+        widget = await ap.ensure_site_widget(site, _WS)
+        assert widget is not None and widget.id == existing.id
+        assert widget.agent_id, "the unbound existing widget gains an agent"
+        assert widget.spec.actions == [], "but its actions are never touched"
+
+        # Second pass on the now-bound widget (the idempotent early return).
+        again = await ap.ensure_site_widget(site, _WS)
+        assert again is not None and again.id == existing.id
+        assert again.spec.actions == []
 
 
 class TestConciergeEnableTrigger:

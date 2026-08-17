@@ -73,6 +73,7 @@ from soul_protocol.engine.journal import open_journal  # noqa: E402
 
 import pocketpaw.journal_dep as journal_dep  # noqa: E402
 from pocketpaw.instinct.store import InstinctStore  # noqa: E402
+from tests.conftest import seed_gated_action  # noqa: E402
 
 TRIGGER = {"type": "agent", "source": "claude", "reason": "slice 3 test"}
 
@@ -207,7 +208,7 @@ def _propose(
     payload: dict[str, Any] = {"pocket_id": pocket_id, "title": title, "trigger": TRIGGER}
     if parameters is not None:
         payload["parameters"] = parameters
-    resp = client.post("/instinct/actions", json=payload)
+    resp = seed_gated_action(client, payload)
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
 

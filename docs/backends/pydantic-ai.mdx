@@ -1,0 +1,295 @@
+---
+title: "Pydantic AI: In-Process Backend"
+description: "The Pydantic AI backend runs the agent loop inside the API process instead of spawning a subprocess per turn, and reaches models through the LiteLLM proxy. Built for high concurrency."
+section: Agent Backends
+ogType: article
+keywords: ["pydantic ai", "in-process agent", "litellm", "concurrency", "agent backend", "dispatch-only"]
+tags: ["backends", "pydantic-ai", "litellm"]
+---
+
+# Pydantic AI: In-Process Backend
+
+The Pydantic AI backend runs the agent loop **inside the API process** using
+[Pydantic AI](https://ai.pydantic.dev/) (`pydantic-ai-slim`), and reaches models
+through an OpenAI-compatible client pointed at a LiteLLM proxy.
+
+It exists for one reason: concurrency. The default `claude_agent_sdk` backend
+spawns a Claude Code CLI subprocess per concurrent run at roughly 300–500 MB
+RSS. That is fine for a laptop and expensive for a server serving hundreds of
+simultaneous sessions. This backend's per-run cost is roughly the conversation
+context, which moves the limit from process memory to the event loop — something
+you address by adding web processes rather than machines.
+
+## Overview
+
+- **Status**: Beta
+- **Provider support**: LiteLLM (default), Anthropic, OpenAI, OpenRouter, OpenAI-compatible, Ollama
+- **Built-in tools**: none of its own — see [Dispatch-only](#dispatch-only)
+- **MCP support**: Yes, servers held open per process — see [MCP](#mcp)
+- **Harness capabilities**: compaction, planning, tool-output limits, step persistence, skills
+- **Required key**: none at the top level; the LiteLLM virtual key is used instead
+
+## Quick Start
+
+```bash
+export POCKETPAW_AGENT_BACKEND="pydantic_ai"
+export POCKETPAW_PYDANTIC_AI_MODEL="litellm:claude-sonnet-4-6"
+export POCKETPAW_LITELLM_API_BASE="http://localhost:4000"
+export POCKETPAW_LITELLM_API_KEY="sk-your-virtual-key"
+```
+
+Install the extra:
+
+```bash
+pip install 'pocketpaw[pydantic-ai]'
+```
+
+That step is for a **self-hosted** install, where this backend is opt-in. The
+enterprise layer pulls the extra in on its own: `pydantic_ai` is the default
+backend for every new cloud agent, so `pocketpaw-ee` depends on
+`pocketpaw[pydantic-ai]` and `pocketpaw[all]` covers it too.
+
+## Configuration
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `POCKETPAW_PYDANTIC_AI_MODEL` | `litellm:claude-sonnet-4-6` | Model in `provider:model` form |
+| `POCKETPAW_PYDANTIC_AI_PROVIDER` | `auto` | Provider when the model carries no prefix |
+| `POCKETPAW_PYDANTIC_AI_MAX_TURNS` | `100` | Max model requests per run (`0` = unlimited) |
+| `POCKETPAW_PYDANTIC_AI_TIMEOUT` | `3600` | Seconds to wait on the model (`0` = indefinitely) |
+| `POCKETPAW_PYDANTIC_AI_MCP_ENABLED` | `true` | Attach configured MCP servers |
+| `POCKETPAW_PYDANTIC_AI_DEFER_MCP_TOOLS` | `false` | Hide MCP tools behind tool search |
+| `POCKETPAW_PYDANTIC_AI_HARNESS_ENABLED` | `true` | Attach harness capabilities |
+| `POCKETPAW_PYDANTIC_AI_SKILLS_ENABLED` | `true` | Expose PocketPaw skills to the model |
+| `POCKETPAW_PYDANTIC_AI_COMPACTION_MAX_MESSAGES` | `200` | History size that triggers compaction |
+| `POCKETPAW_PYDANTIC_AI_MAX_TOOL_OUTPUT_CHARS` | `200000` | Per-tool-result truncation ceiling |
+
+The model string accepts either form:
+
+```bash
+POCKETPAW_PYDANTIC_AI_MODEL="litellm:claude-sonnet-4-6"   # explicit provider
+POCKETPAW_PYDANTIC_AI_MODEL="claude-sonnet-4-6"           # uses PYDANTIC_AI_PROVIDER
+```
+
+## Why LiteLLM by default
+
+Model access goes through the LiteLLM proxy rather than straight to a vendor,
+because the proxy already owns spend logs, virtual keys, and per-customer
+budgets. Pointing the backend at a vendor SDK directly would work, but it would
+fork metering into two places.
+
+<Callout type="info">
+The proxy base URL needs no `/v1` suffix in your config — the backend appends it.
+This differs from the Deep Agents backend, which passes the same setting to the
+LiteLLM SDK, which builds the path itself.
+</Callout>
+
+Other providers are supported and bypass the proxy:
+
+```bash
+POCKETPAW_PYDANTIC_AI_MODEL="anthropic:claude-sonnet-4-6"   # direct Anthropic
+POCKETPAW_PYDANTIC_AI_MODEL="ollama:llama3.2"               # fully local
+```
+
+## Dispatch-only
+
+This backend emits tool calls; it does not execute local file or shell work.
+Execution belongs to sandboxes (Daytona, WebContainers, the desktop app), object
+storage, or MCP servers.
+
+That is a security property, not just a design preference. PocketPaw's built-in
+shell and filesystem tools confine themselves to a **process-global** jail path.
+A subprocess-per-run backend can give each tenant its own working directory; an
+in-process backend cannot, so every tenant would share one jail. Pocket sessions
+therefore have shell and filesystem tools stripped from the tool surface
+mechanically, and this backend ships no such tools of its own.
+
+If you run single-tenant and want local execution, use `claude_agent_sdk`.
+
+## MCP
+
+MCP servers configured in PocketPaw are attached automatically. Each server is
+started **once per backend instance and held open** for that instance's
+lifetime.
+
+That detail is the whole feature. Pydantic AI's MCP toolsets are refcounted: a
+server that is merely cached still shuts down the moment concurrent runs reach
+zero, and respawns on the next one. At sparse traffic — which is most traffic —
+that means a stdio subprocess spawn on every single turn, the exact cost this
+backend exists to remove. Holding the servers open pins the refcount above zero
+so it never happens, and stdio transports additionally run with fastmcp's
+`keep_alive`, which keeps the child process alive across sessions.
+
+A server that fails to start is dropped with a warning rather than failing the
+run. MCP is additive to the tool surface, never load-bearing.
+
+```bash
+export POCKETPAW_PYDANTIC_AI_MCP_ENABLED="false"   # drop MCP entirely
+```
+
+## Tool search
+
+An ungated surface carries 131 tools, and their schemas are JSON that rides
+every model request. Measured against the real corpus through the model class
+this backend builds:
+
+| | Tools on the wire | Schema bytes | Tokens per request |
+|---|---|---|---|
+| Default | 131 | 121,750 | ~30,437 |
+| `DEFER_MCP_TOOLS=true` | 35 | 23,320 | ~5,830 |
+
+That cost is paid in full rather than amortised, because tool schemas do not
+prompt-cache the way a stable text prefix does (see [Prompt caching](#prompt-caching)).
+
+```bash
+export POCKETPAW_PYDANTIC_AI_DEFER_MCP_TOOLS="true"
+```
+
+With it on, the ~97 bridged MCP tools are hidden and the model reaches them by
+calling `search_tools` with a query. The ~32 builtin function tools stay
+visible: they are the smaller half of the bill and the half the agent uses
+constantly. Surface deny and allow sets are applied first, so a tool the
+surface withheld is not in the search corpus and no query can surface it.
+
+Two things to weigh before turning it on:
+
+- **One extra model request per discovery.** Cheap at these ratios — a two-call
+  turn is roughly 61k tool tokens by default against 18k deferred — but not
+  free.
+- **The model has to actually search.** A capable model treats `search_tools`
+  as an ordinary tool; a weaker one may answer without looking. The token
+  saving is measured, this is not, so it is off by default and worth an A/B on
+  your own model.
+
+A surface that has already named its tools is skipped outright: with an allow
+set or an exclusive turn there is little left to save, and the discovery round
+trip would be pure cost. `/sites` cuts 97 MCP tools to 12 that way.
+
+Ranking uses PocketPaw's own function rather than pydantic-ai's built-in
+keyword overlap, which scores one point per token wherever it lands. On our
+corpus that answers "publish it" with five tools that merely mention publishing
+and never the tool named `publish`, and returns Daytona and Foresight tools for
+"make me a webpage". Against twelve realistic phrasings the built-in algorithm
+finds the right tool 8 times and ours 11.
+
+## Harness capabilities
+
+The backend attaches [`pydantic-ai-harness`](https://ai.pydantic.dev/) capabilities:
+
+| Capability | What it does |
+|-----------|--------------|
+| Compaction | Sliding window + clearing old tool results once history passes `COMPACTION_MAX_MESSAGES` |
+| Planning | A todo list the agent maintains across a long task |
+| Tool output limits | Truncates any single oversized tool result before it re-enters context |
+| Step persistence | An in-memory record of the run's steps |
+| Skills | PocketPaw's skills, with progressive disclosure — see below |
+
+Two are deliberately **not** wired. `DeduplicateFileReads` and `RepoContext` key
+off file-read tools and an on-disk repo that a dispatch-only agent doesn't have.
+`SubAgents` discovers agents from a folder on disk and there are no in-code
+subagents to register, so wiring it would add a capability that can never fire.
+
+`POCKETPAW_PYDANTIC_AI_HARNESS_ENABLED=false` runs the bare agent loop. The
+dependency is pinned exactly and releases frequently, so that escape hatch
+exists on purpose.
+
+### Skills
+
+PocketPaw's **bundled** skills are handed to the model with **progressive
+disclosure**: it sees names and descriptions, and pulls a skill's full body only
+when it decides to use one.
+
+Three constraints worth knowing:
+
+- The source is the skills PocketPaw **ships**, not the machine's skill
+  directories (`~/.agents/skills`, `~/.claude/skills`, `~/.pocketpaw/skills`).
+  Those hold the operator's own skills, which aren't tenant content and whose
+  cost scales with whatever happens to be installed there.
+- Skills are passed **programmatically**. The underlying package can also scan
+  directories, clone git repos, or read S3; none of that is used, because
+  PocketPaw already owns skill discovery and a second mechanism is a second
+  place a tenant's surface could drift from policy.
+- The **script-execution tool is excluded**. It runs a skill's bundled script
+  locally, which is what dispatch-only rules out and what has no per-tenant jail
+  here.
+
+Measured input tokens for one trivial turn against `deepseek-v3.2`:
+
+| Configuration | Input tokens |
+|---------------|-------------|
+| Harness off, skills off | 13 |
+| Harness on, skills off | 833 |
+| Harness on + 19 bundled skills | 5,784 |
+| Harness on + 42 skills from `~/.claude` | 8,644 |
+
+Progressive disclosure is doing real work — inlining those 42 would have been
+~118k tokens — and prompt caching absorbs most of what remains on warm turns.
+A caller can narrow further per entity with `skill_names`.
+
+## Prompt caching
+
+Prompt caching **works** through the proxy — no `cache_control` markers needed on
+our side. Measured against `deepseek-v3.2`, six turns sharing one ~4.4k-token
+system prefix:
+
+| Turn | Cache read | Uncached input | Hit rate |
+|------|-----------|----------------|----------|
+| 0 (cold) | 0 | full prompt | 0% |
+| 1 | 4,416 | 19 | 100% |
+| 2 | 4,416 | 9,316 | 32% |
+| 3 | 4,416 | 19 | 100% |
+| 4 | 8,000 | 943 | 89% |
+| 5 | 4,416 | 19 | 100% |
+
+Two things to know. The first turn is always a cold write, and hits are not
+guaranteed — one turn in six missed. So when comparing cost against another
+backend, measure a warm window rather than a single turn.
+
+**Caching covers the text prefix, not tool schemas.** With a short system prompt
+and the full 49-tool surface attached, the same model reported 13,509 input
+tokens and *zero* cache reads on every turn. Drop the tools and a 4.4k system
+prompt caches at 100%.
+
+This matters for which workload you run. The pocket/site specialist carries a
+~12-17k-token design-rules prompt — exactly the shape that caches. A chat agent
+with a small prompt and a large tool surface is the case that won't, so measure
+it rather than assuming from the specialist's numbers.
+
+Whenever a run returns non-zero cache tokens the backend emits a `token_usage`
+event with read and write counts and a hit rate, so you can measure this on your
+own traffic and model rather than trusting the table above.
+
+## Concurrency notes
+
+Two properties matter when many runs share one backend instance:
+
+- **Cancellation is per-run.** Stopping one run never truncates a sibling, and a
+  run that starts after a stop is not born cancelled.
+- **Every bridged tool is async.** A single blocking tool would run on the
+  bounded worker-thread pool and throttle every concurrent run in the process,
+  so the tool bridge rejects sync tools rather than accepting them quietly.
+
+## Pocket specialist
+
+The backend implements dynamic tool attachment, so it can run the pocket/site
+specialist:
+
+```bash
+export POCKETPAW_POCKET_SPECIALIST_BACKEND="pydantic_ai"
+```
+
+Rollback is the same setting — set it back to `deep_agents`.
+
+## Limitations
+
+- Beta. The dependencies are pinned exactly; expect breaking changes on upgrade.
+- No local shell or filesystem tools (by design — see above).
+- Subagents not wired.
+- Tool search is verified on OpenAI-compatible chat completions, which is what
+  LiteLLM, OpenRouter and Ollama all speak here. Anthropic and the OpenAI
+  Responses API drive discovery provider-side instead, and Responses currently
+  rejects the pairing pydantic-ai sends
+  ([pydantic-ai#5938](https://github.com/pydantic/pydantic-ai/issues/5938)).
+- Deferred tools are rediscovered when a conversation's retained transcript is
+  gone (fresh process, evicted session), since discovery state lives in the
+  message history.

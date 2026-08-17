@@ -229,6 +229,20 @@ run-tool route can read the allowlist off the credential row.
 ``get_pocket_backend_for_executor`` APPENDS ``allowed_tools`` as the 9th tuple
 element (back-compatible — every existing positional destructure uses ``*_``).
 
+Changes: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — added
+``set_react_source_file``, the react peer of ``set_svelte_source_file`` and the
+only place a react ``source`` map is written after create. Until this existed the
+react track had NO edit path at all — ``set_svelte_source_file`` rejects a react
+pocket with ``pocket.not_svelte_site``, so the chat agent's only response to
+"shorten the hero headline" was a second ``create_react_site``, which minted a
+SECOND site pocket. It mirrors the svelte peer on access
+(``_check_domain_edit_access``), the fresh-dict reassignment for ODM dirty
+tracking, ``emit(PocketUpdated(...))`` and the best-effort draft
+``ArtifactVersion`` snapshot, and diverges in exactly two ways: a ``create`` flag
+(a new component FILE is needed to add a section, and it INVERTS the path check
+rather than relaxing it — ``create=False`` demands the path exist, ``create=True``
+demands it not), and it returns only the wire dict, because the react lane has no
+republish to roll back from.
 Changes: 2026-06-17 (feat/sites-svelte-component-edit, SE-2) — added
 ``set_svelte_source_file``: rewrite ONE file in a svelte-engine pocket's
 ``source`` map (the {path: contents} hand-written SvelteKit files) and persist
@@ -322,6 +336,7 @@ from pocketpaw_ee.cloud.pockets.dto import (
     UpdateWidgetRequest,
     pocket_to_wire_dict,
 )
+from pocketpaw_ee.cloud.pockets.id_resolve import AmbiguousId, resolve_id
 from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
 from pocketpaw_ee.cloud.ripple_validator import (
     ActionWiringViolationError,
@@ -524,6 +539,12 @@ def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
         # as ``engine="ripple"``, ``source=None``).
         engine=getattr(doc, "engine", "ripple"),
         source=getattr(doc, "source", None),
+        # MT-1 — the authored "my client JS is load-bearing" declaration.
+        # ``getattr`` for legacy docs that pre-date the field, which read back
+        # ``None`` = undeclared. NOT coerced to a bool: that would flatten
+        # undeclared into an explicit ``False`` here, before publish gets the
+        # chance to apply ``sites_keep_client_bundle_default``.
+        keeps_client_bundle=getattr(doc, "keeps_client_bundle", None),
         # Entity-rooms chunk ② — optional per-entity surface-profile override.
         # ``getattr`` for legacy docs that pre-date the field. Dumped to a plain
         # JSON dict so the domain layer carries the wire shape, not the Beanie
@@ -2174,6 +2195,159 @@ async def set_svelte_source_file(
     return await _resolved_wire_dict(doc, user_id), previous_source
 
 
+async def set_react_source_file(
+    pocket_id: str,
+    user_id: str,
+    *,
+    component_path: str,
+    new_source: str,
+    create: bool = False,
+) -> dict:
+    """Write ONE file in a react-engine pocket's ``source`` map and persist it.
+
+    The react peer of ``set_svelte_source_file``, and the only place a react
+    ``source`` map is written after create — the Pocket Beanie write stays inside
+    the pockets service (entity isolation: the sites service resolves the edit and
+    orchestrates, but never touches the Pocket model).
+
+    Access mirrors ``update`` / ``set_svelte_source_file``: explicit
+    ``(pocket_id, user_id)`` with ``_check_domain_edit_access`` (owner /
+    shared_with / workspace-visible). A missing pocket raises ``NotFound``.
+
+    ``create`` is the one place this DIVERGES from the svelte peer, and it exists
+    because "add a testimonials section" needs a new component FILE plus an edit to
+    ``src/App.tsx`` — with an existence-only contract the agent could not add a
+    section at all. It flips the path check rather than relaxing it, so exactly one
+    of the two mistakes is impossible in each mode:
+
+      * ``create=False`` (default) — ``component_path`` MUST already exist, else
+        ``NotFound`` (404) on the component. A typo'd path is never a silent create.
+      * ``create=True`` — ``component_path`` must NOT already exist, else
+        ``ValidationError`` (422). Silently overwriting a real component the agent
+        thought it was adding is worse than a rejected call it can retry.
+
+    A non-react pocket (``engine != "react"`` or no ``source`` map) is a
+    ``ValidationError`` (422, ``pocket.not_react_site``) rather than a write against
+    the wrong content model.
+
+    Returns the resolved wire dict every other write returns. Unlike the svelte peer
+    it does NOT also return the file's prior contents: that value exists there only
+    so the caller can roll back a failed republish, and the react edit lane has no
+    republish to fail (``build_runs_async("react")`` is True — a react publish
+    enqueues a Daytona build and returns before any outcome exists). Persisting the
+    draft IS the whole job.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    if getattr(doc, "engine", "ripple") != "react" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_react_site",
+            "This pocket is not a react Paw Site — it has no component source map to edit.",
+        )
+    exists = component_path in doc.source
+    if create and exists:
+        raise ValidationError(
+            "pocket.react_component_exists",
+            f"`{component_path}` already exists in this site's source map. Edit it "
+            "without `create` instead of overwriting it.",
+        )
+    if not create and not exists:
+        raise NotFound("site_component", component_path)
+
+    # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a
+    # dict field is not always detected as dirty by the ODM) — same note as
+    # ``set_svelte_source_file``.
+    updated = dict(doc.source)
+    updated[component_path] = new_source
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    # Branch primitive (BP-3): a source-map edit ALSO writes a draft
+    # ArtifactVersion snapshotting the FULL map, so the edit is a reviewable draft
+    # a later publish promotes. The helper is engine-agnostic (it snapshots
+    # ``doc.source`` whatever engine wrote it); same best-effort contract — an
+    # additive history layer, never a gate on the edit.
+    await _record_pocket_svelte_draft_version(doc, author=user_id)
+    return await _resolved_wire_dict(doc, user_id)
+
+
+async def set_html_source_file(
+    pocket_id: str,
+    user_id: str,
+    *,
+    file_path: str,
+    new_source: str,
+    create: bool = False,
+) -> dict:
+    """Write ONE file in an html-engine pocket's ``source`` map and persist it.
+
+    The html peer of ``set_react_source_file``. Until HE-10 the html track had no
+    per-file writer at all: ``set_imported_source`` (below) replaces the WHOLE map
+    and is the crawler's, taking an explicit ``workspace_id`` with no viewer check
+    because it runs in the background off a request. Pointing an agent edit at it
+    would have swapped a site's entire contents to change one headline, and done so
+    without the ``_check_domain_edit_access`` every other authored write runs.
+
+    Access mirrors ``update`` / ``set_react_source_file``: explicit
+    ``(pocket_id, user_id)`` with ``_check_domain_edit_access`` (owner /
+    shared_with / workspace-visible). A missing pocket raises ``NotFound``.
+
+    ``create`` carries the same inverted contract as the react peer, for the same
+    reason — "add an about page" needs a new FILE plus a link from ``index.html``:
+
+      * ``create=False`` (default) — ``file_path`` MUST already exist, else
+        ``NotFound`` (404). A typo'd path is never a silent create.
+      * ``create=True`` — ``file_path`` must NOT already exist, else
+        ``ValidationError`` (422). Silently overwriting a real page is worse than
+        a rejected call the agent can retry.
+
+    A non-html pocket (``engine != "html"`` or no ``source`` map) is a
+    ``ValidationError`` (422, ``pocket.not_html_site``) rather than a write against
+    the wrong content model.
+
+    Returns the resolved wire dict every other write returns. Like the react peer
+    and unlike the svelte one it does NOT return the file's prior contents: that
+    value exists there only so the caller can roll back a failed republish, and
+    this lane has no republish to fail — an html publish runs no build and no
+    smoke gate, so there is no gate to be rejected by. Persisting the draft IS
+    the whole job.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    if getattr(doc, "engine", "ripple") != "html" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_html_site",
+            "This pocket is not an html Paw Site — it has no raw source map to edit.",
+        )
+    exists = file_path in doc.source
+    if create and exists:
+        raise ValidationError(
+            "pocket.html_file_exists",
+            f"`{file_path}` already exists in this site's source map. Edit it "
+            "without `create` instead of overwriting it.",
+        )
+    if not create and not exists:
+        raise NotFound("site_component", file_path)
+
+    # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a
+    # dict field is not always detected as dirty by the ODM) — same note as
+    # ``set_svelte_source_file``.
+    updated = dict(doc.source)
+    updated[file_path] = new_source
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    # Branch primitive (BP-3): a source-map edit ALSO writes a draft
+    # ArtifactVersion snapshotting the FULL map, so the edit is a reviewable draft
+    # a later publish promotes. The helper is engine-agnostic despite its name (it
+    # snapshots ``doc.source`` whatever engine wrote it) — the same reuse
+    # ``set_react_source_file`` makes.
+    await _record_pocket_svelte_draft_version(doc, author=user_id)
+    return await _resolved_wire_dict(doc, user_id)
+
+
 async def set_imported_source(
     pocket_id: str,
     *,
@@ -2940,6 +3114,43 @@ def _agent_view_dict(doc: _PocketDoc) -> dict:
     return json.loads(json.dumps(view, default=str))
 
 
+def _is_whole_object_id(value: str) -> bool:
+    """True for a full 24-hex-char ObjectId, the form every pre-existing caller sends."""
+    return len(value) == 24 and all(c in "0123456789abcdefABCDEF" for c in value)
+
+
+async def _resolve_pocket_id_tail(given: str, workspace_id: str) -> tuple[str, str | None]:
+    """Turn a shortened pocket id back into a whole one, WITHIN one workspace.
+
+    The workspace filter is the tenancy boundary and is not optional: an
+    unscoped tail resolve could land on another tenant's pocket, which is a
+    worse bug than the prompt bloat the shortening was introduced to fix. The
+    projection keeps this to ids only — a workspace's pocket count is small, but
+    there is no reason to drag every rippleSpec across the wire to compare 8
+    characters.
+
+    An ambiguous tail returns its error message rather than picking a winner.
+    """
+    # ``get_pymongo_collection``, NOT ``get_motor_collection`` — the latter is
+    # beanie 1.x and this is on 2.1.0, where it does not exist. The first version
+    # of this used the old name; every isolated resolver and handler test still
+    # passed, because the broad ``except`` below turned a missing attribute into
+    # a tidy "could not resolve" string and no test called this function.
+    # ``tests/cloud/pockets/test_short_id_tool_wiring.py`` is what caught it.
+    try:
+        cursor = _PocketDoc.get_pymongo_collection().find({"workspace": workspace_id}, {"_id": 1})
+        candidates = [{"_id": str(row["_id"])} async for row in cursor]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pocket id tail resolve failed for %s: %s", given, exc, exc_info=True)
+        return "", f"could not resolve pocket {given}: {exc}"
+    try:
+        return resolve_id(given, candidates), None
+    except AmbiguousId as exc:
+        return "", str(exc)
+    except KeyError:
+        return "", f"pocket {given} not found"
+
+
 async def _agent_load_doc(pocket_id: str) -> tuple[_PocketDoc | None, str | None]:
     """Load a pocket for an agent-initiated mutation, with workspace +
     access-control checks.
@@ -2963,6 +3174,15 @@ async def _agent_load_doc(pocket_id: str) -> tuple[_PocketDoc | None, str | None
         return None, (
             "no active workspace/user — agent pocket mutations require a cloud SSE chat stream"
         )
+    # The prompt renders a SHORTENED id (last 8 chars — see
+    # ``pocketpaw.prompt.entity``), so the agent can hand one back. A whole id
+    # takes the direct path it always took; only a short one pays for a lookup,
+    # so no existing caller changes behaviour.
+    if not _is_whole_object_id(pocket_id):
+        resolved, resolve_err = await _resolve_pocket_id_tail(pocket_id, workspace_id)
+        if resolve_err is not None:
+            return None, resolve_err
+        pocket_id = resolved
     try:
         doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
     except Exception as exc:  # noqa: BLE001
@@ -3438,6 +3658,16 @@ async def agent_update_widget(
     doc, err = await _agent_load_doc(pocket_id)
     if err:
         return None, err
+    # The prompt shows a shortened widget id, so accept one back. Widgets are
+    # already loaded and already scoped to this pocket, so the resolve is free
+    # and cannot reach another tenant's data. An ambiguous tail raises rather
+    # than patching whichever widget sorted first.
+    try:
+        widget_id = resolve_id(widget_id, list(doc.widgets))
+    except AmbiguousId as exc:
+        return None, str(exc)
+    except KeyError:
+        return None, f"widget {widget_id} not found in pocket {pocket_id}"
     widget = next((w for w in doc.widgets if w.id == widget_id), None)
     if widget is None:
         return None, f"widget {widget_id} not found in pocket {pocket_id}"
@@ -4427,6 +4657,7 @@ async def agent_create(
     ripple_spec: dict | None = None,
     engine: str = "ripple",
     source: dict[str, Any] | None = None,
+    keeps_client_bundle: bool | None = None,
     trusted: bool = False,
 ) -> tuple[dict | None, str | None, str | None]:
     """Insert a brand-new pocket owned by ``owner_id`` in ``workspace_id``.
@@ -4458,6 +4689,20 @@ async def agent_create(
     ride the versioned content and the generator extracts them at publish.
     Both keep today's defaults (``engine="ripple"``, ``source=None``) for
     ripple callers — additive, no Mongo migration.
+
+    ``keeps_client_bundle`` (MT-1) declares that the site's hand-written client
+    JavaScript is load-bearing — an ``onMount``, a ``use:`` action, an
+    IntersectionObserver scroll-reveal, a raw-WebGL canvas. A published site is
+    otherwise generated with ``csr = false`` (and, on ripple, has its emitted
+    hydration bundle pruned after the build), so that code never runs in the
+    browser. It sits beside ``engine`` because it describes the AUTHORED artifact
+    rather than the deploy, and it rides ``siteConfig.keepsClientBundle`` to the
+    generator at publish. TRI-STATE: it defaults to ``None`` — "the author
+    declared nothing" — and publish then resolves that from the
+    ``sites_keep_client_bundle_default`` setting (``True`` by default since
+    feat/sites-js-by-default). Pass an explicit ``True``/``False`` only to record
+    a real authorial decision; both override the setting, so ``False`` is how a
+    pure-static page opts out of shipping a bundle.
 
     ``trusted=True`` skips the STRICT catalog gate — use it ONLY for a
     code-assembled spec the caller fully controls (the deterministic Paw Site
@@ -4512,6 +4757,7 @@ async def agent_create(
             rippleSpec=normalized,
             engine=engine,
             source=source,
+            keeps_client_bundle=keeps_client_bundle,
             visibility="workspace",
         )
         await doc.insert()
@@ -5663,6 +5909,7 @@ __all__ = [
     "set_pocket_backend",
     "set_pocket_connector_permissions",
     "set_pocket_write_policy",
+    "set_react_source_file",
     "set_svelte_source_file",
     "unassign_project_on_pockets",
     "update",

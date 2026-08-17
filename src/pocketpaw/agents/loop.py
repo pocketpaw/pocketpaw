@@ -6,6 +6,31 @@ and streams AgentEvent responses back to channels.
 
 PII scanning before memory storage is opt-in via pii_scan_enabled + pii_scan_memory settings.
 
+Updated: 2026-08-15 (HTN-4, feat/claude-sdk-tool-args) — the ``tool_use`` branch
+correlates ONE pending call per real tool call, not one per event. The claude_sdk
+backend now announces a streamed call twice (provisional when the tool block
+opens, then resolved with the assembled arguments), and this branch appended a
+``pending_tool_calls`` entry per EVENT — so every streamed call left a stale entry
+that ``tool_result``'s name-match never popped, and the ``pop(0)`` fallback then
+handed later results an id belonging to an earlier call. It also published two
+``tool_start`` events per call, the first carrying no real arguments. The branch
+now skips the provisional announcement (``metadata["input_pending"] is True``).
+Backends that never set the flag read None and are untouched.
+
+Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the channel turn
+carries its prompt's ``stable_digest`` to the backend. ``_process_message_inner``
+calls ``AgentContextBuilder.assemble_system_prompt`` (which returns the digest
+alongside the text) instead of ``build_system_prompt``, and passes
+``system_prompt_digest`` to ``AgentRouter.run``, which forwards it only to
+backends whose ``run`` declares it. Everything this module does to the prompt
+AFTER assembly — ``_reinforce_identity``'s every-fifth-message identity append —
+moves the text and NOT the digest, on purpose: a backend caching an agent object
+should not rebuild it for a block the prompt already contained. Before this, the
+warm Claude client on Telegram / Discord / Slack / CLI keyed on
+``claude_sdk._behavior_prefix``, which infers the stable region by pattern-
+matching the rendered text and so cannot see a real behaviour change hiding below
+its cut.
+
 Updated: feat/pocketpaw-cognitive-engine
 - start() now builds a PocketPawCognitiveEngine backed by the active AgentRouter
   and passes it to SoulManager.initialize() so the soul's cognition pipeline
@@ -1122,8 +1147,14 @@ class AgentLoop:
             else:
                 agents_md_dir = str(self.settings.file_jail_path)
 
-            system_prompt, history = await asyncio.gather(
-                self.context_builder.build_system_prompt(
+            # ``assemble_system_prompt`` rather than ``build_system_prompt``
+            # (PA-7b): the same assembly, but it hands back the digest as well as
+            # the text. The digest goes to the backend UNMODIFIED while the text
+            # below is still mutated per turn (identity reinforcement, and the
+            # backend's own history splice) — that asymmetry is the point of a
+            # digest over layer keys rather than over bytes.
+            assembled_prompt, history = await asyncio.gather(
+                self.context_builder.assemble_system_prompt(
                     user_query=content,
                     channel=message.channel,
                     sender_id=sender_id,
@@ -1140,6 +1171,7 @@ class AgentLoop:
                     llm_summarize=self.settings.compaction_llm_summarize,
                 ),
             )
+            system_prompt = assembled_prompt.text
 
             # 2a. Emit AGENTS.md event for the dashboard Activity panel
             try:
@@ -1177,6 +1209,13 @@ class AgentLoop:
             if asyncio.iscoroutine(bootstrap_context):
                 bootstrap_context = await bootstrap_context
             identity_block = bootstrap_context.to_identity_block()
+            # Mutates the TEXT and deliberately not the digest: this appends a
+            # copy of a block the prompt already contains, so two turns that
+            # differ only by reinforcement are the same prompt as far as a
+            # backend caching an agent object is concerned. Moving the digest
+            # here would rebuild the warm client every fifth message for no
+            # change in behaviour. Pinned by
+            # ``tests/test_channel_prompt_digest.py``.
             system_prompt = _reinforce_identity(system_prompt, identity_block, message_count)
 
             # 2c. Emit agent_start + thinking events
@@ -1257,7 +1296,15 @@ class AgentLoop:
 
             await _policy_ctx.__aenter__()
             run_iter = router.run(
-                content, system_prompt=system_prompt, history=history, session_key=session_key
+                content,
+                system_prompt=system_prompt,
+                history=history,
+                session_key=session_key,
+                # The router decides per BACKEND whether this is deliverable —
+                # an out-of-tree backend whose ``run`` never declared the
+                # parameter must keep working, so the check is on the signature
+                # and it lives in ``agents.backend``.
+                system_prompt_digest=assembled_prompt.stable_digest,
             )
             try:
                 async for event in run_iter:
@@ -1408,9 +1455,38 @@ class AgentLoop:
                             except Exception:
                                 logger.debug("Failed to evaluate budget state", exc_info=True)
 
-                    elif etype == "tool_use":
+                    # ``input_pending`` marks a PROVISIONAL announcement: the
+                    # backend knows the tool's name but its arguments are still
+                    # streaming (claude_sdk emits one when the tool block opens,
+                    # then a resolved event with the assembled arguments). Only
+                    # the resolved event may be correlated here — this branch
+                    # appends one pending entry per event, so honouring both
+                    # would leak an entry per call and corrupt every later
+                    # ``tool_call_id`` via the ``pop(0)`` fallback below. It is
+                    # skipped rather than merged because the ``tool_start`` this
+                    # publishes is APPENDED by its consumers (the dashboard
+                    # transparency log and the client activity store both render
+                    # ``params`` as a new row), so a provisional row is a junk
+                    # row with no arguments, not a placeholder that gets
+                    # upgraded. The fast-indicator role the provisional event
+                    # exists for is served on the chat ``tool_use`` path, which
+                    # replaces a status line instead of appending. Backends that
+                    # never set the flag (pydantic_ai, deep_agents, ...) read
+                    # None here and behave exactly as before.
+                    elif etype == "tool_use" and meta.get("input_pending") is not True:
                         tool_name = meta.get("name") or meta.get("tool", "unknown")
-                        tool_input = meta.get("input") or meta
+                        # A tool called with NO arguments reports ``input={}``,
+                        # which is falsy — an ``or meta`` fallback here published
+                        # the whole metadata dict as the call's parameters, so the
+                        # transparency log rendered ``{'input': {}, 'name':
+                        # 'get_system_status'}`` where the arguments belong. No
+                        # backend ever put arguments outside ``input`` (opencode
+                        # omits the key entirely and simply has none to give), so
+                        # the fallback never recovered anything real. Absent or
+                        # malformed now reads as "no arguments", which is true.
+                        tool_input = meta.get("input")
+                        if not isinstance(tool_input, dict):
+                            tool_input = {}
                         tool_call_seq += 1
                         tool_call_id = f"{trace_id}:{tool_call_seq}"
                         pending_tool_calls.append({"id": tool_call_id, "name": tool_name})

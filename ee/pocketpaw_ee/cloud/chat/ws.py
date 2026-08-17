@@ -8,12 +8,42 @@ Handles:
 - Message routing to group members
 - Typing indicators with auto-expiry (5s)
 - Presence tracking with grace period (30s before marking offline)
+- Per-socket liveness (see below)
+
+Updated: 2026-08-11 (fix/notif-liveness-dispatch) — ``is_online`` used to mean
+"a socket object is present in the dict", which a half-open socket (laptop
+asleep, NAT timeout) satisfies indefinitely: the TCP close never arrives, so
+the registry keeps a socket nobody is listening on. Notification dispatch
+reads that verdict to pick WS over Web Push, so a zombie socket silently ate
+the notification.
+
+Liveness is now **capability-gated**, because the honest signal is only
+available from clients that ping:
+
+- A socket that has sent a ``ping`` frame is marked ping-capable
+  (``mark_ping_capable``, called from the router's ping branch — capability is
+  proved by behaviour, not assumed). For these, liveness is INBOUND traffic
+  inside ``LIVENESS_STALE_SECONDS``. Outbound sends are deliberately excluded:
+  a write to a half-open socket succeeds for minutes because the kernel
+  buffers it, so counting outbound would let workspace fan-out resurrect a
+  zombie forever. Past the window the socket is dropped from the verdict and
+  closed best-effort, which wakes the receive loop so the normal
+  disconnect/presence path runs.
+- Every other socket (older FE bundles that never ping) keeps the legacy
+  "live while registered" verdict. They send nothing for long stretches while
+  perfectly alive, so applying staleness would churn them into a
+  close/reconnect loop. Their safety net is unchanged: the dispatch
+  zero-accept fallback in ``push/dispatch.py``. That also removes any
+  deployment-ordering constraint against the FE ping rollout — this can ship
+  first, and each client tightens itself the moment it starts pinging.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import time
 
 from fastapi import WebSocket
 
@@ -23,6 +53,13 @@ logger = logging.getLogger(__name__)
 
 TYPING_TIMEOUT_SECONDS = 5
 PRESENCE_GRACE_SECONDS = 30
+# A ping-capable socket silent this long is presumed dead. The client pings
+# every 30s foregrounded, but Chrome's intensive throttling slows hidden tabs'
+# timers to ~1/min after 5 minutes — so size for two missed pings at the
+# THROTTLED cadence, or backgrounded tabs (exactly where push matters) would
+# sit on the boundary and flap close(1001)/reconnect. Costs only slower zombie
+# detection. Sockets that don't ping are exempt entirely (see _is_fresh).
+LIVENESS_STALE_SECONDS = 150
 
 
 class ConnectionManager:
@@ -39,6 +76,21 @@ class ConnectionManager:
         self._typing_timers: dict[tuple[str, str], asyncio.Task] = {}
         # Current room per socket (at most one): ws -> group_id
         self._ws_to_room: dict[WebSocket, str] = {}
+        # ws -> monotonic timestamp of the last INBOUND frame. This is the only
+        # input to the freshness verdict; see _is_fresh for why outbound is not.
+        self._ws_last_inbound: dict[WebSocket, float] = {}
+        # ws -> monotonic timestamp of the last outbound send the socket
+        # accepted. Diagnostics only — deliberately NOT part of freshness.
+        self._ws_last_outbound: dict[WebSocket, float] = {}
+        # Sockets that have proved they speak the ping heartbeat. Only these
+        # are subject to staleness; everything else keeps legacy semantics.
+        self._ping_capable: set[WebSocket] = set()
+        # Sockets with a close already in flight, so repeated is_online calls
+        # don't pile up duplicate close tasks for the same socket.
+        self._closing: set[WebSocket] = set()
+        # Strong refs to in-flight close tasks — a bare create_task result is
+        # only weakly held by the loop and can be GC'd mid-await.
+        self._close_tasks: set[asyncio.Task] = set()
 
     async def connect(self, websocket: WebSocket, user_id: str) -> None:
         """Register an authenticated WebSocket connection."""
@@ -46,6 +98,7 @@ class ConnectionManager:
             self.active_connections[user_id] = set()
         self.active_connections[user_id].add(websocket)
         self._ws_to_user[websocket] = user_id
+        self.touch(websocket)
 
         # Cancel any pending offline task
         task = self._offline_tasks.pop(user_id, None)
@@ -67,6 +120,10 @@ class ConnectionManager:
         """
         # Always clear any room association, regardless of user mapping.
         self._ws_to_room.pop(websocket, None)
+        self._ws_last_inbound.pop(websocket, None)
+        self._ws_last_outbound.pop(websocket, None)
+        self._ping_capable.discard(websocket)
+        self._closing.discard(websocket)
 
         user_id = self._ws_to_user.pop(websocket, None)
         if not user_id:
@@ -86,22 +143,146 @@ class ConnectionManager:
         """Return the set of active WebSocket connections for a user."""
         return self.active_connections.get(user_id, set())
 
-    def is_online(self, user_id: str) -> bool:
-        """Check whether a user has at least one active connection."""
-        return bool(self.active_connections.get(user_id))
+    # ------------------------------------------------------------------
+    # Liveness
+    # ------------------------------------------------------------------
 
-    async def send_to_user(self, user_id: str, message: WsOutbound) -> None:
-        """Send a message to all of a user's connections."""
+    def mark_ping_capable(self, websocket: WebSocket) -> None:
+        """Record that this socket speaks the ping heartbeat.
+
+        Called from the router's ``ping`` branch, so capability is proved by
+        observed behaviour rather than assumed from a version string. Only
+        capable sockets are subject to staleness — see :meth:`_is_fresh`.
+        Idempotent; untracked sockets are ignored.
+        """
+        if websocket in self._ws_to_user:
+            self._ping_capable.add(websocket)
+
+    def touch(self, websocket: WebSocket) -> None:
+        """Record an INBOUND frame, refreshing the socket's liveness window.
+
+        Called by the router's receive loop on every inbound frame (the ping
+        heartbeat included). Untracked sockets are ignored — a socket that has
+        already been disconnected must not resurrect itself here.
+        """
+        if websocket in self._ws_to_user:
+            self._ws_last_inbound[websocket] = time.monotonic()
+
+    def _mark_outbound(self, websocket: WebSocket) -> None:
+        """Record an outbound send the socket accepted. Diagnostics only.
+
+        Explicitly NOT an input to :meth:`_is_fresh` — see the note there on
+        why a successful write proves nothing about a half-open socket.
+        """
+        if websocket in self._ws_to_user:
+            self._ws_last_outbound[websocket] = time.monotonic()
+
+    def _is_fresh(self, websocket: WebSocket, *, now: float) -> bool:
+        """True when the socket should be treated as live.
+
+        Two regimes, keyed on whether the client has proved it pings:
+
+        - **Ping-capable** — freshness is INBOUND traffic only. Outbound sends
+          are not evidence: ``send_json`` to a half-open socket succeeds for
+          minutes (the kernel just buffers the write), so counting them would
+          let workspace fan-out resurrect a zombie forever in a busy workspace,
+          which is the exact bug this liveness work exists to kill.
+        - **Not ping-capable** — legacy semantics: live while registered. Old
+          FE bundles send nothing for long stretches while perfectly alive, so
+          staleness would churn them into a close/reconnect loop. Their safety
+          net stays the dispatch zero-accept fallback, exactly as before this
+          change — no regression, and no ordering constraint against the FE
+          ping rollout.
+        """
+        if websocket not in self._ping_capable:
+            return True
+
+        last_inbound = self._ws_last_inbound.get(websocket)
+        if last_inbound is None:
+            # Capable but never stamped — treat as stale rather than trusting it.
+            return False
+        return (now - last_inbound) < LIVENESS_STALE_SECONDS
+
+    def _close_stale(self, websocket: WebSocket) -> None:
+        """Best-effort close of a presumed-zombie socket. Never raises.
+
+        Deliberately does NOT unregister the socket: closing it wakes the
+        router's ``receive_text()`` loop, which runs the normal ``disconnect``
+        path and the presence grace timer with it. Unregistering here instead
+        would swallow the ``presence.offline`` broadcast.
+        """
+        if websocket in self._closing:
+            return  # A close is already in flight for this socket.
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # No loop (sync context) — the next send will prune it.
+
+        async def _close() -> None:
+            with contextlib.suppress(Exception):
+                await websocket.close(code=1001, reason="Stale connection")
+
+        try:
+            task = loop.create_task(_close())
+        except Exception:
+            return
+        # Hold a strong ref until the task finishes: the event loop only keeps
+        # a weak one, so an unreferenced task can be collected mid-close.
+        self._closing.add(websocket)
+        self._close_tasks.add(task)
+        task.add_done_callback(self._close_tasks.discard)
+        task.add_done_callback(lambda _t: self._closing.discard(websocket))
+
+    def is_online(self, user_id: str) -> bool:
+        """Check whether a user has at least one LIVE connection.
+
+        For a ping-capable client "live" means an inbound frame inside
+        ``LIVENESS_STALE_SECONDS``, not merely a socket object in the registry
+        — see :meth:`_is_fresh` and the module docstring. Stale sockets are
+        closed best-effort on the way through, so the verdict and the cleanup
+        converge without a separate sweeper.
+        """
+        conns = self.active_connections.get(user_id)
+        if not conns:
+            return False
+
+        now = time.monotonic()
+        live = False
+        for ws in list(conns):
+            if self._is_fresh(ws, now=now):
+                live = True
+            else:
+                self._close_stale(ws)
+        return live
+
+    async def send_to_user(self, user_id: str, message: WsOutbound) -> int:
+        """Send a message to all of a user's connections.
+
+        Returns the number of sockets that ACCEPTED the frame. Zero means the
+        user looked connected but nothing was delivered (every socket was dead
+        and got pruned) — the signal ``push.dispatch.notify`` uses to fall back
+        to Web Push instead of dropping the notification.
+        """
         data = message.model_dump(mode="json")
+        delivered = 0
         dead: list[WebSocket] = []
-        for ws in self.get_user_connections(user_id):
+        # Iterate a COPY: a concurrent _close_stale → disconnect mutates the
+        # live set, and the resulting "set changed size during iteration" fires
+        # at the for statement — outside the per-send try — so it would escape
+        # to notify() and be mistaken for a WS failure, skipping the fallback.
+        for ws in list(self.get_user_connections(user_id)):
             try:
                 await ws.send_json(data)
             except Exception:
                 dead.append(ws)
+            else:
+                delivered += 1
+                self._mark_outbound(ws)
         # Clean up dead connections
         for ws in dead:
             await self.disconnect(ws)
+        return delivered
 
     async def broadcast_to_group(
         self,
@@ -156,6 +337,8 @@ class ConnectionManager:
                 await ws.send_json(data)
             except Exception:
                 dead.append(ws)
+            else:
+                self._mark_outbound(ws)
         for ws in dead:
             await self.disconnect(ws)
 

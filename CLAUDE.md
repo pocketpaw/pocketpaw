@@ -191,7 +191,7 @@ The processing pipeline lives in `agents/loop.py` and `agents/router.py`:
   1. **`~/.claude/skills/` mirror** (boot-time install, `auto_install_bundled_skills`). That path is one of the three `pocketpaw.skills.SKILL_PATHS` PocketPaw's own `SkillLoader` scans, so the desktop slash-command dispatcher resolves them on the non-SDK backends (codex_cli / openai_agents / deep_agents). **This mirror is invisible to the default `claude_agent_sdk` backend** — it launches with `setting_sources=[]` for persona isolation, which disables the SDK's filesystem skill discovery (verified 2026-06-03: a slash hits the SDK as an unknown command and the run returns with no assistant turn).
   2. **Local plugin** (`sdk_load_bundled_skills`). `_bundled/` is also a valid Claude Code local plugin (`.claude-plugin/plugin.json` + `skills/`); the `claude_agent_sdk` backend passes it via the SDK `plugins=` option, which loads regardless of `setting_sources`. This is the only route that reaches that backend — the bundled skills become invokable by slash command **and** natural-language intent without leaking the rest of `~/.claude` (CLAUDE.md, output styles) into the agent.
 
-  Distinct from `pocketpaw/skills/` (the runtime loader/executor) — this module is the *shipping* side. Bundles `pocketpaw-create-pocket`, `pocketpaw-edit-pocket`, `pocketpaw-create-site`, `pocketpaw-pocket-planner`, `pocketpaw-pocket-specialist`, and `foresight-create-sim`. Adding one: drop `_bundled/skills/<name>/SKILL.md` — the installer and the plugin both discover it by directory iteration. Opt out via `POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS=false` (mirror) and `POCKETPAW_SDK_LOAD_BUNDLED_SKILLS=false` (SDK plugin). See `docs/internal/2026-05-bundled-skills.md` for design + how to add a new skill.
+  Distinct from `pocketpaw/skills/` (the runtime loader/executor) — this module is the *shipping* side. Bundles `pocketpaw-create-pocket`, `pocketpaw-edit-pocket`, `pocketpaw-create-site`, `pocketpaw-pocket-planner`, `pocketpaw-pocket-specialist`, `foresight-create-sim`, the per-engine Paw Sites authoring brains (`pocketpaw-create-paw-site`, `pocketpaw-create-svelte-site`, `pocketpaw-create-react-site`, `pocketpaw-create-dynamic-site`), `pocketpaw-edit-react-site` (the react-track EDIT brain — a site already exists and needs changing, which is a different tool and a different failure mode from a create), and the engine-agnostic `pocketpaw-design-taste` they all compose with. Adding one: drop `_bundled/skills/<name>/SKILL.md` — the installer and the plugin both discover it by directory iteration — **then run `uv run pocketpaw atlas build` and commit the regenerated `src/pocketpaw/atlas/data/atlas.json`**. Directory iteration covers the two runtime routes, but atlas is a COMPILED artifact: `tests/atlas/test_widgets_skills.py::test_every_bundled_skill_has_a_valid_entry` requires one `skill:<slug>` entry per skill dir, so a new skill fails the suite until the artifact is rebuilt. Check `tests/atlas/test_eval.py` too — a new skill name enters the search corpus and can re-rank intents that have nothing to do with it. Opt out via `POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS=false` (mirror) and `POCKETPAW_SDK_LOAD_BUNDLED_SKILLS=false` (SDK plugin). See `docs/internal/2026-05-bundled-skills.md` for design + how to add a new skill.
 - **Bundled KB** — *removed 2026-07-12.* PocketPaw previously shipped a `ripple-recipes` kb-go scope (hand-authored pattern recipes auto-installed to `~/.knowledge-base/` and retrieved at pocket-creation time). It was retired because the fixed recipes biased the agent's design toward a handful of canned compositions; design breadth now comes from live design references rather than a shipped scope. The general `_get_kb_context` injection in `bootstrap/context_builder.py` (workspace/agent/pocket KB) is unchanged — only the bundled ripple-recipes scope and its boot-time installer were removed.
 
 ### Frontend
@@ -225,6 +225,23 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   env-configurable), marking queued/running `ChatRunDoc`s older than 10 minutes as
   `interrupted` so runs abandoned by a backend restart surface a retry affordance
   instead of leaving clients subscribed forever.
+- **Growth outbound config (`GROWTH_SENDING_DOMAIN`)**: the secondary domain the
+  `/growth` engine sends cold outreach from — **required**, with no default. The
+  dispatch worker fails closed when it is unset (nothing goes out), validates the
+  from-address against it at send time, and refuses a value equal to the
+  deployment's own host (`POCKETPAW_PUBLIC_BASE_URL`). Never point it at the apex:
+  cold outreach draws spam complaints at rates transactional mail never sees, and
+  the complaints land on the *sending* domain's reputation — a burnt secondary
+  domain costs a DNS record and a warm-up, a burnt apex takes password resets,
+  invoices and receipts with it. The provider credential itself is **not** an env
+  var: it is per-workspace connector state on the workspace's `mailtrap` connector
+  row (`MAILTRAP_API_TOKEN`, plus optional `MAILTRAP_FROM_EMAIL` /
+  `MAILTRAP_FROM_NAME`, `MAILTRAP_REPLY_TO`, and `MAILTRAP_PROJECT_SENDERS` — a
+  `{project_id: {from_email, from_name, reply_to}}` map so an agency sends as the
+  client whose project owns the prospect, resolved per field with the workspace
+  values as the fallback), so disabling the connector revokes sending immediately
+  for every project at once.
+  See `ee/pocketpaw_ee/cloud/growth/connector.py` and `docs/api-reference.md`.
 - **Session supervisor config**: `POCKETPAW_SESSION_SUPERVISOR` (default OFF). When
   truthy (`1`/`true`/`yes`/`on`), the cloud chat executor drives every agent turn
   through the `SessionSupervisor` + the durable `(workspace, session, agent) ->
@@ -331,6 +348,163 @@ When you touch any `ee/pocketpaw_ee/cloud/<entity>/*.py` file for any reason —
 3. Ship the original change + the consolidation in the same PR.
 
 `pockets/` is the canonical reference. Copy its shape.
+
+### Atlas touch-time rule — the OS self-model must not drift
+
+atlas (`src/pocketpaw/atlas/`) is the runtime OS self-model: the compiled corpus
+agents query via `atlas_search` / `atlas_describe` and the always-on Paw OS
+Primer. **A primitive, surface, or agent-facing capability that isn't in atlas is
+undiscoverable to agents — and its CI drift check only proves the compiled
+`atlas.json` matches the authored JSON, NOT that the authored facts match the
+live OS.** Two whole subsystems (Fabric source-truth, the verify loop) shipped
+after atlas was seeded and stayed invisible for weeks; three live routes were
+once missing/stale while the check stayed green.
+
+When you **add, rename, or remove a primitive, a user-facing surface/route, or
+an agent-facing capability** — in the same PR:
+
+1. Update `src/pocketpaw/atlas/authored/{primitives,surfaces,capabilities}.json`
+   (all 10 `AtlasEntry` fields; primitives carry a `gist`; capabilities carry a
+   `role:*` marker in `requires`; verify every route/fact against the real
+   frontend routes, not just that it recompiles).
+2. Recompile: `uv run pocketpaw atlas build`, then `atlas build --check` green;
+   commit `src/pocketpaw/atlas/data/atlas.json`.
+3. Pin the new intent(s) in `tests/atlas/eval_cases.json` (both directions — the
+   new entry wins its intents, existing primitives still win theirs).
+
+Routine refactors and bug fixes don't need atlas updates. If a subsystem ships
+behind a rollout flag, keep the entry discoverable and let the overlay mark its
+live `mode` (see `docs/atlas.md`) — never hide it.
+
+---
+
+## Prompt rows must carry the id the tools take
+
+Applies to every prompt block that lists entities — cloud surface preambles
+(`ee/pocketpaw_ee/cloud/surface/handlers/`) and the channel prompt layers
+(`src/pocketpaw/prompt/`) alike.
+
+**The rule:** if any tool declares a required `<kind>_id`, every prompt row that
+lists `<kind>`s must carry that id.
+
+**Never hand-roll a row.** Use `pocketpaw.prompt.entity.entity_line(label,
+entity_id, **facts)`. `entity_id` is a required positional, so a row cannot
+silently omit it; pass `None` where there genuinely is no id and it renders a
+visible `id=?`.
+
+**Why:** four handlers independently rendered `- {name} (…)` with no id while
+`update_widget` required `widget_id`, so the prompt named widgets and pockets the
+agent could not address. Two pockets called "Sales" rendered identical rows and
+the tool call resolved to the wrong one silently. `rows.append(f"- {name} …")` is
+the obvious thing to type, which is why this is a gate and not a review note.
+
+**Enforcement** (`tests/cloud/surface/test_entity_id_contract.py`): an AST scan
+fails any hand-rolled row; allow-listed modules pin their row *count*, so an
+exempt file cannot grow a new one; and the set of addressable kinds is **derived
+from the MCP tool schemas**, so adding a tool with a required `site_id` fails the
+build until someone decides whether the sites preamble owes an id.
+
+**No id to render?** Use `unaddressed_line("<kind>", label, **facts)` — it emits
+no id, and the `<kind>` literal is *checked* against the tool schemas, so the
+exemption fails the moment a tool starts requiring that id. Prefer it over adding
+an allow-list entry.
+
+**Ids render short.** `entity_line` shows the last 8 characters
+(`id=…3f9a1c07`), and `ee/pocketpaw_ee/cloud/pockets/id_resolve.py` resolves a
+tail back to the whole id, scoped to the workspace/pocket, erroring on ambiguity
+rather than picking. The **tail**, not the head: an ObjectId starts with a
+timestamp, so 12 widgets created together share their first 20 characters.
+
+**Check the cap when you convert a list, and make the fixture realistic.** A test
+entity with no `id` measures rows ~23 chars shorter than production, and the cap
+test will pass while reporting headroom that isn't there.
+
+---
+
+## The prompt may not command a tool the agent doesn't have
+
+Applies to every system-prompt block — `src/pocketpaw/ripple/_inline.py`, the
+rule constants in `ee/pocketpaw_ee/cloud/chat/agent_service.py`, and any new
+block you add.
+
+**The rule:** before a prompt block names a tool, confirm the agent it reaches
+actually has that tool. If the answer depends on the backend, gate the block on
+`backend_name` — `build_behavior_instructions` already takes it.
+
+**Why it fails silently.** A model handed an unsatisfiable instruction does not
+raise; it improvises, and the improvisation looks like a normal reply. Two live
+examples, both found by dumping the wire body rather than reading the code:
+
+- `# MUST CALL BEFORE EMIT` made `get_inline_widget_help` mandatory and said "if
+  the tool returns an error, OMIT the widget". The tool was on the
+  `pocketpaw_widgets` MCP server, which only `agents/claude_sdk.py` builds — so
+  on every other backend it did not error, it was absent, and the agent's only
+  consistent move was to drop the widget. A block written to protect widget
+  quality was destroying it.
+- `<composio-auth-flow>` taught a four-step OAuth sequence on
+  `initiate_connection` / `verify_connection`, gated on credentials alone.
+  Composio builds tools for four backend kinds; this deploy runs a fifth. The
+  agent was told it had Gmail/Slack/GitHub — and told the *user* so.
+
+**Naming an existing-but-wrong tool is the same defect.** The MUST-CALL block
+was satisfiable on the SDK backend and still wrong: `get_inline_widget_help`
+returns hand-written design prose for 16 widgets, while `get_widget_spec` reads
+the manifest and returns the prop schema. For `definition-list` — the block's own
+cited failure — that is 18,623 chars without the answer versus 759 chars with it.
+
+**Gate from one source of truth.** `providers.py` owns
+`supports_composio_tools` / `supports_connection_tools` next to the code that
+builds the tools, so adding a wrapper widens the prompt in the same commit. Never
+hand-maintain a second backend list in the prompt layer.
+
+**Enforcement** (`tests/test_prompt_names_only_real_tools.py`): every backticked
+`tool(` call in the inline prompt must resolve in the runtime builtin registry —
+the registry every backend gets, not the SDK's MCP surface. Per-backend gating is
+tested next to the assembly in
+`tests/cloud/test_agent_service_tools_context.py`.
+
+**Bridging beats deleting.** When the instruction is right and the tool is
+merely unreachable, add it to `tools/builtin/` and `tools/cli.py::_TOOLS` (see
+`widget_spec.py`, and `flow_tool.py` before it) rather than dropping the rule.
+Then classify it in `pydantic_ai._TENANT_SAFE_TOOLS` — an unclassified tool is
+withheld, so registry presence alone still leaves the prompt lying.
+
+**A tool result is prompt too.** A lookup miss that returns the whole catalog is
+not "erring toward too much": `widget_help` answered any unknown type with all
+58,765 chars of the design rulebook, which never contained the answer. Return the
+miss, name what can answer it.
+
+---
+
+## A gate is not a gate until a mutation has been observed to break it
+
+Applies to any test you are treating as protection — a contract test, a cap
+assertion, a security check, a regression guard.
+
+**Before claiming a test guards something, break the code on purpose and watch it
+fail.** Use `scripts/mutate.py`:
+
+```bash
+uv run python scripts/mutate.py --plan tests/mutations/<area>.json
+```
+
+A plan is a JSON list of `{label, file, find, replace, tests}`. The script applies
+each mutation, runs the tests, restores the file, and exits non-zero if any
+mutation **escaped** (tests still passed).
+
+**Why:** a passing test means the code and the test agree, which is also true when
+both are wrong. That is not hypothetical here — `updatedAt` never updated and
+every key on it reported "unchanged"; a `FunctionModel` double advertised native
+tool search and a deferred-loading probe reported 0% saving; a cap fixture with no
+`id` measured rows 23 chars short and kept passing; a positional-only test
+asserted a `TypeError` that came from a missing argument, not from the property it
+named. Each was found by mutation, not by review.
+
+**How to apply:** when you add or change a gate, add its mutations to a plan under
+`tests/mutations/` and run it. Docstrings in this repo name the mutation that
+breaks each test — that convention is only worth anything if the mutation was
+actually run, so run it. An escaping mutation is a bug in your test, not a
+curiosity.
 
 ---
 

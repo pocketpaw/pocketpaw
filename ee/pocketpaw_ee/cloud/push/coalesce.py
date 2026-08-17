@@ -5,7 +5,7 @@
 # limit with 429s). The OS already collapses same-``tag`` notifications on the
 # view side; this bounds the SEND side.
 #
-# Semantics — LEADING-EDGE throttle, keyed by (workspace_id, user_id, group_id):
+# Semantics — LEADING-EDGE throttle, keyed by (workspace_id, user_id, scope):
 #   - First submit for an idle key   → emit IMMEDIATELY (zero added latency),
 #                                        then open a cooldown window.
 #   - Submits during the cooldown     → suppressed; the latest emit is remembered.
@@ -25,6 +25,14 @@
 # coalescing entirely — every submit emits immediately (pre-throttle behaviour).
 # Named ``CLOUD_*`` to match the sibling ``CLOUD_PUSH_CONTACT`` — this cloud
 # layer reads its own knobs from ``os.environ`` directly.
+#
+# Updated 2026-08-11 (fix/notif-push-convergence): the third key component is
+# now a SCOPE, not strictly a group id. Push converged on the persisted
+# notification (push/listeners.py), and most kinds — an invite, a captured
+# lead, a task assignment — have no room to key on. The caller passes
+# ``source_room_id or kind``, so a room-less burst of one kind still coalesces
+# per recipient instead of firing one Web Push per row. Nothing in this module
+# changed: the key was always an opaque 3-tuple. Env knob semantics unchanged.
 #
 # Updated 2026-07-02: the leading edge now fires DETACHED (a background task,
 # like the trailing flush) instead of being awaited inline. ``submit`` is
@@ -52,7 +60,8 @@ logger = logging.getLogger(__name__)
 _ENV_SECONDS = "CLOUD_PUSH_COALESCE_SECONDS"
 _DEFAULT_SECONDS = 5.0
 
-# A key is (workspace_id, user_id, group_id). ``_tasks`` holds the open cooldown
+# A key is (workspace_id, user_id, scope) — scope being the room a notification
+# belongs to, or its kind when it has no room. ``_tasks`` holds the open cooldown
 # window for a key; ``_pending`` holds the latest suppressed emit awaiting the
 # next flush. Both are cleared when a window closes.
 _Key = tuple[str, str, str]

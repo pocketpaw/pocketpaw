@@ -4,6 +4,17 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-08-12 (sites Settings consolidation): added the owner's CLIENT
+# record — ``client_name`` / ``client_contact`` / ``client_notes`` and a
+# ``client_invoices`` list of ``SiteInvoice``. TWO BILLING RELATIONSHIPS NOW MEET
+# ON THIS DOCUMENT AND THEY ARE NOT THE SAME ONE: ``plan_tier`` /
+# ``subscription_status`` are what the site's owner pays US, while these four are
+# what the owner's OWN client owes THEM. Only the first is a real charge; the
+# second is an address book and a receipt book, and nothing in the deploy or
+# billing lanes reads it. It lives on the Site rather than in its own collection
+# because it is per-site by definition and has no lifecycle of its own — it is
+# born and deleted with the site. All four default empty, so no migration.
+#
 # Updated 2026-07-31 (provisioning brick): added ``provision_started_at`` — the
 # clock behind a BOUNDED single-flight guard. ``provision_status="provisioning"``
 # alone is a one-way door: a job that no worker ever consumed, or that died before
@@ -113,6 +124,14 @@
 # for any DB-loaded doc (the PrivateAttr defaults to None). Private so it never
 # round-trips through the DB.
 #
+# Updated 2026-08-10 (SL-2 slice 2 — the build lane got its first caller): pinned the
+# FORMAT of ``build_reason`` to ``"<rung>:<cause>"``. It was described as "the rung name,
+# plus the cause for a user-blamed failure", which is two shapes and would have had every
+# consumer branch on blame before it could read a rung. One shape, both halves from closed
+# sets, colon-separated — see the field. The writer is ``sites/build_job.py``; the fields
+# themselves are written only through the ``sites.service`` seams, and only with a
+# targeted ``set`` so a minutes-long build can never roll back a concurrent publish.
+#
 # Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): added ``import_report`` —
 # the per-import summary an IMPORTED site carries ({pages, asset_count, asset_bytes,
 # forms, scripts, warnings}), persisted by the import service after the html deploy
@@ -161,6 +180,26 @@
 # it fronts. The ids exist so a re-sync can prune what a renamed page left behind
 # without clearing a scope that also holds owner-uploaded files. All default
 # empty/None, so no migration.
+#
+# Updated 2026-08-07 (SC-1 — a site's card shows its own screenshot): added
+# ``preview_image_url`` — the stored URL of a screenshot of this site's live page,
+# written by the best-effort capture ``sites.screenshot`` schedules from the tail
+# of a successful deploy. Empty when no screenshot has landed (never deployed, no
+# public url yet, capture failed, or Cloudflare is unconfigured), and the gallery
+# card falls back to its text layout on empty — so it is always optional and never
+# a gate on publishing. Defaults "" so every existing row reads "no preview" — no
+# migration.
+#
+# Updated 2026-08-07 (SC-3 — the card stops lying after a republish): no schema
+# change, only the write POLICY for that field, recorded where the field lives.
+# ``preview_image_url`` is rewritten on EVERY successful deploy (a republish
+# included — there is no TTL and no "only if empty" guard, since a republish is
+# exactly the case where a value exists and is wrong) and by an explicit
+# POST /sites/{site_id}/preview-refresh. Every capture stores a NEW uploads row, so
+# the value changes each time and nothing overwrites bytes behind a stable URL —
+# a reader may treat an unchanged value as unchanged art. Written by targeted
+# ``set()``, never ``save()``: the capture lands seconds after the publish that
+# scheduled it, holding a doc snapshotted before it.
 
 from __future__ import annotations
 
@@ -180,6 +219,30 @@ class SiteDomain(BaseModel):
     cf_hostname_id: str = ""
     cname_target: str = ""
     status: str = "pending"  # pending | verifying | live | error
+    # Cloudflare Worker route bound to ``<hostname>/*``, which is what decides that
+    # THIS site answers this domain. The custom hostname alone only gets Cloudflare to
+    # accept the request. Empty means no route was written: either the deploy mode has
+    # no per-site Worker to point at (local / WfP), or the row predates the routing
+    # lane. Stored rather than re-derived because teardown needs the id, and a route
+    # nobody recorded is an orphan nobody can delete.
+    cf_route_id: str = ""
+
+
+class SiteInvoice(BaseModel):
+    """One manual receipt the site's OWNER recorded against their own client.
+
+    This is bookkeeping the owner keeps, not a charge we process: nothing here
+    moves money, and the sites service never reads it back for billing. Amounts
+    are integer MINOR units (cents) so a receipt cannot drift through float
+    arithmetic on its way to and from the wire.
+    """
+
+    id: str
+    issued_at: datetime
+    amount_cents: int = 0
+    currency: str = "USD"
+    paid: bool = True
+    note: str = ""
 
 
 class Site(TimestampedDocument):
@@ -192,6 +255,19 @@ class Site(TimestampedDocument):
     # Workers-for-Platforms script name (== site id) once deployed.
     script_name: str = ""
     deployed: bool = False
+    # Which target the last SUCCESSFUL deploy actually used: "" (never deployed) |
+    # "local" | "workers" | "wfp". Stamped only after a deploy returns, so it records
+    # what happened rather than what was configured.
+    #
+    # Exists because PAW_CF_DEPLOY_MODE cannot answer "does this site have its own
+    # route-addressable Worker". It is read at request time, while the Worker was
+    # created at deploy time, and the two disagree constantly: `provision_deploy`
+    # degrades local -> workers for dynamic sites; nothing ever deletes a Worker, so a
+    # site published under `workers` keeps its Worker after the env moves to `wfp`; and
+    # a republish resets a dynamic site's provision_status while last deploy's Worker is
+    # still live and serving. Each disagreement writes — or fails to write — a custom
+    # domain's route against the wrong answer.
+    deploy_target: str = ""
     # P2b: UTC timestamp of the most recent SUCCESSFUL live deploy. Stamped by
     # service.publish ONLY when a non-preview deploy succeeds (when ``deployed``
     # flips True) — never on a preview/edit build, never on a plain updatedAt bump.
@@ -221,6 +297,60 @@ class Site(TimestampedDocument):
     # stale, which is the safe direction (a redundant enqueue costs one
     # idempotent job, a stuck guard costs every future publish).
     provision_started_at: datetime | None = None
+    # ── SG-9i: the ephemeral-build lane's own lifecycle ─────────────────────
+    # Deliberately SEPARATE from the provision_* trio rather than reusing it. A site
+    # is provisioned once (its D1 created and migrated) but REBUILT many times, so
+    # collapsing them would make a rebuild look like a re-provision and would let one
+    # overwrite the other's status.
+    #
+    # ``build_status`` — none | queued | building | built | failed.
+    # ``queued`` is a FIRST-CLASS state, not cosmetic. Once a concurrency cap exists a
+    # publish can wait before it starts, and a queued build is indistinguishable from
+    # a hung one unless the wire says so — which turns the cap into support tickets.
+    build_status: str = "none"
+    # When the CURRENT build attempt entered queued/building (UTC). Same bounded
+    # single-flight reasoning as ``provision_started_at``, and the same asymmetry: a
+    # row with no stamp reads as STALE, because a redundant enqueue costs one
+    # idempotent build while a stuck guard costs the pocket every future publish.
+    #
+    # Do NOT substitute ``updated_at`` for this. The DP0-4 comment above says the same
+    # thing and it is worth repeating where the field is: this model has no such
+    # field, so reading one would make every row look stale and silently disable the
+    # guard entirely.
+    build_started_at: datetime | None = None
+    # The build job's id — PERSISTED, unlike ``_provision_job_id`` below, which is a
+    # transient PrivateAttr that only exists on the response object that enqueued it.
+    # That works for a provision the caller watches synchronously and fails for a
+    # build: a queued build is exactly the case where the user reloads the page, and
+    # on reload a transient id is gone, so the client loses its polling handle at the
+    # precise moment the wait is longest.
+    build_job_id: str | None = None
+    # SL-2: WHY the build reached ``build_status``.
+    #
+    # FORMAT, fixed by ``sites/build_job.py`` when the lane got its first caller:
+    # ``"<rung>:<cause>"``, both halves from closed sets. The rung is a
+    # ``daytona_build.BuildOutcome`` (``completed_ok`` / ``build_failed`` / ``timed_out``
+    # / ``infra_lost``) or one of the job's own pre-sandbox rungs (``engine_not_buildable``
+    # / ``scaffold_failed`` / ``scaffold_empty`` / ``sandbox_unavailable`` /
+    # ``artifact_missing`` / ``enqueue_failed``); the cause is the classifier's own
+    # machine-readable ``reason``, e.g. ``build_failed:install_failed`` or
+    # ``infra_lost:build_killed_by_signal_137``. ONE shape for every rung rather than
+    # "the outcome, plus a cause when the user is to blame", so a consumer parses once and
+    # can always split on the colon to group by rung.
+    #
+    # THIS FIELD IS WHAT MAKES A TERMINAL FAILURE HONEST. Without it every
+    # classification the lane computes dies at the boundary: the row can say ``failed``
+    # and nothing can say whether the user's code broke or we lost the container. Those
+    # two need OPPOSITE handling — one is the user's to fix, the other is ours to retry
+    # — so a ``failed`` with no reason is not a smaller error, it is an unactionable
+    # one, and the fallback ("your build failed") is exactly the mis-report the whole
+    # sentinel design exists to prevent.
+    #
+    # SAFE TO SURFACE. It carries a fixed rung name, never raw stderr: a build's error
+    # text is the user's own code and can contain anything, including a token pasted
+    # into a config. The stderr tail stays in logs. Same reasoning as
+    # ``jobs/worker.py``'s ``_safe_failure_message``.
+    build_reason: str | None = None
     # BC-9: per-site annual plan (the Webflow model — each published site has its
     # OWN recurring annual plan on a tier, distinct from the workspace plan).
     # ``plan_tier`` is the site-plan catalog key (basic | pro | business — see
@@ -266,6 +396,35 @@ class Site(TimestampedDocument):
     import_report: dict[str, Any] = Field(default_factory=dict)
     # Capture hardening config (mirrors sites_capture.SiteFormConfig fields).
     allowed_origins: list[str] = Field(default_factory=list)
+    # Whether ``allowed_origins`` HARD-GATES lead capture, or is only a signal.
+    #
+    # Default OFF, deliberately, and this is the Formspree/Basin/Getform posture
+    # rather than a relaxation of ours by accident. Two facts make the pin close to
+    # worthless as a gate on the capture path while keeping all of its ability to
+    # break a customer's contact form:
+    #
+    #   * The credential it guards is ALREADY PUBLIC on three of the four engines.
+    #     html / react / static-svelte all ship ``paw_key`` as a hidden input in the
+    #     page source, so "the signed key" is a site IDENTIFIER that anyone can read,
+    #     not a secret the origin pin is protecting.
+    #   * ``Origin`` binds BROWSERS ONLY. Any curl/script forges it in one flag, so
+    #     the pin never stopped a determined spammer — it stopped the honest case.
+    #
+    # What it DID do reliably was 403 real submissions: a site whose doc predates
+    # the deployed-host stamping, an async (react) build whose Site row was inserted
+    # with ``url=""`` before the worker filled it in, an apex/``www.`` mismatch, a
+    # preview URL, a page opened over ``file://`` (Origin: null). Every one of those
+    # fails CLOSED, and on the native-form path the visitor — the customer's actual
+    # prospect — is shown a raw JSON 403 instead of a thank-you page.
+    #
+    # So the controls that survive are the ones that work on a public endpoint with
+    # a public key: the honeypot, the per-(scope, minute) rate limit, the injection
+    # screen, and the payload cap. Origin becomes an ATTRIBUTABLE SIGNAL — recorded
+    # on every lead (``LeadSource.origin``) so an owner can see where submissions
+    # came from — and a per-site opt-in for anyone who wants the strict behaviour
+    # back. Existing rows read the default and are therefore un-gated, which is the
+    # intended migration: they were the ones silently dropping leads.
+    enforce_origin: bool = False
     signed_key: str = ""
     rate_limit_per_min: int = 60
     per_ip_limit_per_min: int = 10
@@ -323,6 +482,31 @@ class Site(TimestampedDocument):
     # is broken". "" means the last sync was clean.
     kb_synced_at: datetime | None = None
     kb_sync_error: str = ""
+    # SC-1: the stored URL of a screenshot of this site's live page — what the
+    # gallery card renders instead of a title and three pills. Written by the
+    # best-effort capture ``sites.screenshot`` schedules from the tail of a
+    # successful deploy, via a targeted ``set`` so it can never roll back a
+    # concurrent write. "" while no screenshot has landed (never deployed, no
+    # public url, capture failed, Cloudflare unconfigured); the card falls back to
+    # the text layout on empty, so this is never a gate on publishing.
+    preview_image_url: str = ""
+    # The site owner's record of WHO this site is for, and what they have billed
+    # them. Two billing relationships meet on this document and they are not the
+    # same one: ``plan_tier`` / ``subscription_status`` above are what the owner
+    # pays US, while everything below is what the owner's OWN client owes THEM.
+    # Only the first is a real charge; these four are an address book and a
+    # receipt book that the Settings surface reads and writes.
+    #
+    # ``client_contact`` and ``client_notes`` are free text a human types about a
+    # third party, so they hold personal data by design. They are workspace-scoped
+    # like every other field here (read and write both go through ``_load``), never
+    # reach a generated page, and are capped in the DTO rather than here so an
+    # over-long value is a 422 at the edge instead of a silently truncated record.
+    # All four default empty, so no migration.
+    client_name: str = ""
+    client_contact: str = ""
+    client_notes: str = ""
+    client_invoices: list[SiteInvoice] = Field(default_factory=list)
 
     def rotate_signed_key(self) -> str:
         """Regenerate the public embed key and return the new value (T1).

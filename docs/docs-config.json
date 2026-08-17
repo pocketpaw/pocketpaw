@@ -450,6 +450,11 @@
             "icon": "lucide:workflow"
           },
           {
+            "label": "Pydantic AI",
+            "href": "/backends/pydantic-ai",
+            "icon": "lucide:gauge"
+          },
+          {
             "label": "Ollama (Local LLMs)",
             "href": "/backends/ollama",
             "icon": "lucide:hard-drive"

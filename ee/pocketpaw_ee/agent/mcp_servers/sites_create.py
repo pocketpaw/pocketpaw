@@ -1,6 +1,64 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated: 2026-08-11 (RX-3 — the react track gets an EDIT lane) — added a SEVENTH
+# tool ``edit_react_component`` plus its handler, mirroring
+# ``make_edit_svelte_component_tool``'s shape (identity → record_tool_call →
+# input validation → plan gate → service → draft-framed success body). It closes a
+# hole this file was half of: ``edit_svelte_component`` was the ONLY edit tool
+# registered, so on a react site the agent's only move for "shorten the hero
+# headline" was to call ``create_react_site`` again, minting a SECOND site pocket.
+# Three things about it differ from the svelte edit tool, all deliberate:
+#   * DRAFT-ONLY, with no ``SmokeGateFailed`` branch to map. Nothing is built, so
+#     nothing can fail a smoke gate — and a react publish enqueues its build and
+#     returns before any outcome exists, so there would be nothing to roll back to
+#     anyway. The success body says draft and publishing stays the user's call.
+#   * A ``create`` flag, because ``set_react_source_file`` (like its svelte peer)
+#     refuses a path that is not already in the map, and "add a testimonials
+#     section" needs a NEW file plus an ``src/App.tsx`` edit. It requires
+#     ``new_source`` and requires the path to be ABSENT, so it cannot overwrite a
+#     real component.
+#   * It runs ``_require_sites_plan_or_error``. ``edit_svelte_component`` does not,
+#     which is an asymmetry in that tool rather than a precedent for this one.
+# The reserved-path guard is the load-bearing part: without the same normalization
+# create uses, ``edit_react_component(component_path="package.json", create=true)``
+# writes the dependency manifest, defeating the generator's dependency allowlist
+# and with it the supply-chain release-age floor. So the policy moved OUT of this
+# file into ``pocketpaw_ee.sites.react_paths`` and both writers call it — the
+# constants below are now re-exports.
+#
+# Updated: 2026-08-07 (RX-2 — the agent can select the react engine) — added a
+# FIFTH create tool ``create_react_site`` for the Paw Sites "react track" (the
+# engine RX-1 registered). It mirrors ``create_html_site`` (the agent IS the
+# author; a {relative_path: file_contents} source MAP is persisted verbatim via
+# ``agent_create(engine="react", source=<map>, type_="site", pattern="landing",
+# ripple_spec=None, trusted=True)`` — no ``assemble_*`` step, no rippleSpec, no
+# catalog gate) with two react-specific differences:
+#
+#   * VALIDATION is two-sided. The required key is the ``src/App.tsx``
+#     composition root (both generated entries import it by that exact path), and
+#     the map is ALSO rejected when it writes a generator-owned path — the build
+#     shell (index.html / package.json / vite.config.ts / paw-prerender.mjs) or
+#     the ``src/paw/`` namespace. paw-sites' react-scaffold.ts throws on the same
+#     collision; checking here turns a build-time throw far from the authoring
+#     turn into an actionable create error.
+#   * There is an ``interactive`` argument, the react spelling of MT-1's
+#     per-site ``keeps_client_bundle``. Edited (feat/sites-js-by-default): it is
+#     now TRI-STATE. Omitting it persists ``None`` — no declaration — and publish
+#     resolves that from ``sites_keep_client_bundle_default`` (True by default),
+#     so an unflagged interactive component now HYDRATES instead of silently
+#     doing nothing. It is still forwarded explicitly when the agent passes it,
+#     because an explicit True/False beats the setting in both directions and
+#     ``False`` is the only way to ship a page with no bundle at all. Coercing
+#     the omitted case to ``False`` here (the pre-edit behaviour) would record a
+#     decision the agent never made and hold every react site out of the default.
+#
+# This is OPT-IN like html was: the description steers the agent here ONLY on an
+# explicit React request or a genuine interactivity need; the default create stays
+# create_html_site. The authoring brain is the bundled
+# ``pocketpaw-create-react-site`` skill, which composes with (never restates)
+# ``pocketpaw-design-taste``.
+#
 # Updated: 2026-07-17 (fix/sites-draft-visible — a DRAFT lists in the gallery) —
 # every create handler (landing / svelte / html / dynamic) now mints a DRAFT Site
 # doc right after the pocket is persisted, via the shared best-effort helper
@@ -168,6 +226,7 @@ import logging
 from typing import Any
 
 from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
+from pocketpaw_ee.sites import react_paths
 
 from ._audit import record_tool_call
 
@@ -197,12 +256,35 @@ CREATE_DYNAMIC_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_dynamic_site"
 # False for html); the raw markup is materialized and served as-is.
 CREATE_HTML_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_html_site"
 
+# RX-2 — the react-track create tool. Same shape as the html id above; the
+# authoring hop is author a React source map → create_react_site → publish.
+# Publishing a react site DOES run a Node build (a Vite SSG) but deploys the
+# prerendered static output assets-only, with no server entry.
+CREATE_REACT_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_react_site"
+
+# RX-3 — the react-track EDIT tool. Same server again. Without it the agent's only
+# response to "shorten the hero headline" on a react site was to call
+# ``create_react_site`` a second time, which mints a SECOND site pocket instead of
+# changing the one the user is looking at.
+EDIT_REACT_COMPONENT_TOOL_ID = f"mcp__{SERVER_NAME}__edit_react_component"
+
+# HE-10 — the html-track EDIT tool, and the last engine to get one. Same server
+# again. Its absence had the same shape as RX-3's: ``edit_svelte_component``
+# rejects an html pocket and so does ``edit_react_component``, so "change the phone
+# number in the footer" had no tool that would take it and the agent's only move was
+# a second ``create_html_site`` — a second pocket at a second url. Named for a FILE,
+# not a component, because an html site has no component model to name.
+EDIT_HTML_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__edit_html_file"
+
 SITES_CREATE_TOOL_IDS = (
     CREATE_LANDING_SITE_TOOL_ID,
     CREATE_SVELTE_SITE_TOOL_ID,
     EDIT_SVELTE_COMPONENT_TOOL_ID,
     CREATE_DYNAMIC_SITE_TOOL_ID,
     CREATE_HTML_SITE_TOOL_ID,
+    CREATE_REACT_SITE_TOOL_ID,
+    EDIT_REACT_COMPONENT_TOOL_ID,
+    EDIT_HTML_FILE_TOOL_ID,
 )
 
 
@@ -297,6 +379,57 @@ def _missing_html_keys(source: dict[str, Any]) -> list[str]:
     and the edge serves at the site root. Used to fail the create closed with an
     actionable message rather than persisting a site with no servable entry."""
     return [k for k in HTML_REQUIRED_KEYS if k not in source]
+
+
+# ── react-track source map (RX-2) ───────────────────────────────────────────
+# A react-engine ``source`` map is a {relative_path: file_contents} map of
+# hand-written React files. The generator (paw-sites react-scaffold.ts) owns the
+# build shell — index.html, package.json, vite.config.ts, paw-prerender.mjs and
+# the two ``src/paw/`` entries — and materializes this map on top of it.
+#
+# The only required key is the composition root ``src/App.tsx``: BOTH generated
+# entries (client and server) import it by that exact path, so a map without it
+# builds nothing. The generator asserts the same key, but failing here names it
+# before a build is ever started.
+REACT_REQUIRED_KEYS = ("src/App.tsx",)
+
+# Paths the generator owns and a source map may NOT write. Mirrors
+# ``RESERVED_FILES`` + ``RESERVED_NAMESPACE`` in paw-sites' react-scaffold.ts,
+# which throws on a collision — this is the same guard moved to create time, so
+# the agent gets an actionable message instead of a build failure at publish.
+#
+# Reserving them is not tidiness: an author who could overwrite ``index.html`` or
+# ``paw-prerender.mjs`` could remove the prerender outlet or the pass that fills
+# it, turning the site back into a shell that is blank with JavaScript disabled —
+# exactly what this engine exists to refuse to ship. And an author who could
+# overwrite ``package.json`` would be writing the dependency manifest, which is
+# where the supply-chain release-age floor is enforced.
+#
+# RX-3: the policy itself now lives in ``pocketpaw_ee.sites.react_paths`` because
+# the EDIT lane is a second writer of the same map and two copies of a guard drift.
+# These names are re-exported here (and stay in ``__all__``) so every importer of
+# the create-time spelling keeps working.
+REACT_RESERVED_FILES = react_paths.REACT_RESERVED_FILES
+REACT_RESERVED_PREFIX = react_paths.REACT_RESERVED_PREFIX
+
+
+def _missing_react_keys(source: dict[str, Any]) -> list[str]:
+    """Return the required react keys absent from ``source`` (empty list = valid).
+
+    Only ``src/App.tsx`` is required — the composition root both generated entries
+    import. Everything else (the components it imports, its CSS, ``public/``
+    assets) is the author's business."""
+    return [k for k in REACT_REQUIRED_KEYS if k not in source]
+
+
+def _reserved_react_keys(source: dict[str, Any]) -> list[str]:
+    """Return the source-map keys that collide with a generator-owned path.
+
+    A thin alias for ``react_paths.reserved_react_keys`` (RX-3), which normalizes
+    backslashes and ``.``/``..`` segments so ``./index.html`` and
+    ``src\\paw\\x.tsx`` cannot slip past the check. Kept under this name because
+    the create handler and its tests call it."""
+    return react_paths.reserved_react_keys(source)
 
 
 # ── Dynamic-track spec surface (RFC 12 A2) ──────────────────────────────────
@@ -1262,6 +1395,285 @@ def make_create_html_site_tool(tool: Any) -> Any:
     return create_html_site
 
 
+async def _create_react_site_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__create_react_site`` (the react track, RX-2).
+
+    Reads workspace/user identity from the per-stream ContextVars, validates the
+    ``source`` map (a {relative_path: file_contents} map of hand-written React
+    files that MUST carry the ``src/App.tsx`` composition root and MUST NOT write
+    a generator-owned path), and persists it DIRECTLY via ``agent_create``
+    (engine="react", source=<map>, type="site", pattern="landing",
+    ripple_spec=None, trusted=True). Returns ``{ok, pocket_id, pocket}`` on
+    success; sets ``is_error`` when identity is missing, ``source`` is
+    absent/malformed/incomplete, or the persist fails.
+
+    Like ``create_svelte_site`` and ``create_html_site`` there is no ``assemble_*``
+    step — the agent authored the components, so the map is persisted verbatim and
+    the generator materializes it at publish. Unlike html, a react publish DOES run
+    a per-site Node build (``needs_node_build("react")`` is True) — but that build
+    is an SSG that prerenders to a static ``dist/`` with no server entry, which is
+    why react deploys assets-only like html does (``emits_server_worker`` is False
+    for both — see ``sites/engines.py``).
+
+    ``interactive`` is the react-track spelling of the per-site
+    ``keeps_client_bundle`` declaration. It is a SEPARATE argument rather than an
+    inference over the source because "does this component need the browser?" is a
+    question about authorial intent that reading JSX cannot answer reliably: a
+    ``useState`` that never changes needs nothing, and a component that only
+    registers a ``matchMedia`` listener does.
+
+    It is TRI-STATE (feat/sites-js-by-default). OMITTING it records NO decision
+    and lets publish apply ``sites_keep_client_bundle_default`` — ``True`` by
+    default, so an omitted ``interactive`` now ships the bundle rather than
+    withholding it. That inverts the old failure mode: leaving it off used to
+    silently break an interactive page (built, deployed, menu never opens), and
+    now the silent cost is the opposite and much cheaper — a purely static page
+    ships a bundle it never needed. Pass ``interactive=False`` EXPLICITLY to opt
+    such a page out; an explicit value beats the default in both directions.
+
+    react has NO live-data binding siblings (that is the svelte/ripple dynamic
+    track), so the whole map is {path: str} and every value must be a content
+    string — no exemption list."""
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "create_react_site requires workspace and user context (call from a "
+            "cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_create_react_site",
+        status="ok",
+        ok=True,
+    )
+
+    args = coerce_json_object_args(args, ("source",))
+    source = args.get("source")
+    if not isinstance(source, dict) or not source:
+        return _error_response(
+            "create_react_site requires a `source` object — the React source map "
+            "{ relative_path: file_contents } you authored. It must include "
+            "`src/App.tsx` (the composition root); add your section components "
+            "under `src/components/` and your stylesheet as sibling entries. You "
+            "write the components; this tool persists them."
+        )
+    # The whole map is {path: contents} — every value is a file content string.
+    # react has no live-data binding siblings (that is the svelte/ripple dynamic
+    # track), so unlike create_svelte_site there is no exemption list.
+    bad = [k for k, v in source.items() if not isinstance(v, str)]
+    if bad:
+        return _error_response(
+            "create_react_site `source` file values must be content strings; these "
+            f"keys are not strings: {', '.join(sorted(bad)[:8])}."
+        )
+    missing = _missing_react_keys(source)
+    if missing:
+        return _error_response(
+            "create_react_site `source` is missing required files: "
+            f"{', '.join(missing)}. A react site needs a `src/App.tsx` composition "
+            "root — the generated client and server entries both import it, so "
+            "without it there is nothing to render or prerender."
+        )
+    # Fail here rather than at publish: the generator throws on a reserved-path
+    # collision, and a build-time throw names the path far from the authoring turn
+    # that caused it.
+    reserved = _reserved_react_keys(source)
+    if reserved:
+        return _error_response(
+            "create_react_site `source` may not write generator-owned paths: "
+            f"{', '.join(reserved)}. The build shell (index.html, package.json, "
+            "vite.config.ts, paw-prerender.mjs) and the `src/paw/` namespace are "
+            "generated — they carry the prerender contract that keeps the page "
+            "from shipping blank without JavaScript. Author under `src/` (outside "
+            "`src/paw/`) and `public/`."
+        )
+
+    # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
+    # create can't bypass the router's require_plan_feature("sites") gate.
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+
+    name_raw = args.get("name")
+    name = name_raw.strip() if isinstance(name_raw, str) and name_raw.strip() else "React site"
+    description_raw = args.get("description")
+    description = description_raw if isinstance(description_raw, str) else ""
+    icon_raw = args.get("icon")
+    icon = icon_raw if isinstance(icon_raw, str) else ""
+    color_raw = args.get("color")
+    color = color_raw if isinstance(color_raw, str) else ""
+    # RX-2: the authored "this site's own JavaScript is load-bearing" declaration,
+    # spelled ``interactive`` on the wire because that is the authoring question
+    # the agent can actually answer. Persisted as the engine-agnostic
+    # ``keeps_client_bundle`` (MT-1) so publish reads ONE field for every engine.
+    # TRI-STATE (feat/sites-js-by-default): an OMITTED ``interactive`` persists as
+    # ``None`` — no declaration — which publish resolves from
+    # ``sites_keep_client_bundle_default``. Coercing the absent case to ``False``
+    # here would record a decision the agent never made and lock every react site
+    # that skips the argument out of the default.
+    _interactive_raw = args.get("interactive")
+    interactive = None if _interactive_raw is None else bool(_interactive_raw)
+
+    # Persist DIRECTLY through the pockets service — NO pocket_specialist, NO
+    # rippleSpec, NO catalog gate (there is no spec to gate). ``engine="react"``
+    # + ``source`` stamp the react track so the generator materializes the map onto
+    # its Vite skeleton and prerenders it; ``type_="site"`` + ``pattern="landing"``
+    # keep the site identity the rest of the pipeline (publish, /sites listing)
+    # keys on. ``trusted=True`` short-circuits the strict catalog gate, which only
+    # runs on a non-null rippleSpec anyway — the react path passes
+    # ``ripple_spec=None``.
+    from pocketpaw_ee.cloud.pockets.service import agent_create
+
+    try:
+        view, new_pocket_id, err = await agent_create(
+            workspace_id=workspace_id,
+            owner_id=user_id,
+            name=name,
+            description=description,
+            type_="site",
+            pattern="landing",
+            icon=icon,
+            color=color,
+            ripple_spec=None,
+            engine="react",
+            source=source,
+            keeps_client_bundle=interactive,
+            trusted=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("create_react_site: persist raised", exc_info=True)
+        return _error_response(f"create failed: {exc}")
+
+    if err is not None or view is None or new_pocket_id is None:
+        return _error_response(f"create failed: {err or 'create returned no view'}")
+
+    # Mint the DRAFT Site doc so the new site lists in the /sites gallery right away
+    # (draft-first create persists the pocket but no Site doc; the gallery reads Site
+    # docs). Best-effort — a draft, NOT a publish, and it never fails the create.
+    await _mint_draft_site(workspace_id, user_id, new_pocket_id, name)
+
+    await _bind_session_and_emit(new_pocket_id, view, user_id)
+
+    return _success_response(
+        {
+            "ok": True,
+            "pocket_id": new_pocket_id,
+            "pocket": {
+                "id": new_pocket_id,
+                "name": view.get("name"),
+                "type": view.get("type"),
+                "pattern": view.get("pattern"),
+                "engine": view.get("engine"),
+            },
+        }
+    )
+
+
+def make_create_react_site_tool(tool: Any) -> Any:
+    """Build the ``create_react_site`` SDK tool object using the SDK's ``tool``
+    decorator (passed in by the caller that already imported it).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as publish +
+    create_landing_site + create_svelte_site + create_html_site +
+    create_dynamic_site (see ``make_create_landing_site_tool`` for why one
+    server)."""
+
+    @tool(
+        "create_react_site",
+        (
+            "Create a Paw Site landing page on the REACT TRACK — hand-written React "
+            "components, PRERENDERED to static HTML at build time. Use this ONLY "
+            "when the user EXPLICITLY asks for React ('build it in React', 'a React "
+            "landing page') or the page genuinely needs React-shaped client "
+            "interactivity. For a normal marketing request the default is "
+            "create_html_site — do NOT pick this one by default. You AUTHOR the "
+            "components yourself and pass them as a `source` MAP { relative_path: "
+            "file_contents }; the tool persists the map and stamps the pocket "
+            "type='site', pattern='landing', engine='react'. You do NOT compose a "
+            "rippleSpec, do NOT call get_widget_spec, do NOT call pocket_specialist. "
+            "The map MUST include `src/App.tsx` (the composition root both generated "
+            "entries import); add section components under `src/components/*.tsx` "
+            "and a stylesheet App.tsx imports — every value is a content STRING. The "
+            "build shell is GENERATED and reserved: the map may NOT write "
+            "index.html, package.json, vite.config.ts, paw-prerender.mjs, or "
+            "anything under `src/paw/`. The project has react, react-dom and vite "
+            "and NOTHING else — no router, no CSS framework, no state or animation "
+            "library, and you cannot add dependencies; it is ONE page. CRITICAL "
+            "authoring rule: the page is PRERENDERED, so every component must render "
+            "its resting/final state in its RETURNED MARKUP — useEffect does not run "
+            "at prerender time (a count-up initialized to 0 bakes '0'; initialize it "
+            "to the final value). SECOND RULE: sites ship their client JavaScript by "
+            "DEFAULT, so React hydrates and a menu toggle, tabs or a counter work "
+            "without any extra argument. Still pass `interactive=true` explicitly "
+            "whenever a component needs the browser — it records the intent and "
+            "survives a deployment that turns the default off. Pass "
+            "`interactive=false` for a purely static page (CSS-only hover/keyframe "
+            "motion, anchors, a native form POST) to opt out of shipping a bundle it "
+            "never uses. Returns {ok, "
+            "pocket_id, pocket}; hand `pocket_id` to "
+            "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
+            "asks to go live (draft-first: a plain create stops at the draft for "
+            "in-app preview). ok=false with an error means relay the reason, do NOT "
+            "report a created pocket."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "object",
+                    "description": (
+                        "The React source map you authored — a { relative_path: "
+                        "file_contents } map, paths relative to the project root, "
+                        "every value a content STRING. MUST include `src/App.tsx` "
+                        "(the composition root, which imports your stylesheet and "
+                        "renders the sections). Add `src/components/*.tsx` sections "
+                        "and `public/*` assets as sibling entries. May NOT write "
+                        "index.html, package.json, vite.config.ts, paw-prerender.mjs "
+                        "or anything under `src/paw/` — those are generated."
+                    ),
+                    "additionalProperties": {"type": "string"},
+                },
+                "interactive": {
+                    "type": "boolean",
+                    "description": (
+                        "TRUE when this site's own JavaScript is load-bearing — any "
+                        "changing useState/useReducer, any onClick/onChange/onSubmit "
+                        "that does something, any useEffect, a canvas you draw into. "
+                        "The page is prerendered either way; this decides whether "
+                        "React HYDRATES on top of the baked markup. OMIT it and the "
+                        "deployment's default decides — which ships the bundle and "
+                        "hydrates, so an interactive component left unflagged still "
+                        "works. Pass TRUE anyway when the browser is genuinely "
+                        "needed: it records the intent instead of relying on a "
+                        "setting. Pass FALSE for a purely static page (CSS-only "
+                        "motion, anchors, a native form POST) — an explicit value "
+                        "wins over the default, so this is the way to ship no "
+                        "JavaScript at all."
+                    ),
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional pocket/site name. Defaults to 'React site'.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional one-line pocket description.",
+                },
+                "icon": {"type": "string", "description": "Optional lucide icon name."},
+                "color": {"type": "string", "description": "Optional accent color hex."},
+            },
+            "required": ["source"],
+            "additionalProperties": False,
+        },
+    )
+    async def create_react_site(args):  # type: ignore[no-untyped-def]
+        return await _create_react_site_handler(args)
+
+    return create_react_site
+
+
 async def _edit_svelte_component_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__edit_svelte_component``.
 
@@ -1522,13 +1934,570 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
     return edit_svelte_component
 
 
+async def _edit_react_component_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__edit_react_component`` (RX-3).
+
+    Reads workspace/user identity from the per-stream ContextVars, runs the same
+    plan gate the create handlers run, validates the inputs, and delegates to
+    ``sites_service.edit_react_component`` — which resolves the edit and persists
+    the one file as a reviewable DRAFT.
+
+    It does NOT republish and does NOT enqueue a build, so unlike the svelte edit
+    handler there is no ``SmokeGateFailed`` case to map: nothing is built, so
+    nothing can fail a smoke gate, and there would be nothing to roll back if it
+    could (a react publish enqueues its build and returns before any outcome
+    exists). The success body says draft, and publishing stays the user's call.
+
+    Returns ``{ok, status:"draft", is_live:false, pocket_id, component_path,
+    created, message}``; sets ``is_error`` when identity is missing, the plan lacks
+    Sites, the inputs are malformed, or the service rejects the edit (a reserved
+    path, a wrong-engine pocket, a missing/colliding component, an ambiguous
+    ``old_string``) — each relayed by code so the agent can fix and retry rather
+    than report a change that did not happen.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "edit_react_component requires workspace and user context (call from a "
+            "cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_edit_react_component",
+        status="ok",
+        ok=True,
+    )
+
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "edit_react_component requires a `pocket_id` — the id of the react site "
+            "pocket whose component you are editing."
+        )
+    component_path = args.get("component_path")
+    if not isinstance(component_path, str) or not component_path:
+        return _error_response(
+            "edit_react_component requires a `component_path` — the relative path of "
+            "the file to write (e.g. 'src/components/Hero.tsx'). It must already "
+            "exist in the site's source map unless you pass `create=true`."
+        )
+    args = coerce_json_object_args(args, ("edits",))
+    edits = args.get("edits")
+    new_source = args.get("new_source")
+    has_edits = edits is not None
+    has_new_source = new_source is not None
+    if has_edits == has_new_source:
+        return _error_response(
+            "edit_react_component requires exactly one of `edits` (a targeted "
+            "search/replace diff — PREFERRED for small changes) or `new_source` "
+            "(the FULL new file contents — for large rewrites and for `create`). "
+            "Provide one, not both and not neither."
+        )
+    if has_new_source and not isinstance(new_source, str):
+        return _error_response(
+            "edit_react_component `new_source` must be the FULL new contents of the "
+            "file as a string (the tool replaces the whole file, not a patch)."
+        )
+    if has_edits:
+        # Validate the diff SHAPE here so a malformed payload gets a clear error
+        # before the service runs. The MATCH-uniqueness contract belongs to the
+        # service's apply_edits (relayed below as a ValidationError).
+        if not isinstance(edits, list) or not edits:
+            return _error_response(
+                "edit_react_component `edits` must be a non-empty list of "
+                "{old_string, new_string} blocks (like the built-in Edit tool)."
+            )
+        for i, block in enumerate(edits):
+            if (
+                not isinstance(block, dict)
+                or not isinstance(block.get("old_string"), str)
+                or not isinstance(block.get("new_string"), str)
+            ):
+                return _error_response(
+                    f"edit_react_component `edits` block {i} must be an object with "
+                    "string `old_string` and `new_string`."
+                )
+    create = bool(args.get("create"))
+    if create and not has_new_source:
+        return _error_response(
+            "edit_react_component `create=true` needs `new_source` — the full "
+            "contents of the new file. There is nothing for `edits` to search "
+            "against in a file that does not exist yet."
+        )
+
+    # Plan gate (Sites = "sites"): an edit mutates a site pocket, so it is gated on
+    # the same feature the create tools are. Without this a workspace that lost the
+    # plan could keep editing a site its own /sites list 403s.
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        result = await sites_service.edit_react_component(
+            user_id=user_id,
+            pocket_id=pocket_id,
+            component_path=component_path,
+            new_source=new_source if has_new_source else None,
+            edits=edits if has_edits else None,
+            create=create,
+        )
+    except CloudError as exc:
+        # ValidationError (reserved path / outside src+public / not a react site /
+        # already exists / a bad diff) or NotFound (unknown pocket or component).
+        # Relay the code + message so the agent knows WHICH guard rejected it.
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("edit_react_component failed", exc_info=True)
+        return _error_response(f"edit failed: {exc}")
+
+    # The edit is a DRAFT. The chat agent narrates this payload, so — exactly like
+    # the svelte edit tool — it must not contain a completed-state publish claim.
+    return _success_response(
+        {
+            "ok": True,
+            "status": "draft",
+            "is_live": False,
+            "pocket_id": result["pocket_id"],
+            "component_path": result["component_path"],
+            "created": result["created"],
+            "message": (
+                "Saved to the site's draft — it is NOT online yet, and no build was "
+                "started. Tell the user the change is in the draft they can preview "
+                "under /sites, and offer to publish it; only call the publish tool "
+                "when they ask."
+            ),
+        }
+    )
+
+
+def make_edit_react_component_tool(tool: Any) -> Any:
+    """Build the ``edit_react_component`` SDK tool object using the SDK's ``tool``
+    decorator (passed in by the caller that already imported it).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as create + publish +
+    ``edit_svelte_component`` (see ``make_create_landing_site_tool`` for why one
+    server)."""
+
+    @tool(
+        "edit_react_component",
+        (
+            "Change an EXISTING react Paw Site. Use this WHENEVER the user asks to "
+            "alter a react site that already exists — 'shorten the hero headline', "
+            "'make the pricing cards darker', 'fix the typo in the FAQ', 'add a "
+            "testimonials section'. NEVER call `create_react_site` again for a "
+            "change: that mints a SECOND site pocket and leaves the one the user is "
+            "looking at untouched. The change is saved to the site's DRAFT — it is "
+            "NOT published, nothing is built, and nothing goes live.\n"
+            "Give the change ONE of two ways (exactly one, not both):\n"
+            "  * `edits` — PREFER THIS for small/targeted changes. A list of "
+            "search/replace blocks [{old_string, new_string}, ...], exactly like "
+            "the built-in Edit tool: each `old_string` is copied VERBATIM from the "
+            "current file and must match EXACTLY ONCE (include enough surrounding "
+            "context to be unique), and `new_string` is what it becomes. You send "
+            "ONLY the change, not the whole file — far fewer tokens and faster. If "
+            "you have not read the file this turn, read it first so old_string "
+            "matches.\n"
+            "  * `new_source` — the FULL new file contents as a string (REPLACES "
+            "the whole file). For large rewrites, and the only form `create` "
+            "accepts.\n"
+            "To ADD a section: call this twice — once with `create=true` and "
+            "`new_source` for the new `src/components/<Name>.tsx`, then once with "
+            "`edits` on `src/App.tsx` to import and render it. `create=true` "
+            "REQUIRES the path to be new; editing an existing file with it is "
+            "rejected so you cannot overwrite a component by accident. Without "
+            "`create` the path must already exist, so a typo is an error and never "
+            "a stray new file.\n"
+            "You may only write under `src/` (outside `src/paw/`) and `public/`. "
+            "`index.html`, `package.json`, `vite.config.ts`, `paw-prerender.mjs` "
+            "and `src/paw/` are GENERATED and rejected — they carry the prerender "
+            "contract and the dependency list, and there is no way to add a "
+            "dependency. PRERENDER RULE (same as create_react_site): every "
+            "component must render its resting/final state in its RETURNED MARKUP, "
+            "because `useEffect` does not run at prerender time.\n"
+            "Args: `pocket_id` (the react site pocket), `component_path`, and one "
+            "of `edits` / `new_source`, plus optional `create`. Returns {ok, "
+            "status:'draft', is_live:false, pocket_id, component_path, created, "
+            "message}. Relay the `message`: the change is in the DRAFT the user can "
+            "preview under /sites, and publishing is their call — do NOT tell them "
+            "it is live. ok=false with an error means NOTHING was saved: an "
+            "old_string that matched 0 or >1 times means make it more specific and "
+            "retry; a reserved-path, wrong-engine, already-exists or not-found "
+            "error means relay the reason. Do NOT report a successful edit when "
+            "ok=false."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Id of the react site pocket to edit.",
+                },
+                "component_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Relative path of the file to write (e.g. "
+                        "'src/components/Hero.tsx'). Must already exist in the "
+                        "site's source map unless `create` is true. Only `src/` "
+                        "(outside `src/paw/`) and `public/` may be written."
+                    ),
+                },
+                "edits": {
+                    "type": "array",
+                    "description": (
+                        "PREFERRED for small changes: a list of search/replace "
+                        "blocks applied to the file's CURRENT contents. Each "
+                        "`old_string` must match exactly once. Send this INSTEAD of "
+                        "`new_source` so you emit only the diff. Not valid with "
+                        "`create`."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": {
+                                "type": "string",
+                                "description": (
+                                    "Exact text to replace, copied verbatim from the "
+                                    "current file; must match exactly once."
+                                ),
+                            },
+                            "new_string": {
+                                "type": "string",
+                                "description": "Replacement text (may be empty to delete).",
+                            },
+                        },
+                        "required": ["old_string", "new_string"],
+                        "additionalProperties": False,
+                    },
+                },
+                "new_source": {
+                    "type": "string",
+                    "description": (
+                        "The FULL new contents of the file as a string (REPLACES the "
+                        "whole file — not a diff). Use for large rewrites, and "
+                        "always with `create`."
+                    ),
+                },
+                "create": {
+                    "type": "boolean",
+                    "description": (
+                        "Create a NEW file at `component_path` instead of editing an "
+                        "existing one. Requires `new_source`, and the path must NOT "
+                        "already exist. Use it to add a section, then edit "
+                        "`src/App.tsx` to render it."
+                    ),
+                },
+            },
+            "required": ["pocket_id", "component_path"],
+            "additionalProperties": False,
+        },
+    )
+    async def edit_react_component(args):  # type: ignore[no-untyped-def]
+        return await _edit_react_component_handler(args)
+
+    return edit_react_component
+
+
+async def _edit_html_file_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__edit_html_file`` (HE-10).
+
+    Reads workspace/user identity from the per-stream ContextVars, runs the same
+    plan gate the create handlers run, validates the inputs, and delegates to
+    ``sites_service.edit_html_file`` — which resolves the edit and persists the one
+    file as a reviewable DRAFT.
+
+    Mirrors ``_edit_react_component_handler`` almost line for line, and the places
+    it does NOT are the html-specific ones: the argument is ``file_path`` (an html
+    site has files, not components), and the path guidance names the ``_paw/``
+    namespace rather than react's build shell.
+
+    Like the react handler it does NOT republish, so there is no ``SmokeGateFailed``
+    case to map. The reason differs and is worth keeping straight: react cannot roll
+    back because its build is async, whereas html has no build to gate on AT ALL —
+    which means a republish here would push unvalidated markup straight to a live
+    site. Draft-only is the safer contract, not merely the convenient one.
+
+    Returns ``{ok, status:"draft", is_live:false, pocket_id, file_path, created,
+    message}``; sets ``is_error`` when identity is missing, the plan lacks Sites,
+    the inputs are malformed, or the service rejects the edit (a reserved or
+    escaping path, a wrong-engine pocket, a missing/colliding file, an ambiguous
+    ``old_string``) — each relayed by code so the agent can fix and retry rather
+    than report a change that did not happen.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "edit_html_file requires workspace and user context (call from a cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_edit_html_file",
+        status="ok",
+        ok=True,
+    )
+
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "edit_html_file requires a `pocket_id` — the id of the html site "
+            "pocket whose file you are editing."
+        )
+    file_path = args.get("file_path")
+    if not isinstance(file_path, str) or not file_path:
+        return _error_response(
+            "edit_html_file requires a `file_path` — the relative path of the file "
+            "to write (e.g. 'index.html' or 'css/site.css'). It must already exist "
+            "in the site's source map unless you pass `create=true`."
+        )
+    args = coerce_json_object_args(args, ("edits",))
+    edits = args.get("edits")
+    new_source = args.get("new_source")
+    has_edits = edits is not None
+    has_new_source = new_source is not None
+    if has_edits == has_new_source:
+        return _error_response(
+            "edit_html_file requires exactly one of `edits` (a targeted "
+            "search/replace diff — PREFERRED for small changes) or `new_source` "
+            "(the FULL new file contents — for large rewrites and for `create`). "
+            "Provide one, not both and not neither."
+        )
+    if has_new_source and not isinstance(new_source, str):
+        return _error_response(
+            "edit_html_file `new_source` must be the FULL new contents of the file "
+            "as a string (the tool replaces the whole file, not a patch)."
+        )
+    if has_edits:
+        # Validate the diff SHAPE here so a malformed payload gets a clear error
+        # before the service runs. The MATCH-uniqueness contract belongs to the
+        # service's apply_edits (relayed below as a ValidationError).
+        if not isinstance(edits, list) or not edits:
+            return _error_response(
+                "edit_html_file `edits` must be a non-empty list of "
+                "{old_string, new_string} blocks (like the built-in Edit tool)."
+            )
+        for i, block in enumerate(edits):
+            if (
+                not isinstance(block, dict)
+                or not isinstance(block.get("old_string"), str)
+                or not isinstance(block.get("new_string"), str)
+            ):
+                return _error_response(
+                    f"edit_html_file `edits` block {i} must be an object with "
+                    "string `old_string` and `new_string`."
+                )
+    create = bool(args.get("create"))
+    if create and not has_new_source:
+        return _error_response(
+            "edit_html_file `create=true` needs `new_source` — the full contents of "
+            "the new file. There is nothing for `edits` to search against in a file "
+            "that does not exist yet."
+        )
+
+    # Plan gate (Sites = "sites"): an edit mutates a site pocket, so it is gated on
+    # the same feature the create tools are. Without this a workspace that lost the
+    # plan could keep editing a site its own /sites list 403s.
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        result = await sites_service.edit_html_file(
+            user_id=user_id,
+            pocket_id=pocket_id,
+            file_path=file_path,
+            new_source=new_source if has_new_source else None,
+            edits=edits if has_edits else None,
+            create=create,
+        )
+    except CloudError as exc:
+        # ValidationError (reserved `_paw/` path / escapes the site dir / not an
+        # html site / already exists / a bad diff) or NotFound (unknown pocket or
+        # file). Relay the code + message so the agent knows WHICH guard rejected it.
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("edit_html_file failed", exc_info=True)
+        return _error_response(f"edit failed: {exc}")
+
+    # The edit is a DRAFT. The chat agent narrates this payload, so — exactly like
+    # both sibling edit tools — it must not contain a completed-state publish claim.
+    return _success_response(
+        {
+            "ok": True,
+            "status": "draft",
+            "is_live": False,
+            "pocket_id": result["pocket_id"],
+            "file_path": result["file_path"],
+            "created": result["created"],
+            "message": (
+                "Saved to the site's draft — it is NOT online yet. Tell the user the "
+                "change is in the draft they can preview under /sites, and offer to "
+                "publish it; only call the publish tool when they ask."
+            ),
+        }
+    )
+
+
+def make_edit_html_file_tool(tool: Any) -> Any:
+    """Build the ``edit_html_file`` SDK tool object using the SDK's ``tool``
+    decorator (passed in by the caller that already imported it).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as create + publish +
+    the two sibling edit tools (see ``make_create_landing_site_tool`` for why one
+    server)."""
+
+    @tool(
+        "edit_html_file",
+        (
+            "Change an EXISTING html Paw Site (a raw HTML/CSS/JS site — the kind "
+            "`create_html_site` makes, and the kind a site imported from a URL is). "
+            "Use this WHENEVER the user asks to alter an html site that already "
+            "exists — 'change the phone number in the footer', 'shorten the hero "
+            "headline', 'fix the typo on the about page', 'add a contact page'. "
+            "NEVER call `create_html_site` again for a change: that mints a SECOND "
+            "site pocket at a SECOND url and leaves the one the user is looking at "
+            "untouched. The change is saved to the site's DRAFT — it is NOT "
+            "published and nothing goes live.\n"
+            "Give the change ONE of two ways (exactly one, not both):\n"
+            "  * `edits` — PREFER THIS, and prefer it harder here than on the other "
+            "tracks. A list of search/replace blocks [{old_string, new_string}, "
+            "...], exactly like the built-in Edit tool: each `old_string` is copied "
+            "VERBATIM from the current file and must match EXACTLY ONCE (include "
+            "enough surrounding context to be unique), and `new_string` is what it "
+            "becomes. An html page is ONE flat document with no components, so a "
+            "full rewrite means re-emitting the entire page to change a phone "
+            "number. If you have not read the file this turn, read it first so "
+            "old_string matches.\n"
+            "  * `new_source` — the FULL new file contents as a string (REPLACES "
+            "the whole file). For large rewrites, and the only form `create` "
+            "accepts.\n"
+            "To ADD a page: call this twice — once with `create=true` and "
+            "`new_source` for the new file (e.g. `about.html`), then once with "
+            "`edits` on `index.html` to link to it. `create=true` REQUIRES the path "
+            "to be new; editing an existing file with it is rejected so you cannot "
+            "overwrite a page by accident. Without `create` the path must already "
+            "exist, so a typo is an error and never a stray new file.\n"
+            "PATHS: an html site's files are project-relative and MOST LIVE AT THE "
+            "ROOT — `index.html` is the page the edge serves, alongside things like "
+            "`styles.css`, `about.html`, `img/logo.svg`. This is NOT like the react "
+            "track: do NOT prefix paths with `src/`. The ONLY forbidden paths are "
+            "the generated `_paw/` namespace and anything that climbs out of the "
+            "site with `..`.\n"
+            "KEEP THE FORM PLUMBING. If the file contains a `<form>` posting to a "
+            "`/capture/form` endpoint, leave its `action` and its hidden "
+            "`paw_site_id` / `paw_key` / `paw_redirect` inputs EXACTLY as they are "
+            "unless the user asks to change the form itself — they are what makes "
+            "submissions arrive as leads, and a rewrite that drops them silently "
+            "sends every future enquiry nowhere.\n"
+            "Args: `pocket_id` (the html site pocket), `file_path`, and one of "
+            "`edits` / `new_source`, plus optional `create`. Returns {ok, "
+            "status:'draft', is_live:false, pocket_id, file_path, created, "
+            "message}. Relay the `message`: the change is in the DRAFT the user can "
+            "preview under /sites, and publishing is their call — do NOT tell them "
+            "it is live. ok=false with an error means NOTHING was saved: an "
+            "old_string that matched 0 or >1 times means make it more specific and "
+            "retry; a reserved-path, wrong-engine, already-exists or not-found "
+            "error means relay the reason. Do NOT report a successful edit when "
+            "ok=false."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Id of the html site pocket to edit.",
+                },
+                "file_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Relative path of the file to write (e.g. 'index.html', "
+                        "'styles.css', 'about.html'). Files usually sit at the site "
+                        "ROOT — do NOT prefix with 'src/'. Must already exist in the "
+                        "site's source map unless `create` is true. The generated "
+                        "`_paw/` namespace is not writable."
+                    ),
+                },
+                "edits": {
+                    "type": "array",
+                    "description": (
+                        "PREFERRED for small changes: a list of search/replace "
+                        "blocks applied to the file's CURRENT contents. Each "
+                        "`old_string` must match exactly once. Send this INSTEAD of "
+                        "`new_source` so you emit only the diff. Not valid with "
+                        "`create`."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": {
+                                "type": "string",
+                                "description": (
+                                    "Exact text to replace, copied verbatim from the "
+                                    "current file; must match exactly once."
+                                ),
+                            },
+                            "new_string": {
+                                "type": "string",
+                                "description": "Replacement text (may be empty to delete).",
+                            },
+                        },
+                        "required": ["old_string", "new_string"],
+                        "additionalProperties": False,
+                    },
+                },
+                "new_source": {
+                    "type": "string",
+                    "description": (
+                        "The FULL new contents of the file as a string (REPLACES the "
+                        "whole file — not a diff). Use for large rewrites, and "
+                        "always with `create`."
+                    ),
+                },
+                "create": {
+                    "type": "boolean",
+                    "description": (
+                        "Create a NEW file at `file_path` instead of editing an "
+                        "existing one. Requires `new_source`, and the path must NOT "
+                        "already exist. Use it to add a page, then edit "
+                        "`index.html` to link to it."
+                    ),
+                },
+            },
+            "required": ["pocket_id", "file_path"],
+            "additionalProperties": False,
+        },
+    )
+    async def edit_html_file(args):  # type: ignore[no-untyped-def]
+        return await _edit_html_file_handler(args)
+
+    return edit_html_file
+
+
 __all__ = [
     "CREATE_DYNAMIC_SITE_TOOL_ID",
     "CREATE_HTML_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",
+    "CREATE_REACT_SITE_TOOL_ID",
     "CREATE_SVELTE_SITE_TOOL_ID",
+    "EDIT_HTML_FILE_TOOL_ID",
+    "EDIT_REACT_COMPONENT_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "HTML_REQUIRED_KEYS",
+    "REACT_REQUIRED_KEYS",
+    "REACT_RESERVED_FILES",
+    "REACT_RESERVED_PREFIX",
     "SERVER_NAME",
     "SITES_CREATE_TOOL_IDS",
     "SVELTE_REQUIRED_EXACT_KEYS",
@@ -1536,6 +2505,9 @@ __all__ = [
     "make_create_dynamic_site_tool",
     "make_create_html_site_tool",
     "make_create_landing_site_tool",
+    "make_create_react_site_tool",
     "make_create_svelte_site_tool",
+    "make_edit_html_file_tool",
+    "make_edit_react_component_tool",
     "make_edit_svelte_component_tool",
 ]

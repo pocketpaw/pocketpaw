@@ -156,6 +156,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -612,21 +613,22 @@ async def _sum_amount_delta(query: dict[str, Any]) -> int:
 
     Runs a Mongo ``$match`` + ``$group`` aggregation in the DB (NOT a
     pull-all-then-sum in Python) and returns the summed ``amount_delta`` (signed),
-    or 0 when nothing matches. We iterate the raw pymongo command cursor with
-    ``async for`` because awaiting it directly (``await coll.aggregate(...)``)
-    raises ``TypeError`` under the mongomock-motor test harness; ``async for`` runs
-    the server-side ``$match`` + ``$group`` in BOTH real Mongo and the harness.
-    (Beanie's ``Document.aggregate(...).to_list()`` also works under the harness
-    and is the form used elsewhere, e.g. ``workspace/service.py`` — either is
-    genuinely DB-side; this module uses the cursor form.)
+    or 0 when nothing matches. ``get_pymongo_collection().aggregate()`` returns
+    DIFFERENT shapes per driver: a COROUTINE under the pymongo-async client the
+    app uses in prod (``async for`` raises TypeError — the same live bug that hit
+    ``storage.service.workspace_storage_usage``), but a directly-iterable latent
+    cursor under the mongomock-motor test harness. We discriminate with
+    ``inspect.isawaitable`` (the repo's cross-driver idiom in ``files/router.py``,
+    ``connectors/registry.py``) and await only when the cursor is awaitable.
     """
-    coll = CreditLedgerEntry.get_pymongo_collection()
-    cursor = coll.aggregate(
+    cursor = CreditLedgerEntry.get_pymongo_collection().aggregate(
         [
             {"$match": query},
             {"$group": {"_id": None, "total": {"$sum": "$amount_delta"}}},
         ]
     )
+    if inspect.isawaitable(cursor):
+        cursor = await cursor
     async for row in cursor:
         return int(row.get("total") or 0)
     return 0

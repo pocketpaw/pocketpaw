@@ -1,0 +1,584 @@
+<!doctype html>
+<!--
+  recap-template.html — paw-visual-recap skill (created 2026-07-03).
+  Changes: initial version. Self-contained diff-recap viewer: ALL CSS/JS inline, zero external
+  requests (no CDN, no fonts, no http(s) references). Renders entirely from window.RECAP_SPEC
+  (contract: recap-spec.schema.json). The RECAP_SPEC placeholder line in the script below is
+  replaced by string substitution — see SKILL.md. Rendered copies are GENERATED artifacts:
+  never hand-edit one; regenerate from the refs (the diff wins on conflict).
+  Sibling of paw-visual-plan/plan-template.html — same mechanism, same visual language.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Recap</title>
+<style>
+  *{box-sizing:border-box}
+  :root{
+    --bg:#0b0e14;--panel:#11161f;--panel2:#182031;--line:#232c3d;
+    --text:#c8d3e0;--dim:#7f8b9e;--green:#5ac8a8;--amber:#d9a854;
+    --blue:#6ca8d9;--red:#d97c7c;
+    --addbg:rgba(90,200,168,.08);--delbg:rgba(217,124,124,.09);
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 var(--mono);-webkit-font-smoothing:antialiased}
+  a{color:var(--blue);text-decoration:none}
+  main,header.mast{max-width:1060px;margin:0 auto;padding:0 24px}
+  header.mast{padding-top:30px;padding-bottom:14px}
+  .kicker{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+  header.mast h1{margin:6px 0 12px;font-size:26px;line-height:1.2;color:#e8eef5;font-weight:600}
+  .meta-row{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:3px 10px;font-size:12px;color:var(--dim)}
+  .chip b{color:var(--green);font-weight:600;margin-right:4px}
+  .refline{color:var(--dim);font-size:13px;margin:8px 0 0}
+  .refline code{color:#dbe6f1}
+  .refline .arr{color:var(--green);margin:0 6px}
+  ul.commits{list-style:none;margin:10px 0 0;padding:0}
+  ul.commits li{padding:2px 0;font-size:13px}
+  ul.commits .sha{color:var(--amber);margin-right:10px}
+  nav{position:sticky;top:0;z-index:10;background:rgba(11,14,20,.92);backdrop-filter:blur(6px);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+  nav .inner{max-width:1060px;margin:0 auto;padding:7px 20px;display:flex;flex-wrap:wrap;gap:2px}
+  nav a{padding:4px 10px;border-radius:4px;color:var(--dim);font-size:11px;letter-spacing:.06em;text-transform:uppercase}
+  nav a:hover{color:var(--text);background:var(--panel2)}
+  main{padding-bottom:90px}
+  section{margin-top:46px;scroll-margin-top:56px}
+  h2{margin:0 0 14px;font-size:13px;text-transform:uppercase;letter-spacing:.14em;color:var(--dim);border-bottom:1px solid var(--line);padding-bottom:8px;font-weight:600}
+  h2 .hash{color:var(--green);margin-right:7px}
+  .prose p{margin:9px 0;max-width:76ch}
+  .prose ul{margin:8px 0;padding-left:22px}
+  .prose li{margin:3px 0}
+  code{background:var(--panel2);border:1px solid var(--line);padding:1px 5px;border-radius:3px;font-size:.92em;color:#dbe6f1}
+  .tag{display:inline-block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;border-radius:3px;padding:1px 7px;border:1px solid;vertical-align:middle}
+  .tag.warn{color:var(--amber);border-color:var(--amber)}
+  /* stats */
+  .stat-row{display:flex;flex-wrap:wrap;gap:14px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 22px;min-width:130px}
+  .stat .n{font-size:26px;font-weight:600;color:#e8eef5;display:block}
+  .stat .n.plus{color:var(--green)}
+  .stat .n.minus{color:var(--red)}
+  .stat .k{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim)}
+  .bar{margin-top:14px;height:8px;border-radius:4px;overflow:hidden;display:flex;background:var(--panel2);border:1px solid var(--line);max-width:420px}
+  .bar .add{background:var(--green)}
+  .bar .del{background:var(--red)}
+  /* key changes accordion */
+  details.kc{border:1px solid var(--line);border-radius:6px;background:var(--panel);margin:0 0 12px}
+  details.kc summary{cursor:pointer;padding:10px 14px;display:flex;flex-wrap:wrap;align-items:baseline;gap:10px}
+  details.kc summary::marker{color:var(--green)}
+  details.kc[open] summary{border-bottom:1px solid var(--line)}
+  .kc-path{color:#e8eef5;font-weight:600;font-size:13px;word-break:break-all}
+  .kc-note{color:var(--dim);font-size:13px;flex:1 1 100%;margin-left:22px}
+  .hunk{margin:12px 14px;border:1px solid var(--line);border-radius:4px;overflow-x:auto}
+  .hunk-h{background:var(--panel2);color:var(--blue);padding:4px 12px;font-size:12px;border-bottom:1px solid var(--line);white-space:pre}
+  .hunk pre{margin:0;padding:6px 0;font:12px/1.5 var(--mono)}
+  .dl{display:block;padding:0 12px;white-space:pre}
+  .dl.add{color:var(--green);background:var(--addbg)}
+  .dl.del{color:var(--red);background:var(--delbg)}
+  .dl.ctx{color:var(--dim)}
+  .dl .m{display:inline-block;width:1.2em;user-select:none;opacity:.8}
+  /* file tree */
+  .dirgrp{margin:0 0 18px}
+  .dirname{color:var(--blue);font-size:12px;letter-spacing:.04em;padding:4px 0;border-bottom:1px dashed var(--line)}
+  table.ft{width:100%;border-collapse:collapse;font-size:13px}
+  table.ft td{padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:baseline}
+  table.ft td.f{width:60%}
+  table.ft td.n{text-align:right;white-space:nowrap}
+  .plus{color:var(--green)}
+  .minus{color:var(--red)}
+  .fflag{font-size:10px;letter-spacing:.1em;text-transform:uppercase;border-radius:3px;padding:1px 7px;border:1px solid}
+  .fflag.new{color:var(--green);border-color:var(--green)}
+  .fflag.modified{color:var(--amber);border-color:var(--amber)}
+  .fflag.deleted{color:var(--red);border-color:var(--red)}
+  .fflag.renamed{color:var(--blue);border-color:var(--blue)}
+  .keymark{color:var(--green);font-size:11px;margin-left:8px}
+  /* api deltas */
+  .delta{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 16px;margin:0 0 12px}
+  .delta .kind{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--amber);border:1px solid var(--amber);border-radius:3px;padding:1px 7px}
+  .delta .pair{margin-top:8px;overflow-x:auto}
+  .delta .b,.delta .a{display:block;padding:3px 10px;white-space:pre-wrap;border-radius:3px;font-size:13px}
+  .delta .b{color:var(--red);background:var(--delbg)}
+  .delta .a{color:var(--green);background:var(--addbg);margin-top:3px}
+  .delta .note{margin-top:8px;color:var(--dim);font-size:13px}
+  ul.inf{list-style:none;margin:0;padding:0}
+  ul.inf li{padding:8px 0;border-bottom:1px dashed var(--line);max-width:80ch}
+  ul.inf .tag{margin-right:10px}
+  footer{max-width:1060px;margin:60px auto 0;padding:14px 24px;border-top:1px solid var(--line);color:var(--dim);font-size:11px}
+  @media print{
+    :root{--bg:#fff;--panel:#fff;--panel2:#f2f2f2;--line:#bbb;--text:#111;--dim:#555;--green:#0a7a5c;--amber:#8a6414;--blue:#1c5f96;--red:#a33;--addbg:#eaf6f1;--delbg:#faeceb}
+    nav{display:none}
+    body{font-size:12px}
+    details.kc,.delta,.dirgrp{break-inside:avoid}
+    section{margin-top:26px}
+  }
+</style>
+</head>
+<body>
+<header class="mast" id="mast"></header>
+<nav><div class="inner" id="navlinks"></div></nav>
+<main id="main"></main>
+<footer>generated by paw-visual-recap — the refs are the source of truth; regenerate, don't hand-edit.</footer>
+<script>
+window.RECAP_SPEC = {
+  "meta": {
+    "title": "Default backend's tool arguments (PR #1943)",
+    "date": "2026-08-15",
+    "base": "origin/dev",
+    "head": "origin/feat/claude-sdk-tool-args",
+    "commits": [
+      {
+        "sha": "6e17f792",
+        "subject": "fix(agents): a tool with no arguments reported the metadata dict as its arguments"
+      },
+      {
+        "sha": "121be545",
+        "subject": "docs(agents): write the input_pending contract where consumers will find it"
+      },
+      {
+        "sha": "3782c36f",
+        "subject": "fix(agents): one pending tool call per call, not per event"
+      },
+      {
+        "sha": "901a8e54",
+        "subject": "fix(agents): claude_sdk announced every tool call with empty arguments"
+      }
+    ]
+  },
+  "narrative": "`claude_agent_sdk` is the default backend. On a streamed turn every tool call reached consumers with `input={}`.\n\nThe arguments were never lost in transit. The SDK assembles them and delivers them on the completed `AssistantMessage`; they died two lines later at a name guard, because the streaming branch had already announced that tool. On a streamed turn that is every tool, so the only emission carrying real arguments was always the one discarded. No `input_json_delta` reassembly was needed \u2014 the original plan called for it, and that was wrong.\n\n**Review the two-event contract.** Both emissions now go out, distinguished by an additive `input_pending`. That broke correlation in `loop.py`, which appended one pending entry per event \u2014 caught before the PR and fixed here. Skipping the provisional event matters because both consumers of that `tool_start` *append* rather than replace, so a provisional row was permanent junk, not a placeholder.\n\nTwo existing tests asserted the old suppression and were rewritten rather than deleted. **That is the part most worth a second pair of eyes** \u2014 an assertion being rewritten by the change it was guarding.",
+  "stats": {
+    "files": 6,
+    "adds": 854,
+    "dels": 22
+  },
+  "fileTree": [
+    {
+      "path": "src/pocketpaw/agents/claude_sdk.py",
+      "adds": 52,
+      "dels": 14,
+      "flag": "modified"
+    },
+    {
+      "path": "src/pocketpaw/agents/loop.py",
+      "adds": 42,
+      "dels": 2,
+      "flag": "modified"
+    },
+    {
+      "path": "src/pocketpaw/agents/protocol.py",
+      "adds": 39,
+      "dels": 1,
+      "flag": "modified"
+    },
+    {
+      "path": "tests/test_agent_loop_tool_correlation.py",
+      "adds": 353,
+      "dels": 0,
+      "flag": "new"
+    },
+    {
+      "path": "tests/test_claude_sdk_tool_args.py",
+      "adds": 338,
+      "dels": 0,
+      "flag": "new"
+    },
+    {
+      "path": "tests/test_stream_event.py",
+      "adds": 30,
+      "dels": 5,
+      "flag": "modified"
+    }
+  ],
+  "keyChanges": [
+    {
+      "path": "src/pocketpaw/agents/claude_sdk.py",
+      "annotation": "The whole bug, deleted: `_announced_tools` was suppressing the only emission that ever held real arguments. The set is gone because this guard was its only reader.",
+      "hunks": [
+        {
+          "header": "@@ -3110,7 +3125,6 @@ class ClaudeSDKBackend(BaseAgentBackend):",
+          "lines": [
+            {
+              "t": "ctx",
+              "s": "            # State tracking for StreamEvent deduplication"
+            },
+            {
+              "t": "ctx",
+              "s": "            _streamed_via_events = False"
+            },
+            {
+              "t": "del",
+              "s": "            _announced_tools: set[str] = set()"
+            },
+            {
+              "t": "ctx",
+              "s": "            _event_count = 0"
+            },
+            {
+              "t": "ctx",
+              "s": "            _saw_result = False  # Track if ResultMessage was consumed"
+            }
+          ]
+        },
+        {
+          "header": "@@ -3153,11 +3167,23 @@",
+          "lines": [
+            {
+              "t": "ctx",
+              "s": "                            if cb.get(\"type\") == \"tool_use\":"
+            },
+            {
+              "t": "ctx",
+              "s": "                                tool_name = cb.get(\"name\", \"unknown\")"
+            },
+            {
+              "t": "del",
+              "s": "                                _announced_tools.add(tool_name)"
+            },
+            {
+              "t": "add",
+              "s": "                                # PROVISIONAL announcement. ``content_block_start``"
+            },
+            {
+              "t": "add",
+              "s": "                                # opens the block before a single argument fragment"
+            },
+            {
+              "t": "add",
+              "s": "                                # has streamed, so the name is known here and the"
+            },
+            {
+              "t": "add",
+              "s": "                                # input is not."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "src/pocketpaw/agents/loop.py",
+      "annotation": "The correlation fix. One compound condition; `is not True` fails open so a backend setting something unexpected is still correlated rather than silently dropped.",
+      "hunks": [
+        {
+          "header": "@@ -1444,9 +1455,38 @@ class AgentLoop:",
+          "lines": [
+            {
+              "t": "del",
+              "s": "                    elif etype == \"tool_use\":"
+            },
+            {
+              "t": "add",
+              "s": "                    # ``input_pending`` marks a PROVISIONAL announcement: the"
+            },
+            {
+              "t": "add",
+              "s": "                    # backend knows the tool's name but its arguments are still"
+            },
+            {
+              "t": "add",
+              "s": "                    # streaming. Only the resolved event may be correlated here \u2014"
+            },
+            {
+              "t": "add",
+              "s": "                    # this branch appends one pending entry per event, so honouring"
+            },
+            {
+              "t": "add",
+              "s": "                    # both would leak an entry per call and corrupt every later"
+            },
+            {
+              "t": "add",
+              "s": "                    # ``tool_call_id`` via the ``pop(0)`` fallback below."
+            },
+            {
+              "t": "add",
+              "s": "                    elif etype == \"tool_use\" and meta.get(\"input_pending\") is not True:"
+            }
+          ]
+        },
+        {
+          "header": "@@ -1475,7 +1475,18 @@",
+          "lines": [
+            {
+              "t": "ctx",
+              "s": "                        tool_name = meta.get(\"name\") or meta.get(\"tool\", \"unknown\")"
+            },
+            {
+              "t": "del",
+              "s": "                        tool_input = meta.get(\"input\") or meta"
+            },
+            {
+              "t": "add",
+              "s": "                        # A tool called with NO arguments reports ``input={}``,"
+            },
+            {
+              "t": "add",
+              "s": "                        # which is falsy \u2014 an ``or meta`` fallback here published"
+            },
+            {
+              "t": "add",
+              "s": "                        # the whole metadata dict as the call's parameters."
+            },
+            {
+              "t": "add",
+              "s": "                        tool_input = meta.get(\"input\")"
+            },
+            {
+              "t": "add",
+              "s": "                        if not isinstance(tool_input, dict):"
+            },
+            {
+              "t": "add",
+              "s": "                            tool_input = {}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "src/pocketpaw/agents/protocol.py",
+      "annotation": "The contract, written where a consumer will actually find it. The last paragraph is the rule that would have prevented the correlation bug.",
+      "hunks": [
+        {
+          "header": "@@ (AgentEvent docstring)",
+          "lines": [
+            {
+              "t": "add",
+              "s": "    The ``input_pending`` contract \u2014 ONE tool call may produce MORE THAN ONE"
+            },
+            {
+              "t": "add",
+              "s": "    ``tool_use`` event:"
+            },
+            {
+              "t": "add",
+              "s": ""
+            },
+            {
+              "t": "add",
+              "s": "        - ``input_pending=True`` marks a PROVISIONAL announcement."
+            },
+            {
+              "t": "add",
+              "s": "        - ``input_pending=False`` \u2014 or the key being ABSENT \u2014 marks a RESOLVED"
+            },
+            {
+              "t": "add",
+              "s": "          event: ``input`` is final."
+            },
+            {
+              "t": "add",
+              "s": ""
+            },
+            {
+              "t": "add",
+              "s": "    Consumer rule: if you APPEND per event \u2014 a log, an activity feed, a pending"
+            },
+            {
+              "t": "add",
+              "s": "    list keyed per call \u2014 you MUST skip events with ``input_pending is True``, or"
+            },
+            {
+              "t": "add",
+              "s": "    you will record a phantom call carrying no arguments."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "tests/test_stream_event.py",
+      "annotation": "The judgment call worth checking: an existing assertion rewritten by the change it guarded. The replacement pins count, ordering and both payload shapes where the original pinned only a count.",
+      "hunks": [
+        {
+          "header": "@@ -200,7 +220,12 @@",
+          "lines": [
+            {
+              "t": "ctx",
+              "s": "        tool_events = [e for e in events if e.type == \"tool_use\"]"
+            },
+            {
+              "t": "del",
+              "s": "        assert len(tool_events) == 1"
+            },
+            {
+              "t": "add",
+              "s": "        assert len(tool_events) == 2"
+            },
+            {
+              "t": "add",
+              "s": "        provisional, resolved = tool_events"
+            },
+            {
+              "t": "add",
+              "s": "        assert provisional.metadata[\"input_pending\"] is True"
+            },
+            {
+              "t": "add",
+              "s": "        assert provisional.metadata[\"input\"] == {}"
+            },
+            {
+              "t": "add",
+              "s": "        assert resolved.metadata[\"input_pending\"] is False"
+            },
+            {
+              "t": "add",
+              "s": "        assert resolved.metadata[\"input\"] == {\"file\": \"foo.py\"}"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "apiDeltas": [
+    {
+      "kind": "schema",
+      "before": "AgentEvent(type=\"tool_use\").metadata -> {name, input}",
+      "after": "AgentEvent(type=\"tool_use\").metadata -> {name, input, input_pending?}",
+      "note": "Additive. Absent means resolved, so deep_agents' single deduped event and claude_sdk's pair are both correct under one rule."
+    },
+    {
+      "kind": "schema",
+      "before": "streamed tool call -> 1 tool_use event, input always {}",
+      "after": "streamed tool call -> 2 tool_use events: provisional {} then resolved real args",
+      "note": "Non-streaming path is unchanged at exactly one event per call."
+    }
+  ],
+  "inferred": [
+    "The claim that no backend carries arguments outside `input` comes from reading all eight backends; opencode omits the key entirely and has no arguments to give.",
+    "The 71-failure full-suite baseline was shown unchanged by reverting the touched files and re-running, so it is attributed to the environment (a missing herdr binary) rather than measured per-cause."
+  ]
+};
+(function(){
+"use strict";
+var S = window.RECAP_SPEC;
+var main = document.getElementById("main");
+if (!S) {
+  main.innerHTML = "<p style='padding:40px 0'>window.RECAP_SPEC is empty — this file was not generated. Run the substitution in the paw-visual-recap SKILL.md.</p>";
+  return;
+}
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
+function inline(t){
+  t = esc(t);
+  t = t.replace(/`([^`]+)`/g,"<code>$1</code>");
+  t = t.replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>");
+  t = t.replace(/\*([^*]+)\*/g,"<em>$1</em>");
+  return t;
+}
+function md(s){ /* md-lite: paragraphs, "- " lists, **bold**, *em*, `code` */
+  return String(s).trim().split(/\n\s*\n/).map(function(b){
+    var lines = b.split("\n");
+    var isList = lines.length > 0 && lines.every(function(l){return /^\s*-\s+/.test(l);});
+    if (isList) return "<ul>" + lines.map(function(l){return "<li>"+inline(l.replace(/^\s*-\s+/,""))+"</li>";}).join("") + "</ul>";
+    return "<p>" + inline(b) + "</p>";
+  }).join("");
+}
+function chip(k,v){return '<span class="chip"><b>'+esc(k)+'</b>'+esc(v)+'</span>';}
+
+/* masthead */
+var meta = S.meta || {};
+document.title = (meta.title || "Recap") + " — recap";
+var mast = '<div class="kicker">paw-visual-recap &middot; generated &mdash; regenerate, don\'t hand-edit</div>'
+  + '<h1>'+esc(meta.title || "Untitled recap")+'</h1>'
+  + '<div class="refline"><code>'+esc(meta.base||"?")+'</code><span class="arr">&rarr;</span><code>'+esc(meta.head||"?")+'</code></div>'
+  + '<div class="meta-row" style="margin-top:10px">'
+  + (meta.date ? chip("date", meta.date) : "")
+  + ((meta.commits||[]).length ? chip("commits", String(meta.commits.length)) : "")
+  + (S.stats ? chip("files", String(S.stats.files)) : "")
+  + '</div>'
+  + (meta.prUrl ? '<div class="refline">PR: <a href="'+esc(meta.prUrl)+'">'+esc(meta.prUrl)+'</a></div>' : "");
+if ((meta.commits || []).length) {
+  mast += '<ul class="commits">' + meta.commits.map(function(c){
+    return '<li><span class="sha">'+esc(c.sha)+'</span>'+esc(c.subject)+'</li>';
+  }).join("") + '</ul>';
+}
+document.getElementById("mast").innerHTML = mast;
+
+/* sections — only pushed when the spec has data, so empty blocks disappear */
+var sections = [];
+function section(id, label, html){ sections.push({id:id, label:label, html:html}); }
+
+if (S.narrative) section("narrative", "Narrative", '<div class="prose">'+md(S.narrative)+'</div>');
+
+if (S.stats) {
+  var st = S.stats, tot = (st.adds + st.dels) || 1;
+  section("stats", "Stats",
+    '<div class="stat-row">'
+    + '<div class="stat"><span class="n">'+st.files+'</span><span class="k">files</span></div>'
+    + '<div class="stat"><span class="n plus">+'+st.adds+'</span><span class="k">insertions</span></div>'
+    + '<div class="stat"><span class="n minus">&minus;'+st.dels+'</span><span class="k">deletions</span></div>'
+    + '</div>'
+    + '<div class="bar" title="+'+st.adds+' / -'+st.dels+'">'
+    + '<div class="add" style="width:'+Math.round(100*st.adds/tot)+'%"></div>'
+    + '<div class="del" style="flex:1"></div>'
+    + '</div>');
+}
+
+var keyPaths = {};
+if ((S.keyChanges || []).length) {
+  var kcs = S.keyChanges.map(function(k, i){
+    keyPaths[k.path] = true;
+    var hunks = (k.hunks || []).map(function(h){
+      var body = (h.lines || []).map(function(l){
+        var m = l.t === "add" ? "+" : (l.t === "del" ? "-" : " ");
+        return '<span class="dl '+esc(l.t)+'"><span class="m">'+m+'</span>'+esc(l.s)+'</span>';
+      }).join("");
+      return '<div class="hunk"><div class="hunk-h">'+esc(h.header)+'</div><pre>'+body+'</pre></div>';
+    }).join("");
+    return '<details class="kc"'+(i===0?' open':'')+'>'
+      + '<summary><span class="kc-path">'+esc(k.path)+'</span>'
+      + '<span class="kc-note">'+inline(k.annotation||"")+'</span></summary>'
+      + hunks + '</details>';
+  }).join("");
+  section("keychanges", "Key changes", kcs);
+}
+
+if ((S.fileTree || []).length) {
+  var groups = {}, order = [];
+  S.fileTree.forEach(function(f){
+    var i = f.path.lastIndexOf("/");
+    var dir = i < 0 ? "." : f.path.slice(0, i);
+    if (!groups[dir]) { groups[dir] = []; order.push(dir); }
+    groups[dir].push(f);
+  });
+  var ft = order.map(function(dir){
+    var rows = groups[dir].map(function(f){
+      var base = f.path.slice(dir === "." ? 0 : dir.length + 1);
+      return '<tr><td class="f"><code>'+esc(base)+'</code>'
+        + (keyPaths[f.path] ? '<span class="keymark" title="annotated in key changes">&#9670; key</span>' : '')
+        + '</td>'
+        + '<td class="n"><span class="plus">+'+f.adds+'</span> <span class="minus">&minus;'+f.dels+'</span></td>'
+        + '<td><span class="fflag '+esc(f.flag)+'">'+esc(f.flag)+'</span></td></tr>';
+    }).join("");
+    return '<div class="dirgrp"><div class="dirname">'+esc(dir)+'/</div><table class="ft"><tbody>'+rows+'</tbody></table></div>';
+  }).join("");
+  section("files", "Files", ft);
+}
+
+if ((S.apiDeltas || []).length) {
+  section("apideltas", "API deltas", S.apiDeltas.map(function(d){
+    return '<div class="delta"><span class="kind">'+esc(d.kind)+'</span>'
+      + '<div class="pair"><span class="b">- '+esc(d.before)+'</span><span class="a">+ '+esc(d.after)+'</span></div>'
+      + (d.note ? '<div class="note">'+inline(d.note)+'</div>' : '')
+      + '</div>';
+  }).join(""));
+}
+
+if ((S.inferred || []).length)
+  section("inferred", "Inferred", '<ul class="inf">'+S.inferred.map(function(x){
+    return '<li><span class="tag warn">inferred</span>'+inline(x)+'</li>';
+  }).join("")+'</ul>');
+
+main.innerHTML = sections.map(function(s){
+  return '<section id="'+s.id+'"><h2><span class="hash">#</span>'+s.label+'</h2>'+s.html+'</section>';
+}).join("");
+document.getElementById("navlinks").innerHTML = sections.map(function(s){
+  return '<a href="#'+s.id+'">'+s.label+'</a>';
+}).join("");
+
+/* print-friendly: expand all collapsed key changes before printing */
+window.addEventListener("beforeprint", function(){
+  document.querySelectorAll("details").forEach(function(d){ d.open = true; });
+});
+})();
+</script>
+</body>
+</html>

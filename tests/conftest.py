@@ -11,6 +11,7 @@ YAMLs on a dev machine can't leak into test registries.
 import asyncio
 import os
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -23,6 +24,44 @@ from pocketpaw.security.audit import AuditLogger
 # we relax the check so Settings() instantiates cleanly. Tests that need the
 # strict behaviour monkeypatch POCKETPAW_ALLOW_INTERNAL_URLS=false themselves.
 os.environ.setdefault("POCKETPAW_ALLOW_INTERNAL_URLS", "true")
+
+
+def pytest_report_header() -> str | None:
+    """Say so, loudly, when a mutation sweep is running in this worktree.
+
+    Added 2026-08-09 after this cost real time twice in one day. ``scripts/mutate.py``
+    applies each mutation IN PLACE, so while one is live the tree genuinely contains
+    broken code and any test run against it fails for a reason that looks exactly like a
+    regression. It happened to a reviewer, and then to me while verifying the fix.
+
+    This hook is the reader's ACTUAL path — someone investigating a failure runs the
+    suite; they do not necessarily run ``git status``. So the warning belongs in pytest's
+    own header, where it is impossible to miss and where it still works with the marker
+    gitignored.
+
+    A header, deliberately, not a hard failure: a sweep runs the suite itself, over and
+    over, and erroring out would make the tool unable to do its job.
+    """
+    marker = Path(__file__).resolve().parents[1] / ".mutation-sweep-active"
+    if not marker.exists():
+        return None
+    current = ""
+    try:
+        for line in marker.read_text(encoding="utf-8").splitlines():
+            if line.startswith("current"):
+                current = line.partition(":")[2].strip()
+                break
+    except OSError:  # pragma: no cover - best effort
+        pass
+    return (
+        "\n"
+        "  ****************************************************************\n"
+        "  *  A MUTATION SWEEP IS RUNNING IN THIS WORKTREE.               *\n"
+        "  *  Failures below are EXPECTED and are NOT regressions.        *\n"
+        "  *  Re-run once .mutation-sweep-active is gone.                 *\n"
+        "  ****************************************************************\n"
+        f"  currently mutated: {current or '(unknown)'}\n"
+    )
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -88,3 +127,77 @@ def _isolate_audit_log(tmp_path):
         patch("pocketpaw.tools.registry.get_audit_logger", return_value=temp_logger),
     ):
         yield temp_logger
+
+
+# ---------------------------------------------------------------------------
+# Gated-proposal test seam (feat/growth-g4, security review F2)
+# ---------------------------------------------------------------------------
+
+
+def seed_gated_action(client, payload: dict):
+    """Seed a PENDING Action carrying a gated blob, the way a real proposer does.
+
+    ``POST /instinct/actions`` is the GENERIC propose route, open to any MEMBER.
+    It now REFUSES reserved gated-blob parameter keys (``_ship_action``,
+    ``_growth_send``, ``_admin_action``, …) with
+    ``422 instinct.reserved_parameter_key`` — a member could otherwise file an
+    innocuous Tray card whose blob dispatches a privileged executor the moment
+    someone clicks Approve. Only the in-process helper that owns each kind
+    (``ee.cloud.ship.propose``, ``ee.cloud.growth.propose``, …) may mint one;
+    those call ``store.propose`` directly and never cross this route.
+
+    Gate tests still need such an Action in the store. This helper reproduces
+    the state the real helper leaves behind: POST the payload with the plain
+    parameters, then write the gated blob onto the stored row. The write is a
+    plain synchronous sqlite UPDATE (not ``store.update_parameters``) so the
+    helper works identically inside and outside a running event loop.
+
+    Returns the propose response, so a call site keeps reading
+    ``resp.json()["id"]`` / ``resp.status_code`` exactly as before.
+    """
+    import json as _json
+    import sqlite3
+
+    from pocketpaw_ee.instinct import router as _instinct_router
+    from pocketpaw_ee.instinct.router import RESERVED_GATED_PARAM_KEYS
+
+    parameters = dict(payload.get("parameters") or {})
+    gated = {k: v for k, v in parameters.items() if k in RESERVED_GATED_PARAM_KEYS}
+    plain = {k: v for k, v in parameters.items() if k not in gated}
+
+    resp = client.post("/instinct/actions", json={**payload, "parameters": plain})
+    if not gated or resp.status_code != 201:
+        return resp
+
+    store = _instinct_router._store(payload.get("workspace_id") or "")
+    with sqlite3.connect(store._db_path) as db:
+        db.execute(
+            "UPDATE instinct_actions SET parameters = ? WHERE id = ?",
+            (_json.dumps(parameters), resp.json()["id"]),
+        )
+    return resp
+
+
+async def aseed_gated_action(client, payload: dict):
+    """``seed_gated_action`` for an httpx ``AsyncClient``. Same contract."""
+    import json as _json
+    import sqlite3
+
+    from pocketpaw_ee.instinct import router as _instinct_router
+    from pocketpaw_ee.instinct.router import RESERVED_GATED_PARAM_KEYS
+
+    parameters = dict(payload.get("parameters") or {})
+    gated = {k: v for k, v in parameters.items() if k in RESERVED_GATED_PARAM_KEYS}
+    plain = {k: v for k, v in parameters.items() if k not in gated}
+
+    resp = await client.post("/instinct/actions", json={**payload, "parameters": plain})
+    if not gated or resp.status_code != 201:
+        return resp
+
+    store = _instinct_router._store(payload.get("workspace_id") or "")
+    with sqlite3.connect(store._db_path) as db:
+        db.execute(
+            "UPDATE instinct_actions SET parameters = ? WHERE id = ?",
+            (_json.dumps(parameters), resp.json()["id"]),
+        )
+    return resp

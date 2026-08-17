@@ -2,12 +2,16 @@
 # Created: 2026-02-02
 # Updated: 2026-05-21 (#1160) — BaseTool._success / _error now pass results
 # through cap_tool_output() so a noisy tool blob can't flood agent context.
+# Updated: 2026-08-15 (HTN-1) — BaseTool grows an optional ``narration``
+# property so a tool can declare how its call reads in plain language. Defaults
+# to None; see ``pocketpaw.tools.narration``.
 
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from pocketpaw.tools.narration import Narration
 from pocketpaw.tools.output_budget import cap_tool_output
 
 
@@ -98,6 +102,16 @@ class BaseTool(ABC):
     def trust_level(self) -> str:
         """Required trust level to use this tool."""
         return "standard"
+
+    @property
+    def narration(self) -> Narration | None:
+        """Plain-language phrasing for a call to this tool.
+
+        Override to give users a readable status line ("Searching the web for
+        quarterly filings") instead of the bare tool name. ``None`` means the
+        tool has no phrasing and callers should not invent one.
+        """
+        return None
 
     @property
     def parameters(self) -> dict[str, Any]:

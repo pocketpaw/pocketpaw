@@ -15,6 +15,11 @@ Updated: 2026-07-27 (fix/dev-ci) — ``_strip_builtin_servers`` now also drops
   it as an external config and dev went red. Same regime as
   ``pocketpaw_daytona``: ambient registration, scoped by the /code
   SurfaceProfile allowlist rather than by being withheld.
+
+  Two branches hit this and fixed it independently, which is the actual signal:
+  the list below is a dozen entries long, and every one of them was written
+  after an always-on server took six external-config assertions down with it.
+  "A builtin server landed" should fail somewhere more specific than here.
 Updated: 2026-07-06 (feat/paw-sites-stock-imagery) — ``_strip_builtin_servers``
   now also drops ``pocketpaw_stock`` (search_stock_images: free Pexels +
   Unsplash photo search for site imagery, registered always-on via the
@@ -100,6 +105,7 @@ from pocketpaw_ee.agent.mcp_servers.external_actions import (
 )
 from pocketpaw_ee.agent.mcp_servers.fabric import SERVER_NAME as _FABRIC_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.growth import SERVER_NAME as _GROWTH_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.icons import SERVER_NAME as _ICONS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.instinct import SERVER_NAME as _INSTINCT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.loom import SERVER_NAME as _LOOM_MCP_SERVER_NAME
@@ -192,12 +198,14 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``pocketpaw_daytona`` is always-on too — the /code surface scopes access
     # via its profile allowlist, same regime as fabric / instinct / media.
     out.pop(_DAYTONA_MCP_SERVER_NAME, None)
-    # ``pocketpaw_code`` is always-on too — the four /code file tools
-    # (readFile / search / listDir / writeFile) are ambient, NOT in
+    # ``pocketpaw_code`` is always-on too — the /code file tools (readFile /
+    # search / listDir / editFile / writeFile) are ambient, NOT in
     # ``OPT_IN_MCP_SERVERS``. The /code SurfaceProfile scopes them via
     # ``tool_mode="exclusive"`` + ``_CODE_FILE_TOOL_IDS``, so the allowlist is
     # the boundary, not registration — the same regime as its sibling
-    # ``pocketpaw_daytona`` directly above.
+    # ``pocketpaw_daytona`` directly above. Registration could not be the
+    # boundary anyway: each tool parks on a delegate frame that only a tab with
+    # a code project open can answer.
     out.pop(_CODE_MCP_SERVER_NAME, None)
     # ``pocketpaw_atlas`` is always-on too — the capability atlas
     # (atlas_search / atlas_describe) is registered unconditionally in core
@@ -213,6 +221,16 @@ def _strip_builtin_servers(result: dict) -> dict:
     # registered unconditionally (ambient, NOT in OPT_IN_MCP_SERVERS); the /ship
     # surface profile's allow_mcp_tool_ids scoping plus the Instinct gate on the
     # destructive verbs are the security boundary, not registration (SHIP-4/8a).
+    # ``pocketpaw_growth`` is always-on too — the /growth rail's agent surface
+    # (prospect + draft reads, authoring writes, and the PROPOSE verbs). It
+    # sends nothing; the Instinct gate is the security boundary, not
+    # registration. Same regime as belt / ship / workspace_admin.
+    out.pop(_GROWTH_MCP_SERVER_NAME, None)
+    # ``pocketpaw_code`` (CD-3) and ``pocketpaw_ship`` (SHIP-4) are always-on as
+    # well and were never added here when they landed — every assertion in this
+    # class has been failing on their names since. Stripped now so the file
+    # measures what it claims to measure: EXTERNAL config.
+    out.pop(_CODE_MCP_SERVER_NAME, None)
     out.pop(_SHIP_MCP_SERVER_NAME, None)
     return out
 

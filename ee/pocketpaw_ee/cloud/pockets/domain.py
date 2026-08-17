@@ -13,6 +13,14 @@ Updated: 2026-06-03 (feat/sites-landing-brain) — added optional
 ``Pocket.pattern`` so the wire layer + sites generator can read the
 layout/conversion intent the pocket was authored as (``"landing"`` for
 marketing sites). ``None`` for legacy pockets.
+Updated: 2026-08-08 (feat/sites-js-by-default) — ``Pocket.keeps_client_bundle``
+became tri-state (``bool | None``, default ``None`` = the author declared
+nothing). Publish resolves ``None`` from ``sites_keep_client_bundle_default``;
+an explicit ``True``/``False`` overrides it either way. Legacy pockets read back
+``None``, not ``False``.
+Updated: 2026-08-07 (MT-1) — added ``Pocket.keeps_client_bundle``, the per-site
+declaration that the authored client JS must ship and run. Mirrors the Beanie
+field.
 Updated: 2026-06-04 (feat/sites-svelte-engine) — added the Paw Sites
 "Svelte track" fields ``Pocket.engine`` (``"ripple"`` | ``"svelte"``) and
 ``Pocket.source`` (the SvelteKit source map, or ``None``) so the wire
@@ -146,6 +154,14 @@ class Pocket:
     # dict — hence ``dict[str, Any]`` (DSV-5). ``None`` for ripple pockets; a
     # static svelte pocket carries only the str->str file map (a subset).
     source: dict[str, Any] | None = None
+    # MT-1 — the site's own client JavaScript is load-bearing, so the generator
+    # keeps CSR on instead of emitting the static ``csr = false`` default.
+    # TRI-STATE since feat/sites-js-by-default: ``None`` = the author declared
+    # nothing (legacy pockets included), so publish resolves it from
+    # ``sites_keep_client_bundle_default``; ``True`` / ``False`` are explicit and
+    # both override that default. Mirrors ``surface_profile``'s "None = use the
+    # default" convention.
+    keeps_client_bundle: bool | None = None
     # Optional per-entity surface-profile override (the JSON-shaped dict that
     # mirrors the surface-domain ``SurfaceProfile``). Consumed by the
     # entity-aware resolve_profile (entity-rooms chunk ①). ``None`` = use the

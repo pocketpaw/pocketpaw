@@ -67,6 +67,31 @@ search dropped a 3N sqlite N+1. SECURITY (separate PRs): the role-aware
 provider now re-resolves per turn (a warm shared client had leaked owner
 cards to a member), and the admin path gained an OWNER guard on owner-grants
 + an atomic approve.
+Updated: 2026-08-17 (atlas learns source-truth + the verify loop, AST-1..4)
+— closed a self-model blind spot: two subsystems that shipped after atlas was
+seeded (Fabric source-truth FST-1..8, the self-verifying loop SVL-1..5 + J-1)
+were undiscoverable. AST-1: authored `primitive:source-truth` and
+`primitive:verify-loop` (with primer gists) + `capability:fabric.provenance_read`
+and `capability:fabric.conflict_steward`; eval strict-hit baseline 35/36 →
+43/44 with two-directional pins. AST-2: `atlas_describe fabric:<Type>` carries
+an additive type-level `source_truth` roll-up (async optional introspector
+method, tracked-key-bounded, points at `fabric_query include_provenance`).
+AST-3: flag-aware `available` + tri-state `mode` (off|shadow|enforce) for the
+two primitives via the overlay — discoverable AND honest, never hidden, never
+a gate; `mode?` on search cards. AST-4: the atlas TOUCH-TIME RULE (pocketpaw
+CLAUDE.md) — add/rename/remove a primitive, surface, or capability → update
+authored/ + recompile + eval-pin in the same PR — because the drift check
+proves recompile fidelity, not accuracy vs the live OS.
+Updated: 2026-08-17 (AST-5a — pre-merge review fixes on the stack): the
+type-level `source_truth` aggregate is honest and O(1) in store connections
+(ONE bulk `get_statements_for_type` + ONE uncapped `statement_coverage_for_type`
+instead of a per-key `get_statements` walk; `object_count` and every property's
+`objects` are exact so the 500-key cap can't hide a property; new
+`live`, `sampled_keys`, `note`); mode `off` short-circuits with zero store
+reads; the two `capability:fabric.*` cards inherit `primitive:source-truth`'s
+flag mode (`FLAGGED_CAPABILITY_MODES`); `primitive:source-truth`'s `how` is
+hedged to where the EE fabric MCP server is bound (OSS has no
+`include_provenance`).
 -->
 
 # Atlas — the OS self-model
@@ -189,9 +214,65 @@ Primitives with a natural home route cross-link it in their own `surface`
 field so `atlas_describe` answers include where to see the result:
 `primitive:pocket` → `/pockets`, `primitive:instinct` → `/decisions`,
 `primitive:connector` → `/settings/workspace/integrations`,
-`primitive:sites` → `/sites`, `primitive:belt` → `/belt`. (There is no
-dedicated billing route in the client today; plan info lives on
-`/settings/workspace`.)
+`primitive:sites` → `/sites`, `primitive:belt` → `/belt`,
+`primitive:verify-loop` → `/deep-work`. Billing lives at `/settings/billing`
+(`surface:billing`), the owner-gated security console at `/security`
+(`surface:security`).
+
+## Source-truth + the verify loop in the self-model (AST-1)
+
+Two subsystems shipped after atlas was seeded and were invisible to agents until
+2026-08-17. Both are modelled as **separate primitives** — the code has two
+independent subsystems (FST in `src/pocketpaw/fabric/`, SVL in
+`src/pocketpaw/instinct/`) with no shared module, and "company brain" has no code
+referent, so no umbrella entry.
+
+- **`primitive:source-truth`** — per-property provenance, trust, and conflict
+  resolution for Fabric facts: every value is a *statement* (value + source +
+  `writer_class` `human|connector|mirror|agent|inferred` + `observed_at`); ONE
+  resolver ranks statements on the trust ladder `human-pin > human > connector >
+  mirror > agent > inferred` → recency → deterministic tiebreak and computes the
+  winner + `is_disputed`; freshness `fresh/aging/stale` is computed at read time
+  from `observed_at` + a per-type TTL (never stored); un-rankable conflicts open
+  an Instinct stewardship proposal (`/decisions`) with the steward verbs PIN /
+  IGNORE; CHANGE / CORRECT never hard-delete. `how`: `fabric_query
+  include_provenance=true`. Disambiguator: NOT a knowledge base, NOT a
+  fact-checker — it ranks SOURCES, it does not judge truth. `requires:
+  ["primitive:fabric"]`.
+- **`primitive:verify-loop`** — the OS's self-verifying outcome check: on task
+  completion a `VerdictProvider` computes an `OutcomeVerdict` (`SOLVED / PARTIAL
+  / NOT_SOLVED / UNKNOWN`) against success criteria; PARTIAL / NOT_SOLVED requeue
+  with diagnostic feedback bounded by a retry budget; a convergence guard
+  escalates no-progress / oscillation early; SOLVED / UNKNOWN → DONE (never
+  mutate a passing result); an LLM-as-judge provider runs in **shadow** ("judge:
+  shadow"); two terminals — the OSS deep-work executor and the cloud planner.
+  Disambiguator: NOT a test runner, NOT the Instinct approval gate — it verifies
+  OUTCOMES; humans still approve ACTIONS. Surface `/deep-work`.
+- **Capability cards:** `capability:fabric.provenance_read` ("See where a Fabric
+  fact came from") and `capability:fabric.conflict_steward` ("Arbitrate a source
+  conflict" — PIN / IGNORE via the Instinct gate at `/decisions`); both
+  `requires: ["role:member"]`. The steward card is deliberately NOT named
+  "…disputed Fabric fact": a name containing the pinned intent tokens out-scores
+  the governing primitive at name-weight, so `primitive:source-truth` would lose
+  "is this fact disputed" to its own capability card. Authored-name discipline,
+  not a scorer change.
+- **Both ship behind rollout flags that default `off`** — see the flag-aware
+  primitives note in the overlay section: they stay discoverable, the overlay
+  marks the live `mode`, and `describe` says how to enable. Never hidden, never
+  a gate.
+
+### The atlas touch-time rule (AST-4)
+
+The drift check (`atlas build --check`) proves **recompile fidelity** — the
+compiled `atlas.json` equals a fresh compile of the authored JSON — **not
+accuracy vs the live OS**. That let three live routes go missing/stale (July)
+and two whole subsystems stay invisible (August) while CI stayed green. So,
+per pocketpaw `CLAUDE.md` ("Atlas touch-time rule"): **adding, renaming, or
+removing a primitive, a user-facing surface/route, or an agent-facing
+capability updates `atlas/authored/`, recompiles `atlas.json`, and eval-pins
+the intent in the same PR.** Verify each route/fact against the real frontend
+routes. Routine refactors and bug fixes don't. A CI hint (new
+`src/pocketpaw/<mod>/` with no atlas entry → warn) is a follow-up.
 
 ## Search ranking rules (`atlas/store.py`)
 
@@ -242,6 +323,25 @@ the calling workspace's reality:
   listing. No "upgrade to see this" leakage in v1. If
   `connected_connector_names` raises, every connector is annotated
   `available: false` (unavailable, not filtered).
+- **Flag-aware primitives (AST-3)** — `primitive:source-truth` and
+  `primitive:verify-loop` ship behind rollout flags that default off. They are
+  ALWAYS described (discoverable — hiding them would misdirect the agent), but
+  the overlay stamps `available` (flag not `off`) plus a tri-state `mode`
+  (`off` | `shadow` | `enforce`), read from live settings on every pass:
+  source-truth from `fabric_source_truth_mode`
+  (`POCKETPAW_FABRIC_SOURCE_TRUTH_MODE`) — and the two member-level cards that
+  derive from the same flag, `capability:fabric.provenance_read` and
+  `capability:fabric.conflict_steward`, inherit that mode / `available` /
+  `enable_hint` verbatim (`overlay.FLAGGED_CAPABILITY_MODES`, AST-5a — before,
+  an un-marked card outranked the demoted primitive in search when off; the
+  role gate is unchanged, so `FLAGGED_PRIMITIVE_IDS` stays the provider-parity
+  set); verify-loop from the HIGHER of
+  `effective_deep_work_verify_mode()` / `effective_cloud_plan_verify_mode()`
+  (`POCKETPAW_DEEP_WORK_VERIFY_MODE` / `POCKETPAW_CLOUD_PLAN_VERIFY_MODE`).
+  Search cards and describe carry `mode`; an off primitive's describe adds
+  `enable_hint` (the env-flag pointer) instead of the connector `connect_hint`,
+  and it demotes below available entries at equal relevance exactly like an
+  unavailable connector. Discovery hints only — never an enforcement gate.
 - **Re-ranking** — search results get a stable re-sort so an available
   connector ranks above an unavailable one at EQUAL relevance; the store's
   base scoring is untouched (an unavailable-but-more-relevant entry still
@@ -322,6 +422,81 @@ run's workspace id — per run, never a process-global — and degrades to
 the real EE adapter test is import-guarded and skips when `pocketpaw_ee`
 isn't installed).
 
+### Type-level source-truth aggregate on describe (AST-2)
+
+The introspector describes entity **types**; Fabric source-truth (statements,
+provenance, `is_disputed`, freshness) attaches to object **instances**
+`(object_id, property)`. So `atlas_describe fabric:<Type>` carries an
+**additive `source_truth` roll-up at the type level** and points at the
+shipped instance-level read instead of duplicating it:
+
+```
+source_truth: {
+  mode: "off" | "shadow" | "enforce",   # settings.fabric_source_truth_mode
+  live: bool,                            # mode != "off" (AST-5a)
+  tracked: bool,                         # any statements for this type at all
+  sampled: bool,                         # fewer keys walked than tracked
+  sampled_keys: int,                     # keys actually walked (≤ 500)
+  object_count: int,                     # EXACT distinct objects with statements
+  properties: { <prop>: { objects,       # EXACT distinct objects on this property
+                          disputed, stale, aging,           # walked keys only
+                          winner_writer_mix: {human: n, connector: n, ...} } },
+  pointer: "fabric_query include_provenance=true for the per-object answer",
+  note?: str                             # when off, or when sampled
+}
+```
+
+**Mode `off` short-circuits (AST-5a).** Off means the store records and reads
+no provenance anywhere else, so the aggregate does ZERO store reads and answers
+`live=false, tracked=false, properties={}` plus a `note` ("source-truth is off
+in this deployment; statement history from an earlier shadow phase is not
+read") — it never reports shadow-era leftovers as `tracked` beside a
+`primitive:source-truth` the overlay marks unavailable. `live` is present in
+every mode.
+
+Mechanics: an optional, **async**, duck-typed
+`RegistryFabricIntrospector.entity_type_source_truth(name)` (documented in the
+same "OPTIONAL — not a Protocol member" block as `list_entity_properties`;
+adding it to the Protocol would break `isinstance` for two-method fakes).
+`build_workspace_fabric_introspector` binds the OSS `get_fabric_store(
+workspace_id=)` (a *different* DB from the EE registry — `fabric.db` vs
+`fabric_registry.db`) in an inner try so a store failure degrades alone.
+ONLY `describe_fabric_id_async` consumes it (via `getattr` + `callable` +
+`await`, from the already-async `atlas_describe` handler); the sync
+`describe_fabric_id` is unchanged; `search_entity_types` NEVER calls it (search
+stays properties-only). Cost is bounded by the **tracked-key set**
+and by a CONSTANT number of store connections (AST-5a — the first cut walked
+keys with one `get_statements` per key, i.e. one aiosqlite connection per key,
+~500 serial opens on a saturated type). Two additive `FabricStore` reads over
+the same indexed `fabric_objects(type_id) ⋈ fabric_statements(object_id)` join
+(EXPLAIN pinned: no SCAN), W4a-scoped on BOTH `s.workspace_id` and
+`o.workspace_id` (as is `list_statement_keys(type_id=)` now — a legacy
+NULL-workspace type shared by two tenants no longer rolls B's objects into A):
+`statement_coverage_for_type` — uncapped `COUNT(DISTINCT object_id)` overall
+and per property, the source of `object_count` and each property's `objects` —
+and `get_statements_for_type(key_cap=500)` — ONE query grouped by
+`(object_id, property)` in the same `(recorded_at, id)` order `get_statements`
+returns, so the pure resolver's input is unchanged. The winner cache stores only
+the value, so `is_disputed` / freshness / winner writer-class are recomputed per
+walked key. **The cap can no longer hide data**: `properties` ALWAYS lists every
+tracked property with its exact object count (before, a 500-key object_id-ordered
+prefix silently dropped a property that only appears on later objects — 600
+Customers with `arr` + a disputed `late` on the last 50 read "tracked, clean");
+`disputed` / `stale` / `aging` / `winner_writer_mix` cover the walked keys only,
+`sampled_keys` says how many, and `sampled=true` adds a `note` saying those
+counts cover the first N keys by object_id. An **untracked** type is the type
+lookup + one coverage read → `tracked=false` with zero statement reads
+(asserted). `tracked=false` renders as "no source-truth tracking yet", never as
+"0 disputed" (which would read as verified-clean). Any error → the key is
+absent; the registry payload still answers.
+
+`primitive:source-truth`'s `how` names `fabric_query include_provenance=true`
+**where an EE fabric MCP server is bound** (mirroring `primitive:fabric`'s
+hedge, AST-5a): the flag exists only on the EE MCP `fabric_query`; the OSS
+builtin fabric tools have no provenance flag. Availability semantics are
+unchanged — the overlay still marks the primitive live whenever the mode is not
+off; the `how` just stops implying every deployment has the read.
+
 ## Agent tools (`pocketpaw_atlas` MCP server)
 
 The `pocketpaw_atlas` in-process MCP server is registered on the Claude Agent
@@ -333,7 +508,7 @@ path), so it is ambient on every agent run. Two tools:
 - **Args:** `intent` (string, required) — what the agent is trying to do,
   e.g. `"approve agent actions"` or `"publish a website"`.
 - **Returns:** ranked capability cards as JSON —
-  `{"results": [{id, kind, name, summary, surface?, available?}, ...]}`
+  `{"results": [{id, kind, name, summary, surface?, available?, mode?}, ...]}`
   (top 5). Simple lexical scoring over name / keywords / summary /
   narrative with suffix normalization (see "Search ranking rules"); name
   and keyword hits rank highest. `available` appears on

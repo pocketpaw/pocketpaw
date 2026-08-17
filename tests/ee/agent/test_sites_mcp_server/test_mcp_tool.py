@@ -5,6 +5,17 @@
 # allowlist publication) plus per-handler tests that mock the identity
 # ContextVars + the shared publish_pocket service and inspect the MCP envelope
 # the SDK returns to the agent.
+#
+# Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3 + RX-4) — the registration test
+# now pins the EIGHTH and NINTH tool ids on this server, ``edit_react_component`` and
+# the read-only ``get_site_build_status``. The count assertion did its job both times:
+# each new tool failed this test before anything else, which is exactly the decision
+# point it exists to force (SITES_TOOL_IDS feeds the /sites surface allow-list, so a new
+# id widens what the agent can reach).
+#
+# The publish handler's own response is no longer covered only here — RX-4 widened it
+# with the build-lane fields, and those live in test_build_status_tool.py beside the
+# status tool that shares their derivation.
 """MCP server registration + handler tests for the Paw Sites publish tool."""
 
 from __future__ import annotations
@@ -28,8 +39,12 @@ class TestSitesMcpServerRegistration:
             CREATE_DYNAMIC_SITE_TOOL_ID,
             CREATE_HTML_SITE_TOOL_ID,
             CREATE_LANDING_SITE_TOOL_ID,
+            CREATE_REACT_SITE_TOOL_ID,
             CREATE_SVELTE_SITE_TOOL_ID,
+            EDIT_HTML_FILE_TOOL_ID,
+            EDIT_REACT_COMPONENT_TOOL_ID,
             EDIT_SVELTE_COMPONENT_TOOL_ID,
+            GET_SITE_BUILD_STATUS_TOOL_ID,
             PUBLISH_TOOL_ID,
             SERVER_NAME,
             SITES_TOOL_IDS,
@@ -50,13 +65,38 @@ class TestSitesMcpServerRegistration:
         )
         assert CREATE_DYNAMIC_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_dynamic_site"
         assert CREATE_HTML_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_html_site"
+        # RX-2 — the react-track create tool, the 5th create tool on this server.
+        assert CREATE_REACT_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_react_site"
+        # RX-3 — the react-track EDIT tool, the SECOND edit tool on this server.
+        # Its absence was the whole react-edit hole: with only the svelte edit tool
+        # registered, a react site could be created and published but never changed.
+        assert EDIT_REACT_COMPONENT_TOOL_ID == "mcp__pocketpaw_sites_manager__edit_react_component"
+        # HE-10 — the html-track EDIT tool, the THIRD edit tool and the one that
+        # completes the set: every engine with a create tool now has an edit tool.
+        # Named for a FILE because an html site has no component model. Its absence
+        # was the react hole one engine over — an html site could be created,
+        # imported and published but never changed.
+        assert EDIT_HTML_FILE_TOOL_ID == "mcp__pocketpaw_sites_manager__edit_html_file"
         assert PUBLISH_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_LANDING_SITE_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_SVELTE_SITE_TOOL_ID in SITES_TOOL_IDS
         assert EDIT_SVELTE_COMPONENT_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_DYNAMIC_SITE_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_HTML_SITE_TOOL_ID in SITES_TOOL_IDS
-        assert len(SITES_TOOL_IDS) == 6
+        assert CREATE_REACT_SITE_TOOL_ID in SITES_TOOL_IDS
+        assert EDIT_REACT_COMPONENT_TOOL_ID in SITES_TOOL_IDS
+        assert EDIT_HTML_FILE_TOOL_ID in SITES_TOOL_IDS
+        # RX-4 — the READ-ONLY build-status tool. It is the only way the
+        # agent can learn how an ASYNC build ended, since publish returns before the
+        # build starts.
+        assert (
+            GET_SITE_BUILD_STATUS_TOOL_ID == "mcp__pocketpaw_sites_manager__get_site_build_status"
+        )
+        assert GET_SITE_BUILD_STATUS_TOOL_ID in SITES_TOOL_IDS
+        # The count is deliberate: adding a tool here widens the /sites surface
+        # allow-list (SITES_TOOL_IDS feeds it), so a new id must be a decision,
+        # not a side effect. Bump it WITH an id assertion above — never alone.
+        assert len(SITES_TOOL_IDS) == 10
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk

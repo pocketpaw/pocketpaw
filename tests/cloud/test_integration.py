@@ -94,3 +94,30 @@ def test_total_route_count():
     paths = _get_route_paths(app)
     # We have ~50+ endpoints across 6 domains + license + ws
     assert len(paths) >= 40, f"Only {len(paths)} routes mounted — expected 40+"
+
+
+def test_lead_captured_bridge_subscribed_at_mount():
+    """mount_cloud must WIRE the leads → notifications bridge, not just be able
+    to.
+
+    Route assertions can't see this one: the bridge has no endpoint, it is a bus
+    subscriber. Without this test the production ``register_lead_notification_
+    listeners()`` call can be deleted and the whole suite stays green, because
+    the bridge's own e2e tests self-register through a fixture. Then a captured
+    lead silently stops ringing the workspace in the deployed app while CI says
+    everything is fine.
+
+    Restores the subscriber list afterwards so mounting here doesn't leave a
+    handler behind for tests that run later in the session.
+    """
+    from pocketpaw_ee.cloud.leads.bridges.notifications import _on_lead_captured
+    from pocketpaw_ee.cloud.shared.events import event_bus
+
+    saved = list(event_bus._handlers["lead.captured"])
+    event_bus._handlers["lead.captured"].clear()
+    try:
+        app = FastAPI()
+        mount_cloud(app)
+        assert _on_lead_captured in event_bus._handlers["lead.captured"]
+    finally:
+        event_bus._handlers["lead.captured"] = saved

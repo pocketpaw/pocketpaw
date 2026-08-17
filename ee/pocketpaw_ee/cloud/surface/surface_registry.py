@@ -121,6 +121,7 @@ from typing import NamedTuple
 from pocketpaw_ee.cloud.surface.domain import (
     SurfaceKind,
     SurfaceMeta,
+    SurfacePreamble,
     SurfaceProfile,
 )
 from pocketpaw_ee.cloud.surface.handlers import (
@@ -160,8 +161,11 @@ from pocketpaw_ee.cloud.surface.handlers import (
 from pocketpaw_ee.cloud.surface.system_prompts import CODE_SYSTEM_PROMPT
 
 # The shape every handler module exports: an async preamble builder taking the
-# tenancy tuple + the validated client meta and returning the rendered block.
-BuildPreamble = Callable[[str, str, SurfaceMeta], Awaitable[str]]
+# tenancy tuple + the validated client meta and returning the rendered block
+# WITH the cache key that says what the handler read to render it (PA-2). The
+# key is part of the handler contract rather than something the dispatcher
+# derives, because only the handler knows what it read — see ``SurfacePreamble``.
+BuildPreamble = Callable[[str, str, SurfaceMeta], Awaitable[SurfacePreamble]]
 
 # A profile resolver: given the client meta, return the surface's behavioral
 # profile. Set on the rows whose profile depends on the lazily-loaded per-mode
@@ -223,7 +227,10 @@ def _route_for(kind: SurfaceKind) -> str:
 # off the module-import path.
 # ---------------------------------------------------------------------------
 
-# The two ripple-authoring MCP tool ids the /sites SVELTE-CREATE mode forbids.
+# The two ripple-authoring MCP tool ids the /sites hand-authored-component CREATE
+# modes forbid. Named for svelte because it was the only such mode until RX-2
+# added react; both share the set (see ``_SITES_AUTHORING_SKILL``), and the name
+# is kept rather than churned because it crosses into two test modules.
 # Spelled out here (the EE layer is the source of truth); they cross to the OSS
 # backend as a plain ``frozenset[str]`` via ``deny_mcp_tool_ids`` — never as an
 # imported ``pocketpaw_ee`` symbol (import-linter forbids EE→OSS imports).
@@ -259,17 +266,29 @@ _BELT_GATE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_belt__belt_prop
 # agent drives the /code work in its own tool loop and reaches the project ONLY
 # through these four verbs — each one delegates a single call to the browser,
 # which owns the file session (the project runs in the tab, not on the backend).
-# ``writeFile`` does not write: it stages a proposal for the user's per-hunk
-# review. Spelled as LITERALS for the same reason ``_BELT_GATE_TOOL_IDS`` above
+# ``writeFile`` saves the file (it staged a proposal for per-hunk review until
+# 2026-07-25). Spelled as LITERALS for the same reason ``_BELT_GATE_TOOL_IDS`` above
 # is — their canonical constants live in the in-process MCP server (server
 # ``pocketpaw_code``), which the profile layer must not import. The id format is
 # the SDK's ``mcp__<server>__<tool>`` namespacing. Do NOT drift these ids;
 # ``test_code_mcp_server`` pins them against the server's own constants.
+#
+# ``editFile`` joined the set 2026-07-28 (fix/code-truncated-read-destroys-file).
+# It is not an optional extra: ``readFile`` caps at 30_000 characters, so on any
+# larger file a whole-file ``writeFile`` means sending back invented text for the
+# part never read — which is what a live session reported as the agent
+# "fabricating things". ``editFile`` is the verb that makes a large file
+# changeable without holding all of it, and the browser now refuses the lossy
+# write. Adding the id HERE is not sufficient on its own: the seeded ``code``
+# agent's ``tool_mode="exclusive"`` policy caps the run's ``mcp__*`` surface
+# independently, so the same id has to reach that config too or the tool is
+# defined, allowed here, and still stripped at run time.
 _CODE_FILE_TOOL_IDS: frozenset[str] = frozenset(
     {
         "mcp__pocketpaw_code__readFile",
         "mcp__pocketpaw_code__search",
         "mcp__pocketpaw_code__listDir",
+        "mcp__pocketpaw_code__editFile",
         "mcp__pocketpaw_code__writeFile",
     }
 )
@@ -636,28 +655,59 @@ def _concierge_profile(meta: SurfaceMeta) -> SurfaceProfile:
     )
 
 
+# The bundled authoring skill each hand-authored-component create engine needs.
+# These two engines drop ripple (they write markup, not a widget spec), so the
+# agent's whole authoring brain arrives as a skill — an entry that names nothing
+# real leaves the surface with ZERO skills (see
+# ``test_every_surface_skill_name_resolves_to_a_real_skill``).
+#
+# Each skill composes with ``pocketpaw-design-taste`` rather than restating it:
+# design taste is engine-agnostic and reaches the agent EMBEDDED in the preamble
+# (``handlers/sites.py::_design_taste_system``), so it is deliberately absent from
+# this map — naming it here would ship the same bytes twice per turn.
+_SITES_AUTHORING_SKILL: dict[str, str] = {
+    "svelte": "pocketpaw-create-svelte-site",
+    "react": "pocketpaw-create-react-site",
+}
+
+
 def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
-    """/sites is META-AWARE — three modes, only svelte-CREATE loses ripple.
+    """/sites is META-AWARE — three modes; only the hand-authored component
+    CREATE engines (svelte, react) lose ripple.
 
       * refine (``meta.pocket_id`` set, ANY engine) edits the existing ripple
         landing spec → KEEP ripple (sites default). Refine WINS over engine: a
         ``pocket_id`` present means refine even if ``engine="svelte"``.
-      * create + svelte (``meta.engine == "svelte"``, no ``pocket_id``)
-        hand-authors SvelteKit → DROP ripple, deny the two ripple-create tools,
-        surface the create-svelte-site skill.
-      * create + ripple (``engine`` None/"ripple", no ``pocket_id``) authors a
-        ripple landing page → KEEP ripple (sites default).
+      * create + svelte/react (``meta.engine`` in ``_SITES_AUTHORING_SKILL``, no
+        ``pocket_id``) hand-authors components → DROP ripple, deny the two
+        ripple-create tools, surface that engine's authoring skill.
+      * create + ripple/html (``engine`` None/"ripple"/"html", no ``pocket_id``)
+        → KEEP ripple (sites default).
 
-    Both modes scope to the sites authoring tools + general. svelte-create
-    additionally denies the two ripple-create tools (deny runs AFTER allow).
+    All modes scope to the sites authoring tools + general. The component-create
+    modes additionally deny the two ripple-create tools (deny runs AFTER allow).
+
+    react (RX-2) joins svelte rather than getting its own branch: the two differ
+    only in WHICH authoring skill they name. Sharing the branch is what keeps the
+    ripple_mode and the deny set from drifting apart between them — and the
+    ``ripple_on`` fork in ``handlers/sites.py::_create_preamble`` reads the same
+    split, so the preamble's ask-mechanism instruction matches what the surface
+    actually grants.
     """
     sites_allow = _mcp_tool_ids().sites_allow
-    if meta.pocket_id is None and meta.engine == "svelte":
+    authoring_skill = _SITES_AUTHORING_SKILL.get(meta.engine or "")
+    if meta.pocket_id is None and authoring_skill is not None:
         return SurfaceProfile(
             ripple_mode="off",
             deny_mcp_tool_ids=_SITES_SVELTE_CREATE_DENY | _SITES_BUILTIN_DENY,
             allow_mcp_tool_ids=sites_allow,
-            skill_names=frozenset({"create-svelte-site"}),
+            # The BUNDLED skill's real name. svelte's was "create-svelte-site"
+            # until 2026-07-31, which matched nothing — and a non-empty
+            # skill_names suppresses the wholesale bundled plugin, so this
+            # surface ran with ZERO skills and the agent authored sites by hand
+            # instead of through the sites tools. Guarded by
+            # test_every_surface_skill_name_resolves_to_a_real_skill.
+            skill_names=frozenset({authoring_skill}),
         )
     # Ripple-create + refine: keep ripple + the sites tool scope, but still drop the
     # file/shell built-ins — no /sites mode authors on disk (refine edits the ripple

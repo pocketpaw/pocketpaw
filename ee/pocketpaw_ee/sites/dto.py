@@ -2,6 +2,31 @@
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
 #
+# Updated 2026-08-12 (sites Settings consolidation — the client record gets a
+# backend): added ``SiteClientResponse`` / ``SiteClientUpdate`` / ``SiteInvoiceOut``
+# / ``SiteInvoiceCreate``, backing GET+PATCH /sites/{site_id}/client and
+# POST /sites/{site_id}/invoices. The builder's Settings surface had held the
+# owner's client details and manual receipts in COMPONENT STATE with a comment
+# saying persistence was a later task, so every value typed there was gone on
+# reload and on a site switch — the panel demonstrated its own contract without
+# honouring it. ``SiteClientUpdate`` is three-way (absent ≠ empty) so a partial
+# edit cannot blank a field the caller never sent, and money is integer minor
+# units end to end so no receipt is ever a float on the wire.
+#
+# Updated 2026-08-10 (SL-3 — the build lane reaches the wire): added
+# ``SiteResponse.build_reason`` and put all three build fields
+# (``build_status`` / ``build_reason`` / ``build_job_id``) on ``SiteStatusResponse``
+# too.
+#
+# SG-9i DECLARED ``build_status`` AND ``build_job_id`` ON ``SiteResponse`` AND NOTHING
+# EVER POPULATED THEM. ``service._to_response`` builds the DTO field by field and never
+# passed either, so every response carried the field DEFAULTS: ``build_status`` was
+# frozen at "none" for every site, no matter what the row said, and there was no
+# ``build_reason`` field at all. The frontend build-status UI reads all three — so it was
+# polling a value that could not change, which looks exactly like a build that never
+# starts. The populating half is in ``service.py``; this file only ever declared the
+# shape, which is why the gap survived a review: both halves looked complete alone.
+#
 # Updated 2026-06-01 (Phase 3 — local fake-deploy): SiteResponse carries ``url``,
 # the deployed site's openable address. LOCAL mode returns the localhost URL the
 # per-site static server serves so the caller (and the cmux smoke) can open the
@@ -118,6 +143,25 @@
 # validated in the service) and ImportFromUrlResponse ({site_id, pocket_id,
 # status:"queued"} — the 202 body; the crawler is the next stacked slice). The zip
 # import endpoint reuses SiteResponse (it publishes live through the html path).
+# Updated 2026-08-07 (SC-1 — a site's card shows its own screenshot):
+# ``SiteResponse`` (which IS the gallery list item — GET /sites is
+# ``response_model=list[SiteResponse]``) and ``SiteStatusResponse`` gain
+# ``preview_image_url`` — the stored URL of a screenshot of the site's live page,
+# resolved from the Site doc's own field. The sibling of ``pattern`` / ``engine``
+# in role: one more thing the card needs that would otherwise cost a per-card
+# fetch. None when no screenshot has landed (never deployed, no public url,
+# capture failed, Cloudflare unconfigured) — the card then falls back to its text
+# layout, so the field is optional, empty-safe and backward-compatible.
+# Updated 2026-08-07 (SC-3 — the card stops lying after a republish): the refresh
+# POLICY is now written onto both ``preview_image_url`` fields instead of being
+# inferrable only from where the capture is called — re-captured on every
+# successful deploy (so a republish updates the card), plus an explicit refresh, no
+# TTL, and a different uploads link every capture. New DTO
+# ``SitePreviewRefreshResponse`` ({site_id, preview_image_url}) backs that explicit
+# path, POST /sites/{site_id}/preview-refresh. It is deliberately its own response
+# rather than a reused ``SiteResponse``: the call answers one question ("what is
+# the new picture"), and unlike every deploy-triggered capture it REPORTS failure
+# — a person asked for it and is waiting on the answer.
 
 from __future__ import annotations
 
@@ -186,11 +230,85 @@ class SiteResponse(BaseModel):
     # caller can poll the job. None for a static publish, and None on a single-flight
     # no-op (a second publish while already provisioning does not enqueue a job).
     provision_job_id: str | None = None
+    # ── SG-9i: the ephemeral-build lane's state, on the wire ────────────────
+    # ``build_status`` — none | queued | building | built | failed.
+    #
+    # ``queued`` is the reason this pair exists at all. Once builds run in an ephemeral
+    # sandbox behind a concurrency cap, a publish can WAIT before it starts, and a
+    # queued build is indistinguishable from a hung one unless the wire says which it
+    # is. Without this the cap converts a crash into a support ticket.
+    #
+    # A client MUST treat an unrecognised status as in-progress rather than as an
+    # error: this vocabulary will grow, and a client that errors on unknown values
+    # turns every future state addition into a visible outage.
+    build_status: str = "none"
+    # The build job's id, so a caller can poll it. Unlike ``provision_job_id`` — which
+    # comes from a transient PrivateAttr and therefore only exists on the response that
+    # enqueued it — this is read from a PERSISTED field, so a client that reloads mid-
+    # build still gets it. That matters precisely because a queued build is the case
+    # where the user reloads.
+    build_job_id: str | None = None
+    # SL-3: WHY the build reached ``build_status`` — a fixed ``"<rung>:<cause>"``
+    # identifier from ``sites/build_job.py`` (e.g. ``build_failed:install_failed``,
+    # ``infra_lost:build_killed_by_signal_137``), read from the persisted
+    # ``Site.build_reason``. None when no build has settled.
+    #
+    # WITHOUT THIS ON THE WIRE, ``build_status="failed"`` IS UNACTIONABLE, which is the
+    # exact failure the field was added to prevent: the row can say a build failed and
+    # nothing can say whether the user's code broke or we lost the container — and those
+    # two need opposite responses from whoever is looking at it.
+    #
+    # SAFE TO SURFACE, and that is a property of the WRITER, not of this field: the
+    # vocabulary is closed on both halves and the build's stderr never enters it (a
+    # build's error text is the user's own code and can carry a token pasted into a
+    # config). A client may split on the colon to group by rung; it must not assume the
+    # set of rungs is closed forever, for the same reason it must not error on an
+    # unrecognised ``build_status``.
+    build_reason: str | None = None
     # SI-4: the persisted import summary for an IMPORTED site — {pages: [{path,
     # title}], asset_count, asset_bytes, forms: [{page, original_action, rewired}],
     # scripts, warnings} (from-url adds status/source_url). None for every
     # non-imported site, so the field is backward-compatible and empty-safe.
     import_report: dict[str, Any] | None = None
+    # SC-1: the stored URL of a screenshot of this site's live page (an uploads
+    # link, e.g. "/api/v1/uploads/{id}"), read from the Site doc. This is what
+    # turns a gallery card from a title and three pills into a picture of the
+    # actual page. Written by a best-effort background capture scheduled from the
+    # tail of a successful deploy, so it is None until one lands — and None
+    # whenever the capture failed, the site has no public url yet, or Cloudflare
+    # Browser Rendering is unconfigured. The card falls back to its text layout on
+    # None, so the field is optional and backward-compatible.
+    #
+    # SC-3 — WHEN THIS CHANGES (the refresh policy, written down so a reader does
+    # not have to infer it from behaviour):
+    #   * on EVERY successful deploy, including a republish. A deploy is the only
+    #     moment the design is known to have changed, it is user-initiated and
+    #     already slow, and it is the only trigger with no staleness window. There
+    #     is no TTL and no "only if empty" guard — the republish case is exactly
+    #     the one where a picture exists and shows the wrong design.
+    #   * on an explicit request to POST /sites/{site_id}/preview-refresh, for the
+    #     cases a deploy cannot cover (a capture that failed, a deployment that was
+    #     unconfigured then, a draft whose markup only became buildable later).
+    # The value is a DIFFERENT uploads link every capture (each one mints its own
+    # uuid-keyed row), so a client may treat a changed value as new art and a
+    # cached one as unchanged — nothing ever overwrites bytes behind a stable URL.
+    preview_image_url: str | None = None
+
+
+class SitePreviewRefreshResponse(BaseModel):
+    """The result of an explicit preview re-capture (SC-3) —
+    POST /sites/{site_id}/preview-refresh.
+
+    ``preview_image_url`` is the NEWLY stored image, never the previous one: the
+    endpoint only answers 200 once a capture has landed and been recorded on the
+    Site. Everything else (Cloudflare unconfigured or refusing, a draft with no
+    buildable markup) surfaces as an error, because unlike the deploy-triggered
+    capture this one was asked for by a person who is watching — the never-fail
+    rule protects publishes, not this call.
+    """
+
+    site_id: str
+    preview_image_url: str
 
 
 class SitePreviewResponse(BaseModel):
@@ -248,6 +366,30 @@ class SiteStatusResponse(BaseModel):
     # from Pocket.engine — the same field the list response carries, so a by-pocket
     # status read can badge the engine too. "" when unresolved / pre-engine row.
     engine: str = ""
+    # SC-1: the stored URL of a screenshot of the pocket's live site — the same
+    # field the list response carries, so a by-pocket status read can show the
+    # page too. None until a capture lands (and whenever one failed, the site has
+    # no public url, or Cloudflare Browser Rendering is unconfigured).
+    #
+    # SC-3 — same refresh policy as ``SiteResponse.preview_image_url`` above, which
+    # is the fuller write-up: re-captured on every successful deploy (so a
+    # republish updates it), plus POST /sites/{site_id}/preview-refresh on demand,
+    # and the value is a different uploads link every capture.
+    preview_image_url: str | None = None
+    # ── SL-3: the build lane's state on the BY-POCKET read too ──────────────────
+    # The same three fields ``SiteResponse`` carries (see there for the full write-up
+    # of each). They are duplicated onto this DTO for the same reason ``deployed_at`` /
+    # ``pattern`` / ``engine`` / ``preview_image_url`` already are: this is the read a
+    # builder polls BY POCKET, and it is the only GET keyed on a pocket id, so a client
+    # watching a build it just triggered has nowhere else to look. Without them a badge
+    # would have to fetch the whole gallery list to find one site's build state.
+    #
+    # All three default to the "no build has happened" values, so a pocket with no Site
+    # doc, and every row that predates the fields, reads as "nothing building" rather
+    # than as an error.
+    build_status: str = "none"
+    build_reason: str | None = None
+    build_job_id: str | None = None
 
 
 class SiteVersionResponse(BaseModel):
@@ -449,6 +591,107 @@ class ImportFromUrlResponse(BaseModel):
     site_id: str
     pocket_id: str
     status: str  # queued
+
+
+class SiteInvoiceOut(BaseModel):
+    """One manual receipt on the site's client record. ``amount_cents`` is integer
+    MINOR units — the wire never carries a float for money, so the reading client
+    formats it and nothing rounds in transit."""
+
+    id: str
+    issued_at: str
+    amount_cents: int
+    currency: str
+    paid: bool
+    note: str = ""
+
+
+class SiteClientResponse(BaseModel):
+    """The site owner's record of their own client (backs GET/PATCH
+    /sites/{site_id}/client). This is the owner's address book and receipt book for
+    the business the site belongs to — NOT the owner's own subscription with us,
+    which lives on ``SiteResponse.plan_tier`` / ``subscription_status``. Every field
+    defaults empty, so a site that has never been edited returns a valid, blank
+    record rather than a 404: the Settings surface renders the same form either way.
+    """
+
+    site_id: str
+    name: str = ""
+    contact: str = ""
+    notes: str = ""
+    invoices: list[SiteInvoiceOut] = []
+
+
+class SiteClientUpdate(BaseModel):
+    """PATCH body for the client record. Every field is optional and OMISSION MEANS
+    "leave unchanged" — the service applies three-way semantics via
+    ``model_fields_set``, so a caller editing only the notes cannot blank the name
+    it never sent. Sending an explicit empty string DOES clear that field, which is
+    how the form deletes a value.
+
+    The caps are the reason this validation lives at the edge rather than on the
+    document: an over-long value is a 422 the form can show, instead of a record
+    that silently lost its tail on the way to Mongo.
+    """
+
+    name: str | None = None
+    contact: str | None = None
+    notes: str | None = None
+
+    @field_validator("name", "contact")
+    @classmethod
+    def _cap_short(cls, v: str | None) -> str | None:
+        if v is not None and len(v) > 200:
+            raise ValueError("value must be 200 characters or fewer")
+        return v
+
+    @field_validator("notes")
+    @classmethod
+    def _cap_notes(cls, v: str | None) -> str | None:
+        if v is not None and len(v) > 5000:
+            raise ValueError("notes must be 5000 characters or fewer")
+        return v
+
+
+class SiteInvoiceCreate(BaseModel):
+    """POST body for recording one manual receipt against the client record.
+
+    ``amount_cents`` is a non-negative integer in minor units. It is bounded on BOTH
+    ends on purpose: negative would let a receipt reverse the running total, and the
+    upper bound stops a typo (or a paste of an id into an amount field) from writing
+    a number no currency has a use for. ``currency`` is normalized to upper case and
+    must be a 3-letter ISO-4217-shaped code, so the list cannot end up rendering
+    "usd" and "USD" as two different currencies.
+    """
+
+    amount_cents: int = 0
+    currency: str = "USD"
+    paid: bool = True
+    note: str = ""
+
+    @field_validator("amount_cents")
+    @classmethod
+    def _validate_amount(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("amount_cents must not be negative")
+        if v > 1_000_000_000_000:
+            raise ValueError("amount_cents is implausibly large")
+        return v
+
+    @field_validator("currency")
+    @classmethod
+    def _validate_currency(cls, v: str) -> str:
+        code = (v or "").strip().upper()
+        if not re.fullmatch(r"[A-Z]{3}", code):
+            raise ValueError("currency must be a 3-letter code")
+        return code
+
+    @field_validator("note")
+    @classmethod
+    def _cap_note(cls, v: str) -> str:
+        if len(v) > 500:
+            raise ValueError("note must be 500 characters or fewer")
+        return v
 
 
 class NativeArtifactResponse(BaseModel):

@@ -1,4 +1,11 @@
-"""Trace propagation tests for AgentLoop integration."""
+"""Trace propagation tests for AgentLoop integration.
+
+Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the stub builder
+returns an ``AssembledPrompt`` from ``assemble_system_prompt`` and the fake router
+declares ``system_prompt_digest``, because ``AgentLoop`` now carries the assembled
+prompt's stable digest through the router to the backend. Trace propagation
+itself is unchanged.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +16,7 @@ import pytest
 from pocketpaw.agents.loop import AgentLoop
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.bus import Channel, InboundMessage
+from pocketpaw.prompt import AssembledPrompt
 
 
 @patch("pocketpaw.agents.loop.get_message_bus")
@@ -37,8 +45,10 @@ async def test_loop_emits_trace_lifecycle_and_normalized_token_usage(
 
     router = MagicMock()
 
-    async def run_with_usage(message, *, system_prompt=None, history=None, session_key=None):
-        _ = message, system_prompt, history, session_key
+    async def run_with_usage(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
+        _ = message, system_prompt, history, session_key, system_prompt_digest
         yield AgentEvent(type="message", content="hello")
         yield AgentEvent(
             type="token_usage",
@@ -59,7 +69,9 @@ async def test_loop_emits_trace_lifecycle_and_normalized_token_usage(
     mock_router_cls.return_value = router
 
     builder = mock_builder_cls.return_value
-    builder.build_system_prompt = AsyncMock(return_value="System prompt")
+    builder.assemble_system_prompt = AsyncMock(
+        return_value=AssembledPrompt(text="System prompt", stable_digest="0123456789abcdef")
+    )
     builder.bootstrap.get_context = AsyncMock(return_value=MagicMock(to_identity_block=lambda: ""))
 
     class Tracker:

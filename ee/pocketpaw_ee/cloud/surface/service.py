@@ -55,6 +55,17 @@
 # ``studio`` skill; CODE sets an ``allowed_sdk_tools`` allowlist (Bash/Read/Write/
 # Edit/Glob/Grep) and surfaces the ``code`` skill. Both are plain ``by_kind``
 # entries (not meta-aware like /sites).
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) —
+# ``resolve_surface_context`` carries the handler's cache key out on
+# ``SurfaceContext.preamble_cache_key``. The preamble is a prompt LAYER now
+# (``pocketpaw.prompt.surface``), and a layer keys the digest a backend uses to
+# decide whether its cached agent still matches the prompt it was built for.
+# The key is the HANDLER's, not this module's: the tempting central version —
+# ``f"{kind}:{meta.pocket_id}:{meta.intent}"``, everything already in hand and
+# zero handler changes — cannot see a pocket being edited between two turns,
+# which is the one drift on this surface a user would actually notice. The
+# error absorption is unchanged: every fall-back path still renders GENERIC
+# with an empty preamble, now paired with a ``None`` key.
 # Changes: 2026-06-10 (feat/belt-surface, BS-2 Belt & Pulley stations thin
 # slice) — registered the BELT surface (the develop station). Its handler
 # (``belt.build_preamble``) joins ``_load_handlers``, and ``_build_profiles``
@@ -83,6 +94,7 @@ from pocketpaw_ee.cloud.surface.domain import (
     SurfaceContext,
     SurfaceKind,
     SurfaceMeta,
+    SurfacePreamble,
     SurfaceProfile,
 )
 from pocketpaw_ee.cloud.surface.dto import SurfaceMetaRequest, SurfaceRequest
@@ -336,6 +348,14 @@ async def resolve_surface_context(
 
     The dispatcher passes the validated meta and the tenancy tuple to
     every handler so individual handlers don't have to re-derive them.
+
+    PA-2: it also carries the handler's ``cache_key`` out on the context. It
+    does NOT compute one. The dispatcher has ``kind``, ``pocket_id`` and the
+    rest of the meta in hand, and a key built from those would need no handler
+    changes at all — and would be wrong for every handler that reads live data,
+    because a pocket edited between two turns keeps all three. Every absorbed
+    error above yields a key of ``None``, matching the empty preamble those
+    paths render.
     """
     global _HANDLERS
 
@@ -351,6 +371,7 @@ async def resolve_surface_context(
             kind=SurfaceKind.GENERIC,
             meta=SurfaceMeta(),
             preamble="",
+            preamble_cache_key=None,
         )
 
     kind = _resolve_kind(validated.surface)
@@ -372,12 +393,13 @@ async def resolve_surface_context(
             kind=SurfaceKind.GENERIC,
             meta=meta,
             preamble="",
+            preamble_cache_key=None,
         )
 
     # Step 3: render the preamble. Handler exceptions are absorbed —
     # we'd rather ship a chat with no surface context than fail the send.
     try:
-        preamble = await handler(workspace_id, user_id, meta)
+        rendered = await handler(workspace_id, user_id, meta)
     except Exception:
         logger.exception("surface handler %s failed; using GENERIC preamble", kind.value)
         return SurfaceContext(
@@ -386,7 +408,20 @@ async def resolve_surface_context(
             kind=SurfaceKind.GENERIC,
             meta=meta,
             preamble="",
+            preamble_cache_key=None,
         )
+
+    # Handlers return a ``SurfacePreamble``. A bare ``str`` is still accepted —
+    # the same liberal-in-what-we-accept rule ``_resolve_kind`` follows for an
+    # unknown surface name, and tests monkeypatch the dispatch table with plain
+    # coroutines — but it carries NO key: text with an unknown provenance is
+    # exactly the case that must not be allowed to claim stability, so it
+    # renders as volatile rather than being handed a key we would have to
+    # invent for it.
+    if isinstance(rendered, SurfacePreamble):
+        preamble, cache_key = rendered.text, rendered.cache_key
+    else:
+        preamble, cache_key = (rendered or ""), None
 
     return SurfaceContext(
         workspace_id=workspace_id,
@@ -394,6 +429,7 @@ async def resolve_surface_context(
         kind=kind,
         meta=meta,
         preamble=preamble or "",
+        preamble_cache_key=cache_key,
     )
 
 

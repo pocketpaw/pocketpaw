@@ -1,0 +1,104 @@
+[
+  {
+    "label": "SL-3: every engine flips to async, so a ripple or dynamic-svelte publish queues a build whose artifact cannot serve (its pages come from a _worker.js whose imports sit outside the tar) — the site stops publishing",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return normalize_engine(engine) == \"react\"",
+    "replace": "    return True",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestOnlyTheDeployableEngineFlips",
+      "tests/ee/sites/test_async_publish.py::TestTheInlinePathIsUnchanged"
+    ]
+  },
+  {
+    "label": "SL-3: no engine flips, so the whole slice is inert — publish still blocks on an inline build and the queued-build UI has nothing to show",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "def build_runs_async(engine: str | None) -> bool:",
+    "replace": "def build_runs_async(engine: str | None) -> bool:\n    return False",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestAReactPublishEnqueues",
+      "tests/ee/sites/test_async_publish.py::TestOnlyTheDeployableEngineFlips::test_react_builds_asynchronously"
+    ]
+  },
+  {
+    "label": "SL-3: the async fork stops excluding a worker callback, so the worker's deploy re-enters the fork and enqueues ANOTHER build — a publish that queues itself forever and never goes live",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if prebuilt_project_dir is None and build_runs_async(engine):",
+    "replace": "    if build_runs_async(engine):",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestTheDeploySeamRunsTheInlineTail"
+    ]
+  },
+  {
+    "label": "SL-3: the deploy seam drops the prebuilt dir, so the worker's callback REBUILDS the site inline in the worker instead of deploying the artifact it just paid a sandbox for",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        prebuilt_project_dir=project_dir,\n        local_deploy=_local_deploy,",
+    "replace": "        local_deploy=_local_deploy,",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestTheDeploySeamRunsTheInlineTail::test_it_deploys_the_prebuilt_tree_without_rebuilding"
+    ]
+  },
+  {
+    "label": "SL-3: a re-publish clears deployed/url while the rebuild runs, so a working site reports itself not-live for the length of a build — a rebuild made to look like an outage",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        doc.pocket_id = pocket_id\n        doc.owner = user_id\n        doc.name = site_name\n        doc.script_name = site_id\n        await doc.save()",
+    "replace": "        doc.pocket_id = pocket_id\n        doc.owner = user_id\n        doc.name = site_name\n        doc.script_name = site_id\n        doc.deployed = False\n        doc.url = \"\"\n        await doc.save()",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestAReactPublishEnqueues::test_a_rebuild_leaves_the_live_site_serving"
+    ]
+  },
+  {
+    "label": "SL-3: publish swallows a failed enqueue and returns success, so the row reads in-progress forever and the UI polls a job that was never queued — the worst outcome of the whole slice",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    job_id = await build_job.enqueue_site_build(\n        doc,\n        engine=engine,\n        generator_input=generator_input,\n        deploy_inputs=deploy_inputs,\n    )",
+    "replace": "    job_id = None\n    try:\n        job_id = await build_job.enqueue_site_build(\n            doc,\n            engine=engine,\n            generator_input=generator_input,\n            deploy_inputs=deploy_inputs,\n        )\n    except Exception:\n        pass",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestAReactPublishEnqueues::test_a_failed_enqueue_surfaces_and_leaves_the_site_republishable",
+      "tests/ee/sites/test_fault_ladder_build.py::TestF1AndF3AtThePublishBoundary::test_a_publish_whose_enqueue_fails_returns_an_error_the_user_can_see"
+    ]
+  },
+  {
+    "label": "SL-3: the deploy inputs are dropped from the job payload, so the worker builds and records a verdict and NEVER deploys — every react publish stops at 'built' and the site never goes live",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        generator_input=generator_input,\n        deploy_inputs=deploy_inputs,\n    )",
+    "replace": "        generator_input=generator_input,\n    )",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestAReactPublishEnqueues::test_the_payload_carries_the_deploy_inputs"
+    ]
+  },
+  {
+    "label": "SL-3: the row settles 'built' BEFORE the deploy runs, so a client sees a finished build while the site is not yet serving — and a deploy that then fails leaves 'built' standing on a site that never went live",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if settlement.status == \"built\" and deploy_inputs is not None:",
+    "replace": "    await _record(site, settlement)\n    if settlement.status == \"built\" and deploy_inputs is not None:",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestTheWorkerFinishesThePublish::test_a_clean_build_is_deployed_before_the_row_says_built"
+    ]
+  },
+  {
+    "label": "SL-3: a deploy failure after a clean build is swallowed, so the row settles 'built' for a site nothing deployed — publish reports success forever and nobody learns the deploy died",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "            await _record(\n                site,\n                _settlement(\n                    RUNG_DEPLOY_FAILED,\n                    \"deploy_raised\",\n                    retryable=True,\n                    attempts_left=attempts_left,\n                ),\n            )\n            raise",
+    "replace": "            pass",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestTheWorkerFinishesThePublish::test_a_deploy_failure_after_a_clean_build_is_its_own_rung"
+    ]
+  },
+  {
+    "label": "SL-3: the artifact is extracted FLAT instead of under the engine's static-output dir, so the deploy target resolves an empty directory and a blank site replaces a working one",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "            artifact, Path(project_dir, static_output_rel(engine))",
+    "replace": "            artifact, Path(project_dir)",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestTheWorkerFinishesThePublish::test_the_deploy_receives_the_artifact_under_the_engines_output_dir"
+    ]
+  },
+  {
+    "label": "SL-3: a failed build still reaches the deploy, so a site that did not compile is pushed to the edge on the strength of whatever bytes came back",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if settlement.status == \"built\" and deploy_inputs is not None:\n        try:",
+    "replace": "    if deploy_inputs is not None:\n        try:",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestTheWorkerFinishesThePublish::test_a_failed_build_never_reaches_the_deploy"
+    ]
+  }
+]

@@ -1,4 +1,5 @@
 {
+  "_comment": "capabilities.json — hand-authored capability cards, each role-gated by a role:<tier> marker in requires (WA-3). Updated 2026-08-17 (feat/ast-1-atlas-primitives, AST-1): added the two member-level fabric cards capability:fabric.provenance_read and capability:fabric.conflict_steward. Their names/summaries deliberately avoid the tokens 'fact'+'disputed' together (and only provenance_read says 'Fabric') so the two-content-token eval intents ('is this fact disputed', 'what is fabric') keep the primitives at #1 — a name hit outscores the primitive's keyword ceiling.",
   "schema": "paw.atlas/v1",
   "entries": [
     {
@@ -347,6 +348,47 @@
         "downgrade plan",
         "billing plan",
         "subscribe"
+      ]
+    },
+    {
+      "id": "capability:fabric.provenance_read",
+      "kind": "capability",
+      "name": "See where a Fabric fact came from",
+      "summary": "Read a Fabric object's winner value, whether it is contested, its freshness, and the competing statements with their sources. A member-level read.",
+      "narrative": "Reads the provenance behind any Fabric object's properties: the resolver's winner value, whether it is disputed, its freshness (fresh / aging / stale), and every competing statement with its source, writer_class, and observed_at. A MEMBER-level read that runs directly (reads are not human-gated). Reach for it when the user asks where a value came from, who wrote it, or how old it is; arbitrating a dispute is a separate, human-gated stewardship action.",
+      "how": "call fabric_query with include_provenance=true",
+      "surface": "",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "provenance",
+        "where did this come from",
+        "source of this value",
+        "is this stale",
+        "who wrote this"
+      ]
+    },
+    {
+      "id": "capability:fabric.conflict_steward",
+      "kind": "capability",
+      "name": "Arbitrate a source conflict",
+      "summary": "Resolve two equally-trusted, fresh Fabric sources that disagree: propose PIN or IGNORE, a human approves it in the Instinct tray. Member-level, human-gated.",
+      "narrative": "When two equally-trusted, fresh sources disagree on a Fabric property, atlas / agents PROPOSE a resolution and a human approves it in the Instinct tray — PIN a statement (it wins) or IGNORE a source (deprecate it). NEVER applied from chat: the approval executes as a Fabric statement operation, and losing statements stay as ranked history. Reach for it when the user asks which competing value is right and wants it settled; tell the user it needs approval, do not claim it is done.",
+      "how": "propose via the Instinct gate; approve/reject at /decisions",
+      "surface": "/decisions",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "resolve conflict",
+        "pin",
+        "ignore",
+        "disputed value",
+        "which is right",
+        "arbitrate",
+        "steward",
+        "competing sources"
       ]
     }
   ]

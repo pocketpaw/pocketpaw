@@ -14,6 +14,14 @@
 #   is a capability-DISCLOSURE leak (a member seeing cards they can't use), not an
 #   enforcement bypass — but a real leak worth fixing. Warm-client sharing is left
 #   untouched (the surgical option).
+# Updated: 2026-08-17 (feat/ast-3-atlas-flag-aware, AST-3) — no code change.
+#   The rollout-flagged primitives (``primitive:source-truth`` /
+#   ``primitive:verify-loop``) get their ``available`` + tri-state ``mode`` from
+#   the CORE overlay's ``_overlay_one`` (provider-independent, read from live
+#   settings per pass), so this provider has parity with the OSS default by
+#   construction — pinned in tests/ee/agent/test_atlas_role_provider.py
+#   (``TestFlagAwareParity``), not duplicated here. The ``capability:fabric.*``
+#   cards stay ``role:member``-gated regardless of mode.
 #
 # The DISCOVERY layer for the workspace-admin tools — NOT the security gate.
 # The RBAC checks INSIDE each admin tool (workspace_admin.py) are the real lock

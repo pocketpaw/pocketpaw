@@ -1,0 +1,101 @@
+[
+  {
+    "label": "the react engine stops being selectable (create falls back to html, the skill is unreachable, and a react refine loses its own branch)",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "_SITE_ENGINES: tuple[str, ...] = (\"html\", \"svelte\", \"ripple\", \"react\")",
+    "replace": "_SITE_ENGINES: tuple[str, ...] = (\"html\", \"svelte\", \"ripple\")",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_create_mode_engine_react_prefers_create_react_site_skill"
+    ]
+  },
+  {
+    "label": "react-create keeps inline ripple, so the preamble teaches a ui-spec ask the surface renders as raw JSON",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "    ripple_on = engine not in (\"svelte\", \"react\")",
+    "replace": "    ripple_on = engine != \"svelte\"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_react_create_uses_ask_user_tool_not_ripple"
+    ]
+  },
+  {
+    "label": "the react profile keeps ripple and surfaces no authoring skill (the agent authors by hand)",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "    \"react\": \"pocketpaw-create-react-site\",",
+    "replace": "",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_react_create_drops_ripple_and_denies"
+    ]
+  },
+  {
+    "label": "react-create is handed the SVELTE brain instead of its own",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "    \"react\": \"pocketpaw-create-react-site\",",
+    "replace": "    \"react\": \"pocketpaw-create-svelte-site\",",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_component_engines_get_exactly_one_authoring_skill"
+    ]
+  },
+  {
+    "label": "the interactive flag is dropped at create, so every React site ships inert",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "            keeps_client_bundle=interactive,\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_create_react_site.py::TestCreateReactSiteEndToEnd::test_interactive_persists_as_keeps_client_bundle"
+    ]
+  },
+  {
+    "label": "interactive is forced ON, overriding an author's explicit opt-out so a static brochure page cannot refuse the bundle",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "    interactive = None if _interactive_raw is None else bool(_interactive_raw)",
+    "replace": "    interactive = True",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_create_react_site.py::TestCreateReactSiteEndToEnd::test_explicit_false_is_recorded_as_an_opt_out"
+    ]
+  },
+  {
+    "label": "the reserved-path guard stops normalizing, so ./index.html overwrites the prerender template",
+    "file": "ee/pocketpaw_ee/sites/react_paths.py",
+    "find": "    return posixpath.normpath(path.replace(\"\\\\\", \"/\"))",
+    "replace": "    return path",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_create_react_site.py::TestReservedPathRejection"
+    ]
+  },
+  {
+    "label": "the reserved guard matches by prefix, locking the author out of src/pawprint.ts",
+    "file": "ee/pocketpaw_ee/sites/react_paths.py",
+    "find": "REACT_RESERVED_PREFIX = \"src/paw/\"",
+    "replace": "REACT_RESERVED_PREFIX = \"src/paw\"",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_create_react_site.py::TestReservedPathRejection"
+    ]
+  },
+  {
+    "label": "the composition root stops being required (the create succeeds and the build dies at publish)",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "REACT_REQUIRED_KEYS = (\"src/App.tsx\",)",
+    "replace": "REACT_REQUIRED_KEYS = ()",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_create_react_site.py::TestSourceMapValidation"
+    ]
+  },
+  {
+    "label": "create_react_site is registered nowhere, so the preamble names a tool the agent cannot call",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "            create_react_site,\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_create_react_site.py::TestRegistration::test_tool_is_registered_on_the_built_server"
+    ]
+  },
+  {
+    "label": "the skill-name scan reads source text again, going blind to a variable skill_names",
+    "file": "tests/cloud/surface/test_surface_registry.py",
+    "find": "            referenced |= set(resolve_profile(spec.kind, meta).skill_names)",
+    "replace": "            referenced |= set() if spec.kind.value == \"sites\" else set(resolve_profile(spec.kind, meta).skill_names)",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_every_surface_skill_name_resolves_to_a_real_skill"
+    ]
+  }
+]

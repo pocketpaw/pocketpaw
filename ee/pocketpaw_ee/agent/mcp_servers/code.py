@@ -11,10 +11,11 @@
 # this server changes shape to match. Instead of one ``code_mode(task)`` tool,
 # it now exposes the four file verbs the agent reasons WITH:
 #
-#   readFile(path)          — read a file
+#   readFile(path, offset)  — read a file, or a window of one
 #   search(query)           — search the project
 #   listDir(path)           — list a directory
-#   writeFile(path, content)— PROPOSE a full-file rewrite (staged, not written)
+#   editFile(path, old, new)— replace an exact string in a file
+#   writeFile(path, content)— write a full-file rewrite
 #
 # The main agent runs its own tool loop over these, exactly as a coding agent
 # does over local file tools. The difference this whole module exists for: the
@@ -30,13 +31,19 @@
 # and parks until the tab POSTs the result back. The same inversion MCP
 # standardizes as elicitation.
 #
-# The write gate stays in the tab. ``writeFile`` NEVER writes. It delegates the
-# proposed content to the browser, which STAGES it for the user's per-hunk
-# review; the user accepting a hunk is the only thing that writes, and it happens
-# long after this tool has returned. So the honest result of a ``writeFile`` call
-# is "a change was proposed for review", never "the file was changed" — the
-# description and the system prompt both say so, because the model must not tell
-# the user a file was written when nothing has been.
+# The write happens in the tab, but it HAPPENS. ``writeFile`` delegates the
+# content to the browser, which puts it on the runtime's filesystem and answers
+# with a sentence saying so — and this tool does not return until it has. A
+# success here means the file was changed.
+#
+# It used to mean the opposite (until 2026-07-25): the browser staged the content
+# behind a per-hunk review panel and nothing landed until the user accepted it,
+# so the only honest result was "a change was proposed". That gate is gone — it
+# was a toll on every turn of a surface built around asking an agent to build
+# things — and its removal is why the tool description below reads in the past
+# tense and why ``<code-surface-honesty>`` in the system prompt shrank to almost
+# nothing. Both of them existed to stop the model claiming a write that had not
+# happened. The write happens now.
 #
 # Why this lives in ee/ and not src/pocketpaw/agents/. The channel this wraps
 # (``ee.cloud.codeagent.delegates``) is EE cloud code, and the workspace identity
@@ -56,6 +63,35 @@
 # without changing ``surface_registry._CODE_FILE_TOOL_IDS`` in the same PR — they
 # are matched by string, so a rename fails silently by scoping the surface to an
 # id nothing provides. ``test_code_mcp_server`` pins both ends against each other.
+#
+# ── 2026-07-28 (fix/code-truncated-read-destroys-file) ──────────────────────
+#
+# ``readFile`` gained ``offset`` and ``editFile`` was added, because the two
+# halves of this server contradicted each other and the model paid for it.
+#
+# The browser caps every read at 30_000 characters (``tools.ts``,
+# ``MAX_TOOL_OUTPUT_CHARS``). ``writeFile`` below asked for the file's ENTIRE new
+# contents and warned that anything omitted is deleted. On any file past the cap
+# both instructions cannot be obeyed: the model sees the head, is asked for the
+# whole, and — having no way to read the rest and no verb for changing part of a
+# file — sends back the head with the tail reconstructed from priors. Reported
+# from a live session as the agent "fabricating things instead of reading the
+# files". It is not fabrication in the usual sense; it is the only move the tool
+# surface left available, and since the review gate was removed on 2026-07-25 it
+# lands on the user's disk.
+#
+# Both new affordances are needed and neither alone is sufficient. ``offset``
+# alone still leaves ``writeFile`` as the only mutation verb, and the largest real
+# files exceed ``_MAX_CONTENT_CHARS`` (180_000) outright — paw-enterprise's own
+# ChatPanel.svelte is 203_099 characters, so it can be read now but still not
+# rewritten. ``editFile`` alone leaves the model unable to see past the first
+# 30_000 characters to find its anchor. Together the model can locate a span and
+# change it without ever holding the file.
+#
+# The mechanical backstop lives in the browser (``delegate.ts``,
+# ``lossyWriteRefusal``): a whole-file write that would shorten a file bigger than
+# one read is refused. That is deliberate placement — the guard has to compare
+# against what is actually on disk, and the disk is not here.
 
 from __future__ import annotations
 
@@ -69,15 +105,20 @@ SERVER_NAME = "pocketpaw_code"
 # Claude Code namespaces in-process MCP tools as ``mcp__<server>__<tool>``.
 READ_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__readFile"
 WRITE_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__writeFile"
+EDIT_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__editFile"
 SEARCH_TOOL_ID = f"mcp__{SERVER_NAME}__search"
 LIST_DIR_TOOL_ID = f"mcp__{SERVER_NAME}__listDir"
 
 # Exported as a tuple for the provider's ``tool_ids()``. Order is read-first so a
-# log or an allow-list dump reads in the order the agent typically calls them.
+# log or an allow-list dump reads in the order the agent typically calls them,
+# and ``editFile`` precedes ``writeFile`` because that is the order of preference
+# as well as of use — a targeted edit is the normal way to change a file, and a
+# whole-file rewrite is the exception for new or small ones.
 CODE_TOOL_IDS = (
     READ_FILE_TOOL_ID,
     SEARCH_TOOL_ID,
     LIST_DIR_TOOL_ID,
+    EDIT_FILE_TOOL_ID,
     WRITE_FILE_TOOL_ID,
 )
 
@@ -191,7 +232,49 @@ async def _read_file_handler(args: dict) -> dict[str, Any]:
         return _error_response(
             "`path` is required — the file to read, relative to the project root."
         )
-    return await _delegate("readFile", {"path": path})
+    # ``offset`` is optional and forgiving. The browser clamps it and reports the
+    # window it actually returned, so a nonsense value costs a sentence rather
+    # than a turn; rejecting it here would only add a failure mode the model has
+    # to recover from mid-read.
+    offset = args.get("offset")
+    payload: dict[str, Any] = {"path": path}
+    if isinstance(offset, int) and offset > 0:
+        payload["offset"] = offset
+    return await _delegate("readFile", payload)
+
+
+async def _edit_file_handler(args: dict) -> dict[str, Any]:
+    """Replace one exact span of a file, leaving the rest untouched.
+
+    This is the verb for changing a file the agent has not read in full — which
+    is most real files. ``oldString`` must be unique in the file; the browser
+    refuses a match count of zero or of more than one rather than guessing,
+    because replacing the first of several hits is a silent wrong answer of
+    exactly the kind this whole change exists to remove.
+    """
+    path = _require_str(args, "path", max_chars=_MAX_PATH_CHARS)
+    if path is None:
+        return _error_response(
+            "`path` is required — the file to change, relative to the project root."
+        )
+    old_string = args.get("oldString")
+    if not isinstance(old_string, str) or not old_string:
+        return _error_response(
+            "`oldString` is required and must be non-empty — the exact text to replace."
+        )
+    # ``newString`` may legitimately be empty: that is how a span is deleted.
+    new_string = args.get("newString")
+    if not isinstance(new_string, str):
+        return _error_response("`newString` is required — the text to put in its place.")
+    if len(old_string) + len(new_string) > _MAX_CONTENT_CHARS:
+        return _error_response(
+            f"`oldString` and `newString` are too long together (limit {_MAX_CONTENT_CHARS} "
+            "chars). Anchor the edit on a smaller, unique span."
+        )
+    return await _delegate(
+        "editFile",
+        {"path": path, "oldString": old_string, "newString": new_string},
+    )
 
 
 async def _search_handler(args: dict) -> dict[str, Any]:
@@ -213,12 +296,11 @@ async def _list_dir_handler(args: dict) -> dict[str, Any]:
 
 
 async def _write_file_handler(args: dict) -> dict[str, Any]:
-    """Propose a full-file rewrite. This does NOT write the file.
+    """Write the full new contents of a file.
 
-    The proposed ``content`` is delegated to the browser, which stages it for the
-    user's per-hunk review. Nothing is written until the user accepts a hunk,
-    which happens after this returns — so a success here means "a change was
-    proposed for review", not "the file was changed".
+    The ``content`` is delegated to the browser, which writes it to the runtime's
+    filesystem and answers with a sentence describing what it did. This does not
+    return until then, so a success here means the file was changed.
     """
     path = _require_str(args, "path", max_chars=_MAX_PATH_CHARS)
     if path is None:
@@ -234,7 +316,7 @@ async def _write_file_handler(args: dict) -> dict[str, Any]:
     if len(content) > _MAX_CONTENT_CHARS:
         return _error_response(
             f"`content` is too long ({len(content)} chars, limit {_MAX_CONTENT_CHARS}). "
-            "Propose a change to a smaller file, or split the work across files."
+            "Write a smaller file, or split the work across files."
         )
     return await _delegate("writeFile", {"path": path, "content": content})
 
@@ -258,7 +340,12 @@ def build_code_server() -> tuple[str, Any] | None:
             "Read a file from the user's project and return its contents. This is "
             "how you look at their code — the project runs in the user's browser, "
             "not on your machine, so the built-in file tools do not address it. "
-            "Args: `path` (the file, relative to the project root)."
+            "Large files come back one window at a time: if the result ends with a "
+            "note saying how many characters were not shown, you are holding PART "
+            "of the file, not the file. Call readFile again with the `offset` that "
+            "note gives you to continue reading. "
+            "Args: `path` (the file, relative to the project root), `offset` "
+            "(optional character position to start from; omit for the beginning)."
         ),
         {
             "type": "object",
@@ -267,6 +354,14 @@ def build_code_server() -> tuple[str, Any] | None:
                     "type": "string",
                     "minLength": 1,
                     "description": "File path relative to the project root, e.g. 'src/App.tsx'.",
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Character position to start reading from. Omit to start at the "
+                        "beginning; pass the offset named in a truncation note to continue."
+                    ),
                 },
             },
             "required": ["path"],
@@ -322,15 +417,61 @@ def build_code_server() -> tuple[str, Any] | None:
         return await _list_dir_handler(args)
 
     @tool(
+        "editFile",
+        (
+            "Change part of a file in the user's project by replacing an exact "
+            "span of text. PREFER THIS over writeFile for any file that already "
+            "exists — it changes only what you name and cannot damage the rest, "
+            "including the parts you have not read. `oldString` must appear "
+            "EXACTLY ONCE in the file and must match it character for character, "
+            "indentation and line breaks included: copy it from what readFile "
+            "returned rather than retyping it. If it matches nothing or matches "
+            "more than once the edit is refused and nothing changes — widen it "
+            "with surrounding lines and try again. To delete a span, pass an empty "
+            "`newString`. The file is saved when this returns. "
+            "Args: `path` (the file), `oldString` (the exact text to replace), "
+            "`newString` (what to put in its place)."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "File path relative to the project root.",
+                },
+                "oldString": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "The exact text to replace. Must occur exactly once in the file."
+                    ),
+                },
+                "newString": {
+                    "type": "string",
+                    "description": "The replacement text. Empty string deletes the span.",
+                },
+            },
+            "required": ["path", "oldString", "newString"],
+            "additionalProperties": False,
+        },
+    )
+    async def edit_file(args):  # type: ignore[no-untyped-def]
+        return await _edit_file_handler(args)
+
+    @tool(
         "writeFile",
         (
-            "Propose the full new contents of a file in the user's project. This "
-            "does NOT save the file — it stages the change for the user to review "
-            "and accept hunk by hunk. So report it as a change PROPOSED for "
-            "review, never as a file that was written or a feature that is done; "
-            "the user has to accept it first. Pass the ENTIRE new file in "
-            "`content`, not a diff or a snippet. Args: `path` (the file), "
-            "`content` (its full new contents)."
+            "Write the full new contents of a file in the user's project. Use this "
+            "to CREATE a file, or to replace a small one you have read in full. "
+            "For changing an existing file, use editFile instead — it is safer and "
+            "it is what you should reach for by default. Pass the ENTIRE new file "
+            "in `content`, not a diff or a snippet: whatever you send REPLACES the "
+            "file, so anything you leave out is deleted. If readFile showed you "
+            "only part of this file, you CANNOT write it whole — you would be "
+            "sending back text you invented for the part you never saw, and the "
+            "write will be refused. Use editFile for that file. "
+            "Args: `path` (the file), `content` (its full new contents)."
         ),
         {
             "type": "object",
@@ -354,14 +495,15 @@ def build_code_server() -> tuple[str, Any] | None:
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
-        version="1.0.0",
-        tools=[read_file, search, list_dir, write_file],
+        version="1.1.0",
+        tools=[read_file, search, list_dir, edit_file, write_file],
     )
     return SERVER_NAME, server
 
 
 __all__ = [
     "CODE_TOOL_IDS",
+    "EDIT_FILE_TOOL_ID",
     "LIST_DIR_TOOL_ID",
     "READ_FILE_TOOL_ID",
     "SEARCH_TOOL_ID",

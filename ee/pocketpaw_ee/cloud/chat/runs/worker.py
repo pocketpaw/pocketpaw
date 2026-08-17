@@ -5,6 +5,18 @@ deploy job ``deploy_app_job`` into ``WorkerSettings.functions``, wrapped the sam
 way as ``provision_box_job``: its own long timeout (a deploy pulls an image and
 swaps containers) and ``max_tries=1`` (the job records the attempt ``failed``
 instead of raising, so an arq retry would only re-run a known-bad deploy).
+Updated: 2026-08-10 (SL-2 slice 2 — the site-build lane) — registered
+``run_site_build`` (``pocketpaw_ee.sites.build_job``) into
+``WorkerSettings.functions``, wrapped in ``arq.worker.func`` with ITS OWN timeout from
+``site_build_job_timeout_seconds()``. Same default #1 as workspace jobs: this is the one
+arq entrypoint that is actually deployed, so the build lane costs no new deploy artifact.
+
+The separate timeout is not tidiness. A site build's budget is the widest per-engine
+in-sandbox timeout plus ``run_build``'s exec slack plus the phases outside the sandbox —
+1020s at today's defaults, ALREADY over the 900s the workspace-jobs registry shares. An
+arq cancellation before the in-sandbox ``timeout(1)`` fires destroys the sentinel the
+lane classifies from, so a healthy-but-slow build would be recorded as lost
+infrastructure. Three functions now carry three budgets, and none can clip another.
 
 Updated: 2026-06-22 (feat/jobs-custom-job-entrypoints) — ``_startup`` now also
 calls ``load_entrypoint_jobs()`` right after ``register_builtins()`` so the
@@ -79,6 +91,13 @@ from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
 from pocketpaw_ee.cloud.shared.db import close_cloud_db, init_cloud_db
 from pocketpaw_ee.cloud.ship.deploy_job import deploy_app_job
 from pocketpaw_ee.cloud.ship.job import provision_box_job
+from pocketpaw_ee.sites.build_job import (
+    ARQ_FUNCTION_NAME as SITE_BUILD_FUNCTION_NAME,
+)
+from pocketpaw_ee.sites.build_job import (
+    run_site_build,
+    site_build_job_timeout_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -271,10 +290,38 @@ _ship_deploy_fn = func(
 )
 
 
+# SL-2: site builds ride this same worker with their OWN budget, for the reason in the
+# module docstring — the in-sandbox ``timeout(1)`` must be the thing that fires first, or
+# the lane loses the sentinel it classifies from. Evaluated at import, like the two
+# timeouts above, so a deploy that retunes ``PAW_SITES_BUILD_TIMEOUT_SEC*`` picks it up
+# on the worker restart the deploy performs anyway.
+#
+# ``max_tries=1`` matches the rest of this worker and is load-bearing here: a build is
+# billed per attempt in a third-party sandbox, and the retry decision belongs to
+# ``build_state.settle`` (which records WHY it gave up), not to arq silently re-running a
+# job whose row already says ``failed``.
+_site_build_fn = func(
+    run_site_build,
+    name=SITE_BUILD_FUNCTION_NAME,
+    timeout=site_build_job_timeout_seconds(),
+    max_tries=1,
+)
+
+
 class WorkerSettings:
     """arq worker configuration. Loaded by ``arq <dotted-path>``."""
 
     functions = [execute_run_job, _workspace_job_fn, _ship_provision_fn, _ship_deploy_fn]
+    # All four lanes. Keeping both sides of this merge verbatim produced two
+    # consecutive `functions = [...]` assignments, where the second silently
+    # won and NEITHER ship job would have registered.
+    functions = [
+        execute_run_job,
+        _workspace_job_fn,
+        _ship_provision_fn,
+        _ship_deploy_fn,
+        _site_build_fn,
+    ]
     on_startup = _startup
     on_shutdown = _shutdown
     # Crash policy: no auto-retry. A failed run is left as ``failed``/``interrupted``

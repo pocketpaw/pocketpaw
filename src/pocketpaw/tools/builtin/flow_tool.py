@@ -18,6 +18,17 @@
 #     screens), mirroring the inline-prompt rule (`_inline.py`
 #     `_MULTI_STEP_FLOW_RULE`).
 #
+# Updated: 2026-08-04 (fix/prompt-tells-the-truth — ONE CONTRACT, TWO SURFACES):
+#   - `description` and `parameters` now return `_flows.START_FLOW_DESCRIPTION`
+#     and `_flows.start_flow_parameters()`. They used to be hand-written copies
+#     of the text in `agents/sdk_mcp_widgets.py`, 82.7% similar — and they had
+#     already drifted. THIS copy, the one every runtime backend reads, was the
+#     poorer of the two: it was missing the `set`-stepped anti-pattern, the
+#     "terminal `complete` uses `action:`, never `type:`/`kind:`" rule, the
+#     approve/reject-is-a-call_binding-button rule, and the repair-vs-reject
+#     retry contract. Second split of this pair; the 2026-06-15 SPLIT-BRAIN FIX
+#     was the first. The contract now lives beside the builder that enforces it.
+#
 # A `start_flow`-style builtin tool. The contract that makes it reliable: the
 # agent NEVER hand-writes the recursively-nested chain/chain_map tree — it
 # describes a FLAT graph (impossible to mis-nest), and a DETERMINISTIC builder
@@ -37,9 +48,11 @@ from typing import Any
 
 from pocketpaw.ripple._flows import (
     FLOW_TYPES,
+    START_FLOW_DESCRIPTION,
     FlowBuildError,
     build_flow,
     build_flow_from_descriptor,
+    start_flow_parameters,
 )
 from pocketpaw.tools.protocol import BaseTool
 
@@ -60,51 +73,13 @@ class StartFlowTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return (
-            "Scaffold a complete multi-step flow OR interactive mini-app (a "
-            "wizard, intake, survey, onboarding sequence, or a 'collect "
-            "details then DO something' flow) from a FLAT step-graph. DO NOT "
-            "hand-author nested chain / chain_map step trees — they are fragile "
-            "to write by hand. You describe a flat list of steps; this tool "
-            "materializes the ENTIRE nested, validated flow tree as a "
-            "{version, ui} doc, ready to drop into a ```ui-spec fence. The flow "
-            "then advances entirely client-side with no further model calls "
-            "between steps.\n\n"
-            "AUTHOR A FLAT GRAPH (think in states, not screens):\n"
-            "- `flow`: a stable id for the flow (e.g. 'vendor_intake').\n"
-            "- `entry`: the id of the first step.\n"
-            "- `steps`: a list. Each step has an `id`, a `kind` "
-            "(select | form | confirm | info), a `title`, its content "
-            "(`options` for select, `fields` for form, `review` for confirm, "
-            "`body` for info), and where it goes next:\n"
-            '    * `next: "<id>"` — linear next step;\n'
-            '    * `branch: { "<optionId>": "<id>" }` — branch on the '
-            "picked option.\n"
-            "  A step with NEITHER `next` nor `branch` is the TERMINAL step and "
-            "carries `complete` (what to do with the answers):\n"
-            "    chat → hand the answers back to you (default); navigate / emit "
-            "→ go somewhere / raise an event; call_binding → write to the "
-            "backend; create_pocket → materialize a permanent pocket; "
-            "invoke_tool → run a tool (may be unavailable until the tool "
-            "registry ships).\n"
-            "- Per-step `actions` (optional) are buttons that call a "
-            "tool/API/binding MID-FLOW without leaving the step (verb: "
-            "call_binding | api | invoke_tool).\n"
-            "- Reference earlier answers with `{stepId.field}` "
-            "(e.g. `{pick_goal.label}`, `{enter_details.company}`) in review "
-            "rows and action args — this tool rewrites them correctly; you "
-            "NEVER write the raw `{state.…_selection/_formData}` form.\n\n"
-            "The builder REJECTS any graph that would dead-end (a select step "
-            "that goes nowhere, a dangling transition, a missing terminal, an "
-            "unknown verb) with a precise error you can fix and retry.\n\n"
-            "PRESET SHORTHAND (optional): instead of `steps`, you may pass a "
-            "`flow_type` for one of the two known shapes — 'onboarding_wizard' "
-            "or 'due_diligence_intake' — plus an optional `config` for copy "
-            "tweaks. The flat `steps` graph is the general path; `flow_type` is "
-            "a convenience for those two exact shapes.\n\n"
-            "Returns the JSON doc to emit. Wrap it verbatim in a ```ui-spec "
-            "fence in your reply — do not edit the chain / chain_map structure."
-        )
+        # Shared with the SDK MCP surface (``agents/sdk_mcp_widgets.py``). This
+        # used to be a second hand-written copy that had already drifted: it was
+        # missing the `set`-stepped anti-pattern, the "`action:` never
+        # `type:`/`kind:`" rule, the approve/reject-is-a-call_binding-button
+        # rule, and the repair-vs-reject retry contract. Every runtime backend
+        # read the weaker text. See ``_flows.START_FLOW_DESCRIPTION``.
+        return START_FLOW_DESCRIPTION
 
     @property
     def trust_level(self) -> str:
@@ -112,84 +87,10 @@ class StartFlowTool(BaseTool):
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "flow": {
-                    "type": "string",
-                    "description": (
-                        "A stable id for the flow (e.g. 'vendor_intake'). Seeds "
-                        "each step's flowId namespace. Required when authoring a "
-                        "flat `steps` graph."
-                    ),
-                },
-                "entry": {
-                    "type": "string",
-                    "description": (
-                        "The id of the FIRST step (must exist in `steps`). "
-                        "Required when authoring a flat `steps` graph."
-                    ),
-                },
-                "steps": {
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": (
-                        "The flat step-graph: a list of step objects. Each step "
-                        "has `id`, `kind` (select | form | confirm | info), "
-                        "`title`, its kind-specific content (`options` / "
-                        "`fields` / `review` / `body`), and a transition "
-                        "(`next` or `branch`) — OR `complete` if it is the "
-                        "terminal step. Optional per-step `actions` run a "
-                        "tool/API mid-flow. This is the general authoring path."
-                    ),
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Optional title shown on the flow frame.",
-                },
-                "complete": {
-                    "type": "object",
-                    "description": (
-                        "Optional flow-level terminal default — the `complete` "
-                        "action a terminal step inherits when it declares none "
-                        "of its own (e.g. {action:'chat', message:'…'})."
-                    ),
-                },
-                "flow_type": {
-                    "type": "string",
-                    "enum": list(FLOW_TYPES),
-                    "description": (
-                        "OPTIONAL preset shorthand for the two known shapes "
-                        "('onboarding_wizard' | 'due_diligence_intake') instead "
-                        "of authoring a flat `steps` graph. The builder owns the "
-                        "full nested tree for this preset."
-                    ),
-                },
-                "domain": {
-                    "type": "string",
-                    "description": (
-                        "Optional domain hint (e.g. 'fintech', 'saas') for the "
-                        "preset path. Reserved for a future data-fresh "
-                        "materialization path; does not change the tree today."
-                    ),
-                },
-                "config": {
-                    "type": "object",
-                    "description": (
-                        "Optional per-preset copy overrides (preset path only). "
-                        "Shape-stable: tweaks labels/text, never the chain "
-                        "structure. onboarding_wizard accepts {product_name, "
-                        "goals, complete_message}; due_diligence_intake accepts "
-                        "{company_name, complete_message}."
-                    ),
-                },
-            },
-            # Nothing is hard-required at the schema level: the general path
-            # needs flow+entry+steps, the preset path needs flow_type. `execute`
-            # validates the combination and returns an agent-readable error when
-            # neither is supplied.
-            "required": [],
-        }
+        # Shared with the SDK MCP surface — see the description note above.
+        # The schema was the second copy: same seven properties, written out
+        # twice, with the ``flow_type`` enum read from FLOW_TYPES in both.
+        return start_flow_parameters()
 
     async def execute(
         self,

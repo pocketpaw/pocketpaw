@@ -1,6 +1,10 @@
 """
 Bootstrap protocol for agent identity and context.
 Created: 2026-02-02
+Updated: 2026-08-02 (PA-3b, feat/prompt-assembler-seam) — ``BootstrapContext``
+  carries ``identity_cache_key``: the provider's own claim about what its
+  ``identity`` + ``knowledge`` content is stable for. Defaulted to ``None`` (no
+  claim) so every existing provider and every test constructor is unchanged.
 """
 
 from dataclasses import dataclass, field
@@ -18,6 +22,20 @@ class BootstrapContext:
     instructions: str = ""  # Behavioral instructions & tool usage guides
     knowledge: list[str] = field(default_factory=list)  # Key background info
     user_profile: str = ""  # USER.md content
+
+    # What the PROVIDER says its ``identity`` + ``knowledge`` content is stable
+    # for. ``None`` — the default, and what every non-soul provider returns —
+    # means "I make no claim", and a consumer keying on this must fall back to
+    # whatever it keyed on before.
+    #
+    # It travels WITH the text rather than being derived from it downstream for
+    # the same reason ``PromptContext.surface_cache_key`` does: only the
+    # provider knows which of the bytes it just rendered are meaningful and
+    # which are counters. ``SoulBootstrapProvider`` renders a soul whose mood,
+    # energy, focus, self-image confidences, bond level and memory count all
+    # move on ordinary interaction; it is the only module that can say so
+    # without parsing its own output from two packages away.
+    identity_cache_key: str | None = None
 
     def to_system_prompt(self) -> str:
         """Combine fields into a coherent system prompt.

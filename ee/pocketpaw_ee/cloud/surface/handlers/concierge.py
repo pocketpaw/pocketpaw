@@ -51,10 +51,19 @@
 #
 # Mirrors handlers/belt.py: an async ``build_preamble`` returning an XML-ish
 # ``<surface>`` + ``<orientation>`` + ``<procedure>`` block.
+#
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
+# ``SurfacePreamble`` keyed on a digest of what was rendered. This handler does
+# no I/O — the declared actions and the product catalog arrive on ``meta``,
+# stamped by ``concierge_chat`` from the widget spec — but those two are
+# LISTS of dicts rather than ids, so a digest of the rendered paragraphs is
+# both simpler and tighter than trying to name them: it moves when the widget's
+# declared verbs or its products change, and holds still while they don't.
 
 from __future__ import annotations
 
-from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
+from pocketpaw_ee.cloud.surface.handlers._helpers import content_key
 
 
 def _format_price(price_cents: object, currency: object) -> str:
@@ -228,14 +237,16 @@ def _handoff_paragraph(widget_id: str | None) -> str:
     )
 
 
-async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:  # noqa: ARG001
+async def build_preamble(  # noqa: ARG001
+    workspace_id: str, user_id: str, meta: SurfaceMeta
+) -> SurfacePreamble:
     """Render the /paw-bar concierge surface preamble — the public-visitor loop."""
     route = meta.route_path or "/paw-bar"
     actions_para = _actions_paragraph(
         getattr(meta, "pawbar_actions", None), getattr(meta, "pawbar_catalog", None)
     )
     handoff_para = _handoff_paragraph(getattr(meta, "widget_id", None))
-    return (
+    text = (
         f'<surface kind="concierge" route="{route}" />\n'
         "<concierge-orientation>\n"
         "You are a PUBLIC concierge embedded on this site's page, talking to an "
@@ -262,6 +273,7 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         f"{handoff_para}"
         "</concierge-procedure>"
     )
+    return SurfacePreamble(text=text, cache_key=content_key("concierge", text))
 
 
 __all__ = ["build_preamble"]

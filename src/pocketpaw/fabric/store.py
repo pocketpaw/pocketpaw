@@ -1,5 +1,22 @@
 # Fabric store — async SQLite operations for the ontology layer.
 # Created: 2026-03-28 — CRUD for object types, objects, and links.
+# Updated: 2026-08-17 (AST-5a — review fixes on the atlas source-truth stack) —
+#   two additive type-level statement reads for the atlas aggregate:
+#   ``get_statements_for_type(type_id, workspace_id=, key_cap=)`` — ONE query
+#   (type join, ORDER BY object_id, property, recorded_at, id) grouped by
+#   (object_id, property) in Python, per-key order identical to
+#   ``get_statements``; stops after ``key_cap`` DISTINCT keys — and
+#   ``statement_coverage_for_type`` — uncapped ``COUNT(DISTINCT object_id)``
+#   overall + per property, so a capped walk never hides a property. Both (and
+#   now ``list_statement_keys`` with ``type_id``) scope ``o.workspace_id`` as
+#   well as ``s.workspace_id`` — the joined-object scope every sibling
+#   fabric_objects join already applied (review finding V5).
+# Updated: 2026-08-17 (AST-2 — atlas type-level trust aggregate) —
+#   ``list_statement_keys`` gains two optional kwargs: ``type_id`` narrows the
+#   DISTINCT (object_id, property) walk to objects of ONE type via an indexed
+#   join (idx_statements_object ↔ idx_objects_type — still tracked-set cost,
+#   never a full-fabric scan) and ``limit`` caps the rows. Read-only,
+#   additive; existing keyword callers are byte-identical.
 # Updated: 2026-07-11 (FST-7 — freshness) — the merge-site statement pass now
 #   threads an aware-UTC ``now`` into resolve() (within-family staleness
 #   demotion live in shadow AND enforce); the divergence line gained a
@@ -2796,6 +2813,8 @@ class FabricStore:
         *,
         workspace_id: str | None = None,
         object_id: str | None = None,
+        type_id: str | None = None,
+        limit: int | None = None,
     ) -> list[tuple[str, str]]:
         """DISTINCT ``(object_id, property)`` pairs that HAVE statements (FST-6).
 
@@ -2805,26 +2824,139 @@ class FabricStore:
         not the whole fabric. ``workspace_id`` applies the standard W4a read
         scope (own rows + legacy NULL); ``object_id`` narrows to one object.
         Ordered by ``(object_id, property)`` for a deterministic walk.
+
+        ``type_id`` (AST-2) narrows to objects OF ONE TYPE — an indexed join
+        of ``fabric_statements.object_id`` (idx_statements_object) to
+        ``fabric_objects.type_id`` (idx_objects_type), so a type-level read
+        still visits only tracked keys, never the whole fabric. ``limit`` caps
+        the row count (the atlas trust aggregate passes cap+1 to detect
+        sampling in the same single query).
         """
         conditions: list[str] = []
         params: list[Any] = []
         if object_id is not None:
-            conditions.append("object_id = ?")
+            conditions.append("s.object_id = ?")
             params.append(object_id)
-        ws_cond, ws_params = _workspace_scope(workspace_id)
+        if type_id is not None:
+            conditions.append("o.type_id = ?")
+            params.append(type_id)
+            # AST-5a: scope the JOINED object row too — every other
+            # fabric_objects join in this store does, so a legacy NULL-workspace
+            # type shared by two tenants can't roll workspace B's objects into A.
+            obj_cond, obj_params = _workspace_scope(workspace_id, column="o.workspace_id")
+            if obj_cond:
+                conditions.append(obj_cond)
+                params.extend(obj_params)
+        ws_cond, ws_params = _workspace_scope(workspace_id, column="s.workspace_id")
         if ws_cond:
             conditions.append(ws_cond)
             params.extend(ws_params)
+        join = " JOIN fabric_objects o ON o.id = s.object_id" if type_id is not None else ""
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = (
-            "SELECT DISTINCT object_id, property FROM fabric_statements"
-            f"{where} ORDER BY object_id, property"
+            "SELECT DISTINCT s.object_id, s.property FROM fabric_statements s"
+            f"{join}{where} ORDER BY s.object_id, s.property"
         )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
         await self._ensure_schema()
         async with self._conn() as db:
             async with db.execute(sql, params) as cur:
                 rows = await cur.fetchall()
         return [(str(r[0]), str(r[1])) for r in rows]
+
+    @staticmethod
+    def _type_statement_scope(type_id: str, workspace_id: str | None) -> tuple[str, list[Any]]:
+        """WHERE fragment + params shared by the type-level statement reads
+        (AST-5a): ``o.type_id = ?`` plus the standard W4a scope on BOTH the
+        statement row (``s.workspace_id``) and the joined object row
+        (``o.workspace_id``). Callers prepend
+        ``FROM fabric_statements s JOIN fabric_objects o ON o.id = s.object_id``.
+        """
+        conditions = ["o.type_id = ?"]
+        params: list[Any] = [type_id]
+        for column in ("s.workspace_id", "o.workspace_id"):
+            cond, cond_params = _workspace_scope(workspace_id, column=column)
+            if cond:
+                conditions.append(cond)
+                params.extend(cond_params)
+        return " AND ".join(conditions), params
+
+    async def statement_coverage_for_type(
+        self, type_id: str, *, workspace_id: str | None = None
+    ) -> dict[str, Any]:
+        """Honest, UNCAPPED totals for one type's tracked set (AST-5a).
+
+        ``{"object_count": <distinct objects with any statement>,
+        "properties": {<property>: <distinct objects with a statement on it>}}``
+        — two indexed aggregate queries (``COUNT(DISTINCT s.object_id)`` overall
+        and grouped by ``s.property``) over the same
+        ``fabric_objects(type_id) ⋈ fabric_statements(object_id)`` join and W4a
+        scope as :meth:`get_statements_for_type`, on ONE connection. The atlas
+        type-level aggregate reports these as its ``object_count`` and the
+        per-property ``objects`` so a capped walk can never make a property
+        vanish or under-count the type. An untracked type answers
+        ``{"object_count": 0, "properties": {}}``.
+        """
+        where, params = self._type_statement_scope(type_id, workspace_id)
+        base = f"FROM fabric_statements s JOIN fabric_objects o ON o.id = s.object_id WHERE {where}"
+        await self._ensure_schema()
+        async with self._conn() as db:
+            async with db.execute(f"SELECT COUNT(DISTINCT s.object_id) {base}", params) as cur:
+                row = await cur.fetchone()
+                object_count = int(row[0]) if row and row[0] is not None else 0
+            async with db.execute(
+                f"SELECT s.property, COUNT(DISTINCT s.object_id) {base}"
+                " GROUP BY s.property ORDER BY s.property",
+                params,
+            ) as cur:
+                rows = await cur.fetchall()
+        return {
+            "object_count": object_count,
+            "properties": {str(r[0]): int(r[1]) for r in rows},
+        }
+
+    async def get_statements_for_type(
+        self,
+        type_id: str,
+        *,
+        workspace_id: str | None = None,
+        key_cap: int | None = None,
+    ) -> dict[tuple[str, str], list[Statement]]:
+        """Bulk statement read for every tracked key of ONE type (AST-5a).
+
+        ONE query — ``fabric_objects(type_id) ⋈ fabric_statements(object_id)``,
+        W4a-scoped on both ``s.workspace_id`` and ``o.workspace_id`` — ordered
+        ``s.object_id, s.property, s.recorded_at, s.id`` and grouped in Python
+        by ``(object_id, property)``. Each group's statement order is exactly
+        what :meth:`get_statements` returns for that key (``recorded_at, id``,
+        oldest first), so a resolver fed either sees the same input. ``key_cap``
+        stops the read after that many DISTINCT keys (the first N by object_id,
+        then property) — the row cursor is abandoned there, so a saturated type
+        costs one connection instead of one per key. Grouped dict preserves the
+        walk order.
+        """
+        where, params = self._type_statement_scope(type_id, workspace_id)
+        sql = (
+            "SELECT s.* FROM fabric_statements s"
+            " JOIN fabric_objects o ON o.id = s.object_id"
+            f" WHERE {where} ORDER BY s.object_id, s.property, s.recorded_at, s.id"
+        )
+        grouped: dict[tuple[str, str], list[Statement]] = {}
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, params) as cur:
+                async for row in cur:
+                    key = (str(row["object_id"]), str(row["property"]))
+                    bucket = grouped.get(key)
+                    if bucket is None:
+                        if key_cap is not None and len(grouped) >= key_cap:
+                            break
+                        bucket = grouped[key] = []
+                    bucket.append(self._row_to_statement(row))
+        return grouped
 
     async def get_source(
         self, source_ref_id: str, workspace_id: str | None = None

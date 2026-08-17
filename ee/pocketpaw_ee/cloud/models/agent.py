@@ -33,11 +33,12 @@ from __future__ import annotations
 from beanie import Indexed
 from pydantic import BaseModel, Field
 
+from pocketpaw_ee.cloud.agents.defaults import CLOUD_DEFAULT_AGENT_BACKEND
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
 
 class AgentConfig(BaseModel):
-    backend: str = "claude_agent_sdk"
+    backend: str = CLOUD_DEFAULT_AGENT_BACKEND
     model: str = ""  # empty = use backend default
     system_prompt: str = ""
     tools: list[str] = Field(default_factory=list)
