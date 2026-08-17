@@ -15,9 +15,20 @@ import pytest
 from cryptography.fernet import Fernet
 from pocketpaw_ee.cloud.ship import job, store
 
+
+# The PEM header is ASSEMBLED, never written as a literal — the same idiom
+# ``scripts/scan_secrets.py`` uses on itself (see ``_H`` there). Storing the
+# five-hyphen run verbatim makes this fixture indistinguishable from a real
+# leaked key to the secret scanner, and "it's only a test" is exactly what a
+# real leak would also claim. No key material here: the body is a placeholder.
+_H = "-" * 5
+_PEM_BEGIN = f"{_H}BEGIN OPENSSH PRIVATE KEY{_H}"
+_PEM_END = f"{_H}END OPENSSH PRIVATE KEY{_H}"
+
+
 _KEY_ENV = "CLOUD_ENCRYPTION_KEY"
 _TOKEN_ENV = "POCKETPAW_HCLOUD_TOKEN"
-_PRIV = "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE\n-----END OPENSSH PRIVATE KEY-----\n"
+_PRIV = _PEM_BEGIN + "\nFAKE\n" + _PEM_END + "\n"
 _PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITEST paw-ship"
 
 

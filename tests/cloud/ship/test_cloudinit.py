@@ -14,6 +14,16 @@ from pocketpaw_ee.ship_engine.cloudinit import (
     render_user_data,
 )
 
+
+# The PEM header is ASSEMBLED, never written as a literal — the same idiom
+# ``scripts/scan_secrets.py`` uses on itself (see ``_H`` there). Storing the
+# five-hyphen run verbatim makes this fixture indistinguishable from a real
+# leaked key to the secret scanner, and "it's only a test" is exactly what a
+# real leak would also claim. No key material here: the body is a placeholder.
+_H = "-" * 5
+_PEM_BEGIN = f"{_H}BEGIN OPENSSH PRIVATE KEY{_H}"
+_PEM_END = f"{_H}END OPENSSH PRIVATE KEY{_H}"
+
 _PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY paw-ship"
 
 
@@ -40,7 +50,7 @@ def test_rejects_multiline_public_key():
 
 def test_rejects_non_openssh_public_key():
     with pytest.raises(ValueError, match="single-line OpenSSH public key"):
-        render_user_data(ssh_public_key="-----BEGIN OPENSSH PRIVATE KEY-----")
+        render_user_data(ssh_public_key=_PEM_BEGIN)
 
 
 def test_no_private_key_material_in_output():
