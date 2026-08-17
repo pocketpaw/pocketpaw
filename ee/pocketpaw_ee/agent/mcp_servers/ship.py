@@ -87,9 +87,13 @@ async def _with_identity(tool_name: str):
     """Resolve identity or return the error envelope. Returns (ws, user, err)."""
     workspace_id, user_id = _identity()
     if not workspace_id or not user_id:
-        return None, None, _error_response(
-            f"{tool_name} requires workspace and user context "
-            "(call it from a cloud chat session)."
+        return (
+            None,
+            None,
+            _error_response(
+                f"{tool_name} requires workspace and user context "
+                "(call it from a cloud chat session)."
+            ),
         )
     _audit(workspace_id, user_id, tool_name)
     return workspace_id, user_id, None

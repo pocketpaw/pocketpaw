@@ -167,9 +167,7 @@ async def _logs(workspace_id: str = "w1") -> list[Any]:
     """
     from pocketpaw_ee.cloud.models.message_log import MessageLog
 
-    return await MessageLog.find(
-        {"workspace": workspace_id, "channel": "whatsapp"}
-    ).to_list()
+    return await MessageLog.find({"workspace": workspace_id, "channel": "whatsapp"}).to_list()
 
 
 async def _draft_status(workspace_id: str, draft_id: str) -> str:

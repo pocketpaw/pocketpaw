@@ -519,9 +519,7 @@ def _is_due(cadence: str, now: datetime) -> bool:
     return False
 
 
-async def discovery_sweep(
-    ctx: dict[str, Any], *, now: datetime | None = None
-) -> dict[str, int]:
+async def discovery_sweep(ctx: dict[str, Any], *, now: datetime | None = None) -> dict[str, int]:
     """Run every due ICP across every tenant. NEVER raises.
 
     Registered as a daily arq cron on the ``growth`` queue. ``ctx`` is arq's
