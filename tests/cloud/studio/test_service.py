@@ -1,0 +1,296 @@
+# tests/cloud/studio/test_service.py — the direct /studio generation service.
+#
+# The proxy calls are mocked at the SAME seam the media MCP uses
+# (``service._PROXY_TRANSPORT`` → httpx.MockTransport) so the full request
+# shape — path, model, prompt, size, count, the OpenAI ``user`` tenant tag, and
+# the Bearer key — is asserted end-to-end without a live proxy. ``_generated_dir``
+# and ``_history_path`` are redirected to a tmp dir so nothing touches the
+# developer's real ``~/.pocketpaw``. Coverage:
+#   * list_models — catalog image/video entries map onto StudioModel shapes,
+#     first image model is the catalog default, chat entries are excluded.
+#   * generate (image) — happy path (b64_json): POSTs the right payload, saves a
+#     PNG into the generated dir, returns a succeeded Generation, and persists it
+#     to the workspace history.
+#   * generate url path — a ``data[0].url`` result is fetched + saved too.
+#   * generate style suffix — the style promptSuffix is appended server-side.
+#   * generate guards — empty prompt / missing model are ValueError; video is
+#     StudioNotSupported (until the gateway serves video models).
+#   * proxy failure — a 500 from the proxy surfaces as StudioUpstreamError.
+#   * history scoping — list_generations / get_generation are workspace-scoped.
+#
+# Created 2026-08-17 (studio-real-backend): new service tests.
+
+from __future__ import annotations
+
+import base64
+import json
+
+import httpx
+import pocketpaw_ee.cloud.studio.service as service
+import pytest
+from pocketpaw_ee.catalog import service as catalog_service
+from pocketpaw_ee.catalog.litellm_client import CatalogUpstreamError
+from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry, Pricing
+from pocketpaw_ee.cloud.studio import schemas
+
+_PROXY_BASE = "https://proxy.test:4000"
+_PROXY_KEY = "sk-proxy-master"
+
+
+def _entry(
+    id_: str,
+    *,
+    provider: str,
+    modality: Modality,
+    description: str | None = None,
+) -> ModelCatalogEntry:
+    return ModelCatalogEntry(
+        id=id_,
+        display_name=id_.split("/", 1)[-1],
+        provider=provider,
+        modality=modality,
+        pricing=Pricing(input_per_mtok=1.0, output_per_mtok=2.0),
+        capabilities=[],
+        description=description,
+    )
+
+
+@pytest.fixture
+def proxy_env(monkeypatch):
+    """Point the catalog proxy config (which studio reuses) at a fake proxy with
+    a key so the Bearer header + base URL are exercised end-to-end."""
+    monkeypatch.setenv("POCKETPAW_LITELLM_API_BASE", _PROXY_BASE)
+    monkeypatch.setenv("POCKETPAW_LITELLM_API_KEY", _PROXY_KEY)
+
+
+@pytest.fixture
+def studio_env(tmp_path, monkeypatch):
+    """Redirect generated-media + history persistence into a tmp dir so tests
+    never touch the real ~/.pocketpaw, and resolve the tenant key to a fixed
+    value (no provisioning lookup)."""
+    generated = tmp_path / "generated"
+    generated.mkdir(exist_ok=True)
+    history = tmp_path / "studio" / "generations.jsonl"
+    history.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(service, "_generated_dir", lambda: generated)
+    monkeypatch.setattr(service, "_history_path", lambda: history)
+
+    async def _tenant_key(workspace_id):
+        return "sk-tenant-ws"
+
+    monkeypatch.setattr(service, "_resolve_auth_key", _tenant_key)
+    return generated, history
+
+
+def _install_transport(monkeypatch, handler) -> dict:
+    """Install an httpx.MockTransport on service._PROXY_TRANSPORT and capture
+    every request the handler sees (asserts the proxy wire shape)."""
+    captured: dict = {"requests": []}
+
+    def _wrapped(request: httpx.Request) -> httpx.Response:
+        captured["requests"].append(request)
+        return handler(request)
+
+    monkeypatch.setattr(service, "_PROXY_TRANSPORT", httpx.MockTransport(_wrapped))
+    return captured
+
+
+# ── Model mapping ────────────────────────────────────────────────────────────
+
+async def test_list_models_maps_image_and_video_entries(monkeypatch) -> None:
+    """Image entries map to StudioModel picker rows (first image is default),
+    video entries are included, chat/embedding entries are excluded."""
+    entries = [
+        _entry("fal_ai/fal-ai/flux/schnell", provider="fal_ai", modality=Modality.IMAGE),
+        _entry("fal_ai/fal-ai/gpt-image-1", provider="fal_ai", modality=Modality.IMAGE),
+        _entry("fal_ai/fal-ai/kling/v2", provider="fal_ai", modality=Modality.VIDEO),
+        _entry("anthropic/claude-3-5-sonnet", provider="anthropic", modality=Modality.CHAT),
+        _entry("openai/text-embedding-3-small", provider="openai", modality=Modality.EMBEDDING),
+    ]
+
+    async def _list(**kw):
+        return entries
+
+    monkeypatch.setattr(catalog_service, "list_models", _list)
+
+    models = await service.list_models()
+
+    ids = [m.id for m in models]
+    assert ids == [
+        "fal_ai/fal-ai/flux/schnell",
+        "fal_ai/fal-ai/gpt-image-1",
+        "fal_ai/fal-ai/kling/v2",
+    ]
+    flux = models[0]
+    assert flux.kind == "image"
+    assert flux.default is True
+    assert flux.maxCount == 1
+    assert flux.provider == "fal_ai"
+    assert flux.label == "Flux Schnell"
+    assert "1:1" in flux.aspectRatios and "16:9" in flux.aspectRatios
+    assert flux.supportsNegativePrompt is False
+    gpt = models[1]
+    assert gpt.default is False
+    video = models[2]
+    assert video.kind == "video"
+    assert video.durationsSec == [5]
+
+
+async def test_list_models_upstream_failure_propagates(monkeypatch) -> None:
+    """A catalog outage propagates CatalogUpstreamError so the router can 502."""
+
+    async def _boom(**kw):
+        raise CatalogUpstreamError("proxy down")
+
+    monkeypatch.setattr(catalog_service, "list_models", _boom)
+    with pytest.raises(CatalogUpstreamError):
+        await service.list_models()
+
+
+# ── generate (image) ─────────────────────────────────────────────────────────
+
+async def test_generate_image_happy_path(
+    monkeypatch, proxy_env, studio_env
+) -> None:
+    """A b64_json proxy result → the PNG is saved under generated/, a succeeded
+    Generation is returned, and the history records it under the workspace."""
+    generated, history = studio_env
+    png = b"\x89PNG\r\n\x1a\nfake-image"
+    b64 = base64.b64encode(png).decode()
+    _CINEMATIC_SUFFIX = (
+        ", cinematic lighting, shallow depth of field, film grain, dramatic composition"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == f"{_PROXY_BASE}/v1/images/generations"
+        assert request.headers["Authorization"] == "Bearer sk-tenant-ws"
+        body = json.loads(request.content)
+        assert body["model"] == "fal_ai/fal-ai/flux/schnell"
+        assert body["prompt"] == "a red bicycle" + _CINEMATIC_SUFFIX
+        assert body["size"] == "1024x1024"  # 1:1 mapped
+        assert body["n"] == 1
+        assert body["user"] == "ws-1"  # workspace tenant tag
+        return httpx.Response(200, json={"data": [{"b64_json": b64}]})
+
+    captured = _install_transport(monkeypatch, handler)
+
+    req = schemas.GenerateRequest(
+        prompt="a red bicycle",
+        kind="image",
+        model="fal_ai/fal-ai/flux/schnell",
+        aspectRatio="1:1",
+        count=1,
+        styleId="cinematic",
+    )
+    gen = await service.generate(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert gen.kind == "image"
+    assert gen.model == "fal_ai/fal-ai/flux/schnell"
+    assert gen.prompt == "a red bicycle" + _CINEMATIC_SUFFIX
+    assert gen.params.styleId == "cinematic"
+    assert len(gen.assets) == 1
+    url = gen.assets[0].url
+    assert url.startswith("/api/v1/media/")
+    name = url.rsplit("/", 1)[-1]
+    assert (generated / name).read_bytes() == png
+    assert len(captured["requests"]) == 1
+
+    # History: one record, scoped to ws-1, re-readable as a wire Generation.
+    records = service._load_history()
+    assert len(records) == 1
+    assert records[0]["_workspace"] == "ws-1"
+    listed = service.list_generations("ws-1")
+    assert [g.id for g in listed] == [gen.id]
+    assert service.get_generation(gen.id, "ws-1") is not None
+    # A different workspace does not see it.
+    assert service.list_generations("ws-other") == []
+    assert service.get_generation(gen.id, "ws-other") is None
+    # The media router exclusion sees the saved file.
+    assert name in service.tracked_generation_filenames()
+
+
+async def test_generate_image_url_path(
+    monkeypatch, proxy_env, studio_env
+) -> None:
+    """A proxy ``data[0].url`` result (dall-e style) is fetched and saved too."""
+    generated, _ = studio_env
+    png = b"\x89PNG\r\n\x1a\nfake-from-url"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/images/generations":
+            return httpx.Response(200, json={"data": [{"url": "http://cdn.test/img.png"}]})
+        if request.url.path == "/img.png":
+            return httpx.Response(200, content=png)
+        return httpx.Response(404)
+
+    _install_transport(monkeypatch, handler)
+
+    req = schemas.GenerateRequest(
+        prompt="a cat",
+        kind="image",
+        model="fal_ai/fal-ai/flux/schnell",
+        aspectRatio="16:9",
+        count=1,
+    )
+    gen = await service.generate(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    name = gen.assets[0].url.rsplit("/", 1)[-1]
+    assert (generated / name).read_bytes() == png
+
+
+async def test_generate_empty_prompt_is_valueerror(monkeypatch, studio_env) -> None:
+    req = schemas.GenerateRequest(prompt="  ", model="m")
+    with pytest.raises(ValueError):
+        await service.generate(req, workspace_id="ws-1")
+
+
+async def test_generate_missing_model_is_valueerror(monkeypatch, studio_env) -> None:
+    req = schemas.GenerateRequest(prompt="x", model="")
+    with pytest.raises(ValueError):
+        await service.generate(req, workspace_id="ws-1")
+
+
+async def test_generate_video_is_not_supported(monkeypatch, studio_env) -> None:
+    """No video model on the gateway yet → a typed 501 path, not a proxy call."""
+    req = schemas.GenerateRequest(prompt="a clip", kind="video", model="fal-ai/kling-v2")
+    with pytest.raises(service.StudioNotSupported):
+        await service.generate(req, workspace_id="ws-1")
+
+
+async def test_generate_proxy_failure_is_upstream_error(
+    monkeypatch, proxy_env, studio_env
+) -> None:
+    """A non-2xx proxy response surfaces as StudioUpstreamError (→ 502), and
+    nothing is persisted."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": {"message": "no quota"}})
+
+    _install_transport(monkeypatch, handler)
+
+    req = schemas.GenerateRequest(
+        prompt="x", model="fal_ai/fal-ai/flux/schnell", aspectRatio="1:1"
+    )
+    with pytest.raises(service.StudioUpstreamError):
+        await service.generate(req, workspace_id="ws-1")
+    assert service._load_history() == []
+
+
+# ── styles + suggest ─────────────────────────────────────────────────────────
+
+def test_list_styles_matches_mock() -> None:
+    styles = service.list_styles()
+    ids = [s.id for s in styles]
+    assert ids == ["none", "cinematic", "photoreal", "watercolor", "anime", "threed", "neon"]
+    cinematic = next(s for s in styles if s.id == "cinematic")
+    assert "cinematic" in cinematic.promptSuffix
+
+
+def test_suggest_prompt_heuristic() -> None:
+    image = service.suggest_prompt("a lighthouse")
+    assert image.kind == "image"
+    assert "highly detailed" in image.prompt
+    video = service.suggest_prompt("a clip of waves moving")
+    assert video.kind == "video"

@@ -382,6 +382,11 @@ def mount_cloud(app: FastAPI) -> None:
 
     # /studio generated media — serve + list (EE layer).
     app.include_router(media_router, prefix="/api/v1")
+    # Direct describe-to-media surface (paw-enterprise /studio): the composer +
+    # gallery drive their typed StudioBackend client over these endpoints.
+    from pocketpaw_ee.cloud.studio.router import router as studio_router
+
+    app.include_router(studio_router, prefix="/api/v1")
     app.include_router(meetings_router, prefix="/api/v1")
     # Inbound Recall.ai webhook — no auth dependency (Svix-signed instead).
     app.include_router(meetings_webhooks_router, prefix="/api/v1")
