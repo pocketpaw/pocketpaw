@@ -233,29 +233,39 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         last let a trailing recap beat it, AND let a nested `companies` key
         inside a company entry beat its own parent. Both were reproduced. So
         the tiebreak is content: the real answer is the one whose `companies`
-        is the longest list of dicts that actually carry a domain.
+        is the longest list of dicts that actually carry a domain, weighted by
+        how much each row actually says.
+
+        HONEST LIMIT: two candidates of identical shape and richness cannot be
+        told apart by content, and this falls back to the first. The real
+        protection against an echoed template is that the prompt no longer
+        contains parseable JSON to echo — this scoring is defence in depth,
+        not a proof.
         """
         rows = obj.get("companies")
         if not isinstance(rows, list):
             return -1
-        return sum(1 for r in rows if isinstance(r, dict) and str(r.get("domain") or "").strip())
+        score = 0
+        for r in rows:
+            if not isinstance(r, dict) or not str(r.get("domain") or "").strip():
+                continue
+            # A real finding is RICHER than an echoed shape: it carries the
+            # brief and the pages that were read. Counting rows alone ties a
+            # one-row echo against a one-row answer.
+            score += 1
+            score += sum(
+                1
+                for field in ("company", "name", "research_brief")
+                if str(r.get(field) or "").strip()
+            )
+            urls = r.get("source_urls")
+            score += len(urls) if isinstance(urls, list) else 0
+        return score
 
     scored = [(o, _answer_score(o)) for o in objects]
     best = max(scored, key=lambda pair: pair[1])
     if best[1] >= 0:
         return best[0]
-    # The LAST qualifying object wins, not the first.
-    #
-    # This is the fix for a reproduced bug, so it is worth being explicit about
-    # why. The prompt used to carry a fully-valid JSON example — complete with
-    # an "observed" email on example.com — and this loop took the FIRST object
-    # with a ``companies`` key. A model that restated the shape before
-    # answering therefore had its own template parsed as the research: the real
-    # findings were discarded and a fabricated prospect was filed carrying an
-    # address nobody had ever seen. The prompt no longer contains parseable
-    # JSON, and this picks the last candidate, so a preamble cannot shadow the
-    # answer even if one reappears. Two independent guards, because the thing
-    # they protect is the one guarantee this module claims to be structural.
     return objects[0]
 
 
