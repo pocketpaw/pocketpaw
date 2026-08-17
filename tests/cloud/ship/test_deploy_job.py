@@ -21,7 +21,6 @@ from tests.cloud.ship.conftest import (
     install_refused_engine,
 )
 
-
 # The PEM header is ASSEMBLED, never written as a literal — the same idiom
 # ``scripts/scan_secrets.py`` uses on itself (see ``_H`` there). Storing the
 # five-hyphen run verbatim makes this fixture indistinguishable from a real
