@@ -1,0 +1,58 @@
+[
+  {
+    "label": "extractor takes the FIRST companies object again (the template-echo bug)",
+    "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
+    "find": "    for obj in reversed(objects):",
+    "replace": "    for obj in objects:",
+    "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_preamble_object_cannot_shadow_the_answer"
+  },
+  {
+    "label": "email shape check removed — a two-line address becomes storable",
+    "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
+    "find": "    if any(ch.isspace() for ch in address) or address.count(\"@\") != 1:\n        return None",
+    "replace": "    if False:\n        return None",
+    "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_malformed_address_is_never_storable"
+  },
+  {
+    "label": "host dotted-ness no longer required — a@localhost becomes storable",
+    "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
+    "find": "    if not local or \".\" not in host:\n        return None",
+    "replace": "    if not local:\n        return None",
+    "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_malformed_address_is_never_storable"
+  },
+  {
+    "label": "an unobserved confidence is upgraded to observed",
+    "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
+    "find": "    confidence = str(raw.get(\"confidence\") or \"\").strip().lower()",
+    "replace": "    confidence = str(raw.get(\"confidence\") or \"observed\").strip().lower()",
+    "tests": "tests/cloud/growth/test_researcher.py::TestAGuessNeverBecomesAnAddress"
+  },
+  {
+    "label": "tool output is collected again alongside the answer",
+    "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
+    "find": "            if getattr(event, \"type\", None) != \"message\":\n                continue",
+    "replace": "            if False:\n                continue",
+    "tests": "tests/cloud/growth/test_researcher.py::TestToolOutputNeverPollutesTheAnswer"
+  },
+  {
+    "label": "the researcher regains a write tool",
+    "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
+    "find": "GROWTH_RESEARCHER_TOOLS: tuple[str, ...] = (\"WebSearch\", \"WebFetch\")",
+    "replace": "GROWTH_RESEARCHER_TOOLS: tuple[str, ...] = (\"WebSearch\", \"WebFetch\", \"Write\")",
+    "tests": "tests/cloud/growth/test_researcher.py::TestTheToolSurfaceStaysShut"
+  },
+  {
+    "label": "tool_mode falls back to additive (unions the universal MCP grant)",
+    "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
+    "find": "        \"tool_mode\": \"exclusive\",",
+    "replace": "        \"tool_mode\": \"additive\",",
+    "tests": "tests/cloud/growth/test_researcher.py::TestTheToolSurfaceStaysShut::test_tool_mode_is_exclusive_not_additive"
+  },
+  {
+    "label": "the agent can set a cadence again (schedules its own spend)",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/growth.py",
+    "find": "                \"max_per_run\": {\"type\": \"integer\", \"minimum\": 1, \"maximum\": 100},",
+    "replace": "                \"max_per_run\": {\"type\": \"integer\", \"minimum\": 1, \"maximum\": 100},\n                \"cadence\": {\"type\": \"string\"},",
+    "tests": "tests/cloud/growth/test_mcp_server.py::TestTheGateHolds::test_no_tool_can_switch_a_hunt_on"
+  }
+]
