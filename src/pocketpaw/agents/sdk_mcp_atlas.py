@@ -49,6 +49,15 @@
 # role-gated id like an unknown id, and the known-ids error listing excludes
 # them. Belt-and-braces: admin capabilities can never leak from ANY atlas server
 # wiring, provider or not (matches DefaultEntitlementProvider's role hiding).
+#
+# Updated: 2026-08-17 (feat/ast-2-atlas-trust-aggregate, AST-2) — the describe
+# handler awaits ``describe_fabric_id_async`` instead of the sync
+# ``describe_fabric_id``: same registry payload for ``fabric:<type>`` ids, plus
+# the additive ``source_truth`` field (live per-property disputed / stale /
+# aging counts + winner writer mix from the OSS FabricStore) when the
+# introspector exposes the optional ``entity_type_source_truth``. Handlers are
+# already async, so the aiosqlite read runs in the handler's own loop — no sync
+# bridge. Search is untouched (properties-only, FINDING B).
 
 from __future__ import annotations
 
@@ -217,9 +226,12 @@ async def _atlas_describe_handler(
     if introspector is not None:
         # Fail-closed inside: a miss OR a raising introspector returns None,
         # and the id falls through to the normal unknown-id error below.
-        from pocketpaw.atlas.fabric import describe_fabric_id
+        # AST-2: the async sibling ALSO awaits the optional type-level
+        # ``source_truth`` aggregate (only when the introspector exposes it;
+        # any raise leaves the key absent and the schema payload intact).
+        from pocketpaw.atlas.fabric import describe_fabric_id_async
 
-        fabric_payload = describe_fabric_id(introspector, entry_id.strip())
+        fabric_payload = await describe_fabric_id_async(introspector, entry_id.strip())
         if fabric_payload is not None:
             return _text_result(json.dumps(fabric_payload, ensure_ascii=False))
 

@@ -1,5 +1,11 @@
 # Fabric store — async SQLite operations for the ontology layer.
 # Created: 2026-03-28 — CRUD for object types, objects, and links.
+# Updated: 2026-08-17 (AST-2 — atlas type-level trust aggregate) —
+#   ``list_statement_keys`` gains two optional kwargs: ``type_id`` narrows the
+#   DISTINCT (object_id, property) walk to objects of ONE type via an indexed
+#   join (idx_statements_object ↔ idx_objects_type — still tracked-set cost,
+#   never a full-fabric scan) and ``limit`` caps the rows. Read-only,
+#   additive; existing keyword callers are byte-identical.
 # Updated: 2026-07-11 (FST-7 — freshness) — the merge-site statement pass now
 #   threads an aware-UTC ``now`` into resolve() (within-family staleness
 #   demotion live in shadow AND enforce); the divergence line gained a
@@ -2796,6 +2802,8 @@ class FabricStore:
         *,
         workspace_id: str | None = None,
         object_id: str | None = None,
+        type_id: str | None = None,
+        limit: int | None = None,
     ) -> list[tuple[str, str]]:
         """DISTINCT ``(object_id, property)`` pairs that HAVE statements (FST-6).
 
@@ -2805,21 +2813,35 @@ class FabricStore:
         not the whole fabric. ``workspace_id`` applies the standard W4a read
         scope (own rows + legacy NULL); ``object_id`` narrows to one object.
         Ordered by ``(object_id, property)`` for a deterministic walk.
+
+        ``type_id`` (AST-2) narrows to objects OF ONE TYPE — an indexed join
+        of ``fabric_statements.object_id`` (idx_statements_object) to
+        ``fabric_objects.type_id`` (idx_objects_type), so a type-level read
+        still visits only tracked keys, never the whole fabric. ``limit`` caps
+        the row count (the atlas trust aggregate passes cap+1 to detect
+        sampling in the same single query).
         """
         conditions: list[str] = []
         params: list[Any] = []
         if object_id is not None:
-            conditions.append("object_id = ?")
+            conditions.append("s.object_id = ?")
             params.append(object_id)
-        ws_cond, ws_params = _workspace_scope(workspace_id)
+        if type_id is not None:
+            conditions.append("o.type_id = ?")
+            params.append(type_id)
+        ws_cond, ws_params = _workspace_scope(workspace_id, column="s.workspace_id")
         if ws_cond:
             conditions.append(ws_cond)
             params.extend(ws_params)
+        join = " JOIN fabric_objects o ON o.id = s.object_id" if type_id is not None else ""
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = (
-            "SELECT DISTINCT object_id, property FROM fabric_statements"
-            f"{where} ORDER BY object_id, property"
+            "SELECT DISTINCT s.object_id, s.property FROM fabric_statements s"
+            f"{join}{where} ORDER BY s.object_id, s.property"
         )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
         await self._ensure_schema()
         async with self._conn() as db:
             async with db.execute(sql, params) as cur:
