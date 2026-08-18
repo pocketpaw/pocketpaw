@@ -456,11 +456,11 @@ bun run tauri build            # Production build
 
 ## Star History
 
-<a href="https://star-history.com/#pocketpaw/pocketpaw&Date">
+<a href="https://star-history.dera.page/#pocketpaw/pocketpaw&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=pocketpaw/pocketpaw&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=pocketpaw/pocketpaw&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=pocketpaw/pocketpaw&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=pocketpaw/pocketpaw&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=pocketpaw/pocketpaw&type=Date" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=pocketpaw/pocketpaw&type=Date" />
  </picture>
 </a>
 
