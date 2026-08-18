@@ -7,6 +7,7 @@ from pocketpaw_ee.cloud._core.realtime.audience import AudienceResolver
 from pocketpaw_ee.cloud._core.realtime.events import (
     GroupCreated,
     GroupMemberRemoved,
+    MessageNew,
     MessageSent,
     NotificationNew,
     SessionCreated,
@@ -126,6 +127,37 @@ async def test_message_sent_only_to_sender():
     r = AudienceResolver()
     ev = MessageSent(data={"group_id": "g1", "sender_id": "u1"})
     assert await r.audience(ev) == ["u1"]
+
+
+@pytest.mark.asyncio
+async def test_message_new_reaches_every_group_member_including_sender():
+    """message.new fans out to all group members — sender included.
+
+    The sender's other devices/tabs share the same user_id; excluding the
+    sender here used to starve the second device of the persisted message
+    (phone + desktop on one account went stale until a manual reload). The
+    originating socket dedups the echo against its optimistic row.
+    """
+
+    async def members(_gid: str) -> list[str]:
+        return ["u1", "u2"]
+
+    r = AudienceResolver(group_members=members)
+    ev = MessageNew(data={"group_id": "g1", "sender": "u1"})
+    assert set(await r.audience(ev)) == {"u1", "u2"}
+
+
+@pytest.mark.asyncio
+async def test_message_new_restricted_to_group_members():
+    """message.new must never leak outside the group's DB-resolved membership."""
+
+    async def members(gid: str) -> list[str]:
+        assert gid == "g1"
+        return ["u-alice"]
+
+    r = AudienceResolver(group_members=members)
+    ev = MessageNew(data={"group_id": "g1", "sender": "u-alice"})
+    assert await r.audience(ev) == ["u-alice"]
 
 
 @pytest.mark.asyncio
