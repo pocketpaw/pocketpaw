@@ -67,7 +67,7 @@ Sends a message to ALL of a user's connections. Includes dead connection cleanup
 
 ### broadcast_to_group(group_id, member_ids, message, exclude_user)
 
-Iterates through group member IDs and sends to each online user. The `exclude_user` parameter prevents the sender from receiving their own message (they get a separate confirmation event).
+Iterates through group member IDs and sends to each online user. The `exclude_user` parameter is available for callers that must withhold a specific user (e.g. typing indicators), but the chat message fan-out deliberately does NOT exclude the sender: `message.new` reaches every group member — sender included — so a user's other devices/tabs (same `user_id`) see the persisted message and stay in sync. The originating socket dedups the echo against its optimistic row, and `message.sent` carries the confirmation that swaps the local-{ts} id for the persisted one.
 
 ## Typing Indicators
 

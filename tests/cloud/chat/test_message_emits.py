@@ -78,7 +78,9 @@ async def test_send_message_emits_new_and_sent(mongo_db, recording_bus):
     assert len(new_evs) == 1
     assert len(sent_evs) == 1
 
-    # message.new payload must carry sender so AudienceResolver can exclude.
+    # message.new payload carries sender so the frontend renders the sender's own
+    # message on every device/tab (the sender is part of the audience so phone +
+    # desktop stay in sync; the originating socket dedups against its optimistic row).
     assert new_evs[0].data.get("sender") == "u1"
     # message.sent payload must carry sender_id so AudienceResolver can address it.
     assert sent_evs[0].data.get("sender_id") == "u1"

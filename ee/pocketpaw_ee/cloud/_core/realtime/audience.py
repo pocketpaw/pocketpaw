@@ -119,11 +119,15 @@ class AudienceResolver:
 
         # --- Messages -----------------------------------------------------------
         if t == "message.new":
-            members = await self._group(d["group_id"])
-            sender = d.get("sender")  # MessageResponse.sender
-            if sender:
-                members = [m for m in members if m != sender]
-            return members
+            # Fan out to EVERY group member, sender included. The originating
+            # socket already rendered its optimistic row and dedups this against
+            # it (the frontend swaps the local-{ts} id for the persisted id and
+            # drops the redundant echo). Excluding the sender by user_id was a
+            # cross-device sync bug: the same account on phone + desktop shares
+            # one user_id, so the second device was also treated as "the sender"
+            # and never received the persisted message — its timeline went stale
+            # until a manual reload.
+            return await self._group(d["group_id"])
         if t in {
             "message.edited",
             "message.deleted",
