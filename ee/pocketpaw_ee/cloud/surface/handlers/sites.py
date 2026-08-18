@@ -139,6 +139,26 @@
 # the entry point answers the key. (The refine half of that claim no longer
 # holds — see the next entry.)
 #
+# Changes: 2026-08-18 (fix/sites-html-refine-names-the-edit-tool) — the html
+# branches stopped denying a tool that exists. ``edit_html_file`` shipped in
+# db083bfc ("html sites could be made and published, never changed") wired all the
+# way through: service → MCP tool → ``sites_manager`` server → ``SITES_TOOL_IDS``
+# → the /sites allow-list. That commit never touched THIS file, so the refine
+# preamble kept the pre-HE-10 text telling the agent an html site "has no edit tool
+# yet" and to hand back a code block instead. The agent obeyed the prompt over its
+# own tool list — the reported symptom was it answering an edit request with
+# "editing an html site's files from chat is not wired up yet" while holding the
+# tool that does it. Four sites carried the stale claim and all four are fixed:
+# ``_refine_preamble``'s html branch (now names the tool, its ``file_path``
+# argument and its root-relative paths, mirroring the react branch),
+# ``_refine_unknown_engine_step`` (listed html as the engine with no edit tool),
+# the ``publish_step`` gate (html was excluded because no write could land — it
+# now gets the same publish step, rendered synchronous since ``build_runs_async``
+# is react-only), and ``_create_preamble``'s html branch (had no "changes go
+# through the edit tool" clause, so a follow-up change in the create conversation
+# re-created the site). Guarded by a NEW inverse test: every REGISTERED edit tool
+# must be named by its engine's refine branch — the existing gate only checked
+# that named tools exist, which is why a real tool going unnamed shipped clean.
 # Changes: 2026-08-11 (fix/sites-refine-preamble-engine-fork) — ``_refine_preamble``
 # FORKS BY ENGINE. It was written for ripple and shipped to all four: on a react,
 # html or svelte site it commanded ``pocket_specialist__edit`` (which mutates a
@@ -689,7 +709,19 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "live-data / dynamic app (dashboards, per-user data) → "
             "`mcp__pocketpaw_sites_manager__create_dynamic_site`. A described "
             "business, a desire for a 'nice' or 'modern' site, or the design "
-            "direction the user picked is NOT such a request — stay on HTML."
+            "direction the user picked is NOT such a request — stay on HTML.\n"
+            "CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further "
+            "change the user asks for in this conversation — 'change the phone "
+            "number in the footer', 'shorten the hero headline', 'add an about "
+            "page' — is `mcp__pocketpaw_sites_manager__edit_html_file` with the "
+            "SAME pocket_id, NOT a second `create_html_site` call. Calling create "
+            "again mints a SECOND site and leaves the one the user is looking at "
+            "unchanged. Send a targeted `edits` diff for a small change (an html "
+            "page is one flat document, so a rewrite re-emits the whole page to "
+            "change a line); to add a page, call it with `create=true` for the new "
+            "file and then again with `edits` on `index.html` to link to it. The "
+            "edit saves to the DRAFT — it does not publish, so keep offering the "
+            "Preview rather than announcing a live change."
         )
 
     # ASK MECHANISM — used ONLY when the agent genuinely needs a real-world FACT
@@ -992,10 +1024,10 @@ def _refine_unknown_engine_step(pocket_id: str) -> str:
 
     The read fails on a deleted pocket, a cross-workspace stamp, or a dropped
     connection — and a fifth engine in ``sites/engines.py`` with no branch here
-    lands in the same place. Every engine's edit path is a DIFFERENT tool and three
-    of the four reject a pocket from another track, so guessing is the one move
-    guaranteed to be wrong roughly three times in four. Name no tool; make the
-    agent look first.
+    lands in the same place. Every engine's edit path is a DIFFERENT tool and each
+    one rejects a pocket from another track, so guessing is the one move guaranteed
+    to be wrong roughly three times in four. Name no single tool; make the agent
+    look first.
     """
     return (
         "WHICH ENGINE AUTHORED THIS SITE COULD NOT BE DETERMINED, so do not assume "
@@ -1009,9 +1041,8 @@ def _refine_unknown_engine_step(pocket_id: str) -> str:
         "pockets carry a `source` map ({path: file contents}) instead, and the "
         "specialist CANNOT edit those — svelte uses "
         "`mcp__pocketpaw_sites_manager__edit_svelte_component`, react uses "
-        "`mcp__pocketpaw_sites_manager__edit_react_component`, and html has no "
-        "edit tool at all yet (say so plainly rather than reaching for a create "
-        "tool).\n"
+        "`mcp__pocketpaw_sites_manager__edit_react_component`, and html uses "
+        "`mcp__pocketpaw_sites_manager__edit_html_file`.\n"
         "If the read fails too, tell the user you could not load their site rather "
         "than attempting an edit blind.\n"
     )
@@ -1025,8 +1056,8 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
 
     * **which tool can edit the page at all** — ripple's content is a ``rippleSpec``
       the pocket specialist merges into; svelte, react and html carry a ``source``
-      map instead, which that tool cannot touch. Each source engine has (or lacks)
-      its own file-level edit tool;
+      map instead, which that tool cannot touch. Each source engine has its own
+      file-level edit tool, and they do not take the same arguments;
     * **whether JavaScript runs for the visitor** — a react site ships a hydrating
       client bundle by default (``sites_keep_client_bundle_default``), so "no
       JavaScript runs" is false there, while the prerender contract that DOES bind
@@ -1174,50 +1205,75 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
             " The page is a hand-authored static HTML/CSS bundle served straight "
             "from the edge — the files in the source map ARE the page."
         )
-        # THE HONEST BRANCH. html is the DEFAULT create engine and has no
-        # chat-reachable edit tool: ``create_html_site`` takes no ``pocket_id`` (it
-        # mints a new pocket, so calling it here would leave the user with a second,
-        # unrelated site), ``edit_svelte_component``'s service guard is svelte-only
-        # by design, and the uid-splice path behind the native editor
-        # (``sites/service.py::apply_leaf_edits``) is a REST route and svelte-gated
-        # too. Naming any of them would be the exact defect this fork fixes, so the
-        # branch states the gap instead. Being useful inside a real limit beats
-        # improvising outside it.
+        # THE BRANCH THAT WENT STALE. Written when html genuinely had no
+        # chat-reachable edit tool, it told the agent to hand the user a code block
+        # and say editing "is not wired up yet". ``edit_html_file`` shipped in
+        # db083bfc (service → MCP tool → ``sites_manager`` registration →
+        # ``SITES_TOOL_IDS``) and that commit never touched this file, so the prompt
+        # kept denying a capability the agent was already holding.
+        #
+        # That is the MIRROR of the defect pocketpaw/CLAUDE.md names under "The
+        # prompt may not command a tool the agent doesn't have", and it fails the
+        # same silent way: a prompt may not DENY a tool the agent DOES have. The
+        # model trusts the preamble over its own tool list, so the user is told the
+        # product cannot do something it can — and nothing errors.
+        #
+        # The argument names are read off ``edit_html_file``'s own schema rather
+        # than copied from the react branch: an html site has FILES, so the argument
+        # is ``file_path``, and its paths are root-relative with no ``src/`` prefix.
         edit_step = (
-            "YOU CANNOT WRITE THIS SITE'S FILES FROM THIS CHAT. An html site has "
-            "no edit tool yet — that is a real gap in the product, not something "
-            "to work around:\n"
-            "- the pocket specialist edits a rippleSpec. This pocket has a "
-            "`source` map instead, so it has nothing to merge into — do NOT call "
-            "it and do NOT draft a rippleSpec.\n"
-            "- the create tools take no pocket id: each one creates a NEW pocket "
-            "and a SECOND site, leaving the one the user is looking at untouched. "
-            "Do NOT call a create tool to 'apply' a change.\n"
-            "WHAT TO DO INSTEAD, in one turn: call "
-            f"`mcp__pocketpaw_pocket__get_pocket` with pocket_id `{pocket_id}` to "
-            "read the current files from its `source` map, work out exactly what "
-            "the change is, and give the user the finished replacement markup for "
-            "the file that changes (in a code block, with the file's path) plus a "
-            "one-line description of where it goes. Then say plainly that editing "
-            "an html site's files from chat is not wired up yet, so you cannot "
-            "apply it for them. Do not imply you saved, published, or previewed "
-            "anything — nothing was written.\n"
+            "Treat the user's message as an edit to ONE file. This site's content "
+            "is a `source` map ({path: file contents}), NOT a rippleSpec — there is "
+            "no widget spec here, so do NOT call the pocket specialist and do NOT "
+            "draft a rippleSpec.\n"
+            "Call `mcp__pocketpaw_sites_manager__edit_html_file` with pocket_id "
+            f"`{pocket_id}`, the `file_path` to write, and EXACTLY ONE of `edits` "
+            "(a list of {old_string, new_string} blocks — PREFER THIS, and prefer "
+            "it harder here than on the component tracks: an html page is ONE flat "
+            "document, so a whole-file rewrite means re-emitting the entire page to "
+            "change a phone number. Each old_string must match the current file "
+            "verbatim and exactly once) or `new_source` (the whole new file, for a "
+            "large rewrite). Read the file before you diff it. To ADD a page, call "
+            "it twice: once with `create=true` and `new_source` for the new file "
+            "(e.g. 'about.html'), then once with `edits` on `index.html` to link to "
+            "it. NEVER call `create_html_site` again to apply a change — it takes "
+            "no pocket id, so it mints a SECOND site pocket at a SECOND url and "
+            "leaves the one the user is looking at untouched.\n"
+            "PATHS ARE ROOT-RELATIVE: `index.html` is the page the edge serves, "
+            "alongside `styles.css`, `about.html`, `img/logo.svg`. Do NOT prefix "
+            "them with `src/` — that is the react track. The generated `_paw/` "
+            "namespace and any path climbing out with `..` are rejected.\n"
+            "THE EDIT IS SAVED TO THE DRAFT, NOT PUBLISHED. The tool returns "
+            '`status:"draft"` / `is_live:false`; nothing is built and nothing goes '
+            "live, and the user previews it under /sites. Relay the tool's own "
+            "`message` and do not tell them it is live. On `ok:false` NOTHING was "
+            "saved — relay the reason (a reserved path, the wrong engine, a file "
+            "that already exists or does not exist, an old_string that matched 0 or "
+            "more than 1 time) rather than reporting a change that did not "
+            "happen.\n"
         )
         rules = _REFINE_SHARED_RULES + (
-            "Whatever markup you hand back keeps the page working with no "
-            "JavaScript: the full resting state lives in the HTML, never rendered "
-            "only by a script.\n"
+            "Whatever markup you write keeps the page working with no JavaScript: "
+            "the full resting state lives in the HTML, never rendered only by a "
+            "script.\n"
         )
     else:
         render_truth = ""
         edit_step = _refine_unknown_engine_step(pocket_id)
         rules = _REFINE_SHARED_RULES
 
-    # html has nothing to publish FROM chat (no write landed), and the unknown
-    # branch has not established which engine it would be publishing — naming a
-    # publish flow in either would invite the agent to publish the LAST build as
-    # if it carried the change the user just asked for.
-    publish_step = "" if engine in (None, "html") else _refine_publish_step(engine, pocket_id)
+    # html was excluded here only because no write could land on it. Now that
+    # ``edit_html_file`` stages a draft exactly as svelte and react do, it earns the
+    # same publish step they get — leaving it out would strand the user with a
+    # saved change and no way to take it live. Its build is INLINE
+    # (``build_runs_async`` is react-only), so ``_refine_publish_step`` renders the
+    # synchronous wording for it.
+    #
+    # The UNKNOWN branch still gets nothing, for the reason it always did: it has
+    # not established which engine it would be publishing, so naming a publish flow
+    # there invites the agent to publish the LAST build as if it carried the change
+    # the user just asked for.
+    publish_step = "" if engine is None else _refine_publish_step(engine, pocket_id)
 
     return (
         f'<surface kind="sites" route="{route}" pocket="{pocket_id}"'
