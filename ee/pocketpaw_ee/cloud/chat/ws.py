@@ -10,6 +10,15 @@ Handles:
 - Presence tracking with grace period (30s before marking offline)
 - Per-socket liveness (see below)
 
+Updated: 2026-08-18 (fix/ws-fanout-stale-sockets) — the liveness verdict below
+was only consulted by ``is_online``. Fan-out (``send_to_user`` /
+``send_to_room``) still wrote to every registered socket, so a zombie kept
+receiving kernel-buffered frames and — worse — kept counting toward
+``delivered``, the signal ``push/dispatch.py`` reads to pick WS over Web Push.
+Both fan-out paths now apply the same ``_is_fresh`` gate: a stale ping-capable
+socket is skipped (not delivered) and closed best-effort via ``_close_stale``,
+exactly as ``is_online`` does. Legacy sockets are unaffected.
+
 Updated: 2026-08-11 (fix/notif-liveness-dispatch) — ``is_online`` used to mean
 "a socket object is present in the dict", which a half-open socket (laptop
 asleep, NAT timeout) satisfies indefinitely: the TCP close never arrives, so
@@ -261,17 +270,27 @@ class ConnectionManager:
 
         Returns the number of sockets that ACCEPTED the frame. Zero means the
         user looked connected but nothing was delivered (every socket was dead
-        and got pruned) — the signal ``push.dispatch.notify`` uses to fall back
-        to Web Push instead of dropping the notification.
+        and got pruned, or stale and skipped) — the signal
+        ``push.dispatch.notify`` uses to fall back to Web Push instead of
+        dropping the notification.
         """
         data = message.model_dump(mode="json")
         delivered = 0
         dead: list[WebSocket] = []
+        now = time.monotonic()
         # Iterate a COPY: a concurrent _close_stale → disconnect mutates the
         # live set, and the resulting "set changed size during iteration" fires
         # at the for statement — outside the per-send try — so it would escape
         # to notify() and be mistaken for a WS failure, skipping the fallback.
         for ws in list(self.get_user_connections(user_id)):
+            # Same verdict as is_online: a stale ping-capable socket is a
+            # zombie. Writing to it "succeeds" (kernel buffer) and would count
+            # as delivered — which is exactly the signal dispatch reads to skip
+            # Web Push. Skip it and close it best-effort instead; the receive
+            # loop then runs the normal disconnect/presence path.
+            if not self._is_fresh(ws, now=now):
+                self._close_stale(ws)
+                continue
             try:
                 await ws.send_json(data)
             except Exception:
@@ -328,10 +347,15 @@ class ConnectionManager:
         """
         data = message.model_dump(mode="json")
         dead: list[WebSocket] = []
+        now = time.monotonic()
         for ws, room in list(self._ws_to_room.items()):
             if room != group_id:
                 continue
             if exclude_user and self._ws_to_user.get(ws) == exclude_user:
+                continue
+            # Same freshness gate as send_to_user — see the note there.
+            if not self._is_fresh(ws, now=now):
+                self._close_stale(ws)
                 continue
             try:
                 await ws.send_json(data)

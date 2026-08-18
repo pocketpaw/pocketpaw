@@ -65,6 +65,8 @@ This design prevents false offline notifications when a user just closed one of 
 
 Sends a message to ALL of a user's connections. Includes dead connection cleanup — if `send_json` raises an exception (broken pipe, closed socket), the connection is removed via `disconnect()`. This prevents stale connections from accumulating.
 
+**Freshness gate (2026-08-18).** Before each send, `send_to_user` and `send_to_room` (typing/read receipts) evaluate the same `_is_fresh` verdict `is_online` uses. A ping-capable socket with no inbound frame inside `LIVENESS_STALE_SECONDS` is a zombie: it is skipped, NOT counted in the returned delivered total (the signal `push/dispatch.py` reads to choose WS over Web Push), and closed best-effort via `_close_stale` so the router's receive loop runs the normal disconnect/presence path. Sockets that have never pinged keep the legacy live-while-registered behaviour and are always sent to.
+
 ### broadcast_to_group(group_id, member_ids, message, exclude_user)
 
 Iterates through group member IDs and sends to each online user. The `exclude_user` parameter is available for callers that must withhold a specific user (e.g. typing indicators), but the chat message fan-out deliberately does NOT exclude the sender: `message.new` reaches every group member — sender included — so a user's other devices/tabs (same `user_id`) see the persisted message and stay in sync. The originating socket dedups the echo against its optimistic row, and `message.sent` carries the confirmation that swaps the local-{ts} id for the persisted one.

@@ -1,5 +1,12 @@
 """Tests for the WebSocket connection manager.
 
+Updated: 2026-08-18 (fix/ws-fanout-stale-sockets) — added the fan-out
+freshness block at the bottom. ``send_to_user`` / ``send_to_room`` now consult
+the same ``_is_fresh`` verdict as ``is_online``: a stale ping-capable socket is
+skipped (not counted delivered) and closed best-effort instead of being written
+to. ``test_outbound_send_does_not_resurrect_a_zombie`` was restructured to
+match — it sends to a fresh socket first, then ages it.
+
 Updated: 2026-08-11 (fix/notif-liveness-dispatch) — added the liveness block at
 the bottom. ``is_online`` is now capability-gated: a socket that has proved it
 pings is held to an INBOUND-traffic deadline, everything else keeps the legacy
@@ -286,12 +293,19 @@ async def test_outbound_send_does_not_resurrect_a_zombie(cm):
     # THE busy-workspace bug: send_json to a half-open socket succeeds (the
     # kernel buffers the write), so if outbound counted as proof of life,
     # ordinary workspace fan-out would keep a dead socket "fresh" forever and
-    # the notification would keep going into the void.
-    await _stale_ping_capable(cm)
+    # the notification would keep going into the void. Send while fresh (so
+    # the outbound stamp is recorded), then age the inbound stamp: the accepted
+    # write must not rescue the verdict.
+    ws = AsyncMock()
+    await cm.connect(ws, "u1")
+    cm.mark_ping_capable(ws)
 
     delivered = await cm.send_to_user("u1", WsOutbound(type="test", data={}))
-
     assert delivered == 1  # the write "succeeded"...
+    assert ws in cm._ws_last_outbound
+
+    _backdate_inbound(cm, ws, LIVENESS_STALE_SECONDS + 1)
+
     assert not cm.is_online("u1")  # ...and proved nothing.
 
 
@@ -428,3 +442,87 @@ def test_touch_ignores_unknown_socket(cm):
     ws = AsyncMock()
     cm.touch(ws)
     assert ws not in cm._ws_last_inbound
+
+
+# ---------------------------------------------------------------------------
+# Fan-out freshness (fix/ws-fanout-stale-sockets, 2026-08-18)
+#
+# The liveness verdict above was only consulted by is_online. Fan-out still
+# wrote to every registered socket, so a zombie kept receiving kernel-buffered
+# frames AND kept counting toward `delivered` — the signal push/dispatch reads
+# to choose WS over Web Push. send_to_user / send_to_room now apply the same
+# _is_fresh gate: a stale ping-capable socket is skipped, not counted, and
+# closed best-effort exactly as is_online does. Legacy sockets are untouched.
+# ---------------------------------------------------------------------------
+
+
+async def test_send_to_user_skips_stale_ping_capable_socket(cm):
+    ws = await _stale_ping_capable(cm)
+
+    delivered = await cm.send_to_user("u1", WsOutbound(type="test", data={}))
+
+    assert delivered == 0
+    ws.send_json.assert_not_awaited()
+    # Closed best-effort through the same in-flight-guarded path as is_online:
+    # one close task, held strongly, and NOT unregistered here — disconnect()
+    # owns that so presence.offline still fires through the receive loop.
+    assert ws in cm._closing
+    assert len(cm._close_tasks) == 1
+    assert ws in cm.get_user_connections("u1")
+    await asyncio.sleep(0)
+    assert ws.close.await_count == 1
+
+
+async def test_repeated_sends_do_not_spawn_duplicate_closes_for_stale_socket(cm):
+    # Busy-workspace fan-out hits the same zombie many times per second.
+    ws = await _stale_ping_capable(cm)
+
+    for _ in range(5):
+        assert await cm.send_to_user("u1", WsOutbound(type="test", data={})) == 0
+
+    assert len(cm._close_tasks) == 1
+    await asyncio.sleep(0)
+    assert ws.close.await_count == 1
+
+
+async def test_send_to_user_fresh_and_legacy_sockets_still_receive(cm):
+    # Multi-device: a fresh ping-capable tab, a legacy (never-pinged) tab, and
+    # a zombie. Only the zombie is skipped; legacy keeps live-while-registered.
+    fresh = AsyncMock()
+    legacy = AsyncMock()
+    zombie = AsyncMock()
+    await cm.connect(fresh, "u1")
+    await cm.connect(legacy, "u1")
+    await cm.connect(zombie, "u1")
+    cm.mark_ping_capable(fresh)
+    cm.mark_ping_capable(zombie)
+    _backdate_inbound(cm, legacy, LIVENESS_STALE_SECONDS * 100)
+    _backdate_inbound(cm, zombie, LIVENESS_STALE_SECONDS + 1)
+
+    delivered = await cm.send_to_user("u1", WsOutbound(type="test", data={}))
+
+    assert delivered == 2
+    fresh.send_json.assert_awaited_once()
+    legacy.send_json.assert_awaited_once()
+    zombie.send_json.assert_not_awaited()
+    assert legacy not in cm._closing
+
+
+async def test_send_to_room_skips_stale_socket(cm):
+    fresh = AsyncMock()
+    zombie = AsyncMock()
+    await cm.connect(fresh, "u1")
+    await cm.connect(zombie, "u2")
+    cm.join_room(fresh, "g1")
+    cm.join_room(zombie, "g1")
+    cm.mark_ping_capable(zombie)
+    _backdate_inbound(cm, zombie, LIVENESS_STALE_SECONDS + 1)
+
+    await cm.send_to_room("g1", WsOutbound(type="typing", data={}))
+
+    fresh.send_json.assert_awaited_once()
+    zombie.send_json.assert_not_awaited()
+    assert zombie in cm._closing
+    assert zombie in cm.get_user_connections("u2")  # disconnect() owns removal
+    await asyncio.sleep(0)
+    assert zombie.close.await_count == 1
