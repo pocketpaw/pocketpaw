@@ -1,0 +1,279 @@
+# tests/cloud/test_paw_bar_appearance.py — the owner's Paw Bar appearance.
+#
+# Created 2026-08-19. Two things are being pinned, and the second matters more
+# than the first.
+#
+# (1) The wire finally carries something. ``_pawbar_frame_config`` answered
+#     ``"tokens": {}`` from the day the glass bar shipped — the widget read the
+#     map and injected it as ``--pawbar-*`` custom properties, and nothing ever
+#     filled it — and never emitted ``theme`` at all, which is why every bar was
+#     dark regardless of what an owner wanted.
+#
+# (2) Every value in this model becomes the RIGHT-HAND SIDE of a CSS custom
+#     property inside a document the widget serves. So an unvalidated value is a
+#     style injection, and a URL field is an exfiltration channel — ``url(...)``
+#     fires a request that carries a referrer. The validators are the boundary,
+#     which makes them worth attacking in a test rather than trusting.
+
+from __future__ import annotations
+
+import pytest
+
+from pocketpaw.paw_bar.appearance import (
+    FONT_STACKS,
+    ConciergeAppearance,
+    HeroAppearance,
+    LauncherAppearance,
+    MotionAppearance,
+)
+
+# --------------------------------------------------------------------------- #
+# Defaults — an unstyled site must be unchanged
+# --------------------------------------------------------------------------- #
+
+
+def test_defaults_reproduce_todays_look():
+    """A Site nobody has styled renders the bar it always rendered. This is what
+    makes the field additive and the migration unnecessary."""
+    look = ConciergeAppearance()
+
+    assert look.surface_mode == "dark"
+    assert look.radius == 20
+    assert look.blur == 28
+    assert look.motion.preset == "spring"
+    tokens = look.tokens()
+    assert tokens["--pawbar-radius"] == "20px"
+    assert tokens["--pawbar-blur"] == "28px"
+    assert tokens["--pawbar-font"] == FONT_STACKS["system"]
+
+
+def test_unset_optional_tokens_are_absent_rather_than_restated():
+    """A token the owner did not set must NOT be emitted at its default value.
+
+    The widget's own stylesheet is the source of the base look; restating it
+    here would freeze every site to the values current at save time, so a later
+    retune of the base would reach nobody.
+    """
+    look = ConciergeAppearance(accent="")
+    assert "--pawbar-accent" not in look.tokens()
+
+
+# --------------------------------------------------------------------------- #
+# The validation boundary
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "red; background: url(https://evil.test/x)",
+        "var(--anything)",
+        "expression(alert(1))",
+        "#12",
+        "#gggggg",
+        "url(https://evil.test/pixel.png)",
+        "",
+    ],
+)
+def test_a_colour_that_is_not_plain_hex_is_dropped(hostile: str):
+    """Anything that is not ``#rgb`` / ``#rrggbb`` becomes "" and is therefore
+    never emitted. A colour field that accepted general CSS would let an owner —
+    or anyone who reached the settings endpoint — append a second declaration."""
+    assert ConciergeAppearance(accent=hostile).accent == ""
+    assert "--pawbar-accent" not in ConciergeAppearance(accent=hostile).tokens()
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "javascript:alert(1)",
+        "JavaScript:alert(1)",
+        "vbscript:msgbox",
+        "file:///etc/passwd",
+        "//evil.test/x.png",
+        "http://insecure.test/x.png",  # mixed content — can only ever fail
+        'https://evil.test/x.png"); background: url("https://evil.test/steal',
+        "https://evil.test/a b.png",
+    ],
+)
+def test_an_unsafe_image_url_is_dropped(hostile: str):
+    """Only https:// and data:image/ survive, and neither may carry a character
+    that could terminate the ``url()`` token and open a new declaration."""
+    assert HeroAppearance(image_url=hostile).image_url == ""
+    assert LauncherAppearance(icon_url=hostile).icon_url == ""
+    assert ConciergeAppearance(agent_avatar_url=hostile).agent_avatar_url == ""
+    assert ConciergeAppearance(team_avatar_urls=[hostile]).team_avatar_urls == []
+
+
+def test_a_safe_image_url_survives_and_is_quoted_by_us():
+    url = "https://cdn.example.test/hero.jpg"
+    look = ConciergeAppearance(hero=HeroAppearance(style="image", image_url=url))
+
+    assert look.tokens()["--pawbar-hero-image"] == f'url("{url}")'
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("radius", 9999, 32),
+        ("radius", -40, 0),
+        ("blur", 9999, 48),
+        ("blur", -1, 0),
+    ],
+)
+def test_lengths_are_clamped_not_echoed(field: str, value: int, expected: int):
+    """A length is re-formatted from a clamped int, so a stored value can never
+    be a string that carries anything but digits."""
+    look = ConciergeAppearance(**{field: value})
+    assert getattr(look, field) == expected
+    assert look.tokens()[f"--pawbar-{field}"] == f"{expected}px"
+
+
+def test_an_unknown_font_falls_back_rather_than_being_stored():
+    """The family is looked up in a fixed table by key, never accepted as a
+    string — which is what stops a font field from being a CSS grammar."""
+    look = ConciergeAppearance(font="'; background: red; font-family: 'x")
+    assert look.font == "system"
+    assert look.tokens()["--pawbar-font"] == FONT_STACKS["system"]
+
+
+@pytest.mark.parametrize(
+    ("field", "cls", "hostile", "expected"),
+    [
+        ("surface_mode", ConciergeAppearance, "neon", "dark"),
+        ("style", HeroAppearance, "iframe", "gradient"),
+        ("position", LauncherAppearance, "middle-of-the-screen", "bottom-right"),
+        ("preset", MotionAppearance, "seizure", "spring"),
+    ],
+)
+def test_every_enum_field_falls_back_to_a_known_value(field, cls, hostile, expected):
+    assert getattr(cls(**{field: hostile}), field) == expected
+
+
+def test_reduced_motion_cannot_be_switched_off():
+    """Not an owner's choice to make. A widget that ignores
+    prefers-reduced-motion is an accessibility defect on somebody else's
+    website, and the owner does not get to trade their visitors' setting away."""
+    assert MotionAppearance(honor_reduced_motion=False).honor_reduced_motion is True
+
+
+def test_team_avatars_are_capped_and_filtered():
+    look = ConciergeAppearance(
+        team_avatar_urls=[
+            "https://a.test/1.png",
+            "javascript:alert(1)",
+            "https://a.test/2.png",
+            "https://a.test/3.png",
+            "https://a.test/4.png",
+        ]
+    )
+    assert look.team_avatar_urls == [
+        "https://a.test/1.png",
+        "https://a.test/2.png",
+        "https://a.test/3.png",
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Motion presets
+# --------------------------------------------------------------------------- #
+
+
+def test_motion_presets_render_distinct_token_sets():
+    calm = ConciergeAppearance(motion=MotionAppearance(preset="subtle")).tokens()
+    loud = ConciergeAppearance(motion=MotionAppearance(preset="expressive")).tokens()
+
+    assert calm["--pawbar-duration"] != loud["--pawbar-duration"]
+    assert loud["--pawbar-motion-scale"] == "1.35"
+
+
+def test_the_none_preset_stops_travel_without_stopping_state_changes():
+    """``none`` zeroes duration and travel. Opacity transitions still resolve at
+    0ms, so a state change is instant rather than invisible."""
+    tokens = ConciergeAppearance(motion=MotionAppearance(preset="none")).tokens()
+
+    assert tokens["--pawbar-duration"] == "0ms"
+    assert tokens["--pawbar-motion-scale"] == "0"
+
+
+def test_a_solid_hero_collapses_both_stops_to_one_colour():
+    """One code path in the widget (a gradient) rather than a second background
+    rule that has to be kept in sync with the first."""
+    tokens = ConciergeAppearance(
+        hero=HeroAppearance(style="solid", from_color="#123456", to_color="#abcdef")
+    ).tokens()
+
+    assert tokens["--pawbar-hero-from"] == "#123456"
+    assert tokens["--pawbar-hero-to"] == "#123456"
+
+
+# --------------------------------------------------------------------------- #
+# The seam — the frame config that answered {} for a year
+# --------------------------------------------------------------------------- #
+
+
+def _config(**ov):
+    from pocketpaw_ee.paw_bar.router import _pawbar_frame_config
+
+    kwargs = dict(
+        site_key="site_key_" + "a" * 24,
+        widget_id="w-1",
+        api_base="https://api.test/api/v1",
+        parent_origin="https://brewco.com",
+        greeting="",
+    )
+    kwargs.update(ov)
+    return _pawbar_frame_config(**kwargs)
+
+
+def test_the_frame_finally_emits_real_tokens():
+    """The whole point. ``tokens`` was a hardcoded ``{}`` while the widget read
+    it and injected it, so the white-label path was built end to end and dead."""
+    look = ConciergeAppearance(accent="#ff0055", radius=4, surface_mode="light")
+
+    config = _config(appearance=look)
+
+    assert config["tokens"]["--pawbar-accent"] == "#ff0055"
+    assert config["tokens"]["--pawbar-radius"] == "4px"
+    # ``theme`` was never emitted at all, so the widget's `?? 'dark'` fallback
+    # always won and a light bar was unreachable.
+    assert config["theme"] == "light"
+
+
+def test_a_site_with_no_appearance_still_frames():
+    """A Site document written before this field exists deserializes without it,
+    and the public frame must render for those rather than 500 the visitor."""
+    config = _config(appearance=None)
+
+    assert config["theme"] == "dark"
+    assert config["tokens"]["--pawbar-radius"] == "20px"
+    assert config["agentName"] == ""
+
+
+def test_agent_identity_reaches_the_widget():
+    look = ConciergeAppearance(
+        agent_name="Fin",
+        agent_subtitle="The team can also help",
+        team_avatar_urls=["https://a.test/1.png"],
+    )
+
+    config = _config(appearance=look)
+
+    assert config["agentName"] == "Fin"
+    assert config["agentSubtitle"] == "The team can also help"
+    assert config["avatars"] == ["https://a.test/1.png"]
+
+
+def test_a_hostile_appearance_reaches_the_frame_defanged():
+    """End to end: the validators run on construction, so what the frame emits
+    is already safe rather than relying on a second scrub at render time."""
+    look = ConciergeAppearance(
+        accent="red; background: url(https://evil.test/x)",
+        hero=HeroAppearance(style="image", image_url="javascript:alert(1)"),
+    )
+
+    tokens = _config(appearance=look)["tokens"]
+
+    assert "--pawbar-accent" not in tokens
+    assert "--pawbar-hero-image" not in tokens
+    assert not any("evil.test" in v for v in tokens.values())

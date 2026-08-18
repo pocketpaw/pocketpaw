@@ -425,6 +425,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from pocketpaw.paw_bar.appearance import ConciergeAppearance
 from pocketpaw.paw_bar.models import (
     MAX_PAYLOAD_BYTES,
     ConversationState,
@@ -828,6 +829,7 @@ def _pawbar_frame_config(
     parent_origin: str,
     greeting: str,
     starters: list[str] | None = None,
+    appearance: ConciergeAppearance | None = None,
 ) -> dict[str, Any]:
     """Build the ``window.__PAWBAR__`` bootstrap config shared by the public frame
     and the owner preview frame (D5).
@@ -843,7 +845,13 @@ def _pawbar_frame_config(
     no starters is unchanged. On this branch the Agent model carries no
     ``conversation_starters`` field (the ASG-1 identity fields are absent), so
     callers pass ``[]`` today — the wire is in place for when those fields land.
+
+    ``appearance`` is the owner's white-label settings (2026-08-19). ``None``
+    renders the defaults, which reproduce the look every bar had before this
+    existed — so a Site nobody has styled is byte-identical to before apart from
+    the token map now carrying the base values explicitly.
     """
+    look = appearance or ConciergeAppearance()
     return {
         "siteKey": site_key,
         "widgetId": widget_id or "",
@@ -855,7 +863,17 @@ def _pawbar_frame_config(
         "greeting": greeting or "",
         # E3 — the bound agent's conversation starters (capped 4).
         "starters": (starters or [])[:4],
-        "tokens": {},
+        # 2026-08-19 — the owner's appearance, rendered to --pawbar-* custom
+        # properties. This line answered ``{}`` from the day the glass bar
+        # shipped: the widget read the map and injected it, and nothing ever
+        # filled it, so the whole white-label path was dead wire. ``theme`` was
+        # never emitted at all, which is why every bar was dark regardless.
+        "tokens": look.tokens(),
+        "theme": look.surface_mode,
+        "agentName": look.agent_name,
+        "agentSubtitle": look.agent_subtitle,
+        "agentAvatar": look.agent_avatar_url,
+        "avatars": list(look.team_avatar_urls),
     }
 
 
@@ -996,6 +1014,9 @@ async def frame(
         parent_origin=_safe_parent_origin(po, site.allowed_origins),
         greeting=site.concierge_greeting or "",
         starters=[],
+        # Read off the Site every request, never cached, so an owner saving a
+        # colour sees it on the next reload rather than after a redeploy.
+        appearance=getattr(site, "concierge_appearance", None),
     )
     html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT)
     return HTMLResponse(
@@ -1354,6 +1375,11 @@ class ConciergeSettingsUpdate(BaseModel):
 
     concierge_enabled: bool | None = None
     concierge_greeting: str | None = None
+    # 2026-08-19. Sent WHOLE rather than per-field: the editor round-trips the
+    # block it was handed, and every field validates itself into a safe literal
+    # (see paw_bar/appearance.py), so a partial merge would only add a way for
+    # half a theme to be stored.
+    concierge_appearance: ConciergeAppearance | None = None
     # Retention switch for the VISITOR half of a transcript. Off means the
     # concierge keeps working and keeps storing its own replies, but the visitor's
     # words are never written down. Turning it off does NOT purge what is already
@@ -1368,6 +1394,7 @@ class ConciergeSettingsResponse(BaseModel):
     concierge_enabled: bool
     concierge_greeting: str
     concierge_store_transcripts: bool
+    concierge_appearance: ConciergeAppearance = Field(default_factory=ConciergeAppearance)
 
 
 async def _load_site_scoped(site_id: str, workspace_id: str) -> Any:
@@ -1411,6 +1438,10 @@ async def get_site_concierge_settings(
         concierge_enabled=site.concierge_enabled,
         concierge_greeting=site.concierge_greeting,
         concierge_store_transcripts=site.concierge_store_transcripts,
+        # getattr, not attribute access: a Site document written before this
+        # field existed deserializes without it, and the settings page must open
+        # for those rather than 500 on the owner who has not saved a theme yet.
+        concierge_appearance=getattr(site, "concierge_appearance", None) or ConciergeAppearance(),
     )
 
 
@@ -1460,6 +1491,10 @@ async def update_site_concierge_settings(
         concierge_enabled=site.concierge_enabled,
         concierge_greeting=site.concierge_greeting,
         concierge_store_transcripts=site.concierge_store_transcripts,
+        # getattr, not attribute access: a Site document written before this
+        # field existed deserializes without it, and the settings page must open
+        # for those rather than 500 on the owner who has not saved a theme yet.
+        concierge_appearance=getattr(site, "concierge_appearance", None) or ConciergeAppearance(),
     )
 
 
@@ -2665,6 +2700,7 @@ async def get_site_preview_frame(
         parent_origin=_safe_parent_origin(dash, [dash]),
         greeting=site.concierge_greeting or "",
         starters=await _bound_agent_starters(widget.agent_id),
+        appearance=getattr(site, "concierge_appearance", None),
     )
     # Preview-only dark page so the transparent bar reads as sitting on the dark
     # dashboard, not a white canvas. The public /paw-bar/frame passes no page_bg
