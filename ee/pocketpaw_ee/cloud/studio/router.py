@@ -10,7 +10,7 @@
 #   GET  /studio/generations     → GenerationsResponse    (per-workspace history)
 #   POST /studio/generate        → Generation             (LiteLLM + fal.ai)
 #   GET  /studio/generations/{id}→ Generation
-#   POST /studio/edit            → 501 (ops not wired through the gateway yet)
+#   POST /studio/edit            → Generation             (fal.ai edit endpoints)
 #   POST /studio/suggest-prompt  → PromptSuggestion       (heuristic, no LLM)
 #
 # The tenant is attached per-request via ``current_workspace_id`` (the frontend
@@ -97,14 +97,21 @@ async def edit(
     req: schemas.EditRequest,
     workspace_id: str = Depends(current_workspace_id),
 ) -> schemas.Generation:
-    """Run a canvas edit op (inpaint/expand/upscale/variations/remove-bg).
+    """Run a canvas edit op (inpaint/expand/upscale/variations/remove-bg/edit/
+    sketch-to-image) directly against fal.ai.
 
-    Not wired through the model gateway yet — returns a clean 501 so the
-    frontend's optimistic tile resolves to a visible error instead of hanging."""
+    The LiteLLM gateway serves generation models only — fal's image-edit
+    endpoints are called by the service (cloud.studio.fal_edit), and the result
+    is saved through media storage as a NEW generation. Bad input (unknown op /
+    missing prompt / bad sourceUrl) returns 400; a fal upstream failure 502."""
     try:
         return await service.edit(req, workspace_id=workspace_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except service.StudioNotSupported as exc:
         raise HTTPException(501, str(exc)) from exc
+    except service.StudioUpstreamError as exc:
+        raise HTTPException(502, f"Image edit failed: {exc}") from exc
 
 
 @router.post("/suggest-prompt", response_model=schemas.PromptSuggestion)
@@ -119,6 +126,7 @@ async def suggest_prompt(req: schemas.SuggestPromptRequest) -> schemas.PromptSug
 # active canvas and calls PUT (an UPSERT — create-or-update), so an offline-first
 # cache plus a server round-trip keeps every project across devices. Node/edge
 # payloads are opaque (the backend never inspects them).
+
 
 @router.get("/flow-projects", response_model=schemas.FlowProjectsResponse)
 async def list_flow_projects(

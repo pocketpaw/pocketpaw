@@ -1,14 +1,19 @@
 # ee/pocketpaw_ee/cloud/studio — the /studio direct describe-to-media HTTP surface.
 #
 # The paw-enterprise /studio page drives its composer + gallery through a
-# typed StudioBackend adapter. Until now it ran against an OFFLINE mock backend
-# (SVG placeholder "images") because the real endpoints didn't exist. This
-# package ships the real surface: a thin FastAPI router (``router``) over a
-# service layer (``service``) that maps the LiteLLM proxy's model catalog to the
-# Studio model list, runs image generation through the proxy's OpenAI-compatible
-# ``/v1/images/generations`` endpoint (the same gateway the agent-side media MCP
-# uses — fal.ai image models are already served), and persists a per-workspace
-# generation history so the gallery survives reloads.
+# typed StudioBackend adapter. This package ships the real surface: a thin
+# FastAPI router (``router``) over a service layer (``service``) that maps the
+# LiteLLM proxy's model catalog to the Studio model list, runs image generation
+# through the proxy's OpenAI-compatible ``/v1/images/generations`` endpoint (the
+# same gateway the agent-side media MCP uses — fal.ai image models are already
+# served), and persists a per-workspace generation history so the gallery
+# survives reloads.
+#
+# Canvas EDIT ops (inpaint / expand-outpaint / upscale / variations / remove-bg
+# / edit / sketch-to-image) are NOT proxy-able — LiteLLM has no route for fal's
+# image-edit endpoints. They run directly against fal via ``fal_edit`` (the
+# official fal-client SDK), and their outputs persist through the same media
+# storage so the gallery + flow grow on every edit.
 #
 # Wire shapes match paw-enterprise ``src/lib/core/studio/types.ts`` exactly
 # (models/styles/generations/GenerateRequest/EditRequest/PromptSuggestion), so

@@ -17,6 +17,9 @@
 #     StudioNotSupported (until the gateway serves video models).
 #   * proxy failure — a 500 from the proxy surfaces as StudioUpstreamError.
 #   * history scoping — list_generations / get_generation are workspace-scoped.
+#   * edit — dispatch (monkeypatched fal_edit.run_fal_edit), stored-media source
+#     resolution → data URL, unknown op → StudioNotSupported, missing source →
+#     ValueError, fal failure → StudioUpstreamError.
 #
 # Created 2026-08-17 (studio-real-backend): new service tests.
 
@@ -32,12 +35,13 @@ from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.litellm_client import CatalogUpstreamError
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry, Pricing
 from pocketpaw_ee.cloud.media import storage as media_storage
-from pocketpaw_ee.cloud.studio import schemas
+from pocketpaw_ee.cloud.studio import fal_edit, schemas
 
 from pocketpaw.uploads.local import LocalStorageAdapter
 
 _PROXY_BASE = "https://proxy.test:4000"
 _PROXY_KEY = "sk-proxy-master"
+_DATA_URL = "data:image/png;base64,c3Jj"  # base64("src")
 
 
 def _entry(
@@ -109,6 +113,7 @@ def _install_transport(monkeypatch, handler) -> dict:
 
 # ── Model mapping ────────────────────────────────────────────────────────────
 
+
 async def test_list_models_maps_image_and_video_entries(monkeypatch) -> None:
     """Image entries map to StudioModel picker rows (first image is default),
     video entries are included, chat/embedding entries are excluded."""
@@ -161,9 +166,8 @@ async def test_list_models_upstream_failure_propagates(monkeypatch) -> None:
 
 # ── generate (image) ─────────────────────────────────────────────────────────
 
-async def test_generate_image_happy_path(
-    monkeypatch, proxy_env, studio_env
-) -> None:
+
+async def test_generate_image_happy_path(monkeypatch, proxy_env, studio_env) -> None:
     """A b64_json proxy result → the PNG is saved under generated/, a succeeded
     Generation is returned, and the history records it under the workspace."""
     generated, history = studio_env
@@ -222,9 +226,7 @@ async def test_generate_image_happy_path(
     assert name in service.tracked_generation_filenames()
 
 
-async def test_generate_image_url_path(
-    monkeypatch, proxy_env, studio_env
-) -> None:
+async def test_generate_image_url_path(monkeypatch, proxy_env, studio_env) -> None:
     """A proxy ``data[0].url`` result (dall-e style) is fetched and saved too."""
     generated, _ = studio_env
     png = b"\x89PNG\r\n\x1a\nfake-from-url"
@@ -271,9 +273,7 @@ async def test_generate_video_is_not_supported(monkeypatch, studio_env) -> None:
         await service.generate(req, workspace_id="ws-1")
 
 
-async def test_generate_proxy_failure_is_upstream_error(
-    monkeypatch, proxy_env, studio_env
-) -> None:
+async def test_generate_proxy_failure_is_upstream_error(monkeypatch, proxy_env, studio_env) -> None:
     """A non-2xx proxy response surfaces as StudioUpstreamError (→ 502), and
     nothing is persisted."""
 
@@ -282,15 +282,125 @@ async def test_generate_proxy_failure_is_upstream_error(
 
     _install_transport(monkeypatch, handler)
 
-    req = schemas.GenerateRequest(
-        prompt="x", model="fal_ai/fal-ai/flux/schnell", aspectRatio="1:1"
-    )
+    req = schemas.GenerateRequest(prompt="x", model="fal_ai/fal-ai/flux/schnell", aspectRatio="1:1")
     with pytest.raises(service.StudioUpstreamError):
         await service.generate(req, workspace_id="ws-1")
     assert service._load_history() == []
 
 
+# ── edit (direct fal.ai dispatch) ────────────────────────────────────────────
+
+
+async def test_edit_happy_path(monkeypatch, studio_env) -> None:
+    """A fal edit result → a NEW succeeded Generation whose asset is saved into
+    the generated dir, recorded in history, and excluded from the /media list."""
+    generated, _ = studio_env
+    png = b"\x89PNG\r\n\x1a\nedited"
+
+    async def _run_fal_edit(**kwargs):
+        assert kwargs["op"] == "upscale"
+        assert kwargs["image_data_url"].startswith("data:image/png;base64,")
+        assert kwargs["factor"] == 4
+        return [(png, "image/png")]
+
+    monkeypatch.setattr(fal_edit, "run_fal_edit", _run_fal_edit)
+
+    req = schemas.EditRequest(op="upscale", sourceUrl=_DATA_URL, factor=4)
+    gen = await service.edit(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert gen.kind == "image"
+    assert gen.model == "fal-ai/esrgan"  # DEFAULT_EDIT_MODELS["upscale"]
+    assert gen.prompt == "upscale"
+    assert len(gen.assets) == 1
+    url = gen.assets[0].url
+    assert url.startswith("/api/v1/media/")
+    name = url.rsplit("/", 1)[-1]
+    assert (generated / name).read_bytes() == png
+
+    # History: one record, scoped to ws-1, excluded from the /media list.
+    records = service._load_history()
+    assert len(records) == 1
+    assert records[0]["_workspace"] == "ws-1"
+    assert name in service.tracked_generation_filenames()
+
+
+async def test_edit_resolves_stored_media_source(monkeypatch, studio_env) -> None:
+    """A ``/api/v1/media/<name>`` sourceUrl reads the stored bytes through the
+    media adapter and hands fal a ``data:`` URL (the common edit-a-previous-
+    generation case)."""
+    generated, _ = studio_env
+    src = b"\x89PNG\r\n\x1a\nsource"
+    (generated / "src.png").write_bytes(src)
+    seen: dict = {}
+
+    async def _run_fal_edit(**kwargs):
+        seen["image_data_url"] = kwargs["image_data_url"]
+        return [(b"\x89PNG\r\n\x1a\nout", "image/png")]
+
+    monkeypatch.setattr(fal_edit, "run_fal_edit", _run_fal_edit)
+
+    req = schemas.EditRequest(op="remove-bg", sourceUrl="/api/v1/media/src.png")
+    gen = await service.edit(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert seen["image_data_url"] == fal_edit.encode_bytes(src, "image/png")
+    assert gen.model == "fal-ai/birefnet/v2"  # DEFAULT_EDIT_MODELS["remove-bg"]
+
+
+async def test_edit_unknown_op_is_not_supported(monkeypatch, studio_env) -> None:
+    req = schemas.EditRequest(op="warp", sourceUrl=_DATA_URL)
+    with pytest.raises(service.StudioNotSupported):
+        await service.edit(req, workspace_id="ws-1")
+
+
+async def test_edit_missing_source_is_valueerror(monkeypatch, studio_env) -> None:
+    req = schemas.EditRequest(op="upscale", sourceUrl="  ")
+    with pytest.raises(ValueError, match="sourceUrl is required"):
+        await service.edit(req, workspace_id="ws-1")
+
+
+async def test_edit_fal_failure_is_upstream_error(monkeypatch, studio_env) -> None:
+    """A fal upstream error surfaces as StudioUpstreamError (→ 502), and
+    nothing is persisted."""
+
+    async def _boom(**kwargs):
+        raise fal_edit.FalEditError("fal edit 'fal-ai/esrgan' failed: timeout")
+
+    monkeypatch.setattr(fal_edit, "run_fal_edit", _boom)
+
+    req = schemas.EditRequest(op="upscale", sourceUrl=_DATA_URL)
+    with pytest.raises(service.StudioUpstreamError):
+        await service.edit(req, workspace_id="ws-1")
+    assert service._load_history() == []
+
+
+async def test_edit_missing_prompt_is_valueerror(monkeypatch, studio_env) -> None:
+    """A prompt-driven op (edit) with no prompt → ValueError, so the router can
+    400 without a doomed fal round-trip. The REAL run_fal_edit raises it in
+    build_arguments before any fal call."""
+    req = schemas.EditRequest(op="edit", sourceUrl=_DATA_URL)
+    with pytest.raises(ValueError, match="prompt is required"):
+        await service.edit(req, workspace_id="ws-1")
+    assert service._load_history() == []
+
+
+async def test_edit_no_output_is_upstream_error(monkeypatch, studio_env) -> None:
+    """fal returns [] → StudioUpstreamError, nothing persisted."""
+
+    async def _run_fal_edit(**kwargs):
+        return []
+
+    monkeypatch.setattr(fal_edit, "run_fal_edit", _run_fal_edit)
+
+    req = schemas.EditRequest(op="upscale", sourceUrl=_DATA_URL)
+    with pytest.raises(service.StudioUpstreamError, match="no output images"):
+        await service.edit(req, workspace_id="ws-1")
+    assert service._load_history() == []
+
+
 # ── styles + suggest ─────────────────────────────────────────────────────────
+
 
 def test_list_styles_matches_mock() -> None:
     styles = service.list_styles()
@@ -310,6 +420,7 @@ def test_suggest_prompt_heuristic() -> None:
 
 # ── Flow projects (JSONL persistence, workspace-scoped) ─────────────────────
 
+
 def _node(node_id: str = "text_1") -> schemas.FlowNode:
     return schemas.FlowNode(
         id=node_id,
@@ -326,9 +437,7 @@ def _edge() -> schemas.FlowEdge:
 def test_save_flow_project_upserts(studio_env) -> None:
     """PUT semantics: an unknown id creates the project, a known id updates it
     in place (nodes/edges replaced, createdAt preserved, updatedAt bumped)."""
-    saved = service.save_flow_project(
-        "proj_1", "ws-1", name="Posters", nodes=[_node()], edges=[]
-    )
+    saved = service.save_flow_project("proj_1", "ws-1", name="Posters", nodes=[_node()], edges=[])
     assert saved.id == "proj_1"
     assert saved.name == "Posters"
     assert saved.nodes[0].data["text"] == "hello"

@@ -13,8 +13,12 @@
 #                         S3), return a Generation.
 #   * generations       — persisted per-workspace history (JSONL under
 #                         ~/.pocketpaw/studio) so the gallery survives reloads.
-#   * edit              — the canvas edit ops are NOT yet wired through the
-#                         gateway; the router maps this to a clear 501.
+#   * edit              — canvas edit ops (inpaint/expand/upscale/variations/
+#                         remove-bg/edit/sketch-to-image) run DIRECTLY against
+#                         fal.ai via cloud.studio.fal_edit — the LiteLLM gateway
+#                         serves generation models only and has no route for
+#                         fal's image-edit endpoints. Results persist through
+#                         media storage like generations.
 #   * suggest-prompt    — lightweight heuristic enrichment (no LLM call).
 #
 # Proxy base/key + the httpx style are REUSED from the catalog entity
@@ -44,7 +48,7 @@ from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
 from pocketpaw_ee.cloud.media import storage as media_storage
 
-from . import schemas
+from . import fal_edit, schemas
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +137,7 @@ def _history_path() -> Path:
 
 # ── Model catalog mapping ────────────────────────────────────────────────────
 
+
 def _friendly_label(model_id: str, display_name: str) -> str:
     """Human label from the catalog's display name (e.g. ``flux/schnell`` →
     ``Flux Schnell``, ``bytedance/seedream/v3/text-to-image`` → ``Seedream V3``).
@@ -220,6 +225,7 @@ def list_styles() -> list[schemas.StudioStyle]:
 
 # ── Generation history (JSONL persistence) ──────────────────────────────────
 
+
 def _load_history() -> list[dict[str, Any]]:
     """Read the persisted generation records (best-effort — a corrupt/missing
     file degrades to an empty history, never a crash)."""
@@ -255,9 +261,7 @@ def list_generations(workspace_id: str) -> list[schemas.Generation]:
     tagged with the owning workspace so multi-tenant deployments never leak."""
     records = _load_history()
     mine = [
-        r
-        for r in records
-        if r.get("_workspace") == workspace_id or r.get("_workspace") is None
+        r for r in records if r.get("_workspace") == workspace_id or r.get("_workspace") is None
     ]
     mine.sort(key=lambda r: r.get("createdAt", 0), reverse=True)
     return [schemas.Generation.model_validate(r) for r in mine]
@@ -294,6 +298,7 @@ def tracked_generation_filenames() -> set[str]:
 # projects are mutable (save = upsert, delete = remove), so the whole set is
 # rewritten on each write. The set is tiny (a handful of canvases per
 # workspace), so a full rewrite is fine and keeps the file trivially debuggable.
+
 
 def _projects_path() -> Path:
     """Get (and create) the flow-projects JSONL path under ``~/.pocketpaw/studio``
@@ -338,9 +343,7 @@ def _rewrite_projects(records: list[dict[str, Any]]) -> None:
 def list_flow_projects(workspace_id: str) -> list[schemas.FlowProject]:
     """Return the workspace's flow projects, most-recently-updated first. Records
     are tagged with the owning workspace so multi-tenant deployments never leak."""
-    mine = [
-        r for r in _load_projects() if r.get("_workspace") == workspace_id
-    ]
+    mine = [r for r in _load_projects() if r.get("_workspace") == workspace_id]
     mine.sort(key=lambda r: r.get("updatedAt", 0), reverse=True)
     return [schemas.FlowProject.model_validate(r) for r in mine]
 
@@ -405,6 +408,7 @@ def delete_flow_project(project_id: str, workspace_id: str) -> bool:
 
 
 # ── LiteLLM proxy transport (REUSED from the catalog entity) ────────────────
+
 
 def _proxy_base() -> str:
     return catalog_config.litellm_proxy_url()
@@ -484,6 +488,7 @@ def _http_error_detail(what: str, exc: httpx.HTTPStatusError) -> str:
 
 # ── Image generation (POST {proxy}/v1/images/generations) ───────────────────
 
+
 async def _proxy_generate_image(
     *,
     model: str,
@@ -537,11 +542,13 @@ async def _proxy_generate_image(
         return None, f"image generation failed: {exc}"
 
 
-async def _save_image_bytes(image_bytes: bytes) -> str:
-    """Persist one generated PNG through the media storage adapter and return
+async def _save_image_bytes(
+    image_bytes: bytes, *, mime: str = "image/png", ext: str = "png"
+) -> str:
+    """Persist one generated image through the media storage adapter and return
     its backend-relative URL (the /media router serves it). Shared with the
     agent-side media MCP so every generated asset lands on the same storage."""
-    return await media_storage.save_generated(image_bytes, mime="image/png")
+    return await media_storage.save_generated(image_bytes, mime=mime, ext=ext)
 
 
 async def _apply_style(prompt: str, style_id: str | None) -> str:
@@ -662,14 +669,116 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
     return record
 
 
+_MIME_BY_EXT: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
+def _mime_for_filename(name: str) -> str:
+    """Best-effort mime from a media filename's extension (defaults to png)."""
+    return _MIME_BY_EXT.get(Path(name).suffix.lower(), "image/png")
+
+
+async def _resolve_source_data_url(source_url: str) -> tuple[str, str]:
+    """Resolve an EditRequest ``sourceUrl`` into ``(data_url, mime)`` fal accepts
+    as an ``image_url`` input.
+
+    Handles three shapes the frontend can send:
+      * ``data:`` URL             — pass through as-is (mime parsed from header).
+      * ``http(s)://`` URL        — fetch the bytes, encode as a data URL.
+      * ``/api/v1/media/<name>``  — read the stored bytes via the media adapter
+                                    and encode as a data URL (the common case:
+                                    editing a previously generated asset).
+    """
+    s = source_url.strip()
+    if s.startswith("data:"):
+        mime = s[5:].split(";", 1)[0] or "image/png"
+        return s, mime
+    if s.startswith(("http://", "https://")):
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(s)
+            resp.raise_for_status()
+        mime = resp.headers.get("content-type", "image/png").split(";")[0].strip() or "image/png"
+        return fal_edit.encode_bytes(resp.content, mime), mime
+    name = s.rsplit("/", 1)[-1]
+    if not name or ".." in name or name != Path(name).name:
+        raise ValueError("sourceUrl must be a valid media path")
+    adapter = media_storage.get_adapter()
+    key = media_storage.media_key(name)
+    if not await adapter.exists(key):
+        raise ValueError(f"source media '{name}' not found")
+    chunks = [c async for c in adapter.open(key)]
+    data = b"".join(chunks)
+    mime = _mime_for_filename(name)
+    return fal_edit.encode_bytes(data, mime), mime
+
+
 async def edit(req: schemas.EditRequest, *, workspace_id: str) -> schemas.Generation:
-    """Canvas edit ops (inpaint/expand/upscale/variations/remove-bg) are NOT yet
-    wired through the model gateway. Raised so the router returns a clean 501 and
-    the frontend's optimistic tile resolves to a visible error instead of hanging."""
-    raise StudioNotSupported(
-        f"Edit op '{req.op}' is not wired through the model gateway yet. "
-        "Generate a new image instead."
+    """Run a canvas edit op (inpaint/expand/upscale/variations/remove-bg/edit/
+    sketch-to-image) DIRECTLY against fal.ai — the LiteLLM gateway serves
+    generation models only and has no route for fal's image-edit endpoints.
+
+    The source asset is resolved to a ``data:`` URL, dispatched to the op's
+    fal endpoint (or the ``req.model`` override), and every output image is
+    persisted through media storage. Returns a NEW ``succeeded`` Generation
+    (kept in the workspace history so the gallery + filmstrip grow). A missing
+    prompt / bad model surfaces as ValueError (router → 400); an upstream fal
+    failure surfaces as StudioUpstreamError (router → 502).
+    """
+    op = (req.op or "").strip()
+    if op not in fal_edit.SUPPORTED_OPS:
+        raise StudioNotSupported(
+            f"Edit op '{op}' is not supported. Supported: "
+            f"{', '.join(sorted(fal_edit.SUPPORTED_OPS))}."
+        )
+    if not (req.sourceUrl or "").strip():
+        raise ValueError("sourceUrl is required for an edit")
+
+    source_data_url, _ = await _resolve_source_data_url(req.sourceUrl)
+
+    try:
+        results = await fal_edit.run_fal_edit(
+            op=op,
+            image_data_url=source_data_url,
+            mask_data_url=req.maskDataUrl,
+            prompt=req.prompt,
+            direction=req.direction,
+            factor=req.factor,
+            model=req.model,
+        )
+    except fal_edit.FalEditError as exc:
+        raise StudioUpstreamError(str(exc)) from exc
+
+    if not results:
+        raise StudioUpstreamError("fal edit produced no output images")
+
+    assets: list[dict[str, Any]] = []
+    for data, mime in results:
+        url = await _save_image_bytes(data, mime=mime, ext=fal_edit.mime_to_ext(mime))
+        assets.append({"id": _seq_id("asset"), "url": url, "mime": mime})
+
+    model = (req.model or "").strip() or fal_edit.DEFAULT_EDIT_MODELS[op]
+    params: dict[str, Any] = {
+        "kind": "image",
+        "model": model,
+        "aspectRatio": "1:1",
+        "count": len(assets),
+    }
+    record = _new_generation(
+        gen_id=_seq_id("gen"),
+        prompt=(req.prompt or op).strip() or op,
+        kind="image",
+        model=model,
+        params=params,
+        assets=assets,
+        status="succeeded",
     )
+    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    return record
 
 
 def suggest_prompt(sentence: str) -> schemas.PromptSuggestion:

@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 # ── Model / style catalog ───────────────────────────────────────────────────
 
+
 class StudioModel(BaseModel):
     """One selectable generation model in the composer picker."""
 
@@ -46,6 +47,7 @@ class StudioStyle(BaseModel):
 
 
 # ── Generation domain ───────────────────────────────────────────────────────
+
 
 class GeneratedAsset(BaseModel):
     """One produced image/video file. ``url`` is a backend-relative path
@@ -140,6 +142,7 @@ class SuggestPromptRequest(BaseModel):
 # @xyflow/svelte canvas needs and never inspects it, so the node schema can grow
 # without a backend change.
 
+
 class FlowNode(BaseModel):
     """A @xyflow/svelte node snapshot (id, kind, position, and its data bag)."""
 
@@ -182,6 +185,7 @@ class FlowProjectSave(BaseModel):
 
 # ── Envelopes ───────────────────────────────────────────────────────────────
 
+
 class StudioModelsResponse(BaseModel):
     models: list[StudioModel]
 
@@ -202,6 +206,7 @@ class FlowProjectsResponse(BaseModel):
 
 
 # ── Media list (reuses the /media router's shape) ───────────────────────────
+
 
 class MediaFile(BaseModel):
     name: str

@@ -58,6 +58,7 @@ def generated(client, tmp_path) -> Path:
 
 # ── LOCAL mode ───────────────────────────────────────────────────────────────
 
+
 def test_list_media_excludes_generation_tracked_files(client, generated) -> None:
     (generated / "gen-uuid.png").write_bytes(b"png-bytes")
     (generated / "agent-uuid.png").write_bytes(b"agent-bytes")
@@ -145,6 +146,7 @@ def test_post_media_upload_sanitizes_name(client, generated) -> None:
 
 # ── REMOTE (S3) mode ─────────────────────────────────────────────────────────
 
+
 class _FakeRemoteAdapter(StorageAdapter):
     """Minimal remote adapter: no local path, an in-memory key→bytes store, and
     browse returning timestamp-prefixed keys to exercise S3-style listing."""
@@ -202,9 +204,7 @@ def remote_client(remote_adapter, monkeypatch) -> TestClient:
     return TestClient(app, raise_server_exceptions=False)
 
 
-def test_remote_list_uses_browse_and_timestamp_modified(
-    remote_client, remote_adapter
-) -> None:
+def test_remote_list_uses_browse_and_timestamp_modified(remote_client, remote_adapter) -> None:
     """S3 listing comes from browse(); the tracked key is excluded; ``modified``
     is parsed from the timestamp in the generated filename, newest first."""
     resp = remote_client.get("/api/v1/media")
@@ -222,9 +222,7 @@ def test_remote_serve_streams_bytes(remote_client, remote_adapter) -> None:
     assert resp.headers["content-type"].startswith("image/png")
 
 
-def test_remote_upload_keys_under_generated_prefix(
-    remote_client, remote_adapter
-) -> None:
+def test_remote_upload_keys_under_generated_prefix(remote_client, remote_adapter) -> None:
     resp = remote_client.post(
         "/api/v1/media",
         files={"file": ("edited.png", b"PNG-BYTES", "image/png")},

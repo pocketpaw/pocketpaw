@@ -8,7 +8,8 @@
 #   * POST /studio/generate      → a Generation; bad input → 400; video → 501;
 #                                  proxy failure → 502.
 #   * GET /studio/generations/{id} → one generation, 404 on a miss.
-#   * POST /studio/edit          → 501 (ops not wired through the gateway yet).
+#   * POST /studio/edit          → a Generation; unknown op → 501; bad input →
+#                                 400; fal upstream failure → 502.
 #   * POST /studio/suggest-prompt → PromptSuggestion from the {sentence} body.
 #   * license gate               → no override, require_license denies.
 #
@@ -58,6 +59,7 @@ def client() -> TestClient:
 
 # ── catalog reads ────────────────────────────────────────────────────────────
 
+
 def test_list_models_returns_envelope(client, monkeypatch):
     async def _list():
         return [
@@ -100,6 +102,7 @@ def test_list_styles_returns_envelope(client):
 
 
 # ── generations ──────────────────────────────────────────────────────────────
+
 
 def test_list_generations_is_workspace_scoped(client, monkeypatch):
     seen: dict = {}
@@ -197,16 +200,60 @@ def test_get_generation_not_found_is_404(client, monkeypatch):
 
 # ── edit + suggest ───────────────────────────────────────────────────────────
 
-def test_post_edit_is_501(client, monkeypatch):
+
+def test_post_edit_returns_generation(client, monkeypatch):
     async def _edit(req, *, workspace_id):
-        raise studio_service.StudioNotSupported("edit not wired")
+        assert req.op == "upscale"
+        assert req.sourceUrl == "/api/v1/media/x.png"
+        assert workspace_id == "ws-1"
+        return _generation()
 
     monkeypatch.setattr(studio_service, "edit", _edit)
     resp = client.post(
         "/api/v1/studio/edit",
-        json={"op": "upscale", "sourceUrl": "/api/v1/media/x.png"},
+        json={"op": "upscale", "sourceUrl": "/api/v1/media/x.png", "factor": 4},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "gen_abc"
+    assert resp.json()["status"] == "succeeded"
+
+
+def test_post_edit_unknown_op_is_501(client, monkeypatch):
+    async def _edit(req, *, workspace_id):
+        raise studio_service.StudioNotSupported("Edit op 'warp' is not supported")
+
+    monkeypatch.setattr(studio_service, "edit", _edit)
+    resp = client.post(
+        "/api/v1/studio/edit",
+        json={"op": "warp", "sourceUrl": "/api/v1/media/x.png"},
     )
     assert resp.status_code == 501
+
+
+def test_post_edit_bad_input_is_400(client, monkeypatch):
+    async def _edit(req, *, workspace_id):
+        raise ValueError("sourceUrl is required for an edit")
+
+    monkeypatch.setattr(studio_service, "edit", _edit)
+    resp = client.post(
+        "/api/v1/studio/edit",
+        json={"op": "upscale", "sourceUrl": ""},
+    )
+    assert resp.status_code == 400
+    assert "sourceUrl is required" in resp.json()["detail"]
+
+
+def test_post_edit_upstream_failure_is_502(client, monkeypatch):
+    async def _edit(req, *, workspace_id):
+        raise studio_service.StudioUpstreamError("fal edit failed: timeout")
+
+    monkeypatch.setattr(studio_service, "edit", _edit)
+    resp = client.post(
+        "/api/v1/studio/edit",
+        json={"op": "remove-bg", "sourceUrl": "/api/v1/media/x.png"},
+    )
+    assert resp.status_code == 502
+    assert "Image edit failed" in resp.json()["detail"]
 
 
 def test_post_suggest_prompt(client):
@@ -233,6 +280,7 @@ def test_license_gate_403_when_denied(monkeypatch):
 
 
 # ── Flow projects ────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def flow_env(tmp_path, monkeypatch):
