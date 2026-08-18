@@ -389,7 +389,11 @@ class _McpToolIds(NamedTuple):
     sites_allow: frozenset[str] | None
     studio_allow: frozenset[str] | None
     belt_allow: frozenset[str] | None
-    ship_allow: frozenset[str] | None
+    # Defaulted, unlike the fields above: a test that pins the cache by naming
+    # only the fields it knows (test_sites_handler builds one with five) must not
+    # break when a NEW surface adds an allow-list. ``None`` is the degrade value
+    # (no MCP restriction), which is the safe direction to default toward.
+    ship_allow: frozenset[str] | None = None
 
 
 # Built lazily + memoized: pulling the EE mcp-server tool-id constants at module
