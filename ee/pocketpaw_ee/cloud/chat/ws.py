@@ -17,7 +17,10 @@ receiving kernel-buffered frames and — worse — kept counting toward
 ``delivered``, the signal ``push/dispatch.py`` reads to pick WS over Web Push.
 Both fan-out paths now apply the same ``_is_fresh`` gate: a stale ping-capable
 socket is skipped (not delivered) and closed best-effort via ``_close_stale``,
-exactly as ``is_online`` does. Legacy sockets are unaffected.
+exactly as ``is_online`` does. Legacy sockets are unaffected. Each send is
+also bounded by ``SEND_TIMEOUT_SECONDS``: a back-pressured socket (client
+stopped reading) used to stall the whole inline fan-out loop; on timeout it is
+now treated as dead and dropped, never retried (see the constant's note).
 
 Updated: 2026-08-11 (fix/notif-liveness-dispatch) — ``is_online`` used to mean
 "a socket object is present in the dict", which a half-open socket (laptop
@@ -69,6 +72,18 @@ PRESENCE_GRACE_SECONDS = 30
 # sit on the boundary and flap close(1001)/reconnect. Costs only slower zombie
 # detection. Sockets that don't ping are exempt entirely (see _is_fresh).
 LIVENESS_STALE_SECONDS = 150
+# Upper bound on a single ``send_json``. uvicorn (ws=auto → the ``websockets``
+# protocol) awaits ``drain()`` inside ``send()`` with a 64 KiB write high-water
+# mark, so a client that stopped reading (backgrounded phone) eventually
+# back-pressures the write. Fan-out is awaited per audience member INLINE in
+# the emitting request (InProcessBus.publish → send_to_user), so one stuck
+# socket would stall delivery to every other member and the sender's own
+# request. On timeout the socket is DROPPED, never retried: ``websockets``
+# documents that cancelling ``send()`` mid-drain leaves the connection
+# unusable. The client reconnects (the FE bus reconnects on any close code
+# other than 1000/4001 and refetches on ``system.reconnected``). 5s is far
+# above any healthy RTT and short enough that a stalled fan-out is noticed.
+SEND_TIMEOUT_SECONDS = 5.0
 
 
 class ConnectionManager:
@@ -243,6 +258,39 @@ class ConnectionManager:
         task.add_done_callback(self._close_tasks.discard)
         task.add_done_callback(lambda _t: self._closing.discard(websocket))
 
+    async def _send_bounded(self, websocket: WebSocket, data: dict) -> bool:
+        """Send one frame, bounded by ``SEND_TIMEOUT_SECONDS``.
+
+        Returns False when the socket must be treated as dead — a raised send
+        (broken pipe, closed socket) OR a timeout. A timed-out send is not
+        retried on the same socket: ``websockets`` documents that cancelling
+        ``send()`` mid-drain leaves the connection unusable, so the caller
+        drops it and the client reconnects. See ``SEND_TIMEOUT_SECONDS``.
+        """
+        try:
+            await asyncio.wait_for(websocket.send_json(data), timeout=SEND_TIMEOUT_SECONDS)
+        except TimeoutError:
+            # asyncio.TimeoutError IS builtins.TimeoutError on 3.11+ (the
+            # project floor), so the builtin alone covers wait_for's raise;
+            # ruff UP041 rejects the redundant alias.
+            logger.warning(
+                "WS send timed out after %.1fs; dropping socket user=%s",
+                SEND_TIMEOUT_SECONDS,
+                self._ws_to_user.get(websocket),
+            )
+            # Unlike a raised send, a timed-out socket is still OPEN: the
+            # router's receive loop keeps answering the client's pings
+            # directly, so the client would think it is healthy while it no
+            # longer receives fan-out (the caller unregisters it). Tear the
+            # transport down best-effort — uvicorn's close() aborts the
+            # transport after its handshake timeout even if the write side is
+            # stuck — so the receive loop exits and the client reconnects.
+            self._close_stale(websocket)
+            return False
+        except Exception:
+            return False
+        return True
+
     def is_online(self, user_id: str) -> bool:
         """Check whether a user has at least one LIVE connection.
 
@@ -291,13 +339,11 @@ class ConnectionManager:
             if not self._is_fresh(ws, now=now):
                 self._close_stale(ws)
                 continue
-            try:
-                await ws.send_json(data)
-            except Exception:
-                dead.append(ws)
-            else:
+            if await self._send_bounded(ws, data):
                 delivered += 1
                 self._mark_outbound(ws)
+            else:
+                dead.append(ws)
         # Clean up dead connections
         for ws in dead:
             await self.disconnect(ws)
@@ -357,12 +403,10 @@ class ConnectionManager:
             if not self._is_fresh(ws, now=now):
                 self._close_stale(ws)
                 continue
-            try:
-                await ws.send_json(data)
-            except Exception:
-                dead.append(ws)
-            else:
+            if await self._send_bounded(ws, data):
                 self._mark_outbound(ws)
+            else:
+                dead.append(ws)
         for ws in dead:
             await self.disconnect(ws)
 

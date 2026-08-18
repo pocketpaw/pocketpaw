@@ -5,7 +5,10 @@ freshness block at the bottom. ``send_to_user`` / ``send_to_room`` now consult
 the same ``_is_fresh`` verdict as ``is_online``: a stale ping-capable socket is
 skipped (not counted delivered) and closed best-effort instead of being written
 to. ``test_outbound_send_does_not_resurrect_a_zombie`` was restructured to
-match — it sends to a fresh socket first, then ages it.
+match — it sends to a fresh socket first, then ages it. Also added the bounded
+send block: a ``send_json`` that exceeds ``SEND_TIMEOUT_SECONDS`` is treated
+as a dead socket (disconnected, not counted) so one back-pressured client can't
+stall fan-out to everyone else.
 
 Updated: 2026-08-11 (fix/notif-liveness-dispatch) — added the liveness block at
 the bottom. ``is_online`` is now capability-gated: a socket that has proved it
@@ -21,6 +24,7 @@ import time
 from unittest.mock import AsyncMock
 
 import pytest
+from pocketpaw_ee.cloud.chat import ws as ws_module
 from pocketpaw_ee.cloud.chat.schemas import WsOutbound
 from pocketpaw_ee.cloud.chat.ws import LIVENESS_STALE_SECONDS, ConnectionManager
 
@@ -526,3 +530,81 @@ async def test_send_to_room_skips_stale_socket(cm):
     assert zombie in cm.get_user_connections("u2")  # disconnect() owns removal
     await asyncio.sleep(0)
     assert zombie.close.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Bounded send (fix/ws-fanout-stale-sockets, 2026-08-18)
+#
+# uvicorn's websockets protocol awaits drain() inside send(), with a 64 KiB
+# write high-water mark. A client that stopped reading (backgrounded phone)
+# eventually back-pressures send_json, and because InProcessBus.publish awaits
+# send_to_user per audience member inline in the emitting request, one stuck
+# socket stalls delivery to EVERY other member and the sender's own request.
+# Each send is now bounded by SEND_TIMEOUT_SECONDS; a timeout is treated as a
+# dead socket (dropped, not retried — cancelling a send mid-drain leaves the
+# connection unusable), and the client reconnects.
+# ---------------------------------------------------------------------------
+
+
+async def _hang(*_args, **_kwargs):
+    await asyncio.sleep(1)
+
+
+async def test_send_to_user_timeout_treats_socket_as_dead(cm, monkeypatch):
+    monkeypatch.setattr(ws_module, "SEND_TIMEOUT_SECONDS", 0.01)
+    stuck = AsyncMock()
+    stuck.send_json.side_effect = _hang
+    ok = AsyncMock()
+    await cm.connect(stuck, "u1")
+    await cm.connect(ok, "u1")
+
+    delivered = await cm.send_to_user("u1", WsOutbound(type="test", data={}))
+
+    assert delivered == 1
+    ok.send_json.assert_awaited_once()
+    # Timed-out socket is dropped via the dead-cleanup path (disconnect), not
+    # merely closed — the websockets lib leaves a cancelled send unusable.
+    assert stuck not in cm.get_user_connections("u1")
+    assert ok in cm.get_user_connections("u1")
+    # ...AND its transport is torn down: unlike a raised send, a timed-out
+    # socket is still open and the router loop would keep ponging the client,
+    # which would then believe it is healthy while receiving no fan-out.
+    await asyncio.sleep(0)
+    stuck.close.assert_awaited_once()
+    assert stuck.close.await_args.kwargs.get("code") == 1001
+
+
+async def test_send_to_room_timeout_treats_socket_as_dead(cm, monkeypatch):
+    monkeypatch.setattr(ws_module, "SEND_TIMEOUT_SECONDS", 0.01)
+    stuck = AsyncMock()
+    stuck.send_json.side_effect = _hang
+    ok = AsyncMock()
+    await cm.connect(stuck, "u1")
+    await cm.connect(ok, "u2")
+    cm.join_room(stuck, "g1")
+    cm.join_room(ok, "g1")
+
+    await cm.send_to_room("g1", WsOutbound(type="typing", data={}))
+
+    ok.send_json.assert_awaited_once()
+    assert stuck not in cm.get_user_connections("u1")
+    assert cm.current_room(stuck) is None
+    await asyncio.sleep(0)
+    stuck.close.assert_awaited_once()
+
+
+async def test_send_within_timeout_still_counts(cm, monkeypatch):
+    monkeypatch.setattr(ws_module, "SEND_TIMEOUT_SECONDS", 0.5)
+
+    async def _quick(*_args, **_kwargs):
+        await asyncio.sleep(0.01)
+
+    ws = AsyncMock()
+    ws.send_json.side_effect = _quick
+    await cm.connect(ws, "u1")
+
+    delivered = await cm.send_to_user("u1", WsOutbound(type="test", data={}))
+
+    assert delivered == 1
+    assert ws in cm.get_user_connections("u1")
+    assert ws in cm._ws_last_outbound
