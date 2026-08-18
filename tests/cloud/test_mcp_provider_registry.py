@@ -107,3 +107,29 @@ def test_every_provider_class_is_registered_as_an_entry_point() -> None:
         f"McpProvider classes defined but not registered under {_GROUP}: "
         f"{sorted(unregistered)} — add them to ee/pyproject.toml, then re-sync"
     )
+
+
+def test_no_two_providers_build_the_same_server() -> None:
+    """Every provider must build a server with a UNIQUE name.
+
+    A merge once fused ``CloudShipMcpProvider``'s method bodies into
+    ``CloudGrowthMcpProvider`` (the ship ``return`` landed first, making growth's
+    own lines dead code), so two providers both built ``pocketpaw_ship``. The SDK
+    backend keys servers by name and silently kept one; the pydantic-ai bridge
+    wraps each provider in a ``PrefixedToolset`` and raised a name conflict on
+    ``pocketpaw_ship_ship_list_boxes`` for every run — while the per-provider
+    tests, which only look at one provider at a time, stayed green. Only a
+    registry-wide walk sees this.
+    """
+    built_by: dict[str, list[str]] = {}
+    for name, provider in _providers():
+        built = provider.build_server()  # type: ignore[attr-defined]
+        if built is None:
+            continue
+        server_name, _ = built
+        built_by.setdefault(server_name, []).append(name)
+    dupes = {s: p for s, p in built_by.items() if len(p) > 1}
+    assert not dupes, (
+        f"multiple providers build the same server: {dupes} — a provider's "
+        "build_server body probably got fused with a neighbour's in a merge"
+    )

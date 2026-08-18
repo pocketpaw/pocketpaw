@@ -1192,9 +1192,6 @@ class CloudGrowthMcpProvider:
 
     def build_server(self) -> tuple[str, Any] | None:
         try:
-            from pocketpaw_ee.agent.mcp_servers.ship import build_ship_server
-
-            return build_ship_server()
             from pocketpaw_ee.agent.mcp_servers.growth import build_growth_server
 
             return build_growth_server()
@@ -1203,9 +1200,6 @@ class CloudGrowthMcpProvider:
             return None
 
     def tool_ids(self) -> list[str]:
-        from pocketpaw_ee.agent.mcp_servers.ship import SHIP_TOOL_IDS
-
-        return list(SHIP_TOOL_IDS)
         from pocketpaw_ee.agent.mcp_servers.growth import GROWTH_TOOL_IDS
 
         return list(GROWTH_TOOL_IDS)
