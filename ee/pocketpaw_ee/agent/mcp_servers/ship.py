@@ -45,6 +45,12 @@ SHIP_TOOL_IDS = tuple(
         "ship_deploy_app",
         "ship_add_domain",
         "ship_create_db",
+        "ship_set_scale",
+        "ship_set_checks",
+        "ship_set_resources",
+        "ship_create_volume",
+        "ship_restart",
+        "ship_rebuild",
         "ship_logs",
         "ship_metrics",
         "ship_request_destroy",
@@ -168,11 +174,19 @@ async def _create_app_handler(args: dict) -> dict:
     from pocketpaw_ee.cloud.ship.dto import CreateAppRequest
 
     try:
+        # An agent points /ship at a git repo (source_kind="git" + repo_url) so
+        # "write code -> ship it" needs no pre-built image. The token (private
+        # repos) is accepted but NEVER echoed back — the app-wire view omits it.
+        source_kind = str(args.get("source_kind") or "").strip() or None
         body = CreateAppRequest(
             name=str(args.get("name") or ""),
             box_id=str(args.get("box_id") or ""),
             image=str(args.get("image") or ""),
             git_ref=str(args.get("git_ref") or ""),
+            **({"source_kind": source_kind} if source_kind else {}),
+            **({"repo_url": str(args["repo_url"])} if args.get("repo_url") else {}),
+            **({"repo_ref": str(args["repo_ref"])} if args.get("repo_ref") else {}),
+            **({"token": str(args["token"])} if args.get("token") else {}),
         )
         view = await service.create_app(ws, user, body)
     except Exception as exc:  # noqa: BLE001
@@ -190,12 +204,30 @@ async def _deploy_app_handler(args: dict) -> dict:
     app_id = str(args.get("app_id") or "")
     if not app_id:
         return _error_response("ship_deploy_app requires an `app_id`.")
+    from pocketpaw_ee.cloud.ship.domain import DestroyProposalView
+
     try:
         result = await service.deploy_app_or_propose(ws, user, app_id)
     except Exception as exc:  # noqa: BLE001
         return _view_error(exc, "deploy the app")
-    if isinstance(result, dict) and result.get("status") == "proposed":
-        return _success_response(result)
+    # A PROD app files a proposal instead of deploying. This used to test
+    # ``isinstance(result, dict)``, but the service returns
+    # ``DeployView | DestroyProposalView`` — both dataclasses, never a dict — so
+    # the branch was dead and a gated prod deploy fell through to ``result.id``
+    # and raised, breaking the one path the Instinct gate exists to serve.
+    if isinstance(result, DestroyProposalView):
+        return _success_response(
+            {
+                "status": "proposed",
+                "proposal_id": result.proposal_id,
+                "app_id": result.target_id,
+                "note": (
+                    "this app is PROD-flagged, so the deploy was NOT run — it is "
+                    "waiting for human approval in The Tray. Say it is awaiting "
+                    "approval; never report it as deployed."
+                ),
+            }
+        )
     return _success_response(
         {
             "deploy_id": result.id,
@@ -219,11 +251,13 @@ async def _add_domain_handler(args: dict) -> dict:
     try:
         body = AddDomainRequest(domain=str(args.get("domain") or ""))
         view = await service.add_domain(ws, user, app_id, body)
+        # The wire shape comes from the service's own mapper — DomainView has no
+        # ``url`` field, and reading one here crashed the tool AFTER the domain
+        # was routed and a real ACME certificate had been issued.
+        wire = service.domain_to_wire(view).model_dump()
     except Exception as exc:  # noqa: BLE001
         return _view_error(exc, "route the domain")
-    return _success_response(
-        {"domain": view.domain, "tls_enabled": view.tls_enabled, "url": view.url}
-    )
+    return _success_response(wire)
 
 
 async def _create_db_handler(args: dict) -> dict:
@@ -236,13 +270,137 @@ async def _create_db_handler(args: dict) -> dict:
     app_id = str(args.get("app_id") or "")
     if not app_id:
         return _error_response("ship_create_db requires an `app_id`.")
+    db_type = str(args.get("db_type") or "").strip() or None
     try:
-        view = await service.create_db(ws, user, app_id, CreateDbRequest())
+        body = CreateDbRequest(**({"db_type": db_type} if db_type else {}))
+        view = await service.create_db(ws, user, app_id, body)
     except Exception as exc:  # noqa: BLE001
         return _view_error(exc, "create the database")
     # The connection string is a secret and is NEVER returned — the app reads it
     # from the injected env var, whose NAME is all the agent needs.
     return _success_response({"service": view.service, "env_var": view.env_var})
+
+
+async def _set_scale_handler(args: dict) -> dict:
+    ws, user, err = await _with_identity("ship_set_scale")
+    if err:
+        return err
+    from pocketpaw_ee.cloud.ship import service
+    from pocketpaw_ee.cloud.ship.dto import SetScaleRequest
+
+    app_id = str(args.get("app_id") or "")
+    if not app_id:
+        return _error_response("ship_set_scale requires an `app_id`.")
+    raw = args.get("scale") or {}
+    if not isinstance(raw, dict) or not raw:
+        return _error_response('ship_set_scale requires a `scale` map, e.g. {"web": 2}.')
+    try:
+        scale = {str(k): int(v) for k, v in raw.items()}
+        view = await service.set_scale(ws, user, app_id, SetScaleRequest(scale=scale))
+    except Exception as exc:  # noqa: BLE001
+        return _view_error(exc, "scale the app")
+    return _success_response({"app_id": view.id, "scale": dict(view.scale)})
+
+
+async def _set_checks_handler(args: dict) -> dict:
+    ws, user, err = await _with_identity("ship_set_checks")
+    if err:
+        return err
+    from pocketpaw_ee.cloud.ship import service
+    from pocketpaw_ee.cloud.ship.dto import SetChecksRequest
+
+    app_id = str(args.get("app_id") or "")
+    if not app_id:
+        return _error_response("ship_set_checks requires an `app_id`.")
+    try:
+        body = SetChecksRequest(
+            zero_downtime=bool(args.get("zero_downtime", True)),
+            healthcheck_path=str(args.get("healthcheck_path") or ""),
+        )
+        view = await service.set_checks(ws, user, app_id, body)
+    except Exception as exc:  # noqa: BLE001
+        return _view_error(exc, "configure deploy checks")
+    return _success_response(
+        {
+            "app_id": view.id,
+            "zero_downtime": view.zero_downtime,
+            "healthcheck_path": view.healthcheck_path,
+        }
+    )
+
+
+async def _set_resources_handler(args: dict) -> dict:
+    ws, user, err = await _with_identity("ship_set_resources")
+    if err:
+        return err
+    from pocketpaw_ee.cloud.ship import service
+    from pocketpaw_ee.cloud.ship.dto import SetResourcesRequest
+
+    app_id = str(args.get("app_id") or "")
+    if not app_id:
+        return _error_response("ship_set_resources requires an `app_id`.")
+    try:
+        body = SetResourcesRequest(
+            cpu=int(args.get("cpu") or 0),
+            memory_mb=int(args.get("memory_mb") or 0),
+        )
+        view = await service.set_resources(ws, user, app_id, body)
+    except Exception as exc:  # noqa: BLE001
+        return _view_error(exc, "set resource limits")
+    return _success_response(
+        {"app_id": view.id, "cpu_limit": view.cpu_limit, "memory_limit_mb": view.memory_limit_mb}
+    )
+
+
+async def _create_volume_handler(args: dict) -> dict:
+    ws, user, err = await _with_identity("ship_create_volume")
+    if err:
+        return err
+    from pocketpaw_ee.cloud.ship import service
+    from pocketpaw_ee.cloud.ship.dto import CreateVolumeRequest
+
+    app_id = str(args.get("app_id") or "")
+    if not app_id:
+        return _error_response("ship_create_volume requires an `app_id`.")
+    name = str(args.get("name") or "").strip() or None
+    mount_path = str(args.get("mount_path") or "")
+    try:
+        body = CreateVolumeRequest(**({"name": name} if name else {}), mount_path=mount_path)
+        view = await service.create_volume(ws, user, app_id, body)
+    except Exception as exc:  # noqa: BLE001
+        return _view_error(exc, "create the volume")
+    # host_path is a box-side directory, not a secret — safe to report back.
+    return _success_response(
+        {
+            "app_id": view.id,
+            "volumes": [{"name": n, "mount_path": m, "host_path": h} for (n, m, h) in view.volumes],
+        }
+    )
+
+
+async def _restart_handler(args: dict) -> dict:
+    return await _lifecycle_handler(args, action="restart")
+
+
+async def _rebuild_handler(args: dict) -> dict:
+    return await _lifecycle_handler(args, action="rebuild")
+
+
+async def _lifecycle_handler(args: dict, *, action: str) -> dict:
+    ws, user, err = await _with_identity(f"ship_{action}")
+    if err:
+        return err
+    from pocketpaw_ee.cloud.ship import service
+
+    app_id = str(args.get("app_id") or "")
+    if not app_id:
+        return _error_response(f"ship_{action} requires an `app_id`.")
+    verb = service.restart_app if action == "restart" else service.rebuild_app
+    try:
+        view = await verb(ws, user, app_id)
+    except Exception as exc:  # noqa: BLE001
+        return _view_error(exc, f"{action} the app")
+    return _success_response({"app_id": view.app_id, "action": view.action})
 
 
 async def _logs_handler(args: dict) -> dict:
@@ -312,24 +470,21 @@ async def _request_destroy_handler(args: dict) -> dict:
     )
 
 
+# The agent renders the SAME wire shapes the REST surface serves, by calling the
+# service's own mappers. This module previously hand-rolled a second pair of
+# mappers, which drifted off the view field names (they read ``view.box_id`` /
+# ``view.app_id``; the views expose ``id``) and raised AttributeError on the
+# success path of four tools. One mapper per entity, owned by the service.
 def _box_wire(view: Any) -> dict[str, Any]:
-    return {
-        "id": view.box_id,
-        "provider": view.provider,
-        "ip": view.ip,
-        "status": view.status,
-        "price_monthly": view.price_monthly,
-    }
+    from pocketpaw_ee.cloud.ship import service as ship_service
+
+    return ship_service.box_to_wire(view).model_dump()
 
 
 def _app_wire(view: Any) -> dict[str, Any]:
-    return {
-        "id": view.app_id,
-        "name": view.name,
-        "box_id": view.box_id,
-        "status": view.status,
-        "urls": list(view.urls),
-    }
+    from pocketpaw_ee.cloud.ship import service as ship_service
+
+    return ship_service.app_to_wire(view).model_dump()
 
 
 def build_ship_server() -> tuple[str, Any] | None:
@@ -385,15 +540,37 @@ def build_ship_server() -> tuple[str, Any] | None:
         "ship_create_app",
         (
             "Register an app on a box. `name` is a Dokku app name (lowercase "
-            "alphanumeric + hyphens). Provide `image` to have something to deploy."
+            "alphanumeric + hyphens). Two source options: pass `source_kind='git'` "
+            "with a `repo_url` (+ optional `repo_ref`, default 'main') to build and "
+            "run from SOURCE CODE — the engine detects the stack (buildpack / "
+            "nixpacks / Dockerfile), no pre-built image needed; or pass `image` for "
+            "a pre-built container. For a private repo add `token` (write-only, "
+            "never returned)."
         ),
         {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "minLength": 1},
                 "box_id": {"type": "string", "minLength": 1},
-                "image": {"type": "string", "description": "Container image reference."},
-                "git_ref": {"type": "string", "description": "Source ref, when relevant."},
+                "source_kind": {
+                    "type": "string",
+                    "enum": ["image", "git"],
+                    "description": "'git' builds from repo_url; 'image' runs a prebuilt image.",
+                },
+                "repo_url": {
+                    "type": "string",
+                    "description": "Git repo to build from (when source_kind='git').",
+                },
+                "repo_ref": {
+                    "type": "string",
+                    "description": "Branch/tag/commit to deploy (default 'main').",
+                },
+                "token": {
+                    "type": "string",
+                    "description": "Access token for a PRIVATE repo. Write-only; never echoed.",
+                },
+                "image": {"type": "string", "description": "Prebuilt container image reference."},
+                "git_ref": {"type": "string", "description": "Legacy source ref, when relevant."},
             },
             "required": ["name", "box_id"],
             "additionalProperties": False,
@@ -439,10 +616,122 @@ def build_ship_server() -> tuple[str, Any] | None:
     @tool(
         "ship_create_db",
         (
-            "Attach a database to an app. Returns the service name and the NAME "
-            "of the env var holding the connection string — never the credential "
-            "itself."
+            "Attach a database to an app. `db_type` is postgres, redis, or mongo "
+            "(defaults to mongo). Returns the service name and the NAME of the env "
+            "var holding the connection string — never the credential itself."
         ),
+        {
+            "type": "object",
+            "properties": {
+                "app_id": {"type": "string", "minLength": 1},
+                "db_type": {
+                    "type": "string",
+                    "enum": ["postgres", "redis", "mongo"],
+                    "description": "Which database engine to provision + link.",
+                },
+            },
+            "required": ["app_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def ship_create_db(args):  # type: ignore[no-untyped-def]
+        return await _create_db_handler(args)
+
+    @tool(
+        "ship_set_scale",
+        (
+            'Set how many containers run per process type (e.g. {"web": 2, '
+            '"worker": 1}). Scaling to 0 stops a process. Runs immediately.'
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "app_id": {"type": "string", "minLength": 1},
+                "scale": {
+                    "type": "object",
+                    "description": 'Process name -> container count, e.g. {"web": 2}.',
+                    "additionalProperties": {"type": "integer", "minimum": 0},
+                },
+            },
+            "required": ["app_id", "scale"],
+            "additionalProperties": False,
+        },
+    )
+    async def ship_set_scale(args):  # type: ignore[no-untyped-def]
+        return await _set_scale_handler(args)
+
+    @tool(
+        "ship_set_checks",
+        (
+            "Configure zero-downtime deploy checks for an app. `zero_downtime` "
+            "toggles Dokku's settle-and-drain deploy (on by default); an optional "
+            "`healthcheck_path` is the HTTP path the check hits."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "app_id": {"type": "string", "minLength": 1},
+                "zero_downtime": {"type": "boolean"},
+                "healthcheck_path": {
+                    "type": "string",
+                    "description": "HTTP health path, e.g. /healthz (optional).",
+                },
+            },
+            "required": ["app_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def ship_set_checks(args):  # type: ignore[no-untyped-def]
+        return await _set_checks_handler(args)
+
+    @tool(
+        "ship_set_resources",
+        (
+            "Set an app's CPU and/or memory ceilings (the cost-control lever). "
+            "`cpu` is in Dokku's CPU units, `memory_mb` in megabytes; a 0 leaves "
+            "that dimension unlimited, but set at least one. Applies on next start."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "app_id": {"type": "string", "minLength": 1},
+                "cpu": {"type": "integer", "minimum": 0},
+                "memory_mb": {"type": "integer", "minimum": 0},
+            },
+            "required": ["app_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def ship_set_resources(args):  # type: ignore[no-untyped-def]
+        return await _set_resources_handler(args)
+
+    @tool(
+        "ship_create_volume",
+        (
+            "Attach a persistent volume to an app so its data survives redeploys. "
+            "`mount_path` is the absolute container path (e.g. /data); `name` is "
+            "optional and defaults to <app>-data. Takes effect on the next deploy."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "app_id": {"type": "string", "minLength": 1},
+                "mount_path": {
+                    "type": "string",
+                    "description": "Absolute container path to mount at, e.g. /data.",
+                },
+                "name": {"type": "string", "description": "Volume name (optional)."},
+            },
+            "required": ["app_id", "mount_path"],
+            "additionalProperties": False,
+        },
+    )
+    async def ship_create_volume(args):  # type: ignore[no-untyped-def]
+        return await _create_volume_handler(args)
+
+    @tool(
+        "ship_restart",
+        "Restart an app's containers — a graceful, reversible bounce.",
         {
             "type": "object",
             "properties": {"app_id": {"type": "string", "minLength": 1}},
@@ -450,8 +739,21 @@ def build_ship_server() -> tuple[str, Any] | None:
             "additionalProperties": False,
         },
     )
-    async def ship_create_db(args):  # type: ignore[no-untyped-def]
-        return await _create_db_handler(args)
+    async def ship_restart(args):  # type: ignore[no-untyped-def]
+        return await _restart_handler(args)
+
+    @tool(
+        "ship_rebuild",
+        "Rebuild an app from its current source/image and restart it (reversible).",
+        {
+            "type": "object",
+            "properties": {"app_id": {"type": "string", "minLength": 1}},
+            "required": ["app_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def ship_rebuild(args):  # type: ignore[no-untyped-def]
+        return await _rebuild_handler(args)
 
     @tool(
         "ship_logs",
@@ -511,6 +813,12 @@ def build_ship_server() -> tuple[str, Any] | None:
             ship_deploy_app,
             ship_add_domain,
             ship_create_db,
+            ship_set_scale,
+            ship_set_checks,
+            ship_set_resources,
+            ship_create_volume,
+            ship_restart,
+            ship_rebuild,
             ship_logs,
             ship_metrics,
             ship_request_destroy,

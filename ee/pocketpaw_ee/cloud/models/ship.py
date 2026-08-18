@@ -44,6 +44,26 @@
 # so the workspace-scoped ``/api/v1/ship`` surface has app + deploy state to
 # read. Both are workspace-indexed and read exclusively through
 # ``ee.cloud.ship.store``.
+# Changed 2026-07-23 (feat/ship-9-env-store, SHIP-9): added the encrypted env
+# store to ``ShipApp`` — ``env_vars`` maps an env var NAME to a ``ShipEnvVar``
+# sub-doc holding the value Fernet-encrypted at rest (same envelope + key,
+# ``CLOUD_ENCRYPTION_KEY``, as the box SSH key) plus a non-secret display mask
+# and a ``both|prod|preview`` scope. Plaintext env VALUES never live at rest;
+# ``env_refs`` (names only) is unchanged and still carried alongside it. Only
+# ``ee.cloud.ship.store`` encrypts/decrypts the ``enc_value`` (mirrors
+# ``decrypt_ssh_key``); no other layer ever handles the plaintext.
+# Changed 2026-07-23 (feat/ship-14-source-deploy, SHIP-14): ``ShipApp`` gained a
+# deploy SOURCE — ``source_kind`` (``image`` default keeps today's behavior, or
+# ``git``), ``repo_url`` / ``repo_ref`` for the git kind, and ``repo_token_enc``,
+# the private-repo access token Fernet-encrypted at rest EXACTLY like the env
+# store / box SSH key (``cloud._core.crypto`` + ``CLOUD_ENCRYPTION_KEY``). The
+# plaintext token never lives at rest, never serializes into a DTO/event/log, and
+# is decrypted solely inside ``ship.store`` (``decrypt_repo_token``) at deploy.
+# Changed 2026-07-24 (feat/ship-18-ops, SHIP-18): ``ShipApp`` gained Wave 3
+# operations state — a ``volumes`` list of ``ShipAppVolume`` sub-docs (persistent
+# storage mounts) and the ``cpu_limit`` / ``memory_limit_mb`` resource ceilings.
+# All additive with defaults; none carry a secret. Written only through
+# ``ee.cloud.ship.store``.
 
 from __future__ import annotations
 
@@ -106,6 +126,14 @@ class ShipBox(TimestampedDocument):
     # cloud-init and re-supplied to the provisioner on a retry. Stored so the
     # public half never has to be re-derived from the encrypted private key.
     ssh_public_key: str = ""
+    # The BOX's SSH host key (its server identity, not secret), captured on the
+    # first successful probe of a freshly provisioned box and pinned on every
+    # connect thereafter. Without this the driver could not reach a new box at
+    # all: asyncssh's default verification consults ~/.ssh/known_hosts, a brand
+    # new box is by definition absent from it, and every connection was refused —
+    # so no box could ever leave ``provisioning``. Empty means "not captured
+    # yet" (a pre-existing box), which falls back to the default posture.
+    ssh_host_key: str = ""
     # The provider's quoted monthly price for the server type, captured at
     # provision (provenance; the cost recorder in SHIP-7 reads it).
     price_monthly: float | None = None
@@ -127,13 +155,23 @@ class ShipBox(TimestampedDocument):
 
 
 # The app lifecycle. ``created`` is the birth state; a deploy job drives
-# ``deploying`` -> ``live`` / ``failed``.
-ShipAppStatus = Literal["created", "deploying", "live", "failed"]
+# ``deploying`` -> ``live`` / ``failed``. ``destroyed`` is the terminal state an
+# approved teardown writes — it MUST be a member here: the executor was already
+# writing it, and because a Beanie save does not validate on assignment the doc
+# persisted with a value outside this Literal, after which every READ of that
+# workspace's app list raised ValidationError (one torn-down app made the whole
+# list unreadable, unfixable through the API).
+ShipAppStatus = Literal["created", "deploying", "live", "failed", "destroyed"]
 
 # How the app's image is produced. v1 deploys a pre-built image reference; the
 # build strategy is recorded now so the SHIP-5 build path has somewhere to read
 # it from without a migration.
 ShipBuildPath = Literal["dockerfile", "nixpacks"]
+
+# Where the app's code comes from at deploy (SHIP-14). ``image`` (default) is the
+# pre-built-image path — today's behavior, unchanged. ``git`` pulls + builds a
+# repo (``repo_url`` / ``repo_ref``) via the engine's ``deploy_source`` verb.
+ShipSourceKind = Literal["image", "git"]
 
 
 class ShipAppDomain(BaseModel):
@@ -148,6 +186,54 @@ class ShipAppDomain(BaseModel):
     tls_enabled: bool = False
 
 
+class ShipAppDatabase(BaseModel):
+    """One database linked to an app (SHIP-17). ``env_var`` is the NAME of the
+    variable the plugin's ``:link`` injected (e.g. ``DATABASE_URL``) — the
+    connection string is a secret and is NEVER stored. A sub-document (not a bare
+    string) because the /ship console shows type + injected var per database."""
+
+    name: str
+    db_type: str
+    env_var: str
+
+
+class ShipAppVolume(BaseModel):
+    """One persistent volume mounted into an app (SHIP-18). ``name`` is the Dokku
+    storage entry, ``mount_path`` the container path it appears at, ``host_path``
+    the box-side directory backing it. Data survives redeploys. A sub-document (not
+    a bare string) because the /ship console shows the mount + backing path per
+    volume. Carries no secret."""
+
+    name: str
+    mount_path: str
+    host_path: str
+
+
+# An env var's deploy scope: applied to both deploy kinds, or only to production
+# / only to preview deploys. The deploy-time merge filters on it (SHIP-9).
+ShipEnvScope = Literal["both", "prod", "preview"]
+
+
+class ShipEnvVar(BaseModel):
+    """One env var stored for an app (SHIP-9).
+
+    ``enc_value`` is a Fernet token — the plaintext value NEVER lives at rest,
+    the same envelope the box SSH key uses (``cloud._core.crypto`` +
+    ``CLOUD_ENCRYPTION_KEY``). ``masked`` is a NON-secret display hint (a short
+    suffix, or bullets for short values) the read surface returns so the console
+    can render the var without ever decrypting it — decryption happens only at
+    deploy, inside ``ship.store``. ``scope`` decides which deploy kinds the var
+    is merged into.
+
+    Only ``ee.cloud.ship.store`` reads/writes ``enc_value`` (encrypt on upsert,
+    decrypt at deploy); no router, DTO, domain, or service ever touches it.
+    """
+
+    enc_value: str
+    masked: str = ""
+    scope: ShipEnvScope = "both"
+
+
 class ShipApp(TimestampedDocument):
     """One app deployed onto a workspace's managed box.
 
@@ -155,10 +241,12 @@ class ShipApp(TimestampedDocument):
     store asserts it). ``box_id`` is the owning ``ShipBox`` id — an app never
     outlives its box.
 
-    SECURITY: ``env_refs`` carries env var NAMES only. Values are the app's
-    secret material; they live in the app's own environment on the box and are
-    never persisted, serialized, or logged here — the same invariant SHIP-1's
-    ``AppSpec``/``DbResult`` hold at the engine boundary.
+    SECURITY: ``env_refs`` carries env var NAMES only. ``env_vars`` (SHIP-9) may
+    carry VALUES, but only as Fernet ciphertext (``ShipEnvVar.enc_value``) — the
+    plaintext never lives at rest, is never serialized into a DTO/event/log, and
+    is decrypted solely inside ``ship.store`` at deploy time (the same envelope
+    the box SSH key uses). SHIP-1's ``AppSpec``/``DbResult`` hold the matching
+    invariant at the engine boundary.
     """
 
     # Tenancy filter — every ship read scopes on this.
@@ -173,8 +261,25 @@ class ShipApp(TimestampedDocument):
     git_ref: str = ""
     # The container image reference (tag included) the engine deploys.
     image: str = ""
+    # Where the app's code comes from (SHIP-14). ``image`` (default) keeps the
+    # pre-built-image path; ``git`` builds from ``repo_url`` @ ``repo_ref``.
+    source_kind: ShipSourceKind = "image"
+    # The git clone URL + ref for ``source_kind == "git"`` (empty otherwise).
+    repo_url: str = ""
+    repo_ref: str = "main"
+    # The private-repo access token, Fernet-encrypted at rest (empty = public
+    # repo). SECURITY: the plaintext token is NEVER stored, serialized into a
+    # DTO/event/log, and is decrypted solely inside ``ship.store``
+    # (``decrypt_repo_token``) at deploy — the same envelope the env store and box
+    # SSH key use.
+    repo_token_enc: str = ""
     # Env var NAMES the app expects. NEVER values (see the class docstring).
     env_refs: list[str] = Field(default_factory=list)
+    # Encrypted env store (SHIP-9): NAME -> ``ShipEnvVar`` (value Fernet-encrypted
+    # at rest, plus a non-secret display mask + scope). The one place an app's
+    # env VALUES are persisted — encrypted, and only ever written/read through
+    # ``ship.store``. Distinct from ``env_refs`` (names an app merely expects).
+    env_vars: dict[str, ShipEnvVar] = Field(default_factory=dict)
     # Production flag — the console badges it; no behaviour hangs off it yet.
     prod: bool = False
     # Engine-reported URLs the app answers on (deploy URL + added domains).
@@ -183,8 +288,28 @@ class ShipApp(TimestampedDocument):
     domains: list[ShipAppDomain] = Field(default_factory=list)
     # The linked database service name + the env var name the link injected.
     # The connection string itself is a secret and is NEVER stored.
+    # (SHIP-3 scalar fields — kept for the first-linked db; SHIP-17's
+    # ``databases`` list is the multi-db record the console reads.)
     db_service: str = ""
     db_env_var: str = ""
+    # SHIP-17: every linked database (postgres / redis / mongo), the console's
+    # source of truth. Additive — the scalars above stay for back-compat.
+    databases: list[ShipAppDatabase] = Field(default_factory=list)
+    # SHIP-17: process scale (Procfile process type -> container count). Empty =
+    # Dokku's default (one web). Applied via ``ps:scale``.
+    scale: dict[str, int] = Field(default_factory=dict)
+    # SHIP-17: zero-downtime deploy checks (Dokku's ``checks`` plugin, on by
+    # default) + an optional HTTP health path.
+    zero_downtime: bool = True
+    healthcheck_path: str = ""
+    # SHIP-18: persistent volumes mounted into the app (``storage:create`` +
+    # ``storage:mount``). Data survives redeploys; the console reads this list.
+    volumes: list[ShipAppVolume] = Field(default_factory=list)
+    # SHIP-18: resource ceilings applied via ``resource:limit`` (BYO cost control).
+    # ``cpu_limit`` is in Dokku's CPU units, ``memory_limit_mb`` in megabytes; 0 =
+    # unset (no ceiling).
+    cpu_limit: int = 0
+    memory_limit_mb: int = 0
     # Lifecycle state (see ``ShipAppStatus``).
     status: ShipAppStatus = "created"
     # Set when a DELETE parked a teardown for human approval (SHIP-3); SHIP-4

@@ -1,5 +1,12 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-07-24 (feat/ship-17-databases) — ``_strip_builtin_servers`` now
+  also drops ``pocketpaw_ship`` (the /ship managed-deploy verbs, registered
+  always-on / ambient via the ``CloudShipMcpProvider`` mcp_servers entry point,
+  NOT in OPT_IN_MCP_SERVERS), so the external-config assertions stay focused.
+  Same regime as pocketpaw_belt / pocketpaw_workspace_admin: the /ship surface
+  profile's tool-scoping plus the Instinct gate are the boundary, not
+  registration (SHIP-4/8a drift, surfaced by the full ee suite).
 Updated: 2026-07-27 (fix/dev-ci) — ``_strip_builtin_servers`` now also drops
   ``pocketpaw_code`` (the Code Mode delegate server: readFile / search /
   listDir / writeFile), registered always-on via the ``code`` mcp_servers entry
@@ -210,6 +217,10 @@ def _strip_builtin_servers(result: dict) -> dict:
     # the RBAC gate on each tool is the security boundary, not registration
     # (WA-1, feat/workspace-admin-tools).
     out.pop(_WORKSPACE_ADMIN_MCP_SERVER_NAME, None)
+    # ``pocketpaw_ship`` is always-on too — the /ship managed-deploy verbs are
+    # registered unconditionally (ambient, NOT in OPT_IN_MCP_SERVERS); the /ship
+    # surface profile's allow_mcp_tool_ids scoping plus the Instinct gate on the
+    # destructive verbs are the security boundary, not registration (SHIP-4/8a).
     # ``pocketpaw_growth`` is always-on too — the /growth rail's agent surface
     # (prospect + draft reads, authoring writes, and the PROPOSE verbs). It
     # sends nothing; the Instinct gate is the security boundary, not

@@ -44,6 +44,7 @@ Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — added ``ShipApp`` and
 and ``get_all_documents()`` so the ``ship_apps`` / ``ship_deploys`` collections
 are wired into ``init_beanie``. Only ``ee.cloud.ship.store`` imports the doc
 classes directly (import-linter "Ship" contract).
+
 Updated: 2026-07-15 (fix/workspace-vm-map-to-db) — added ``WorkspaceVm`` (the
 workspace→Daytona-VM mapping, moved out of the local
 ``~/.pocketpaw/daytona_workspace_vm_map.json`` file into the ``workspace_vms``

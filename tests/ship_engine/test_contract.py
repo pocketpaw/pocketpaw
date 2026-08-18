@@ -59,6 +59,17 @@ async def test_deploy_app_returns_typed_result(engine_case: EngineCase) -> None:
     assert_no_secret_material(result, engine_case.secret_markers)
 
 
+async def test_deploy_source_returns_typed_result(engine_case: EngineCase) -> None:
+    # The source-deploy sibling: build+run from a git repo. The private-repo
+    # token is a registered secret marker, so the no-leak scan proves it never
+    # reaches the returned DeployResult (nor the plain repo_url it carries).
+    result = await engine_case.make_happy().deploy_source(c.APP_SPEC, c.GIT_SOURCE)
+    assert isinstance(result, DeployResult)
+    assert result.app == c.APP
+    assert isinstance(result.app_url, str)
+    assert_no_secret_material(result, engine_case.secret_markers)
+
+
 async def test_add_domain_returns_typed_result(engine_case: EngineCase) -> None:
     result = await engine_case.make_happy().add_domain(c.APP, c.DOMAIN)
     assert isinstance(result, DomainResult)
@@ -112,6 +123,9 @@ async def test_metrics_returns_typed_result(engine_case: EngineCase) -> None:
     assert result.running is True
     assert result.processes >= 1
     assert 0.0 <= result.disk_used_pct <= 100.0
+    # Real per-container usage (None when the box can't report it).
+    assert result.cpu_pct is None or 0.0 <= result.cpu_pct <= 100.0
+    assert result.mem_pct is None or 0.0 <= result.mem_pct <= 100.0
     assert_no_secret_material(result, engine_case.secret_markers)
 
 

@@ -18,18 +18,16 @@ from pocketpaw_ee.cloud.ship import provisioning, store
 from pocketpaw_ee.ship_engine.hcloud import ProvisionError
 from pocketpaw_ee.ship_engine.port import BoxHandle
 
-# The PEM header is ASSEMBLED, never written as a literal — the same idiom
-# ``scripts/scan_secrets.py`` uses on itself (see ``_H`` there). Storing the
-# five-hyphen run verbatim makes this fixture indistinguishable from a real
-# leaked key to the secret scanner, and "it's only a test" is exactly what a
-# real leak would also claim. No key material here: the body is a placeholder.
-_H = "-" * 5
-_PEM_BEGIN = f"{_H}BEGIN OPENSSH PRIVATE KEY{_H}"
-_PEM_END = f"{_H}END OPENSSH PRIVATE KEY{_H}"
-
+# A bare hyphen in its own constant, so no five-hyphen run — and therefore no
+# PEM header — exists as a literal in this file. The repo's secret scanner
+# (scripts/scan_secrets.py) has a LIVE PEM pattern and uses this same idiom to
+# avoid matching itself; a fake key spelled out longhand trips it and fails CI.
+_H = "-"
+_PEM_BEGIN = f"{_H * 5}BEGIN OPENSSH PRIVATE KEY{_H * 5}"
+_PEM_END = f"{_H * 5}END OPENSSH PRIVATE KEY{_H * 5}"
 
 _KEY_ENV = "CLOUD_ENCRYPTION_KEY"
-_PRIV = _PEM_BEGIN + "\nFAKEKEYBODY\n" + _PEM_END + "\n"
+_PRIV = f"{_PEM_BEGIN}\nFAKEKEYBODY\n{_PEM_END}\n"
 _PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY paw-ship"
 
 
@@ -63,11 +61,17 @@ class FakeProvisioner:
 
 
 def probe_script(*results):
-    """A readiness probe that returns each scripted result in turn."""
+    """A readiness probe that returns each scripted result in turn.
+
+    The probe contract is ``(ready, host_key)`` — the real probe captures the
+    box's SSH host key trust-on-first-use so it can be pinned on the box. A
+    scripted bool is lifted into that shape with a stub key.
+    """
     seq = list(results)
 
-    async def _probe(handle: BoxHandle, key: str) -> bool:
-        return seq.pop(0) if seq else False
+    async def _probe(handle: BoxHandle, key: str) -> tuple[bool, str]:
+        ready = seq.pop(0) if seq else False
+        return (ready, "ssh-ed25519 AAAAFAKEHOSTKEY" if ready else "")
 
     return _probe
 
@@ -153,7 +157,7 @@ async def test_probe_exception_is_tolerated_then_ready(mongo_db, enc_key):  # no
         calls["n"] += 1
         if calls["n"] == 1:
             raise ConnectionRefusedError("still booting")
-        return True
+        return (True, "ssh-ed25519 AAAAFAKEHOSTKEY")
 
     updated = await provisioning.run_provision(
         box,
@@ -219,3 +223,32 @@ async def test_get_box_is_workspace_scoped(mongo_db, enc_key):  # noqa: ARG001
     assert await store.get_box("ws-owner", str(box.id)) is not None
     # A different tenant may not read it, even with the right id.
     assert await store.get_box("ws-attacker", str(box.id)) is None
+
+
+# ---------------------------------------------------------------------------
+# Host-key pinning (fix/ship-review-p0)
+# ---------------------------------------------------------------------------
+
+
+async def test_ready_box_pins_the_host_key(mongo_db, enc_key):  # noqa: ARG001
+    """The probe's captured host key must land on the box BEFORE it goes ready.
+
+    Without this no box could ever be reached: asyncssh's default verification
+    consults ~/.ssh/known_hosts, a freshly created box is by definition absent
+    from it, and every connection was refused — so the readiness probe failed on
+    every attempt and every box ended ``degraded``. The probe now trusts the key
+    on first use and the box pins it for every connect thereafter.
+    """
+    box = await _make_box()
+
+    updated = await provisioning.run_provision(
+        box,
+        provisioner=FakeProvisioner(),
+        ssh_public_key="ssh-ed25519 AAAAPUB test",
+        ssh_private_key="PRIVATE",
+        probe=probe_script(True),
+        sleep=_noop_sleep,
+    )
+
+    assert updated.status == "ready"
+    assert updated.ssh_host_key == "ssh-ed25519 AAAAFAKEHOSTKEY"

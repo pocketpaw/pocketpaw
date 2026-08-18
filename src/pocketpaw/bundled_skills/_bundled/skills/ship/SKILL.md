@@ -35,7 +35,12 @@ and serves real traffic.** That shapes how you work.
 | `ship_create_app` | Register an app on a box |
 | `ship_deploy_app` | Deploy an app's image (see the caveat below) |
 | `ship_add_domain` | Route a domain to an app and issue TLS |
-| `ship_create_db` | Attach a database and link it to an app |
+| `ship_create_db` | Attach a database (postgres, redis, or mongo) and link it to an app |
+| `ship_set_scale` | Set how many containers run per process type (`web=2 worker=1`; `0` stops one) |
+| `ship_set_checks` | Toggle zero-downtime deploy checks and set the healthcheck path |
+| `ship_set_resources` | Cap an app's CPU and memory (cost control) |
+| `ship_create_volume` | Attach persistent storage so data survives redeploys |
+| `ship_restart` / `ship_rebuild` | Bounce an app, or rebuild it from source — both reversible |
 | `ship_logs` | An app's recent log lines |
 | `ship_metrics` | A box's live CPU / memory / disk |
 
@@ -80,10 +85,23 @@ Provisioning a box and getting an app live:
    background. Poll `ship_list_apps` and watch the app's status walk
    `deploying → live`, or `failed`.
 5. **`ship_add_domain`** to put it on a real hostname with TLS.
-6. **`ship_create_db`** if it needs one. You get back the service name and the
-   **name** of the environment variable holding the connection string — never
-   the credential itself. The app reads it from its own environment; you don't
-   need the value and shouldn't ask for it.
+6. **`ship_create_db`** if it needs one. Pick the engine with `db_type` —
+   `postgres`, `redis`, or `mongo` (defaults to mongo). You get back the service
+   name and the **name** of the environment variable holding the connection
+   string — never the credential itself. The app reads it from its own
+   environment; you don't need the value and shouldn't ask for it.
+7. **`ship_set_scale`** / **`ship_set_checks`** to tune how it runs. Scale gives
+   a process type more containers (`{"web": 2, "worker": 1}`; `0` stops one);
+   checks turn on zero-downtime deploys (Dokku settles and drains the old
+   container before cutting over) and set the HTTP healthcheck path. Both apply
+   to the next deploy — set checks before a production deploy, not after.
+8. **Day-2 operations.** `ship_set_resources` caps an app's CPU and memory (the
+   cost-control lever, and useful when one app is starving its neighbours on a
+   shared box). `ship_create_volume` attaches persistent storage at an absolute
+   mount path, so a database or an upload directory survives a redeploy instead
+   of vanishing with the container. `ship_restart` bounces the containers and
+   `ship_rebuild` rebuilds from source — both are reversible, so you can run them
+   without a proposal, but say what you did and check `ship_logs` after.
 
 ## Guardrails
 

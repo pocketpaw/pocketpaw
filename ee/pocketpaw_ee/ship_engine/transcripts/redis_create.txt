@@ -1,0 +1,11 @@
+# transcript: `dokku redis:create demo-db` — dokku-redis prints the full DSN
+# including the generated password; the driver must never let it reach logs.
+EXIT: 0
+--- stdout ---
+       Waiting for container to be ready
+=====> Redis container created: demo-db
+=====> demo-db redis service information
+       Dsn:                 redis://:s3cr3tpass8f2a@dokku-redis-demo-db:6379
+       Status:              running
+       Version:             redis:7.4
+--- stderr ---

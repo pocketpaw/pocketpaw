@@ -1447,6 +1447,9 @@ leak).
 
 Long work never blocks the request. `POST /ship/boxes` and
 `POST /ship/apps/{id}/deploy` enqueue an ARQ job and return immediately with a
+pollable record; the engine-backed routes (domains, database, scale, checks,
+resources, volumes, restart, rebuild, logs, metrics) run inline over SSH and
+answer `409` with `code: ship.*_failed` when the deploy engine refuses.
 pollable record; the engine-backed routes (domains, database, logs, metrics)
 run inline over SSH and answer `409` with `code: ship.*_failed` when the deploy
 engine refuses.
@@ -1558,6 +1561,13 @@ add time.
 ### `POST /ship/apps/{app_id}/db`
 
 Create a database service and link it to the app. Body is optional; `service`
+defaults to `<app-name>-db`. `db_type` picks the engine — `postgres`, `redis`,
+or `mongo` (default `mongo`); the box installs all three plugins at provision
+time. The injected variable name follows the engine (`DATABASE_URL` for
+postgres, `REDIS_URL` for redis, `MONGO_URL` for mongo). Returns:
+
+```json
+{"service": "demo-db", "linked_app": "demo", "env_var": "DATABASE_URL"}
 defaults to `<app-name>-db`. Returns:
 
 ```json
@@ -1566,6 +1576,61 @@ defaults to `<app-name>-db`. Returns:
 
 `env_var` is the NAME of the variable the link injected. The connection string
 is a secret and never crosses the wire.
+
+### `PUT /ship/apps/{app_id}/scale`
+
+Set how many containers run per process type. The body is a `scale` map of
+process name → count; a count of `0` stops that process. Process names use the
+Procfile grammar (`^[a-z][a-z0-9_-]*$`). Applies on the next deploy. Returns the
+app with its new `scale`:
+
+```json
+{"scale": {"web": 2, "worker": 1}}
+```
+
+### `PUT /ship/apps/{app_id}/checks`
+
+Configure zero-downtime deploys. `zero_downtime` (default `true`) toggles Dokku's
+settle-and-drain deploy — the new container must pass its checks before the old
+one is retired; `healthcheck_path` is the optional HTTP path the check hits.
+Both apply on the next deploy. Returns the app's current settings:
+
+```json
+{"zero_downtime": true, "healthcheck_path": "/healthz"}
+```
+
+### `PUT /ship/apps/{app_id}/resources`
+
+Set the app's CPU and/or memory ceilings (the cost-control lever, `resource:limit`).
+`cpu` is in Dokku's CPU units, `memory_mb` in megabytes; a `0` leaves that
+dimension unlimited, but at least one must be non-zero. Applies on the next
+container start. Returns the app with its new `cpu_limit` / `memory_limit_mb`:
+
+```json
+{"cpu_limit": 1000, "memory_limit_mb": 512}
+```
+
+### `POST /ship/apps/{app_id}/volumes`
+
+Create a persistent volume and mount it into the app (`storage:create` +
+`storage:mount`). `mount_path` is the absolute container path; `name` is optional
+and defaults to `<app-name>-data`. The data survives redeploys (a host bind
+mount). Returns the app with its `volumes` list:
+
+```json
+{"volumes": [{"name": "demo-data", "mount_path": "/data",
+              "host_path": "/var/lib/dokku/data/storage/demo-data"}]}
+```
+
+### `POST /ship/apps/{app_id}/restart` · `POST /ship/apps/{app_id}/rebuild`
+
+Restart (`ps:restart`) or rebuild-from-source (`ps:rebuild`) the app. Both are
+reversible bounces — the app comes back — so they run inline, not through the
+Instinct gate, and they change no persisted config. Each answers a confirmation:
+
+```json
+{"app_id": "665…", "action": "restart"}
+```
 
 ### `GET /ship/apps/{app_id}/logs?num=<n>`
 
@@ -1581,6 +1646,70 @@ redacts them before they leave the box:
 **Parks** an app teardown for human approval, exactly like the box DELETE above.
 Nothing is destroyed.
 
+### `GET /ship/apps/{app_id}/metrics`
+
+One app's live health: process state (from Dokku) plus **real per-container
+CPU/memory** (from `docker stats` — Dokku's own `ps:report` gives only process
+state, not resource usage). `cpu`/`mem`/`disk` are percentages or `null` when the
+box could not report them (an old Docker, a down container) — render "—" for a
+null, never a misleading 0. Process state always comes back.
+
+```json
+{"deployed": true, "running": true, "processes": 1,
+ "cpu": 12.3, "mem": 5.6, "disk": 38.0}
+```
+
+### Environment variables (SHIP-9)
+
+An app's env vars are stored **Fernet-encrypted at rest** (the same envelope as
+the box SSH key) and are **never returned in plaintext** — every response masks
+the value to a short hint. Values are decrypted only at deploy time, merged into
+the engine's `config:set`, and redacted from every log line. `scope` is one of
+`both` (default), `prod`, or `preview`; at deploy only the vars matching the
+app's kind (its `prod` flag) plus every `both` var are applied.
+
+#### `GET /ship/apps/{app_id}/env`
+
+Lists the app's env vars, values masked:
+
+```json
+{"vars": [{"key": "API_KEY", "masked_value": "sk-…3f9", "scope": "both"}]}
+```
+
+#### `PUT /ship/apps/{app_id}/env`
+
+Upserts a batch. Each key is added or overwritten; keys absent from the body are
+left untouched. Keys use the POSIX env-name grammar; values are opaque (any
+string up to 64 KiB). Returns the full masked list.
+
+```json
+{"vars": [{"key": "API_KEY", "value": "sk-live-…", "scope": "prod"}]}
+```
+
+#### `POST /ship/apps/{app_id}/env/import`
+
+Bulk-imports a `.env` blob. Blank lines and `#` comments are ignored; each
+remaining line is split on the first `=` with surrounding quotes stripped; a line
+whose key is not a valid POSIX name is **skipped** (a paste never 422s on one
+stray line). Returns the full masked list.
+
+```json
+{"dotenv": "API_KEY=sk-live-abc\n# comment\nDEBUG=false"}
+```
+
+#### `DELETE /ship/apps/{app_id}/env/{key}`
+
+Removes one variable. Returns the remaining masked list.
+
+### The agent surface (`pocketpaw_ship` MCP)
+
+A chat agent in a room whose pocket has the **Ship connector** bound reaches the
+same service layer through sixteen in-process MCP tools — `ship_list_boxes`,
+`ship_provision_box`, `ship_list_apps`, `ship_create_app`, `ship_deploy_app`,
+`ship_add_domain`, `ship_create_db`, `ship_set_scale`, `ship_set_checks`,
+`ship_set_resources`, `ship_create_volume`, `ship_restart`, `ship_rebuild`,
+`ship_logs`, `ship_metrics`, and `ship_request_destroy`. Binding the connector
+also auto-surfaces the bundled `ship` skill into that room.
 ### The agent surface (`pocketpaw_ship` MCP)
 
 A chat agent in a room whose pocket has the **Ship connector** bound reaches the

@@ -1801,6 +1801,18 @@ async def bulk_approve_actions(
     for action_id in req.ids:
         action = await store.get_action(action_id)
         if action is not None:
+            _assert_pocket_write_workspace(action, workspace_id)
+            _assert_code_change_workspace(action, workspace_id)
+            _assert_external_action_workspace(action, workspace_id)
+            _assert_fabric_objects_workspace(action, workspace_id)
+            _assert_ship_action_workspace(action, workspace_id)
+            _assert_pocket_create_workspace(action, workspace_id)
+            _assert_instinct_rule_workspace(action, workspace_id)
+            _assert_fabric_conflict_workspace(action, workspace_id)
+            _assert_belt_plan_workspace(action, workspace_id)
+            _assert_artifact_change_workspace(action, workspace_id)
+            _assert_admin_action_workspace(action, workspace_id)
+            _assert_customer_reply_workspace(action, workspace_id)
             # One chokepoint runs every gated kind's tenancy guard
             # (``_assert_gated_workspaces``) so a new kind can never be wired
             # into three of the four dispatch paths and silently miss the
@@ -2248,6 +2260,18 @@ async def bulk_reject_actions(
     for action_id in req.ids:
         action = await store.get_action(action_id)
         if action is not None:
+            _assert_pocket_write_workspace(action, workspace_id)
+            _assert_code_change_workspace(action, workspace_id)
+            _assert_external_action_workspace(action, workspace_id)
+            _assert_fabric_objects_workspace(action, workspace_id)
+            _assert_ship_action_workspace(action, workspace_id)
+            _assert_pocket_create_workspace(action, workspace_id)
+            _assert_instinct_rule_workspace(action, workspace_id)
+            _assert_fabric_conflict_workspace(action, workspace_id)
+            _assert_belt_plan_workspace(action, workspace_id)
+            _assert_artifact_change_workspace(action, workspace_id)
+            _assert_admin_action_workspace(action, workspace_id)
+            _assert_customer_reply_workspace(action, workspace_id)
             # One chokepoint runs every gated kind's tenancy guard
             # (``_assert_gated_workspaces``) so a new kind can never be wired
             # into three of the four dispatch paths and silently miss the
@@ -2582,6 +2606,53 @@ async def approve_action(
     if not before:
         raise HTTPException(404, "Action not found")
 
+    # BLOCKER 1 — reject a cross-workspace parked-write approval before
+    # any state mutation. ``require_action_any_workspace`` only proved the
+    # caller holds ``instinct.approve`` somewhere; this binds the Action
+    # to the caller's workspace.
+    _assert_pocket_write_workspace(before, workspace_id)
+    # Same tenancy gate for a Belt code-change Action (BS-3) — its
+    # ``_code_change`` blob carries the workspace, not a pocket.
+    _assert_code_change_workspace(before, workspace_id)
+    # Same tenancy gate for a gated external-action Action — its
+    # ``_external_action`` blob carries the workspace, not a pocket.
+    _assert_external_action_workspace(before, workspace_id)
+    # Same tenancy gate for a gated Fabric-objects Action — its
+    # ``_fabric_objects`` blob carries the workspace, not a pocket. Approving it
+    # writes typed objects into the tenant's Fabric, so the cross-workspace gate
+    # is mandatory here.
+    _assert_fabric_objects_workspace(before, workspace_id)
+    # Same tenancy gate for a gated Pocket-create Action — its ``_pocket_create``
+    # blob carries the workspace (and owner) on SEPARATE top-level fields, not a
+    # pocket. Approving it creates a Pocket in the tenant's workspace, so the
+    # cross-workspace gate is mandatory here.
+    _assert_pocket_create_workspace(before, workspace_id)
+    # Same tenancy gate for a gated governed-rule-create Action — its
+    # ``_instinct_rule`` blob carries the workspace (and owner) on SEPARATE
+    # top-level fields, not a pocket. Approving it creates an active governed rule
+    # in the tenant's workspace, so the cross-workspace gate is mandatory here.
+    _assert_instinct_rule_workspace(before, workspace_id)
+    # FST-6 — same tenancy gate for a conflict-stewardship Action — its
+    # ``_fabric_conflict`` blob carries the workspace on a SEPARATE top-level
+    # field. Approving it PINs a statement in the tenant's Fabric, so the
+    # cross-workspace gate is mandatory here.
+    _assert_fabric_conflict_workspace(before, workspace_id)
+    # Same tenancy gate for a mandate shift-plan Action (belt_plan) — its
+    # ``_belt_plan`` blob carries the workspace.
+    _assert_belt_plan_workspace(before, workspace_id)
+    # BP-3 — same tenancy gate for an artifact-change merge (its
+    # ``_artifact_change`` blob carries the workspace). Approving it moves the
+    # published pointer + deploys, so the cross-workspace gate is mandatory here.
+    _assert_artifact_change_workspace(before, workspace_id)
+    # WA-2 — same tenancy gate for a gated workspace-admin Action — its
+    # ``_admin_action`` blob carries the workspace, not a pocket. Approving it
+    # fires a workspace-admin write (e.g. a member role change) after an
+    # execute-time RBAC re-check, so the cross-workspace gate is mandatory here.
+    _assert_admin_action_workspace(before, workspace_id)
+    # ``_customer_reply`` (paw-bar) — the delivery hook routes the reply to the
+    # blob's workspace, so a cross-workspace approve would deliver a decision into
+    # another tenant's paw-bar surface. Gate it like every other blob kind.
+    _assert_customer_reply_workspace(before, workspace_id)
     # BLOCKER 1 — reject a cross-workspace gated approval before any state
     # mutation. ``require_action_any_workspace`` only proved the caller holds
     # ``instinct.approve`` somewhere; this binds the Action to the caller's
@@ -3143,6 +3214,43 @@ async def reject_action(
     if not before:
         raise HTTPException(404, "Action not found")
 
+    # Touch-time security fix — same gate the approve path runs.
+    _assert_pocket_write_workspace(before, workspace_id)
+    _assert_code_change_workspace(before, workspace_id)
+    _assert_external_action_workspace(before, workspace_id)
+    # Same tenancy gate for a gated Fabric-objects Action on the REJECT side —
+    # asymmetric tenant scope is no tenant scope: a cross-workspace reject must
+    # 403 before any mutation, exactly like the approve side.
+    _assert_fabric_objects_workspace(before, workspace_id)
+    # Same tenancy gate for a gated Pocket-create Action on the REJECT side —
+    # asymmetric tenant scope is no tenant scope: a cross-workspace reject must
+    # 403 before any mutation, exactly like the approve side.
+    _assert_pocket_create_workspace(before, workspace_id)
+    # Same tenancy gate for a gated governed-rule-create Action on the REJECT side —
+    # asymmetric tenant scope is no tenant scope: a cross-workspace reject must
+    # 403 before any mutation, exactly like the approve side.
+    _assert_instinct_rule_workspace(before, workspace_id)
+    # FST-6 — same tenancy gate for a conflict-stewardship Action on the REJECT
+    # side. Asymmetric tenant scope is no tenant scope: a cross-workspace reject
+    # (which would dismiss another tenant's conflict) must 403 before any
+    # mutation, exactly like the approve side.
+    _assert_fabric_conflict_workspace(before, workspace_id)
+    # Same tenancy gate for a mandate shift-plan Action (belt_plan) — its
+    # ``_belt_plan`` blob carries the workspace.
+    _assert_belt_plan_workspace(before, workspace_id)
+    # BP-3 — same tenancy gate for an artifact-change merge on the REJECT side.
+    # Asymmetric tenant scope is no tenant scope: a cross-workspace reject (which
+    # would discard another tenant's candidate) must 403 before any mutation,
+    # exactly like the approve side (pocketpaw#1183 / #1250).
+    _assert_artifact_change_workspace(before, workspace_id)
+    # WA-2 — same tenancy gate for a gated workspace-admin Action on the REJECT
+    # side. Asymmetric tenant scope is no tenant scope: a cross-workspace reject
+    # must 403 before any mutation, exactly like the approve side.
+    _assert_admin_action_workspace(before, workspace_id)
+    # ``_customer_reply`` (paw-bar) — same tenancy gate on the REJECT side: a
+    # cross-workspace reject would deliver a DECLINED decision into another
+    # tenant's paw-bar surface. Asymmetric tenant scope is no tenant scope.
+    _assert_customer_reply_workspace(before, workspace_id)
     # Touch-time security fix — the reject path runs the SAME full tenancy
     # sweep as approve. Asymmetric tenant scope is no tenant scope: a
     # cross-workspace reject must 403 before any mutation

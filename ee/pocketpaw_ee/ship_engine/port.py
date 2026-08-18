@@ -7,19 +7,26 @@
 # routes, the /ship console) depends only on this module, so swapping the
 # engine never touches a consumer.
 #
-# Nine typed verbs, each speaking frozen framework-free dataclasses (the same
+# Sixteen typed verbs, each speaking frozen framework-free dataclasses (the same
 # convention as ``cloud/billing/domain.py`` — a driver adapts its CLI/API
 # output into these; consumers never see engine-specific text):
 #
-#   provision_box  BoxSpec        -> BoxHandle      (create + prepare a VPS)
-#   deploy_app     DeployRequest  -> DeployResult   (app exists + image runs)
-#   add_domain     app, domain    -> DomainResult   (domain routed, TLS on)
-#   db_create      app, service   -> DbResult       (db up + linked to app)
-#   backup         service, path  -> BackupResult   (db dump landed at path)
-#   rollback       app, image     -> DeployResult   (previous image re-deployed)
-#   logs           app, num       -> LogChunk       (recent app log lines)
-#   metrics        app            -> MetricsSnapshot (process + disk health)
-#   destroy        app            -> None           (app gone)
+#   provision_box   BoxSpec         -> BoxHandle       (create + prepare a VPS)
+#   deploy_app      DeployRequest   -> DeployResult    (app exists + image runs)
+#   deploy_source   app, SourceSpec -> DeployResult    (app exists + source built)
+#   add_domain      app, domain     -> DomainResult    (domain routed, TLS on)
+#   db_create       app, svc, type  -> DbResult        (db up + linked to app)
+#   set_healthcheck app, enabled    -> HealthcheckResult (zero-downtime checks)
+#   scale           app, {proc:n}   -> ScaleResult     (process counts applied)
+#   set_resources   app, cpu, mem   -> ResourceResult  (cpu/mem ceilings applied)
+#   create_volume   app, name, path -> VolumeResult    (persistent volume mounted)
+#   restart         app             -> LifecycleResult (containers bounced)
+#   rebuild         app             -> LifecycleResult (app rebuilt + restarted)
+#   backup          service, path   -> BackupResult    (db dump landed at path)
+#   rollback        app, image      -> DeployResult    (previous image re-deployed)
+#   logs            app, num        -> LogChunk        (recent app log lines)
+#   metrics         app             -> MetricsSnapshot (process + disk health)
+#   destroy         app             -> None            (app gone)
 #
 # A driver that cannot perform a verb raises ``VerbNotSupported`` (e.g. the
 # Dokku driver does not provision boxes — that belongs to the SHIP-2
@@ -35,13 +42,38 @@
 #   validation in ``AppSpec.__post_init__`` (hostile names now fail at the DTO
 #   boundary, before any command string exists), and ``AppSpec.env`` is
 #   ``repr=False`` so a logged/debugged spec never prints secret values.
+# Updated 2026-07-23 (feat/ship-14-source-deploy, SHIP-14): added the
+#   source-agnostic ``deploy_source(app, SourceSpec) -> DeployResult`` verb + the
+#   ``SourceSpec`` tagged union (``GitSource`` today; ``ArchiveSource`` reserved
+#   for the archive/agent path later). ``deploy_app(image)`` stays for the
+#   pre-built path. ``GitSource.token`` is ``repr=False`` and, like ``AppSpec.env``,
+#   is REQUEST-side only — it never crosses into a result DTO, an exception, or a
+#   log line (the driver builds any tokenized URL only inside its ``_run``
+#   chokepoint and redacts it).
+# Updated 2026-07-24 (feat/ship-17-databases, SHIP-17): Wave 2 "expose the
+#   engine" — three additive verbs/shapes. (A) ``db_create`` gained a ``db_type``
+#   (``DbType`` = postgres/redis/mongo, the 90% set; default ``mongo`` keeps SHIP-3
+#   behaviour) so one seam drives every Dokku database plugin, not just mongo.
+#   (B) ``set_healthcheck(app, enabled, path) -> HealthcheckResult`` exposes Dokku's
+#   built-in zero-downtime ``checks``. (C) ``scale(app, {proc: count}) -> ScaleResult``
+#   exposes ``ps:scale``. All three keep the invariants — no secret on a result DTO,
+#   everything through the driver's redacting chokepoint.
+# Updated 2026-07-24 (feat/ship-18-ops, SHIP-18): Wave 3 "operations depth" —
+#   four additive verbs, none carrying a secret. (A) ``set_resources(app, cpu,
+#   memory_mb) -> ResourceResult`` exposes Dokku's ``resource:limit`` (cpu + memory
+#   ceilings, the BYO cost-control seam). (B) ``create_volume(app, name, mount_path)
+#   -> VolumeResult`` exposes ``storage:create`` + ``storage:mount`` (a persistent
+#   bind mount that survives redeploys). (C)/(D) ``restart`` / ``rebuild`` ->
+#   ``LifecycleResult`` expose ``ps:restart`` / ``ps:rebuild`` (reversible bounces,
+#   NOT teardowns — so they run inline, not through the Instinct gate). Same
+#   invariants: additive, default-off, everything through the redacting chokepoint.
 
 from __future__ import annotations
 
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 # --------------------------------------------------------------------------- #
 # Errors
@@ -143,11 +175,47 @@ class AppSpec:
 @dataclass(frozen=True)
 class DeployRequest:
     """Deploy ``image`` (a pre-built container image reference, tag included)
-    as ``app``. v1 is image-based deploy only — git-push builds are a later
-    slice."""
+    as ``app``. The pre-built-image path; source builds go through
+    ``deploy_source`` + a ``SourceSpec`` instead."""
 
     app: AppSpec
     image: str
+
+
+# --------------------------------------------------------------------------- #
+# Source specs (frozen tagged union — the deploy_source input)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class SourceSpec:
+    """Base of the deploy-source tagged union consumed by ``deploy_source``.
+
+    A source describes WHERE the app's code comes from, leaving the build to the
+    engine (buildpack / nixpacks / Dockerfile auto-detection). ``GitSource`` is
+    the v1 member; an ``ArchiveSource`` sibling (a tarball of an agent's work
+    dir) is reserved for later — the verb is source-agnostic so it bolts on
+    without a second seam. Never instantiated directly; a driver matches on the
+    concrete member.
+    """
+
+
+@dataclass(frozen=True)
+class GitSource(SourceSpec):
+    """Deploy from a git repository the engine clones/fetches and builds.
+
+    ``repo_url`` is the plain, secret-free clone URL (``https://host/owner/repo``
+    or ``.git``); ``ref`` is the branch/tag/SHA to build (default ``main``).
+    ``token`` is an OPTIONAL access token for a private repo — it is
+    REQUEST-side only, ``repr=False`` so a logged spec never prints it, and a
+    driver injects it into a clone URL ONLY inside its redacting ``_run``
+    chokepoint. ``None`` means a public repo (a plain URL). Like ``AppSpec.env``,
+    the token never appears in a result DTO, an exception, or a log line.
+    """
+
+    repo_url: str
+    ref: str = "main"
+    token: str | None = field(default=None, repr=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -193,18 +261,98 @@ class DomainResult:
     tls_enabled: bool
 
 
+# The database engines a driver can stand up. The 90% set Railway headlines;
+# Dokku ships six official plugins (mysql / clickhouse / elasticsearch follow
+# the identical ``<svc>:create`` + ``<svc>:link`` shape and slot in behind the
+# same verb later). ``mongo`` is the default so SHIP-3's behaviour is unchanged.
+DbType = Literal["postgres", "redis", "mongo"]
+
+
 @dataclass(frozen=True)
 class DbResult:
     """A database service created and linked to an app.
 
     ``exposed_env_var`` is the NAME of the env var the link injected (e.g.
-    ``MONGO_URL``). The connection string itself is a secret and never
-    appears on this DTO — the app reads it from its own environment.
+    ``DATABASE_URL`` for postgres, ``REDIS_URL``, ``MONGO_URL``). The connection
+    string itself is a secret and never appears on this DTO — the app reads it
+    from its own environment.
     """
 
     service: str
     linked_app: str
     exposed_env_var: str
+
+
+@dataclass(frozen=True)
+class HealthcheckResult:
+    """The zero-downtime health-check state now in force for an app.
+
+    ``zero_downtime`` reports whether Dokku's ``checks`` are enabled (the engine
+    default is on — a settling probe + connection-draining on release, the
+    Heroku dyno-shutdown parity). ``path`` is the optional HTTP health path the
+    app carries; "" means the engine's default TCP-port check. Carries no secret.
+    """
+
+    app: str
+    zero_downtime: bool
+    path: str = ""
+
+
+@dataclass(frozen=True)
+class ScaleResult:
+    """The process counts now applied to an app.
+
+    ``scale`` maps a Procfile process type (``web``, ``worker``, …) to its
+    running container count, as the engine set it. Carries no secret.
+    """
+
+    app: str
+    scale: Mapping[str, int]
+
+
+@dataclass(frozen=True)
+class ResourceResult:
+    """The resource ceilings now in force for an app (BYO cost control).
+
+    ``cpu`` and ``memory_mb`` are the limits the engine applied via Dokku's
+    ``resource:limit`` — ``cpu`` in Dokku's CPU units, ``memory_mb`` in megabytes.
+    ``0`` means that dimension is unset (no ceiling). The limit applies to the
+    app's next container start. Carries no secret.
+    """
+
+    app: str
+    cpu: int = 0
+    memory_mb: int = 0
+
+
+@dataclass(frozen=True)
+class VolumeResult:
+    """A persistent volume created and mounted into an app.
+
+    ``name`` is the storage entry's label, ``mount_path`` the container path it is
+    mounted at, and ``host_path`` the box-side directory backing it
+    (``/var/lib/dokku/data/storage/<name>``). The data survives redeploys — a host
+    bind mount, not an ephemeral container layer — and takes effect on the app's
+    next deploy/rebuild. Carries no secret.
+    """
+
+    app: str
+    name: str
+    mount_path: str
+    host_path: str
+
+
+@dataclass(frozen=True)
+class LifecycleResult:
+    """The lifecycle action the engine performed on an app.
+
+    ``action`` is ``"restart"`` or ``"rebuild"``. Both are reversible bounces (the
+    app comes back), NOT teardowns — a failure raises ``CommandFailed`` rather than
+    returning one of these. Carries no secret.
+    """
+
+    app: str
+    action: str
 
 
 @dataclass(frozen=True)
@@ -232,6 +380,13 @@ class MetricsSnapshot:
     ``deployed``/``running`` are the engine's process-level flags,
     ``processes`` the running process count, ``disk_used_pct`` the box's
     root-filesystem usage (0.0–100.0).
+
+    ``cpu_pct``/``mem_pct`` are the app's REAL per-container resource usage
+    from ``docker stats`` (Dokku's ``ps:report`` gives only process STATE, not
+    resource usage). They are ``None`` when the box could not report them (an
+    old Docker, a container that is down) — a metrics view shows "—" rather than
+    a false 0. The whole snapshot degrades gracefully: process state without
+    resource numbers is still useful.
     """
 
     app: str
@@ -239,6 +394,8 @@ class MetricsSnapshot:
     running: bool
     processes: int
     disk_used_pct: float
+    cpu_pct: float | None = None
+    mem_pct: float | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -265,12 +422,78 @@ class ShipEngine(Protocol):
         """Ensure the app exists, apply its env, and run ``request.image``."""
         ...
 
+    async def deploy_source(self, app: AppSpec, source: SourceSpec) -> DeployResult:
+        """Ensure the app exists, apply its env, and build+run ``source``.
+
+        The source-agnostic sibling of ``deploy_app``: instead of a pre-built
+        image, the engine builds the app from ``source`` (a git repo in v1) with
+        its own build-source auto-detection. A build failure raises
+        ``CommandFailed`` with a redacted log tail — never a silent hang. Any
+        secret carried by the source (a private-repo token) never reaches the
+        returned ``DeployResult`` or a raised error.
+        """
+        ...
+
     async def add_domain(self, app: str, domain: str, *, enable_tls: bool = True) -> DomainResult:
         """Route ``domain`` to ``app``; issue a TLS cert when ``enable_tls``."""
         ...
 
-    async def db_create(self, app: str, service: str) -> DbResult:
-        """Create database service ``service`` and link it to ``app``."""
+    async def db_create(self, app: str, service: str, db_type: DbType = "mongo") -> DbResult:
+        """Create a ``db_type`` database ``service`` and link it to ``app``.
+
+        Every ``db_type`` drives the SAME plugin shape (``<svc>:create`` then
+        ``<svc>:link <app>``, which injects a connection-string env var); only
+        the plugin and the injected var NAME differ. ``mongo`` is the default so
+        an existing caller is unchanged.
+        """
+        ...
+
+    async def set_healthcheck(
+        self, app: str, *, enabled: bool, path: str = ""
+    ) -> HealthcheckResult:
+        """Enable or disable ``app``'s zero-downtime health checks.
+
+        Exposes the engine's BUILT-IN zero-downtime deploy checks (a settling
+        probe + connection-draining on release). ``path`` is an optional HTTP
+        health path recorded for the app; the engine applies it at deploy.
+        """
+        ...
+
+    async def scale(self, app: str, scale: Mapping[str, int]) -> ScaleResult:
+        """Set ``app``'s per-process container counts (``{"web": 2, ...}``)."""
+        ...
+
+    async def set_resources(self, app: str, *, cpu: int = 0, memory_mb: int = 0) -> ResourceResult:
+        """Set ``app``'s CPU and/or memory ceilings (the BYO cost-control seam).
+
+        Exposes Dokku's ``resource:limit``. ``cpu`` is in Dokku's CPU units,
+        ``memory_mb`` in megabytes; a ``0`` leaves that dimension unlimited. The
+        limit applies to the app's next container start. At least one of the two
+        must be non-zero (the caller validates this at its DTO boundary).
+        """
+        ...
+
+    async def create_volume(self, app: str, *, name: str, mount_path: str) -> VolumeResult:
+        """Create a persistent volume ``name`` and mount it into ``app``.
+
+        Exposes ``storage:create`` + ``storage:mount`` (the modern named-entry
+        form, k3s-ready). ``mount_path`` is the container path the volume appears
+        at; the data survives redeploys (a host bind mount). Takes effect on the
+        app's next deploy/rebuild.
+        """
+        ...
+
+    async def restart(self, app: str) -> LifecycleResult:
+        """Restart ``app``'s containers — a graceful bounce (``ps:restart``).
+
+        Reversible (the app comes back up), so it runs inline, not through the
+        Instinct gate.
+        """
+        ...
+
+    async def rebuild(self, app: str) -> LifecycleResult:
+        """Rebuild ``app`` from its current source/image and restart it
+        (``ps:rebuild``). Reversible, like ``restart``."""
         ...
 
     async def backup(self, service: str, dest_path: str) -> BackupResult:

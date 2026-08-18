@@ -25,6 +25,7 @@ import os
 import tempfile
 from typing import Any
 
+from pocketpaw_ee.cloud.shared.db import is_multi_tenant_cloud
 from pocketpaw_ee.cloud.ship import provisioning, store
 from pocketpaw_ee.ship_engine.hcloud import (
     HcloudProvisioner,
@@ -38,12 +39,18 @@ logger = logging.getLogger(__name__)
 _HCLOUD_TOKEN_ENV = "POCKETPAW_HCLOUD_TOKEN"
 
 
-async def _ssh_dokku_ready(handle: BoxHandle, ssh_private_key: str) -> bool:
+async def _ssh_dokku_ready(handle: BoxHandle, ssh_private_key: str) -> tuple[bool, str]:
     """Real readiness probe: SSH in with the box key, confirm ``dokku version``.
 
-    Writes the key to a private temp file (asyncssh reads a key path), connects
-    via SHIP-1's ``AsyncSSHTransport``, and runs ``dokku version``. Any failure
-    (still booting, connection refused) returns False; the orchestrator retries.
+    Returns ``(ready, host_key)``. ``host_key`` is the box's SSH HOST key,
+    captured trust-on-first-use during this probe so the caller can pin it on the
+    ShipBox — every connect after provisioning verifies against it. It is the
+    box's server identity, not a secret.
+
+    Writes the client key to a private temp file (asyncssh reads a key path),
+    connects via SHIP-1's ``AsyncSSHTransport``, and runs ``dokku version``. Any
+    failure (still booting, connection refused) returns ``(False, "")``; the
+    orchestrator retries.
     """
     from pocketpaw_ee.ship_engine.dokku import AsyncSSHTransport
 
@@ -53,15 +60,26 @@ async def _ssh_dokku_ready(handle: BoxHandle, ssh_private_key: str) -> bool:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as fh:
             fh.write(ssh_private_key)
+        # TRUST ON FIRST USE. The box was created seconds ago, so its host key
+        # cannot be known in advance and asyncssh's default verification would
+        # refuse every connection — which is exactly why no box could ever reach
+        # ``ready``. Accept the key on this one probe, hand it back so the caller
+        # pins it on the ShipBox, and every later connect verifies against it.
         transport = AsyncSSHTransport(
             handle.host,
             port=handle.ssh_port,
             username=handle.ssh_user,
             client_key_path=key_path,
+            trust_on_first_use=True,
         )
-        result = await transport.run("dokku version")
-        await _safe_close(transport)
-        return result.exit_code == 0
+        try:
+            result = await transport.run("dokku version")
+        finally:
+            # In the finally, not on the success line — a probe that raised
+            # mid-command used to leak an open asyncssh connection, and the
+            # orchestrator retries up to 30 times per box.
+            await _safe_close(transport)
+        return (result.exit_code == 0, transport.captured_host_key)
     finally:
         if key_path and os.path.exists(key_path):
             os.unlink(key_path)
@@ -94,7 +112,32 @@ async def provision_box_job(ctx: dict, box_id: str, workspace_id: str) -> dict:
     # here, OUTSIDE run_provision — so it must be caught and turned into a
     # ``degraded`` box, or the box hangs in ``provisioning`` forever (the exact
     # "never hang" contract run_provision guarantees for failures it sees).
+    # CREDENTIAL SOURCE. ``POCKETPAW_HCLOUD_TOKEN`` is a PROCESS-GLOBAL operator
+    # credential, which is correct for a single-tenant deployment (a dedicated
+    # box, where the operator IS the tenant) and WRONG for multi-tenant cloud:
+    # there it would create and bill every tenant's servers on one Hetzner
+    # account — exactly what connectors/ship.yaml says must never happen ("the
+    # central project never holds a shared infrastructure credential").
+    #
+    # Per-workspace BYO credentials need an ENCRYPTED store (the connector doc's
+    # ``config`` is plaintext, and ship Fernet-encrypts every other secret it
+    # holds), which is its own slice. Until that lands this fails CLOSED in
+    # multi-tenant cloud rather than silently charging the operator.
     token = os.environ.get(_HCLOUD_TOKEN_ENV, "").strip()
+    if token and is_multi_tenant_cloud():
+        await store.mark_degraded(
+            box,
+            reason=(
+                "provisioning with a shared operator token is refused in "
+                "multi-tenant cloud; a per-workspace Hetzner credential is required"
+            ),
+        )
+        logger.error(
+            "ship provision: refused shared %s in multi-tenant cloud (workspace=%s)",
+            _HCLOUD_TOKEN_ENV,
+            workspace_id,
+        )
+        return {"ok": False, "reason": "shared_provider_token_refused"}
     try:
         provisioner = HcloudProvisioner(build_hcloud_client(token))
     except ProvisionError as exc:

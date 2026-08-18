@@ -9,14 +9,12 @@ from __future__ import annotations
 
 from pocketpaw_ee.ship_engine.keygen import generate_box_keypair
 
-# The PEM header is ASSEMBLED, never written as a literal — the same idiom
-# ``scripts/scan_secrets.py`` uses on itself (see ``_H`` there). Storing the
-# five-hyphen run verbatim makes this fixture indistinguishable from a real
-# leaked key to the secret scanner, and "it's only a test" is exactly what a
-# real leak would also claim. No key material here: the body is a placeholder.
-_H = "-" * 5
-_PEM_BEGIN = f"{_H}BEGIN OPENSSH PRIVATE KEY{_H}"
-_PEM_END = f"{_H}END OPENSSH PRIVATE KEY{_H}"
+# A bare hyphen in its own constant, so no five-hyphen run — and therefore no
+# PEM header — exists as a literal in this file. The repo's secret scanner
+# (scripts/scan_secrets.py) has a LIVE PEM pattern and uses this same idiom to
+# avoid matching itself; a fake key spelled out longhand trips it and fails CI.
+_H = "-"
+_PEM_BEGIN = f"{_H * 5}BEGIN OPENSSH PRIVATE KEY{_H * 5}"
 
 
 def test_generates_valid_openssh_keypair():

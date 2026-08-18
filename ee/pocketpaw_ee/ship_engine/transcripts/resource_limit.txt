@@ -1,0 +1,7 @@
+# transcript: `dokku resource:limit --cpu 1000 --memory 512 demo` — sets cpu/mem ceilings.
+EXIT: 0
+--- stdout ---
+-----> Setting resource limits for demo
+       cpu: 1000
+       memory: 512
+--- stderr ---

@@ -21,16 +21,15 @@ from tests.cloud.ship.conftest import (
     install_refused_engine,
 )
 
-# The PEM header is ASSEMBLED, never written as a literal — the same idiom
-# ``scripts/scan_secrets.py`` uses on itself (see ``_H`` there). Storing the
-# five-hyphen run verbatim makes this fixture indistinguishable from a real
-# leaked key to the secret scanner, and "it's only a test" is exactly what a
-# real leak would also claim. No key material here: the body is a placeholder.
-_H = "-" * 5
-_PEM_BEGIN = f"{_H}BEGIN OPENSSH PRIVATE KEY{_H}"
-_PEM_END = f"{_H}END OPENSSH PRIVATE KEY{_H}"
+# A bare hyphen in its own constant, so no five-hyphen run — and therefore no
+# PEM header — exists as a literal in this file. The repo's secret scanner
+# (scripts/scan_secrets.py) has a LIVE PEM pattern and uses this same idiom to
+# avoid matching itself; a fake key spelled out longhand trips it and fails CI.
+_H = "-"
+_PEM_BEGIN = f"{_H * 5}BEGIN OPENSSH PRIVATE KEY{_H * 5}"
+_PEM_END = f"{_H * 5}END OPENSSH PRIVATE KEY{_H * 5}"
 
-_PRIV = _PEM_BEGIN + "\nFAKEKEYBODY\n" + _PEM_END + "\n"
+_PRIV = f"{_PEM_BEGIN}\nFAKEKEYBODY\n{_PEM_END}\n"
 _PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY paw-ship"
 
 
@@ -171,6 +170,103 @@ async def test_the_deploy_pins_the_image_from_the_attempt_not_the_app(
 
     assert f"dokku git:from-image {APP} {IMAGE}" in issued
     assert not any("NEWER" in cmd for cmd in issued)
+
+
+# ---------------------------------------------------------------------------
+# The git source path (SHIP-14): source_kind="git" builds from a repo via
+# git:sync, decrypting the private-repo token ONLY at deploy and never leaking
+# it into an event / status record.
+# ---------------------------------------------------------------------------
+
+_GIT_REPO = "https://github.com/paw-demo/app.git"
+_GIT_REF = "release"
+_GIT_TOKEN = "ghp_S3cr3tDeployTokenNeverLeakXYZ789"
+
+
+async def _git_app_and_deploy(workspace="w1", *, token=None):
+    """An app whose source is a git repo, plus a queued deploy for it."""
+    box = await _ready_box(workspace)
+    app = await store.create_app(
+        workspace_id=workspace,
+        box_id=str(box.id),
+        name=APP,
+        build_path="dockerfile",
+        git_ref="",
+        image="",
+        env_refs=[],
+        prod=False,
+    )
+    await store.set_app_source(
+        app,
+        source_kind="git",
+        repo_url=_GIT_REPO,
+        repo_ref=_GIT_REF,
+        repo_token=token,
+    )
+    deploy = await store.create_deploy(workspace_id=workspace, app_id=str(app.id), image="")
+    return box, app, deploy
+
+
+def _git_replies(*, token=None, fail=False):
+    """Fake-engine replies covering the git:sync command the driver issues."""
+    from tests.cloud.ship.conftest import SHIP3_REPLIES
+
+    url = f"https://x-access-token:{token}@github.com/paw-demo/app.git" if token else _GIT_REPO
+    transcript = "git_sync_build_fail.txt" if fail else "git_sync.txt"
+    return {**SHIP3_REPLIES, f"dokku git:sync --build {APP} {url} {_GIT_REF}": transcript}
+
+
+async def test_git_source_deploys_via_git_sync(mongo_db, enc_key, monkeypatch):  # noqa: ARG001
+    """A git-source app builds through git:sync — NOT git:from-image."""
+    issued = install_fake_engine(monkeypatch, replies=_git_replies())
+    _box, _app, deploy = await _git_app_and_deploy()
+
+    await deploy_job.deploy_app_job({}, str(deploy.id), "w1")
+
+    assert any(f"dokku git:sync --build {APP} {_GIT_REPO} {_GIT_REF}" == c for c in issued)
+    assert not any("git:from-image" in c for c in issued)
+    landed = await store.get_deploy("w1", str(deploy.id))
+    assert landed is not None and landed.status == "live"
+
+
+async def test_git_source_private_token_never_leaks(
+    mongo_db,
+    enc_key,
+    monkeypatch,
+    recording_bus,
+):
+    """The private-repo token is decrypted only at deploy — never in the deploy
+    record, an emitted event, or (via the driver's redaction) a log line."""
+    issued = install_fake_engine(monkeypatch, replies=_git_replies(token=_GIT_TOKEN))
+    _box, _app, deploy = await _git_app_and_deploy(token=_GIT_TOKEN)
+
+    await deploy_job.deploy_app_job({}, str(deploy.id), "w1")
+
+    # The token reached the driver (a tokenized clone URL was issued)...
+    assert any("x-access-token" in c for c in issued)
+    # ...but never the persisted attempt.
+    landed = await store.get_deploy("w1", str(deploy.id))
+    blob = landed.model_dump_json() if landed is not None else ""
+    assert _GIT_TOKEN not in blob
+    # ...and never an emitted event payload.
+    for event in recording_bus.events:
+        assert _GIT_TOKEN not in str(getattr(event, "data", event))
+
+
+async def test_git_source_build_failure_is_recorded_not_raised(
+    mongo_db,
+    enc_key,
+    monkeypatch,  # noqa: ARG001
+):
+    """A failed build (bad Dockerfile / buildpack) → a ``failed`` attempt with the
+    log tail, never a hang or a raise."""
+    install_fake_engine(monkeypatch, replies=_git_replies(fail=True))
+    _box, _app, deploy = await _git_app_and_deploy()
+
+    await deploy_job.deploy_app_job({}, str(deploy.id), "w1")
+
+    landed = await store.get_deploy("w1", str(deploy.id))
+    assert landed is not None and landed.status == "failed"
 
 
 async def test_an_unreachable_box_fails_the_attempt_without_leaking_its_address(

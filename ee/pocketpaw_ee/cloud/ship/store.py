@@ -13,9 +13,23 @@
 # halves — ``list_boxes``, the ``ShipApp`` CRUD used by the HTTP surface, the
 # ``ShipDeploy`` attempt log the arq deploy job advances, and the two
 # ``park_*_destroy`` writers that record a parked teardown without executing it.
+# Changed 2026-07-23 (feat/ship-9-env-store, SHIP-9): this module now owns the
+# app's encrypted env store too — ``upsert_app_env`` Fernet-encrypts each value
+# before it is written (mirrors the SSH-key envelope in
+# ``create_provisioning_box``), ``delete_app_env`` removes one var, and
+# ``decrypt_app_env`` is the SOLE decryption path (mirrors ``decrypt_ssh_key``),
+# scope-filtered for the deploy-time merge. Plaintext values are handled nowhere
+# else.
+# Changed 2026-07-23 (feat/ship-14-source-deploy, SHIP-14): the app's deploy
+# SOURCE lives here too — ``create_app`` and ``set_app_source`` Fernet-encrypt the
+# private-repo token before it is written (the same envelope as the env store),
+# and ``decrypt_repo_token`` is its SOLE decryption path (mirrors
+# ``decrypt_ssh_key`` / ``decrypt_app_env``), read only by the deploy job. The
+# plaintext token is handled nowhere else.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from beanie import PydanticObjectId
@@ -24,13 +38,17 @@ from bson.errors import InvalidId
 from pocketpaw_ee.cloud._core import crypto
 from pocketpaw_ee.cloud.models.ship import (
     ShipApp,
+    ShipAppDatabase,
     ShipAppDomain,
     ShipAppStatus,
+    ShipAppVolume,
     ShipBox,
     ShipBoxStatus,
     ShipBuildPath,
     ShipDeploy,
     ShipDeployStatus,
+    ShipEnvVar,
+    ShipSourceKind,
 )
 
 
@@ -89,6 +107,18 @@ async def get_box(workspace_id: str, box_id: str) -> ShipBox | None:
 async def list_boxes(workspace_id: str) -> list[ShipBox]:
     """Every box the workspace owns, newest first. Tenant-filtered read."""
     return await ShipBox.find(ShipBox.workspace == workspace_id).sort("-createdAt").to_list()
+
+
+async def record_host_key(box: ShipBox, *, host_key: str) -> ShipBox:
+    """Pin the box's SSH HOST key, captured trust-on-first-use at provisioning.
+
+    Not a secret — it is the box's server identity, the same string an operator
+    would find in ``~/.ssh/known_hosts``. Every connect after provisioning
+    verifies against it, which is what makes a fresh box reachable at all.
+    """
+    box.ssh_host_key = host_key.strip()
+    await box.save()
+    return box
 
 
 async def mark_ready(
@@ -162,8 +192,17 @@ async def create_app(
     image: str,
     env_refs: list[str],
     prod: bool,
+    source_kind: ShipSourceKind = "image",
+    repo_url: str = "",
+    repo_ref: str = "main",
+    repo_token: str | None = None,
 ) -> ShipApp:
-    """Insert a fresh app in ``created``. ``env_refs`` are NAMES only."""
+    """Insert a fresh app in ``created``. ``env_refs`` are NAMES only.
+
+    ``repo_token`` is PLAINTEXT in; it is Fernet-encrypted before the doc is
+    written (mirrors the SSH-key / env-value envelope) — a ``None``/empty token is
+    a public repo and stores empty ciphertext. The plaintext never lives at rest.
+    """
     app = ShipApp(
         workspace=workspace_id,
         box_id=box_id,
@@ -173,6 +212,10 @@ async def create_app(
         image=image,
         env_refs=list(env_refs),
         prod=prod,
+        source_kind=source_kind,
+        repo_url=repo_url,
+        repo_ref=repo_ref,
+        repo_token_enc=crypto.encrypt(repo_token) if repo_token else "",
     )
     await app.insert()
     return app
@@ -241,14 +284,68 @@ async def record_app_domain(app: ShipApp, *, domain: str, tls_enabled: bool, url
     return app
 
 
-async def record_app_db(app: ShipApp, *, service: str, env_var: str) -> ShipApp:
-    """Record the linked database service + the env var NAME the link injected.
+async def record_app_db(
+    app: ShipApp, *, service: str, env_var: str, db_type: str = "mongo"
+) -> ShipApp:
+    """Record a linked database service + the env var NAME the link injected.
 
     The connection string is a secret and is never stored — SHIP-1's ``DbResult``
-    deliberately exposes only the variable's name.
+    deliberately exposes only the variable's name. SHIP-17: appends to the
+    ``databases`` list (the multi-db record) AND keeps the scalar ``db_service``/
+    ``db_env_var`` pointing at the first-linked db for back-compat. A re-link of
+    the same service name refreshes its entry rather than duplicating it.
     """
-    app.db_service = service
-    app.db_env_var = env_var
+    if not app.db_service:
+        app.db_service = service
+        app.db_env_var = env_var
+    for existing in app.databases:
+        if existing.name == service:
+            existing.db_type = db_type
+            existing.env_var = env_var
+            break
+    else:
+        app.databases.append(ShipAppDatabase(name=service, db_type=db_type, env_var=env_var))
+    await app.save()
+    return app
+
+
+async def set_app_scale(app: ShipApp, *, scale: dict[str, int]) -> ShipApp:
+    """Persist the app's process scale (SHIP-17). Replaces the map wholesale."""
+    app.scale = dict(scale)
+    await app.save()
+    return app
+
+
+async def set_app_checks(app: ShipApp, *, zero_downtime: bool, healthcheck_path: str) -> ShipApp:
+    """Persist the app's zero-downtime + healthcheck settings (SHIP-17)."""
+    app.zero_downtime = zero_downtime
+    app.healthcheck_path = healthcheck_path
+    await app.save()
+    return app
+
+
+async def record_app_volume(app: ShipApp, *, name: str, mount_path: str, host_path: str) -> ShipApp:
+    """Record a persistent volume mounted into an app (SHIP-18).
+
+    Appends to the ``volumes`` list; a re-mount of the same volume name refreshes
+    its entry rather than duplicating it. Carries no secret (the backing directory
+    is a path, not a credential).
+    """
+    for existing in app.volumes:
+        if existing.name == name:
+            existing.mount_path = mount_path
+            existing.host_path = host_path
+            break
+    else:
+        app.volumes.append(ShipAppVolume(name=name, mount_path=mount_path, host_path=host_path))
+    await app.save()
+    return app
+
+
+async def set_app_resources(app: ShipApp, *, cpu: int, memory_mb: int) -> ShipApp:
+    """Persist the app's resource ceilings (SHIP-18). Replaces both values."""
+    app.cpu_limit = cpu
+    app.memory_limit_mb = memory_mb
     await app.save()
     return app
 
@@ -258,6 +355,113 @@ async def park_app_destroy(app: ShipApp, *, proposal_id: str) -> ShipApp:
     app.pending_destroy_proposal_id = proposal_id
     await app.save()
     return app
+
+
+# --------------------------------------------------------------------------- #
+# App deploy source (SHIP-14) — the SOLE encrypt/decrypt seam for the repo token.
+# --------------------------------------------------------------------------- #
+
+
+async def set_app_source(
+    app: ShipApp,
+    *,
+    source_kind: ShipSourceKind,
+    repo_url: str,
+    repo_ref: str,
+    repo_token: str | None,
+) -> ShipApp:
+    """Point the app at a deploy source (``image`` or ``git``).
+
+    ``repo_token`` is PLAINTEXT in and Fernet-encrypted before write — the SOLE
+    encrypt seam for it, mirroring the env store. Its three-way semantics:
+    ``None`` LEAVES the stored token untouched (re-point a ref without re-entering
+    the credential); an EMPTY string CLEARS it (a public repo); a non-empty string
+    replaces it. The plaintext never lives at rest.
+    """
+    app.source_kind = source_kind
+    app.repo_url = repo_url
+    app.repo_ref = repo_ref
+    if repo_token is not None:
+        app.repo_token_enc = crypto.encrypt(repo_token) if repo_token else ""
+    await app.save()
+    return app
+
+
+def decrypt_repo_token(app: ShipApp) -> str:
+    """Decrypt the app's private-repo token for the deploy job — the SOLE
+    decryption path (mirrors ``decrypt_ssh_key`` / ``decrypt_app_env``). Empty
+    ciphertext (a public repo) returns "". Never logged, never serialized."""
+    if not app.repo_token_enc:
+        return ""
+    return crypto.decrypt(app.repo_token_enc)
+
+
+# --------------------------------------------------------------------------- #
+# App env store (SHIP-9) — the SOLE encrypt/decrypt seam for env VALUES.
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class EnvVarWrite:
+    """One env var to persist: the ``value`` is PLAINTEXT in, encrypted before it
+    is written. ``masked`` is the caller-computed non-secret display hint stored
+    alongside the ciphertext; ``scope`` is ``both|prod|preview``.
+
+    ``value`` is excluded from ``repr`` (like SHIP-1's ``AppSpec.env``) so a
+    logged/debugged write object never prints the secret.
+    """
+
+    key: str
+    masked: str
+    scope: str
+    value: str = field(repr=False)
+
+
+async def upsert_app_env(app: ShipApp, writes: list[EnvVarWrite]) -> ShipApp:
+    """Encrypt + upsert each env var on the app doc. New keys are added, existing
+    keys overwritten. This is the ONLY place an env value is encrypted — the
+    plaintext ``value`` becomes a Fernet token here and never lives at rest.
+
+    Encryption needs ``CLOUD_ENCRYPTION_KEY``; a missing key raises a clear setup
+    error (``crypto.encrypt``) rather than persisting a secret in the clear.
+    """
+    for w in writes:
+        app.env_vars[w.key] = ShipEnvVar(
+            enc_value=crypto.encrypt(w.value),
+            masked=w.masked,
+            scope=w.scope,  # type: ignore[arg-type] — validated at the DTO boundary
+        )
+    if writes:
+        await app.save()
+    return app
+
+
+async def delete_app_env(app: ShipApp, key: str) -> ShipApp:
+    """Remove one env var from the app. Idempotent — a missing key is a no-op."""
+    if key in app.env_vars:
+        del app.env_vars[key]
+        await app.save()
+    return app
+
+
+def decrypt_app_env(app: ShipApp) -> dict[str, str]:
+    """Decrypt the app's env for the deploy-time merge — the SOLE decryption path
+    (mirrors ``decrypt_ssh_key``). Returns ``{name: plaintext}`` filtered to the
+    vars that apply to this app's deploy kind (its ``prod`` flag). Never logged,
+    never serialized — the caller hands it straight to the engine's ``AppSpec``.
+    """
+    out: dict[str, str] = {}
+    for key, var in app.env_vars.items():
+        if _env_scope_applies(var.scope, prod=app.prod):
+            out[key] = crypto.decrypt(var.enc_value)
+    return out
+
+
+def _env_scope_applies(scope: str, *, prod: bool) -> bool:
+    """``both`` always applies; ``prod``/``preview`` only to the matching kind."""
+    if scope == "both":
+        return True
+    return scope == ("prod" if prod else "preview")
 
 
 # --------------------------------------------------------------------------- #

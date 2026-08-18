@@ -1,0 +1,8 @@
+# transcript: `dokku ps:restart demo` — a graceful bounce of the app's containers.
+EXIT: 0
+--- stdout ---
+-----> Restarting demo...
+       Stopping demo.web.1
+       Starting demo.web.1
+=====> Application restarted
+--- stderr ---

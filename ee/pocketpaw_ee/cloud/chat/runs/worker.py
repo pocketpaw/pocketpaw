@@ -311,6 +311,7 @@ _site_build_fn = func(
 class WorkerSettings:
     """arq worker configuration. Loaded by ``arq <dotted-path>``."""
 
+    functions = [execute_run_job, _workspace_job_fn, _ship_provision_fn, _ship_deploy_fn]
     # All four lanes. Keeping both sides of this merge verbatim produced two
     # consecutive `functions = [...]` assignments, where the second silently
     # won and NEITHER ship job would have registered.

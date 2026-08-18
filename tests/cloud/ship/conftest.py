@@ -50,8 +50,35 @@ SHIP3_REPLIES: dict[str, str] = {
     f"dokku letsencrypt:enable {APP}": "letsencrypt_enable.txt",
     f"dokku mongo:create {SERVICE}": "mongo_create.txt",
     f"dokku mongo:link {SERVICE} {APP}": "mongo_link.txt",
+    # Wave 2 (SHIP-17): postgres/redis database plugins, zero-downtime checks,
+    # and process scaling — the same box-free transcript replay.
+    f"dokku postgres:create {SERVICE}": "postgres_create.txt",
+    f"dokku postgres:link {SERVICE} {APP}": "postgres_link.txt",
+    f"dokku redis:create {SERVICE}": "redis_create.txt",
+    f"dokku redis:link {SERVICE} {APP}": "redis_link.txt",
+    f"dokku checks:enable {APP}": "checks_enable.txt",
+    f"dokku checks:disable {APP}": "checks_disable.txt",
+    f"dokku ps:scale {APP} web=2 worker=1": "ps_scale.txt",
+    # Wave 3 (SHIP-18): resource limits, persistent volumes, lifecycle bounces.
+    f"dokku resource:limit --cpu 1000 --memory 512 {APP}": "resource_limit.txt",
+    f"dokku storage:create {APP}-data": "storage_create.txt",
+    f"dokku storage:mount {APP} {APP}-data --container-dir /data": "storage_mount.txt",
+    f"dokku ps:restart {APP}": "ps_restart.txt",
+    f"dokku ps:rebuild {APP}": "ps_rebuild.txt",
+    # The APPROVED-teardown + approved-deploy paths (fix/ship-review-p0). These
+    # were never mapped because tests/cloud/ship/test_instinct_gate.py stubs
+    # ``_run_verb`` out, so the executor's real verb bodies never ran under test.
+    f"dokku --force apps:destroy {APP}": "apps_destroy.txt",
+    (f"dokku config:set --no-restart {APP} API_KEY=hunter2-super-secret-value"): "config_set.txt",
     f"dokku logs {APP} --num 100": "logs.txt",
     ship_engine.BOX_METRICS_COMMAND: "box_metrics.txt",
+    # App-level metrics (SHIP-12): ps:report state + df + real docker stats.
+    f"dokku ps:report {APP}": "ps_report.txt",
+    "df -Pk /": "df_root.txt",
+    (
+        f"docker stats --no-stream --no-trunc "
+        f"--format '{{{{.CPUPerc}}}} {{{{.MemPerc}}}}' --filter name={APP}."
+    ): "docker_stats.txt",
 }
 
 # The same surface, but the image deploy fails.
@@ -135,7 +162,18 @@ def install_refused_engine(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_app(workspace_id: str) -> FastAPI:
+def _build_app(workspace_id: str, *, role: str = "admin") -> FastAPI:
+    """Build the /ship app for one workspace, acting as ``role``.
+
+    ``role`` drives the RBAC route deps: ``ship.read`` is MEMBER and
+    ``ship.manage`` is ADMIN, so a ``member`` app can read but must be refused on
+    every mutating route. The suites default to ``admin`` (the pre-RBAC
+    behaviour); test_ship_rbac.py builds a ``member`` client to prove the gate.
+    """
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud._core.deps import current_active_user
+
     app = FastAPI()
     add_error_handler(app)
     app.include_router(ship_router)
@@ -149,8 +187,16 @@ def _build_app(workspace_id: str) -> FastAPI:
             started_at=datetime.now(UTC),
         )
 
+    async def _user():
+        return SimpleNamespace(
+            id="u1",
+            active_workspace=workspace_id,
+            workspaces=[SimpleNamespace(workspace=workspace_id, role=role)],
+        )
+
     app.dependency_overrides[request_context] = _ctx
     app.dependency_overrides[require_license] = lambda: None
+    app.dependency_overrides[current_active_user] = _user
     return app
 
 

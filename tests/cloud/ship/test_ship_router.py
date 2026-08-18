@@ -25,6 +25,7 @@ from tests.cloud.ship.conftest import (
     DOMAIN,
     SECRET_MARKERS,
     SERVICE,
+    SHIP3_REPLIES,
     _app_on_box,
     _ready_box,
     install_fake_engine,
@@ -96,6 +97,47 @@ async def test_box_metrics_refuses_a_box_that_is_not_ready(w1, monkeypatch):
     assert metrics.json()["error"]["code"] == "ship.box_not_ready"
 
 
+async def test_app_metrics_reports_state_plus_real_cpu_mem(w1, monkeypatch):
+    """App metrics = process state (Dokku) + real per-container CPU/mem (docker
+    stats). SHIP-12."""
+    install_fake_engine(monkeypatch)
+    box_id = await _ready_box(w1)
+    app_id = await _app_on_box(w1, box_id)
+
+    resp = await w1.get(f"/ship/apps/{app_id}/metrics")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert set(body) == {"deployed", "running", "processes", "cpu", "mem", "disk"}
+    assert body["deployed"] is True
+    assert body["running"] is True
+    assert body["processes"] == 1
+    # docker_stats.txt: 12.34% cpu, 5.60% mem (rounded 1dp); df_root.txt: 38%.
+    assert body["cpu"] == 12.3
+    assert body["mem"] == 5.6
+    assert body["disk"] == 38.0
+
+
+async def test_app_metrics_degrades_when_docker_stats_unavailable(w1, monkeypatch):
+    """A box whose Docker can't report stats still answers — cpu/mem read null,
+    process state survives (renders "—", never a false 0)."""
+    stats_cmd = (
+        f"docker stats --no-stream --no-trunc "
+        f"--format '{{{{.CPUPerc}}}} {{{{.MemPerc}}}}' --filter name={APP}."
+    )
+    install_fake_engine(monkeypatch, {**SHIP3_REPLIES, stats_cmd: "docker_stats_fail.txt"})
+    box_id = await _ready_box(w1)
+    app_id = await _app_on_box(w1, box_id)
+
+    resp = await w1.get(f"/ship/apps/{app_id}/metrics")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["running"] is True
+    assert body["cpu"] is None
+    assert body["mem"] is None
+
+
 # ---------------------------------------------------------------------------
 # Apps
 # ---------------------------------------------------------------------------
@@ -108,13 +150,31 @@ async def test_create_and_list_apps(w1):
 
     assert created.status_code == 200, created.text
     body = created.json()
-    assert set(body) == {"id", "name", "box_id", "status", "urls"}
+    assert set(body) == {
+        "id",
+        "name",
+        "box_id",
+        "status",
+        "urls",
+        "source_kind",
+        "repo_url",
+        "repo_ref",
+        "databases",
+        "scale",
+        "zero_downtime",
+        "healthcheck_path",
+        "volumes",
+        "cpu_limit",
+        "memory_limit_mb",
+    }
     assert (body["name"], body["box_id"], body["status"], body["urls"]) == (
         APP,
         box_id,
         "created",
         [],
     )
+    # An app created without a source defaults to the pre-built-image path.
+    assert body["source_kind"] == "image"
 
     listed = (await w1.get("/ship/apps")).json()
     assert [a["id"] for a in listed] == [body["id"]]
@@ -201,6 +261,17 @@ async def test_deploy_transitions_are_observable_through_the_deploys_route(w1, m
         "box_id": box_id,
         "status": "live",
         "urls": ["http://demo.paw.example"],
+        # An image-source app (the default) carries the source fields at defaults.
+        "source_kind": "image",
+        "repo_url": "",
+        "repo_ref": "main",
+        "databases": [],
+        "scale": {},
+        "zero_downtime": True,
+        "healthcheck_path": "",
+        "volumes": [],
+        "cpu_limit": 0,
+        "memory_limit_mb": 0,
     }
 
 
@@ -338,6 +409,7 @@ async def test_cross_tenant_box_routes_404(w1, w2, monkeypatch):
         ("get", "/domains", None),
         ("post", "/db", {}),
         ("get", "/logs", None),
+        ("get", "/metrics", None),
         ("delete", "", None),
     ],
 )

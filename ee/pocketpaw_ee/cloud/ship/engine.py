@@ -94,6 +94,9 @@ async def box_session(box: ShipBox) -> AsyncIterator[BoxSession]:
             port=box.ssh_port,
             username=box.ssh_user,
             client_key_path=key_path,
+            # Pin the host key captured when the box was provisioned, so every
+            # session after provisioning verifies the box's identity.
+            host_key=box.ssh_host_key,
         )
         yield BoxSession(engine=DokkuDriver(transport), transport=transport)
     finally:

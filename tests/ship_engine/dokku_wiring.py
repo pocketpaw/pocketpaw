@@ -22,6 +22,14 @@ _CONFIG_SET_CMD = (
     "API_KEY=hunter2-super-secret-value MONGO_PASSWORD=passw0rd-abc"
 )
 
+# The EXACT git:sync command the driver builds for the standard GitSource: the
+# access token is injected as ``x-access-token`` userinfo of the https clone URL.
+# Hardcoded (not computed) so the fake pins the precise credential-injection
+# format — a change to it updates this map deliberately. The URL has no
+# shell-special characters, so shlex.quote leaves it unquoted.
+_TOKENIZED_GIT_URL = f"https://x-access-token:{c.GIT_TOKEN}@github.com/paw-demo/app.git"
+_GIT_SYNC_CMD = f"dokku git:sync --build {c.APP} {_TOKENIZED_GIT_URL} {c.GIT_REF}"
+
 # The happy path: app missing on first deploy (exercises apps:create), then
 # every verb of the standard scenario.
 HAPPY_REPLIES: dict[str, str] = {
@@ -30,6 +38,7 @@ HAPPY_REPLIES: dict[str, str] = {
     _CONFIG_SET_CMD: "config_set.txt",
     f"dokku git:from-image {c.APP} {c.IMAGE}": "git_from_image.txt",
     f"dokku git:from-image {c.APP} {c.ROLLBACK_IMAGE}": "git_from_image.txt",
+    _GIT_SYNC_CMD: "git_sync.txt",
     f"dokku domains:add {c.APP} {c.DOMAIN}": "domains_add.txt",
     f"dokku letsencrypt:enable {c.APP}": "letsencrypt_enable.txt",
     f"dokku mongo:create {c.SERVICE}": "mongo_create.txt",
@@ -39,6 +48,10 @@ HAPPY_REPLIES: dict[str, str] = {
     f"dokku logs {c.APP} --num 100": "logs.txt",
     f"dokku ps:report {c.APP}": "ps_report.txt",
     "df -Pk /": "df_root.txt",
+    (
+        f"docker stats --no-stream --no-trunc "
+        f"--format '{{{{.CPUPerc}}}} {{{{.MemPerc}}}}' --filter name={c.APP}."
+    ): "docker_stats.txt",
     f"dokku --force apps:destroy {c.APP}": "apps_destroy.txt",
 }
 
@@ -53,6 +66,7 @@ SECRET_MARKERS: tuple[str, ...] = (
     "hunter2-super-secret-value",  # ENV["API_KEY"], echoed by config_set.txt
     "passw0rd-abc",  # ENV["MONGO_PASSWORD"], echoed by config_set.txt
     "s3cr3tpass8f2a",  # the DSN password in mongo_create/link transcripts
+    c.GIT_TOKEN,  # the private-repo token in the git:sync clone URL
 )
 
 

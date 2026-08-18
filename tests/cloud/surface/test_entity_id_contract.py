@@ -210,17 +210,32 @@ _REQUIRED_ID = re.compile(r"^(?P<kind>[a-z0-9_]+)_id$")
 # request context, and no preamble lists them.
 _KNOWN_ADDRESSABLE_KINDS = frozenset(
     {
+        # ``app`` / ``box`` — the /ship MCP verbs take ``app_id`` / ``box_id``.
+        # The /ship preamble (handlers/ship.py) is static prose and lists neither:
+        # the agent discovers them from ``ship_list_boxes`` / ``ship_list_apps``
+        # tool output, so no prompt row owes an id.
+        "app",
         "assignee",
         "backtest",
+        "box",
         "custom_scenario",
         "decision",
+        # ``draft`` / ``icp`` / ``prospect`` — the /growth MCP verbs (#1807) take
+        # ``draft_id`` / ``icp_id`` / ``prospect_id`` as REQUIRED. The /growth
+        # preamble is static prose and lists none of them; the agent addresses
+        # them from ``growth_list_prospects`` / ``growth_list_drafts`` output.
+        # (dev landed these tools without extending this set, so the harvester
+        # tripped on the first branch that merged both growth and a full lane.)
+        "draft",
         "from",
+        "icp",
         "input",
         "invite",
         "link",
         "meeting",
         "pocket",
         "project",
+        "prospect",
         "run",
         "scenario",
         "task",

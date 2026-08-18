@@ -17,6 +17,10 @@
 # ``DbResult`` invariant, carried up the stack).
 #
 # Created 2026-07-22 (feat/ship-3-cloud-entity, SHIP-3): new module.
+# Changed 2026-07-23 (feat/ship-9-env-store, SHIP-9): added ``EnvVarView`` — the
+# read model for one masked env var. It carries the MASK, never the value: the
+# plaintext is only ever decrypted inside ``ship.store`` at deploy time, so a
+# view (which crosses the entity boundary) can never leak one.
 
 from __future__ import annotations
 
@@ -46,7 +50,12 @@ class BoxView:
 
 @dataclass(frozen=True)
 class AppView:
-    """Read model for one app deployed onto a box."""
+    """Read model for one app deployed onto a box.
+
+    ``source_kind`` / ``repo_url`` / ``repo_ref`` describe the deploy source
+    (SHIP-14). The private-repo TOKEN is never a view field — it is decrypted
+    solely inside ``ship.store`` at deploy time and never crosses this boundary.
+    """
 
     id: AppId
     workspace_id: str
@@ -60,6 +69,22 @@ class AppView:
     urls: tuple[str, ...] = ()
     # Env var NAMES the app expects — never values.
     env_refs: tuple[str, ...] = ()
+    # Deploy source (SHIP-14) — never the token.
+    source_kind: str = "image"
+    repo_url: str = ""
+    repo_ref: str = "main"
+    # Runtime config (SHIP-17). ``databases`` carries (name, db_type, env_var)
+    # tuples — never a connection string. ``scale`` is process -> count.
+    databases: tuple[tuple[str, str, str], ...] = ()
+    scale: dict[str, int] = field(default_factory=dict)
+    zero_downtime: bool = True
+    healthcheck_path: str = ""
+    # Operations config (SHIP-18). ``volumes`` carries (name, mount_path,
+    # host_path) tuples; ``cpu_limit`` / ``memory_limit_mb`` are resource ceilings
+    # (0 = unset). None carry a secret.
+    volumes: tuple[tuple[str, str, str], ...] = ()
+    cpu_limit: int = 0
+    memory_limit_mb: int = 0
     pending_destroy_proposal_id: str | None = None
 
 
@@ -104,6 +129,17 @@ class DbView:
 
 
 @dataclass(frozen=True)
+class LifecycleView:
+    """The result of a lifecycle action on an app (SHIP-18, ``restart`` /
+    ``rebuild``). Both are reversible bounces, so the view simply confirms what
+    the engine did. Carries no secret."""
+
+    workspace_id: str
+    app_id: str
+    action: str
+
+
+@dataclass(frozen=True)
 class LogsView:
     """A bounded chunk of an app's recent log lines, newest last."""
 
@@ -124,6 +160,35 @@ class BoxMetricsView:
 
 
 @dataclass(frozen=True)
+class AppMetricsView:
+    """One app's health: process state (always) + real per-container resource
+    usage (``None`` when the box could not report it — the view shows "—", never
+    a false 0). ``cpu``/``mem`` come from ``docker stats``, ``disk`` from the
+    box's root filesystem."""
+
+    workspace_id: str
+    app_id: str
+    deployed: bool
+    running: bool
+    processes: int
+    cpu: float | None
+    mem: float | None
+    disk: float | None
+
+
+@dataclass(frozen=True)
+class EnvVarView:
+    """Read model for one env var. ``masked_value`` is the masked hint — the
+    plaintext value is never read out of the store except at deploy time."""
+
+    workspace_id: str
+    app_id: str
+    key: str
+    masked_value: str
+    scope: str
+
+
+@dataclass(frozen=True)
 class DestroyProposalView:
     """A PARKED teardown. Nothing was destroyed — a human still has to approve.
 
@@ -141,6 +206,7 @@ __all__ = [
     "AppId",
     "AppView",
     "BoxId",
+    "AppMetricsView",
     "BoxMetricsView",
     "BoxView",
     "DbView",
@@ -148,5 +214,6 @@ __all__ = [
     "DeployView",
     "DestroyProposalView",
     "DomainView",
+    "EnvVarView",
     "LogsView",
 ]
