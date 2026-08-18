@@ -2,6 +2,17 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-08-18 (fix/sites-html-refine-names-the-edit-tool) — documented
+`edit_html_file`, the html track's chat edit tool. It shipped in db083bfc without
+reaching this file, so the section below still said html had no edit tool and was
+"edited by uid splice via the leaf-edits route" — that route is the NATIVE
+editor's path, not the agent's, and the two are different entry points. Recorded
+with the same emphasis the react entry gets on the things a field list cannot
+show: why the argument is `file_path` rather than `component_path` (html has no
+component model, and its paths are root-relative), and why this tool does not
+republish for a DIFFERENT reason than react's — html runs no build at all, so
+there is no gate that could catch a bad edit before it went live.
+
 Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-4) — documented the build-lane
 fields now on the `publish` tool response and the new read-only
 `get_site_build_status` tool, in the same MCP section. Both are recorded here
@@ -1738,7 +1749,7 @@ report a destroy as done.
 Editing a Paw Site from chat does not go over HTTP. The chat agent reaches it
 through the in-process MCP server `pocketpaw_sites_manager`
 (`ee/pocketpaw_ee/agent/mcp_servers/sites.py`), whose tools are namespaced
-`mcp__pocketpaw_sites_manager__<tool>`. Two editing tools live there, one per
+`mcp__pocketpaw_sites_manager__<tool>`. Three editing tools live there, one per
 hand-authored engine, and they are **not interchangeable** — each rejects the
 other's pockets.
 
@@ -1746,10 +1757,12 @@ other's pockets.
 |------|--------|-----------|
 | `edit_svelte_component` | `engine: "svelte"` | Builds a draft **preview** (workerd smoke gate; rolls the source back if it fails) |
 | `edit_react_component` | `engine: "react"` | **No.** Persists the draft and stops — no build, no deploy |
+| `edit_html_file` | `engine: "html"` | **No.** Persists the draft and stops — html runs no build, so there is nothing to gate a deploy on |
 
 A ripple or dynamic site is edited through the pocket specialist's rippleSpec
-merge instead; an html site is edited by uid splice via the leaf-edits route
-above.
+merge instead. The leaf-edits REST route above is the *native editor's* html path
+(uid splice) and is a different entry point from `edit_html_file`, which is the
+chat agent's.
 
 ### `edit_react_component`
 
@@ -1803,6 +1816,68 @@ Errors (relayed to the agent as `is_error` with the code, so it can fix and retr
 Every write goes through `pockets_service.set_react_source_file`, which emits
 `PocketUpdated` and records a draft `ArtifactVersion` snapshotting the full edited
 source map — so an edit is a reviewable Branch draft a later publish promotes.
+
+### `edit_html_file`
+
+Write ONE file of an html site's `source` map as a reviewable draft.
+
+| Arg | Type | Notes |
+|-----|------|-------|
+| `pocket_id` | string | Required. The html site pocket. |
+| `file_path` | string | Required. Project-relative and usually at the site **root** — `index.html`, `styles.css`, `about.html`, `img/logo.svg`. Must already exist unless `create` is true. |
+| `edits` | array | A list of `{old_string, new_string}` blocks applied to the file's current contents. Each `old_string` must match **exactly once**. Exactly one of `edits` / `new_source`. |
+| `new_source` | string | The full new file contents (replaces the whole file). Required with `create`. |
+| `create` | boolean | Default `false`. Create a NEW file at `file_path`; the path must **not** already exist. |
+
+Returns `{ok: true, status: "draft", is_live: false, pocket_id, file_path,
+created, message}`. To **add a page**, call it twice: once with `create: true` for
+e.g. `about.html`, then again with `edits` on `index.html` to link to it.
+
+**The argument is `file_path`, not `component_path`, and the difference is not
+cosmetic.** svelte and react have a component model; html does not — the scaffold
+writes the author's map verbatim into the directory the edge serves, so what
+exists is files. Paths are **root-relative with no `src/` prefix**; passing react's
+`src/components/Hero.tsx` shape here creates a file nothing serves.
+
+**It does not publish**, for a different reason than react's. React defers because
+its build is async and there is no synchronous outcome to roll back from. Html has
+no build *at all* (`needs_node_build` is false), so there is no smoke render and
+nothing that could reject a bad edit before it deployed — a republish here would
+push unvalidated markup straight to a live customer site. Draft-only is the safer
+contract, not merely the convenient one.
+
+**Write scope**: only two rejections, because an html site's files legitimately
+live at the project root and react's `src/`-or-`public/` rule would reject the
+whole track. Paths are normalized (backslashes, `.`/`..`) before the check.
+
+| Rejected | Why |
+|----------|-----|
+| the `_paw/` namespace | Generator-owned. `_paw/edit-manifest.json` maps each editable element to a byte range; shadowing it makes the next **native** editor edit splice at wrong offsets and land mid-tag — silently. |
+| anything escaping the site directory | `..` and absolute paths. |
+
+Errors (relayed to the agent as `is_error` with the code, so it can fix and retry):
+
+| Code | When |
+|------|------|
+| `site_edit.invalid_args` | Not exactly one of `edits` / `new_source`. |
+| `site_edit.create_needs_source` | `create` without `new_source`. |
+| `site_edit.reserved_path` | The resolved path is in `_paw/`. |
+| `site_edit.path_outside_source` | The resolved path escapes the site directory. |
+| `site_edit.no_match` / `site_edit.ambiguous_match` | An `old_string` matched 0 or >1 times. Make it more specific and retry. |
+| `pocket.not_html_site` | The pocket is not an html Paw Site. |
+| `pocket.html_file_exists` | `create` on a path that already exists. |
+| `site_component.not_found` | `create` is false and the path is not in the source map. |
+| `plan.feature_denied` | The workspace's plan lacks the `sites` feature. |
+
+Every write goes through `pockets_service.set_html_source_file`, which emits
+`PocketUpdated` and records a draft `ArtifactVersion` — the same chokepoint
+contract the react tool uses.
+
+**Keep the form plumbing.** If a file contains a `<form>` posting to
+`/capture/form`, its `action` and the hidden `paw_site_id` / `paw_key` /
+`paw_redirect` inputs are what deliver leads. A rewrite that drops them leaves a
+form that still looks right and captures nothing, with no visible change to the
+page.
 
 ### Build state on the `publish` response
 

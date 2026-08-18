@@ -20,10 +20,10 @@
   {
     "label": "the html branch names a create tool as its apply path — the agent mints a SECOND site and reports the edit done",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "            \"- the create tools take no pocket id: each one creates a NEW pocket \"",
-    "replace": "            \"- apply the change with `mcp__pocketpaw_sites_manager__create_html_site` \"",
+    "find": "            \"Call `mcp__pocketpaw_sites_manager__edit_html_file` with pocket_id \"",
+    "replace": "            \"Call `mcp__pocketpaw_sites_manager__create_html_site` with pocket_id \"",
     "tests": [
-      "tests/cloud/surface/test_sites_handler.py::test_html_refine_admits_it_has_no_edit_tool"
+      "tests/cloud/surface/test_sites_handler.py::test_html_refine_routes_the_edit_to_the_html_edit_tool"
     ]
   },
   {
