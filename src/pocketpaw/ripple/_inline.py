@@ -641,7 +641,7 @@ Final self-check before sending:
 ✔ Matched the reply SHAPE to its typed widget (comparison-table / data-grid /
   timeline / kv-table / status-dot / pricing-table) — did NOT rebuild it from a
   plain table / text / flex
-✔ Used a core widget, an inlined typed widget, or called `get_inline_widget_help`
+✔ Used a core widget, an inlined typed widget, or called `get_widget_spec`
   BEFORE emitting any other type
 ✔ Multi-step / wizard / intake flow → called `start_flow`, not a hand-authored or `set`-stepped spec
 ✔ Pending Instinct approvals → Approve/Reject buttons `api`-POST the route, NOT chat.send
@@ -659,7 +659,7 @@ _INLINE_TYPED_WIDGET_RULE = """\
 The most common chat-quality miss is answering a SHAPED request with a
 plain `table` / `text` / `flex` when a dedicated widget exists. When the
 reply matches a shape below, emit that widget — its props are inlined
-right here, so NO `get_inline_widget_help` call is needed.
+right here, so NO `get_widget_spec` call is needed.
 
   compare X vs Y / feature or plan matrix      -> comparison-table
   ranked list / top N / leaderboard            -> data-grid (sortable)
@@ -695,13 +695,15 @@ data-grid — { columns:[{key,label,sortable,align}], rows, defaultSort?, search
       "defaultSort":"revenue:desc","searchable":true }}
 
 timeline — { events:[{date,title,detail?,type?}], density? }
-  type: default | success | warning | destructive | info
+  type: default | success | warning | error | info
   { "type":"timeline","props":{"density":"compact","events":[
       {"date":"Jan 2026","title":"Alpha","type":"success"},
       {"date":"Mar 2026","title":"Public beta"} ]}}
 
 kv-table       — { rows:[{key,value}], columns?:1|2, striped? }
-status-dot     — { variant:"online|offline|degraded|warning", label, pulse? }
+status-dot     — { variant:"online|offline|busy|away|custom", label, pulse?, color? (custom only) }
+  degraded/warning are NOT variants — use "busy" (amber) or "custom" + color; an unknown
+  variant silently renders the online GREEN.
 pricing-table  — { currency, tiers:[{id,name,price,period,features:[{label,included}],cta}] }
 source-card    — { source, title, url?, color? }
 callout        — { variant:"info|insight|warning", title, text }

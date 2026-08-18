@@ -1813,10 +1813,13 @@ do NOT surround it with sibling ``stat`` / ``funnel`` / ``chart`` nodes
 
 An "app for triaging X" brief (tickets, leads, inbox, moderation queue)
 is an ``app-shell`` root with a ``sidebar`` (grouped nav, NOT a column of
-``button`` widgets), a ``master-detail`` in the content (list + selected
-detail), and ``comment-thread`` inside the detail (NOT a flex of
-``card`` widgets). Reach for these structural widgets — do NOT rebuild
-the shell / list / thread from ``split`` / ``flex`` / ``each`` / ``card``.
+``button`` widgets), a ``master-detail`` for the list, and a
+``comment-thread`` beside it for the selected item (NOT a flex of
+``card`` widgets). ``master-detail`` has NO ``detail`` prop — it owns the
+list only (``items`` + ``valueKey``/``labelKey``); put the detail widgets
+next to it in the content and bind them to the selection. Reach for these
+structural widgets — do NOT rebuild the shell / list / thread from
+``split`` / ``flex`` / ``each`` / ``card``.
 
   create_pocket(
     name="Support inbox",
@@ -1826,20 +1829,21 @@ the shell / list / thread from ``split`` / ``flex`` / ``each`` / ``card``.
         {"id": 1, "title": "Webhook 500s", "customer": "Globex", "status": "in-progress"},
         {"id": 2, "title": "Slow exports", "customer": "Stark", "status": "open"}]},
       "ui": {"type": "app-shell", "children": [
-        {"slot": "sidebar", "type": "sidebar", "props": {"groups": [
-          {"label": "INBOX", "items": [
-            {"label": "All tickets", "value": "all", "count": 47},
-            {"label": "Assigned to me", "value": "mine", "count": 12}]}]}},
-        {"type": "master-detail", "bind": "selected", "props": {
-          "items": "{state.tickets}", "width": "340px",
-          "detail": {"type": "flex",
-            "props": {"direction": "column", "gap": "12px"},
-            "children": [
-              {"type": "heading", "props": {"text": "{item.title}", "level": 3}},
-              {"type": "comment-thread", "props": {"messages": [
-                {"author": "Customer", "body": "Webhooks 500 for 2h.", "time": "2h ago"},
-                {"author": "Alex", "body": "On it — retry storm from the outage.", "time": "12m ago"}]}}
-            ]}}}
+        {"slot": "sidebar", "type": "sidebar", "props": {"title": "Inbox", "items": [
+            {"label": "All tickets", "value": "all", "group": "INBOX", "badge": "47"},
+            {"label": "Assigned to me", "value": "mine", "group": "INBOX", "badge": "12"}]}},
+        {"type": "split", "props": {"direction": "horizontal", "defaultSize": 40}, "children": [
+          {"type": "master-detail", "bind": "selected", "props": {
+            "items": "{state.tickets}", "valueKey": "id", "labelKey": "title",
+            "descriptionKey": "customer", "badgeKey": "status", "width": "100%"}},
+          {"type": "flex", "props": {"direction": "column", "gap": 12}, "children": [
+            {"type": "heading", "props": {"text": "Webhook 500s", "level": 3}},
+            {"type": "comment-thread", "props": {"comments": [
+              {"id": 1, "author": "Customer", "body": "Webhooks 500 for 2h.", "timestamp": "2h ago"},
+              {"id": 2, "author": "Alex", "body": "On it — retry storm from the outage.",
+               "timestamp": "12m ago"}]}}
+          ]}
+        ]}
       ]}
     }
   )
