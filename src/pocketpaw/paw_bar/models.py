@@ -654,6 +654,11 @@ class OwnerMessage(BaseModel):
     id: str = Field(default_factory=_gen_owner_message_id)
     widget_id: str
     customer_ref: str
+    #: The conversation this line was said in (2026-08-19). Empty only for lines
+    #: written before the column existed and never backfilled — see the store's
+    #: migration. It is what stops an owner's reply appearing in a thread it does
+    #: not belong to.
+    conversation_id: str = ""
     workspace_id: str = ""
     role: OwnerMessageRole = OwnerMessageRole.OWNER
     content: str = ""
