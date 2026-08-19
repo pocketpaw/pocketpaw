@@ -263,6 +263,7 @@ def test_agent_identity_reaches_the_widget():
     assert config["agentSubtitle"] == "The team can also help"
     assert config["avatars"] == ["https://a.test/1.png"]
 
+
 def test_the_launcher_label_reaches_the_frame():
     """The resting pill says what the OWNER calls their own site.
 
