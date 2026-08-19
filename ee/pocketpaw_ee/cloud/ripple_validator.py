@@ -23,6 +23,12 @@ new token / method added to the resolver should be added here too — the
 two files together are the contract.
 
 Changes:
+  - 2026-07-09 (RCR-3b, catalog gate fail-closed): added
+    ``CatalogUnavailableError`` (subclasses ``CatalogViolationError`` so
+    existing strict-path handlers block it) for the fail-closed posture in
+    ``pockets/service._gate_catalog`` when the manifest can't be fetched and
+    ``ripple_catalog_gate_require_manifest`` is enabled. The shared formatters
+    render a synthetic ``{"unavailable": True}`` violation as a clear message.
   - 2026-06-19 (feat/typed-ripplespec-phase2): DUAL-PATH READER. Every public
     spec reader (``validate_ripple_spec`` + ``_logged`` / ``_strict``,
     ``validate_against_catalog_*``, ``validate_action_wiring_*``,
@@ -423,7 +429,12 @@ class CatalogViolationError(Exception):
     def _format(violations: list[dict[str, Any]]) -> str:
         lines = [f"{len(violations)} catalog violation(s) in rippleSpec:"]
         for v in violations[:20]:  # cap the message length
-            if "reason" in v:
+            if v.get("unavailable"):
+                lines.append(
+                    f"  - [catalog_unavailable] {v['path']}: widget manifest "
+                    "could not be fetched — spec could not be verified"
+                )
+            elif "reason" in v:
                 lines.append(f"  - [embed] {v['path']}: {v['reason']}\n      url: {v.get('url')!r}")
             else:
                 hint = f" — did you mean '{v['suggestion']}'?" if v.get("suggestion") else ""
@@ -431,6 +442,23 @@ class CatalogViolationError(Exception):
         if len(violations) > 20:
             lines.append(f"  - …and {len(violations) - 20} more")
         return "\n".join(lines)
+
+
+class CatalogUnavailableError(CatalogViolationError):
+    """Raised on the STRICT (agent-generation) path when the widget-catalog
+    manifest can't be fetched and ``ripple_catalog_gate_require_manifest`` is
+    enabled — the spec can't be verified against the catalog, so it is
+    rejected rather than persisted (fail-closed).
+
+    Subclasses :class:`CatalogViolationError` so every existing strict-path
+    handler (which already catches ``CatalogViolationError``) blocks the write
+    with no new wiring. The distinct type lets operators tell "manifest down"
+    from "bad widget type" in telemetry, and carries a single synthetic
+    ``unavailable`` violation so the shared formatters render a clear message.
+    """
+
+    def __init__(self) -> None:
+        super().__init__([{"path": "ui", "unavailable": True}])
 
 
 def _collect_catalog_violations(
@@ -459,7 +487,12 @@ def format_violations_for_agent(violations: list[dict[str, Any]]) -> str:
         return ""
     lines = ["The rippleSpec was rejected — it contains nodes outside the widget catalog:"]
     for v in violations[:10]:
-        if "reason" in v:
+        if v.get("unavailable"):
+            lines.append(
+                f"  • {v['path']}: the widget catalog is temporarily unavailable, "
+                "so this spec could not be verified. Try again shortly."
+            )
+        elif "reason" in v:
             lines.append(f"  • {v['path']}: embed url rejected — {v['reason']}")
         else:
             hint = f" Use '{v['suggestion']}' instead." if v.get("suggestion") else ""
@@ -979,6 +1012,7 @@ def find_unreferenced_state_keys(spec: RippleSpec | dict[str, Any] | None) -> li
 
 __all__ = [
     "ActionWiringViolationError",
+    "CatalogUnavailableError",
     "CatalogViolationError",
     "ExpressionWarning",
     "MissingRequiredPropError",

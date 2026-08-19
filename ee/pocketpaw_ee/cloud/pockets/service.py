@@ -340,6 +340,7 @@ from pocketpaw_ee.cloud.pockets.id_resolve import AmbiguousId, resolve_id
 from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
 from pocketpaw_ee.cloud.ripple_validator import (
     ActionWiringViolationError,
+    CatalogUnavailableError,
     CatalogViolationError,
     MissingRequiredPropError,
     find_unreferenced_state_keys,
@@ -922,14 +923,26 @@ async def _gate_catalog(
     (human / import path) logs a structured warning per violation and does
     not block. Either way, an embed-bearing spec is audit-logged.
 
-    Best-effort: when the widget manifest can't be fetched the gate is
-    skipped (same posture as the manifest-drift validator).
+    When the widget manifest can't be fetched the gate can't verify the spec.
+    Posture is controlled by ``ripple_catalog_gate_require_manifest``:
+
+    * default (``False``) — best-effort skip, same as the manifest-drift
+      validator (preserves current behavior; the manifest URL defaults to the
+      local ripple dev server, often down in dev).
+    * ``True`` — the strict (agent) path FAILS CLOSED, raising
+      :class:`CatalogUnavailableError` rather than persisting an unverifiable
+      spec. The logged (human/import) path still skips — it never blocks.
     """
     if not isinstance(spec, dict):
         return
     _audit_embed_ingest(spec, actor=actor, workspace_id=workspace_id, pocket_id=pocket_id)
     allowed_types = await _catalog_allowed_types()
     if allowed_types is None:
+        if strict:
+            from pocketpaw.config import get_settings
+
+            if get_settings().ripple_catalog_gate_require_manifest:
+                raise CatalogUnavailableError()
         return
     embed_hosts = _embed_allowed_hosts()
     if strict:
