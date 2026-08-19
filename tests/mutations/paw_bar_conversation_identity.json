@@ -40,8 +40,8 @@
   {
     "label": "an owner action loses its active scope — closing one conversation closes the visitor's whole history",
     "file": "src/pocketpaw/paw_bar/store.py",
-    "find": "            \" WHERE widget_id = ? AND customer_ref = ? AND active = 1\"\n        )\n        values.extend([widget_id, customer_ref])",
-    "replace": "            \" WHERE widget_id = ? AND customer_ref = ?\"\n        )\n        values.extend([widget_id, customer_ref])",
+    "find": "                \" WHERE widget_id = ? AND customer_ref = ? AND active = 1\"\n            )\n            values.extend([widget_id, customer_ref])",
+    "replace": "                \" WHERE widget_id = ? AND customer_ref = ?\"\n            )\n            values.extend([widget_id, customer_ref])",
     "tests": [
       "tests/cloud/test_paw_bar_conversation_identity.py::test_owner_actions_touch_only_the_conversation_in_progress"
     ]

@@ -1800,6 +1800,11 @@ class ConversationItem(BaseModel):
     """
 
     customer_ref: str
+    # WHICH conversation this row is (2026-08-19). A visitor may hold several, so
+    # ``customer_ref`` names the person and no longer identifies the row. Empty
+    # only for a conversation with no state row and no identified run — the
+    # legacy shape, kept listable rather than dropped.
+    conversation_id: str = ""
     last_message_at: str
     preview: str
     state: str = "open"
@@ -1933,6 +1938,11 @@ class ConversationPatchRequest(BaseModel):
     tags: list[str] | None = None
     note: str | None = None
     bot_paused: bool | None = None
+    # WHICH of the visitor's conversations to file (2026-08-19). Absent means the
+    # one in progress, which is what every pre-identity client sends and what the
+    # store has always written. It is not a patchable FIELD — it is the address —
+    # so it is stripped before the field whitelist ever sees it.
+    conversation_id: str | None = None
 
 
 class ConversationPatchResponse(BaseModel):
@@ -1969,9 +1979,17 @@ class TranscriptMessage(BaseModel):
 
 
 class ConversationReplyRequest(BaseModel):
-    """Body of POST .../conversations/{customer_ref}/reply — the owner's own turn."""
+    """Body of POST .../conversations/{customer_ref}/reply — the owner's own turn.
+
+    ``conversation_id`` names the thread being answered (2026-08-19). Absent means
+    the visitor's active one — the pre-identity behaviour, kept so a cached
+    dashboard bundle keeps working. Sending it is how an owner answers a question
+    from a conversation the visitor has since moved on from without that answer
+    materializing inside the conversation they are typing in right now.
+    """
 
     text: str
+    conversation_id: str | None = None
 
 
 class ConversationReplyResponse(BaseModel):
@@ -2243,20 +2261,18 @@ async def patch_site_conversation(
         raise HTTPException(404, "conversation_not_found")
 
     store = _store()
-    conversation = await store.get_conversation(widget.id, customer_ref, workspace_id=workspace_id)
-    if conversation is None:
-        # No row yet — only mint one if this ref actually HAS a conversation here.
-        runs = await _concierge_runs_for_visitor(
-            site.pocket_id, customer_ref, workspace_id, limit=1
-        )
-        if not runs:
-            raise HTTPException(404, "conversation_not_found")
-        conversation = await store.ensure_conversation(widget.id, customer_ref, workspace_id)
+    conversation = await _resolve_owner_conversation(
+        store, site, widget, customer_ref, workspace_id, req.conversation_id or ""
+    )
 
     if fields:
         before = conversation
         updated = await store.update_conversation(
-            widget.id, customer_ref, workspace_id=workspace_id, **fields
+            widget.id,
+            customer_ref,
+            workspace_id=workspace_id,
+            conversation_id=conversation.id,
+            **fields,
         )
         conversation = updated or conversation
         # AL-2 — record whichever ledger beats this patch actually crossed
@@ -2342,19 +2358,18 @@ async def post_site_conversation_reply(
         raise HTTPException(404, "conversation_not_found")
 
     store = _store()
-    conversation = await store.get_conversation(widget.id, customer_ref, workspace_id=workspace_id)
-    if conversation is None:
-        runs = await _concierge_runs_for_visitor(
-            site.pocket_id, customer_ref, workspace_id, limit=1
-        )
-        if not runs:
-            raise HTTPException(404, "conversation_not_found")
-        conversation = await store.ensure_conversation(widget.id, customer_ref, workspace_id)
+    conversation = await _resolve_owner_conversation(
+        store, site, widget, customer_ref, workspace_id, req.conversation_id or ""
+    )
 
     message = await store.add_owner_message(
         widget.id,
         customer_ref,
         text,
+        # The line is said IN a conversation (2026-08-19). Without this it was
+        # said to the VISITOR, and surfaced in every thread they owned — including
+        # ones they started after it was written.
+        conversation_id=conversation.id,
         role=OwnerMessageRole.OWNER,
         author=getattr(user, "id", "") or "",
         workspace_id=workspace_id,
@@ -2372,7 +2387,11 @@ async def post_site_conversation_reply(
         fields["snooze_until"] = ""
     before = conversation
     updated = await store.update_conversation(
-        widget.id, customer_ref, workspace_id=workspace_id, **fields
+        widget.id,
+        customer_ref,
+        workspace_id=workspace_id,
+        conversation_id=conversation.id,
+        **fields,
     )
     conversation = updated or conversation
     # AL-2 — typing IS taking over, so this is where ``paw.conversation.takeover``
@@ -2498,6 +2517,9 @@ async def get_agent_conversations(
 async def get_site_conversation_transcript(
     site_id: str,
     customer_ref: str,
+    conversation_id: str = Query(
+        "", description="Read ONE conversation, not the visitor's whole history"
+    ),
     workspace_id: str = Depends(current_workspace_id),
 ) -> ConversationTranscriptResponse:
     """One visitor's concierge transcript on a site, oldest-first (D2 drill-in).
@@ -2523,7 +2545,13 @@ async def get_site_conversation_transcript(
     # No concierge widget on this site → no conversation exists to read.
     if widget is None:
         raise HTTPException(404, "conversation_not_found")
-    messages = await _load_transcript(site.pocket_id, customer_ref, workspace_id, widget=widget)
+    messages = await _load_transcript(
+        site.pocket_id,
+        customer_ref,
+        workspace_id,
+        widget=widget,
+        conversation_id=conversation_id,
+    )
     if messages is None:
         # No concierge run for this (pocket, customer_ref) — the ref has no
         # conversation on this site's widget.
@@ -2721,6 +2749,51 @@ async def get_site_preview_frame(
 # --- D2 aggregation data-source helpers -------------------------------------
 
 
+async def _resolve_owner_conversation(
+    store: Any,
+    site: Any,
+    widget: Any,
+    customer_ref: str,
+    workspace_id: str,
+    conversation_id: str = "",
+) -> Any:
+    """The conversation an owner's write addresses. Raises 404 if there isn't one.
+
+    ONE resolver for the PATCH and the reply (2026-08-19), because they were
+    resolving separately and both resolved to the visitor's ACTIVE row — so an
+    owner acting on the thread they were reading silently acted on a different
+    one the moment the visitor started a new conversation.
+
+    With ``conversation_id`` the named row must belong to this widget AND this
+    visitor; a mismatch is a 404 rather than a silent fallback. The fallback is
+    right on the VISITOR path (telling an anonymous caller that an id was real is
+    the only thing a refusal there would leak), and wrong here: this caller is
+    authenticated and already workspace-scoped, so answering their explicit
+    address with a different conversation's data is a correctness bug, not
+    defence.
+
+    Without it, the visitor's conversation in progress — the pre-identity
+    behaviour, kept so a cached dashboard bundle keeps working. LAZY ROW
+    CREATION is preserved on that path only: a conversation that predates the
+    state table is minted on first touch rather than 404ing the owner's first
+    snooze.
+    """
+    if conversation_id:
+        named = await store.get_conversation_by_id(conversation_id, workspace_id=workspace_id)
+        if named is None or named.widget_id != widget.id or named.customer_ref != customer_ref:
+            raise HTTPException(404, "conversation_not_found")
+        return named
+    conversation = await store.get_conversation(widget.id, customer_ref, workspace_id=workspace_id)
+    if conversation is None:
+        runs = await _concierge_runs_for_visitor(
+            site.pocket_id, customer_ref, workspace_id, limit=1
+        )
+        if not runs:
+            raise HTTPException(404, "conversation_not_found")
+        conversation = await store.ensure_conversation(widget.id, customer_ref, workspace_id)
+    return conversation
+
+
 def _validated_conversation_fields(req: ConversationPatchRequest, author: str) -> dict[str, Any]:
     """Turn a validated PATCH body into the store's keyword fields.
 
@@ -2841,17 +2914,49 @@ def _display_name(contact_email: str, customer_ref: str) -> str:
     return f"visitor-{customer_ref[:_DISPLAY_REF_CHARS]}" if customer_ref else "visitor"
 
 
+def _conversation_of_run(run: Any, pocket_id: str, widget: PawBarWidget | None) -> str:
+    """The conversation token encoded in a run's ``session_key``.
+
+    The key is ``cloud:concierge:{pocket}:{conversation}:{agent}``. Before
+    conversation identity the middle slot held the VISITOR's handle, so this
+    returns whatever is there and the caller decides what it is by looking for a
+    matching conversation row — a token that resolves to no row is a legacy run,
+    not an error. Parsed by stripping the known prefix and the last segment
+    rather than splitting on ``:``, because a pocket id is not guaranteed to be
+    colon-free and a naive split would mis-slice it.
+
+    Returns ``""`` for a key this function does not recognize, which groups that
+    run under its visitor exactly as the pre-identity code did.
+    """
+    key = getattr(run, "session_key", "") or ""
+    prefix = f"cloud:concierge:{pocket_id}:"
+    if not pocket_id or not key.startswith(prefix):
+        return ""
+    rest = key[len(prefix) :]
+    agent_id = getattr(widget, "agent_id", "") if widget is not None else ""
+    if agent_id and rest.endswith(f":{agent_id}"):
+        return rest[: -len(agent_id) - 1]
+    head, _, _tail = rest.rpartition(":")
+    return head
+
+
 async def _conversation_side_data(
     widget: PawBarWidget | None, workspace_id: str, refs: list[str]
 ) -> tuple[dict[str, Any], set[str], dict[str, str]]:
     """Load the per-visitor extras a conversation list row needs.
 
-    Returns ``(state rows by ref, refs with a pending action, contact email by
-    ref)``. Two bounded store reads for the WHOLE page, never one per row:
+    Returns ``(state rows by CONVERSATION ID, refs with a pending action, contact
+    email by ref)``. Two bounded store reads for the WHOLE page, never one per
+    row:
 
       * the ``paw_bar_conversations`` rows for exactly the refs on this page, and
       * this widget's decision rows, which answer both "is something waiting on
         the owner" and "did this visitor ever leave an email".
+
+    The state map is keyed by conversation id (2026-08-19). It was keyed by
+    ``customer_ref``, which silently kept ONE row per visitor — the same collapse
+    the list itself was making, one layer down, so fixing only the list would
+    have joined every one of a visitor's conversations to the same state.
 
     The email is READ from the decision row rather than copied onto the
     conversation row — it stays in the one place the PII invariant names, and this
@@ -2863,9 +2968,16 @@ async def _conversation_side_data(
         return states, set(), {}
     try:
         rows = await _store().list_conversations(
-            widget.id, workspace_id=workspace_id, limit=len(refs), customer_refs=refs
+            widget.id,
+            workspace_id=workspace_id,
+            # A visitor may hold several conversations, so the page's row budget
+            # is no longer one-per-ref. Bounded by the same scan cap the run
+            # window uses rather than by len(refs), which would truncate a busy
+            # visitor's threads out of their own state join.
+            limit=_CONVERSATION_SCAN_CAP,
+            customer_refs=refs,
         )
-        states = {row.customer_ref: row for row in rows}
+        states = {row.id: row for row in rows}
     except Exception:  # noqa: BLE001 — queue metadata is additive, never fatal
         logger.warning("conversation state read failed for widget %s", widget.id, exc_info=True)
     pending, emails = await _decision_side_data(widget, refs)
@@ -2966,15 +3078,53 @@ async def _list_conversations(
         logger.warning("conversations read failed for pocket %s", pocket_id, exc_info=True)
         return ConversationsResponse(items=[], cursor=None, unsupported=False)
 
-    # Dedupe the scanned window first (most-recent run per customer wins), THEN
-    # join and filter, THEN cut to `limit` — cutting first would hide a matching
-    # conversation behind a page of non-matching ones.
-    candidates: list[tuple[str, str, str]] = []
-    seen: set[str] = set()
+    # Dedupe the scanned window first (most-recent run per CONVERSATION wins),
+    # THEN join and filter, THEN cut to `limit` — cutting first would hide a
+    # matching conversation behind a page of non-matching ones.
+    #
+    # 2026-08-19: the dedupe key is the conversation, not the visitor. It was
+    # ``run.user_id``, which was right exactly while a visitor could hold one
+    # conversation; once they could hold several it silently discarded all but
+    # their most recent, and the owner's inbox showed one row for a person who
+    # had asked four separate questions. The other three were not collapsed
+    # behind a disclosure — they were absent, with no way to reach them.
+    parsed: list[tuple[str, str, Any]] = []  # (customer_ref, conversation token, run)
+    refs: list[str] = []
     for run in runs:
-        if run.user_id in seen:
+        if run.user_id not in refs:
+            refs.append(run.user_id)
+        parsed.append((run.user_id, _conversation_of_run(run, pocket_id, widget), run))
+
+    states, pending, emails = await _conversation_side_data(widget, workspace_id, refs)
+
+    # A token is a real conversation id only if a row confirms it. Anything else
+    # is a run from before conversations had identity, whose session_key carries
+    # the visitor's handle in that slot — those keep the old behaviour and group
+    # per visitor, resolving to that visitor's conversation in progress.
+    active_by_ref = {
+        row.customer_ref: row for row in states.values() if getattr(row, "active", True)
+    }
+
+    candidates: list[tuple[str, str, str, str]] = []  # ref, conversation_id, when, preview
+    seen: set[str] = set()
+    for ref, token, run in parsed:
+        if states.get(token) is not None:
+            conversation_id = token
+        else:
+            legacy = active_by_ref.get(ref)
+            conversation_id = legacy.id if legacy is not None else ""
+        # Group by the CONVERSATION we resolved to, falling back to the visitor
+        # only when there is no conversation to name. Grouping by the raw token
+        # instead splits one thread in two on the shape this deploy creates: a
+        # visitor mid-conversation at the migration has runs of both spellings —
+        # older ones carrying their handle in the session_key's conversation
+        # slot, newer ones carrying the real id — and both resolve HERE to the
+        # same row. Two rows, one id, and a client keying its list on the id has
+        # duplicate keys.
+        group = conversation_id or ref
+        if group in seen:
             continue
-        seen.add(run.user_id)
+        seen.add(group)
         when = run.ended_at or run.createdAt
         # Prefer the agent's reply as the row preview (unchanged). Fall back to the
         # visitor's own question when there is no reply — a run that failed or was
@@ -2982,16 +3132,17 @@ async def _list_conversations(
         # question at least says what the visitor wanted.
         preview = (run.partial_text or "") or (getattr(run, "user_text", "") or "")
         candidates.append(
-            (run.user_id, when.isoformat() if when else "", preview[:_CONVERSATION_PREVIEW_CHARS])
+            (
+                ref,
+                conversation_id,
+                when.isoformat() if when else "",
+                preview[:_CONVERSATION_PREVIEW_CHARS],
+            )
         )
 
-    states, pending, emails = await _conversation_side_data(
-        widget, workspace_id, [ref for ref, _, _ in candidates]
-    )
-
     items: list[ConversationItem] = []
-    for ref, last_message_at, preview in candidates:
-        row = states.get(ref)
+    for ref, conversation_id, last_message_at, preview in candidates:
+        row = states.get(conversation_id)
         row_state = row.state.value if row is not None else "open"
         if state and row_state != state:
             continue
@@ -2999,6 +3150,7 @@ async def _list_conversations(
         items.append(
             ConversationItem(
                 customer_ref=ref,
+                conversation_id=conversation_id,
                 last_message_at=last_message_at,
                 preview=preview,
                 state=row_state,
@@ -3200,6 +3352,7 @@ async def _load_transcript(
     customer_ref: str,
     workspace_id: str,
     widget: PawBarWidget | None = None,
+    conversation_id: str = "",
 ) -> list[TranscriptMessage] | None:
     """Build one visitor's full conversation, oldest-first (D2 drill-in + slice 2).
 
@@ -3225,9 +3378,23 @@ async def _load_transcript(
 
     Returns ``None`` only when the ref has NOTHING here (the caller 404s) —
     distinct from an empty list, which means rows exist but none carried text.
+
+    ``conversation_id`` narrows BOTH sources to one thread (2026-08-19). Narrowing
+    only one would be worse than narrowing neither: the owner would read one
+    conversation's questions interleaved with every reply a human ever sent that
+    visitor, and the timestamps would make it look like a coherent exchange.
     """
+    session_key = (
+        f"cloud:concierge:{pocket_id}:{conversation_id}:{getattr(widget, 'agent_id', '')}"
+        if conversation_id and widget is not None
+        else ""
+    )
     runs = await _concierge_runs_for_visitor(
-        pocket_id, customer_ref, workspace_id, limit=_TRANSCRIPT_CAP
+        pocket_id,
+        customer_ref,
+        workspace_id,
+        limit=_TRANSCRIPT_CAP,
+        session_key=session_key,
     )
 
     messages: list[TranscriptMessage] = []
@@ -3264,6 +3431,7 @@ async def _load_transcript(
                 customer_ref,
                 workspace_id=workspace_id,
                 limit=_TRANSCRIPT_CAP,
+                conversation_id=conversation_id or None,
             )
         except Exception:  # noqa: BLE001 — the run-derived half must still render
             logger.warning("owner message read failed for widget %s", widget.id, exc_info=True)
@@ -4673,6 +4841,7 @@ async def get_visitor_messages(
     request: Request,
     signed_key: str = Query("", description="The public Site.signed_key"),
     after: str = Query("", description="Only messages stamped strictly later"),
+    conversation_id: str = Query("", description="Only lines said in this conversation"),
 ) -> VisitorMessagesResponse:
     """Poll for owner/system messages on this visitor's thread.
 
@@ -4711,9 +4880,26 @@ async def get_visitor_messages(
     store = _store()
     try:
         await store.auto_resume_bot_if_idle(widget.id, customer_ref, ctx.workspace_id)
-        conversation = await store.get_conversation(
-            widget.id, customer_ref, workspace_id=ctx.workspace_id
-        )
+        # ``bot_paused`` belongs to the conversation on screen, not to the
+        # visitor's most recent one — otherwise a visitor reading an old thread a
+        # human had taken over is told the assistant is muted in the thread they
+        # are actually typing into. A named conversation must still be THEIRS;
+        # a stranger's id reads as no conversation rather than as its state.
+        conversation = None
+        if conversation_id:
+            named = await store.get_conversation_by_id(
+                conversation_id, workspace_id=ctx.workspace_id
+            )
+            if (
+                named is not None
+                and named.widget_id == widget.id
+                and named.customer_ref == customer_ref
+            ):
+                conversation = named
+        else:
+            conversation = await store.get_conversation(
+                widget.id, customer_ref, workspace_id=ctx.workspace_id
+            )
         messages = await store.list_owner_messages(
             widget.id,
             customer_ref,
@@ -4721,6 +4907,11 @@ async def get_visitor_messages(
             after=_normalized_after(after),
             roles=_PUBLIC_MESSAGE_ROLES,
             limit=_OWNER_POLL_CAP,
+            # Scoped to the thread on screen (2026-08-19). Omitted by a cached
+            # widget bundle, which then keeps the pre-identity behaviour of
+            # receiving every owner line on the visitor's whole thread — degraded
+            # but never silent, which is the right way round for a poll.
+            conversation_id=conversation_id or None,
         )
     except Exception:  # noqa: BLE001 — a poll that 500s stalls the visitor's thread
         logger.warning("visitor message poll failed for widget %s", widget.id, exc_info=True)

@@ -2333,7 +2333,7 @@ the split is the security model:
 | `POST /paw-bar/action` | Run a verb the widget spec declares. `auto` verbs touch only the visitor's own cart or a checkout link; `gated` verbs execute nothing and raise an Instinct proposal for a human. |
 | `GET /paw-bar/cart` | The visitor's own cart. |
 | `POST /paw-bar/decision-contact` | Leave an email so a decision reaches the visitor after they close the page. The address is stored on the decision row only — never in agent context, the KB, or transcripts. |
-| `GET /paw-bar/messages/{widget_id}/{customer_ref}` | Poll for owner and system messages once a human has joined. Returns `role`, `content`, `at` and `bot_paused` — never notes, tags, assignee or contact address. |
+| `GET /paw-bar/messages/{widget_id}/{customer_ref}` | Poll for owner and system messages once a human has joined. Returns `role`, `content`, `at` and `bot_paused` — never notes, tags, assignee or contact address. Pass `conversation_id` to scope the read (and `bot_paused`) to the thread on screen; omitting it answers for the visitor's whole history, which is what a cached widget bundle does. |
 | `GET /paw-bar/articles` | The site's own synced pages, for a self-serve reading list. |
 
 ### Admin — the owner surface
@@ -2342,10 +2342,10 @@ the split is the security model:
 |---|---|
 | `GET /paw-bar/admin/site/{site_id}/overview` | Counts and the bound widget. |
 | `GET/PATCH /paw-bar/admin/site/{site_id}/settings` | The kill switch, greeting, transcript-retention toggle, and `concierge_appearance` — the white-label block (accent, surface mode, radius, blur, font, launcher, hero, motion preset, agent identity) that renders into the widget's `--pawbar-*` custom properties. Sent whole rather than per-field; every value validates into a safe CSS literal, since these become the right-hand side of a custom property in a document the widget serves. |
-| `GET /paw-bar/admin/site/{site_id}/conversations` | The inbox. Supports `?state=open\|needs_human\|snoozed\|closed`, carries per-state `counts`, and each row joins its lifecycle state, unread count, tags and whether an action is pending. |
-| `GET /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | One conversation's transcript, interleaving visitor, assistant, owner and system turns by timestamp. |
-| `PATCH /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | Move state, snooze, tag, or append a private note. |
-| `POST /paw-bar/admin/site/{site_id}/conversations/{customer_ref}/reply` | Reply as the owner. Persists the turn, mutes the bot, clears unread, and reopens a closed or snoozed conversation. |
+| `GET /paw-bar/admin/site/{site_id}/conversations` | The inbox. One row per CONVERSATION, not per visitor — a visitor who asked four separate questions is four rows, each carrying its own `conversation_id` and its own last sentence. Supports `?state=open\|needs_human\|snoozed\|closed`, carries per-state `counts`, and each row joins its lifecycle state, unread count, tags and whether an action is pending. |
+| `GET /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | One conversation's transcript, interleaving visitor, assistant, owner and system turns by timestamp. Pass `conversation_id` to read ONE thread; without it the visitor's whole history is merged into a single transcript. Both sources narrow together — narrowing only the runs would interleave one thread's questions with every reply a human ever sent that visitor. |
+| `PATCH /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | Move state, snooze, tag, or append a private note. Send `conversation_id` to file the thread you are READING; omit it and the visitor's conversation in progress is filed instead. |
+| `POST /paw-bar/admin/site/{site_id}/conversations/{customer_ref}/reply` | Reply as the owner. Persists the turn, mutes the bot, clears unread, and reopens a closed or snoozed conversation. Send `conversation_id` so the reply lands in the thread being answered — without it an answer to an older question surfaces inside whichever conversation the visitor has open now. A `conversation_id` belonging to another visitor or another site is a 404, never a silent fallback. |
 | `GET /paw-bar/admin/agent/{agent_id}/conversations` | The same inbox scoped to an agent rather than a site — the union across every site that agent serves. |
 | `GET /paw-bar/admin/site/{site_id}/decisions` | Gated actions awaiting a human. |
 | `GET /paw-bar/admin/site/{site_id}/handoffs` | Conversations a visitor asked to escalate. |

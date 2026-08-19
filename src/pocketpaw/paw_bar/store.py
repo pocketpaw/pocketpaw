@@ -281,12 +281,24 @@ CREATE TABLE IF NOT EXISTS paw_bar_conversations (
 -- that arrived while the bot was muted (no run was dispatched, by design). Kept
 -- out of the run collection deliberately: the metering sweeper bills every
 -- unbilled terminal run, so an owner reply shaped as one would charge the owner
--- for typing. Same (widget_id, customer_ref) identity as the conversation row,
--- so the transcript reader merges the two sources on one key.
+-- for typing.
+--
+-- 2026-08-19 (owner-side conversation identity): a line carries the
+-- ``conversation_id`` it was said IN. It used to carry only (widget, visitor),
+-- which was correct exactly while a visitor could hold one conversation. Once
+-- they could hold several, an owner's reply had nowhere to say WHICH — so it was
+-- appended to the visitor and surfaced in every thread they owned, including
+-- ones started after it was written. An owner answering yesterday's question in
+-- front of today's is the failure this column removes.
+--
+-- Empty means "said before this column existed". Deployed rows are backfilled to
+-- the visitor's active conversation on migration (there was only one, which is
+-- the whole premise), so an empty value should not survive a migrated DB.
 CREATE TABLE IF NOT EXISTS paw_bar_owner_messages (
     id TEXT PRIMARY KEY,
     widget_id TEXT NOT NULL,
     customer_ref TEXT NOT NULL,
+    conversation_id TEXT DEFAULT '',
     workspace_id TEXT DEFAULT '',
     role TEXT DEFAULT 'owner',
     content TEXT DEFAULT '',
@@ -320,6 +332,9 @@ CREATE INDEX IF NOT EXISTS idx_pp_conversations_visitor
     ON paw_bar_conversations(widget_id, customer_ref, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_pp_owner_messages_thread
     ON paw_bar_owner_messages(widget_id, customer_ref, created_at);
+-- The visitor's poll, scoped to the conversation on screen (2026-08-19).
+CREATE INDEX IF NOT EXISTS idx_pp_owner_messages_conversation
+    ON paw_bar_owner_messages(conversation_id, created_at);
 """
 
 # The paw_bar_conversations columns, with the exact declaration each ALTER must
@@ -354,6 +369,9 @@ _CONVERSATION_COLUMNS: dict[str, str] = {
 # The paw_bar_owner_messages columns, same contract as the conversation map above:
 # keep in lockstep with the CREATE TABLE, primary key excluded.
 _OWNER_MESSAGE_COLUMNS: dict[str, str] = {
+    # 2026-08-19 (owner-side conversation identity). The first column here to
+    # post-date a deployed table, so this is the ALTER path's first real use.
+    "conversation_id": "TEXT DEFAULT ''",
     "workspace_id": "TEXT DEFAULT ''",
     "role": "TEXT DEFAULT 'owner'",
     "content": "TEXT DEFAULT ''",
@@ -555,9 +573,36 @@ class PawBarStore:
         # first column that post-dates a deployed one.
         if "paw_bar_owner_messages" in existing:
             cols = await _columns("paw_bar_owner_messages")
-            for name, decl in _OWNER_MESSAGE_COLUMNS.items():
-                if name not in cols:
-                    await db.execute(f"ALTER TABLE paw_bar_owner_messages ADD COLUMN {name} {decl}")
+            added = [name for name in _OWNER_MESSAGE_COLUMNS if name not in cols]
+            for name in added:
+                await db.execute(
+                    f"ALTER TABLE paw_bar_owner_messages ADD COLUMN"
+                    f" {name} {_OWNER_MESSAGE_COLUMNS[name]}"
+                )
+            # 2026-08-19 (owner-side conversation identity): backfill the lines a
+            # deployed DB already holds. Every one was written while a visitor
+            # could hold exactly ONE conversation, so the thread it was said in is
+            # unambiguous — it is that visitor's active row. Done once, at the
+            # moment the column appears, rather than left empty and papered over
+            # by a fallback in every reader: a nullable "means the old thing" is
+            # how the pair-keyed bug survived this long.
+            if "conversation_id" in added and "paw_bar_conversations" in existing:
+                await db.execute(
+                    "UPDATE paw_bar_owner_messages SET conversation_id = ("
+                    "  SELECT c.id FROM paw_bar_conversations c"
+                    "   WHERE c.widget_id = paw_bar_owner_messages.widget_id"
+                    "     AND c.customer_ref = paw_bar_owner_messages.customer_ref"
+                    "     AND c.active = 1"
+                    "   LIMIT 1"
+                    ") WHERE conversation_id = '' OR conversation_id IS NULL"
+                )
+                # A line whose visitor has no conversation row at all (the thread
+                # predates the conversations table) keeps '' rather than NULL, so
+                # every reader compares against one empty value, not two.
+                await db.execute(
+                    "UPDATE paw_bar_owner_messages SET conversation_id = ''"
+                    " WHERE conversation_id IS NULL"
+                )
 
     @staticmethod
     async def _drop_legacy_conversation_pair_unique(db: aiosqlite.Connection) -> None:
@@ -1479,6 +1524,8 @@ class PawBarStore:
         widget_id: str,
         customer_ref: str,
         workspace_id: str | None = None,
+        *,
+        conversation_id: str = "",
         **fields: Any,
     ) -> Conversation | None:
         """Patch a conversation's operator fields. Returns ``None`` if it has no row.
@@ -1492,8 +1539,28 @@ class PawBarStore:
 
         The lookup and the UPDATE are both workspace-scoped, so a cross-tenant
         (widget, customer) pair writes nothing and reads back ``None``.
+
+        ``conversation_id`` targets ONE conversation, active or retired
+        (2026-08-19). Without it the write lands on the visitor's active row,
+        which is right for a visitor-driven touch and wrong for an owner: an
+        owner filing or taking over the thread they are READING must reach that
+        thread, not whichever one the visitor has since moved on to. The named
+        row is checked against ``(widget_id, customer_ref)`` before anything is
+        written, so an id belonging to another visitor or another site addresses
+        nothing rather than being taken on trust.
         """
-        existing = await self.get_conversation(widget_id, customer_ref, workspace_id=workspace_id)
+        if conversation_id:
+            existing = await self.get_conversation_by_id(conversation_id, workspace_id=workspace_id)
+            if (
+                existing is None
+                or existing.widget_id != widget_id
+                or existing.customer_ref != customer_ref
+            ):
+                return None
+        else:
+            existing = await self.get_conversation(
+                widget_id, customer_ref, workspace_id=workspace_id
+            )
         if existing is None:
             return None
         allowed = {
@@ -1542,15 +1609,22 @@ class PawBarStore:
             return existing
         assignments.append("updated_at = ?")
         values.append(datetime.now().isoformat())
-        # ``active = 1`` is load-bearing since a visitor may own several
+        # Address ONE row, always. With an explicit id that is the row the caller
+        # named (already proven to belong to this visitor and widget above);
+        # without one it is the visitor's active conversation. ``active = 1`` is
+        # load-bearing in that second form since a visitor may own several
         # conversations (2026-08-19): without it, one owner action — closing,
         # snoozing, tagging, adding a note — would rewrite that visitor's ENTIRE
         # history in one statement.
-        sql = (
-            f"UPDATE paw_bar_conversations SET {', '.join(assignments)}"
-            " WHERE widget_id = ? AND customer_ref = ? AND active = 1"
-        )
-        values.extend([widget_id, customer_ref])
+        if conversation_id:
+            sql = f"UPDATE paw_bar_conversations SET {', '.join(assignments)} WHERE id = ?"
+            values.append(existing.id)
+        else:
+            sql = (
+                f"UPDATE paw_bar_conversations SET {', '.join(assignments)}"
+                " WHERE widget_id = ? AND customer_ref = ? AND active = 1"
+            )
+            values.extend([widget_id, customer_ref])
         ws_cond, ws_params = _conversation_workspace_scope(workspace_id)
         if ws_cond:
             sql += f" AND {ws_cond}"
@@ -1559,6 +1633,11 @@ class PawBarStore:
         async with self._conn() as db:
             await db.execute(sql, values)
             await db.commit()
+        # Read back the row that was WRITTEN. Reading the active one here would
+        # hand a caller who patched a retired conversation somebody else's state
+        # and report it as the result of their own edit.
+        if conversation_id:
+            return await self.get_conversation_by_id(existing.id, workspace_id=workspace_id)
         return await self.get_conversation(widget_id, customer_ref, workspace_id=workspace_id)
 
     async def conversation_counts(
@@ -1658,6 +1737,7 @@ class PawBarStore:
         customer_ref: str,
         content: str,
         *,
+        conversation_id: str = "",
         role: OwnerMessageRole | str = OwnerMessageRole.OWNER,
         author: str = "",
         workspace_id: str = "",
@@ -1669,12 +1749,18 @@ class PawBarStore:
         read it; a line that could be edited afterwards is not a transcript.
         ``role`` is normalized through :class:`OwnerMessageRole`, so an unknown
         value raises here rather than becoming a row no reader can classify.
+
+        ``conversation_id`` names the thread the line was said in (2026-08-19).
+        It is optional so the pre-identity callers keep compiling, but every
+        caller in this codebase passes it — an empty value now means only
+        "written before the column existed".
         """
         await self._ensure_schema()
         message = OwnerMessage(
             id=_gen_owner_message_id(),
             widget_id=widget_id,
             customer_ref=customer_ref,
+            conversation_id=conversation_id,
             workspace_id=workspace_id,
             role=OwnerMessageRole(role),
             content=content,
@@ -1684,12 +1770,14 @@ class PawBarStore:
         async with self._conn() as db:
             await db.execute(
                 "INSERT INTO paw_bar_owner_messages"
-                " (id, widget_id, customer_ref, workspace_id, role, content, author, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " (id, widget_id, customer_ref, conversation_id, workspace_id,"
+                "  role, content, author, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     message.id,
                     message.widget_id,
                     message.customer_ref,
+                    message.conversation_id,
                     message.workspace_id,
                     message.role.value,
                     message.content,
@@ -1708,6 +1796,7 @@ class PawBarStore:
         after: str = "",
         roles: list[str] | None = None,
         limit: int = 50,
+        conversation_id: str | None = None,
     ) -> list[OwnerMessage]:
         """One thread's out-of-band lines, OLDEST-first.
 
@@ -1722,9 +1811,20 @@ class PawBarStore:
         The cap keeps the LATEST ``limit`` lines: a long-running thread's newest
         messages are the ones a poll is missing. They are then reversed so the
         result reads oldest-first like every other transcript in this codebase.
+
+        ``conversation_id`` narrows to ONE thread (2026-08-19). It is STRICT: a
+        line said in another conversation never comes back, and neither does an
+        unmigrated line carrying no conversation. Both were tempting to include —
+        "show the owner everything" — and both are the bug this column exists to
+        remove, which is a reply appearing in a conversation it was not said in.
+        Omit the argument to read the visitor's whole thread, which is what the
+        owner's per-visitor history view still wants.
         """
         conditions = "widget_id = ? AND customer_ref = ?"
         params: list[Any] = [widget_id, customer_ref]
+        if conversation_id is not None:
+            conditions += " AND conversation_id = ?"
+            params.append(conversation_id)
         ws_cond, ws_params = _conversation_workspace_scope(workspace_id)
         if ws_cond:
             conditions += f" AND {ws_cond}"
@@ -1930,6 +2030,7 @@ class PawBarStore:
             id=row["id"],
             widget_id=row["widget_id"],
             customer_ref=row["customer_ref"],
+            conversation_id=row["conversation_id"] or "",
             workspace_id=row["workspace_id"] or "",
             role=role,
             content=row["content"] or "",
