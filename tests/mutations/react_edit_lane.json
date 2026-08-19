@@ -261,8 +261,8 @@
   {
     "label": "the build-status tool id leaves SITES_TOOL_IDS, so the /sites allow-list filters the tool out silently and every handler test still passes",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
-    "find": "    EDIT_REACT_COMPONENT_TOOL_ID,\n    EDIT_HTML_FILE_TOOL_ID,\n    GET_SITE_BUILD_STATUS_TOOL_ID,\n)",
-    "replace": "    EDIT_REACT_COMPONENT_TOOL_ID,\n    EDIT_HTML_FILE_TOOL_ID,\n)",
+    "find": "    EDIT_HTML_FILE_TOOL_ID,\n    GET_SITE_BUILD_STATUS_TOOL_ID,\n",
+    "replace": "    EDIT_HTML_FILE_TOOL_ID,\n",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_build_status_tool.py::TestRegistration::test_status_tool_id_is_on_the_shared_allowlist",
       "tests/ee/agent/test_sites_mcp_server/test_mcp_tool.py::TestSitesMcpServerRegistration::test_server_name_and_tool_id"

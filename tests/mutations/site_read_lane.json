@@ -1,0 +1,65 @@
+[
+  {
+    "label": "the read tool is dropped from SITES_TOOL_IDS, so the /sites allow-list filters it out silently and the edit lane is blind again",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "    GET_SITE_BUILD_STATUS_TOOL_ID,\n    READ_SITE_SOURCE_TOOL_ID,\n)",
+    "replace": "    GET_SITE_BUILD_STATUS_TOOL_ID,\n)",
+    "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestReachableFromTheSitesSurface"]
+  },
+  {
+    "label": "the tool is registered but not handed to the server, so the allow-listed name does not answer",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "            edit_html_file,\n            read_site_source,",
+    "replace": "            edit_html_file,",
+    "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestRegistration::test_the_built_server_actually_lists_the_tool"]
+  },
+  {
+    "label": "file_path becomes required, so the agent cannot list the site and must guess a path before it can read one",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "            \"required\": [\"pocket_id\"],\n            \"additionalProperties\": False,\n        },\n    )\n    async def read_site_source(args):",
+    "replace": "            \"required\": [\"pocket_id\", \"file_path\"],\n            \"additionalProperties\": False,\n        },\n    )\n    async def read_site_source(args):",
+    "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestRegistration::test_only_pocket_id_is_required"]
+  },
+  {
+    "label": "the manifest ships every file's contents, flooding the context the edit itself needs",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            \"files\": [{\"path\": k, \"bytes\": len(str(files[k]).encode(\"utf-8\"))} for k in listed],",
+    "replace": "            \"files\": [{\"path\": k, \"bytes\": len(str(files[k]).encode(\"utf-8\")), \"contents\": str(files[k])} for k in listed],",
+    "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestReadService::test_the_manifest_carries_no_file_contents"]
+  },
+  {
+    "label": "a dynamic svelte site's live-data bindings are listed as files, so the agent tries to read `objects` as a component",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    files = {k: v for k, v in source.items() if k not in _SOURCE_BINDING_KEYS}",
+    "replace": "    files = dict(source)",
+    "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestReadService::test_dynamic_svelte_bindings_are_not_listed_as_files"]
+  },
+  {
+    "label": "the generated _paw/ namespace is listed, inviting an edit that the path guard rejects outright",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        listed = sorted(k for k in files if not is_reserved_html_path(k))",
+    "replace": "        listed = sorted(files)",
+    "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestReadService::test_manifest_excludes_the_generated_paw_namespace"]
+  },
+  {
+    "label": "a ripple pocket falls through the no-source-map guard and dies on an attribute error instead of a relayable code",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not isinstance(source, dict) or not source:\n        raise ValidationError(\n            \"pocket.no_source_map\",",
+    "replace": "    if False:\n        raise ValidationError(\n            \"pocket.no_source_map\",",
+    "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestReadService::test_a_ripple_pocket_is_rejected_not_a_keyerror"]
+  },
+  {
+    "label": "the unknown-path guard is skipped, so a typo dies on a raw KeyError instead of the relayable 404 that names what exists",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if key not in files:\n        # Name what DOES exist:",
+    "replace": "    if False:\n        # Name what DOES exist:",
+    "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestReadService::test_an_unknown_file_is_not_found_and_names_what_exists"]
+  },
+  {
+    "label": "the html edit tool stops naming the read tool, so its 'read it first' instruction names nothing the agent can call",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "\"`read_site_source` (pocket_id + file_path) FIRST and copy old_string \"",
+    "replace": "\"the current file FIRST and copy old_string \"",
+    "tests": ["tests/ee/agent/test_sites_mcp_server/test_read_site_source.py::TestEditDescriptionsPointAtTheReadTool::test_edit_description_names_the_read_tool[edit_html_file]"]
+  }
+]

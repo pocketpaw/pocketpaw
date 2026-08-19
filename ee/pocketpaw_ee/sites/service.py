@@ -1,6 +1,17 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-08-19 (fix/sites-read-source-tool): added ``read_site_source`` — the
+# READ primitive beside ``apply_edits``. The three ``edit_*`` functions below all
+# resolve an agent-authored diff against the CURRENT file, and nothing on the /sites
+# surface could hand the agent that file: ``get_pocket`` carries ``source`` but sits
+# on a server the /sites allowlist excludes, and the profile drops the file/shell
+# built-ins. The reachable fallback was a whole-file rewrite from memory, which is how
+# a site loses its capture-form plumbing with no error raised. Two modes — a manifest
+# (paths + byte sizes, no contents, ``_paw/`` filtered) and one file verbatim — so the
+# read cannot itself flood the context the edit needs. Engine-agnostic on purpose:
+# only a pocket with no source map at all (ripple) is rejected.
+#
 # Updated 2026-08-12 (sites Settings consolidation): added ``get_site_client`` /
 # ``update_site_client`` / ``record_site_invoice`` — the owner's record of who a
 # site is FOR and what they have billed them. Two decisions worth knowing before
@@ -5147,6 +5158,112 @@ def apply_edits(source: str, edits: list[dict[str, str]]) -> str:
             )
         result = result.replace(old, new, 1)
     return result
+
+
+# The svelte ``source`` envelope keeps a dynamic site's live-data bindings as
+# SIBLING keys beside the file map. Reused here (rather than importing the
+# generator client) so a read never drags the generator's import graph in.
+_SOURCE_BINDING_KEYS = ("objects", "sources", "actions", "auth")
+
+
+async def read_site_source(
+    *,
+    user_id: str,
+    pocket_id: str,
+    file_path: str | None = None,
+) -> dict[str, Any]:
+    """Read an existing Paw Site's source map — the READ half of the edit lane.
+
+    This is the counterpart the three ``edit_*`` tools were written against and
+    that did not exist. Each of them PREFERS its ``edits`` (search/replace) form,
+    whose ``old_string`` must be copied VERBATIM from the current file and match
+    exactly once; their descriptions duly say "read it first". On /sites there was
+    nothing to read with: ``sites_allow`` is a hard whitelist that excludes the
+    ``pockets`` server (so ``get_pocket``, which does carry ``source``, is filtered
+    out), and the profile drops the file/shell built-ins on the stated assumption
+    that "the source map is a tool ARGUMENT" — true when the agent authored the
+    site in the same context, false for every later turn and every imported site.
+    The only reachable edit form was therefore a blind full-file ``new_source``
+    rewrite, which is precisely the shape that silently drops a ``<form>``'s
+    ``action`` and its hidden ``paw_*`` inputs and sends future leads nowhere.
+
+    TWO MODES, because a react site's whole source map would flood the context
+    window that has to hold it:
+
+      * ``file_path=None`` → the MANIFEST: ``{files: [{path, bytes}, ...],
+        file_count, bindings}``. Paths and sizes only, NO contents.
+      * ``file_path="index.html"`` → that ONE file's contents, byte-for-byte.
+
+    Engine-agnostic on purpose: unlike the edit tools (each pinned to its own
+    engine) a read is safe everywhere, and the agent frequently does not know the
+    engine until it looks. Only a pocket with no source map at all — a ripple site
+    — is rejected, and by code so the agent stops rather than retries.
+
+    The generated ``_paw/`` namespace is filtered out of the manifest: the edit
+    tools reject it on the path alone, so listing it only invites a call that
+    cannot succeed. Reading one by explicit path is still allowed — seeing the
+    generated manifest is occasionally useful and never destructive.
+
+    Raises ``ValidationError("pocket.no_source_map")`` for a ripple pocket and
+    ``NotFound`` for an unknown ``file_path``. Tenancy is the pockets service's
+    public ``get``, which raises NotFound / Forbidden for a missing or
+    cross-tenant pocket, so this adds no isolation rules of its own.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    source = pocket.get("source")
+    engine = pocket.get("engine") or "ripple"
+    if not isinstance(source, dict) or not source:
+        raise ValidationError(
+            "pocket.no_source_map",
+            f"This pocket has no raw source map to read (engine={engine!r}). Only "
+            "html, react and svelte Paw Sites keep one; a ripple site is authored "
+            "as a rippleSpec, so read it with the pocket tools instead.",
+        )
+
+    # Files are the str-valued entries. A dynamic svelte envelope's bindings
+    # (objects/sources/actions/auth) are list/bool siblings on the SAME dict — the
+    # agent must not be handed `objects` as though it were a component to edit.
+    files = {k: v for k, v in source.items() if k not in _SOURCE_BINDING_KEYS}
+    bindings = [k for k in _SOURCE_BINDING_KEYS if k in source]
+
+    if file_path is None:
+        listed = sorted(k for k in files if not is_reserved_html_path(k))
+        return {
+            "pocket_id": pocket_id,
+            "engine": engine,
+            # The react edit skill's orientation step reads engine + source +
+            # keeps_client_bundle off ONE call. It used to name get_pocket, which
+            # /sites filters out, so the manifest carries the third field too and
+            # the step stops depending on an unreachable tool.
+            "keeps_client_bundle": pocket.get("keeps_client_bundle"),
+            "files": [{"path": k, "bytes": len(str(files[k]).encode("utf-8"))} for k in listed],
+            "file_count": len(listed),
+            "bindings": bindings,
+        }
+
+    # Single-file read. Try the path as spelled first, then normalized, so
+    # './index.html' and 'img\\logo.svg' resolve to the file the agent meant —
+    # the same courtesy the html edit path extends on write.
+    key = file_path if file_path in files else normalize_html_path(file_path)
+    if key not in files:
+        # Name what DOES exist: a typo must not read as "the file is empty", and a
+        # blind retry is just another guess.
+        available = ", ".join(sorted(k for k in files if not is_reserved_html_path(k))[:40])
+        raise NotFound(
+            "site_file",
+            f"{file_path} (this site's files are: {available})",
+        )
+
+    contents = str(files[key])
+    return {
+        "pocket_id": pocket_id,
+        "engine": engine,
+        "file_path": key,
+        "bytes": len(contents.encode("utf-8")),
+        "contents": contents,
+    }
 
 
 async def apply_leaf_edits(

@@ -60,6 +60,27 @@
 # ``SITES_TOOL_IDS`` like every other tool here; the /sites allow-list is a hard
 # whitelist that filters an absent id out silently.
 #
+# Updated 2026-08-19 (fix/sites-read-source-tool — the edit lane could write but not
+# read): added an ELEVENTH tool, the READ-ONLY ``read_site_source``. The surface could
+# WRITE a site's source three ways and READ it zero ways, which is not a missing
+# convenience but a hole the three edit tools fall through. Each of them PREFERS its
+# ``edits`` (search/replace) form, whose ``old_string`` must be copied VERBATIM from the
+# current file and match exactly once, and each description duly said "read it first" —
+# naming no tool, because none existed. ``get_pocket`` does carry ``source``, but it
+# lives on the ``pockets`` server and ``sites_allow`` is a hard whitelist
+# (SITES|STOCK|ICON|PALETTE|DESIGN_SYSTEM|ASK), so on /sites it is filtered out with no
+# error; the profile separately drops the file/shell built-ins on the stated assumption
+# that "the source map is a tool ARGUMENT", which holds only while the agent still has
+# the source it just authored in context. So the only REACHABLE edit form was a
+# whole-file ``new_source`` composed from memory — precisely the shape the edit
+# descriptions warn about, which silently drops a ``<form>``'s ``action`` and its hidden
+# ``paw_site_id`` / ``paw_key`` / ``paw_redirect`` inputs and sends every future enquiry
+# nowhere. Two modes keep the fix from causing the problem it prevents: no ``file_path``
+# returns a manifest of paths + byte sizes (a react source map inlined whole would
+# swallow the context the edit needs), and a ``file_path`` returns that one file
+# verbatim. Engine-agnostic, unlike the edit tools — a read is safe everywhere and the
+# agent often does not know the engine until it looks.
+#
 # Updated 2026-08-11 (RX-3 — the react track gets an EDIT lane): the
 # ``edit_react_component`` tool also registers on this SAME server (built via the
 # factory in sites_create.py), so create → publish → edit sit together for react
@@ -172,6 +193,16 @@ EDIT_HTML_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__edit_html_file"
 # finished. Must ride SITES_TOOL_IDS like the rest — the /sites allow-list is a hard
 # whitelist and filters an absent id out with no error.
 GET_SITE_BUILD_STATUS_TOOL_ID = f"mcp__{SERVER_NAME}__get_site_build_status"
+# The READ-ONLY source tool — also registers on this SAME server (see
+# sites_create.py). It closes the hole the three edit tools were written over:
+# each PREFERS an `edits` diff whose ``old_string`` must be copied verbatim from
+# the current file, and each says "read it first", but /sites had no reader. The
+# ``pockets`` server's ``get_pocket`` does carry ``source`` and is filtered out by
+# the hard allowlist; the file/shell built-ins are dropped by the profile on the
+# assumption that "the source map is a tool ARGUMENT" — which holds only while the
+# agent still has the source it just authored in context. Must ride SITES_TOOL_IDS
+# like the rest: an absent id is filtered out with no error at all.
+READ_SITE_SOURCE_TOOL_ID = f"mcp__{SERVER_NAME}__read_site_source"
 
 SITES_TOOL_IDS = (
     PUBLISH_TOOL_ID,
@@ -184,6 +215,7 @@ SITES_TOOL_IDS = (
     EDIT_REACT_COMPONENT_TOOL_ID,
     EDIT_HTML_FILE_TOOL_ID,
     GET_SITE_BUILD_STATUS_TOOL_ID,
+    READ_SITE_SOURCE_TOOL_ID,
 )
 
 
@@ -518,6 +550,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
         make_edit_html_file_tool,
         make_edit_react_component_tool,
         make_edit_svelte_component_tool,
+        make_read_site_source_tool,
     )
 
     create_landing_site = make_create_landing_site_tool(tool)
@@ -550,6 +583,11 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     # it is what stops the agent answering "change the phone number in the footer"
     # with a second create_html_site call and a second site pocket.
     edit_html_file = make_edit_html_file_tool(tool)
+    # The READ tool — same server, so read → edit → publish sit together. It is the
+    # precondition for the `edits` form the three edit tools above prefer: their
+    # `old_string` has to be copied out of the CURRENT file, and this is the only
+    # thing on /sites that can hand the agent that file.
+    read_site_source = make_read_site_source_tool(tool)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
@@ -565,6 +603,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             create_react_site,
             edit_react_component,
             edit_html_file,
+            read_site_source,
         ],
     )
     return SERVER_NAME, server
@@ -581,6 +620,7 @@ __all__ = [
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "GET_SITE_BUILD_STATUS_TOOL_ID",
     "PUBLISH_TOOL_ID",
+    "READ_SITE_SOURCE_TOOL_ID",
     "SERVER_NAME",
     "SITES_TOOL_IDS",
     "build_sites_manager_server",
