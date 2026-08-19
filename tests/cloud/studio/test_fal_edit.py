@@ -139,7 +139,7 @@ def test_build_arguments_upscale_invalid_factor_clamps() -> None:
 
 def test_build_arguments_expand_builds_outpaint_prompt() -> None:
     args = fal_edit.build_arguments(op="expand", image_data_url=_DATA, direction="up", factor=1.5)
-    assert args["image_url"] == _DATA
+    assert args["image_urls"] == [_DATA]
     assert "upward" in args["prompt"]
     assert "150%" in args["prompt"]
 
@@ -152,7 +152,7 @@ def test_build_arguments_expand_defaults_all_sides() -> None:
 def test_build_arguments_variations_uses_default_prompt() -> None:
     args = fal_edit.build_arguments(op="variations", image_data_url=_DATA)
     assert "variation" in args["prompt"].lower()
-    assert args["image_url"] == _DATA
+    assert args["image_urls"] == [_DATA]
 
 
 def test_build_arguments_edit_requires_prompt() -> None:
@@ -162,24 +162,29 @@ def test_build_arguments_edit_requires_prompt() -> None:
 
 def test_build_arguments_edit_uses_prompt() -> None:
     args = fal_edit.build_arguments(op="edit", image_data_url=_DATA, prompt="make it sunset")
-    assert args == {"prompt": "make it sunset", "image_url": _DATA}
+    assert args == {"prompt": "make it sunset", "image_urls": [_DATA]}
 
 
 def test_build_arguments_inpaint_defaults_prompt_and_mask() -> None:
     mask = "data:image/png;base64," + base64.b64encode(b"mask").decode()
     args = fal_edit.build_arguments(op="inpaint", image_data_url=_DATA, mask_data_url=mask)
     assert "masked region" in args["prompt"]
+    assert args["image_urls"] == [_DATA]
     assert args["mask_url"] == mask
 
 
 def test_build_arguments_inpaint_no_mask_omits_mask_url() -> None:
     args = fal_edit.build_arguments(op="inpaint", image_data_url=_DATA)
     assert "mask_url" not in args
+    assert args["image_urls"] == [_DATA]
 
 
 def test_build_arguments_sketch_default_prompt() -> None:
     args = fal_edit.build_arguments(op="sketch-to-image", image_data_url=_DATA)
     assert "polished" in args["prompt"]
+    # Seedream keeps the single image_url shape (unlike nano-banana's array).
+    assert args["image_url"] == _DATA
+    assert "image_urls" not in args
 
 
 def test_build_arguments_sketch_appends_user_text() -> None:

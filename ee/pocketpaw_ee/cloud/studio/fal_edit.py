@@ -179,10 +179,16 @@ def build_arguments(
     if op == "upscale":
         scale = int(factor or 2)
         return {"image_url": image_data_url, "upscale_factor": scale if scale in (2, 4) else 2}
+    # Nano Banana 2's edit endpoint takes the source as an ARRAY
+    # (``image_urls``) — the single-string ``image_url`` shape is rejected with
+    # "At least one image URL is required" (seen live: expand + edit → 502).
+    # The B&W mask for inpaint is ``mask_url`` (white = regenerate).
+    # Seedream (sketch-to-image) keeps the single ``image_url`` shape.
+    nana_args: dict[str, Any] = {"image_urls": [image_data_url]}
     if op == "expand":
-        return {"prompt": _expand_prompt(direction, factor), "image_url": image_data_url}
+        return {"prompt": _expand_prompt(direction, factor), **nana_args}
     if op == "variations":
-        return {"prompt": _DEFAULT_PROMPTS["variations"], "image_url": image_data_url}
+        return {"prompt": _DEFAULT_PROMPTS["variations"], **nana_args}
 
     # Prompt-driven ops: edit / inpaint / sketch-to-image.
     text = (prompt or "").strip()
@@ -194,7 +200,11 @@ def build_arguments(
         text = _DEFAULT_PROMPTS["sketch-to-image"]
     if not text:
         raise ValueError(f"prompt is required for edit op '{op}'")
-    args: dict[str, Any] = {"prompt": text, "image_url": image_data_url}
+    args: dict[str, Any] = {"prompt": text}
+    if op == "sketch-to-image":
+        args["image_url"] = image_data_url
+    else:
+        args.update(nana_args)
     if op == "inpaint" and mask_data_url:
         args["mask_url"] = mask_data_url
     return args
