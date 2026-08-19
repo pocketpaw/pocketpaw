@@ -52,6 +52,17 @@
 #   approval (it lands in their Instinct Tray and fires on approve) rather than
 #   running inline. `call_binding` remains the first reach for backend/connector
 #   data; `invoke_tool` is for a named tool/connector grant the owner allow-listed.
+# Modified: 2026-06-15 - widget-richness fix: added _INLINE_TYPED_WIDGET_RULE
+#   (shape->typed-widget map + inlined schemas/examples for comparison-table,
+#   data-grid, timeline, kv-table, status-dot, pricing-table) so chat reaches
+#   for the typed widget instead of rebuilding shapes from table/text/flex;
+#   reframed the core-catalog opening and added a self-check line.
+# Modified: 2026-06-15 - inlined funnel + gauge into _INLINE_TYPED_WIDGET_RULE
+#   (two shape->widget map rows, prop shapes, and worked examples) so
+#   conversion/drop-off funnels and metric-vs-target dials reach for the
+#   typed widget with no tool-call friction. Props sourced from the ripple
+#   manifest (funnel: data[{label,value}]/title/sort/colors/height;
+#   gauge: value/max/label/title/color/height).
 # Modified: 2026-06-16 (feat/invoke-tool-v1 — close the in-chat approval loop)
 #   — added `_INSTINCT_TRAY_RULE`: when the agent renders the pending-Instinct-
 #   approvals view (the items `instinct_pending` returns), the Approve / Reject
@@ -261,9 +272,13 @@ Interaction rules:
 
 _INLINE_CORE_CATALOG = """\
 
-# WIDGET CATALOG — chat-inline allowlist
+# WIDGET CATALOG — chat-inline
 
-Six core widgets cover ~90% of chat replies. Use these from memory:
+These six core widgets handle SIMPLE replies from memory. They are the
+base, NOT the ceiling: the moment a reply has a SHAPE (a comparison, a
+ranked list, dated events, a status row, plans/tiers), the typed widget in
+"REACH FOR THE TYPED WIDGET" below reads far better — use it instead of
+rebuilding the shape out of `table` / `text` / `flex`. The six base widgets:
 
   text       — plain or rich text. Props: text, variant ('h1'..'h4',
                'body','muted','small'), align.
@@ -623,7 +638,11 @@ Final self-check before sending:
 ✔ Actions emit chat.send to close the loop
 ✔ One focal widget — clean, minimal layout, no clutter
 ✔ flex/grid `gap` is tight for inline — numeric 2 or 4, not 10/12+
-✔ Used a core widget, or called `get_inline_widget_help` BEFORE emitting the type
+✔ Matched the reply SHAPE to its typed widget (comparison-table / data-grid /
+  timeline / kv-table / status-dot / pricing-table) — did NOT rebuild it from a
+  plain table / text / flex
+✔ Used a core widget, an inlined typed widget, or called `get_widget_spec`
+  BEFORE emitting any other type
 ✔ Multi-step / wizard / intake flow → called `start_flow`, not a hand-authored or `set`-stepped spec
 ✔ Pending Instinct approvals → Approve/Reject buttons `api`-POST the route, NOT chat.send
 ✔ Open Tray affordance navigates to /deep-work (not a chat.send)
@@ -631,6 +650,84 @@ Final self-check before sending:
 ✔ No static lists for open-ended queries
 ✔ Valid JSON, concrete values, one fence
 </ripple>"""
+
+
+_INLINE_TYPED_WIDGET_RULE = """\
+
+# REACH FOR THE TYPED WIDGET (chat) — the #1 chat-quality lever
+
+The most common chat-quality miss is answering a SHAPED request with a
+plain `table` / `text` / `flex` when a dedicated widget exists. When the
+reply matches a shape below, emit that widget — its props are inlined
+right here, so NO `get_widget_spec` call is needed.
+
+  compare X vs Y / feature or plan matrix      -> comparison-table
+  ranked list / top N / leaderboard            -> data-grid (sortable)
+  dated events / history / roadmap / releases  -> timeline
+  facts about ONE thing / key:value pairs      -> kv-table
+  service / system / job status                -> status-dot (one per item)
+  plans / tiers / pricing                      -> pricing-table
+  a single KPI with a trend                    -> metric (NOT a bare stat)
+  conversion / drop-off / pipeline funnel      -> funnel
+  a single metric vs a target/threshold (dial) -> gauge
+  a cited source / link                        -> source-card
+  a 1-2 line takeaway / warning                -> callout
+  term : definition pairs                      -> definition-list
+
+Inlined prop shapes — copy these, put the data in props:
+
+comparison-table — { label, columns:[{key,label,highlight?}], rows:[{feature, <colKey>:value}] }
+  a cell value may be true/false (renders check/cross), a string, or a number.
+  { "type":"comparison-table","props":{
+      "label":"Feature",
+      "columns":[{"key":"a","label":"Plan A"},{"key":"b","label":"Plan B","highlight":true}],
+      "rows":[ {"feature":"Price","a":"$29/mo","b":"$99/mo"},
+               {"feature":"Seats","a":5,"b":25},
+               {"feature":"SSO","a":false,"b":true} ] }}
+
+data-grid — { columns:[{key,label,sortable,align}], rows, defaultSort?, searchable?, dense? }
+  { "type":"data-grid","props":{
+      "columns":[{"key":"name","label":"Customer","sortable":true},
+                 {"key":"revenue","label":"Revenue","align":"right","sortable":true},
+                 {"key":"deals","label":"Deals","align":"right","sortable":true}],
+      "rows":[{"id":1,"name":"Globex","revenue":"$1.24M","deals":14},
+              {"id":2,"name":"Stark","revenue":"$980K","deals":9}],
+      "defaultSort":"revenue:desc","searchable":true }}
+
+timeline — { events:[{date,title,detail?,type?}], density? }
+  type: default | success | warning | error | info
+  { "type":"timeline","props":{"density":"compact","events":[
+      {"date":"Jan 2026","title":"Alpha","type":"success"},
+      {"date":"Mar 2026","title":"Public beta"} ]}}
+
+kv-table       — { rows:[{key,value}], columns?:1|2, striped? }
+status-dot     — { variant:"online|offline|busy|away|custom", label, pulse?, color? (custom only) }
+  degraded/warning are NOT variants — use "busy" (amber) or "custom" + color; an unknown
+  variant silently renders the online GREEN.
+pricing-table  — { currency, tiers:[{id,name,price,period,features:[{label,included}],cta}] }
+source-card    — { source, title, url?, color? }
+callout        — { variant:"info|insight|warning", title, text }
+definition-list— { items:[{term,definition}], layout?:"inline|stacked" }
+metric         — { label, value, trend?, description? }
+funnel         — { data:[{label,value}], title?, colors?, height?,
+                   sort?:"descending|ascending|none" }
+gauge          — { value, max?, label?, title?, color?, height? }
+
+Worked examples — the typed-widget choice in action (data already in hand):
+
+  "compare Plan A vs Plan B"       -> ONE comparison-table  (NOT two cards, NOT a plain table)
+  "top 5 customers by revenue"     -> ONE data-grid sorted desc  (NOT text rows, NOT a bare table)
+  "release timeline for v2"        -> ONE timeline  (NOT numbered text, NOT a table of dates)
+  "deployment status of services"  -> flex(column) of [text + status-dot] rows, or a kv-table
+                                      with a status-dot per value  (NOT prose, NOT a plain table)
+  "our pricing"                    -> ONE pricing-table
+  "sales funnel leads to closed"   -> ONE funnel  (data:[{label,value}] per stage, NOT a table)
+  "capacity at 75 of 100"          -> ONE gauge  (value + max, NOT a bare stat tile)
+
+Keep it tight: ONE typed widget is the answer most of the time. Wrap it in
+at most a heading + a chat.send follow-up — never surround it with
+redundant stat tiles or a second table.
+"""
 
 
 INLINE_RIPPLE_SYSTEM_PROMPT = (
@@ -641,6 +738,8 @@ INLINE_RIPPLE_SYSTEM_PROMPT = (
     + USE_THE_WIDGET_RULE
     + "\n"
     + _INLINE_CORE_CATALOG
+    + "\n"
+    + _INLINE_TYPED_WIDGET_RULE
     + "\n"
     + _MULTI_STEP_FLOW_RULE
     + "\n"
