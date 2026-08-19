@@ -46,6 +46,7 @@ class TestSitesMcpServerRegistration:
             EDIT_SVELTE_COMPONENT_TOOL_ID,
             GET_SITE_BUILD_STATUS_TOOL_ID,
             PUBLISH_TOOL_ID,
+            READ_SITE_SOURCE_TOOL_ID,
             SERVER_NAME,
             SITES_TOOL_IDS,
         )
@@ -93,10 +94,20 @@ class TestSitesMcpServerRegistration:
             GET_SITE_BUILD_STATUS_TOOL_ID == "mcp__pocketpaw_sites_manager__get_site_build_status"
         )
         assert GET_SITE_BUILD_STATUS_TOOL_ID in SITES_TOOL_IDS
+        # The READ-ONLY source tool — the counterpart the three edit tools above
+        # were written against. Each PREFERS an `edits` diff whose `old_string`
+        # must be copied VERBATIM from the current file, and each says "read it
+        # first"; until this shipped /sites had no reader, because the allowlist
+        # excludes the `pockets` server (whose `get_pocket` does carry `source`)
+        # and the profile drops the file/shell built-ins. The reachable edit form
+        # was therefore a blind whole-file rewrite — the shape that silently drops
+        # a capture form's hidden paw_* inputs.
+        assert READ_SITE_SOURCE_TOOL_ID == "mcp__pocketpaw_sites_manager__read_site_source"
+        assert READ_SITE_SOURCE_TOOL_ID in SITES_TOOL_IDS
         # The count is deliberate: adding a tool here widens the /sites surface
         # allow-list (SITES_TOOL_IDS feeds it), so a new id must be a decision,
         # not a side effect. Bump it WITH an id assertion above — never alone.
-        assert len(SITES_TOOL_IDS) == 10
+        assert len(SITES_TOOL_IDS) == 11
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk
