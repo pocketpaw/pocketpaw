@@ -115,13 +115,62 @@ def test_vendored_loader_keeps_its_globals_to_itself():
     source = paw_bar_widget_file().read_text(encoding="utf-8")
     body = [ln for ln in source.splitlines() if ln and not ln.startswith("//")]
 
-    assert body[0].startswith("(function")
+    # esbuild emits `"use strict";` then an arrow IIFE; the hand-vendored copy
+    # opened with `(function`. Either is a wrapper — what matters is that the
+    # file opens with one and declares nothing at column 0 outside it.
+    opener = [ln for ln in body if ln != '"use strict";'][0]
+    assert opener.startswith("(function") or opener.startswith("(() =>")
     # Nothing declared at column 0 except the wrapper itself and its close.
     stray = [
         ln for ln in body[1:] if (ln.startswith(("const ", "let ", "var ", "function ", "class ")))
     ]
     assert stray == []
     assert "win.PawBar" in source
+
+
+def test_the_vendored_loader_docks_a_column_rather_than_covering_the_page():
+    """The bug this exists for: the vendored copy was hand-transcribed from the
+    paw-bar source with the type annotations stripped BY HAND, so it drifted
+    silently. It sat a whole session behind, still calling ``goFullscreen()`` on
+    ``pawbar:open`` — a real published site opened the messenger over the entire
+    viewport and made the page unclickable, while the source it claimed to mirror
+    had docked it to a 400px column for days.
+
+    Nothing could see it. paw-bar's own tests load paw-bar's build, not this
+    file, and this file is what every published site actually downloads.
+
+    Asserting on the specific behaviours the served widget depends on, rather
+    than diffing against a sibling checkout that is not present on a CI box.
+    """
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    code = chr(10).join(ln for ln in source.splitlines() if not ln.lstrip().startswith("//"))
+
+    # The open panel is a sized column. A full-viewport iframe swallows every
+    # click on the host page whether or not the app paints a backdrop.
+    assert "PANEL_W = 400" in code
+    assert "PANEL_MAX_H = 720" in code
+
+    # Both doors into the widget — the app's message and the host's own button —
+    # must dock. goFullscreen() survives ONLY in the drag protocol.
+    assert code.count("goFullscreen()") == 1, "goFullscreen belongs to drag alone"
+
+    # The opt-in big reading surface, and the box animation, both reached here.
+    assert "pawbar:expand" in code
+    assert "BOX_MS" in code
+
+
+def test_the_vendored_loader_is_generated_not_hand_edited():
+    """A header that says where it came from is the only thing standing between
+    this file and the silent drift above. If someone hand-edits it again, the
+    next reader has no way to know which source it is behind."""
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    header = paw_bar_widget_file().read_text(encoding="utf-8").split('"use strict";')[0]
+
+    assert "GENERATED, DO NOT EDIT BY HAND" in header
+    assert "loader/src/loader.ts" in header
 
 
 # --------------------------------------------------------------------------- #
