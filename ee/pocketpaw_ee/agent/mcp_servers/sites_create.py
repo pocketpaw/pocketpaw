@@ -1,6 +1,18 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated: 2026-08-19 (fix/sites-read-source-tool — the edit lane could write but not
+# read) — added ``read_site_source`` + ``_read_site_source_handler``, the READ half the
+# three edit tools in this file were written against and never had. Each of them prefers
+# an ``edits`` diff whose ``old_string`` must be copied VERBATIM from the current file,
+# and each told the agent to "read it first" while naming no tool that could: /sites
+# filters out ``get_pocket`` (wrong server, hard whitelist) and drops the file/shell
+# built-ins. So the only reachable form was a blind ``new_source`` rewrite — the shape
+# that silently drops a capture form's hidden ``paw_*`` inputs. All three descriptions
+# now name ``read_site_source`` and spell out the read → copy → ``edits`` flow, because
+# a description is the only prompt real estate this surface has. Two modes (manifest vs
+# one file) keep a react source map from flooding the context the edit itself needs.
+#
 # Updated: 2026-08-11 (RX-3 — the react track gets an EDIT lane) — added a SEVENTH
 # tool ``edit_react_component`` plus its handler, mirroring
 # ``make_edit_svelte_component_tool``'s shape (identity → record_tool_call →
@@ -1842,8 +1854,11 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
             "current file and must match EXACTLY ONCE (include enough surrounding "
             "context to be unique), and `new_string` is what it becomes. You send "
             "ONLY the change, not the whole file — far fewer tokens and faster. If "
-            "you have not read the file this turn, read it first so old_string "
-            "matches.\n"
+            "you have not read the file this turn, call `read_site_source` "
+            "(pocket_id + file_path) FIRST and copy old_string out of what it "
+            "returns — a remembered or guessed old_string does not match, and "
+            "rewriting the file instead silently drops whatever you did not carry "
+            "over.\n"
             "  * `new_source` — the FULL new file contents as a string (REPLACES "
             "the whole file, not a patch). Reserve this for LARGE rewrites where "
             "most of the file changes; for a small tweak use `edits`.\n"
@@ -2100,8 +2115,11 @@ def make_edit_react_component_tool(tool: Any) -> Any:
             "current file and must match EXACTLY ONCE (include enough surrounding "
             "context to be unique), and `new_string` is what it becomes. You send "
             "ONLY the change, not the whole file — far fewer tokens and faster. If "
-            "you have not read the file this turn, read it first so old_string "
-            "matches.\n"
+            "you have not read the file this turn, call `read_site_source` "
+            "(pocket_id + file_path) FIRST and copy old_string out of what it "
+            "returns — a remembered or guessed old_string does not match, and "
+            "rewriting the file instead silently drops whatever you did not carry "
+            "over.\n"
             "  * `new_source` — the FULL new file contents as a string (REPLACES "
             "the whole file). For large rewrites, and the only form `create` "
             "accepts.\n"
@@ -2202,6 +2220,95 @@ def make_edit_react_component_tool(tool: Any) -> Any:
         return await _edit_react_component_handler(args)
 
     return edit_react_component
+
+
+async def _read_site_source_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__read_site_source``.
+
+    The READ half of the edit lane. The three ``edit_*`` tools all prefer their
+    ``edits`` (search/replace) form and all tell the agent to read the file first
+    — and until this tool existed nothing on /sites could, because the surface's
+    allowlist excludes the ``pockets`` server and its profile drops the file/shell
+    built-ins. The agent's only reachable move was a full-file ``new_source``
+    rewrite composed from memory, which is how a site loses its capture-form
+    plumbing without a single error being raised.
+
+    Two modes, mirroring the built-in Read instinct the edit descriptions invoke:
+    no ``file_path`` returns the cheap MANIFEST (paths + byte sizes, no contents —
+    a react source map would otherwise flood the context), and a ``file_path``
+    returns that one file VERBATIM so an ``old_string`` copied out of it matches.
+
+    Plan-gated like its edit siblings: reading is a step of the edit flow, so a
+    workspace whose plan no longer unlocks Sites should not keep using it.
+
+    Returns ``{ok, pocket_id, engine, ...}``; sets ``is_error`` when identity is
+    missing, the plan lacks Sites, ``pocket_id`` is absent, or the service rejects
+    the read (a ripple pocket with no source map, an unknown file) — each relayed
+    by code so the agent can correct itself rather than guess again.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "read_site_source requires workspace and user context (call from a cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_read_site_source",
+        status="ok",
+        ok=True,
+    )
+
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "read_site_source requires a `pocket_id` — the id of the site pocket "
+            "whose source you are reading."
+        )
+    file_path = args.get("file_path")
+    if file_path is not None and (not isinstance(file_path, str) or not file_path):
+        return _error_response(
+            "read_site_source `file_path` must be a non-empty string (the relative "
+            "path of one file). Omit it entirely to list the site's files instead."
+        )
+
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        result = await sites_service.read_site_source(
+            user_id=user_id,
+            pocket_id=pocket_id,
+            file_path=file_path,
+        )
+    except CloudError as exc:
+        # ValidationError (a ripple pocket has no source map) or NotFound (unknown
+        # pocket or file). Relay code + message so the agent knows WHICH guard hit.
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("read_site_source failed", exc_info=True)
+        return _error_response(f"read failed: {exc}")
+
+    body: dict[str, Any] = {"ok": True, **result}
+    body["message"] = (
+        (
+            "These are the site's files. Read the one you need with `file_path` "
+            "before you edit it, then copy `old_string` out of what comes back."
+        )
+        if file_path is None
+        else (
+            "This is the file's CURRENT content. Copy `old_string` from it "
+            "VERBATIM for the matching edit tool's `edits`, and prefer that over "
+            "`new_source` — a full rewrite drops anything you did not carry over, "
+            "including the capture form's hidden paw_* inputs."
+        )
+    )
+    return _success_response(body)
 
 
 async def _edit_html_file_handler(args: dict) -> dict:
@@ -2348,6 +2455,75 @@ async def _edit_html_file_handler(args: dict) -> dict:
     )
 
 
+def make_read_site_source_tool(tool: Any) -> Any:
+    """Build the ``read_site_source`` SDK tool object.
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as create + publish +
+    the three edit tools, so read → edit → publish sit on one allowlisted server
+    (see ``make_create_landing_site_tool`` for why one server)."""
+
+    @tool(
+        "read_site_source",
+        (
+            "READ the current source of an EXISTING Paw Site. READ-ONLY — it "
+            "changes nothing and never publishes. Works on every source-bearing "
+            "engine (html, react, svelte); only a ripple site has no source map.\n"
+            "CALL THIS BEFORE EVERY EDIT. The edit tools "
+            "(`edit_html_file` / `edit_react_component` / "
+            "`edit_svelte_component`) take an `edits` list whose `old_string` must "
+            "be copied VERBATIM from the file and match EXACTLY ONCE — you cannot "
+            "write one for a file you have not read this turn. Guessing instead, or "
+            "falling back to a whole-file `new_source` written from memory, is how a "
+            "site silently loses content the user never asked you to touch — most "
+            "damagingly a `<form>`'s `action` and its hidden `paw_site_id` / "
+            "`paw_key` / `paw_redirect` inputs, after which the page still renders, "
+            "still submits, and every future enquiry goes nowhere.\n"
+            "TWO MODES:\n"
+            "  * NO `file_path` — the MANIFEST: every file's path and byte size, no "
+            "contents. Start here when you do not know what the site contains; it is "
+            "cheap and it tells you the real paths (html sites keep `index.html` at "
+            "the ROOT, react sites live under `src/`).\n"
+            "  * WITH `file_path` — that ONE file's exact current contents. Read only "
+            "the files you intend to change; a whole react site at once wastes the "
+            "context you need for the edit itself.\n"
+            "Args: `pocket_id` (required — the site pocket) and optional `file_path`. "
+            "Returns {ok, pocket_id, engine, ...}: the manifest carries {files:[{path, "
+            "bytes}], file_count, bindings}, a single read carries {file_path, bytes, "
+            "contents}. `bindings` names a DYNAMIC svelte site's live-data keys "
+            "(objects / sources / actions / auth) — they are configuration, NOT files, "
+            "so never pass one as a `file_path`. ok=false means nothing was read: "
+            "`pocket.no_source_map` means it is a ripple site (use the pocket tools), "
+            "and a not-found names the paths that DO exist — use one of them rather "
+            "than guessing again."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Id of the site pocket whose source you are reading.",
+                },
+                "file_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Optional. The relative path of ONE file to read in full "
+                        "(e.g. 'index.html', 'src/App.tsx'). OMIT it to list the "
+                        "site's files with their sizes and no contents."
+                    ),
+                },
+            },
+            "required": ["pocket_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def read_site_source(args):  # type: ignore[no-untyped-def]
+        return await _read_site_source_handler(args)
+
+    return read_site_source
+
+
 def make_edit_html_file_tool(tool: Any) -> Any:
     """Build the ``edit_html_file`` SDK tool object using the SDK's ``tool``
     decorator (passed in by the caller that already imported it).
@@ -2376,8 +2552,11 @@ def make_edit_html_file_tool(tool: Any) -> Any:
             "enough surrounding context to be unique), and `new_string` is what it "
             "becomes. An html page is ONE flat document with no components, so a "
             "full rewrite means re-emitting the entire page to change a phone "
-            "number. If you have not read the file this turn, read it first so "
-            "old_string matches.\n"
+            "number. If you have not read the file this turn, call "
+            "`read_site_source` (pocket_id + file_path) FIRST and copy old_string "
+            "out of what it returns — a remembered or guessed old_string does not "
+            "match, and rewriting the page instead is what drops the capture "
+            "form.\n"
             "  * `new_source` — the FULL new file contents as a string (REPLACES "
             "the whole file). For large rewrites, and the only form `create` "
             "accepts.\n"
@@ -2510,4 +2689,5 @@ __all__ = [
     "make_edit_html_file_tool",
     "make_edit_react_component_tool",
     "make_edit_svelte_component_tool",
+    "make_read_site_source_tool",
 ]
