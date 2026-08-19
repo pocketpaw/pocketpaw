@@ -2997,7 +2997,12 @@ async def _conversation_counts(widget: PawBarWidget | None, workspace_id: str) -
 
 
 async def _concierge_runs_for_visitor(
-    pocket_id: str, customer_ref: str, workspace_id: str, *, limit: int
+    pocket_id: str,
+    customer_ref: str,
+    workspace_id: str,
+    *,
+    limit: int,
+    session_key: str = "",
 ) -> list[Any]:
     """One visitor's concierge runs on one site, most-recent first.
 
@@ -3013,19 +3018,31 @@ async def _concierge_runs_for_visitor(
       * ``user_id``       — the anonymous customer handle; a sibling VISITOR of
                             the same widget never matches.
 
+    ``session_key`` narrows further, to ONE conversation of that visitor
+    (2026-08-19). It is optional because the two callers want different things:
+    the owner's transcript read wants the visitor's whole history with the site,
+    while the agent's memory rehydration must see only the conversation actually
+    in progress — replaying an abandoned thread into a fresh one is the bug this
+    parameter exists to fix. The key already encodes the conversation id, so this
+    needs no new field on the run doc.
+
     Callers pass ``workspace_id`` / ``pocket_id`` from the authenticated
     authority (the resolved site key or the session's workspace), never from the
     request body. Index-backed and always bounded by ``limit``.
     """
     from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 
+    predicates = [
+        ChatRunDoc.workspace == workspace_id,
+        ChatRunDoc.context_type == _CONCIERGE_CONTEXT_TYPE,
+        ChatRunDoc.scope_id == pocket_id,
+        ChatRunDoc.user_id == customer_ref,
+    ]
+    if session_key:
+        predicates.append(ChatRunDoc.session_key == session_key)
+
     return (
-        await ChatRunDoc.find(
-            ChatRunDoc.workspace == workspace_id,
-            ChatRunDoc.context_type == _CONCIERGE_CONTEXT_TYPE,
-            ChatRunDoc.scope_id == pocket_id,
-            ChatRunDoc.user_id == customer_ref,
-        )
+        await ChatRunDoc.find(*predicates)
         .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
         .limit(limit)
         .to_list()
@@ -3033,9 +3050,9 @@ async def _concierge_runs_for_visitor(
 
 
 async def _load_concierge_history(
-    pocket_id: str, customer_ref: str, workspace_id: str
+    pocket_id: str, customer_ref: str, workspace_id: str, session_key: str = ""
 ) -> list[dict[str, str]]:
-    """Rehydrate one visitor's prior turns as ``RunSpec.history``.
+    """Rehydrate this CONVERSATION's prior turns as ``RunSpec.history``.
 
     The concierge visitor is anonymous and has no ``Message`` rows, so the authed
     surfaces' ``load_history_for_scope`` has nothing to read and every turn was
@@ -3057,6 +3074,13 @@ async def _load_concierge_history(
     writes this turn's doc, so the visitor's message rides in ``RunSpec.content``
     exactly once.
 
+    ``session_key`` scopes the replay to ONE conversation (2026-08-19). Before it,
+    the read was per-VISITOR, so a visitor who started over still had their
+    abandoned thread replayed into the agent — the loudest half of the reported
+    "every session is one session" bug, because it is the half the visitor could
+    actually feel. Passing "" restores the old visitor-wide behaviour and is what
+    a caller with no conversation in hand gets.
+
     Failure-soft: any read error degrades to no memory and logs. A visitor's chat
     must not 500 because the run collection hiccuped.
     """
@@ -3067,7 +3091,11 @@ async def _load_concierge_history(
 
     try:
         runs = await _concierge_runs_for_visitor(
-            pocket_id, customer_ref, workspace_id, limit=_HISTORY_TURN_CAP
+            pocket_id,
+            customer_ref,
+            workspace_id,
+            limit=_HISTORY_TURN_CAP,
+            session_key=session_key,
         )
 
         history: list[dict[str, str]] = []
@@ -3596,6 +3624,18 @@ class ConciergeChatRequest(BaseModel):
     # NEVER an authenticated principal.
     customer_ref: str
     message: str
+    # Which of this visitor's conversations the turn belongs to (2026-08-19).
+    #
+    # OPTIONAL on purpose, and it must stay optional: widget bundles cached on
+    # visitors' devices predate the field, and a required one would 422 every one
+    # of them the moment this deploys. Absent means "the conversation in
+    # progress", which the store resolves-or-creates — exactly the behaviour
+    # before conversations had identities.
+    #
+    # An id belonging to another visitor or another tenant does not resolve, and
+    # the turn falls back to the caller's own active conversation rather than
+    # erroring: the value is client-supplied, so it is a hint, never an authority.
+    conversation_id: str = ""
 
 
 def _sse(event: str, data: dict[str, Any], *, entry_id: str | None = None) -> bytes:
@@ -3868,6 +3908,30 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     except Exception:
         logger.warning("conversation state upsert failed (non-fatal)", exc_info=True)
 
+    # Which conversation is this turn part of (2026-08-19)? The body's id is a
+    # client-supplied HINT and is verified against this visitor's own rows before
+    # it is honoured — a caller naming a stranger's (or another tenant's)
+    # conversation gets their own active one instead of a refusal, because the
+    # only thing a refusal would tell them is that the id was real.
+    #
+    # Everything downstream keys off ``conversation_key``: the run's session_key,
+    # the history replay, and the ledger's conversation id. It is derived HERE,
+    # once, so those three can never drift apart again.
+    if body.conversation_id and conversation is not None:
+        try:
+            named = await store.get_conversation_by_id(
+                body.conversation_id, workspace_id=ctx.workspace_id
+            )
+            if (
+                named is not None
+                and named.widget_id == body.widget_id
+                and named.customer_ref == body.customer_ref
+            ):
+                conversation = named
+        except Exception:
+            logger.warning("conversation id lookup failed (non-fatal)", exc_info=True)
+    conversation_key = conversation.id if conversation is not None else body.customer_ref
+
     # Owner notification #1 of 3 (slice 3): a NEW conversation started. Not every
     # turn — a bar that pinged on each message would train the owner to ignore the
     # badge, which costs them the two escalations that actually need them. Awaited
@@ -3983,11 +4047,20 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     stored_user_text = (
         body.message[:_STORED_USER_TEXT_CHARS] if site.concierge_store_transcripts else ""
     )
-    # ``history`` is THIS visitor's prior turns on THIS site (see
+    # The agent session this turn belongs to. It carries ``conversation_key`` —
+    # the conversation's own id — where it used to carry ``customer_ref``
+    # (2026-08-19). That one substitution is the identity fix at the run layer:
+    # with the visitor's handle in this slot, every conversation they ever had
+    # was ONE agent session, which is precisely what "multiple sessions are
+    # treated as a single session" described. Built here rather than inline in
+    # the RunSpec because the history read below must scope to the same value.
+    session_key = f"cloud:concierge:{ctx.pocket_id}:{conversation_key}:{widget.agent_id}"
+    # ``history`` is THIS CONVERSATION's prior turns (see
     # ``_load_concierge_history``). Read BEFORE ``create_run`` below writes this
     # turn's doc, so the current message rides in ``content`` and appears exactly
-    # once. Scoped to (workspace, concierge, pocket, customer_ref) — a sibling
-    # visitor's, a sibling site's, and another tenant's turns can never appear.
+    # once. Scoped to (workspace, concierge, pocket, customer_ref, session) — a
+    # sibling visitor's, a sibling site's, another tenant's, and now this
+    # visitor's OWN earlier conversations can never appear.
     #
     # Gated on the SAME retention toggle as the write: an owner who turned
     # transcript storage off gets no memory, because there is nothing stored to
@@ -3995,7 +4068,12 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     # conversation with the questions missing. That degradation is the owner's
     # privacy choice working, not a bug to route around.
     prior_history = (
-        await _load_concierge_history(ctx.pocket_id or "", body.customer_ref, ctx.workspace_id)
+        await _load_concierge_history(
+            ctx.pocket_id or "",
+            body.customer_ref,
+            ctx.workspace_id,
+            session_key=session_key,
+        )
         if site.concierge_store_transcripts
         else []
     )
@@ -4004,7 +4082,7 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
         workspace_id=ctx.workspace_id,
         context_type="concierge",
         scope_id=ctx.pocket_id or "",
-        session_key=f"cloud:concierge:{ctx.pocket_id}:{body.customer_ref}:{widget.agent_id}",
+        session_key=session_key,
         group=None,
         user_id=body.customer_ref,
         agent_id=widget.agent_id,
@@ -4245,6 +4323,172 @@ async def get_cart(
         logger.debug("cart-read marker record failed (non-fatal)", exc_info=True)
     cart = await store.get_cart(w, customer_ref)
     return JSONResponse(cart_wire(widget, customer_ref, cart))
+
+
+# ---------------------------------------------------------------------------
+# Public conversation endpoints (2026-08-19) — the visitor's own Messages list
+#
+# The visitor half of the conversation-identity fix. Before it, a visitor had
+# exactly one conversation per widget forever, so there was nothing to list and
+# no way to start another; the widget's "New conversation" wiped its own
+# localStorage and the backend never heard about it.
+#
+# Same armor class as chat and the cart, through the shared
+# ``_front_gate_for_key`` (404 unknown widget → 429 rate limit → 401 bad key →
+# 403 origin/binding). Both endpoints are strictly visitor-scoped: the caller can
+# only ever read or write conversations belonging to the ``customer_ref`` the
+# gate already bound, so there is no id to enumerate and nothing to reach across.
+# ---------------------------------------------------------------------------
+
+
+class VisitorConversationItem(BaseModel):
+    """One row of the widget's Messages list."""
+
+    id: str
+    state: str = "open"
+    # The last thing said, from the visitor's point of view. "" for a conversation
+    # opened but never used — the widget renders its own empty-state copy rather
+    # than a blank row.
+    preview: str = ""
+    last_message_at: str = ""
+    # Is this the conversation in progress? The widget resumes into it and sends
+    # turns against it by default.
+    active: bool = False
+
+
+class VisitorConversationsResponse(BaseModel):
+    conversations: list[VisitorConversationItem] = Field(default_factory=list)
+
+
+class OpenConversationRequest(BaseModel):
+    key: str
+    w: str
+    customer_ref: str
+
+
+async def _visitor_conversation_previews(
+    widget: PawBarWidget, pocket_id: str, customer_ref: str, workspace_id: str
+) -> dict[str, tuple[str, str]]:
+    """Map ``conversation_id -> (preview, last_message_at)`` in ONE query.
+
+    The conversation rows carry lifecycle state but deliberately no messages, so
+    the preview comes from the run docs. Rather than a query per conversation
+    (which would be N round-trips for a list of N), this reads the visitor's
+    recent runs once, bounded by ``_CONVERSATION_SCAN_CAP``, and buckets them by
+    the conversation encoded in each run's ``session_key``. Runs arrive
+    newest-first, so the FIRST run seen for a conversation is its latest.
+
+    A conversation whose only turns are the owner's own replies (those live in
+    ``paw_bar_owner_messages``, never as run docs — the metering sweeper bills
+    runs, and an owner reply shaped as one would charge the owner for typing)
+    resolves to no preview here and renders from its state instead.
+
+    Failure-soft: the list is worth showing without previews.
+    """
+    out: dict[str, tuple[str, str]] = {}
+    if not pocket_id:
+        return out
+    try:
+        runs = await _concierge_runs_for_visitor(
+            pocket_id, customer_ref, workspace_id, limit=_CONVERSATION_SCAN_CAP
+        )
+    except Exception:
+        logger.warning("visitor conversation previews failed (non-fatal)", exc_info=True)
+        return out
+
+    prefix = f"cloud:concierge:{pocket_id}:"
+    suffix = f":{widget.agent_id}"
+    for run in runs:
+        key = getattr(run, "session_key", "") or ""
+        if not key.startswith(prefix) or not key.endswith(suffix):
+            continue
+        conversation_id = key[len(prefix) : len(key) - len(suffix)]
+        if not conversation_id or conversation_id in out:
+            continue  # newest-first, so the first hit is the latest turn
+        text = (run.partial_text or "") or (getattr(run, "user_text", "") or "")
+        when = getattr(run, "createdAt", None)
+        out[conversation_id] = (
+            text[:_CONVERSATION_PREVIEW_CHARS],
+            when.isoformat() if when else "",
+        )
+    return out
+
+
+@router.get("/paw-bar/conversations", response_model=VisitorConversationsResponse)
+async def list_visitor_conversations(
+    request: Request,
+    w: str,
+    key: str,
+    customer_ref: str,
+) -> VisitorConversationsResponse:
+    """This visitor's own conversations on this bar, newest first.
+
+    What the widget's Messages tab reads. Scoped twice over — the store filters to
+    one (widget, visitor) pair and the front gate has already bound that visitor
+    to the resolved key — so a sibling visitor's or a sibling site's conversations
+    can never appear in the answer.
+    """
+    origin = request.headers.get("origin")
+    widget, ctx, _site = await _front_gate_for_key(
+        widget_id=w,
+        signed_key=key,
+        customer_ref=customer_ref,
+        origin=origin,
+        request=request,
+    )
+    store = _store()
+    rows = await store.list_conversations_for_visitor(
+        widget.id, customer_ref, workspace_id=ctx.workspace_id
+    )
+    previews = await _visitor_conversation_previews(
+        widget, ctx.pocket_id or "", customer_ref, ctx.workspace_id
+    )
+    conversations = []
+    for row in rows:
+        preview, last_at = previews.get(row.id, ("", ""))
+        conversations.append(
+            VisitorConversationItem(
+                id=row.id,
+                state=row.state.value,
+                preview=preview,
+                last_message_at=last_at or (row.last_visitor_at or ""),
+                active=row.active,
+            )
+        )
+    return VisitorConversationsResponse(conversations=conversations)
+
+
+@router.post("/paw-bar/conversations", response_model=VisitorConversationItem)
+async def open_visitor_conversation(
+    body: OpenConversationRequest, request: Request
+) -> VisitorConversationItem:
+    """Start a fresh conversation for this visitor and return it.
+
+    The backend half of the widget's "New conversation". The visitor's current
+    conversation is RETIRED rather than deleted — it stays in their Messages list
+    and in the owner's inbox — and the new one becomes active, so the next turn
+    lands on it and the agent starts cold instead of replaying the thread the
+    visitor just walked away from.
+    """
+    origin = request.headers.get("origin")
+    widget, ctx, _site = await _front_gate_for_key(
+        widget_id=body.w,
+        signed_key=body.key,
+        customer_ref=body.customer_ref,
+        origin=origin,
+        request=request,
+    )
+    store = _store()
+    conversation = await store.open_conversation(
+        widget.id, body.customer_ref, workspace_id=ctx.workspace_id
+    )
+    return VisitorConversationItem(
+        id=conversation.id,
+        state=conversation.state.value,
+        preview="",
+        last_message_at="",
+        active=True,
+    )
 
 
 # ---------------------------------------------------------------------------

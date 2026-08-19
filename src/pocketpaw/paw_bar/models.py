@@ -593,6 +593,13 @@ class Conversation(BaseModel):
     # uses it to say when the bot hands itself back.
     bot_paused_at: str = ""
     unread_for_owner: int = 0
+    # 2026-08-19 (conversation identity): is this the visitor's conversation IN
+    # PROGRESS? A visitor may own several — starting over retires the current one
+    # (``active = False``) and opens a fresh one — and a partial unique index
+    # keeps at most one active per (widget, visitor), so a chat turn that names no
+    # conversation still resolves to exactly one row. Defaults True because every
+    # row written before this existed was that visitor's only conversation.
+    active: bool = True
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
