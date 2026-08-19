@@ -1,0 +1,125 @@
+[
+  {
+    "label": "the hex guard accepts any string — a colour field becomes a CSS grammar",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "_HEX_RE = re.compile(r\"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$\")",
+    "replace": "_HEX_RE = re.compile(r\".*\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_a_colour_that_is_not_plain_hex_is_dropped",
+      "tests/cloud/test_paw_bar_appearance.py::test_a_hostile_appearance_reaches_the_frame_defanged"
+    ]
+  },
+  {
+    "label": "an image url is echoed unchecked — javascript: reaches the served document",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "    lowered = v.lower()",
+    "replace": "    return v\n    lowered = v.lower()",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_an_unsafe_image_url_is_dropped",
+      "tests/cloud/test_paw_bar_appearance.py::test_a_hostile_appearance_reaches_the_frame_defanged"
+    ]
+  },
+  {
+    "label": "the url() token can be terminated — a second declaration is appended",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "    if lowered.startswith(\"https://\"):\n        # Nothing may terminate the url() token and start a new declaration.",
+    "replace": "    if lowered.startswith(\"https://\"):\n        return v\n        # Nothing may terminate the url() token and start a new declaration.",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_an_unsafe_image_url_is_dropped"
+    ]
+  },
+  {
+    "label": "lengths stop being clamped — an unbounded value is formatted into CSS",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "    return max(low, min(int(value), high))",
+    "replace": "    return int(value)",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_lengths_are_clamped_not_echoed"
+    ]
+  },
+  {
+    "label": "the font is echoed instead of looked up — the family becomes a CSS grammar",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "        out[\"--pawbar-font\"] = FONT_STACKS.get(self.font, FONT_STACKS[\"system\"])",
+    "replace": "        out[\"--pawbar-font\"] = self.font",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_an_unknown_font_falls_back_rather_than_being_stored",
+      "tests/cloud/test_paw_bar_appearance.py::test_defaults_reproduce_todays_look"
+    ]
+  },
+  {
+    "label": "an unknown font is stored rather than falling back",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "        return v if v in FONT_STACKS else \"system\"",
+    "replace": "        return v",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_an_unknown_font_falls_back_rather_than_being_stored"
+    ]
+  },
+  {
+    "label": "reduced motion becomes an owner setting they can switch off",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "        # Not a settable choice. A widget that ignores prefers-reduced-motion is\n        # an accessibility defect on somebody else's website, and the owner does\n        # not get to make that trade on their visitors' behalf.\n        return True",
+    "replace": "        return v",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_reduced_motion_cannot_be_switched_off"
+    ]
+  },
+  {
+    "label": "the frame goes back to answering {} — the white-label path is dead wire again",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        \"tokens\": look.tokens(),",
+    "replace": "        \"tokens\": {},",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_the_frame_finally_emits_real_tokens",
+      "tests/cloud/test_paw_bar_appearance.py::test_a_site_with_no_appearance_still_frames"
+    ]
+  },
+  {
+    "label": "theme stops being emitted — every bar is dark again regardless of the setting",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        \"theme\": look.surface_mode,",
+    "replace": "        \"theme\": \"dark\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_the_frame_finally_emits_real_tokens"
+    ]
+  },
+  {
+    "label": "team avatars lose their cap and their filter",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "        return [u for u in (_safe_image_url(x) for x in (v or [])) if u][:3]",
+    "replace": "        return list(v or [])",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_team_avatars_are_capped_and_filtered",
+      "tests/cloud/test_paw_bar_appearance.py::test_an_unsafe_image_url_is_dropped"
+    ]
+  },
+  {
+    "label": "an unset token is restated at its default, freezing every site to today's base look",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "        if self.accent:\n            out[\"--pawbar-accent\"] = self.accent",
+    "replace": "        out[\"--pawbar-accent\"] = self.accent or \"#3b6fe0\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_unset_optional_tokens_are_absent_rather_than_restated",
+      "tests/cloud/test_paw_bar_appearance.py::test_a_colour_that_is_not_plain_hex_is_dropped"
+    ]
+  },
+  {
+    "label": "the launcher label never reaches the frame — the pill cannot say the owner's words",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "\"launcherLabel\": look.launcher.label,",
+    "replace": "\"launcherLabel\": \"\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_the_launcher_label_reaches_the_frame"
+    ]
+  },
+  {
+    "label": "the launcher label is emitted unbounded — an owner can stretch the pill across the viewport",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "return (v or \"\").strip()[:40]",
+    "replace": "return (v or \"\").strip()",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_an_overlong_launcher_label_is_bounded_before_it_reaches_the_frame"
+    ]
+  }
+]

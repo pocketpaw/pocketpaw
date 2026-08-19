@@ -2341,7 +2341,7 @@ the split is the security model:
 | Route | What it does |
 |---|---|
 | `GET /paw-bar/admin/site/{site_id}/overview` | Counts and the bound widget. |
-| `GET/PATCH /paw-bar/admin/site/{site_id}/settings` | The kill switch, greeting and transcript-retention toggle. |
+| `GET/PATCH /paw-bar/admin/site/{site_id}/settings` | The kill switch, greeting, transcript-retention toggle, and `concierge_appearance` — the white-label block (accent, surface mode, radius, blur, font, launcher, hero, motion preset, agent identity) that renders into the widget's `--pawbar-*` custom properties. Sent whole rather than per-field; every value validates into a safe CSS literal, since these become the right-hand side of a custom property in a document the widget serves. |
 | `GET /paw-bar/admin/site/{site_id}/conversations` | The inbox. Supports `?state=open\|needs_human\|snoozed\|closed`, carries per-state `counts`, and each row joins its lifecycle state, unread count, tags and whether an action is pending. |
 | `GET /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | One conversation's transcript, interleaving visitor, assistant, owner and system turns by timestamp. |
 | `PATCH /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | Move state, snooze, tag, or append a private note. |

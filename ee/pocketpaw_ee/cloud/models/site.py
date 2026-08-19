@@ -209,6 +209,7 @@ from typing import Any
 from beanie import Indexed
 from pydantic import BaseModel, Field, PrivateAttr
 
+from pocketpaw.paw_bar.appearance import ConciergeAppearance
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
 
@@ -471,6 +472,13 @@ class Site(TimestampedDocument):
     # NOT retroactively purge lines already stored. Defaults True (the transcript
     # the dashboard promises), so no migration.
     concierge_store_transcripts: bool = True
+    # Paw Bar appearance (2026-08-19). The owner's white-label settings, rendered
+    # into the frame's ``window.__PAWBAR__.tokens`` as ``--pawbar-*`` custom
+    # properties. The widget has read that map since it shipped and the backend
+    # answered ``{}`` the whole time; this is the other end of that wire.
+    # Defaults reproduce today's look exactly, so an unstyled Site is unchanged
+    # and there is no migration.
+    concierge_appearance: ConciergeAppearance = Field(default_factory=ConciergeAppearance)
     # Site knowledge sync (``sites.kb_ingest``): the kb-go article ids this site's
     # own content currently occupies in ``pocket:<pocket_id>`` — the scope its
     # concierge reads. Kept so a later sync can delete the articles a renamed or
