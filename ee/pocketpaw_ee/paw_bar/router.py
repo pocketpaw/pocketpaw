@@ -874,6 +874,12 @@ def _pawbar_frame_config(
         "agentSubtitle": look.agent_subtitle,
         "agentAvatar": look.agent_avatar_url,
         "avatars": list(look.team_avatar_urls),
+        # The resting pill's own copy. LauncherAppearance.label has been stored
+        # and bound-checked since the appearance model landed; it had nowhere to
+        # go until the bar rested as a labelled pill rather than a wide input
+        # slab. "" means the widget falls back to its own generic wording, so an
+        # owner who never set one still gets a finished sentence.
+        "launcherLabel": look.launcher.label,
     }
 
 

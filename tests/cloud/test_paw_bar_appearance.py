@@ -263,6 +263,27 @@ def test_agent_identity_reaches_the_widget():
     assert config["agentSubtitle"] == "The team can also help"
     assert config["avatars"] == ["https://a.test/1.png"]
 
+def test_the_launcher_label_reaches_the_frame():
+    """The resting pill says what the OWNER calls their own site.
+
+    ``launcher.label`` has been stored and bound-checked since the appearance
+    model landed, and the frame never emitted it, so the widget could not have
+    rendered it however the owner set it. Absent emits "" rather than a
+    server-side default: the fallback wording belongs to the surface that draws
+    the pill, which is the only place that knows how much room it has."""
+    look = ConciergeAppearance(launcher=LauncherAppearance(label="Ask about Ocean Supply"))
+
+    assert _config(appearance=look)["launcherLabel"] == "Ask about Ocean Supply"
+    assert _config(appearance=None)["launcherLabel"] == ""
+
+
+def test_an_overlong_launcher_label_is_bounded_before_it_reaches_the_frame():
+    """It renders inside a pill on somebody else's page. Unbounded, an owner
+    could stretch the resting bar clear across their visitors' viewport."""
+    look = ConciergeAppearance(launcher=LauncherAppearance(label="x" * 200))
+
+    assert len(_config(appearance=look)["launcherLabel"]) == 40
+
 
 def test_a_hostile_appearance_reaches_the_frame_defanged():
     """End to end: the validators run on construction, so what the frame emits

@@ -103,5 +103,23 @@
       "tests/cloud/test_paw_bar_appearance.py::test_unset_optional_tokens_are_absent_rather_than_restated",
       "tests/cloud/test_paw_bar_appearance.py::test_a_colour_that_is_not_plain_hex_is_dropped"
     ]
+  },
+  {
+    "label": "the launcher label never reaches the frame — the pill cannot say the owner's words",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "\"launcherLabel\": look.launcher.label,",
+    "replace": "\"launcherLabel\": \"\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_the_launcher_label_reaches_the_frame"
+    ]
+  },
+  {
+    "label": "the launcher label is emitted unbounded — an owner can stretch the pill across the viewport",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "return (v or \"\").strip()[:40]",
+    "replace": "return (v or \"\").strip()",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_an_overlong_launcher_label_is_bounded_before_it_reaches_the_frame"
+    ]
   }
 ]
