@@ -29,6 +29,13 @@
 #   ``max_storage_bytes`` (the workspace S3 storage cap in bytes; ``None`` ==
 #   uncapped Enterprise) so the plan cards can render the storage limit and the
 #   Settings storage page can show used vs cap.
+# Updated 2026-08-19 (feat/site-plan-catalog-inclusions): ``SitePlanTierResponse``
+#   now also carries ``badge_removal`` and ``sells_concierge``. Both existed
+#   server-side and neither reached the wire, so the buyer-facing plan cards could
+#   only list ``cloudflare_features`` — they showed nothing about the attribution
+#   badge or the concierge, which are the two capabilities the paid tiers are
+#   actually sold on. A card that cannot name what a tier includes cannot name what
+#   it omits either, which is the half buyers ask about.
 
 from __future__ import annotations
 
@@ -132,12 +139,21 @@ class SitePlanTierResponse(BaseModel):
     ``cloudflare_features`` is the SORTED list of Cloudflare features the tier
     resells (deterministic JSON; BC-10 provisions these when a domain is added).
     ``dodo_product_id`` is None until config populates it.
+
+    ``badge_removal`` and ``sells_concierge`` are what the tier SELLS, not what any
+    particular site has: they say a tier may drop the attribution badge and may run
+    a visitor concierge. A site gets neither until its own subscription is active —
+    that AND lives in ``resolve_site_entitlements``, and it is why these two must
+    never be read as a per-site entitlement. They are here so a plan CARD can say
+    what each tier includes and, by their absence, what it does not.
     """
 
     key: str
     annual_price_usd: int
     dodo_product_id: str | None = None
     cloudflare_features: list[str] = Field(default_factory=list)
+    badge_removal: bool = False
+    sells_concierge: bool = False
 
 
 class SitePlanCatalogResponse(BaseModel):
@@ -153,4 +169,6 @@ def site_plan_tier_to_dto(tier: SitePlanTier) -> SitePlanTierResponse:
         annual_price_usd=tier.annual_price_usd,
         dodo_product_id=tier.dodo_product_id,
         cloudflare_features=sorted(tier.cloudflare_features),
+        badge_removal=tier.badge_removal,
+        sells_concierge=tier.sells_concierge,
     )

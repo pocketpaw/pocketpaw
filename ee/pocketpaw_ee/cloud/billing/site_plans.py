@@ -23,6 +23,12 @@
 # never drift.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-9): new module.
+# Updated 2026-08-19 (feat/site-plan-catalog-inclusions): added the
+#   ``sells_concierge`` property — the catalog-level "does this tier sell the
+#   concierge", lifted out of ``resolve_site_entitlements`` where it lived as an
+#   inline ``tier.key != BASE_SITE_PLAN_KEY``. Two callers now need the same
+#   answer (the resolver, and the plan-catalog DTO the buyer-facing plan cards
+#   read), and one rule expressed twice is one rule that drifts.
 # Updated 2026-08-13 (feat/sites-free-badge): added ``badge_removal`` — the gate
 #   ``sites.badge`` reads to decide whether a publish must stamp the attribution
 #   badge. The base tier does NOT carry it (that is what free means); the paid
@@ -87,7 +93,8 @@ class SitePlanTier:
     recurring-product id, or None until config populates it. ``cloudflare_features``
     is the set of Cloudflare features the tier resells (BC-10 provisions them).
     ``badge_removal`` is whether a site on this tier may ship without the
-    attribution badge — read by ``sites.badge.badge_required``.
+    attribution badge — read by ``sites.badge.badge_required``. ``sells_concierge``
+    is derived, not stored (see the property).
     """
 
     key: str
@@ -95,6 +102,24 @@ class SitePlanTier:
     dodo_product_id: str | None
     cloudflare_features: frozenset[str]
     badge_removal: bool = False
+
+    @property
+    def sells_concierge(self) -> bool:
+        """Does this tier sell the visitor concierge at all?
+
+        Derived from the floor rather than a per-tier catalog dict like
+        ``badge_removal``: no tier grants concierge today and the tier that will
+        (``staff``) does not exist until the pricing-spec rekey, which is blocked
+        on an open decision. A dict would need a basic/pro/business mapping
+        invented now and rewritten then; "any tier above the floor" needs no
+        mapping and survives the rekey untouched.
+
+        This is the CATALOG question — "does this tier sell it" — and on its own
+        entitles nobody. ``resolve_site_entitlements`` ANDs it with an active
+        subscription to answer "may THIS site serve one", which is the question
+        every public seam asks.
+        """
+        return self.key != BASE_SITE_PLAN_KEY
 
 
 def _dodo_product_for(key: str) -> str | None:

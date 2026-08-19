@@ -158,13 +158,12 @@ def resolve_site_entitlements(
     if tier is not None and subscription_active:
         badge_removal = tier.badge_removal
         custom_domain = "custom_domain" in tier.cloudflare_features
-        # Any tier ABOVE the free floor sells the concierge. Deliberately derived
-        # from the floor rather than a per-tier catalog flag like ``badge_removal``:
-        # no tier grants concierge today, and the tier that will (``staff``) does not
-        # exist until the pricing-spec rekey, which is blocked on an open decision.
-        # A flag would need a basic/pro/business mapping invented now and rewritten
-        # then. "Paid and paying" needs no mapping and survives the rekey untouched.
-        concierge_entitled = tier.key != site_plan_catalog.BASE_SITE_PLAN_KEY
+        # Any tier ABOVE the free floor sells the concierge. The rule itself now
+        # lives on the catalog row (``SitePlanTier.sells_concierge``) because the
+        # plan-catalog DTO needs the same answer for the buyer-facing plan cards;
+        # read it, do not re-express it. What stays HERE is the AND with an active
+        # subscription, which is this resolver's whole job.
+        concierge_entitled = tier.sells_concierge
 
     return SiteEntitlements(
         site_id=site_id,
