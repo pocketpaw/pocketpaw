@@ -40,7 +40,7 @@ def test_defaults_reproduce_todays_look():
     assert look.surface_mode == "dark"
     assert look.radius == 20
     assert look.blur == 28
-    assert look.motion.preset == "spring"
+    assert look.motion.preset == "lively"
     tokens = look.tokens()
     assert tokens["--pawbar-radius"] == "20px"
     assert tokens["--pawbar-blur"] == "28px"
@@ -143,7 +143,7 @@ def test_an_unknown_font_falls_back_rather_than_being_stored():
         ("surface_mode", ConciergeAppearance, "neon", "dark"),
         ("style", HeroAppearance, "iframe", "gradient"),
         ("position", LauncherAppearance, "middle-of-the-screen", "bottom-right"),
-        ("preset", MotionAppearance, "seizure", "spring"),
+        ("preset", MotionAppearance, "seizure", "lively"),
     ],
 )
 def test_every_enum_field_falls_back_to_a_known_value(field, cls, hostile, expected):

@@ -59,16 +59,26 @@ HERO_STYLES = frozenset({"gradient", "solid", "image"})
 # Motion presets. "none" is not the same as the visitor's reduced-motion
 # setting: this is the OWNER choosing a calmer bar for everyone, while the
 # visitor's OS preference always wins on top of it (see tokens.css).
-MOTION_PRESETS = frozenset({"none", "subtle", "spring", "expressive"})
+MOTION_PRESETS = frozenset({"none", "subtle", "lively", "expressive"})
 
 # Per-preset (duration_ms, easing, travel_scale). Authored here rather than in
 # CSS so the owner's choice is one stored word instead of five stored numbers,
 # and so a preset can be retuned for every existing site at once.
+# Every curve is a pure DECELERATION. An overshoot ("ease-out-back",
+# cubic-bezier(0.34, 1.56, …)) sat here first and was wrong for this surface:
+# real objects decelerate, this widget renders on somebody else's website where
+# a bouncing panel reads as a toy, and the visitor came to ask a question rather
+# than watch the chrome arrive. The presets differ in duration and travel, which
+# is what "more motion" should mean, not in how much they wobble.
+#
+# The preset was called "spring" and is now "lively" — a name that promised
+# overshoot while the curve no longer delivers it is a worse lie than a plain
+# label. Renamed before anything shipped, so no stored value has to migrate.
 _MOTION: dict[str, tuple[int, str, str]] = {
     "none": (0, "linear", "0"),
     "subtle": (160, "cubic-bezier(0.16, 1, 0.3, 1)", "1"),
-    "spring": (240, "cubic-bezier(0.34, 1.56, 0.64, 1)", "1"),
-    "expressive": (360, "cubic-bezier(0.34, 1.56, 0.64, 1)", "1.35"),
+    "lively": (240, "cubic-bezier(0.22, 1, 0.36, 1)", "1"),
+    "expressive": (360, "cubic-bezier(0.22, 1, 0.36, 1)", "1.35"),
 }
 
 
@@ -152,7 +162,7 @@ class HeroAppearance(BaseModel):
 
 
 class MotionAppearance(BaseModel):
-    preset: str = "spring"
+    preset: str = "lively"
     # The visitor's OS setting always wins regardless; this lets an owner ALSO
     # calm the bar for everyone. Off means the owner has opted out of honouring
     # it, which we do not offer — the field exists so the editor can show the
@@ -162,7 +172,7 @@ class MotionAppearance(BaseModel):
     @field_validator("preset")
     @classmethod
     def _known_preset(cls, v: str) -> str:
-        return v if v in MOTION_PRESETS else "spring"
+        return v if v in MOTION_PRESETS else "lively"
 
     @field_validator("honor_reduced_motion")
     @classmethod
@@ -271,10 +281,10 @@ class ConciergeAppearance(BaseModel):
                 hero.from_color if hero.style == "solid" and hero.from_color else hero.to_color
             )
 
-        duration, easing, travel = _MOTION.get(self.motion.preset, _MOTION["spring"])
+        duration, easing, travel = _MOTION.get(self.motion.preset, _MOTION["lively"])
         out["--pawbar-duration"] = f"{duration}ms"
         out["--pawbar-duration-fast"] = f"{max(0, duration // 2)}ms"
         out["--pawbar-duration-slow"] = f"{int(duration * 1.75)}ms"
-        out["--pawbar-ease-spring"] = easing
+        out["--pawbar-ease-emphasis"] = easing
         out["--pawbar-motion-scale"] = travel
         return out
