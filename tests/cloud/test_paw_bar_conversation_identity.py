@@ -520,6 +520,106 @@ async def test_visitor_can_list_and_open_conversations(chat):
 
 
 @pytest.mark.asyncio
+async def test_a_visitor_can_read_back_their_own_conversation(chat):
+    """The read the widget never had.
+
+    Its thread lived only in the frame's localStorage, so anything that lost that
+    storage lost the history — and plenty does: the bar is a third-party iframe
+    (Safari blocks its storage, Chrome and Firefox partition it per top-level
+    site) and the stored row carries a 7-day TTL. The server had every message the
+    whole time; nothing could ask for it.
+    """
+    client, store, executor, widget = chat
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+    conversation = await store.open_conversation(widget.id, _REF, workspace_id="ws-1")
+    await ChatRunDoc(
+        run_id=uuid.uuid4().hex,
+        workspace="ws-1",
+        context_type="concierge",
+        scope_id="pocket-1",
+        session_key=f"cloud:concierge:pocket-1:{conversation.id}:agent-xyz",
+        user_id=_REF,
+        agent_id="agent-xyz",
+        client_message_id=uuid.uuid4().hex,
+        user_message_id="",
+        status="completed",
+        user_text="Do you deliver on Sundays?",
+        partial_text="We do, until 4pm.",
+    ).insert()
+
+    res = await client.get(
+        f"/paw-bar/conversations/{conversation.id}/messages",
+        params={"w": widget.id, "key": _VALID_KEY, "customer_ref": _REF},
+        headers={"Origin": _ORIGIN},
+    )
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["conversation_id"] == conversation.id
+    spoken = " ".join(m["content"] for m in body["messages"])
+    # BOTH halves: the visitor's own question and the reply. A thread that comes
+    # back assistant-only reads as the bar talking to itself.
+    assert "Do you deliver on Sundays?" in spoken
+    assert "We do, until 4pm." in spoken
+
+
+@pytest.mark.asyncio
+async def test_a_visitor_cannot_read_another_visitors_conversation(chat):
+    """Two visitors of the same bar share the widget, the site and the agent —
+    only the handle separates them. A conversation id is guessable in a way a
+    handle is not, so the id alone must never be enough to read a thread."""
+    client, store, executor, widget = chat
+
+    stranger = "cust-stranger-9"
+    theirs = await store.open_conversation(widget.id, stranger, workspace_id="ws-1")
+
+    res = await client.get(
+        f"/paw-bar/conversations/{theirs.id}/messages",
+        params={"w": widget.id, "key": _VALID_KEY, "customer_ref": _REF},
+        headers={"Origin": _ORIGIN},
+    )
+
+    # 404, not an empty 200: the loader filters on customer_ref so it would answer
+    # empty anyway, but that would imply the conversation exists and is silent.
+    assert res.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_conversation_id_is_a_404(chat):
+    client, store, executor, widget = chat
+
+    res = await client.get(
+        "/paw-bar/conversations/ppc-does-not-exist/messages",
+        params={"w": widget.id, "key": _VALID_KEY, "customer_ref": _REF},
+        headers={"Origin": _ORIGIN},
+    )
+
+    assert res.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_known_but_empty_conversation_reads_as_empty_not_missing(chat):
+    """A conversation the store knows about with nothing said in it yet.
+
+    Distinct from a missing one, and the widget needs the difference: empty means
+    "show the greeting", 404 means "this pointer is stale, stop trusting it".
+    """
+    client, store, executor, widget = chat
+
+    opened = await store.open_conversation(widget.id, _REF, workspace_id="ws-1")
+
+    res = await client.get(
+        f"/paw-bar/conversations/{opened.id}/messages",
+        params={"w": widget.id, "key": _VALID_KEY, "customer_ref": _REF},
+        headers={"Origin": _ORIGIN},
+    )
+
+    assert res.status_code == 200, res.text
+    assert res.json()["messages"] == []
+
+
+@pytest.mark.asyncio
 async def test_visitor_conversations_never_leak_across_visitors(chat):
     """A sibling visitor of the SAME bar shares the widget, the site and the
     agent — only the handle separates them. Their conversations must not be
