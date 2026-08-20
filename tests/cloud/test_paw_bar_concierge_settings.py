@@ -291,6 +291,78 @@ async def test_settings_patch_is_partial(client):
 
 
 @pytest.mark.asyncio
+async def test_preview_tokens_renders_without_writing(client):
+    """The editor's live preview needs tokens for a draft nobody has saved."""
+    c, _store = client
+    site = await _site()
+
+    res = await c.post(
+        f"/paw-bar/admin/site/{site.id}/appearance/preview-tokens",
+        json={"concierge_appearance": {"accent": "#ff5a36", "radius": 8}},
+    )
+
+    assert res.status_code == 200, res.text
+    tokens = res.json()["tokens"]
+    assert tokens["--pawbar-accent"] == "#ff5a36"
+    assert tokens["--pawbar-radius"] == "8px"
+
+    # WRITES NOTHING. The whole point is that this renders a draft; if it
+    # persisted, every keystroke in the editor would be a save and Revert would
+    # have nothing to go back to.
+    got = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert got.json()["concierge_appearance"]["accent"] != "#ff5a36"
+
+
+@pytest.mark.asyncio
+async def test_preview_tokens_returns_the_clamped_value_not_the_typed_one(client):
+    """The preview must not promise a look a save would not store.
+
+    Same model, same validators as the PATCH — so an out-of-range radius comes
+    back clamped and an unsafe image URL comes back empty, and the owner sees
+    that while editing instead of discovering it at save time.
+    """
+    c, _store = client
+    site = await _site()
+
+    res = await c.post(
+        f"/paw-bar/admin/site/{site.id}/appearance/preview-tokens",
+        json={
+            "concierge_appearance": {
+                "radius": 9999,
+                "agent_avatar_url": "http://insecure.example/a.png",
+            }
+        },
+    )
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["concierge_appearance"]["radius"] == 32
+    assert body["tokens"]["--pawbar-radius"] == "32px"
+    # http:// is refused rather than upgraded — it would be a mixed-content block
+    # on the owner's own https site.
+    assert body["concierge_appearance"]["agent_avatar_url"] == ""
+
+
+@pytest.mark.asyncio
+async def test_preview_tokens_cross_tenant_is_404(client):
+    """Not an open rendering oracle: another workspace's site id 404s.
+
+    The render does not need the document — the appearance is in the body — so
+    the scoped load exists precisely to keep this gate identical to the settings
+    PATCH beside it.
+    """
+    c, _store = client
+    site = await _site(workspace="ws-other")
+
+    res = await c.post(
+        f"/paw-bar/admin/site/{site.id}/appearance/preview-tokens",
+        json={"concierge_appearance": {"accent": "#ff5a36"}},
+    )
+
+    assert res.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_settings_cross_tenant_is_404(client):
     """A site owned by another workspace 404s for the ws-1 admin session."""
     c, _store = client
