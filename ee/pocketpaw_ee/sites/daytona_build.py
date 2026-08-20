@@ -51,7 +51,11 @@ import tarfile
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pocketpaw_ee.sites.engines import normalize_engine, static_output_rel
+from pocketpaw_ee.sites.engines import (
+    candidate_static_output_rels,
+    normalize_engine,
+    static_output_rel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -453,6 +457,8 @@ def artifact_tar_command(
     engine: str | None,
     project_dir: str,
     dest_path: str,
+    *,
+    output_rel: str | None = None,
 ) -> str:
     """The in-sandbox command that packs ONLY the deployable output.
 
@@ -476,8 +482,35 @@ def artifact_tar_command(
     (``html``): tarring ``.`` would sweep in ``node_modules`` and defeat the whole
     design. html needs no build and so never reaches this lane; a caller that gets
     here with it has a routing bug and should hear about it loudly.
+
+    ``output_rel`` NAMES WHICH OUTPUT DIR THIS BUILD WILL WRITE, for the one engine that
+    has more than one (SL-4). svelte builds on adapter-static (``build``) or
+    adapter-cloudflare (``.svelte-kit/cloudflare``) depending on the site's bindings, and
+    the include-list is rendered into the wrapper BEFORE the build runs, so it cannot read
+    the answer off disk the way ``engines.resolve_static_output_rel`` does. The caller
+    predicts it with ``generator_client.expected_static_output_rel`` — the same helper the
+    unpack uses — and passes it here. ``None`` keeps the nominal per-engine value, so every
+    pre-SL-4 call renders a byte-identical command.
+
+    An ``output_rel`` the engine cannot emit is REFUSED rather than honoured. An
+    include-list aimed at a directory that will never exist packs nothing, and an empty
+    artifact is indistinguishable from a build that produced nothing — so the caller's
+    mistake would arrive disguised as the user's. ``engines.candidate_static_output_rels``
+    owns the per-engine set, so this validates against the same list the resolver probes.
+
+    NOTE THIS IS STILL ONE ``shlex``-SPLITTABLE COMMAND, with no shell conditional in it.
+    An earlier draft probed for the directory in bash so the tar could self-correct; that
+    would have broken ``tests/ee/sites/faults.py::pack_with_real_tar``, which runs the
+    command through ``shlex.split`` WITHOUT a shell precisely so the test does not depend
+    on which bash a Windows Python resolves. Predicting the directory keeps the command a
+    plain argv, and a wrong prediction still fails the designed way: loudly and empty.
     """
-    rel = static_output_rel(engine)
+    rel = static_output_rel(engine) if output_rel is None else output_rel
+    if output_rel is not None and output_rel not in candidate_static_output_rels(engine):
+        raise ValueError(
+            f"engine {normalize_engine(engine)!r} cannot emit its static output at "
+            f"{output_rel!r}; expected one of {candidate_static_output_rels(engine)}"
+        )
     if rel == ".":
         raise ValueError(
             f"engine {normalize_engine(engine)!r} emits its static output at the "
@@ -665,6 +698,52 @@ PYEOF
 """
 
 
+#: Build-log substrings that mean the render FAILED even though the build may have exited
+#: zero. Mirrors ``paw-sites/src/smoke.ts::KNOWN_WORKERD_FAILURES`` and the copy
+#: ``generator_client._WORKERD_SSR_MARKERS`` already keeps for the inline path — a third
+#: copy, and worth it, because this one has to reach the INSIDE of a sandbox that has no
+#: paw-sites in it.
+#:
+#: WHY THE LANE NEEDS ITS OWN. An inline publish runs ``runWorkerdSmokeRender``, which
+#: fails the verdict on any of these markers. The lane runs bare ``bun install`` +
+#: ``bun run build``, so without this a site that prerendered a marker onto a zero exit
+#: would deploy. That is not theoretical for the svelte track: ``window is not defined``
+#: from a top-level import of a browser-only library is the classic Paw Site failure.
+#:
+#: The wrapper greps the WHOLE log rather than the sentinel's tail, which makes this
+#: STRICTER than reading ``stderr_tail`` Python-side would be: a marker printed early in a
+#: long ``bun install`` scrolls out of a tail and would be missed.
+WORKERD_SSR_MARKERS: tuple[str, ...] = (
+    "window is not defined",
+    "document is not defined",
+    "No such module",
+)
+
+
+def _render_marker_scan(markers: tuple[str, ...]) -> str:
+    """The bash that fails a zero-exit build whose log carries an SSR failure marker.
+
+    ``grep -F`` — FIXED strings, never patterns. A marker is prose ("window is not
+    defined"), and letting it be read as a regex would make a future marker containing a
+    ``.`` or a ``*`` match things it does not mean.
+
+    Renders to a no-op when ``markers`` is empty, so a caller can switch the scan off
+    without the script growing an empty ``if`` that always fires.
+    """
+    if not markers:
+        return "# no SSR markers configured for this engine\n"
+    tests = " || ".join(
+        f'grep -qF -- {shlex.quote(marker)} "$STDERR_LOG"' for marker in markers
+    )
+    return (
+        f"if {tests}; then\n"
+        '  echo "paw: build log carries a known SSR failure marker" >>"$STDERR_LOG"\n'
+        "  BUILD_EXIT=1\n"
+        '  exit "$BUILD_EXIT"\n'
+        "fi\n"
+    )
+
+
 def build_wrapper_script(
     engine: str | None,
     project_dir: str,
@@ -673,6 +752,8 @@ def build_wrapper_script(
     artifact_path: str,
     install_command: str = "bun install",
     build_command: str = "bun run build",
+    artifact_rel: str | None = None,
+    ssr_markers: tuple[str, ...] = WORKERD_SSR_MARKERS,
 ) -> str:
     """Render the bash wrapper the sandbox runs.
 
@@ -691,8 +772,16 @@ def build_wrapper_script(
     reaching the sentinel write with the real exit codes in hand, and ``-e`` would
     abort the script at the first failing step, which is precisely when the evidence
     matters. Every command's status is captured explicitly instead.
+
+    ``artifact_rel`` (SL-4) names which of the engine's output dirs this build will write,
+    for the one engine that has two. It reaches BOTH the tar's include-list and the
+    sentinel's ``artifact_rel`` field, which is the point: the sentinel is evidence, and
+    evidence claiming ``.svelte-kit/cloudflare`` for a build that wrote ``build`` sends
+    whoever reads it to look in the wrong place. ``None`` keeps the nominal per-engine
+    value and renders a byte-identical script.
     """
-    tar_cmd = artifact_tar_command(engine, project_dir, artifact_path)
+    tar_cmd = artifact_tar_command(engine, project_dir, artifact_path, output_rel=artifact_rel)
+    marker_scan = _render_marker_scan(ssr_markers)
     result_path = f"{project_dir.rstrip('/')}/{BUILD_RESULT_FILENAME}"
     writer = _SENTINEL_WRITER.replace("TAIL_BYTES", str(STDERR_TAIL_BYTES))
 
@@ -705,7 +794,7 @@ RESULT={shlex.quote(result_path)}
 STDERR_LOG=/tmp/paw-build-stderr.log
 ARTIFACT={shlex.quote(artifact_path)}
 ENGINE={shlex.quote(normalize_engine(engine))}
-ARTIFACT_REL={shlex.quote(static_output_rel(engine))}
+ARTIFACT_REL={shlex.quote(artifact_rel or static_output_rel(engine))}
 STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # -1 distinguishes "never ran" from "ran and returned 0". A step that never ran
@@ -734,6 +823,13 @@ if [ "$BUILD_EXIT" -ne 0 ]; then
   exit "$BUILD_EXIT"
 fi
 
+# A CLEAN EXIT IS NOT A CLEAN RENDER. SvelteKit's prerender pass reports an SSR throw in
+# the log and can still exit zero, so the marker scan runs on a build that "succeeded".
+# Rewriting BUILD_EXIT rather than inventing a new sentinel field is deliberate: the
+# outcome IS a build failure, it belongs to the user, and classify_build already routes a
+# non-zero build exit to ``build_failed`` with the stderr tail attached — which is exactly
+# where the marker the user has to act on already is.
+{marker_scan}
 {tar_cmd} >>"$STDERR_LOG" 2>&1
 if [ -f "$ARTIFACT" ]; then
   ARTIFACT_BYTES=$(wc -c < "$ARTIFACT" | tr -d '[:space:]')
@@ -754,6 +850,7 @@ __all__ = [
     "BuildOutcome",
     "artifact_tar_command",
     "build_timeout_seconds",
+    "WORKERD_SSR_MARKERS",
     "build_wrapper_script",
     "classify_build",
     "promised_artifact_bytes",

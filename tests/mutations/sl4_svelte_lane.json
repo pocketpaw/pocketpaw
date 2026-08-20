@@ -1,0 +1,131 @@
+[
+  {
+    "label": "SL-4: the staging flag defaults ON, so every svelte publish moves to the lane the moment this merges — dropping the resting-visibility gate from every marketing site without anything failing to say so",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not svelte_async_build_enabled():\n        return False\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_svelte_async_build.py::TestTheFlagIsTheDefaultOff",
+      "tests/ee/sites/test_smoke_at_publish.py::test_live_publish_runs_smoke"
+    ]
+  },
+  {
+    "label": "SL-4: the flag reads any non-empty value as on, so a typo (PAW_SITES_SVELTE_ASYNC_BUILD=maybe) becomes a production routing change",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return raw in {\"1\", \"true\", \"yes\", \"on\"}",
+    "replace": "    return bool(raw)",
+    "tests": [
+      "tests/ee/sites/test_svelte_async_build.py::TestTheFlagIsTheDefaultOff::test_anything_else_stays_off"
+    ]
+  },
+  {
+    "label": "SL-4: the gate stops reading the bindings, so a DYNAMIC svelte site enters the lane and deploys an adapter-cloudflare artifact whose _worker.js imports a file outside the tar — a worker shell that cannot start replaces a working site",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return not svelte_source_is_dynamic(source)",
+    "replace": "    return True",
+    "tests": [
+      "tests/ee/sites/test_svelte_async_build.py::TestTheGateReadsTheBindingsNotJustTheEngine::test_a_dynamic_svelte_site_is_refused"
+    ]
+  },
+  {
+    "label": "SL-4: the gate ignores the pattern=='dynamic' stamp, so a stamped dynamic svelte pocket whose bindings live somewhere the envelope does not show still enters the lane",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if pattern == \"dynamic\":\n        return False\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_svelte_async_build.py::TestTheGateReadsTheBindingsNotJustTheEngine::test_the_dynamic_stamp_alone_is_enough"
+    ]
+  },
+  {
+    "label": "SL-4: the classifier counts every source instead of only kind=='data', diverging from parseBindings — static sites are held out of the lane forever, which looks exactly like the feature never shipping",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "            if isinstance(entry, dict) and entry.get(\"kind\") == \"data\":",
+    "replace": "            if isinstance(entry, dict):",
+    "tests": [
+      "tests/ee/sites/test_svelte_async_build.py::TestTheGateReadsTheBindingsNotJustTheEngine::test_a_non_data_source_does_not_make_a_site_dynamic"
+    ]
+  },
+  {
+    "label": "SL-4: auth is read as truthy rather than exactly True, diverging from parseBindings' `spec.auth === true`",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "    if source.get(\"auth\") is True:",
+    "replace": "    if source.get(\"auth\"):",
+    "tests": [
+      "tests/ee/sites/test_generator_client_svelte.py",
+      "tests/ee/sites/test_svelte_async_build.py"
+    ]
+  },
+  {
+    "label": "SL-4: the predicted output dir falls back to the nominal per-engine value, so a static svelte build tars .svelte-kit/cloudflare — a directory adapter-static never writes — and every publish settles artifact_empty",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "    return candidate_static_output_rels(\"svelte\")[0]",
+    "replace": "    return static_output_rel(\"svelte\")",
+    "tests": [
+      "tests/ee/sites/test_svelte_async_build.py::TestTheTarTargetsTheAdapterThatActuallyRan"
+    ]
+  },
+  {
+    "label": "SL-4: an output_rel the engine cannot emit is honoured instead of refused, so a caller's mistake packs nothing and arrives disguised as the user's build producing nothing",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    if output_rel is not None and output_rel not in candidate_static_output_rels(engine):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_svelte_async_build.py::TestTheTarTargetsTheAdapterThatActuallyRan::test_an_override_the_engine_cannot_emit_is_refused"
+    ]
+  },
+  {
+    "label": "SL-4: the wrapper drops the SSR marker scan, so a svelte build that prerenders 'window is not defined' onto a ZERO exit code deploys — the check an inline publish makes and the sandbox has no paw-sites to make",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    marker_scan = _render_marker_scan(ssr_markers)",
+    "replace": "    marker_scan = _render_marker_scan(())",
+    "tests": [
+      "tests/ee/sites/test_svelte_async_build.py::TestTheWrapperKeepsTheSsrMarkerScan"
+    ]
+  },
+  {
+    "label": "SL-4: markers are matched as regexes rather than fixed strings, so a marker containing a '.' matches text it does not mean and fails a build that is fine",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        f'grep -qF -- {shlex.quote(marker)} \"$STDERR_LOG\"' for marker in markers",
+    "replace": "        f'grep -q -- {shlex.quote(marker)} \"$STDERR_LOG\"' for marker in markers",
+    "tests": [
+      "tests/ee/sites/test_svelte_async_build.py::TestTheWrapperKeepsTheSsrMarkerScan::test_markers_are_matched_as_fixed_strings"
+    ]
+  },
+  {
+    "label": "SL-4: a marker hit no longer fails the build, so the scan runs, logs, and lets the broken render deploy anyway",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        \"  BUILD_EXIT=1\\n\"",
+    "replace": "        \"  BUILD_EXIT=0\\n\"",
+    "tests": [
+      "tests/ee/sites/test_svelte_async_build.py::TestTheWrapperKeepsTheSsrMarkerScan::test_a_hit_becomes_a_build_failure_the_user_owns"
+    ]
+  },
+  {
+    "label": "SL-4: the deploy stops refusing an artifact that carries a server entry, so unpack_artifact's preview-shaped skip list silently DROPS the _worker.js and deploys a shell that cannot start",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    _refuse_server_entry(artifact, engine=engine, site_id=deploy_inputs.get(\"site_id\"))",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_svelte_async_build.py::TestTheDeployUnpacksWhereTheDeployerWillLook"
+    ]
+  },
+  {
+    "label": "SL-4: the server-entry check matches a FILE named _worker.js instead of a path component, so adapter-cloudflare's chunked _worker.js/ DIRECTORY escapes — the shape only the biggest sites emit, and the ones most broken by dropping it",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        if any(part == \"_worker.js\" for part in name.replace(\"\\\\\", \"/\").split(\"/\")):",
+    "replace": "        if name.replace(\"\\\\\", \"/\").split(\"/\")[-1] == \"_worker.js\":",
+    "tests": [
+      "tests/ee/sites/test_svelte_async_build.py::TestTheDeployUnpacksWhereTheDeployerWillLook::test_a_chunked_worker_directory_is_refused_too"
+    ]
+  },
+  {
+    "label": "SL-4: the tar and the unpack derive the output dir independently, so a change to one leaves the artifact extracted into a directory the deploy target does not read — a blank site replacing a working one",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "                output_rel=artifact_rel,",
+    "replace": "                output_rel=None,",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestTheWorkerFinishesThePublish",
+      "tests/ee/sites/test_svelte_async_build.py::TestTheJobWiresThePredictionToBothEnds"
+    ]
+  }
+]

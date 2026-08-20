@@ -2,36 +2,46 @@
   {
     "label": "probe order reversed — a stale adapter-cloudflare tree shadows the current build",
     "file": "ee/pocketpaw_ee/sites/engines.py",
-    "find": "for candidate in (_SVELTE_STATIC_OUTPUT_REL, _STATIC_OUTPUT_REL[\"svelte\"]):",
-    "replace": "for candidate in (_STATIC_OUTPUT_REL[\"svelte\"], _SVELTE_STATIC_OUTPUT_REL):",
-    "tests": ["tests/ee/sites/test_engines.py::TestResolveStaticOutputRel"]
+    "find": "        return (_SVELTE_STATIC_OUTPUT_REL, _STATIC_OUTPUT_REL[\"svelte\"])",
+    "replace": "        return (_STATIC_OUTPUT_REL[\"svelte\"], _SVELTE_STATIC_OUTPUT_REL)",
+    "tests": [
+      "tests/ee/sites/test_engines.py::TestResolveStaticOutputRel"
+    ]
   },
   {
     "label": "_worker.js tested with is_file() — a worker DIRECTORY reads as no worker",
     "file": "ee/pocketpaw_ee/sites/engines.py",
     "find": "return (out_dir / \"_worker.js\").exists()",
     "replace": "return (out_dir / \"_worker.js\").is_file()",
-    "tests": ["tests/ee/sites/test_engines.py::TestResolveEmitsServerWorker"]
+    "tests": [
+      "tests/ee/sites/test_engines.py::TestResolveEmitsServerWorker"
+    ]
   },
   {
     "label": "svelte-only guard defeated — ripple/html/react start probing the filesystem too",
     "file": "ee/pocketpaw_ee/sites/engines.py",
     "find": "    if normalized != \"svelte\":",
     "replace": "    if normalized != \"svelte\" and False:",
-    "tests": ["tests/ee/sites/test_engines.py::TestResolveStaticOutputRel"]
+    "tests": [
+      "tests/ee/sites/test_engines.py::TestResolveStaticOutputRel"
+    ]
   },
   {
     "label": "server-worker engine guard defeated — html/react consult a stray _worker.js",
     "file": "ee/pocketpaw_ee/sites/engines.py",
     "find": "    if normalize_engine(engine) not in _SERVER_WORKER_ENGINES:",
     "replace": "    if normalize_engine(engine) not in _SERVER_WORKER_ENGINES and False:",
-    "tests": ["tests/ee/sites/test_engines.py::TestResolveEmitsServerWorker"]
+    "tests": [
+      "tests/ee/sites/test_engines.py::TestResolveEmitsServerWorker"
+    ]
   },
   {
     "label": "static svelte reports the dynamic dir — the deploy uploads an empty tree",
     "file": "ee/pocketpaw_ee/sites/engines.py",
     "find": "_SVELTE_STATIC_OUTPUT_REL = \"build\"",
     "replace": "_SVELTE_STATIC_OUTPUT_REL = \".svelte-kit/cloudflare\"",
-    "tests": ["tests/ee/sites/test_engines.py"]
+    "tests": [
+      "tests/ee/sites/test_engines.py"
+    ]
   }
 ]

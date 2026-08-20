@@ -112,9 +112,15 @@ class TestOnlyTheDeployableEngineFlips:
     @pytest.mark.parametrize("engine", ["ripple", "svelte", "html"])
     def test_every_other_engine_stays_inline(self, engine: str) -> None:
         """Not an arbitrary allowlist. html runs no build at all; ripple and dynamic
-        svelte produce an artifact that cannot serve; static svelte is self-sufficient but
-        indistinguishable from the dynamic shape until AFTER the build, and a gate has to
-        decide before it spends the queue."""
+        svelte produce an artifact that cannot serve.
+
+        CORRECTED 2026-08-21 (SL-4): this docstring used to add that static svelte was
+        "indistinguishable from the dynamic shape until AFTER the build". That was wrong —
+        the adapter is picked from ``parseBindings(...).isDynamic``, whose inputs ride the
+        publish on the ``source`` envelope — and the correction is what let the static
+        svelte track into the lane. svelte is still asserted INLINE here because the flip
+        ships behind ``PAW_SITES_SVELTE_ASYNC_BUILD``, default off; the flipped behaviour
+        lives in ``test_svelte_async_build.py``, which turns the flag on."""
         assert sites_service.build_runs_async(engine) is False
 
     def test_an_unknown_engine_stays_inline(self) -> None:

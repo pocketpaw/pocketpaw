@@ -282,6 +282,28 @@ def static_output_rel(engine: str | None) -> str:
     return _STATIC_OUTPUT_REL[normalize_engine(engine)]
 
 
+def candidate_static_output_rels(engine: str | None) -> tuple[str, ...]:
+    """Every output dir a build of ``engine`` could legitimately write, in PROBE ORDER.
+
+    One place owns the fact that svelte has two output shapes and which one wins a tie.
+    :func:`resolve_static_output_rel` probes this list on disk; the ephemeral build lane
+    validates a caller's override against it before rendering an include-list aimed at a
+    directory the engine never writes.
+
+    PROBE ORDER IS LOAD-BEARING, and for the same reason it was load-bearing when it
+    lived inline in the resolver: ``build`` comes FIRST so a project dir carrying a stale
+    ``.svelte-kit/cloudflare`` tree from a pre-SL-1 build cannot shadow what the current
+    build emitted. Reversing these two silently serves the old artifact.
+
+    Every other engine has exactly one shape, so its tuple has one element and callers
+    that only ever handled one value keep working unchanged.
+    """
+    normalized = normalize_engine(engine)
+    if normalized == "svelte":
+        return (_SVELTE_STATIC_OUTPUT_REL, _STATIC_OUTPUT_REL["svelte"])
+    return (_STATIC_OUTPUT_REL[normalized],)
+
+
 def resolve_static_output_rel(project_dir: str | os.PathLike[str], engine: str | None) -> str:
     """Where THIS build's deployable output actually landed, relative to ``project_dir``.
 
@@ -314,7 +336,8 @@ def resolve_static_output_rel(project_dir: str | os.PathLike[str], engine: str |
     if normalized != "svelte":
         return _STATIC_OUTPUT_REL[normalized]
     root = Path(project_dir)
-    for candidate in (_SVELTE_STATIC_OUTPUT_REL, _STATIC_OUTPUT_REL["svelte"]):
+    candidates = candidate_static_output_rels(normalized)
+    for candidate in candidates:
         if (root / candidate).is_dir():
             return candidate
     return _STATIC_OUTPUT_REL["svelte"]

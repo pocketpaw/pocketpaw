@@ -308,7 +308,13 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import unquote
 
-from pocketpaw_ee.sites.engines import is_source_engine, needs_node_build, static_output_rel
+from pocketpaw_ee.sites.engines import (
+    candidate_static_output_rels,
+    is_source_engine,
+    needs_node_build,
+    normalize_engine,
+    static_output_rel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -491,6 +497,84 @@ def _split_svelte_source(
     files = {k: v for k, v in src.items() if k not in _SVELTE_BINDING_KEYS}
     bindings = {k: src[k] for k in _SVELTE_BINDING_KEYS if k in src}
     return files, bindings
+
+
+def svelte_source_is_dynamic(source: dict[str, Any] | None) -> bool:
+    """Would the generator build this svelte source on adapter-CLOUDFLARE (SL-4)?
+
+    The Python mirror of ``paw-sites/src/bindings.ts::parseBindings``, whose
+    ``isDynamic`` (``sources.length > 0 || actions.length > 0 || auth``) is the ONE flag
+    that picks the adapter — and therefore the output dir, and therefore whether the
+    artifact is a self-contained tree or a worker shell that cannot execute outside its
+    build.
+
+    A SECOND IMPLEMENTATION OF A RULE THAT ALREADY EXISTS IN TYPESCRIPT, and that is worth
+    naming rather than hiding. It earns its place because the answer is needed BEFORE the
+    generator runs: ``service.build_runs_async`` has to decide whether to spend a queue
+    slot, and the only thing that knows the answer today is a build that has not happened.
+
+    THE DISAGREEMENT IS DESIGNED TO BE LOUD. If this and ``parseBindings`` ever diverge,
+    the lane's include-list points at a directory the build did not write, so the artifact
+    is EMPTY and ``classify_build`` refuses it before anything deploys — the same
+    fail-closed shape ``artifact_tar_command`` was built around. It cannot ship the wrong
+    site; it can only fail a publish that should have succeeded.
+
+    MIRRORED EXACTLY, including the parts that look like details:
+
+    * ``sources`` is filtered to ``kind == "data"`` first, because ``parseBindings`` does.
+      Counting every entry would hold static sites out of the lane forever, which is the
+      failure mode that looks like nothing happening.
+    * LENGTH, not presence. An envelope carrying ``sources: []`` is static; a classifier
+      keying on the key existing would call it dynamic.
+    * ``auth`` must be exactly ``True`` (``spec.auth === true``), not merely truthy.
+
+    Accepts either shape the payload takes on its way through the publish: the bindings
+    NESTED in the ``source`` envelope (how a pocket persists them) and spread FLAT as
+    siblings (how ``build_generator_input`` hands them to the generator, via
+    :func:`_split_svelte_source`). Both are read, so a caller holding either one classifies
+    the same and the tar cannot end up aimed at the wrong directory.
+    """
+    if not isinstance(source, dict):
+        return False
+    if source.get("auth") is True:
+        return True
+    raw_sources = source.get("sources")
+    if isinstance(raw_sources, list):
+        for entry in raw_sources:
+            if isinstance(entry, dict) and entry.get("kind") == "data":
+                return True
+    raw_actions = source.get("actions")
+    return isinstance(raw_actions, list) and len(raw_actions) > 0
+
+
+def expected_static_output_rel(engine: str | None, generator_input: dict[str, Any]) -> str:
+    """Which output dir THIS build will write, decided from the payload (SL-4).
+
+    The predict-ahead sibling of ``engines.resolve_static_output_rel``, which answers the
+    same question by reading a finished build off disk. The ephemeral lane needs the answer
+    before the build exists — the include-list that packs the artifact is rendered into the
+    wrapper script, and the unpack that feeds the deploy has to land the tree where the
+    deployer will look for it. ONE helper for both, so the tar and the unpack cannot drift
+    apart; a mismatch between them deploys an empty directory.
+
+    Only svelte can answer anything but its nominal value. Every other engine has exactly
+    one output shape, so this returns ``static_output_rel(engine)`` unchanged for them and
+    their behaviour is byte-for-byte what it was before this function existed.
+
+    Reads the bindings from BOTH shapes the payload takes: nested under ``source`` (how a
+    pocket persists them) and flat at the top level (how ``build_generator_input`` spreads
+    them for the generator).
+    """
+    if normalize_engine(engine) != "svelte":
+        return static_output_rel(engine)
+    nested = generator_input.get("source")
+    if svelte_source_is_dynamic(nested if isinstance(nested, dict) else None):
+        return static_output_rel("svelte")
+    if svelte_source_is_dynamic(generator_input):
+        return static_output_rel("svelte")
+    # The FIRST candidate is adapter-static's ``build`` — read from engines.py rather
+    # than restated here, so the probe order and the prediction can never disagree.
+    return candidate_static_output_rels("svelte")[0]
 
 
 def reap_build_workerd(project_dir: str) -> int:
