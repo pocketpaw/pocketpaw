@@ -1,0 +1,69 @@
+[
+  {
+    "label": "SL-4: the predicate answers from the engine name alone again, so EVERY svelte site queues its build — including a dynamic one, whose artifact's pages come from a _worker.js the deploy-side unpack then drops. A working publish is replaced by one nothing can deploy",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return normalized == \"svelte\" and not _is_dynamic(pattern, ripple_spec)",
+    "replace": "    return normalized == \"svelte\"",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestDynamicSvelteStaysInline",
+      "tests/ee/sites/test_async_publish.py::TestTheSvelteTrackForksOnTheSite::test_a_dynamic_svelte_publish_never_enters_the_build_lane"
+    ]
+  },
+  {
+    "label": "SL-4: the dynamic check is INVERTED, so static svelte blocks the request for the whole build while dynamic svelte queues one that cannot deploy — both lanes wrong at once, and the flip appears to work because something still enqueues",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return normalized == \"svelte\" and not _is_dynamic(pattern, ripple_spec)",
+    "replace": "    return normalized == \"svelte\" and _is_dynamic(pattern, ripple_spec)",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestOnlyTheDeployableEngineFlips::test_static_svelte_builds_asynchronously",
+      "tests/ee/sites/test_async_publish.py::TestTheSvelteTrackForksOnTheSite::test_a_static_svelte_publish_enqueues_and_returns"
+    ]
+  },
+  {
+    "label": "SL-4: the publish's DYNAMIC fork is removed, so a dynamic svelte site falls through to the async fork. Before SL-4 that only cost it the provision job and it still built inline; now it is QUEUED, and the artifact the lane produces has its _worker.js dropped at unpack — a site that cannot serve is pushed to the edge",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if _is_dynamic(pattern, ripple_spec):\n        return await _provision_dynamic_site(",
+    "replace": "    if False:\n        return await _provision_dynamic_site(",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestTheSvelteTrackForksOnTheSite::test_a_dynamic_svelte_publish_never_enters_the_build_lane",
+      "tests/ee/sites/test_async_publish.py::TestTheSvelteTrackForksOnTheSite::test_an_unstamped_dynamic_svelte_publish_also_stays_out"
+    ]
+  },
+  {
+    "label": "SL-4: the in-sandbox tar goes back to the NOMINAL per-engine output dir, which for svelte names the dynamic .svelte-kit/cloudflare a static build never creates — so every static svelte build tars nothing, comes back at zero bytes, and is reported to the user as a build failure",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        tar_cmd = artifact_tar_command(\n            engine, project_dir, artifact_path, output_dir_expr='\"$PROJECT/$ARTIFACT_REL\"'\n        )",
+    "replace": "        tar_cmd = artifact_tar_command(engine, project_dir, artifact_path)",
+    "tests": [
+      "tests/ee/sites/test_daytona_build.py::TestTheSvelteOutputDirIsResolvedInTheSandbox::test_the_tar_reads_the_resolved_dir_and_not_the_nominal_one"
+    ]
+  },
+  {
+    "label": "SL-4: the output-dir probe is hoisted ABOVE the build, where neither candidate exists yet, so it always falls through to the nominal dynamic dir and the resolution is inert — the original bug with a probe in front of it",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "timeout {timeout_seconds}s {build_command} >>\"$STDERR_LOG\" 2>&1",
+    "replace": "{probe}\ntimeout {timeout_seconds}s {build_command} >>\"$STDERR_LOG\" 2>&1",
+    "tests": [
+      "tests/ee/sites/test_daytona_build.py::TestTheSvelteOutputDirIsResolvedInTheSandbox::test_the_probe_runs_after_the_build_and_before_the_tar"
+    ]
+  },
+  {
+    "label": "SL-4: the deploy-side unpack goes back to the nominal rel, so a static svelte artifact is extracted into .svelte-kit/cloudflare while the deploy target resolves build — the deploy finds an empty directory and a blank site replaces a working one",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "            artifact, Path(project_dir, static_output_rel_candidates(engine)[0])",
+    "replace": "            artifact, Path(project_dir, static_output_rel_candidates(engine)[-1])",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestTheWorkerFinishesThePublish::test_a_static_svelte_artifact_lands_where_the_resolver_looks"
+    ]
+  },
+  {
+    "label": "SL-4: the preview's server-entry skip list grows _app, so unpack drops svelte's ENTIRE JS and CSS payload and the site deploys as unstyled, non-hydrating markup — a deploy that looks like it worked",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "_SERVER_ENTRY_NAMES: frozenset[str] = frozenset({\"_worker.js\"})",
+    "replace": "_SERVER_ENTRY_NAMES: frozenset[str] = frozenset({\"_worker.js\", \"_app\"})",
+    "tests": [
+      "tests/ee/sites/test_async_publish.py::TestTheWorkerFinishesThePublish::test_the_preview_shaped_skip_list_drops_nothing_a_static_svelte_site_needs",
+      "tests/ee/sites/test_async_publish.py::TestTheWorkerFinishesThePublish::test_a_static_svelte_artifact_lands_where_the_resolver_looks"
+    ]
+  }
+]

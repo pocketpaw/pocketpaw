@@ -51,7 +51,11 @@ import tarfile
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pocketpaw_ee.sites.engines import normalize_engine, static_output_rel
+from pocketpaw_ee.sites.engines import (
+    normalize_engine,
+    static_output_rel,
+    static_output_rel_candidates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -453,6 +457,8 @@ def artifact_tar_command(
     engine: str | None,
     project_dir: str,
     dest_path: str,
+    *,
+    output_dir_expr: str | None = None,
 ) -> str:
     """The in-sandbox command that packs ONLY the deployable output.
 
@@ -476,6 +482,19 @@ def artifact_tar_command(
     (``html``): tarring ``.`` would sweep in ``node_modules`` and defeat the whole
     design. html needs no build and so never reaches this lane; a caller that gets
     here with it has a routing bug and should hear about it loudly.
+
+    ``output_dir_expr`` (SL-4) overrides the ``-C`` argument with an ALREADY-SHELL-SAFE
+    expression, for the one caller that cannot know the dir when the command is rendered:
+    :func:`build_wrapper_script` resolves svelte's two possible output dirs at RUNTIME, in
+    the sandbox, after the build. It is interpolated verbatim, so a caller passing
+    anything but a quoted literal or a quoted shell expansion is passing a shell-injection
+    hole; ``project_dir`` is still used for the engine guard either way.
+
+    WITHOUT the override this stays a SINGLE ``tar`` invocation containing no shell
+    constructs, and that is a contract, not an accident: ``tests/ee/sites/faults.py``'s
+    ``pack_with_real_tar`` runs the rendered command through ``shlex.split`` +
+    ``subprocess.run`` with NO shell, so the include-list is exercised by the real tar
+    binary. A probe loop rendered in here would silently stop being testable that way.
     """
     rel = static_output_rel(engine)
     if rel == ".":
@@ -484,9 +503,10 @@ def artifact_tar_command(
             "project root, so an include-list cannot exclude node_modules; this "
             "lane is for engines whose build writes a subdirectory"
         )
-    output_dir = f"{project_dir.rstrip('/')}/{rel}"
+    if output_dir_expr is None:
+        output_dir_expr = shlex.quote(f"{project_dir.rstrip('/')}/{rel}")
     return (
-        f"tar -czf {shlex.quote(dest_path)} -C {shlex.quote(output_dir)} "
+        f"tar -czf {shlex.quote(dest_path)} -C {output_dir_expr} "
         f"--exclude={shlex.quote(_EXCLUDED_MEMBER)} ."
     )
 
@@ -692,7 +712,31 @@ def build_wrapper_script(
     abort the script at the first failing step, which is precisely when the evidence
     matters. Every command's status is captured explicitly instead.
     """
-    tar_cmd = artifact_tar_command(engine, project_dir, artifact_path)
+    candidates = static_output_rel_candidates(engine)
+    # SL-4: an engine with ONE output shape renders byte-for-byte the script it always
+    # did — no probe, and the tar's ``-C`` is the literal quoted path. Only svelte has
+    # two, and only svelte pays for the resolution.
+    if len(candidates) > 1:
+        probe = "\n".join(
+            (
+                "# SL-4: which adapter ran is a property of the built SITE, so resolve the",
+                "# output dir off the ARTIFACT rather than predicting it from the engine",
+                "# name. This is the shell twin of engines.resolve_static_output_rel and",
+                "# the PROBE ORDER IS THE SAME ORDER, from the same list: build first, so a",
+                "# project dir carrying a stale adapter-cloudflare tree cannot shadow what",
+                "# this build actually emitted. Runs AFTER the build, because before it",
+                "# neither candidate exists yet.",
+                f"for CAND in {' '.join(shlex.quote(c) for c in candidates)}; do",
+                '  if [ -d "$PROJECT/$CAND" ]; then ARTIFACT_REL="$CAND"; break; fi',
+                "done",
+            )
+        )
+        tar_cmd = artifact_tar_command(
+            engine, project_dir, artifact_path, output_dir_expr='"$PROJECT/$ARTIFACT_REL"'
+        )
+    else:
+        probe = ""
+        tar_cmd = artifact_tar_command(engine, project_dir, artifact_path)
     result_path = f"{project_dir.rstrip('/')}/{BUILD_RESULT_FILENAME}"
     writer = _SENTINEL_WRITER.replace("TAIL_BYTES", str(STDERR_TAIL_BYTES))
 
@@ -705,6 +749,10 @@ RESULT={shlex.quote(result_path)}
 STDERR_LOG=/tmp/paw-build-stderr.log
 ARTIFACT={shlex.quote(artifact_path)}
 ENGINE={shlex.quote(normalize_engine(engine))}
+# The NOMINAL output dir, and for svelte only a pre-build fallback: the probe below
+# re-resolves it off the artifact once the build has run. Set here so a failure
+# BEFORE the build still writes a sentinel under ``set -u`` rather than dying in the
+# trap, which would turn a plain build failure into an unexplained infra loss.
 ARTIFACT_REL={shlex.quote(static_output_rel(engine))}
 STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -734,6 +782,7 @@ if [ "$BUILD_EXIT" -ne 0 ]; then
   exit "$BUILD_EXIT"
 fi
 
+{probe}
 {tar_cmd} >>"$STDERR_LOG" 2>&1
 if [ -f "$ARTIFACT" ]; then
   ARTIFACT_BYTES=$(wc -c < "$ARTIFACT" | tr -d '[:space:]')

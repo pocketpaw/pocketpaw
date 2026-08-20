@@ -2,8 +2,8 @@
   {
     "label": "the artifact is packed from the project root, so node_modules ships to the edge and a 30 KB site becomes a 500 MB upload",
     "file": "ee/pocketpaw_ee/sites/daytona_build.py",
-    "find": "    output_dir = f\"{project_dir.rstrip('/')}/{rel}\"",
-    "replace": "    output_dir = project_dir.rstrip('/')",
+    "find": "        output_dir_expr = shlex.quote(f\"{project_dir.rstrip('/')}/{rel}\")",
+    "replace": "        output_dir_expr = shlex.quote(project_dir.rstrip(\"/\"))",
     "tests": [
       "tests/ee/sites/test_fault_ladder_build.py"
     ]
@@ -11,7 +11,7 @@
   {
     "label": "the include-list becomes an exclude-list that forgets node_modules, which is the regression that silently ships the whole dependency tree",
     "file": "ee/pocketpaw_ee/sites/daytona_build.py",
-    "find": "    return (\n        f\"tar -czf {shlex.quote(dest_path)} -C {shlex.quote(output_dir)} \"\n        f\"--exclude={shlex.quote(_EXCLUDED_MEMBER)} .\"\n    )",
+    "find": "    return (\n        f\"tar -czf {shlex.quote(dest_path)} -C {output_dir_expr} \"\n        f\"--exclude={shlex.quote(_EXCLUDED_MEMBER)} .\"\n    )",
     "replace": "    return (\n        f\"tar -czf {shlex.quote(dest_path)} --exclude=.git \"\n        f\"-C {shlex.quote(project_dir.rstrip('/'))} .\"\n    )",
     "tests": [
       "tests/ee/sites/test_fault_ladder_build.py"

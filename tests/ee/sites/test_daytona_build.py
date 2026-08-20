@@ -24,6 +24,7 @@ import json
 
 import pytest
 from pocketpaw_ee.sites import daytona_build as db
+from pocketpaw_ee.sites import engines
 
 
 def _sentinel(**overrides: object) -> dict[str, object]:
@@ -278,6 +279,26 @@ class TestArtifactIncludeList:
         cmd = db.artifact_tar_command("svelte", "/home/daytona/proj", "/tmp/a.tgz")
         assert "/home/daytona/proj/.svelte-kit/cloudflare" in cmd
 
+    def test_an_override_replaces_the_output_dir_and_nothing_else(self) -> None:
+        """SL-4's seam for the wrapper, which resolves svelte's two output dirs at runtime.
+        The override must reach ``-C`` verbatim and must not disturb the include-list — a
+        change that dropped the exclusion here would ship node_modules to the edge."""
+        cmd = db.artifact_tar_command(
+            "svelte", "/home/daytona/proj", "/tmp/a.tgz", output_dir_expr='"$PROJECT/$REL"'
+        )
+        assert '-C "$PROJECT/$REL"' in cmd
+        assert "/home/daytona/proj/.svelte-kit/cloudflare" not in cmd
+        assert "--exclude=node_modules" in cmd
+
+    def test_the_default_command_stays_free_of_shell_constructs(self) -> None:
+        """A contract, not a style note: ``faults.pack_with_real_tar`` runs this through
+        ``shlex.split`` + ``subprocess.run`` with NO shell, which is what makes the
+        include-list testable against the real tar binary. Rendering a probe loop in here
+        would break that silently — the test would still pass, against nothing."""
+        cmd = db.artifact_tar_command("svelte", "/home/daytona/proj", "/tmp/a.tgz")
+        for construct in ("$", ";", "&&", "|", "\n", "`"):
+            assert construct not in cmd, construct
+
     def test_html_is_refused_because_its_output_is_the_project_root(self) -> None:
         """Tarring ``.`` would sweep in node_modules and defeat the include-list. html
         needs no build so never reaches this lane; a caller that gets here is buggy and
@@ -353,6 +374,56 @@ class TestWrapperScript:
         )
         assert "bun install --frozen-lockfile" in script
         assert "bun run build:prod" in script
+
+
+class TestTheSvelteOutputDirIsResolvedInTheSandbox:
+    """SL-4. The script is rendered BEFORE the build it packs, and which of svelte's two
+    adapters ran is only visible afterwards — on the sandbox's disk. So the script probes
+    there instead of predicting here. Without this the tar packed
+    ``.svelte-kit/cloudflare``, which a static build never creates, and every static svelte
+    publish through this lane would have produced zero bytes and classified as a failure.
+    """
+
+    def _svelte(self) -> str:
+        return db.build_wrapper_script(
+            "svelte", "/home/daytona/p", timeout_seconds=600, artifact_path="/tmp/a.tgz"
+        )
+
+    def test_the_probe_order_matches_the_resolvers(self) -> None:
+        """Load-bearing, and it is the reason both read one list: ``build`` must be tried
+        FIRST so a stale adapter-cloudflare tree left by a pre-SL-1 build cannot shadow what
+        this build emitted. Reversed, the lane silently ships the old artifact."""
+        candidates = engines.static_output_rel_candidates("svelte")
+        assert candidates == ("build", ".svelte-kit/cloudflare")
+        assert f"for CAND in {' '.join(candidates)}; do" in self._svelte()
+
+    def test_the_tar_reads_the_resolved_dir_and_not_the_nominal_one(self) -> None:
+        script = self._svelte()
+        assert '-C "$PROJECT/$ARTIFACT_REL"' in script
+        assert "-C '/home/daytona/p/.svelte-kit/cloudflare'" not in script
+
+    def test_the_probe_runs_after_the_build_and_before_the_tar(self) -> None:
+        """Before the build neither candidate exists, so a probe hoisted above it always
+        falls through to the nominal dynamic dir — the bug this fixes, reintroduced."""
+        script = self._svelte()
+        assert script.index("bun run build") < script.index("for CAND in")
+        assert script.index("for CAND in") < script.index("tar -czf")
+
+    def test_the_sentinel_reports_the_dir_that_was_actually_packed(self) -> None:
+        """``artifact_rel`` in the sentinel is the record of where the bytes came from. It
+        reads ``$ARTIFACT_REL``, so resolving that variable is what keeps the record honest
+        rather than a restatement of the guess."""
+        assert '"$ARTIFACT_REL"' in self._svelte()
+
+    def test_a_single_shape_engine_renders_no_probe(self) -> None:
+        """react and ripple have exactly one output dir each, so they pay nothing for
+        svelte's ambiguity and their script is unchanged."""
+        for engine, nominal in (("react", "dist"), ("ripple", ".svelte-kit/cloudflare")):
+            script = db.build_wrapper_script(
+                engine, "/home/daytona/p", timeout_seconds=600, artifact_path="/tmp/a.tgz"
+            )
+            assert "for CAND in" not in script, engine
+            assert f"-C /home/daytona/p/{nominal} " in script, engine
 
 
 class TestResolveBuildTimeout:
