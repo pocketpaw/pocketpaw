@@ -830,6 +830,7 @@ def _pawbar_frame_config(
     greeting: str,
     starters: list[str] | None = None,
     appearance: ConciergeAppearance | None = None,
+    preview: bool = False,
 ) -> dict[str, Any]:
     """Build the ``window.__PAWBAR__`` bootstrap config shared by the public frame
     and the owner preview frame (D5).
@@ -858,6 +859,14 @@ def _pawbar_frame_config(
         "endpoint": api_base,
         "parentOrigin": parent_origin,
         "mode": "concierge",
+        # 2026-08-20 — TRUE only for the owner preview frame (D5), never the
+        # public embed. It is what lets the glass app accept live --pawbar-*
+        # updates postMessage'd by the appearance editor as the owner drags a
+        # slider. A public bar must refuse those: its parent is the customer's
+        # own page, and an embed that restyles itself on request from whatever
+        # framed it is a wider surface than this feature needs. Origin is checked
+        # too — this flag decides whether the listener exists at all.
+        "preview": bool(preview),
         # D1 / SS-6 — the owner's opening line; the glass app renders it (D4) and
         # falls back to its own default when "".
         "greeting": greeting or "",
@@ -1393,6 +1402,26 @@ class ConciergeSettingsUpdate(BaseModel):
     concierge_store_transcripts: bool | None = None
 
 
+class ConciergePreviewTokensRequest(BaseModel):
+    """An UNSAVED appearance to render, for the editor's live preview (2026-08-20)."""
+
+    concierge_appearance: ConciergeAppearance = Field(default_factory=ConciergeAppearance)
+
+
+class ConciergePreviewTokensResponse(BaseModel):
+    """The rendered ``--pawbar-*`` map, plus the appearance as VALIDATED.
+
+    Both halves matter. The tokens are what the widget applies; the normalized
+    appearance is what the owner actually gets, and returning it means the editor
+    can show a clamped radius or a rejected image URL the moment it happens
+    rather than at save time, which is the point at which it currently surprises
+    people.
+    """
+
+    tokens: dict[str, str]
+    concierge_appearance: ConciergeAppearance
+
+
 class ConciergeSettingsResponse(BaseModel):
     """The owner-facing view of a Site's concierge settings (D1)."""
 
@@ -1502,6 +1531,40 @@ async def update_site_concierge_settings(
         # for those rather than 500 on the owner who has not saved a theme yet.
         concierge_appearance=getattr(site, "concierge_appearance", None) or ConciergeAppearance(),
     )
+
+
+@router.post(
+    "/paw-bar/admin/site/{site_id}/appearance/preview-tokens",
+    response_model=ConciergePreviewTokensResponse,
+    dependencies=[Depends(_require_paw_bar_manage)],
+)
+async def render_preview_tokens(
+    site_id: str,
+    req: ConciergePreviewTokensRequest,
+    workspace_id: str = Depends(current_workspace_id),
+) -> ConciergePreviewTokensResponse:
+    """Render an unsaved appearance to its ``--pawbar-*`` tokens. WRITES NOTHING.
+
+    The appearance editor's preview is the real widget in a cross-origin iframe,
+    so it can only be repainted by telling it what to paint. What it needs is the
+    token map — and ``ConciergeAppearance.tokens()`` is the ONE renderer for that.
+    Re-expressing it in the client would put a second copy of the mapping on the
+    other side of a network boundary, where the two would drift silently and the
+    preview would stop being evidence of anything.
+
+    So the draft comes here, gets validated by exactly the model a save would
+    validate it with, and goes back as tokens. That the validation is the same is
+    the reason this is trustworthy: the preview shows the CLAMPED value, not the
+    one the owner typed, so it cannot promise a look that a save would not store.
+
+    Tenancy: the site is resolved workspace-scoped and the result is discarded.
+    We do not need the document to render — the appearance is in the body — but
+    loading it is what makes a cross-tenant or bogus site id a 404 here exactly
+    as it is on the settings PATCH, rather than an open rendering oracle.
+    """
+    await _load_site_scoped(site_id, workspace_id)
+    look = req.concierge_appearance
+    return ConciergePreviewTokensResponse(tokens=look.tokens(), concierge_appearance=look)
 
 
 # ---------------------------------------------------------------------------
@@ -2735,6 +2798,7 @@ async def get_site_preview_frame(
         greeting=site.concierge_greeting or "",
         starters=await _bound_agent_starters(widget.agent_id),
         appearance=getattr(site, "concierge_appearance", None),
+        preview=True,
     )
     # Preview-only dark page so the transparent bar reads as sitting on the dark
     # dashboard, not a white canvas. The public /paw-bar/frame passes no page_bg
