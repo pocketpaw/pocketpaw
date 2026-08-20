@@ -1684,6 +1684,7 @@ async def _promote_pocket_draft_to_published(
 
 def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResponse:
     deployed_at = getattr(doc, "deployed_at", None)
+    created_at = getattr(doc, "createdAt", None)
     return SiteResponse(
         id=str(doc.id),
         pocket_id=doc.pocket_id,
@@ -1698,6 +1699,13 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # P2b: ISO string of the last successful live deploy, or None before the
         # first deploy (pre-P2b rows read null via the getattr default).
         deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
+        # When the row was made. The gallery orders by "most recent", and
+        # ``deployed_at`` above is None for every draft — so without this the whole
+        # draft half of a workspace had no ordering key and sorted alphabetically,
+        # which put a site created a minute ago below one created last month. Read
+        # via getattr for the same reason deployed_at is: a doc that predates the
+        # field reads None rather than raising.
+        created_at=created_at.isoformat() if created_at is not None else None,
         # DS-1a: the source pocket's authoring pattern ("dynamic" | "landing" |
         # ...), resolved by the caller from Pocket.pattern (it lives on the pocket,
         # not the Site). "" when unset / unresolved so the gallery is empty-safe.
