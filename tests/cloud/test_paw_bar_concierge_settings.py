@@ -291,24 +291,49 @@ async def test_settings_patch_is_partial(client):
 
 
 @pytest.mark.asyncio
-async def test_preview_frame_paints_the_site_behind_the_bar(client):
-    """The owner judges a theme against the page it will sit on, not a rectangle."""
+async def test_the_preview_frames_the_site_itself(client):
+    """The owner judges a theme on the page it will sit on.
+
+    Not a screenshot of it — that was the earlier attempt and it was wrong: a
+    picture does not scroll, does not respond, and goes stale between captures.
+    The published page is frameable (we publish it; the generated worker sets no
+    X-Frame-Options), so it is framed.
+    """
     c, store = client
-    site = await _site(preview_image_url="/api/v1/uploads/shot123")
+    site = await _site(url="https://s1.paw-sites.test")
     await store.create_widget(_widget())
 
     res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
 
     assert res.status_code == 200, res.text
-    assert 'background-image:url("/api/v1/uploads/shot123")' in res.text
-    # Same-origin with this document, so the auth-gated upload is fetched with the
-    # session cookie — no grant flow, unlike the dashboard's cross-origin read.
-    assert "background-size:cover" in res.text
+    assert 'class="pawbar-scene"' in res.text
+    assert "https://s1.paw-sites.test" in res.text
+    # The page auto-embeds the PUBLIC bar. Without this the owner sees two, and
+    # the one that answers the controls is the one behind.
+    assert "pawbar=off" in res.text
 
 
 @pytest.mark.asyncio
-async def test_preview_frame_without_a_capture_keeps_the_flat_surface(client):
-    """A site whose screenshot has not run yet must not render a broken image."""
+async def test_the_framed_site_is_sandboxed_away_from_the_frame(client):
+    """It is the owner's own page, and still a whole third-party document running
+    inside ours. allow-scripts WITH allow-same-origin would hand it this
+    document — and this document holds the site key and takes live token updates.
+    """
+    c, store = client
+    site = await _site(url="https://s1.paw-sites.test")
+    await store.create_widget(_widget())
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert "sandbox=" in res.text
+    assert "allow-scripts" in res.text
+    assert "allow-same-origin" not in res.text
+
+
+@pytest.mark.asyncio
+async def test_an_undeployed_site_previews_without_a_scene(client):
+    """Never deployed, or deployed with no dispatch domain configured. There is
+    nothing to frame, and an empty frame would read as a broken editor."""
     c, store = client
     site = await _site()
     await store.create_widget(_widget())
@@ -316,29 +341,31 @@ async def test_preview_frame_without_a_capture_keeps_the_flat_surface(client):
     res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
 
     assert res.status_code == 200
-    assert "background-image" not in res.text
-    from pocketpaw_ee.paw_bar.router import _PREVIEW_PAGE_BG
-
-    assert _PREVIEW_PAGE_BG in res.text
+    assert "pawbar-scene" not in res.text
+    # The bar is still previewable; that is the point of the pane.
+    assert 'id="pawbar-root"' in res.text
 
 
 @pytest.mark.asyncio
-async def test_a_backdrop_that_could_break_out_of_the_css_is_refused(client):
-    """The URL lands inside a url("...") literal we construct.
+async def test_the_owner_preview_frame_is_transparent(client):
+    """It composites over the site, so it must not paint a page of its own.
 
-    It comes off a stored document field, so it is sanitized rather than trusted:
-    a value carrying a quote could close the literal and start a new declaration.
-    Refused outright — the site falls back to the flat surface.
+    The dashboard frames the site's published page and lays this frame on top, so
+    the bar is judged on the page it will actually sit on. Any background here
+    paints over that — which is what the earlier screenshot-backdrop attempt did,
+    and why it is gone.
     """
     c, store = client
-    site = await _site(preview_image_url='/a"); background:url(https://evil.test/x')
+    site = await _site()
     await store.create_widget(_widget())
 
     res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
 
-    assert res.status_code == 200
-    assert "evil.test" not in res.text
-    assert "background-image" not in res.text
+    assert res.status_code == 200, res.text
+    assert "background" not in res.text
+    # Still the OWNER frame, though: the preview flag is what lets it take live
+    # token updates from the appearance editor.
+    assert '"preview": true' in res.text or '"preview":true' in res.text
 
 
 @pytest.mark.asyncio
