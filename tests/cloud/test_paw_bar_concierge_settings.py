@@ -291,6 +291,57 @@ async def test_settings_patch_is_partial(client):
 
 
 @pytest.mark.asyncio
+async def test_preview_frame_paints_the_site_behind_the_bar(client):
+    """The owner judges a theme against the page it will sit on, not a rectangle."""
+    c, store = client
+    site = await _site(preview_image_url="/api/v1/uploads/shot123")
+    await store.create_widget(_widget())
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert res.status_code == 200, res.text
+    assert 'background-image:url("/api/v1/uploads/shot123")' in res.text
+    # Same-origin with this document, so the auth-gated upload is fetched with the
+    # session cookie — no grant flow, unlike the dashboard's cross-origin read.
+    assert "background-size:cover" in res.text
+
+
+@pytest.mark.asyncio
+async def test_preview_frame_without_a_capture_keeps_the_flat_surface(client):
+    """A site whose screenshot has not run yet must not render a broken image."""
+    c, store = client
+    site = await _site()
+    await store.create_widget(_widget())
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert res.status_code == 200
+    assert "background-image" not in res.text
+    from pocketpaw_ee.paw_bar.router import _PREVIEW_PAGE_BG
+
+    assert _PREVIEW_PAGE_BG in res.text
+
+
+@pytest.mark.asyncio
+async def test_a_backdrop_that_could_break_out_of_the_css_is_refused(client):
+    """The URL lands inside a url("...") literal we construct.
+
+    It comes off a stored document field, so it is sanitized rather than trusted:
+    a value carrying a quote could close the literal and start a new declaration.
+    Refused outright — the site falls back to the flat surface.
+    """
+    c, store = client
+    site = await _site(preview_image_url='/a"); background:url(https://evil.test/x')
+    await store.create_widget(_widget())
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert res.status_code == 200
+    assert "evil.test" not in res.text
+    assert "background-image" not in res.text
+
+
+@pytest.mark.asyncio
 async def test_public_frame_is_not_marked_preview(client):
     """The public embed must not advertise itself as a preview.
 
