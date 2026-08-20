@@ -291,6 +291,22 @@ async def test_settings_patch_is_partial(client):
 
 
 @pytest.mark.asyncio
+async def test_public_frame_is_not_marked_preview(client):
+    """The public embed must not advertise itself as a preview.
+
+    ``preview`` is what lets the glass app accept live token updates from its
+    parent. A public bar's parent is the CUSTOMER's page, so the flag being wrong
+    here would hand every embedder a restyling channel this feature never
+    intended to open.
+    """
+    c, _store = client
+    await _site()
+    res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY})
+    assert res.status_code == 200
+    assert '"preview": false' in res.text or '"preview":false' in res.text
+
+
+@pytest.mark.asyncio
 async def test_preview_tokens_renders_without_writing(client):
     """The editor's live preview needs tokens for a draft nobody has saved."""
     c, _store = client

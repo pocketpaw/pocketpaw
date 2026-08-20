@@ -830,6 +830,7 @@ def _pawbar_frame_config(
     greeting: str,
     starters: list[str] | None = None,
     appearance: ConciergeAppearance | None = None,
+    preview: bool = False,
 ) -> dict[str, Any]:
     """Build the ``window.__PAWBAR__`` bootstrap config shared by the public frame
     and the owner preview frame (D5).
@@ -858,6 +859,14 @@ def _pawbar_frame_config(
         "endpoint": api_base,
         "parentOrigin": parent_origin,
         "mode": "concierge",
+        # 2026-08-20 — TRUE only for the owner preview frame (D5), never the
+        # public embed. It is what lets the glass app accept live --pawbar-*
+        # updates postMessage'd by the appearance editor as the owner drags a
+        # slider. A public bar must refuse those: its parent is the customer's
+        # own page, and an embed that restyles itself on request from whatever
+        # framed it is a wider surface than this feature needs. Origin is checked
+        # too — this flag decides whether the listener exists at all.
+        "preview": bool(preview),
         # D1 / SS-6 — the owner's opening line; the glass app renders it (D4) and
         # falls back to its own default when "".
         "greeting": greeting or "",
@@ -2789,6 +2798,7 @@ async def get_site_preview_frame(
         greeting=site.concierge_greeting or "",
         starters=await _bound_agent_starters(widget.agent_id),
         appearance=getattr(site, "concierge_appearance", None),
+        preview=True,
     )
     # Preview-only dark page so the transparent bar reads as sitting on the dark
     # dashboard, not a white canvas. The public /paw-bar/frame passes no page_bg
