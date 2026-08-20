@@ -40,6 +40,11 @@
 # Updated 2026-08-08 (feat/billing-storage-caps): also added
 #   ``max_storage_bytes`` — the workspace S3 storage cap (Free = 5 GB) surfaced
 #   to the uploads gate and the /storage/usage read; fail-closed to 5 GB.
+# Updated 2026-08-20 (feat/site-plan-catalog-inclusions): ``concierge_entitled``
+#   now reads ``tier.sells_concierge`` off the catalog row instead of re-deriving
+#   "above the free floor" here — the plan-catalog DTO needs the same answer for
+#   the buyer-facing plan cards, and two copies of one rule drift. The AND with an
+#   active subscription stays here; that is this resolver's job, not the catalog's.
 
 from __future__ import annotations
 
@@ -158,13 +163,12 @@ def resolve_site_entitlements(
     if tier is not None and subscription_active:
         badge_removal = tier.badge_removal
         custom_domain = "custom_domain" in tier.cloudflare_features
-        # Any tier ABOVE the free floor sells the concierge. Deliberately derived
-        # from the floor rather than a per-tier catalog flag like ``badge_removal``:
-        # no tier grants concierge today, and the tier that will (``staff``) does not
-        # exist until the pricing-spec rekey, which is blocked on an open decision.
-        # A flag would need a basic/pro/business mapping invented now and rewritten
-        # then. "Paid and paying" needs no mapping and survives the rekey untouched.
-        concierge_entitled = tier.key != site_plan_catalog.BASE_SITE_PLAN_KEY
+        # Any tier ABOVE the free floor sells the concierge. The rule itself now
+        # lives on the catalog row (``SitePlanTier.sells_concierge``) because the
+        # plan-catalog DTO needs the same answer for the buyer-facing plan cards;
+        # read it, do not re-express it. What stays HERE is the AND with an active
+        # subscription, which is this resolver's whole job.
+        concierge_entitled = tier.sells_concierge
 
     return SiteEntitlements(
         site_id=site_id,
