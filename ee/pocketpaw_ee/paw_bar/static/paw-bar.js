@@ -3,7 +3,7 @@
 //
 // GENERATED, DO NOT EDIT BY HAND. Produced by `bun run build:loader` in the
 // paw-bar repo (loader/dist/loader.readable.js) and copied here verbatim.
-// Source: qbtrix/paw-bar loader/src/loader.ts @ 99e2a47
+// Source: qbtrix/paw-bar loader/src/loader.ts @ e8c1d81
 //
 // It used to be hand-transcribed TypeScript with the annotations stripped by
 // hand. That drifts silently: this copy predated a whole session of loader
@@ -30,7 +30,7 @@
   var FRAME_PATH = "/paw-bar/frame";
   var POS_KEY = "__pawbar_pos_v2";
   var DRAG_MIN_PX = 4;
-  var BAR_MAX_W = 720;
+  var BAR_W = 384;
   var DEFAULT_BAR_H = 96;
   var DEFAULT_CHIP = { w: 240, h: 72 };
   var MIN_H = 48;
@@ -64,7 +64,7 @@
     }
     win[LOADED_FLAG] = true;
     const parentOrigin = resolveParentOrigin(win);
-    const src = endpoint + FRAME_PATH + "?key=" + encodeURIComponent(siteKey) + "&w=" + encodeURIComponent(widgetId) + "&po=" + encodeURIComponent(parentOrigin);
+    const src = endpoint + FRAME_PATH + "?key=" + encodeURIComponent(siteKey) + "&w=" + encodeURIComponent(widgetId) + "&po=" + encodeURIComponent(parentOrigin) + "&s=" + hostScheme(win);
     const iframe = doc.createElement("iframe");
     iframe.title = "Site concierge";
     iframe.setAttribute("allow", "clipboard-write");
@@ -77,7 +77,7 @@
     let anchor = readAnchor(win);
     let dragFrom = null;
     const size = {
-      bar: { w: BAR_MAX_W, h: DEFAULT_BAR_H },
+      bar: { w: BAR_W, h: DEFAULT_BAR_H },
       chip: { w: DEFAULT_CHIP.w, h: DEFAULT_CHIP.h },
       panel: { w: PANEL_W, h: PANEL_MAX_H }
     };
@@ -89,8 +89,8 @@
     function dockBox() {
       const vw = win.innerWidth || 0;
       const vh = win.innerHeight || 0;
-      const maxW = vw ? vw - VIEWPORT_MARGIN : BAR_MAX_W;
-      const wantW = view === "bar" ? Math.min(size.bar.w, BAR_MAX_W) : size[view].w;
+      const maxW = vw ? vw - VIEWPORT_MARGIN : BAR_W;
+      const wantW = view === "bar" ? BAR_W : size[view].w;
       const w = Math.min(wantW, maxW);
       const wantH = view === "panel" ? PANEL_MAX_H : size[view].h;
       const h = vh ? clamp(wantH, MIN_H, vh - VIEWPORT_MARGIN) : Math.max(MIN_H, wantH);
@@ -123,9 +123,26 @@
     }
     (doc.body || doc.documentElement).appendChild(iframe);
     applyDock();
+    let overlayOpen = false;
+    function watchHostPointer(on) {
+      overlayOpen = on;
+    }
+    doc.addEventListener(
+      "pointerdown",
+      (ev) => {
+        if (overlayOpen && ev.target !== iframe) postToFrame({ type: "pawbar:host-pointerdown" });
+      },
+      true
+    );
     function postToFrame(msg) {
       const target = iframe.contentWindow;
       if (target) target.postMessage(msg, frameOrigin);
+    }
+    const schemeQuery = win.matchMedia && win.matchMedia("(prefers-color-scheme: dark)");
+    if (schemeQuery && schemeQuery.addEventListener) {
+      schemeQuery.addEventListener("change", () => {
+        postToFrame({ type: "pawbar:scheme", s: hostScheme(win) });
+      });
     }
     win.addEventListener("message", (ev) => {
       if (ev.origin !== frameOrigin) return;
@@ -139,8 +156,8 @@
           const h = Number(data.h);
           if (Number.isFinite(h)) size[view].h = h;
           const w = Number(data.w);
-          if (Number.isFinite(w) && w > 0) size[view].w = w;
-          applyDock(true);
+          if (view !== "bar" && Number.isFinite(w) && w > 0) size[view].w = w;
+          applyDock(false);
           break;
         }
         case "pawbar:view": {
@@ -156,6 +173,7 @@
           break;
         }
         case "pawbar:dead":
+          watchHostPointer(false);
           iframe.remove();
           break;
         case "pawbar:open":
@@ -166,6 +184,9 @@
         case "pawbar:expand":
           expanded = data.on === true;
           applyDock(true);
+          break;
+        case "pawbar:overlay":
+          watchHostPointer(data.on === true);
           break;
         case "pawbar:close":
           view = dockView;
@@ -227,6 +248,26 @@
   function lastScriptWith(dataAttr, doc) {
     const list = doc.querySelectorAll("script[" + dataAttr + "]");
     return list.length ? list[list.length - 1] : null;
+  }
+  function hostScheme(win) {
+    const doc = win.document;
+    try {
+      const declared = win.getComputedStyle(doc.documentElement).colorScheme || "";
+      const dark = declared.indexOf("dark") >= 0;
+      const light = declared.indexOf("light") >= 0;
+      if (dark !== light) return dark ? "d" : "l";
+      const roots = [doc.body, doc.documentElement];
+      for (let i = 0; i < roots.length; i++) {
+        const el = roots[i];
+        if (!el) continue;
+        const parts = win.getComputedStyle(el).backgroundColor.match(/[\d.]+/g);
+        if (!parts || parts.length < 3 || parts.length > 3 && +parts[3] < 0.5) continue;
+        const lum = (0.2126 * +parts[0] + 0.7152 * +parts[1] + 0.0722 * +parts[2]) / 255;
+        return lum < 0.5 ? "d" : "l";
+      }
+    } catch {
+    }
+    return win.matchMedia && win.matchMedia("(prefers-color-scheme: dark)").matches ? "d" : "l";
   }
   function originOf(url) {
     try {
