@@ -43,12 +43,15 @@ NOTIFICATION SHAPE / FE FOLLOW-UP
 ---------------------------------
 ``kind`` is ``f"alert_{alert_type}"`` (e.g. ``alert_budget_exhausted``).
 ``source`` is ``NotificationSource(type="alert", id=<alert_type>)`` —
-alerts have no entity page, and paw-enterprise's
-``core/notifications/target.ts`` currently routes unknown source types to
-``/chat/{id}`` (a harmless dead link). FE follow-up: add a
-``case 'alert'`` to ``targetUrl()`` mapping to the ``/activity`` surface
-(the operational-events page), which is the sensible landing spot until a
-dedicated alerts surface exists.
+alerts have no entity page. The PUSH side is handled:
+``push/listeners._target_url`` has an explicit ``alert`` arm returning
+None, so an alert push carries no deep link rather than a dead
+``/chat/<alert_type>`` one. Remaining FE follow-up (lands separately):
+paw-enterprise's ``core/notifications/target.ts`` still routes unknown
+source types to ``/chat/{id}`` in the bell — add a ``case 'alert'`` to
+``targetUrl()`` mapping to the ``/activity`` surface (the
+operational-events page), the sensible landing spot until a dedicated
+alerts surface exists.
 """
 
 from __future__ import annotations

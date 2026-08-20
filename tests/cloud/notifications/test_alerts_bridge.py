@@ -10,6 +10,9 @@ Created 2026-08-06 (feat/coupling-alerts-to-bell). Covers:
 - registration is idempotent and survives a bus reset
 - cross-tenant safety: only the FIRST-created workspace's admins are
   notified on a multi-workspace instance (real Beanie path via mongo_db)
+- 2026-08-20 (review): get_default_workspace_id skips soft-deleted
+  workspaces (oldest LIVE wins), and push's _target_url returns None for
+  source_type="alert" (no alerts route — no deep link)
 
 Mutation plan: tests/mutations/alerts_bridge.json — each gate here names
 the mutation that breaks it.
@@ -256,3 +259,44 @@ async def test_get_default_workspace_id_orders_by_creation():
     await second.insert()
 
     assert await workspace_service.get_default_workspace_id() == str(first.id)
+
+
+@pytest.mark.usefixtures("mongo_db")
+async def test_get_default_workspace_id_skips_soft_deleted():
+    """A soft-deleted first workspace must NOT swallow instance alerts —
+    the next-oldest LIVE workspace's admins get them. Mutation
+    'workspace: default workspace ignores soft-delete' breaks this."""
+    from datetime import UTC, datetime
+
+    from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    first = Workspace(name="First", slug="first", owner="a", settings=WorkspaceSettings())
+    await first.insert()
+    second = Workspace(name="Second", slug="second", owner="b", settings=WorkspaceSettings())
+    await second.insert()
+
+    first.deleted_at = datetime.now(UTC)
+    await first.save()
+
+    assert await workspace_service.get_default_workspace_id() == str(second.id)
+
+    # Every workspace deleted → no default at all.
+    second.deleted_at = datetime.now(UTC)
+    await second.save()
+    assert await workspace_service.get_default_workspace_id() is None
+
+
+# ---------------------------------------------------------------------------
+# Push deep link — alerts carry NO url
+# ---------------------------------------------------------------------------
+
+
+def test_alert_push_has_no_deep_link():
+    """source_type="alert" has no room and no alerts route, so push's
+    ``_target_url`` must return None instead of the default
+    /chat/<alert_type> (a room that cannot exist). Mutation
+    'push: remove the alert arm from _target_url' breaks this."""
+    from pocketpaw_ee.cloud.push.listeners import _target_url
+
+    assert _target_url({"source_type": "alert", "source_id": "budget_exhausted"}) is None

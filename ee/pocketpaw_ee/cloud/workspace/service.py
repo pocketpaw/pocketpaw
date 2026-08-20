@@ -114,6 +114,10 @@ included). A Free workspace — even one that still holds members from a cancell
 plan — can no longer invite anyone new; existing members are never removed.
 ``raise_seats_for_plan`` is unchanged (upgrade-only, keeps the persisted
 ``doc.seats`` display ceiling in step).
+2026-08-20 (feat/coupling-alerts-to-bell review): get_default_workspace_id now
+filters ``deleted_at == None`` so a soft-deleted first workspace is skipped and
+the next-oldest LIVE workspace receives instance-scoped alerts, instead of
+routing them to a tombstone.
 """
 
 from __future__ import annotations
@@ -1829,12 +1833,20 @@ async def get_default_workspace_id() -> str | None:
     time, so ascending ``_id`` is creation order). Instance-scoped
     signals with no tenant attribution — today only the OSS
     operational-alert bridge — route to this workspace's admins rather
-    than fanning out cross-tenant. Returns None on an empty instance.
+    than fanning out cross-tenant. Soft-deleted workspaces are skipped
+    (the ``deleted_at`` contract every other fetch here honours), so the
+    OLDEST LIVE workspace wins. Returns None on an empty instance.
     """
     # global-read: instance-level signal routing — alerts from the OSS
     # AlertManager have no workspace attribution, so this deliberately
     # resolves the instance's first (operator) workspace.
-    doc = await _WorkspaceDoc.find().sort("+_id").first_or_none()
+    doc = (
+        await _WorkspaceDoc.find(
+            _WorkspaceDoc.deleted_at == None,  # noqa: E711
+        )
+        .sort("+_id")
+        .first_or_none()
+    )
     return str(doc.id) if doc else None
 
 
