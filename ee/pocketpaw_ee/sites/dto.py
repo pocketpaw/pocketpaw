@@ -203,6 +203,18 @@ class SiteResponse(BaseModel):
     # P2b: ISO-8601 timestamp of the most recent successful live deploy, or None
     # before the first deploy (a preview-only / never-deployed pocket reads None).
     deployed_at: str | None = None
+    # ISO-8601 timestamp of when the Site row was created — the doc's ``createdAt``,
+    # which every TimestampedDocument has carried since day one. This only surfaces
+    # it.
+    #
+    # It exists because ``deployed_at`` above is None for every DRAFT, and
+    # draft-first create means most of a real workspace is drafts. The gallery
+    # orders by "most recent", so with only ``deployed_at`` on the wire the entire
+    # draft population had NO ordering key and fell through to alphabetical — a site
+    # created a minute ago rendered under "About". None only for a doc that somehow
+    # predates the base model's field, so the client still degrades to name order
+    # rather than crashing.
+    created_at: str | None = None
     # DS-1a: the source pocket's authoring pattern ("dynamic" | "landing" | ...),
     # resolved from Pocket.pattern (it lives on the pocket, not the Site). "" when
     # the pocket has no pattern or could not be resolved. Lets the frontend badge
