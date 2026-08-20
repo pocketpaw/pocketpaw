@@ -4634,6 +4634,18 @@ class VisitorConversationsResponse(BaseModel):
     conversations: list[VisitorConversationItem] = Field(default_factory=list)
 
 
+class VisitorTranscriptResponse(BaseModel):
+    """One of THIS visitor's conversations, oldest-first (2026-08-21).
+
+    The widget's own history. Same messages the owner drill-in renders, through
+    the same loader — a visitor and the site owner reading one thread must not
+    be reading two different reconstructions of it.
+    """
+
+    conversation_id: str
+    messages: list[TranscriptMessage] = Field(default_factory=list)
+
+
 class OpenConversationRequest(BaseModel):
     key: str
     w: str
@@ -4763,6 +4775,69 @@ async def open_visitor_conversation(
         last_message_at="",
         active=True,
     )
+
+
+@router.get(
+    "/paw-bar/conversations/{conversation_id}/messages",
+    response_model=VisitorTranscriptResponse,
+)
+async def get_visitor_conversation_messages(
+    conversation_id: str,
+    request: Request,
+    w: str,
+    key: str,
+    customer_ref: str,
+) -> VisitorTranscriptResponse:
+    """This visitor's own messages in one conversation, oldest-first.
+
+    WHY THIS EXISTS. The widget had no way to ask. Its thread lived only in the
+    frame's localStorage, so anything that lost that storage lost the history
+    outright — and plenty does: the bar is a third-party iframe, which Safari
+    blocks storage for and Chrome/Firefox partition per top-level site, and the
+    stored row carries a 7-day TTL besides. The server had every message the
+    whole time (it is what the owner's inbox reads); nothing could fetch them.
+
+    So a visitor who chatted, navigated, and came back saw an empty panel with
+    their conversation id still in localStorage pointing at turns nobody could
+    load. This is the read that was missing. localStorage becomes a cache for
+    the first paint rather than the record.
+
+    Scoped twice, like the list beside it: the front gate binds this visitor to
+    the resolved key, and the conversation is checked against the ones the store
+    holds for that (widget, visitor) pair. A conversation id belonging to another
+    visitor or another site 404s rather than returning an empty thread — the
+    loader would answer empty anyway (it filters on customer_ref), but a 404 says
+    the honest thing instead of implying the conversation exists and is silent.
+    """
+    origin = request.headers.get("origin")
+    widget, ctx, _site = await _front_gate_for_key(
+        widget_id=w,
+        signed_key=key,
+        customer_ref=customer_ref,
+        origin=origin,
+        request=request,
+    )
+    if not conversation_id:
+        raise HTTPException(status_code=404, detail="conversation_not_found")
+
+    store = _store()
+    rows = await store.list_conversations_for_visitor(
+        widget.id, customer_ref, workspace_id=ctx.workspace_id
+    )
+    if conversation_id not in {row.id for row in rows}:
+        raise HTTPException(status_code=404, detail="conversation_not_found")
+
+    messages = await _load_transcript(
+        ctx.pocket_id or "",
+        customer_ref,
+        ctx.workspace_id,
+        widget=widget,
+        conversation_id=conversation_id,
+    )
+    # None means the ref has nothing stored at all; for a conversation the store
+    # DOES know about, that is an empty thread rather than a missing one — a bot
+    # muted the whole time, or a site with transcripts off and no owner replies.
+    return VisitorTranscriptResponse(conversation_id=conversation_id, messages=messages or [])
 
 
 # ---------------------------------------------------------------------------
