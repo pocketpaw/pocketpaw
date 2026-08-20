@@ -437,6 +437,7 @@ import re
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -901,41 +902,11 @@ def _safe_parent_origin(po: str, allowed_origins: list[str]) -> str:
     return f"{scheme}://{hostport}"
 
 
-def _safe_css_url(value: str) -> str:
-    """A path or https URL safe inside a CSS ``url("...")`` literal, or "".
-
-    We own the quotes, so what must be impossible is terminating the token or
-    starting a new declaration. Anything carrying a quote, a paren, a backslash,
-    whitespace or a semicolon is REFUSED rather than escaped — the values we
-    actually need (an /api/v1/uploads/{id} path) contain none of them, so refusing
-    costs nothing and leaves nothing to get subtly wrong.
-
-    Mirrors ``paw_bar.appearance._safe_image_url``, which guards the same class of
-    literal for the owner's own hero and avatar URLs.
-    """
-    v = (value or "").strip()
-    if not v:
-        return ""
-    if any(c in v for c in "()\"'\\ \n\r\t;"):
-        return ""
-    if v.startswith("/") and not v.startswith("//"):
-        return v
-    if v.lower().startswith("https://"):
-        return v
-    return ""
-
-
-# Dark page background for the OWNER preview frame only (not the public embed), so
-# the transparent glass bar sits on a dark surface matching the dashboard instead of
-# a white canvas. A near-black neutral tuned to the paw-enterprise dark theme.
-_PREVIEW_PAGE_BG = "#0d0e12"
-
-
 def _pawbar_bootstrap_html(
     config: dict[str, Any],
     asset_mount: str,
     page_bg: str = "",
-    backdrop_url: str = "",
+    scene_url: str = "",
 ) -> str:
     """Render the glass frame document: seed ``window.__PAWBAR__`` then load the app.
 
@@ -955,33 +926,40 @@ def _pawbar_bootstrap_html(
     """
     config_json = json.dumps(config).replace("<", "\\u003c")
     v = _asset_version()
-    # The OWNER preview paints the site's own screenshot behind the bar, so the
-    # owner judges their theme against the page it will actually sit on rather
-    # than against a neutral rectangle. A picture, deliberately, not an iframe of
-    # the live site: a framed site can refuse (X-Frame-Options / frame-ancestors)
-    # and would leave a blank box, and it would run the customer's own scripts
-    # inside our preview. The screenshot always renders, and it is already taken.
+    # THE SITE ITSELF, behind the bar (owner preview only). The owner judges a
+    # theme on the page it will actually sit on — scrolling, responding, current
+    # — rather than on a screenshot of it or on a colour we chose. Composed HERE
+    # rather than in the dashboard because this is where the URL already is: the
+    # route has the Site document open.
     #
-    # ``backdrop_url`` is same-origin with this document (both are this API), so
-    # the auth-gated /api/v1/uploads/{id} it points at is fetched with the session
-    # cookie. The dashboard needs a grant flow to read the same file; this frame
-    # does not, because it is not cross-origin with it.
+    # ?pawbar=off keeps the page's OWN embedded bar down. A published site
+    # auto-embeds the public one, and without this the owner sees two — the public
+    # bar on the SAVED look behind the one being edited, and the wrong one is what
+    # responds to the controls.
     #
-    # Re-sanitized rather than trusted: it comes off a stored document field, and
-    # what we are building here is a CSS literal.
-    safe_backdrop = _safe_css_url(backdrop_url)
-    if page_bg and safe_backdrop:
-        preview_style = (
-            "<style>html,body{"
-            f"background-color:{page_bg};"
-            f'background-image:url("{safe_backdrop}");'
-            "background-size:cover;background-position:top center;"
-            "background-repeat:no-repeat;color-scheme:dark}</style>\n"
-        )
-    elif page_bg:
-        preview_style = f"<style>html,body{{background:{page_bg};color-scheme:dark}}</style>\n"
-    else:
-        preview_style = ""
+    # Sandboxed. It is the owner's own page, but still a whole third-party
+    # document running inside our frame: allow-scripts so it renders as it really
+    # does, and deliberately NOT allow-same-origin beside it, which would hand it
+    # this document.
+    scene_html = (
+        f'<iframe class="pawbar-scene" src="{escape(scene_url, quote=True)}" '
+        f'title="Your site" '
+        f'sandbox="allow-scripts allow-popups allow-forms"></iframe>'
+        if scene_url
+        else ""
+    )
+    # The scene fills the document and the bar app draws over it. Fixed rather
+    # than absolute so the bar stays put while the framed page scrolls under it,
+    # which is how it behaves on a real page.
+    scene_style = (
+        "<style>html,body{margin:0;height:100%}iframe.pawbar-scene{position:fixed;inset:0;width:100%;height:100%;border:0}</style>"
+        + chr(10)
+        if scene_url
+        else ""
+    )
+    preview_style = (
+        f"<style>html,body{{background:{page_bg};color-scheme:dark}}</style>\n" if page_bg else ""
+    )
     return (
         "<!doctype html>\n"
         '<html lang="en">\n'
@@ -990,9 +968,11 @@ def _pawbar_bootstrap_html(
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         "<title>Paw Bar</title>\n"
         f'<link rel="stylesheet" href="{asset_mount}/pawbar.css?v={v}">\n'
+        f"{scene_style}"
         f"{preview_style}"
         "</head>\n"
         "<body>\n"
+        f"{scene_html}"
         '<div id="pawbar-root"></div>\n'
         f"<script>window.__PAWBAR__ = {config_json};</script>\n"
         f'<script src="{asset_mount}/pawbar.js?v={v}"></script>\n'
@@ -2983,18 +2963,18 @@ async def get_site_preview_frame(
         preview=True,
     )
     # Preview-only dark page so the transparent bar reads as sitting on the dark
-    # dashboard, not a white canvas. The public /paw-bar/frame passes no page_bg
-    # (stays transparent over the customer's real site).
-    # The site's own screenshot goes behind the bar, so the owner judges their
-    # theme against the page it will sit on. Same field the gallery card renders
-    # and Match my site reads; empty until a capture has run, which falls back to
-    # the flat dark surface below.
-    html = _pawbar_bootstrap_html(
-        config,
-        PAWBAR_APP_MOUNT,
-        page_bg=_PREVIEW_PAGE_BG,
-        backdrop_url=getattr(site, "preview_image_url", "") or "",
-    )
+    # TRANSPARENT, exactly like the public embed. The dashboard composes the
+    # preview now: it frames the site's own published page and lays this frame
+    # over it, so the bar sits on the real page rather than on a colour we chose
+    # for it. A page background here would paint over that site.
+    # The site's own published URL, straight off the document this route already
+    # loaded. "" when the site has never deployed, or deployed with no dispatch
+    # domain configured — there is genuinely nothing to frame then, and the bar
+    # previews on a plain surface rather than in an empty white box.
+    scene = getattr(site, "url", "") or ""
+    if scene:
+        scene += ("&" if "?" in scene else "?") + "pawbar=off"
+    html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT, scene_url=scene)
     return HTMLResponse(
         content=html,
         headers={"Content-Security-Policy": csp, "Cache-Control": "no-store"},
