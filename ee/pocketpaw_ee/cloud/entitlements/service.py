@@ -40,6 +40,11 @@
 # Updated 2026-08-08 (feat/billing-storage-caps): also added
 #   ``max_storage_bytes`` — the workspace S3 storage cap (Free = 5 GB) surfaced
 #   to the uploads gate and the /storage/usage read; fail-closed to 5 GB.
+# Updated 2026-08-20 (feat/site-plan-catalog-inclusions): ``concierge_entitled``
+#   now reads ``tier.sells_concierge`` off the catalog row instead of re-deriving
+#   "above the free floor" here — the plan-catalog DTO needs the same answer for
+#   the buyer-facing plan cards, and two copies of one rule drift. The AND with an
+#   active subscription stays here; that is this resolver's job, not the catalog's.
 
 from __future__ import annotations
 

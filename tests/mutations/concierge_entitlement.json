@@ -2,7 +2,7 @@
   {
     "label": "the plan is never consulted — concierge_entitled reverts to a pass-through",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
-    "find": "        concierge_entitled = tier.key != site_plan_catalog.BASE_SITE_PLAN_KEY",
+    "find": "        concierge_entitled = tier.sells_concierge",
     "replace": "        concierge_entitled = True",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_a_free_site_is_not_entitled_to_a_concierge",
