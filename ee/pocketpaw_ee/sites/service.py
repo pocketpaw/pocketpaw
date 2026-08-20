@@ -881,7 +881,11 @@ from pocketpaw_ee.sites.dto import (
     SiteStatusResponse,
 )
 from pocketpaw_ee.sites.engines import content_key, is_source_engine, normalize_engine
-from pocketpaw_ee.sites.generator_client import BuildResult, GeneratorClient
+from pocketpaw_ee.sites.generator_client import (
+    BuildResult,
+    GeneratorClient,
+    svelte_source_is_dynamic,
+)
 from pocketpaw_ee.sites.html_paths import (
     html_path_rejection,
     is_reserved_html_path,
@@ -2346,7 +2350,7 @@ async def _deploy_site_doc(
     # SL-3: fork to the EPHEMERAL BUILD LANE for the engines whose artifact can
     # actually be deployed from it. A prebuilt dir means the worker already ran this
     # build and is calling back in to finish the publish, so it must NOT re-fork.
-    if prebuilt_project_dir is None and build_runs_async(engine):
+    if prebuilt_project_dir is None and build_runs_async(engine, source=source, pattern=pattern):
         return await _enqueue_static_build(
             workspace_id=workspace_id,
             user_id=user_id,
@@ -3194,34 +3198,122 @@ async def _provision_dynamic_site(
 # ---------------------------------------------------------------------------
 
 
-def build_runs_async(engine: str | None) -> bool:
-    """Does publishing this engine ENQUEUE its build instead of running it inline?
+def build_runs_async(
+    engine: str | None,
+    *,
+    source: dict[str, Any] | None = None,
+    pattern: str | None = None,
+) -> bool:
+    """Does publishing this site ENQUEUE its build instead of running it inline?
 
-    True for exactly the engines whose ephemeral-lane artifact can actually be
-    DEPLOYED, which today is react alone. This is a narrow answer to a broad-sounding
-    question, and the narrowness is the whole content of the predicate:
+    True for the engines whose ephemeral-lane artifact can actually be DEPLOYED. That is
+    react, and — since SL-4 — a STATIC svelte site. The predicate is about the ARTIFACT,
+    not about the queue, and every line below follows from that:
 
-    * ``html`` runs no build at all (``needs_node_build`` is False), so there is
-      nothing to enqueue. Flipping it would add a queue wait to the one engine that
-      never needed one.
-    * ``ripple`` and DYNAMIC ``svelte`` build on adapter-cloudflare, whose output's
-      pages are rendered by a ``_worker.js`` whose imports sit OUTSIDE the tarred
-      directory. The artifact therefore cannot serve — which is not a guess: it is why
-      ``truth_lane`` refuses to even PREVIEW one (``REASON_WORKER_RENDERED``). Queueing
-      those builds would replace a working publish with one nothing can deploy.
-    * STATIC ``svelte`` (adapter-static) IS self-sufficient, and is still excluded,
-      because which adapter ran is a property of the built SITE and is not knowable at
-      enqueue time — only after the build. A gate has to decide before it spends the
-      queue, so svelte stays inline until the artifact question is settled for the
-      whole track.
-    * ``react`` emits a prerendered, assets-only ``dist`` with no server entry, so the
-      tar is the whole deployable site.
+    * ``html`` runs no build at all (``needs_node_build`` is False), so there is nothing
+      to enqueue. Flipping it would add a queue wait to the one engine that never needed
+      one.
+    * ``ripple`` builds on adapter-cloudflare unconditionally. Its pages are rendered by a
+      ``_worker.js`` whose imports sit OUTSIDE the tarred directory, so the artifact
+      cannot serve — which is not a guess: it is why ``truth_lane`` refuses to even
+      PREVIEW one (``REASON_WORKER_RENDERED``). Queueing it would replace a working
+      publish with one nothing can deploy.
+    * ``react`` emits a prerendered, assets-only ``dist`` with no server entry, so the tar
+      is the whole deployable site.
+    * ``svelte`` DEPENDS ON THE SITE, and reading that dependency is the whole of SL-4.
 
-    Widen this ONLY together with the artifact: the moment an adapter-cloudflare
-    artifact can serve, ripple and svelte belong here too, and this predicate is the
-    one place that changes.
+    ── WHAT CHANGED FOR SVELTE, AND WHY THE OLD REASON NO LONGER HOLDS ──────────────────
+
+    This docstring used to say static svelte was excluded "because which adapter ran is a
+    property of the built SITE and is not knowable at enqueue time — only after the
+    build". That premise was wrong, and it was wrong in a checkable way. The adapter is
+    picked by ``paw-sites/src/index.ts`` from ``parseBindings(...).isDynamic``, computed
+    from ``objects``/``sources``/``actions``/``auth`` — which ride the publish as sibling
+    keys on the ``source`` envelope (``generator_client._SVELTE_BINDING_KEYS``) and are in
+    this function's hand before a queue slot is spent. Nothing has to be built to know.
+
+    So the fork is:
+
+      * static svelte  → adapter-static     → ``build``, self-contained, NO worker → QUEUE
+      * dynamic svelte → adapter-cloudflare → worker-rendered, cannot serve       → INLINE
+
+    THE DYNAMIC ANSWER IS THE LOAD-BEARING ONE. ``_deploy_site_doc`` forks a dynamic site
+    to ``_provision_dynamic_site`` before it ever reaches here, but that fork calls
+    ``_is_dynamic``, which reads the ``ripple_spec`` — and a svelte pocket carries its
+    bindings on the ``source`` envelope instead, so for svelte that fork sees only the
+    ``pattern == "dynamic"`` stamp. An unstamped dynamic svelte pocket therefore arrives
+    here looking static to every check that came before, and a gate keying on the engine
+    name alone would queue it and deploy a worker shell that cannot start. Both signals
+    are read for that reason, not for symmetry.
+
+    ``source`` DEFAULTING TO None ANSWERS "QUEUED" FOR SVELTE, deliberately. The caller
+    that has no source in scope is ``cloud/surface/handlers/sites.py::_publish_runs_async``,
+    which documents why it degrades that way: telling the agent a build is queued when the
+    publish was inline costs one extra click, while telling it a url is live when the build
+    is still queued announces a page that does not exist yet — on a first publish there is
+    no url at all, and on a re-publish the url still serves the PREVIOUS page. The publish
+    path itself always holds the source and never relies on this default.
+
+    Widen this further ONLY together with the artifact: the moment an adapter-cloudflare
+    artifact can serve, ripple and dynamic svelte belong here too, and this predicate is
+    the one place that changes.
     """
-    return normalize_engine(engine) == "react"
+    normalized = normalize_engine(engine)
+    if normalized == "react":
+        return True
+    if normalized != "svelte":
+        return False
+    if not svelte_async_build_enabled():
+        return False
+    if pattern == "dynamic":
+        return False
+    if source is None:
+        return True
+    return not svelte_source_is_dynamic(source)
+
+
+def svelte_async_build_enabled() -> bool:
+    """Is the static svelte track routed to the ephemeral build lane? (SL-4)
+
+    ``PAW_SITES_SVELTE_ASYNC_BUILD``, DEFAULT OFF. Read per call rather than cached at
+    import so an operator can flip it without a redeploy, and so a test can set it with
+    ``monkeypatch.setenv`` and get the behaviour it asked for.
+
+    ── WHY THIS SHIPS BEHIND A FLAG AND react DID NOT ──────────────────────────────────
+
+    Not caution for its own sake. Moving a svelte publish into the lane DROPS TWO
+    PUBLISH-TIME CHECKS that an inline publish runs, because ``paw-sites``'s
+    ``runWorkerdSmokeRender`` is what performs them and it does not exist inside the
+    sandbox:
+
+      1. The known-workerd-marker scan. RECOVERED — the wrapper now greps the full build
+         log for the same markers ``generator_client._WORKERD_SSR_MARKERS`` carries and
+         fails the build on a hit, so this one is not lost. It is better than the inline
+         check on one axis: the wrapper reads the WHOLE log, while the sentinel only ever
+         carries a tail.
+      2. The RESTING-VISIBILITY guard (``checkRestingVisibility`` /
+         ``judgeRestingVisibility``) — the check that a marketing page is not blank at
+         rest. NOT recovered. It judges a CLEAN build by reading the prerendered
+         ``index.html`` and the emitted CSS, so nothing about a non-zero exit code
+         substitutes for it, and porting it to Python would make a third implementation of
+         a rule that already exists twice.
+
+    react never had either check, so the lane cost it nothing. svelte has both today, and
+    a default-on flip would have removed one of them from every marketing site the product
+    publishes without anything failing to say so.
+
+    THE FLAG IS THEREFORE A STAGING DEVICE, NOT A PERMANENT SWITCH. Turning it on is safe
+    and useful right now — the offload is real and the lane's own gates (build exit,
+    artifact verification, the server-entry refusal) all apply. Making it the DEFAULT is
+    blocked on giving the lane a resting-visibility verdict, whose clean shape is a
+    ``paw-sites-gen`` subcommand that judges an already-built tree, invoked by the worker
+    on the unpacked artifact. That is a paw-sites change plus a vendor refresh, so it is
+    its own PR in its own repo rather than a silent gap here.
+    """
+    import os
+
+    raw = os.environ.get("PAW_SITES_SVELTE_ASYNC_BUILD", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 async def _enqueue_static_build(

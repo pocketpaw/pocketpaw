@@ -468,6 +468,13 @@ async def run_site_build(
 
     await sites_service.mark_build_running(site)
 
+    # SL-4 — decided ONCE, from the payload, and used by both the tar's include-list and
+    # the deploy's unpack. Deriving it twice is how the two end up disagreeing, and a
+    # disagreement here unpacks an artifact into a directory the deployer does not read.
+    from pocketpaw_ee.sites.generator_client import expected_static_output_rel
+
+    artifact_rel = expected_static_output_rel(engine, generator_input)
+
     work_dir = tempfile.mkdtemp(prefix=f"paw-build-{site_id}-")
     try:
         try:
@@ -515,6 +522,7 @@ async def run_site_build(
                 engine=normalize_engine(engine),
                 timeout_seconds=timeout_seconds,
                 client=_client,
+                artifact_rel=artifact_rel,
             )
         except Exception:
             # Nothing ran: Daytona unconfigured, or the sandbox could not be created.
@@ -547,6 +555,7 @@ async def run_site_build(
                 engine=engine,
                 deploy_inputs=deploy_inputs,
                 deployer=_deployer,
+                output_rel=artifact_rel,
             )
         except Exception:
             # The build worked and the deploy did not, so this is NOT a build failure —
@@ -575,6 +584,7 @@ async def _deploy_built_artifact(
     engine: str,
     deploy_inputs: dict[str, Any],
     deployer: Any = None,
+    output_rel: str | None = None,
 ) -> None:
     """Materialise the artifact into a project-dir shape and run the deploy tail.
 
@@ -585,15 +595,35 @@ async def _deploy_built_artifact(
     those guards has a mutation proving it fires. Hand-rolling an extractor for the deploy
     path would mean the deploy got the unproven copy.
 
-    Its skip list is written for a PREVIEW (``_worker.js`` and deploy metadata are
-    dropped), which is harmless here only because this path is react-only: react emits no
-    server entry, and ``deploy_workers`` writes its own ``.assetsignore``. Widening
-    ``service.build_runs_async`` past react means revisiting this — an engine whose worker
-    IS the site cannot have it dropped on the way to the edge.
-
     The tree is extracted UNDER the engine's static-output rel, because the deploy targets
     resolve their source as ``<project_dir>/<static_output_rel>`` while the tar is rooted
     AT that directory's contents. Extracting flat would deploy an empty dir.
+
+    ``output_rel`` IS THE SAME PREDICTION THE TAR USED (SL-4), passed down rather than
+    recomputed. svelte has two output dirs and the deploy targets probe for them in a
+    fixed order (``engines.resolve_static_output_rel``), so extracting an adapter-static
+    tree under the nominal ``.svelte-kit/cloudflare`` would still be FOUND — by accident,
+    because the probe falls through to it — while reporting the wrong adapter to anything
+    that asks. Threading the one value the tar was built from keeps the pack and the
+    unpack unable to disagree. ``None`` keeps the nominal value, so react is unchanged.
+
+    ── THE SERVER-ENTRY REFUSAL (the obligation this docstring used to only record) ─────
+
+    ``unpack_artifact``'s skip list DROPS ``_worker.js``. That list is written for a
+    PREVIEW, where a worker is noise the preview server cannot run anyway — and it was
+    harmless here only while this path was react-only, since react emits no server entry.
+    Widening the gate past react is exactly the event the previous version of this
+    docstring warned about, so the warning is now a check.
+
+    An artifact carrying a server entry is REFUSED rather than unpacked, because for an
+    engine whose worker IS the site, silently dropping it deploys a shell that cannot
+    start — a working site replaced by a broken one, with every status reporting success.
+    Refusing settles the row as a deploy failure instead, which is recoverable and true.
+
+    It should be unreachable: ``service.build_runs_async`` keeps dynamic svelte and ripple
+    out of this lane precisely because their artifacts are worker-rendered. "Unreachable"
+    is the reason to check it, not a reason to skip it — the gate reads a prediction, and
+    this reads what actually arrived.
     """
     if not artifact:
         # ``settle`` only reaches ``built`` via ``BuildRunResult.ok``, which requires
@@ -605,21 +635,57 @@ async def _deploy_built_artifact(
     from pocketpaw_ee.sites import service as _service
     from pocketpaw_ee.sites.engines import static_output_rel
 
+    _refuse_server_entry(artifact, engine=engine, site_id=deploy_inputs.get("site_id"))
+
+    rel = output_rel or static_output_rel(engine)
     deploy = deployer or _service.deploy_prebuilt_site
     project_dir = tempfile.mkdtemp(prefix="paw-deploy-")
     try:
-        unpacked = artifact_preview.unpack_artifact(
-            artifact, Path(project_dir, static_output_rel(engine))
-        )
+        unpacked = artifact_preview.unpack_artifact(artifact, Path(project_dir, rel))
         logger.info(
-            "sites.build: materialised %d entries (%d bytes) for the deploy of site %s",
+            "sites.build: materialised %d entries (%d bytes) under %s for the deploy of site %s",
             unpacked.entries,
             unpacked.bytes_written,
+            rel,
             deploy_inputs.get("site_id"),
         )
         await deploy(project_dir=project_dir, deploy_inputs=deploy_inputs)
     finally:
         shutil.rmtree(project_dir, ignore_errors=True)
+
+
+def _refuse_server_entry(artifact: bytes, *, engine: str, site_id: Any) -> None:
+    """Raise when the artifact carries a ``_worker.js`` the unpack would silently drop.
+
+    Reads the tar's MEMBER NAMES only — no extraction, no decompression of contents beyond
+    what the index needs — so this cannot itself become the zip-bomb surface
+    ``unpack_artifact`` is hardened against.
+
+    ``_worker.js`` is matched as a path COMPONENT rather than a filename, because
+    adapter-cloudflare emits it as a DIRECTORY (``_worker.js/chunks/0.js``) once an app is
+    large enough. ``engines.resolve_emits_server_worker`` had to learn the same thing from
+    the other side; a check keyed on a file would report "no worker" for exactly the
+    biggest, most broken-if-dropped sites.
+
+    An UNREADABLE archive is not this function's failure to report: ``verify_artifact``
+    already rejects one upstream with a reason of its own, so re-raising here would
+    relabel a known condition. Pass and let the unpack speak.
+    """
+    import tarfile
+    from io import BytesIO
+
+    try:
+        with tarfile.open(fileobj=BytesIO(artifact), mode="r:gz") as tar:
+            names = tar.getnames()
+    except Exception:  # noqa: BLE001 — see the docstring; not our condition to report
+        return
+    for name in names:
+        if any(part == "_worker.js" for part in name.replace("\\", "/").split("/")):
+            raise RuntimeError(
+                f"refusing to deploy a {normalize_engine(engine)} artifact carrying a "
+                f"server entry ({name}) — the unpack would drop it and deploy a shell "
+                f"that cannot start (site {site_id})"
+            )
 
 
 async def _scaffold(generator_input: dict[str, Any], out_dir: str, *, runner: Any = None) -> str:

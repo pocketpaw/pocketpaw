@@ -20,8 +20,8 @@
   {
     "label": "an engine whose output is the project root is packed anyway, so an html site's node_modules is uploaded with it",
     "file": "ee/pocketpaw_ee/sites/daytona_build.py",
-    "find": "    rel = static_output_rel(engine)\n    if rel == \".\":",
-    "replace": "    rel = static_output_rel(engine)\n    if False:",
+    "find": "    if rel == \".\":\n        raise ValueError(",
+    "replace": "    if False:\n        raise ValueError(",
     "tests": [
       "tests/ee/sites/test_fault_ladder_build.py"
     ]

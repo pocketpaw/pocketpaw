@@ -35,7 +35,12 @@
 # pocket_id / name / url / deployed) while ``_to_response`` — the wire the FRONTEND
 # polls — also carries ``build_status`` / ``build_reason`` / ``build_job_id``. The
 # agent got none of the three, and react is the one engine where that breaks the happy
-# path, because it is the only engine with ``build_runs_async(engine) is True``:
+# path, because it is the only engine with ``build_runs_async(engine) is True``
+# unconditionally. Updated 2026-08-21 (SL-4): STATIC svelte answers True as well once
+# ``PAW_SITES_SVELTE_ASYNC_BUILD`` is on, so everything below now describes two engines
+# rather than one. Nothing here needed changing for that — the keys ride the response for
+# whatever the gate flips, which is why they were added to the response and not to a
+# react branch.
 #
 #   * FIRST publish — ``_enqueue_static_build`` creates the Site doc with ``url=""``
 #     and ``deployed=False``, honestly (nothing is serving yet; the worker flips both
@@ -306,7 +311,9 @@ async def _publish_handler(args: dict) -> dict:
     # RX-4 — the build lane's state rides the response. Without it this body was five
     # keys (id / pocket_id / name / url / deployed), and on the react happy path that
     # is actively misleading in two different ways, because react is the only engine
-    # with ``build_runs_async(engine) is True``:
+    # with ``build_runs_async(engine) is True`` unconditionally — and since SL-4 a STATIC
+    # svelte publish takes the same path whenever the lane is switched on, so read every
+    # "react" below as "any engine the gate flips":
     #
     #   * FIRST publish — ``_enqueue_static_build`` creates the Site doc with
     #     ``url=""`` and ``deployed=False``, honestly, because nothing is serving yet.

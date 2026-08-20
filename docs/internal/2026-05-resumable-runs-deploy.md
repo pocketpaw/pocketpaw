@@ -130,6 +130,35 @@ Env vars (all also documented in `backend/CLAUDE.md` → Key Conventions):
 | `POCKETPAW_CLOUD_RUN_STREAM_TTL` | `3600` | Redis Stream retention after a run terminates |
 | `POCKETPAW_CLOUD_STREAM_TRANSPORT` | `redis` | Future hook for non-Redis backends |
 | `PAW_SITES_BUILD_TIMEOUT_SEC[_<ENGINE>]` | `600` (floor) | Per-build sandbox budget for the site-build function. Read at worker **import**, so a change takes effect on the worker restart a deploy performs — see below |
+| `PAW_SITES_SVELTE_ASYNC_BUILD` | unset (off) | Routes STATIC svelte publishes to the Daytona build lane instead of building them inline. Read per call, so it takes effect without a restart — but set it on **both** the web service and the worker: the web side decides whether to enqueue, the worker side does the build. See the caveat below before turning it on |
+
+### Turning the svelte lane on (`PAW_SITES_SVELTE_ASYNC_BUILD`)
+
+Off by default. On, a **static** svelte publish stops blocking the API process on
+`bun install` + `bun run build` and goes through the same lane react has used since SL-3.
+A **dynamic** svelte site is never routed there whatever the flag says — its
+adapter-cloudflare artifact is rendered by a `_worker.js` whose imports sit outside the
+tarred directory, so the artifact cannot execute.
+
+**Requires Daytona.** The lane has no local fallback: with `DAYTONA_API_URL` /
+`DAYTONA_API_KEY` unset, `run_build` raises and the publish settles
+`sandbox_unavailable:run_build_raised`. Turning this on where Daytona is not configured
+converts working svelte publishes into failures.
+
+**What you give up, and what you do not.** An inline publish runs `paw-sites`'s
+`runWorkerdSmokeRender`, which makes two checks the sandbox has no paw-sites to make:
+
+- The known-workerd-marker scan — **recovered**. The wrapper greps the whole build log
+  for the same markers and fails the build on a hit, which is stricter than the inline
+  path's own read of a truncated stderr tail.
+- The **resting-visibility guard** — **not recovered**. It judges a clean build by reading
+  the prerendered `index.html` and the emitted CSS to catch a page that is blank at rest,
+  and nothing about an exit code substitutes for it. Until the lane can run that verdict,
+  a site published through it is not checked for the blank-at-rest failure.
+
+That gap is why the flag is off by default rather than a straight flip. Its fix is a
+`paw-sites-gen` subcommand that judges an already-built tree, called by the worker on the
+unpacked artifact.
 
 ### The worker runs three functions, each with its own timeout
 

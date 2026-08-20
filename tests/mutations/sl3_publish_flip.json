@@ -2,8 +2,8 @@
   {
     "label": "SL-3: every engine flips to async, so a ripple or dynamic-svelte publish queues a build whose artifact cannot serve (its pages come from a _worker.js whose imports sit outside the tar) — the site stops publishing",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    return normalize_engine(engine) == \"react\"",
-    "replace": "    return True",
+    "find": "    normalized = normalize_engine(engine)\n    if normalized == \"react\":\n        return True",
+    "replace": "    normalized = normalize_engine(engine)\n    return True",
     "tests": [
       "tests/ee/sites/test_async_publish.py::TestOnlyTheDeployableEngineFlips",
       "tests/ee/sites/test_async_publish.py::TestTheInlinePathIsUnchanged"
@@ -12,8 +12,8 @@
   {
     "label": "SL-3: no engine flips, so the whole slice is inert — publish still blocks on an inline build and the queued-build UI has nothing to show",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "def build_runs_async(engine: str | None) -> bool:",
-    "replace": "def build_runs_async(engine: str | None) -> bool:\n    return False",
+    "find": "    normalized = normalize_engine(engine)\n    if normalized == \"react\":",
+    "replace": "    return False\n    normalized = normalize_engine(engine)\n    if normalized == \"react\":",
     "tests": [
       "tests/ee/sites/test_async_publish.py::TestAReactPublishEnqueues",
       "tests/ee/sites/test_async_publish.py::TestOnlyTheDeployableEngineFlips::test_react_builds_asynchronously"
@@ -22,8 +22,8 @@
   {
     "label": "SL-3: the async fork stops excluding a worker callback, so the worker's deploy re-enters the fork and enqueues ANOTHER build — a publish that queues itself forever and never goes live",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if prebuilt_project_dir is None and build_runs_async(engine):",
-    "replace": "    if build_runs_async(engine):",
+    "find": "    if prebuilt_project_dir is None and build_runs_async(engine, source=source, pattern=pattern):",
+    "replace": "    if build_runs_async(engine, source=source, pattern=pattern):",
     "tests": [
       "tests/ee/sites/test_async_publish.py::TestTheDeploySeamRunsTheInlineTail"
     ]
@@ -86,8 +86,8 @@
   {
     "label": "SL-3: the artifact is extracted FLAT instead of under the engine's static-output dir, so the deploy target resolves an empty directory and a blank site replaces a working one",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "            artifact, Path(project_dir, static_output_rel(engine))",
-    "replace": "            artifact, Path(project_dir)",
+    "find": "        unpacked = artifact_preview.unpack_artifact(artifact, Path(project_dir, rel))",
+    "replace": "        unpacked = artifact_preview.unpack_artifact(artifact, Path(project_dir))",
     "tests": [
       "tests/ee/sites/test_async_publish.py::TestTheWorkerFinishesThePublish::test_the_deploy_receives_the_artifact_under_the_engines_output_dir"
     ]
