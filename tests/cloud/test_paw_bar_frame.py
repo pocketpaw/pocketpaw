@@ -3,6 +3,16 @@
 # Created 2026-07-15: covers GET /paw-bar/frame (the iframe document + the CSP
 # frame-ancestors embedder gate) and the CSP/parent-origin helper functions.
 # Three layers:
+# Updated 2026-08-21 (dashboard preview ancestor): the builder frames a site's real
+#   published page, so the bar's iframe sits TWO deep — dashboard → site page → bar —
+#   and frame-ancestors is matched against EVERY ancestor. No Site allowlist named the
+#   dashboard, so the bar was refused in every preview with
+#   "Framing '<backend>' violates ... frame-ancestors". New coverage: the dashboard
+#   origin is admitted alongside the allowlist, sourced from PAWBAR_DASHBOARD_ORIGIN or
+#   (unset — the shipped state) the declared CORS origins; it is sanitized like any
+#   allowlist entry; it never revives an empty allowlist; and with neither source set
+#   the header is byte-identical to before. An autouse fixture clears both vars so the
+#   exact-header assertions stay hermetic.
 # Updated 2026-07-30 (frame-ancestors port fix): the expected header now carries a
 #   ``:*`` port on every portless entry. A CSP host-source with no port matches only
 #   the scheme's DEFAULT port, so a site served on any other port could not be framed
@@ -34,6 +44,14 @@ from pocketpaw.paw_bar.store import PawBarStore
 
 _VALID_KEY = "site_key_" + "a" * 24
 _FRAME_ORIGIN = "https://frame.pocketpaw.test"
+
+
+@pytest.fixture(autouse=True)
+def _no_dashboard_origin(monkeypatch):
+    """Every test here states its own dashboard config. Clearing both sources keeps
+    the exact-header assertions hermetic on a machine that happens to export one."""
+    monkeypatch.delenv("PAWBAR_DASHBOARD_ORIGIN", raising=False)
+    monkeypatch.delenv("POCKETPAW_API_CORS_ALLOWED_ORIGINS", raising=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -74,6 +92,84 @@ def test_frame_ancestors_sanitizes_header_injection():
     assert csp == "frame-ancestors brewco.com:* ok.example.com:*"
     assert ";" not in csp
     assert "\n" not in csp
+
+
+def test_ancestor_sources_dedupes_repeats():
+    """The dashboard origin is appended to the Site's allowlist, and in local dev it
+    IS one of the seeded hosts — so the same source can arrive twice. A repeat is
+    harmless to a browser but makes the header a puzzle to read; it collapses to one,
+    first occurrence wins, order otherwise preserved."""
+    from pocketpaw_ee.paw_bar.router import _ancestor_sources
+
+    assert _ancestor_sources(["localhost", "brewco.com", "localhost", "https://localhost/"]) == [
+        "localhost:*",
+        "brewco.com:*",
+    ]
+
+
+def test_public_frame_ancestors_appends_configured_dashboard_origin(monkeypatch):
+    monkeypatch.setenv("PAWBAR_DASHBOARD_ORIGIN", "https://app.example.com")
+    from pocketpaw_ee.paw_bar.router import _public_frame_ancestors
+
+    assert (
+        _public_frame_ancestors(["brewco.com"])
+        == "frame-ancestors brewco.com:* https://app.example.com:*"
+    )
+
+
+def test_public_frame_ancestors_still_fails_closed_on_empty_allowlist(monkeypatch):
+    """A declared dashboard origin must NOT resurrect a Site that has no embedders.
+    Fail-closed is decided on the Site's own allowlist alone; the dashboard entry is
+    additive on top of a policy that already had at least one source."""
+    monkeypatch.setenv("PAWBAR_DASHBOARD_ORIGIN", "https://app.example.com")
+    from pocketpaw_ee.paw_bar.router import _public_frame_ancestors
+
+    assert _public_frame_ancestors([]) is None
+    assert _public_frame_ancestors(["", "   "]) is None
+
+
+def test_dashboard_ancestor_keeps_an_explicit_scheme():
+    """The reported header ALREADY listed ``localhost:*`` and the bar was blocked
+    anyway — because a schemeless host-source resolves against the FRAME's scheme, so
+    against an https backend it means ``https://localhost``. A dashboard on plain
+    http (every local session pointed at a deployed backend) needs the scheme kept,
+    or appending it changes nothing."""
+    from pocketpaw_ee.paw_bar.router import _sanitize_dashboard_ancestor
+
+    assert _sanitize_dashboard_ancestor("http://localhost:5173") == "http://localhost:5173"
+    assert _sanitize_dashboard_ancestor("https://app.example.com") == "https://app.example.com:*"
+    # No scheme declared → the allowlist's schemeless form, unchanged.
+    assert _sanitize_dashboard_ancestor("app.example.com") == "app.example.com:*"
+    # No host-source spelling for a non-browser scheme → dropped, never guessed at.
+    assert _sanitize_dashboard_ancestor("tauri://localhost") is None
+    # Header injection is refused here exactly as it is for allowed_origins.
+    assert _sanitize_dashboard_ancestor("https://evil.example; default-src *") is None
+    assert _sanitize_dashboard_ancestor("https://bad\nhost") is None
+
+
+def test_dashboard_preview_ancestors_prefers_the_explicit_var(monkeypatch):
+    from pocketpaw_ee.paw_bar.router import _dashboard_preview_ancestors
+
+    monkeypatch.setenv("PAWBAR_DASHBOARD_ORIGIN", "https://app.example.com")
+    monkeypatch.setenv("POCKETPAW_API_CORS_ALLOWED_ORIGINS", '["https://ignored.example"]')
+    assert _dashboard_preview_ancestors() == ["https://app.example.com"]
+
+
+def test_dashboard_preview_ancestors_reads_cors_origins_in_either_shape(monkeypatch):
+    """``api_cors_allowed_origins`` is a pydantic list, so the env form is JSON — but
+    operators write CSV (``.env.example`` even documents CSV for a sibling var). Read
+    the raw env permissively rather than re-implementing pydantic's parsing: both
+    shapes reach the same sanitizer, and anything malformed is dropped there."""
+    from pocketpaw_ee.paw_bar.router import _dashboard_preview_ancestors
+
+    monkeypatch.setenv("POCKETPAW_API_CORS_ALLOWED_ORIGINS", '["https://a.example"]')
+    assert _dashboard_preview_ancestors() == ["https://a.example"]
+
+    monkeypatch.setenv("POCKETPAW_API_CORS_ALLOWED_ORIGINS", "https://a.example,https://b.example")
+    assert _dashboard_preview_ancestors() == ["https://a.example", "https://b.example"]
+
+    monkeypatch.setenv("POCKETPAW_API_CORS_ALLOWED_ORIGINS", "  ")
+    assert _dashboard_preview_ancestors() == []
 
 
 def test_safe_parent_origin_only_echoes_allowlisted():
@@ -146,6 +242,93 @@ async def test_frame_valid_key_renders_with_csp(frame_client):
     assert '"siteKey": "site_key_' in body  # world-visible embed key, by design
     assert "/pawbar-app/pawbar.js" in body
     assert "/pawbar-app/pawbar.css" in body
+
+
+@pytest.mark.asyncio
+async def test_frame_admits_the_dashboard_as_an_ancestor(frame_client, monkeypatch):
+    """The reported bug. The builder previews a site by framing its real published
+    page, so the bar's iframe sits TWO deep — dashboard → site page → bar — and
+    frame-ancestors is matched against EVERY ancestor, not just the immediate parent.
+    Nothing in the publish path knows the dashboard exists, so no Site allowlist ever
+    named it and the bar was refused in every preview."""
+    monkeypatch.setenv("PAWBAR_DASHBOARD_ORIGIN", "https://app.example.com")
+    await _site(allowed_origins=["brewco.com"])
+    res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
+
+    assert res.status_code == 200
+    assert (
+        res.headers["content-security-policy"]
+        == "frame-ancestors brewco.com:* https://app.example.com:*"
+    )
+
+
+@pytest.mark.asyncio
+async def test_frame_admits_an_http_dashboard_against_an_https_frame(frame_client, monkeypatch):
+    """The reported case, end to end: a local dashboard driving a DEPLOYED https
+    backend. The Site allowlist already seeds ``localhost``, and the bar was still
+    blocked, because that bare source reads as https against an https frame. The
+    dashboard entry carries the scheme, so the header now says what it means."""
+    monkeypatch.setenv("PAWBAR_DASHBOARD_ORIGIN", "http://localhost:5173")
+    await _site(allowed_origins=["localhost", "127.0.0.1", "site.pawsites.workers.dev"])
+    res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
+
+    assert res.status_code == 200
+    assert res.headers["content-security-policy"] == (
+        "frame-ancestors localhost:* 127.0.0.1:* site.pawsites.workers.dev:* http://localhost:5173"
+    )
+
+
+@pytest.mark.asyncio
+async def test_frame_falls_back_to_the_declared_cors_origins(frame_client, monkeypatch):
+    """No deploy we ship sets PAWBAR_DASHBOARD_ORIGIN — which is exactly how this
+    broke. The operator has already declared where the frontend lives, as the API's
+    CORS origins, so an unset var reads those instead of staying silently broken."""
+    monkeypatch.setenv("POCKETPAW_API_CORS_ALLOWED_ORIGINS", '["https://app.example.com"]')
+    await _site(allowed_origins=["brewco.com"])
+    res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
+
+    assert (
+        res.headers["content-security-policy"]
+        == "frame-ancestors brewco.com:* https://app.example.com:*"
+    )
+
+
+@pytest.mark.asyncio
+async def test_frame_ancestors_unchanged_when_no_dashboard_is_configured(frame_client):
+    """Neither source set (the autouse fixture clears both) → the header is EXACTLY
+    the Site's allowlist. In particular the ``localhost:5173`` default that
+    ``_dashboard_origin`` applies to the session-authed OWNER preview must not leak
+    into the public frame, where it would name every visitor's own machine as a
+    permitted embedder of a customer's bar."""
+    await _site(allowed_origins=["brewco.com"])
+    res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
+
+    assert res.headers["content-security-policy"] == "frame-ancestors brewco.com:*"
+
+
+@pytest.mark.asyncio
+async def test_frame_sanitizes_the_dashboard_origin(frame_client, monkeypatch):
+    """The var is operator-controlled data flowing into a response HEADER, so it goes
+    through the SAME sanitizer allowed_origins does: an unusable value is dropped and
+    the Site's own policy still renders — never a split header, never a 403."""
+    monkeypatch.setenv("PAWBAR_DASHBOARD_ORIGIN", "https://app.example.com; default-src *")
+    await _site(allowed_origins=["brewco.com"])
+    res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
+
+    assert res.status_code == 200
+    assert res.headers["content-security-policy"] == "frame-ancestors brewco.com:*"
+
+
+@pytest.mark.asyncio
+async def test_frame_dashboard_origin_does_not_revive_an_empty_allowlist(frame_client, monkeypatch):
+    """Fail-closed is decided on the SITE's allowlist alone. A Site with no embedders
+    stays unrenderable even when a dashboard origin is declared — the owner preview
+    has its own session-authed endpoint for that."""
+    monkeypatch.setenv("PAWBAR_DASHBOARD_ORIGIN", "https://app.example.com")
+    await _site(allowed_origins=[])
+    res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
+
+    assert res.status_code == 403
 
 
 @pytest.mark.asyncio

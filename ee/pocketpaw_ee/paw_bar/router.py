@@ -1,4 +1,23 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-08-21 (fix/paw-bar-preview-frame-ancestors) — the bar renders in the
+#   builder's site preview. GET /paw-bar/frame gated the embedder on the Site's
+#   ``allowed_origins`` alone, but the builder previews a site by framing its real
+#   published page, so the bar's iframe sits TWO deep — dashboard → site page → bar —
+#   and ``frame-ancestors`` is matched against EVERY ancestor, not just the immediate
+#   parent. Nothing in the publish path knows the dashboard exists, so no Site
+#   allowlist ever named it and every preview logged "Framing '<backend>' violates
+#   ... frame-ancestors" and showed an empty box. New ``_public_frame_ancestors``
+#   appends the dashboard origin — ``PAWBAR_DASHBOARD_ORIGIN`` or, unset (the state
+#   every deploy we ship is in), the already-declared
+#   ``POCKETPAW_API_CORS_ALLOWED_ORIGINS`` — through the SAME sanitizer, and new
+#   ``_ancestor_sources`` dedupes so a dashboard that is also an allowlist entry
+#   lists once. Deliberately NOT a widening of ``allowed_origins``: that list also
+#   gates chat and lead capture via ``origin_allowed``, so this widens the render
+#   gate and nothing else. Fail-closed still reads the Site's allowlist alone, so a
+#   Site with no embedders stays unrenderable. Neither var set → the header is
+#   byte-identical to before. The session-authed owner preview
+#   (``/paw-bar/admin/site/{id}/preview-frame``) is untouched and still framed by
+#   ``_dashboard_origin`` alone.
 # Updated: 2026-08-16 (fix/paw-bar-role-gates) — the last nine ``require_scope`` gates
 #   in this router become ROLE gates, so the ``require_scope`` import is gone. The
 #   two admin site-settings routes (the concierge kill switch) and the seven widget
@@ -666,6 +685,55 @@ def _sanitize_ancestor(raw: Any) -> str | None:
     return v
 
 
+def _sanitize_dashboard_ancestor(raw: Any) -> str | None:
+    """``_sanitize_ancestor``, but KEEPING an explicit http/https scheme.
+
+    This is the difference between the fix working and not working. A schemeless
+    host-source resolves against the FRAME's OWN scheme (see ``_sanitize_ancestor``),
+    so on an https backend the bare source ``localhost:5173`` means
+    ``https://localhost:5173`` — and a dashboard served over plain http, which is
+    every local dev session pointed at a deployed backend, is refused by a policy
+    that appears to name it. That is exactly the reported failure: the blocked
+    request's header already listed ``localhost:*`` and ``127.0.0.1:*``.
+
+    ``allowed_origins`` cannot carry a scheme (``_normalize_origin_hosts`` reduces it
+    to bare hosts upstream) and shouldn't — a customer's site is https in production
+    and the schemeless form is the https-tight one there. The dashboard origin is
+    different: it is declared BY the operator, complete with the scheme they serve
+    it on, so it is honored as declared. A non-browser scheme (``tauri://localhost``)
+    has no host-source spelling and is dropped rather than guessed at.
+    """
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip().lower()
+    if "://" not in value:
+        return _sanitize_ancestor(value)
+    scheme, _, rest = value.partition("://")
+    if scheme not in ("http", "https"):
+        return None
+    host = _sanitize_ancestor(rest)
+    return f"{scheme}://{host}" if host else None
+
+
+def _ancestor_sources(origins: list[str], sanitize: Any = _sanitize_ancestor) -> list[str]:
+    """Sanitize origins into frame-ancestors host-sources: drop the unusable, collapse
+    repeats (first occurrence wins, order otherwise preserved).
+
+    Dedup earns its keep now that the dashboard origin is appended to the Site's
+    allowlist — in local dev it IS one of the seeded hosts. A repeated source is
+    harmless to a browser but turns the header into a puzzle in a console error,
+    which is the only place anyone ever reads one.
+    """
+    seen: set[str] = set()
+    sources: list[str] = []
+    for origin in origins or []:
+        source = sanitize(origin)
+        if source and source not in seen:
+            seen.add(source)
+            sources.append(source)
+    return sources
+
+
 def _frame_ancestors_csp(allowed_origins: list[str]) -> str | None:
     """Build the ``frame-ancestors`` CSP value from a Site's ``allowed_origins``.
 
@@ -674,10 +742,69 @@ def _frame_ancestors_csp(allowed_origins: list[str]) -> str | None:
     source-less directive. Mirrors ``site_keys.origin_allowed``'s empty=deny model,
     NOT the router's ``_origin_allowed`` empty=allow-all footgun.
     """
-    sources = [s for s in (_sanitize_ancestor(o) for o in (allowed_origins or [])) if s]
+    sources = _ancestor_sources(allowed_origins)
     if not sources:
         return None
     return "frame-ancestors " + " ".join(sources)
+
+
+def _dashboard_preview_ancestors() -> list[str]:
+    """Origins allowed to frame the PUBLIC bar because they are our own dashboard.
+
+    The builder previews a site by framing its real published page, so the bar's
+    iframe sits TWO deep — dashboard → site page → bar — and ``frame-ancestors`` is
+    matched against EVERY ancestor, not just the immediate parent. Nothing in the
+    publish path knows the dashboard exists (``_default_allowed_origins`` seeds the
+    local hosts, ``_with_deployed_host`` adds the site's own), so no Site allowlist
+    ever named it and the bar was refused in every preview.
+
+    Two sources, in order:
+      1. ``PAWBAR_DASHBOARD_ORIGIN`` — explicit, comma-separated. The SAME var the
+         session-authed owner preview reads (``_dashboard_origin``), minus its
+         ``localhost:5173`` default: unset must mean unset here, or every public
+         customer bar would name a visitor's own machine as a permitted embedder.
+      2. ``POCKETPAW_API_CORS_ALLOWED_ORIGINS`` — the origins the operator has
+         ALREADY declared as first-party browsers for this API, i.e. the
+         paw-enterprise frontend. Falling back to it is what makes a correctly
+         configured deploy work with no new variable, and that matters because no
+         deploy we ship sets PAWBAR_DASHBOARD_ORIGIN — which is how this broke.
+
+    The env is read raw rather than through ``Settings.load()``: load() re-reads
+    config.json and the credential store on every call, and this is a public,
+    per-request path. That means parsing the list here, so both the JSON shape
+    pydantic writes and the CSV operators write are accepted — every entry lands in
+    ``_sanitize_ancestor`` regardless, so a malformed one is dropped, never injected.
+    Never the request's own Origin/Referer, never a wildcard.
+    """
+    raw = os.environ.get("PAWBAR_DASHBOARD_ORIGIN", "").strip()
+    if not raw:
+        raw = os.environ.get("POCKETPAW_API_CORS_ALLOWED_ORIGINS", "").strip()
+    if not raw:
+        return []
+    parts = raw.strip("[]").split(",")
+    return [p.strip().strip('"').strip("'") for p in parts if p.strip()]
+
+
+def _public_frame_ancestors(allowed_origins: list[str]) -> str | None:
+    """``frame-ancestors`` for the PUBLIC visitor frame: the Site's allowlist, plus
+    our own dashboard so an owner can actually see the bar in the builder preview.
+
+    Fail-closed is still decided on the SITE's allowlist ALONE — a Site with no
+    embedders stays unrenderable, and a declared dashboard origin never revives it
+    (the owner preview has its own session-authed endpoint for that). The dashboard
+    entry is only ever ADDITIVE, on top of a policy that already had one source.
+
+    Deliberately NOT done by widening ``Site.allowed_origins``: that list also gates
+    chat and lead capture through ``site_keys.origin_allowed``, so writing the
+    dashboard into it would hand the dashboard origin authority it has no need for.
+    This widens the render gate and nothing else.
+    """
+    site_sources = _ancestor_sources(allowed_origins)
+    if not site_sources:
+        return None
+    dashboard = _ancestor_sources(_dashboard_preview_ancestors(), _sanitize_dashboard_ancestor)
+    extra = [s for s in dashboard if s not in site_sources]
+    return "frame-ancestors " + " ".join([*site_sources, *extra])
 
 
 def _configured_frame_origin(request: Request) -> str:
@@ -1058,8 +1185,10 @@ async def frame(
 
     # (2) The embedder gate: the CSP frame-ancestors header. Fail closed when no
     # allowlisted origin survives sanitization — refuse to render (same
-    # invisible-shell shape: this body also lands in a visible iframe).
-    csp = _frame_ancestors_csp(site.allowed_origins)
+    # invisible-shell shape: this body also lands in a visible iframe). The Site's
+    # allowlist plus OUR dashboard, which frames the site's real page in the builder
+    # preview and so becomes a second ancestor the browser matches too.
+    csp = _public_frame_ancestors(site.allowed_origins)
     if csp is None:
         return _dead_frame_response(po, site.allowed_origins)
 
