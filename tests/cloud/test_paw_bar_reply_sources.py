@@ -600,6 +600,100 @@ class TestSameOriginFrameGets:
         res = await client.get("/paw-bar/articles", params=_articles_params(widget.id))
         assert res.status_code == 403
 
+    # ---------------------------------------------------------------- #
+    # The SAME bug, re-introduced on every public GET added since.
+    #
+    # 2026-08-21: found live. _request_origin() resolves the same-origin case
+    # and exists for exactly this, but only the three GETs that existed on
+    # 2026-07-30 were switched to it. /paw-bar/cart, /paw-bar/conversations and
+    # /paw-bar/conversations/{id}/messages were all written afterwards reading
+    # ``request.headers.get("origin")`` straight, so all three 403'd
+    # origin_not_allowed for every visitor on every deployed bar. Captured from
+    # the frame's own origin:
+    #
+    #   conversations     403 {"detail":"origin_not_allowed"}
+    #   conversationMsgs  403 {"detail":"origin_not_allowed"}
+    #   cart              403 {"detail":"origin_not_allowed"}
+    #   articles          200
+    #   operator poll     200
+    #
+    # The visible cost was the concierge's whole history: the Messages tab reads
+    # the list, so it never populated, the conversation was never named, and the
+    # visitor's thread stayed filed under a sentinel key nothing looked up.
+    #
+    # POSTs are unaffected — browsers always send Origin on POST — which is why
+    # conversations could be CREATED while none could be LISTED.
+    # ---------------------------------------------------------------- #
+
+    async def test_conversations_list_same_origin_passes(self, concierge_client) -> None:
+        client, store = concierge_client
+        await _site()
+        widget = await store.create_widget(_widget())
+
+        res = await client.get(
+            "/paw-bar/conversations",
+            params={"w": widget.id, "key": _VALID_KEY, "customer_ref": "cust-0001"},
+            headers={"Sec-Fetch-Site": "same-origin"},
+        )
+        assert res.status_code == 200
+
+    async def test_conversation_messages_same_origin_passes(self, concierge_client) -> None:
+        client, store = concierge_client
+        await _site()
+        widget = await store.create_widget(_widget())
+        conversation = await store.open_conversation(widget.id, "cust-0001", workspace_id="ws-1")
+
+        res = await client.get(
+            f"/paw-bar/conversations/{conversation.id}/messages",
+            params={"w": widget.id, "key": _VALID_KEY, "customer_ref": "cust-0001"},
+            headers={"Sec-Fetch-Site": "same-origin"},
+        )
+        assert res.status_code == 200
+
+    async def test_cart_same_origin_passes(self, concierge_client) -> None:
+        client, store = concierge_client
+        await _site()
+        widget = await store.create_widget(_widget())
+
+        res = await client.get(
+            "/paw-bar/cart",
+            params={"w": widget.id, "key": _VALID_KEY, "customer_ref": "cust-0001"},
+            headers={"Sec-Fetch-Site": "same-origin"},
+        )
+        assert res.status_code == 200
+
+    # GET /paw-bar/spec is deliberately NOT in this list. It is fetched by the
+    # LOADER from the customer's own page, so it carries a real Origin, and its
+    # gate checks that against the WIDGET's allowlist rather than the frame's —
+    # a different question with a different right answer. Resolving same-origin
+    # to the frame there would widen a gate for no caller that exists.
+
+    # ...and the gate must not have been widened while fixing them. A cross-site
+    # GET carries no Origin either, and must still be refused.
+
+    async def test_conversations_list_cross_site_stays_gated(self, concierge_client) -> None:
+        client, store = concierge_client
+        await _site()
+        widget = await store.create_widget(_widget())
+
+        res = await client.get(
+            "/paw-bar/conversations",
+            params={"w": widget.id, "key": _VALID_KEY, "customer_ref": "cust-0001"},
+            headers={"Sec-Fetch-Site": "cross-site"},
+        )
+        assert res.status_code == 403
+
+    async def test_conversations_list_originless_stays_gated(self, concierge_client) -> None:
+        client, store = concierge_client
+        await _site()
+        widget = await store.create_widget(_widget())
+
+        res = await client.get(
+            "/paw-bar/conversations",
+            params={"w": widget.id, "key": _VALID_KEY, "customer_ref": "cust-0001"},
+        )
+        assert res.status_code == 403
+
     async def test_articles_cross_site_fetch_metadata_stays_gated(
         self, concierge_client, monkeypatch
     ) -> None:

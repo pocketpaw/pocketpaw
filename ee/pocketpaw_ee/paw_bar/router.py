@@ -4747,7 +4747,7 @@ async def get_cart(
     results); no cart yet returns an empty cart with the rendered checkout_url."""
     from pocketpaw_ee.paw_bar.actions import cart_wire
 
-    origin = request.headers.get("origin")
+    origin = _request_origin(request)
     widget, _ctx, _site = await _front_gate_for_key(
         widget_id=w,
         signed_key=key,
@@ -4885,7 +4885,7 @@ async def list_visitor_conversations(
     to the resolved key — so a sibling visitor's or a sibling site's conversations
     can never appear in the answer.
     """
-    origin = request.headers.get("origin")
+    origin = _request_origin(request)
     widget, ctx, _site = await _front_gate_for_key(
         widget_id=w,
         signed_key=key,
@@ -4980,7 +4980,7 @@ async def get_visitor_conversation_messages(
     loader would answer empty anyway (it filters on customer_ref), but a 404 says
     the honest thing instead of implying the conversation exists and is silent.
     """
-    origin = request.headers.get("origin")
+    origin = _request_origin(request)
     widget, ctx, _site = await _front_gate_for_key(
         widget_id=w,
         signed_key=key,
