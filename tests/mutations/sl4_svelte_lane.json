@@ -85,8 +85,8 @@
   {
     "label": "SL-4: markers are matched as regexes rather than fixed strings, so a marker containing a '.' matches text it does not mean and fails a build that is fine",
     "file": "ee/pocketpaw_ee/sites/daytona_build.py",
-    "find": "        f'grep -qF -- {shlex.quote(marker)} \"$STDERR_LOG\"' for marker in markers",
-    "replace": "        f'grep -q -- {shlex.quote(marker)} \"$STDERR_LOG\"' for marker in markers",
+    "find": "join(f'grep -qF -- {shlex.quote(marker)} \"$STDERR_LOG\"' for marker in markers)",
+    "replace": "join(f'grep -q -- {shlex.quote(marker)} \"$STDERR_LOG\"' for marker in markers)",
     "tests": [
       "tests/ee/sites/test_svelte_async_build.py::TestTheWrapperKeepsTheSsrMarkerScan::test_markers_are_matched_as_fixed_strings"
     ]

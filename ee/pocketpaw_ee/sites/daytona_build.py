@@ -732,9 +732,7 @@ def _render_marker_scan(markers: tuple[str, ...]) -> str:
     """
     if not markers:
         return "# no SSR markers configured for this engine\n"
-    tests = " || ".join(
-        f'grep -qF -- {shlex.quote(marker)} "$STDERR_LOG"' for marker in markers
-    )
+    tests = " || ".join(f'grep -qF -- {shlex.quote(marker)} "$STDERR_LOG"' for marker in markers)
     return (
         f"if {tests}; then\n"
         '  echo "paw: build log carries a known SSR failure marker" >>"$STDERR_LOG"\n'
