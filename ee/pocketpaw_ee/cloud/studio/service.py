@@ -643,15 +643,17 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
     image bytes, which are saved + served back via /api/v1/media). Video requests
     run DIRECTLY against fal.ai via ``fal_video`` (the gateway serves image
     models for the direct surface; the fal SDK covers video, like the edit ops).
-    The record is persisted to the workspace history so the gallery keeps it
-    across reloads.
+    ``inputImageUrls`` (the flow's Video node wiring Image/Picture results in)
+    switches video to image-to-video — every image goes to the fal model in one
+    call. The record is persisted to the workspace history so the gallery keeps
+    it across reloads.
     """
+    if req.kind == "video":
+        return await _generate_video(req, workspace_id=workspace_id)
+
     prompt = (req.prompt or "").strip()
     if not prompt:
         raise ValueError("prompt is required")
-
-    if req.kind == "video":
-        return await _generate_video(req, workspace_id=workspace_id)
 
     model = (req.model or "").strip()
     if not model:
@@ -738,10 +740,15 @@ def _video_poster_ext(mime: str) -> str:
 async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) -> schemas.Generation:
     """Generate a video DIRECTLY against fal.ai via ``fal_video``.
 
-    The requested model id is resolved onto a real fal endpoint (aliases in
-    ``fal_video``); the returned video bytes are saved through media storage
-    (with a poster frame when the endpoint produced one) and the record lands in
-    the workspace history like every other generation. A fal upstream failure
+    ``inputImageUrls`` (the flow's Video node wiring Image/Picture results in)
+    switches to image-to-video: each URL is resolved to a ``data:`` URL (media
+    path / http / data pass through — see ``_resolve_source_data_url``) and all
+    of them go to the fal model in ONE call. ``fal_video`` owns the endpoint +
+    argument building for 1 / 2 / 3+ images; a text-to-video run (no images)
+    still requires a prompt. The requested model id is resolved onto a real fal
+    endpoint; the returned video bytes are saved through media storage (with a
+    poster frame when the endpoint produced one) and the record lands in the
+    workspace history like every other generation. A fal upstream failure
     surfaces as StudioUpstreamError (router → 502); bad input is ValueError
     (router → 400).
     """
@@ -749,13 +756,30 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
     if not model:
         raise ValueError("model is required")
 
-    final_prompt = await _apply_style((req.prompt or "").strip(), req.styleId)
+    prompt = (req.prompt or "").strip()
+    image_urls = [u for u in (req.inputImageUrls or []) if u and u.strip()]
+    if not image_urls and not prompt:
+        raise ValueError("prompt is required for text-to-video")
+
+    # Image-to-video runs without a typed prompt — fal_video applies its own
+    # default motion prompt, so a user can wire images and hit Generate directly.
+    effective_prompt = prompt or fal_video.DEFAULT_I2V_PROMPT
+    final_prompt = await _apply_style(effective_prompt, req.styleId)
+
+    input_data_urls: list[str] | None = None
+    if image_urls:
+        input_data_urls = []
+        for url in image_urls:
+            data_url, _ = await _resolve_source_data_url(url)
+            input_data_urls.append(data_url)
+
     try:
         video_bytes, video_mime, poster_bytes, poster_mime = await fal_video.run_fal_video(
             prompt=final_prompt,
             duration_sec=req.durationSec,
             aspect_ratio=req.aspectRatio,
             model=model,
+            image_urls=input_data_urls,
         )
     except fal_video.FalVideoError as exc:
         raise StudioUpstreamError(str(exc)) from exc
@@ -782,6 +806,7 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
         "negativePrompt": req.negativePrompt,
         "seed": req.seed,
         "durationSec": req.durationSec,
+        "inputImageCount": len(input_data_urls) if input_data_urls else None,
     }
     record = _new_generation(
         gen_id=_seq_id("gen"),

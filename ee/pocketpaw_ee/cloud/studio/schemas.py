@@ -73,6 +73,7 @@ class GenerationParams(BaseModel):
     negativePrompt: str | None = None
     seed: int | None = None
     durationSec: int | None = None
+    inputImageCount: int | None = None
 
 
 class Generation(BaseModel):
@@ -94,7 +95,10 @@ class Generation(BaseModel):
 
 class GenerateRequest(BaseModel):
     """Body of ``POST /studio/generate``. ``prompt`` is the RAW user prompt
-    (no style suffix); the backend re-applies style by ``styleId``."""
+    (no style suffix); the backend re-applies style by ``styleId``. ``inputImageUrls``
+    switches a video request to image-to-video — the flow's Video node sends the
+    result URLs of the Image/Picture nodes wired into it, and EVERY image goes to
+    the fal model in one call."""
 
     prompt: str
     kind: str = "image"
@@ -106,6 +110,7 @@ class GenerateRequest(BaseModel):
     seed: int | None = None
     durationSec: int | None = None
     referenceAssetUrl: str | None = None
+    inputImageUrls: list[str] | None = None
 
 
 class EditRequest(BaseModel):

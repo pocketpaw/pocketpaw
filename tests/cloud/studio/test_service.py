@@ -326,7 +326,7 @@ async def test_generate_video_happy_path(monkeypatch, studio_env) -> None:
     poster = b"\x89PNG\r\n\x1a\nfake-poster"
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None):
+    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
         seen.update(
             prompt=prompt,
             duration_sec=duration_sec,
@@ -368,7 +368,7 @@ async def test_generate_video_alias_resolves_endpoint(monkeypatch, studio_env) -
     by fal_video before dispatch."""
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None):
+    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
         seen["model"] = model
         return b"mp4", "video/mp4", None, None
 
@@ -386,7 +386,7 @@ async def test_generate_video_alias_resolves_endpoint(monkeypatch, studio_env) -
 async def test_generate_video_fal_failure_is_upstream_error(monkeypatch, studio_env) -> None:
     """A fal video upstream failure surfaces as StudioUpstreamError (→ 502)."""
 
-    async def _boom(*, prompt, duration_sec, aspect_ratio, model, key=None):
+    async def _boom(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
         raise fal_video.FalVideoError("fal video 'x' failed: bad key")
 
     monkeypatch.setattr(fal_video, "run_fal_video", _boom)
@@ -395,6 +395,84 @@ async def test_generate_video_fal_failure_is_upstream_error(monkeypatch, studio_
     with pytest.raises(service.StudioUpstreamError, match="bad key"):
         await service.generate(req, workspace_id="ws-1")
     assert service._load_history() == []
+
+
+async def test_generate_video_image_to_video_passes_all_images(monkeypatch, studio_env) -> None:
+    """A video request carrying ``inputImageUrls`` (the flow wiring Image nodes in)
+    dispatches to the image-to-video path: every image is resolved to a data URL
+    and forwarded to fal_video, and the Generation echoes the input image count."""
+    generated, history = studio_env
+    seen: dict = {}
+
+    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
+        seen.update(
+            prompt=prompt,
+            duration_sec=duration_sec,
+            aspect_ratio=aspect_ratio,
+            model=model,
+            image_urls=image_urls,
+        )
+        return b"mp4", "video/mp4", None, None
+
+    monkeypatch.setattr(fal_video, "run_fal_video", _fake_video)
+
+    req = schemas.GenerateRequest(
+        prompt="",
+        kind="video",
+        model="fal-ai/kling-video/v1/standard/image-to-video",
+        aspectRatio="16:9",
+        durationSec=5,
+        inputImageUrls=["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"],
+    )
+    gen = await service.generate(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert gen.params.inputImageCount == 2
+    assert seen["image_urls"] == ["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"]
+    assert seen["duration_sec"] == 5
+    assert seen["aspect_ratio"] == "16:9"
+    # No typed prompt + images → the fal default motion prompt drives the call.
+    assert seen["prompt"] == fal_video.DEFAULT_I2V_PROMPT
+
+
+async def test_generate_video_image_to_video_forwards_typed_prompt(monkeypatch, studio_env) -> None:
+    """A TYPED prompt is forwarded with the images — the user's motion direction
+    drives the fal image-to-video call, with the active style suffix applied."""
+    generated, history = studio_env
+    seen: dict = {}
+
+    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
+        seen.update(prompt=prompt, image_urls=image_urls, duration_sec=duration_sec)
+        return b"mp4", "video/mp4", None, None
+
+    monkeypatch.setattr(fal_video, "run_fal_video", _fake_video)
+
+    req = schemas.GenerateRequest(
+        prompt="slow zoom in, then pan across",
+        kind="video",
+        model="fal-ai/kling-video/v1/standard/image-to-video",
+        aspectRatio="16:9",
+        durationSec=5,
+        styleId="cinematic",
+        inputImageUrls=["data:image/png;base64,AAAA"],
+    )
+    gen = await service.generate(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert seen["image_urls"] == ["data:image/png;base64,AAAA"]
+    assert seen["duration_sec"] == 5
+    # The typed prompt survives style suffixing and reaches fal_video verbatim-ish.
+    assert seen["prompt"].startswith("slow zoom in, then pan across")
+    assert "cinematic lighting" in seen["prompt"]
+    assert gen.params.inputImageCount == 1
+
+
+async def test_generate_video_without_images_requires_prompt(monkeypatch, studio_env) -> None:
+    """Text-to-video still requires a prompt; only the image-to-video path may run
+    prompt-less (the model animates the supplied frames)."""
+    req = schemas.GenerateRequest(prompt="", kind="video", model="m", aspectRatio="16:9")
+    with pytest.raises(ValueError, match="prompt is required for text-to-video"):
+        await service.generate(req, workspace_id="ws-1")
 
 
 async def test_generate_proxy_failure_is_upstream_error(monkeypatch, proxy_env, studio_env) -> None:
