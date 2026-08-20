@@ -11,6 +11,11 @@
 #                         fal.ai models served upstream), persist the returned
 #                         PNG through the media storage adapter (local disk or
 #                         S3), return a Generation.
+#   * generate (video)  — run DIRECTLY against fal.ai via cloud.studio.fal_video
+#                         (the gateway serves image models for the direct
+#                         surface; the fal SDK covers video like the edit ops),
+#                         persist the video (+ optional poster) through media
+#                         storage, return a Generation.
 #   * generations       — persisted per-workspace history (JSONL under
 #                         ~/.pocketpaw/studio) so the gallery survives reloads.
 #   * edit              — canvas edit ops (inpaint/expand/upscale/variations/
@@ -48,7 +53,7 @@ from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
 from pocketpaw_ee.cloud.media import storage as media_storage
 
-from . import fal_edit, schemas
+from . import fal_edit, fal_video, schemas
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +191,10 @@ def _map_entry(entry: ModelCatalogEntry, *, default: bool) -> schemas.StudioMode
         durations = None
     else:
         aspect_ratios = ["16:9", "9:16", "1:1"]
-        durations = [5]
+        # The rail's duration picker (2s / 5s / 10s) renders exactly these;
+        # fal_video passes the chosen duration through and the endpoint's own
+        # validation reports a duration the selected model can't produce.
+        durations = list(fal_video.SUPPORTED_DURATIONS)
     return schemas.StudioModel(
         id=entry.id,
         label=_friendly_label(entry.id, entry.display_name),
@@ -203,10 +211,39 @@ def _map_entry(entry: ModelCatalogEntry, *, default: bool) -> schemas.StudioMode
     )
 
 
+def _fallback_video_model() -> schemas.StudioModel:
+    """The pickable fal video model to surface when the proxy catalog serves no
+    ``Modality.VIDEO`` entries. Video generation runs DIRECTLY against fal.ai
+    (never through the proxy), so the rail must still offer a video model —
+    otherwise clicking Video in the context sidebar keeps the stale image model
+    selected and the 2s / 5s / 10s duration picker never renders."""
+    return schemas.StudioModel(
+        id=fal_video.DEFAULT_VIDEO_MODEL,
+        label="Kling Video 1.0",
+        kind="video",
+        provider="fal",
+        description=(
+            "Text-to-video via fal.ai (Kling v1 standard). 2s / 5s / 10s clips — "
+            "runs directly against fal, no proxy dependency."
+        ),
+        aspectRatios=["16:9", "9:16", "1:1"],
+        maxCount=1,
+        supportsNegativePrompt=False,
+        durationsSec=list(fal_video.SUPPORTED_DURATIONS),
+        credits=1,
+        tags=["fal", "video"],
+        default=True,
+    )
+
+
 async def list_models() -> list[schemas.StudioModel]:
     """Return the image + video models the LiteLLM proxy serves, shaped for the
     /studio picker. The first image model is the catalog default. A proxy outage
-    propagates CatalogUpstreamError so the router can surface 502."""
+    propagates CatalogUpstreamError so the router can surface 502.
+
+    When the catalog serves no video entries, a fallback fal video model is
+    appended so the rail's Video kind always has a picker row with the
+    2s / 5s / 10s duration set (see _fallback_video_model)."""
     entries = await catalog_service.list_models()
     images = [e for e in entries if e.modality == Modality.IMAGE]
     videos = [e for e in entries if e.modality == Modality.VIDEO]
@@ -215,6 +252,8 @@ async def list_models() -> list[schemas.StudioModel]:
         models.append(_map_entry(entry, default=(i == 0)))
     for entry in videos:
         models.append(_map_entry(entry, default=False))
+    if not videos:
+        models.append(_fallback_video_model())
     return models
 
 
@@ -598,22 +637,21 @@ def time_now_ms() -> int:
 
 
 async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schemas.Generation:
-    """Run a direct studio generation through the LiteLLM gateway.
+    """Run a direct studio generation.
 
     Image requests resolve synchronously to ``succeeded`` (the proxy returns the
     image bytes, which are saved + served back via /api/v1/media). Video requests
-    raise StudioNotSupported until the gateway serves video models. The record is
-    persisted to the workspace history so the gallery keeps it across reloads.
+    run DIRECTLY against fal.ai via ``fal_video`` (the gateway serves image
+    models for the direct surface; the fal SDK covers video, like the edit ops).
+    The record is persisted to the workspace history so the gallery keeps it
+    across reloads.
     """
     prompt = (req.prompt or "").strip()
     if not prompt:
         raise ValueError("prompt is required")
 
     if req.kind == "video":
-        raise StudioNotSupported(
-            "Video generation is not configured yet — the model gateway serves "
-            "image models only. Switch to the Image tab to generate."
-        )
+        return await _generate_video(req, workspace_id=workspace_id)
 
     model = (req.model or "").strip()
     if not model:
@@ -665,6 +703,95 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
         status="succeeded",
     )
     # Persist with the owning workspace tag (dropped by the wire model on read).
+    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    return record
+
+
+# ── Video generation (direct fal.ai dispatch) ────────────────────────────────
+# The gateway serves image models for the direct /studio surface; video runs on
+# the official fal-client SDK (like the canvas edit ops) so /studio video works
+# without waiting on a gateway route. The result video (+ optional poster frame)
+# persists through the same media storage as every other generated asset.
+
+
+def _video_ext(mime: str) -> str:
+    """Storage extension for a fal result content-type (defaults to mp4)."""
+    mime = (mime or "").split(";")[0].strip().lower()
+    return {
+        "video/mp4": "mp4",
+        "video/webm": "webm",
+        "video/quicktime": "mov",
+        "video/x-m4v": "m4v",
+    }.get(mime, "mp4")
+
+
+def _video_poster_ext(mime: str) -> str:
+    """Storage extension for a fal result poster (defaults to jpg)."""
+    mime = (mime or "").split(";")[0].strip().lower()
+    return {
+        "image/png": "png",
+        "image/webp": "webp",
+        "image/jpeg": "jpg",
+    }.get(mime, "jpg")
+
+
+async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) -> schemas.Generation:
+    """Generate a video DIRECTLY against fal.ai via ``fal_video``.
+
+    The requested model id is resolved onto a real fal endpoint (aliases in
+    ``fal_video``); the returned video bytes are saved through media storage
+    (with a poster frame when the endpoint produced one) and the record lands in
+    the workspace history like every other generation. A fal upstream failure
+    surfaces as StudioUpstreamError (router → 502); bad input is ValueError
+    (router → 400).
+    """
+    model = (req.model or "").strip()
+    if not model:
+        raise ValueError("model is required")
+
+    final_prompt = await _apply_style((req.prompt or "").strip(), req.styleId)
+    try:
+        video_bytes, video_mime, poster_bytes, poster_mime = await fal_video.run_fal_video(
+            prompt=final_prompt,
+            duration_sec=req.durationSec,
+            aspect_ratio=req.aspectRatio,
+            model=model,
+        )
+    except fal_video.FalVideoError as exc:
+        raise StudioUpstreamError(str(exc)) from exc
+
+    if not video_bytes:
+        raise StudioUpstreamError("fal video generation returned no data")
+
+    mime = video_mime or "video/mp4"
+    video_url = await _save_image_bytes(video_bytes, mime=mime, ext=_video_ext(mime))
+    assets: list[dict[str, Any]] = [{"id": _seq_id("asset"), "url": video_url, "mime": mime}]
+    if poster_bytes:
+        poster_mime_val = poster_mime or "image/jpeg"
+        poster_url = await _save_image_bytes(
+            poster_bytes, mime=poster_mime_val, ext=_video_poster_ext(poster_mime_val)
+        )
+        assets[0]["posterUrl"] = poster_url
+
+    params: dict[str, Any] = {
+        "kind": "video",
+        "model": model,
+        "aspectRatio": req.aspectRatio,
+        "count": 1,
+        "styleId": req.styleId,
+        "negativePrompt": req.negativePrompt,
+        "seed": req.seed,
+        "durationSec": req.durationSec,
+    }
+    record = _new_generation(
+        gen_id=_seq_id("gen"),
+        prompt=final_prompt,
+        kind="video",
+        model=model,
+        params=params,
+        assets=assets,
+        status="succeeded",
+    )
     _append_history({**record.model_dump(), "_workspace": workspace_id})
     return record
 

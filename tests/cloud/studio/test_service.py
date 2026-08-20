@@ -13,8 +13,10 @@
 #     to the workspace history.
 #   * generate url path — a ``data[0].url`` result is fetched + saved too.
 #   * generate style suffix — the style promptSuffix is appended server-side.
-#   * generate guards — empty prompt / missing model are ValueError; video is
-#     StudioNotSupported (until the gateway serves video models).
+#   * generate guards — empty prompt / missing model are ValueError.
+#   * generate (video) — a fal video result is saved (mp4 + optional poster),
+#     aliases resolve onto a fal endpoint, a fal failure surfaces as
+#     StudioUpstreamError, and nothing is persisted on failure.
 #   * proxy failure — a 500 from the proxy surfaces as StudioUpstreamError.
 #   * history scoping — list_generations / get_generation are workspace-scoped.
 #   * edit — dispatch (monkeypatched fal_edit.run_fal_edit), stored-media source
@@ -35,7 +37,7 @@ from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.litellm_client import CatalogUpstreamError
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry, Pricing
 from pocketpaw_ee.cloud.media import storage as media_storage
-from pocketpaw_ee.cloud.studio import fal_edit, schemas
+from pocketpaw_ee.cloud.studio import fal_edit, fal_video, schemas
 
 from pocketpaw.uploads.local import LocalStorageAdapter
 
@@ -150,7 +152,57 @@ async def test_list_models_maps_image_and_video_entries(monkeypatch) -> None:
     assert gpt.default is False
     video = models[2]
     assert video.kind == "video"
-    assert video.durationsSec == [5]
+    assert video.durationsSec == [2, 5, 10]
+
+
+async def test_list_models_appends_fal_video_fallback_when_catalog_has_none(
+    monkeypatch,
+) -> None:
+    """When the proxy catalog serves no video entries, the fal video model is
+    still surfaced so the rail's Video kind offers a picker row with the
+    2s / 5s / 10s duration set (video generation runs directly against fal)."""
+    entries = [
+        _entry("fal_ai/fal-ai/flux/schnell", provider="fal_ai", modality=Modality.IMAGE),
+        _entry("anthropic/claude-3-5-sonnet", provider="anthropic", modality=Modality.CHAT),
+    ]
+
+    async def _list(**kw):
+        return entries
+
+    monkeypatch.setattr(catalog_service, "list_models", _list)
+
+    models = await service.list_models()
+
+    video = [m for m in models if m.kind == "video"]
+    assert len(video) == 1
+    assert video[0].id == fal_video.DEFAULT_VIDEO_MODEL
+    assert video[0].provider == "fal"
+    assert video[0].durationsSec == [2, 5, 10]
+    assert video[0].default is True
+    assert video[0].aspectRatios == ["16:9", "9:16", "1:1"]
+
+
+async def test_list_models_does_not_append_fallback_when_video_served(
+    monkeypatch,
+) -> None:
+    """A catalog that already serves video keeps exactly those entries — no
+    fallback is appended."""
+    entries = [
+        _entry("fal_ai/fal-ai/flux/schnell", provider="fal_ai", modality=Modality.IMAGE),
+        _entry("fal_ai/fal-ai/kling/v2", provider="fal_ai", modality=Modality.VIDEO),
+    ]
+
+    async def _list(**kw):
+        return entries
+
+    monkeypatch.setattr(catalog_service, "list_models", _list)
+
+    models = await service.list_models()
+
+    videos = [m for m in models if m.kind == "video"]
+    assert len(videos) == 1
+    assert videos[0].id == "fal_ai/fal-ai/kling/v2"
+    assert videos[0].durationsSec == [2, 5, 10]
 
 
 async def test_list_models_upstream_failure_propagates(monkeypatch) -> None:
@@ -266,11 +318,83 @@ async def test_generate_missing_model_is_valueerror(monkeypatch, studio_env) -> 
         await service.generate(req, workspace_id="ws-1")
 
 
-async def test_generate_video_is_not_supported(monkeypatch, studio_env) -> None:
-    """No video model on the gateway yet → a typed 501 path, not a proxy call."""
-    req = schemas.GenerateRequest(prompt="a clip", kind="video", model="fal-ai/kling-v2")
-    with pytest.raises(service.StudioNotSupported):
+async def test_generate_video_happy_path(monkeypatch, studio_env) -> None:
+    """A fal video result → the mp4 (+ poster) is saved into the generated dir, a
+    succeeded Generation is returned, and history records it under the workspace."""
+    generated, history = studio_env
+    mp4 = b"\x00\x00\x00\x18ftypmp42fake-video"
+    poster = b"\x89PNG\r\n\x1a\nfake-poster"
+    seen: dict = {}
+
+    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None):
+        seen.update(
+            prompt=prompt,
+            duration_sec=duration_sec,
+            aspect_ratio=aspect_ratio,
+            model=model,
+        )
+        return mp4, "video/mp4", poster, "image/png"
+
+    monkeypatch.setattr(fal_video, "run_fal_video", _fake_video)
+
+    req = schemas.GenerateRequest(
+        prompt="a clip of waves",
+        kind="video",
+        model="fal-ai/kling-video/v1/standard/text-to-video",
+        aspectRatio="16:9",
+        durationSec=5,
+        styleId="cinematic",
+    )
+    gen = await service.generate(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert gen.kind == "video"
+    assert gen.params.durationSec == 5
+    assert gen.params.aspectRatio == "16:9"
+    assert seen["duration_sec"] == 5
+    assert seen["aspect_ratio"] == "16:9"
+    assert gen.assets and gen.assets[0].mime == "video/mp4"
+    assert gen.assets[0].url.startswith("/api/v1/media/")
+    assert gen.assets[0].posterUrl.startswith("/api/v1/media/")
+    saved = list(generated.iterdir())
+    assert any(p.suffix == ".mp4" for p in saved)
+    assert any(p.suffix == ".png" for p in saved)
+    # The persisted record is scoped to the workspace.
+    assert service.list_generations("ws-1")[0].id == gen.id
+
+
+async def test_generate_video_alias_resolves_endpoint(monkeypatch, studio_env) -> None:
+    """A catalog id (fal_ai/fal-ai/kling/v2) is resolved onto a real fal endpoint
+    by fal_video before dispatch."""
+    seen: dict = {}
+
+    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None):
+        seen["model"] = model
+        return b"mp4", "video/mp4", None, None
+
+    monkeypatch.setattr(fal_video, "run_fal_video", _fake_video)
+
+    req = schemas.GenerateRequest(
+        prompt="a clip", kind="video", model="fal_ai/fal-ai/kling/v2", aspectRatio="16:9"
+    )
+    gen = await service.generate(req, workspace_id="ws-1")
+    assert gen.status == "succeeded"
+    assert seen["model"] == "fal_ai/fal-ai/kling/v2"  # echoed back to fal_video
+    assert gen.model == "fal_ai/fal-ai/kling/v2"  # user sees what they asked for
+
+
+async def test_generate_video_fal_failure_is_upstream_error(monkeypatch, studio_env) -> None:
+    """A fal video upstream failure surfaces as StudioUpstreamError (→ 502)."""
+
+    async def _boom(*, prompt, duration_sec, aspect_ratio, model, key=None):
+        raise fal_video.FalVideoError("fal video 'x' failed: bad key")
+
+    monkeypatch.setattr(fal_video, "run_fal_video", _boom)
+
+    req = schemas.GenerateRequest(prompt="a clip", kind="video", model="m", aspectRatio="16:9")
+    with pytest.raises(service.StudioUpstreamError, match="bad key"):
         await service.generate(req, workspace_id="ws-1")
+    assert service._load_history() == []
 
 
 async def test_generate_proxy_failure_is_upstream_error(monkeypatch, proxy_env, studio_env) -> None:
