@@ -39,6 +39,17 @@
 #   docs/design/drafts/2026-08-13-paw-sites-pricing-spec.md): when basic/pro/
 #   business are rekeyed to free/site/staff, this mapping moves with them and is
 #   the ONLY place the badge's plan gate is expressed.
+# Updated 2026-08-21 (feat/site-free-custom-domain, PW-1): added
+#   ``max_domained_sites`` — HOW MANY SITES in a workspace may carry a custom
+#   domain on this tier (None = uncapped). The floor now carries 1 rather than 0,
+#   which is the captain's rule of 2026-08-21: "only 1 site is allowed to have a
+#   custom domain in free". THE UNIT IS THE SITE, NOT THE HOSTNAME — apex and
+#   ``www`` on one site cost one, not two — which is why the field is not called
+#   ``max_custom_domains``. Custom-domain entitlement now reads this field rather
+#   than ``"custom_domain" in cloudflare_features``, so ``cloudflare_features``
+#   goes back to meaning only what its name says: RESOLD Cloudflare capability
+#   that BC-10 provisions. Also added ``_FREE_MAX_HOSTNAMES_PER_SITE`` — see its
+#   own comment for why a site-unit cap needs a hostname-unit companion.
 
 from __future__ import annotations
 
@@ -50,7 +61,7 @@ from dataclasses import dataclass
 # but the SHAPE (a growing ladder, base resells nothing) is the contract.
 #
 #   basic    — $0/yr    — the included tier; no resold Cloudflare features.
-#   pro      — $120/yr  — adds a custom domain + analytics.
+#   pro      — $120/yr  — adds analytics + uncapped custom domains.
 #   business — $480/yr  — adds the WAF + edge cache controls on top of pro.
 # ---------------------------------------------------------------------------
 _SITE_PLAN_ANNUAL_PRICE_USD: dict[str, int] = {
@@ -77,6 +88,38 @@ _SITE_PLAN_BADGE_REMOVAL: dict[str, bool] = {
     "business": True,
 }
 
+# How many SITES in a workspace may carry a custom domain on this tier.
+# ``None`` means uncapped.
+#
+# THE UNIT IS THE SITE, NOT THE HOSTNAME. A site pointing both ``acme.com`` and
+# ``www.acme.com`` at itself spends ONE of these, not two — which is the pair
+# almost every customer wants and the reason this is not named
+# ``max_custom_domains``. A reader who takes the name literally counts
+# ``SiteDomain`` rows, and ``SiteDomain`` is one row per hostname.
+#
+# The floor carries 1, not 0: "only 1 site is allowed to have a custom domain in
+# free" (captain, 2026-08-21). That 1 is a FLOOR GRANT — it needs no subscription,
+# unlike every other capability on this catalog — so the resolver reads it off the
+# base tier whether or not the site is paying. Unknown keys resolve to 0 in
+# ``_build``: fail-closed, matching ``badge_removal``.
+_SITE_PLAN_MAX_DOMAINED_SITES: dict[str, int | None] = {
+    "basic": 1,
+    "pro": None,
+    "business": None,
+}
+
+# How many HOSTNAMES one FLOOR-tier site may carry. The companion cap to
+# ``max_domained_sites``, and it exists because that field caps sites: without
+# this, a free workspace can point fifty hostnames at its one allowed site, each
+# one costing a Cloudflare custom hostname and a Worker route at $0 revenue. Two
+# is apex + ``www``.
+#
+# Deliberately a single named constant with a single comparison — this is a
+# recommendation the build made, not a rule the captain handed down, so raising it
+# or deleting it is a one-line change and nothing else moves. Paid tiers are not
+# subject to it.
+_FREE_MAX_HOSTNAMES_PER_SITE = 2
+
 # Order the catalog is listed in — the price ladder, cheapest first.
 _SITE_TIER_ORDER: tuple[str, ...] = ("basic", "pro", "business")
 
@@ -94,7 +137,9 @@ class SitePlanTier:
     is the set of Cloudflare features the tier resells (BC-10 provisions them).
     ``badge_removal`` is whether a site on this tier may ship without the
     attribution badge — read by ``sites.badge.badge_required``. ``sells_concierge``
-    is derived, not stored (see the property).
+    is derived, not stored (see the property). ``max_domained_sites`` is how many
+    SITES in the workspace may carry a custom domain on this tier (None =
+    uncapped) — the site, not the hostname, so apex + ``www`` on one site spend one.
     """
 
     key: str
@@ -102,6 +147,7 @@ class SitePlanTier:
     dodo_product_id: str | None
     cloudflare_features: frozenset[str]
     badge_removal: bool = False
+    max_domained_sites: int | None = 0
 
     @property
     def sells_concierge(self) -> bool:
@@ -157,7 +203,22 @@ def _build(key: str) -> SitePlanTier:
         dodo_product_id=_dodo_product_for(key),
         cloudflare_features=_SITE_PLAN_CF_FEATURES.get(key, frozenset()),
         badge_removal=_SITE_PLAN_BADGE_REMOVAL.get(key, False),
+        # ``.get(key, 0)`` and not ``.get(key)``: a missing key must mean NO
+        # domains, while a present key mapped to None means UNCAPPED. Collapsing
+        # the two would hand an unknown tier the uncapped answer.
+        max_domained_sites=_SITE_PLAN_MAX_DOMAINED_SITES.get(key, 0),
     )
+
+
+def free_max_hostnames_per_site() -> int:
+    """How many hostnames one FLOOR-tier site may carry.
+
+    A function rather than a bare constant import so the one seam that enforces it
+    (``sites.service.add_domain``) reads it through the catalog's public surface,
+    the same way it reads every other plan rule. See the constant's comment for why
+    a site-unit cap needs a hostname-unit companion at all.
+    """
+    return _FREE_MAX_HOSTNAMES_PER_SITE
 
 
 def list_site_plans() -> list[SitePlanTier]:
@@ -185,6 +246,7 @@ def get_site_plan(key: str | None) -> SitePlanTier | None:
 __all__ = [
     "BASE_SITE_PLAN_KEY",
     "SitePlanTier",
+    "free_max_hostnames_per_site",
     "get_site_plan",
     "list_site_plans",
 ]

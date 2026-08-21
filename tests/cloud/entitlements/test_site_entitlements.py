@@ -11,6 +11,19 @@
 # The resolver is pure, so every branch is exercised without a database: it takes
 # the site's billing fields because ``entitlements`` may not import ``models.site``
 # (EE cloud rule 2).
+#
+# Updated 2026-08-21 (feat/site-free-custom-domain, PW-1). Several assertions here
+# INVERTED, and the inversion is the change, not a regression: free now includes a
+# custom domain ("only 1 site is allowed to have a custom domain in free" —
+# captain, 2026-08-21), so a site resolving to the floor gets ``custom_domain
+# True`` and ``max_domained_sites == 1`` where it used to get False and nothing.
+# Badge removal, the concierge, and the UNCAPPED allowance are untouched: those are
+# still paid grants and still need an active subscription, which is why the
+# badge half of every one of these tests still reads exactly as it did.
+#
+# ``custom_domain`` answers "may this site have one at all" and is now True almost
+# everywhere. The question with teeth moved to the attach seam, which counts SITES
+# already holding a domain — see tests/cloud/sites/test_custom_domain_entitlement.py.
 
 from __future__ import annotations
 
@@ -55,6 +68,12 @@ def test_business_is_paid_too():
     assert ent.custom_domain is True
 
 
+def test_what_a_paying_site_actually_buys_is_an_UNCAPPED_allowance():
+    """Free includes a custom domain, so the paid tiers no longer sell the
+    capability — they sell the absence of a ceiling on it. None means uncapped."""
+    assert _resolve(plan_tier="pro", subscription_status="active").max_domained_sites is None
+
+
 # --------------------------------------------------------------------------- #
 # The hole: a paid TIER without a paying SUBSCRIPTION
 # --------------------------------------------------------------------------- #
@@ -69,7 +88,23 @@ def test_a_paid_tier_without_an_active_subscription_is_badged(status):
 
     assert ent.subscription_active is False
     assert ent.badge_required is True
-    assert ent.custom_domain is False
+
+
+@pytest.mark.parametrize("status", ["cancelled", "none", "pending", "", None, "garbage"])
+def test_a_lapsed_paid_site_falls_to_the_FLOOR_allowance_not_to_zero(status):
+    """It keeps what free would have given it, and no more.
+
+    Worth its own test because "fail closed" reads like it should mean zero here,
+    and zero would be wrong: a customer who once paid must not end up worse off
+    than one who never did. What lapsing actually costs is the UNCAPPED allowance —
+    the site drops from None to the floor's 1.
+    """
+    floor = site_plan_catalog.get_site_plan(site_plan_catalog.BASE_SITE_PLAN_KEY)
+
+    ent = _resolve(plan_tier="pro", subscription_status=status)
+
+    assert ent.max_domained_sites == floor.max_domained_sites
+    assert ent.custom_domain is True
 
 
 def test_a_tier_recorded_but_never_charged_is_badged():
@@ -79,7 +114,6 @@ def test_a_tier_recorded_but_never_charged_is_badged():
     ent = _resolve(plan_tier="business", subscription_status="none")
 
     assert ent.badge_required is True
-    assert ent.custom_domain is False
 
 
 def test_the_tier_is_still_reported_when_it_is_not_being_paid_for():
@@ -100,7 +134,41 @@ def test_the_base_tier_is_badged_even_when_active():
     ent = _resolve(plan_tier="basic", subscription_status="active")
 
     assert ent.badge_required is True
-    assert ent.custom_domain is False
+
+
+def test_the_floor_grants_its_domain_with_no_subscription_at_all():
+    """The captain's rule, at the resolver.
+
+    This is the case the old single-branch resolver could not express: every
+    capability sat behind ``tier is not None and subscription_active``, so a $0
+    tier fell through to all-False and a catalog edit granting free a domain would
+    have granted nothing. Splitting floor grants out of paid grants is what makes
+    the catalog value reachable.
+    """
+    ent = _resolve(plan_tier=site_plan_catalog.BASE_SITE_PLAN_KEY, subscription_status="none")
+
+    assert ent.subscription_active is False
+    assert ent.max_domained_sites == 1
+    assert ent.custom_domain is True
+
+
+def test_the_allowance_the_resolver_reports_is_the_one_in_the_catalog():
+    """Pinned against the catalog, not the literal 1, so the rekey moves this test
+    with the ladder instead of breaking it."""
+    floor = site_plan_catalog.get_site_plan(site_plan_catalog.BASE_SITE_PLAN_KEY)
+
+    ent = _resolve(plan_tier=site_plan_catalog.BASE_SITE_PLAN_KEY, subscription_status="none")
+
+    assert ent.max_domained_sites == floor.max_domained_sites
+
+
+def test_a_free_site_still_carries_its_badge_and_still_has_no_concierge():
+    """The floor grant is one capability, not a general amnesty. Free getting a
+    custom domain must not leak badge removal or the concierge along with it."""
+    ent = _resolve(plan_tier=site_plan_catalog.BASE_SITE_PLAN_KEY, subscription_status="none")
+
+    assert ent.badge_required is True
+    assert ent.concierge_entitled is False
 
 
 @pytest.mark.parametrize("tier", [None, "", "stduio", "site", "staff"])
@@ -112,7 +180,9 @@ def test_an_unknown_or_absent_tier_falls_to_the_base(tier):
 
     assert ent.plan_tier == site_plan_catalog.BASE_SITE_PLAN_KEY
     assert ent.badge_required is True
-    assert ent.custom_domain is False
+    # Fail-closed on the ALLOWANCE too: an unknown tier gets the floor's, never the
+    # uncapped one. "active" here is a red herring — there is no tier to activate.
+    assert ent.max_domained_sites == 1
 
 
 # --------------------------------------------------------------------------- #

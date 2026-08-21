@@ -40,6 +40,16 @@
 # Updated 2026-08-08 (feat/billing-storage-caps): also added
 #   ``max_storage_bytes`` — the workspace S3 storage cap (Free = 5 GB) surfaced
 #   to the uploads gate and the /storage/usage read; fail-closed to 5 GB.
+# Updated 2026-08-21 (feat/site-free-custom-domain, PW-1): ``resolve_site_entitlements``
+#   no longer has ONE branch. It has two, and the split is the point of the change:
+#   PAID grants (badge removal, concierge, an UNCAPPED domain allowance) still need
+#   an active subscription, while the FLOOR grant (``max_domained_sites``) resolves
+#   off the base tier whether or not anyone is paying — because free now includes a
+#   custom domain, and a catalog edit alone could never have delivered one. Under
+#   the old single branch every $0 tier fell through to the all-False defaults, so a
+#   floor capability was structurally unexpressible. Also extracted the
+#   active-subscription test to ``_subscription_is_active`` now that two branches
+#   ask it.
 # Updated 2026-08-20 (feat/site-plan-catalog-inclusions): ``concierge_entitled``
 #   now reads ``tier.sells_concierge`` off the catalog row instead of re-deriving
 #   "above the free floor" here — the plan-catalog DTO needs the same answer for
@@ -122,6 +132,46 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
 _ACTIVE_SITE_SUBSCRIPTION_STATUSES = frozenset({"active"})
 
 
+def _subscription_is_active(subscription_status: str | None) -> bool:
+    """Is this site's per-site subscription actually paying?
+
+    Extracted from ``resolve_site_entitlements``'s single branch when that branch
+    became two (floor grants vs paid grants) and both needed the same answer. A
+    None / empty status normalizes to "none" — absent is not paying.
+    """
+    return (subscription_status or "none") in _ACTIVE_SITE_SUBSCRIPTION_STATUSES
+
+
+def site_domain_allowance(*, plan_tier: str | None, subscription_status: str | None) -> int | None:
+    """How many SITES may carry a custom domain, from THIS site's own plan.
+
+    ``None`` means uncapped. Public because the ATTACH seam needs it per row: to
+    decide whether a workspace has room for one more domained site it has to ask,
+    of every site already holding a domain, whether that site is riding the free
+    floor or paying for its own uncapped allowance. Only a site on the floor spends
+    the workspace's floor allowance.
+
+    Split out of ``resolve_site_entitlements`` rather than re-derived there, so the
+    floor-vs-paid rule is written once. ``sites.service`` calling this is not a
+    layering break: it is a pure function of two strings, which is the same reason
+    ``resolve_site_entitlements`` takes the site's billing fields instead of
+    reading them (EE cloud rule 2).
+    """
+    # The floor first — it applies to an unknown tier, an absent tier, and a paid
+    # tier whose subscription has lapsed, all of which must land on the same
+    # answer. Free includes one domained site, so this is a grant, not a denial.
+    floor = site_plan_catalog.get_site_plan(site_plan_catalog.BASE_SITE_PLAN_KEY)
+    allowance = floor.max_domained_sites if floor is not None else 0
+
+    # A paying tier's own allowance REPLACES the floor — normally upward
+    # (None = uncapped). Not ``max(...)``: None is not a number, and a tier that
+    # deliberately sells fewer domained sites than free should be able to.
+    tier = site_plan_catalog.get_site_plan(plan_tier)
+    if tier is not None and _subscription_is_active(subscription_status):
+        allowance = tier.max_domained_sites
+    return allowance
+
+
 def resolve_site_entitlements(
     *,
     site_id: str,
@@ -138,31 +188,46 @@ def resolve_site_entitlements(
     passes what it owns. That also makes every branch here testable without a
     database.
 
-    Every paid capability is gated on the tier granting it AND the subscription
-    being active. Reading the tier alone is the bug this function exists to
-    prevent: cancellation never resets ``plan_tier``, and an unconfigured Dodo
-    product records a paid tier with no charge at all.
+    PAID capabilities are gated on the tier granting it AND the subscription being
+    active. Reading the tier alone is the bug this function exists to prevent:
+    cancellation never resets ``plan_tier``, and an unconfigured Dodo product
+    records a paid tier with no charge at all.
+
+    FLOOR capabilities are the exception, and ``max_domained_sites`` is the first
+    of them. Free includes one domained site, so that allowance has to resolve with
+    no subscription — the base tier confers it, and an active paid subscription
+    only ever REPLACES it. Before this split there was one branch and every $0 tier
+    fell straight through it to all-False, which made a floor capability impossible
+    to express in the catalog at all.
 
     Fails closed on every unknown: an absent/unknown tier resolves to the base
-    (badged, no custom domain) rather than raising or substituting a paid tier.
+    (badged, and the base tier's own domain allowance) rather than raising or
+    substituting a paid tier.
     """
     tier = site_plan_catalog.get_site_plan(plan_tier)
     # ``get_site_plan`` deliberately does not substitute a floor, so an unknown or
     # missing key lands here as None — the fail-closed default.
     resolved_key = tier.key if tier is not None else site_plan_catalog.BASE_SITE_PLAN_KEY
 
-    subscription_active = (subscription_status or "none") in _ACTIVE_SITE_SUBSCRIPTION_STATUSES
+    subscription_active = _subscription_is_active(subscription_status)
 
-    # Both paid capabilities collapse to False unless the tier grants them AND the
-    # subscription is paying. Written as an explicit branch rather than
-    # ``paid and tier.x`` so the None-narrowing is visible to the type checker
-    # instead of resting on short-circuit evaluation.
+    # --- FLOOR grants: what the base tier confers with nobody paying -------- #
+    # The rule lives in ``site_domain_allowance`` because the attach seam asks it
+    # per row too, and one rule written twice is one rule that drifts. A lapsed
+    # paid site lands on free's one domained site rather than on zero — losing a
+    # subscription must not leave a customer worse off than never having had one.
+    max_domained_sites = site_domain_allowance(
+        plan_tier=plan_tier, subscription_status=subscription_status
+    )
+
+    # --- PAID grants: the tier AND an active subscription ------------------- #
+    # Written as an explicit branch rather than ``paid and tier.x`` so the
+    # None-narrowing is visible to the type checker instead of resting on
+    # short-circuit evaluation.
     badge_removal = False
-    custom_domain = False
     concierge_entitled = False
     if tier is not None and subscription_active:
         badge_removal = tier.badge_removal
-        custom_domain = "custom_domain" in tier.cloudflare_features
         # Any tier ABOVE the free floor sells the concierge. The rule itself now
         # lives on the catalog row (``SitePlanTier.sells_concierge``) because the
         # plan-catalog DTO needs the same answer for the buyer-facing plan cards;
@@ -176,7 +241,14 @@ def resolve_site_entitlements(
         plan_tier=resolved_key,
         subscription_active=subscription_active,
         badge_required=not badge_removal,
-        custom_domain=custom_domain,
+        # "May this site have a custom domain at all" — derived, never stored
+        # twice. Read off the allowance rather than ``cloudflare_features``, which
+        # goes back to meaning only RESOLD Cloudflare capability (BC-10). Whether
+        # the WORKSPACE has room for one more is a COUNT, and counting needs the
+        # site collection this module may not import (EE cloud rule 2), so it lives
+        # at the attach seam in ``sites.service``.
+        custom_domain=max_domained_sites != 0,
+        max_domained_sites=max_domained_sites,
         # Echoed unchanged — the owner's switch is not a billing question. The
         # AND of the two is ``concierge_available``, which is what seams ask.
         concierge_enabled=bool(concierge_enabled),
