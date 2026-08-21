@@ -463,10 +463,46 @@ def mark_cloud_chat_run() -> Iterator[None]:
 def push_sse_event(name: str, data: dict[str, Any]) -> None:
     """Send a named SSE event to the active stream's sink, if any.
 
-    No-op when there's no sink in scope (e.g. invoked from a unit test or
-    a CLI handler that isn't part of an SSE stream).
+    Resolves the stream in two steps, and the SECOND one is a bug fix rather than
+    a nicety:
+
+    1. The ``_sse_event_sink`` ContextVar — the caller's own stream by
+       construction, and the only path that existed before 2026-08-21.
+    2. Failing that, the session-keyed registry, if this context carries a
+       ``session_mongo_id``.
+
+    WHY STEP 2 EXISTS. The SDK client is POOLED and prewarmed: ``_prewarm_session``
+    creates it in its own task, before the stream loop binds the sink, and a child
+    task inherits a COPY of the context as it stood at creation. ART-2 added a
+    second ``attach_agent_identity`` bind inside prewarm so the tools could read
+    identity; the sink never got the same treatment, and cannot — prewarm has no
+    live stream, so binding one there would capture a queue belonging to no turn.
+    So every in-process MCP tool sees identity and NO sink, and step 1 alone made
+    ``push_sse_event`` a silent no-op for all eight of its call sites on the
+    deployed (warm) path while working fine on a cold local run.
+
+    The visible cost was on /sites: the create tools push ``pocket_created``, and
+    the gallery keys its building cell, its publish fallback, and the effect that
+    NAVIGATES to the new site's builder on that one frame. Losing it made a
+    described site appear in the gallery and never open — see
+    tests/cloud/test_sse_push_pooled_context.py. ``fix/code-delegate-pooled-context``
+    (2026-08-07) diagnosed this exact mechanism for Code Mode's file tools and built
+    the registry to answer it; this wires the registry into the push, which is where
+    the same class of caller needed it all along.
+
+    Tenancy is checked on the fallback and only on the fallback: the registry is a
+    process-global dict, so a lookup keyed on a session id can reach another
+    tenant's stream in a way the ContextVar never could. ``stream_sink_for_session``
+    holds that line — a workspace mismatch resolves to None, and the push goes
+    nowhere rather than somewhere wrong.
+
+    Still a deliberate no-op when neither resolves (a unit test, a CLI handler, any
+    run that isn't part of an SSE stream). An observability frame nobody is obliged
+    to see must never become an exception inside a tool handler.
     """
     sink = _sse_event_sink.get()
+    if sink is None:
+        sink = stream_sink_for_session(_active_session_mongo_id.get(), _active_workspace_id.get())
     if sink is None:
         return
     try:
