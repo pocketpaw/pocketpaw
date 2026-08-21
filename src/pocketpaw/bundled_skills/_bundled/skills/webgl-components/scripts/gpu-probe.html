@@ -1,0 +1,153 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WebGL branch probe</title>
+<style>
+  body { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 2rem; }
+  h1 { font-size: 15px; margin: 0 0 .25rem; }
+  p  { margin: 0 0 1rem; color: #666; }
+  pre { background: #f4f4f5; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+  .verdict { font-weight: 700; padding: .75rem 1rem; border-radius: 6px; margin-bottom: 1rem; }
+  .webgl    { background: #dcfce7; color: #14532d; }
+  .fallback { background: #fee2e2; color: #7f1d1d; }
+</style>
+
+<h1>WebGL branch probe</h1>
+<p>Answers "does this machine render the shader or the fallback?" — and why.</p>
+<div id="verdict" class="verdict">running…</div>
+<pre id="out">running…</pre>
+
+<script>
+// Edit these to match your component's ACTUAL context options. The strict-context
+// answer only transfers to your app if the options match what your app requests.
+const CONTEXT_OPTIONS = {
+  failIfMajorPerformanceCaveat: true,
+  alpha: true,
+  premultipliedAlpha: true,
+  antialias: false,
+};
+
+const results = {};
+const notes = [];
+
+function makeCanvas(size = 8) {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  return c;
+}
+
+// Hand a context back explicitly instead of waiting for GC, so the probe does not
+// leave the page sitting at the context cap after it reports.
+function releaseContext(gl) {
+  try {
+    const ext = gl && !gl.isContextLost() && gl.getExtension("WEBGL_lose_context");
+    if (ext) ext.loseContext();
+  } catch (_) { /* releasing is best-effort; never fail the probe over it */ }
+}
+
+// 1. THE BRANCH DECIDER ------------------------------------------------------
+// This is the single question the probe exists to answer. A null here means every
+// widget on this machine renders its DOM fallback, no matter how good the shader is.
+try {
+  const strict = makeCanvas().getContext("webgl", CONTEXT_OPTIONS);
+  results.strictContext = strict ? "granted" : "null";
+  results.branch = strict ? "webgl" : "fallback";
+  releaseContext(strict);
+} catch (err) {
+  results.strictContext = "threw: " + err.message;
+  results.branch = "fallback";
+}
+
+// 2. Is there any WebGL at all, or is it strictly the performance caveat? -----
+// Distinguishes "GPU blocklisted / acceleration off, software rasterizer offered"
+// from "no WebGL in this browser at all". Both take the fallback, for different reasons.
+try {
+  const loose = makeCanvas().getContext("webgl");
+  results.permissiveContext = loose ? "granted" : "null";
+  if (loose) {
+    results.maxTextureSize = loose.getParameter(loose.MAX_TEXTURE_SIZE);
+    // Renderer strings are hidden under fingerprinting protection; absence is not an error.
+    const info = loose.getExtension("WEBGL_debug_renderer_info");
+    if (info) {
+      results.vendor = loose.getParameter(info.UNMASKED_VENDOR_WEBGL);
+      results.renderer = loose.getParameter(info.UNMASKED_RENDERER_WEBGL);
+      if (/swiftshader|llvmpipe|software|basic render/i.test(String(results.renderer))) {
+        notes.push("Renderer string looks like a software rasterizer. This is exactly the machine failIfMajorPerformanceCaveat is meant to refuse.");
+      }
+    } else {
+      notes.push("WEBGL_debug_renderer_info unavailable (fingerprinting protection). Renderer identity unknown; the strict-context result above is still authoritative.");
+    }
+  }
+  if (results.permissiveContext === "granted" && results.strictContext === "null") {
+    notes.push("WebGL exists but is refused under the performance caveat: hardware acceleration is off, or this GPU is blocklisted. THIS IS THE COMMON CASE and it is a plain browser setting, not an exotic state.");
+  }
+  if (results.permissiveContext === "null") {
+    notes.push("No WebGL context at all, strict or not.");
+  }
+  releaseContext(loose);
+} catch (err) {
+  results.permissiveContext = "threw: " + err.message;
+}
+
+// 3. Blit orientation --------------------------------------------------------
+// Confirms the shared-canvas blit offset: GL's origin is bottom-left, the 2D
+// canvas' is top-left, so a region drawn at GL y=0 is read back at height - size.
+// This runs BEFORE the context-cap test on purpose — that test deliberately
+// exhausts the context pool, and anything needing a live context after it may be
+// handed an evicted one.
+try {
+  const src = makeCanvas(4);
+  const gl = src.getContext("webgl");
+  if (!gl) {
+    results.glOriginIsBottomLeft = "skipped (no context)";
+  } else {
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, 4, 2);           // fill GL rows y = 0..2
+    gl.clearColor(1, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    const dst = makeCanvas(4).getContext("2d");
+    dst.drawImage(src, 0, 0);
+    const isRed = (y) => dst.getImageData(0, y, 1, 1).data[0] === 255;
+    const top = isRed(0), bottom = isRed(3);
+    results.glOriginIsBottomLeft = bottom && !top;
+    if (results.glOriginIsBottomLeft !== true) {
+      notes.push("Blit orientation did not match the documented bottom-left origin. Re-derive the source offset before trusting canvas.height - size.");
+    }
+    releaseContext(gl);
+  }
+} catch (err) {
+  results.glOriginIsBottomLeft = "threw: " + err.message;
+}
+
+// 4. Live context cap --------------------------------------------------------
+// Demonstrates why one context per component instance does not work: the browser
+// keeps handing out contexts while silently killing the oldest ones. Destructive
+// by design, so it runs last, and everything it takes is released afterwards.
+try {
+  const held = [];
+  for (let i = 0; i < 40; i++) {
+    const gl = makeCanvas().getContext("webgl");
+    if (!gl) break;
+    held.push(gl);
+  }
+  const alive = held.filter((gl) => !gl.isContextLost()).length;
+  results.contextsRequested = held.length;
+  results.contextsStillAlive = alive;
+  if (held.length > alive) {
+    notes.push(`Requested ${held.length} contexts, only ${alive} survived, and getContext never returned null while evicting. A per-instance context silently loses its GPU out from under it.`);
+  }
+  held.forEach(releaseContext);
+} catch (err) {
+  results.contextCap = "threw: " + err.message;
+}
+
+results.notes = notes;
+
+const el = document.getElementById("verdict");
+el.className = "verdict " + results.branch;
+el.textContent = results.branch === "webgl"
+  ? "WEBGL — this machine renders the shader. It will NOT show you the fallback; force it to test that branch."
+  : "FALLBACK — this machine renders the DOM fallback for every instance. The shader never runs here.";
+
+document.getElementById("out").textContent = JSON.stringify(results, null, 2);
+window.__probe = results;
+</script>
