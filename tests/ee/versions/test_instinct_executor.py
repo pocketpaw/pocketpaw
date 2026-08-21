@@ -16,7 +16,7 @@
 #     site deploy is triggered; the Action is marked executed.
 #   * execute_approved_change marks the Action FAILED if the deploy raises (the
 #     version is still published — published != live).
-#   * discard_rejected_change DISCARDS: the candidate is flipped to reverted and
+#   * discard_rejected_change DISCARDS: the candidate is flipped to discarded and
 #     the published pointer is left UNTOUCHED (a rejection never moves Live).
 from __future__ import annotations
 
@@ -170,7 +170,7 @@ async def test_approve_merge_marks_failed_when_deploy_raises(
 async def test_reject_discards_candidate_and_leaves_published(
     beanie_test_db, versions_journal, monkeypatch
 ) -> None:
-    """REJECT = DISCARD: the candidate is reverted, the published pointer is
+    """REJECT = DISCARD: the candidate is discarded, the published pointer is
     untouched."""
     store = _FakeStore()
     _install_workspace_store(monkeypatch, store)
@@ -188,11 +188,12 @@ async def test_reject_discards_candidate_and_leaves_published(
 
     await executor.discard_rejected_change(_action(str(cand.id)))
 
-    # The candidate is reverted.
+    # The candidate is discarded — refused by the gate, which is its own outcome
+    # and not the "reverted" this used to claim.
     from pocketpaw_ee.versions.models import ArtifactVersion
 
     row = await ArtifactVersion.get(str(cand.id))
-    assert row.status == "reverted"
+    assert row.status == "discarded"
 
     # The published pointer is still the live version — untouched.
     published = await versions.get_published(scope_type="pocket", scope_id=POCKET)

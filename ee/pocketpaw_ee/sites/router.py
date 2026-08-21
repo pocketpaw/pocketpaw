@@ -201,6 +201,7 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
 from pocketpaw_ee.sites import import_service
 from pocketpaw_ee.sites import service as sites_service
+from pocketpaw_ee.versions import service as versions_service
 from pocketpaw_ee.sites.dto import (
     AuditResponse,
     DevPreviewResponse,
@@ -593,8 +594,16 @@ async def versions_by_pocket(
 ) -> VersionHistoryResponse:
     """The ordered version timeline for a pocket (BP-4): every ArtifactVersion of
     the source pocket (scope_type="pocket"), oldest → newest, tenant-scoped on
-    ctx.workspace_id. An unversioned pocket reads an empty list (not a 404)."""
+    ctx.workspace_id. An unversioned pocket reads an empty list (not a 404).
+
+    Statuses go over the wire through ``resolve_legacy_statuses``: rows written
+    before 2026-08-21 say ``"reverted"`` whether an edit replaced them or the
+    owner discarded them, and this endpoint feeds the owner-facing timeline,
+    where that word reads as a rollback that never happened. The resolver splits
+    them by lineage. Rows written since carry their own status and pass through
+    untouched."""
     rows = await sites_service.version_history(workspace_id=ctx.workspace_id, pocket_id=pocket_id)
+    shown = versions_service.resolve_legacy_statuses(rows)
     return VersionHistoryResponse(
         pocket_id=pocket_id,
         versions=[
@@ -602,7 +611,7 @@ async def versions_by_pocket(
                 id=str(r.id),
                 version_no=r.version_no,
                 branch=r.branch,
-                status=r.status,
+                status=shown[str(r.id)],
                 label=r.label,
                 author=r.author,
                 created_at=r.created_at.isoformat(),
