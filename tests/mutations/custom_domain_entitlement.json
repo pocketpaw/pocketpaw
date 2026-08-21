@@ -1,77 +1,201 @@
 [
   {
-    "label": "the gate is deleted outright",
+    "label": "the capability gate is deleted outright",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    _assert_entitled_to_custom_domain(site)",
-    "replace": "    pass",
+    "find": "    _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT.",
+    "replace": "\n    # Then the COUNT.",
     "tests": [
-      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_free_site_cannot_attach_a_custom_domain",
-      "tests/cloud/sites/test_custom_domain_entitlement.py::test_an_unset_tier_cannot_attach_a_custom_domain"
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_catalog_granting_no_domain_at_all_still_refuses",
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_with_a_zero_floor_a_lapsed_paid_site_is_refused_too"
     ]
   },
   {
-    "label": "the gate reads the TIER alone, ignoring whether the subscription pays",
+    "label": "the capability gate reads resold Cloudflare features again, and free loses its domain",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    if ent.custom_domain:\n        return",
     "replace": "    if \"custom_domain\" in (site_plans.get_site_plan(site.plan_tier).cloudflare_features if site_plans.get_site_plan(site.plan_tier) else set()):\n        return",
     "tests": [
-      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_paid_tier_without_an_active_subscription_is_refused"
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_free_site_attaches_its_one_custom_domain",
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_an_unset_tier_gets_the_floor_allowance"
     ]
   },
   {
-    "label": "the fail-closed default inverts — an unknown tier is handed a domain",
-    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
-    "find": "    custom_domain = False",
-    "replace": "    custom_domain = True",
-    "tests": [
-      "tests/cloud/sites/test_custom_domain_entitlement.py::test_an_unset_tier_cannot_attach_a_custom_domain",
-      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_free_site_cannot_attach_a_custom_domain",
-      "tests/cloud/entitlements/test_site_entitlements.py::test_an_unknown_or_absent_tier_falls_to_the_base"
-    ]
-  },
-  {
-    "label": "the gate runs AFTER Cloudflare has already created the hostname",
+    "label": "the entitled path is broken too — the capability gate refuses everyone",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    _assert_entitled_to_custom_domain(site)\n\n    # Resolve the site's tier",
-    "replace": "\n    # Resolve the site's tier",
+    "find": "    if ent.custom_domain:\n        return",
+    "replace": "    if False:\n        return",
     "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_an_active_paid_site_attaches_normally",
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_the_resold_feature_set_still_rides_along"
+    ]
+  },
+  {
+    "label": "the floor allowance leaks uncapped — every free workspace gets unlimited domained sites",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    allowance = floor.max_domained_sites if floor is not None else 0",
+    "replace": "    allowance = None",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_second_free_site_is_refused",
+      "tests/cloud/entitlements/test_site_entitlements.py::test_the_floor_grants_its_domain_with_no_subscription_at_all"
+    ]
+  },
+  {
+    "label": "the allowance ignores whether the subscription pays — a cancelled site keeps uncapped domains",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    if tier is not None and _subscription_is_active(subscription_status):\n        allowance = tier.max_domained_sites",
+    "replace": "    if tier is not None:\n        allowance = tier.max_domained_sites",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_lapsed_paid_site_is_capped_like_a_free_one",
+      "tests/cloud/entitlements/test_site_entitlements.py::test_a_lapsed_paid_site_falls_to_the_FLOOR_allowance_not_to_zero"
+    ]
+  },
+  {
+    "label": "an unknown key is handed the uncapped answer instead of zero",
+    "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
+    "find": "        max_domained_sites=_SITE_PLAN_MAX_DOMAINED_SITES.get(key, 0),",
+    "replace": "        max_domained_sites=_SITE_PLAN_MAX_DOMAINED_SITES.get(key),",
+    "tests": [
+      "tests/cloud/billing/test_site_plan_domain_quota.py::test_an_unknown_key_gets_no_domains_at_all"
+    ]
+  },
+  {
+    "label": "the workspace count gate never fires",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    exceeded, _count, limit = await _domain_cap_exceeded(workspace_id, site)",
+    "replace": "    exceeded, _count, limit = (False, 0, None)",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_second_free_site_is_refused",
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_free_site_may_carry_apex_plus_www_and_no_more"
+    ]
+  },
+  {
+    "label": "the count includes the site being attached to — apex plus www is refused",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            \"_id\": {\"$ne\": site.id},\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_apex_and_www_both_land_on_one_free_site"
+    ]
+  },
+  {
+    "label": "the count counts PAID sites too — buying a plan takes the free domain away",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if (\n            entitlements_service.site_domain_allowance(\n                plan_tier=row.plan_tier, subscription_status=row.subscription_status\n            )\n            is not None\n        ):\n            count += 1",
+    "replace": "        if row is not None:\n            count += 1",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_paid_sites_domain_does_not_consume_the_free_allowance"
+    ]
+  },
+  {
+    "label": "archived dedupe tombstones spend the allowance",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            \"archived\": {\"$ne\": True},\n            \"_id\": {\"$ne\": site.id},",
+    "replace": "            \"_id\": {\"$ne\": site.id},",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_an_archived_duplicate_does_not_spend_the_allowance"
+    ]
+  },
+  {
+    "label": "the count is scoped to no workspace — a neighbour spends your allowance",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            \"workspace\": workspace_id,\n            \"archived\": {\"$ne\": True},",
+    "replace": "            \"archived\": {\"$ne\": True},",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_another_workspaces_domains_are_invisible"
+    ]
+  },
+  {
+    "label": "the count comparison is off by one — free gets two domained sites",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return (count >= limit, count, limit)\n\n\ndef _hostname_cap_exceeded",
+    "replace": "    return (count > limit, count, limit)\n\n\ndef _hostname_cap_exceeded",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_second_free_site_is_refused"
+    ]
+  },
+  {
+    "label": "an uncapped tier is treated as capped at zero — a paying site is refused",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if limit is None:\n        return (False, 0, None)\n\n    cursor = _SiteDoc.find(",
+    "replace": "    if limit is None:\n        limit = 0\n\n    cursor = _SiteDoc.find(",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_an_uncapped_site_is_never_refused_however_many_siblings_have_domains"
+    ]
+  },
+  {
+    "label": "the per-site hostname guard never fires",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    limit = _site_plans.free_max_hostnames_per_site()\n    count = len(site.domains)\n    return (count >= limit, count, limit)",
+    "replace": "    limit = _site_plans.free_max_hostnames_per_site()\n    count = len(site.domains)\n    return (False, count, limit)",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_free_site_may_carry_apex_plus_www_and_no_more"
+    ]
+  },
+  {
+    "label": "the per-site hostname guard is applied to paying sites too",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if (\n        entitlements_service.site_domain_allowance(\n            plan_tier=site.plan_tier, subscription_status=site.subscription_status\n        )\n        is None\n    ):\n        return (False, 0, None)",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_the_hostname_guard_does_not_apply_to_a_paying_site"
+    ]
+  },
+  {
+    "label": "the count gate runs AFTER Cloudflare has already created the hostname",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT.",
+    "replace": "    await cf.create_custom_hostname(hostname, features=set())\n    _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT.",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_the_refusal_precedes_every_cloudflare_call",
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_refused_attach_never_reaches_cloudflare"
     ]
   },
   {
     "label": "a refused attach still writes the hostname onto allowed_origins",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    _assert_entitled_to_custom_domain(site)",
-    "replace": "    site.allowed_origins.append(hostname)\n    await site.set({\"allowed_origins\": list(site.allowed_origins)})\n    _assert_entitled_to_custom_domain(site)",
+    "find": "    _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT.",
+    "replace": "    site.allowed_origins.append(hostname)\n    await site.set({\"allowed_origins\": list(site.allowed_origins)})\n    _assert_entitled_to_custom_domain(site)\n\n    # Then the COUNT.",
     "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_refused_second_site_keeps_a_clean_document",
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_refused_attach_writes_nothing_to_the_site"
     ]
   },
   {
-    "label": "the gate becomes retroactive — it runs before the already-connected repair",
+    "label": "the count gate becomes retroactive — it runs before the already-connected repair",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    hostname = _normalize_hostname(hostname)\n    existing = next(",
-    "replace": "    _assert_entitled_to_custom_domain(site)\n    hostname = _normalize_hostname(hostname)\n    existing = next(",
+    "replace": "    if (await _domain_cap_exceeded(workspace_id, site))[0]:\n        raise CustomDomainLimitError(limit=1)\n    hostname = _normalize_hostname(hostname)\n    existing = next(",
     "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_re_adding_a_connected_hostname_is_never_refused_for_quota",
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_an_already_connected_domain_still_repairs_its_route"
     ]
   },
   {
-    "label": "the billing_enforced guard is dropped — OSS/self-host inherits the paywall",
+    "label": "the billing_enforced guard is dropped from the count — OSS/self-host inherits the cap",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not get_settings().billing_enforced:\n        return (False, 0, None)\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    limit = entitlements_service.site_domain_allowance(",
+    "replace": "    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    limit = entitlements_service.site_domain_allowance(",
+    "tests": [
+      "tests/cloud/sites/test_custom_domain_cap.py::test_with_billing_off_a_second_site_attaches_freely",
+      "tests/cloud/sites/test_custom_domain_cap.py::test_with_billing_off_the_census_query_never_runs"
+    ]
+  },
+  {
+    "label": "the billing_enforced guard is dropped from the capability gate",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    if not get_settings().billing_enforced:\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
     "replace": "    from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
     "tests": [
-      "tests/cloud/sites/test_custom_domain_entitlement.py::test_with_billing_off_the_gate_never_fires"
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_with_billing_off_even_a_zero_floor_attaches"
     ]
   },
   {
-    "label": "the guard inverts — the gate fires ONLY when billing is off",
+    "label": "the capability guard inverts — the gate fires ONLY when billing is off",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if not get_settings().billing_enforced:\n        return",
-    "replace": "    if get_settings().billing_enforced:\n        return",
+    "find": "    if not get_settings().billing_enforced:\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(",
+    "replace": "    if get_settings().billing_enforced:\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(",
     "tests": [
-      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_free_site_cannot_attach_a_custom_domain",
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_catalog_granting_no_domain_at_all_still_refuses",
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_with_billing_off_the_gate_never_fires"
     ]
   },
@@ -81,18 +205,17 @@
     "find": "        super().__init__(402, \"billing.custom_domain_not_entitled\", f\"Custom domain: {detail}\")",
     "replace": "        super().__init__(422, \"sites.custom_domain_not_entitled\", f\"Custom domain: {detail}\")",
     "tests": [
-      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_free_site_cannot_attach_a_custom_domain",
-      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_paid_tier_without_an_active_subscription_is_refused"
+      "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_catalog_granting_no_domain_at_all_still_refuses"
     ]
   },
   {
-    "label": "the entitled path is broken too — the gate refuses everyone",
-    "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if ent.custom_domain:\n        return",
-    "replace": "    if False:\n        return",
+    "label": "the count refusal degrades to a 4xx with no billing code",
+    "file": "ee/pocketpaw_ee/cloud/_core/errors.py",
+    "find": "        super().__init__(402, \"billing.custom_domain_limit\", f\"Custom domain: {detail}\")",
+    "replace": "        super().__init__(422, \"sites.custom_domain_limit\", f\"Custom domain: {detail}\")",
     "tests": [
-      "tests/cloud/sites/test_custom_domain_entitlement.py::test_an_active_paid_site_attaches_normally",
-      "tests/cloud/sites/test_custom_domain_entitlement.py::test_the_resold_feature_set_still_rides_along"
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_second_free_site_is_refused",
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_free_site_may_carry_apex_plus_www_and_no_more"
     ]
   },
   {

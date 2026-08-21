@@ -163,7 +163,12 @@ class CustomDomainNotEntitled(CloudError):
     upgrade rather than a workspace one.
 
     The distinction from its siblings is that this is not a COUNT limit: there is no
-    ceiling to report, only a capability the site's tier either resells or does not.
+    ceiling to report, only a capability the site's tier either grants or does not.
+    ``CustomDomainLimitError`` below is the count sibling, and since 2026-08-21 it
+    is the one that normally fires — the free floor grants one domained site, so a
+    tier granting NONE only exists if the catalog is edited to say so, or if a
+    resolve lands on a tier whose allowance is 0. The class stays because that is
+    exactly the fail-closed case worth having a distinct code for.
     Two different failures land here and the message separates them, because the
     remedies differ — a free site upgrades its plan, while a paid site whose
     subscription lapsed fixes its billing and keeps the tier it already chose.
@@ -187,6 +192,43 @@ class CustomDomainNotEntitled(CloudError):
                 "renew it to connect a custom domain"
             )
         super().__init__(402, "billing.custom_domain_not_entitled", f"Custom domain: {detail}")
+
+
+class CustomDomainLimitError(CloudError):
+    """Workspace hit its plan's cap on how many SITES may carry a custom domain (402).
+
+    The COUNT sibling of ``CustomDomainNotEntitled``, and a separate class because
+    the remedies differ: that one means "this site's subscription is not paying",
+    this one means "you have used the allowance, upgrade a site to add another".
+    A UI that collapses them tells a paying customer to renew a subscription that
+    never lapsed.
+
+    **The unit is the SITE, not the hostname.** A workspace on the free floor gets
+    one site carrying custom domains; apex and ``www`` both sit on that site and
+    spend one allowance between them. ``scope="site"`` reports the OTHER cap — how
+    many hostnames one floor-tier site may carry — which exists only because the
+    site-unit cap leaves that number unbounded.
+
+    Enforced at ATTACH time only, never retroactive: an existing domain is never
+    detached, and re-adding an already-connected hostname (the only self-service
+    repair for a missing Worker route) never reaches this check. Gated on
+    ``billing_enforced``, so OSS / self-host never sees it.
+    """
+
+    def __init__(self, *, limit: int, scope: str = "workspace") -> None:
+        if scope == "site":
+            detail = (
+                f"this site already has {limit} custom hostnames, which is the limit "
+                "on the free plan — upgrade it to connect more"
+            )
+        else:
+            noun = "site" if limit == 1 else "sites"
+            detail = (
+                f"custom domains are included on {limit} {noun} on your plan, and "
+                f"{'that one is' if limit == 1 else 'those are'} already in use — "
+                "upgrade a site's plan to connect another"
+            )
+        super().__init__(402, "billing.custom_domain_limit", f"Custom domain: {detail}")
 
 
 class CallLimitError(CloudError):

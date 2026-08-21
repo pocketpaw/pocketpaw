@@ -1,6 +1,18 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-08-21 (feat/site-free-custom-domain, PW-1): the free floor now
+# includes a custom domain, so ``add_domain`` gained a COUNT gate beside the
+# existing capability gate. ``_domain_cap_exceeded`` answers "does this workspace
+# have room for another site carrying a custom domain", and the unit is the SITE:
+# apex and ``www`` both live on one site and spend one allowance between them.
+# Three counting rules carry the whole behaviour and each one is load-bearing —
+# see that function. ``_hostname_cap_exceeded`` is its companion, capping how many
+# hostnames a single floor site may carry, which the site-unit rule otherwise
+# leaves unbounded. Both sit AFTER the already-connected early return, so neither
+# is retroactive and neither can block the re-Add route repair, and both are gated
+# on ``billing_enforced`` so self-host reads nothing extra.
+#
 # Updated 2026-08-19 (fix/sites-read-source-tool): added ``read_site_source`` — the
 # READ primitive beside ``apply_edits``. The three ``edit_*`` functions below all
 # resolve an agent-authored diff against the CURRENT file, and nothing on the /sites
@@ -847,10 +859,12 @@ from typing import Any
 
 from bson import ObjectId
 from bson.errors import InvalidId
+from pydantic import BaseModel
 
 from pocketpaw.sites_capture.contact_form import CONTACT_FORM_TYPE, default_event_mapping
 from pocketpaw_ee.cloud._core.errors import (
     CloudError,
+    CustomDomainLimitError,
     CustomDomainNotEntitled,
     Forbidden,
     Internal,
@@ -4123,6 +4137,122 @@ def _assert_entitled_to_custom_domain(site: Any) -> None:
     )
 
 
+class _DomainedSiteProjection(BaseModel):
+    """The two billing fields of a site that already holds a custom domain.
+
+    Sites carry generated source, and the census below reads every domained site
+    in the workspace on the attach path — pulling whole documents to look at two
+    strings would drag entire built sites across the wire and discard them. The
+    query filters on ``domains.0`` existing, so the projection does not need the
+    domain rows themselves: presence is the whole question.
+    """
+
+    plan_tier: str | None = None
+    subscription_status: str = "none"
+
+
+async def _domain_cap_exceeded(workspace_id: str, site: Any) -> tuple[bool, int, int | None]:
+    """Would attaching a domain here exceed the workspace cap? -> (exceeded, count, limit).
+
+    The cap counts SITES, not hostnames: "only 1 site is allowed to have a custom
+    domain in free" (captain, 2026-08-21). Getting the unit wrong is the easiest
+    mistake this function can make, because ``SiteDomain`` is one row per hostname,
+    so anything that counts rows refuses apex + ``www`` — the pair almost every
+    customer wants.
+
+    Three rules, all load-bearing:
+
+    1. **Count sites holding at least one domain**, not domains. The query does it
+       with ``domains.0 exists`` rather than loading the arrays.
+    2. **Count floor sites only.** A site paying for its own uncapped allowance
+       does not spend the workspace's floor one. Without this, a workspace whose
+       paid site has a domain could never give its free site the one free includes.
+       The floor-vs-paid question is asked through
+       ``entitlements.site_domain_allowance`` so the rule is not written twice.
+    3. **Exclude the site being attached to.** It is already inside the allowance
+       if it holds a domain, so its second hostname is free; and if it holds none
+       it contributes nothing to the count anyway. Excluding it unconditionally is
+       therefore the same answer as excluding it conditionally, with one less
+       branch to get wrong.
+
+    Archived sites are excluded (``archived: {"$ne": True}``, matching the gallery
+    read): they are dedupe tombstones of a live site, so counting them would charge
+    a workspace twice for one site it can only see once.
+
+    GATED on ``billing_enforced``: OSS / self-host gets ``(False, 0, None)`` with
+    no DB read at all. Returns the tuple rather than raising, mirroring
+    ``pockets.service._pocket_cap_exceeded``.
+    """
+    from pocketpaw.config import get_settings
+
+    if not get_settings().billing_enforced:
+        return (False, 0, None)
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    limit = entitlements_service.site_domain_allowance(
+        plan_tier=site.plan_tier, subscription_status=site.subscription_status
+    )
+    if limit is None:
+        return (False, 0, None)
+
+    cursor = _SiteDoc.find(
+        {
+            "workspace": workspace_id,
+            "archived": {"$ne": True},
+            "_id": {"$ne": site.id},
+            "domains.0": {"$exists": True},
+        }
+    ).project(_DomainedSiteProjection)
+    count = 0
+    async for row in cursor:
+        if (
+            entitlements_service.site_domain_allowance(
+                plan_tier=row.plan_tier, subscription_status=row.subscription_status
+            )
+            is not None
+        ):
+            count += 1
+    return (count >= limit, count, limit)
+
+
+def _hostname_cap_exceeded(site: Any) -> tuple[bool, int, int | None]:
+    """Would this be one hostname too many ON THIS SITE? -> (exceeded, count, limit).
+
+    The companion to ``_domain_cap_exceeded``, and it exists because that one caps
+    SITES: on its own it lets a free workspace point fifty hostnames at its one
+    allowed site, each costing a Cloudflare custom hostname and a Worker route at
+    $0 revenue. The limit is apex + ``www``.
+
+    Applies only to a site riding a CAPPED allowance, which today is exactly the
+    free floor — every paid tier is uncapped, so a paying site is never subject to
+    it. Synchronous and reads no database: everything it needs is on the loaded doc.
+
+    This cap is a judgement the build made rather than a rule handed down, so it is
+    one constant and one comparison — raising it or removing it changes nothing
+    else. Gated on ``billing_enforced`` like every other cap here.
+    """
+    from pocketpaw.config import get_settings
+
+    if not get_settings().billing_enforced:
+        return (False, 0, None)
+
+    from pocketpaw_ee.cloud.billing import site_plans as _site_plans
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    if (
+        entitlements_service.site_domain_allowance(
+            plan_tier=site.plan_tier, subscription_status=site.subscription_status
+        )
+        is None
+    ):
+        return (False, 0, None)
+
+    limit = _site_plans.free_max_hostnames_per_site()
+    count = len(site.domains)
+    return (count >= limit, count, limit)
+
+
 async def add_domain(
     *,
     workspace_id: str,
@@ -4222,6 +4352,41 @@ async def add_domain(
     #     the product, and it makes the customer's next legitimate attach fail on a
     #     1406 duplicate they can neither see nor clear.
     _assert_entitled_to_custom_domain(site)
+
+    # Then the COUNT. The capability gate above asks whether this site may have a
+    # custom domain at all; this asks whether the workspace has room for another
+    # site carrying one — a different question, a different remedy, and a different
+    # 402 code, so the UI can say "renew your subscription" and "you've used your
+    # free domain" as the distinct things they are.
+    #
+    # Same position and the same reasons: after the already-connected return (never
+    # retroactive, and the re-Add route repair stays reachable), before
+    # ``create_custom_hostname`` (a refusal after Cloudflare accepts the hostname
+    # strands it on the shared zone, invisible to the product and blocking the
+    # customer's next legitimate attach with a 1406 they cannot clear).
+    exceeded, _count, limit = await _domain_cap_exceeded(workspace_id, site)
+    if exceeded:
+        logger.info(
+            "sites: refused a custom domain for site %s — workspace %s already has "
+            "%s site(s) with a custom domain, limit %s",
+            site.id,
+            workspace_id,
+            _count,
+            limit,
+        )
+        raise CustomDomainLimitError(limit=limit)  # type: ignore[arg-type]  # int when exceeded
+
+    # And the per-site hostname cap, which only a floor site can trip.
+    host_exceeded, _hosts, host_limit = _hostname_cap_exceeded(site)
+    if host_exceeded:
+        logger.info(
+            "sites: refused a custom domain for site %s — it already carries %s "
+            "hostnames, limit %s on the free floor",
+            site.id,
+            _hosts,
+            host_limit,
+        )
+        raise CustomDomainLimitError(limit=host_limit, scope="site")  # type: ignore[arg-type]
 
     # Resolve the site's tier → its cloudflare_features and provision them on the
     # custom hostname. A base-tier (or unknown) site resolves to an empty set, so
