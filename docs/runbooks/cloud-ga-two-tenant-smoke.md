@@ -74,6 +74,7 @@ dedicated server / micro tier, per the deployment topology). The deploy must:
   # one-time, idempotent, reversible-safe (renames the shared files to .migrated)
   from pocketpaw.migrations.split_workspace_stores import migrate_shared_stores_to_workspaces
   import asyncio
+
   print(asyncio.run(migrate_shared_stores_to_workspaces()))
   ```
 

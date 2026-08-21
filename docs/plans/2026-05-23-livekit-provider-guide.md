@@ -154,13 +154,9 @@ class MeetingProvider(Protocol):
 
 @runtime_checkable
 class SupportsRecording(Protocol):
-    async def request_recording(
-        self, ctx: RequestContext, meeting: Meeting
-    ) -> "RecordingRef": ...
+    async def request_recording(self, ctx: RequestContext, meeting: Meeting) -> "RecordingRef": ...
 
-    async def stop_recording(
-        self, ctx: RequestContext, meeting: Meeting
-    ) -> None: ...
+    async def stop_recording(self, ctx: RequestContext, meeting: Meeting) -> None: ...
 
 
 @runtime_checkable
@@ -196,18 +192,18 @@ class Meeting(BaseModel, frozen=True):
     organizer_user_id: str
     participants: list[ParticipantRef]
     join_url: str | None
-    recording_refs: list[RecordingRef]   # FileUpload ids, populated as recordings finish
-    transcript_refs: list[TranscriptRef] # File ids of completed transcripts
-    provider_payload: dict[str, Any]     # Source-specific bag — your home
+    recording_refs: list[RecordingRef]  # FileUpload ids, populated as recordings finish
+    transcript_refs: list[TranscriptRef]  # File ids of completed transcripts
+    provider_payload: dict[str, Any]  # Source-specific bag — your home
 ```
 
 For LiveKit, `provider_payload` will hold:
 ```python
 {
     "room_name": "group-call-{group_id}",
-    "group_id": "...",              # if the meeting is tied to a chat group
-    "agent_pid": 12345,              # if active; cleared on end
-    "active_egress_id": "EG_...",    # if recording; cleared on stop_recording
+    "group_id": "...",  # if the meeting is tied to a chat group
+    "agent_pid": 12345,  # if active; cleared on end
+    "active_egress_id": "EG_...",  # if recording; cleared on stop_recording
 }
 ```
 
@@ -271,9 +267,7 @@ class LiveKitProvider:
 
     name = "livekit"
 
-    async def create(
-        self, ctx: RequestContext, body: CreateMeetingRequest
-    ) -> ProviderCreateResult:
+    async def create(self, ctx: RequestContext, body: CreateMeetingRequest) -> ProviderCreateResult:
         # Resolve a deterministic room name. If the meeting is tied to a chat
         # group, reuse the group's call room; otherwise mint a fresh one off
         # the meeting id (which the service will generate before calling us).
@@ -369,6 +363,7 @@ async def start_composite_egress(workspace_id: str, meeting_id: str, room_name: 
     egress_id + the eventual S3 path. Tracks egress_id in the in-memory
     registry that webhooks.py reads on egress completion."""
 
+
 async def stop_egress(egress_id: str) -> None:
     """Stop an active egress. The egress.done webhook fires once it lands
     in S3, and webhooks.py creates the FileUpload doc + emits
@@ -419,12 +414,14 @@ async def livekit_webhook(request: Request) -> dict:
             meeting_id=meeting.id,
             s3_url=s3_url,
         )
-        await emit(MeetingRecordingReady(
-            workspace_id=meeting.workspace_id,
-            meeting_id=meeting.id,
-            file_id=file_id,
-            source="livekit",
-        ))
+        await emit(
+            MeetingRecordingReady(
+                workspace_id=meeting.workspace_id,
+                meeting_id=meeting.id,
+                file_id=file_id,
+                source="livekit",
+            )
+        )
         return {"ok": True, "recording_attached": file_id}
 
     return {"ok": True, "ignored": event_type}

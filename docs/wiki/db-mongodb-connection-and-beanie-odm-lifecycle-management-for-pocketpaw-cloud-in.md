@@ -65,6 +65,7 @@ A module-scoped singleton variable holding the active MongoDB connection. Initia
 4. **Model registration**:
    ```python
    from ee.cloud.models import ALL_DOCUMENTS
+
    await init_beanie(database=db, document_models=ALL_DOCUMENTS)
    ```
    Imports all document models from `ee.cloud.models.ALL_DOCUMENTS` and registers them with Beanie. This is a **deferred import**—models are loaded only when database is initialized, avoiding circular imports and ensuring configuration is set before models introspect the environment.

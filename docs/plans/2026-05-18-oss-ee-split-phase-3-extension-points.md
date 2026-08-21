@@ -73,19 +73,23 @@ from typing import Any, Protocol, runtime_checkable
 @runtime_checkable
 class ToolProvider(Protocol):
     """Entry-point group: pocketpaw.tools"""
+
     def get_tools(self) -> list[Any]: ...
+
     priority: int  # higher wins on conflicts
 
 
 @runtime_checkable
 class ModelProvider(Protocol):
     """Entry-point group: pocketpaw.models"""
+
     def beanie_document_models(self) -> list[type]: ...
 
 
 @runtime_checkable
 class RouteProvider(Protocol):
     """Entry-point group: pocketpaw.routes"""
+
     def fastapi_routers(self) -> list[tuple[str, Any]]:
         """Returns list of (mount_path, APIRouter)."""
         ...
@@ -94,6 +98,7 @@ class RouteProvider(Protocol):
 @runtime_checkable
 class LifecycleHook(Protocol):
     """Entry-point group: pocketpaw.lifecycle"""
+
     async def on_startup(self, app: Any) -> None: ...
     async def on_shutdown(self, app: Any) -> None: ...
 
@@ -101,20 +106,25 @@ class LifecycleHook(Protocol):
 @runtime_checkable
 class AgentExtension(Protocol):
     """Entry-point group: pocketpaw.agent_extensions"""
+
     def install(self, agent_runtime: Any) -> None: ...
 
 
 @runtime_checkable
 class MemoryBackend(Protocol):
     """Entry-point group: pocketpaw.memory_backends"""
+
     name: str
+
     def build(self, config: Any) -> Any: ...
 
 
 @runtime_checkable
 class StorageBackend(Protocol):
     """Entry-point group: pocketpaw.storage_backends"""
+
     name: str
+
     def adapter(self) -> Any: ...
     def meta(self) -> Any: ...
 
@@ -122,18 +132,21 @@ class StorageBackend(Protocol):
 @runtime_checkable
 class EmbeddingProvider(Protocol):
     """Entry-point group: pocketpaw.embeddings"""
+
     def build_embedder(self, config: Any) -> Any: ...
 
 
 @runtime_checkable
 class AuthProvider(Protocol):
     """Entry-point group: pocketpaw.auth"""
+
     def current_optional_user(self) -> Any: ...
 
 
 @runtime_checkable
 class EventBusProvider(Protocol):
     """Entry-point group: pocketpaw.events"""
+
     def get_event_bus(self) -> Any: ...
 ```
 
@@ -199,6 +212,7 @@ Find the concrete class/function in `pocketpaw_ee` (e.g. `pocketpaw_ee.cloud.emb
 class CloudEmbeddingProvider:
     def build_embedder(self, config):
         from .builder import build_embedder  # local import to avoid cycles
+
         return build_embedder(config)
 ```
 
@@ -215,6 +229,7 @@ cloud = "pocketpaw_ee.cloud.embeddings:CloudEmbeddingProvider"
 ```python
 try:
     from pocketpaw_ee.cloud.embeddings import build_embedder
+
     embedder = build_embedder(config)
 except ImportError:
     embedder = None

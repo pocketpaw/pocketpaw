@@ -209,9 +209,11 @@ from .license import require_license, require_feature
 
 router = APIRouter(prefix="/api/enterprise")
 
+
 @router.get("/analytics", dependencies=[Depends(require_license)])
 async def get_analytics():
     return {...}
+
 
 @router.post("/sso/config", dependencies=[Depends(require_feature("sso"))])
 async def set_sso_config(config: SSOConfig):

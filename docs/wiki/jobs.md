@@ -68,7 +68,7 @@ my_jobs = "my_pkg:make_jobs"
 ```python
 # my_pkg/__init__.py
 def make_jobs():
-    return [MyDailyDigestJob()]   # one JobCallable, or a list of them
+    return [MyDailyDigestJob()]  # one JobCallable, or a list of them
 ```
 
 Once that package is installed in the web + worker environments, the job's `name` is registered on boot and can be dispatched via a `kind:"job"` action (`{"kind":"job","job":"my_daily_digest", ...}`).
