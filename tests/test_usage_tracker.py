@@ -207,3 +207,89 @@ class TestEstimateCost:
         # 0 fresh input, 1M cached, 0 output → 0.30 USD
         cost = _estimate_cost("claude-3-5-sonnet-20241022", 0, 0, cached_input_tokens=1_000_000)
         assert cost == pytest.approx(0.30, rel=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# The pricing table has to keep up with the models
+# ---------------------------------------------------------------------------
+
+
+class TestTheModelsWeActuallyRunArePriceable:
+    """A model missing from ``_PRICING`` estimates to None, which
+    ``metering.resolve_cost`` turns into a $0 bill and no error.
+
+    That silence is deliberate — a run must not die over its own invoice — and it
+    is why nobody noticed the table had stopped at the mid-2025 ids while every
+    model in production moved on. Measured on the dev database 2026-08-21:
+    claude-haiku-4-5-20251001, claude-sonnet-4-6 and claude-opus-4-7 all priced
+    to None, so every run on the pydantic_ai backend billed nothing. The
+    claude_agent_sdk path never surfaced it because the SDK reports its own cost
+    and never consults this table.
+
+    These are model ids observed in real run documents, not invented ones. When a
+    new family ships, it goes in the list and in the table.
+    """
+
+    OBSERVED = [
+        "claude-haiku-4-5-20251001",  # seen in chat_runs, 32 runs
+        "claude-opus-4-7[1m]",  # seen in chat_runs — note the context suffix
+        "claude-sonnet-4-6",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-fable-5",
+    ]
+
+    @pytest.mark.parametrize("model", OBSERVED)
+    def test_every_model_in_use_has_a_price(self, model):
+        from pocketpaw.usage_tracker import _estimate_cost
+
+        assert _estimate_cost(model, 10_000, 500, 0) is not None, (
+            f"{model} is not in _PRICING — every run on it bills $0 silently"
+        )
+
+    @pytest.mark.parametrize("model", OBSERVED)
+    def test_a_cache_hit_is_cheaper_than_a_cold_read(self, model):
+        """The cached rate has to actually be applied, not silently fall back to
+        the full input price. At a 69% hit rate — what the dev database shows —
+        getting this wrong overstates the bill by roughly half."""
+        from pocketpaw.usage_tracker import _estimate_cost
+
+        cold = _estimate_cost(model, 10_000, 500, 0)
+        warm = _estimate_cost(model, 10_000, 500, 9_000)
+
+        assert warm < cold
+
+    def test_a_bare_claude_still_resolves_where_it_always_did(self):
+        """``"claude"`` is the agentapi fallback name and prefix-matches the FIRST
+        claude key in insertion order.
+
+        Adding the current families ahead of the older ones would have silently
+        repriced every run that reported it — Opus rates instead of Sonnet, a 66%
+        jump. The new entries go after the old ones for exactly this reason, and
+        this pins it.
+        """
+        from pocketpaw.usage_tracker import _PRICING, _estimate_cost
+
+        assert _estimate_cost("claude", 10_000, 500, 0) == _estimate_cost(
+            "claude-sonnet-4-20250514", 10_000, 500, 0
+        )
+        assert "claude-sonnet-4-20250514" in _PRICING
+
+    def test_a_retired_id_keeps_its_own_retired_price(self):
+        """Opus 4 and Opus 4.5+ are $15 and $5 per MTok respectively. A prefix
+        match that let one shadow the other would misprice by 3x in whichever
+        direction insertion order happened to fall."""
+        from pocketpaw.usage_tracker import _estimate_cost
+
+        retired = _estimate_cost("claude-opus-4-20250514", 1_000_000, 0, 0)
+        current = _estimate_cost("claude-opus-4-7", 1_000_000, 0, 0)
+
+        assert retired == 15.0
+        assert current == 5.0
+
+    def test_an_unknown_model_is_still_none(self):
+        """The fallback stays a fallback. Prefix matching must not start pricing
+        arbitrary strings just because the table grew."""
+        from pocketpaw.usage_tracker import _estimate_cost
+
+        assert _estimate_cost("some-other-vendor-model", 1000, 100, 0) is None
