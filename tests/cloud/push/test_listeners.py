@@ -23,6 +23,10 @@
 #   * ``on_agent_complete`` survives — agent replies persist no notification
 #     row, so retiring it would have silently dropped their push.
 # ``dispatch.notify`` is patched to record calls — no WS, no Web Push, no DB.
+#
+# Updated: 2026-08-20 (test/deeplink-contract-followups) — the deep-link
+# parametrize moved to test_deeplink_contract.py (golden contract table);
+# this file keeps the dispatch/coalesce/privacy pins only.
 
 from __future__ import annotations
 
@@ -223,38 +227,12 @@ async def test_generic_kind_body_passes_through(notify_calls) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Deep links — mirrors paw-enterprise src/lib/core/notifications/target.ts
+# Deep links live in test_deeplink_contract.py — the golden table in that file
+# is the single backend pin for ``_target_url`` (and the twin of the
+# paw-enterprise table). The parametrized copy that used to sit here was a
+# second hand-kept duplicate of the same contract; it drifted-by-omission
+# (no pocket-vs-room precedence row) and is absorbed there (2026-08-20).
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("source_type", "extra", "expected"),
-    [
-        ("message", {"source_room_id": "g1"}, "/chat/g1"),
-        ("mention", {"source_room_id": "g1"}, "/chat/g1"),
-        ("message", {"source_pocket_id": "p1"}, "/pockets/p1/chat"),
-        ("invite", {}, "/invite/s1"),
-        ("pocket_shared", {}, "/pockets/s1"),
-        ("meeting", {}, "/meetings?id=s1"),
-        ("meeting_started", {"source_room_id": "g1"}, "/chat/g1?join=meeting-s1"),
-        ("paw_bar_conversation", {"source_agent_id": "a1"}, "/agents/a1?tab=conversations"),
-        ("paw_bar_conversation", {}, "/agents"),
-        # A lead's room_id is its SITE — without the arm the default builds
-        # /chat/<site_id>, a room that cannot exist.
-        ("lead", {"source_room_id": "site1"}, "/sites/site1?view=leads"),
-        ("meeting_reminder", {"source_room_id": "g1"}, "/chat/g1"),
-    ],
-)
-def test_target_url(source_type, extra, expected) -> None:
-    assert listeners._target_url(_dto(source_type=source_type, source_id="s1", **extra)) == expected
-
-
-def test_target_url_omitted_when_ambiguous() -> None:
-    # No source at all → no link.
-    assert listeners._target_url(_dto(source_type=None, source_id=None)) is None
-    # The approvals tray is a global overlay, not a route — a ``/chat/<id>``
-    # default arm would land on a room that cannot exist.
-    assert listeners._target_url(_dto(source_type="instinct_approval", source_id="a1")) is None
 
 
 async def test_payload_omits_url_when_there_is_none(notify_calls) -> None:

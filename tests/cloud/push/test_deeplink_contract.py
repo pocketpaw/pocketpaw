@@ -9,6 +9,14 @@
 # row here, change it there. Known deliberate divergences: FE
 # paw_bar_conversation appends &conversation=<ref>; FE enumerates several
 # kinds that here fall to the /chat default.
+#
+# Updated 2026-08-20 (test/deeplink-contract-followups): review fixes — added
+# the pocket-AND-room precedence row and the ``alert`` → None row, absorbed
+# test_listeners.py's older duplicate table into this one, and wired the
+# mutation plan (tests/mutations/deeplink_contract.json; run via
+# ``uv run python scripts/mutate.py --plan tests/mutations/deeplink_contract.json``).
+# Mutations proven to break this table: flipping the pocket-vs-room precedence,
+# deleting the ``lead`` arm, deleting the ``alert`` arm.
 
 from __future__ import annotations
 
@@ -59,6 +67,24 @@ GOLDEN = [
         "message without pocket or room falls back to the source id",
         {"source_type": "message", "source_id": "msg-1"},
         "/chat/msg-1",
+    ),
+    (
+        # Pins the precedence, not just each branch alone: with BOTH set the
+        # pocket must win. Flipping the ``if pocket_id`` order passes every
+        # single-field row silently — this row is the one that trips.
+        "message with both pocket and room prefers the pocket chat",
+        {
+            "source_type": "message",
+            "source_id": "msg-1",
+            "source_pocket_id": "pocket-3",
+            "source_room_id": "room-5",
+        },
+        "/pockets/pocket-3/chat",
+    ),
+    (
+        "alert has no route (no alerts page; a dead /chat link would be worse)",
+        {"source_type": "alert", "source_id": "budget_exhausted"},
+        None,
     ),
     (
         "mention inside a pocket goes to the pocket chat",
@@ -139,4 +165,7 @@ GOLDEN = [
     ids=[row[0] for row in GOLDEN],
 )
 def test_target_url_golden(data: dict, expected: str | None) -> None:
+    """Breaks under tests/mutations/deeplink_contract.json — flipped
+    pocket-vs-room precedence, a deleted ``lead``/``alert`` arm, or a
+    paw_bar arm that drops its agent binding (all 4 observed caught)."""
     assert _target_url(data) == expected
