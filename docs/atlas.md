@@ -561,24 +561,27 @@ atlas load failure never breaks prompt building. Tests:
 ```python
 from pocketpaw.atlas import get_atlas_store
 
-store = get_atlas_store()          # lazy singleton over the compiled artifact
+store = get_atlas_store()  # lazy singleton over the compiled artifact
 store.search("approve agent actions", limit=5)  # ranked AtlasEntry list
-store.search_scored("approve agent actions")    # (score, AtlasEntry) pairs (AT-5)
-store.describe("connector:stripe")              # full AtlasEntry or None
+store.search_scored("approve agent actions")  # (score, AtlasEntry) pairs (AT-5)
+store.describe("connector:stripe")  # full AtlasEntry or None
 
 from pocketpaw.atlas import AtlasOverlay, DefaultEntitlementProvider
+
 provider = DefaultEntitlementProvider(scope_key="default")  # or "ws:<id>"
-AtlasOverlay.search(store, "invoices", provider, limit=5)   # OverlaidEntry list
+AtlasOverlay.search(store, "invoices", provider, limit=5)  # OverlaidEntry list
 AtlasOverlay.describe(store, "connector:stripe", provider)  # None if filtered
 
 from pocketpaw.atlas import FabricIntrospector, build_workspace_fabric_introspector
+
 introspector = build_workspace_fabric_introspector("ws-1")  # None on OSS installs
 # build_atlas_context_server(provider=..., introspector=...) serves fabric:* live
 
 from pocketpaw.atlas import check_artifact, compile_atlas, write_artifact
-compile_atlas()      # authored + extracted entries, sorted by id
-write_artifact()     # what `pocketpaw atlas build` calls
-check_artifact()     # (fresh, diff_summary) — what `--check` calls
+
+compile_atlas()  # authored + extracted entries, sorted by id
+write_artifact()  # what `pocketpaw atlas build` calls
+check_artifact()  # (fresh, diff_summary) — what `--check` calls
 ```
 
 Tests: `tests/atlas/` (`test_compile.py` pins byte-determinism, the

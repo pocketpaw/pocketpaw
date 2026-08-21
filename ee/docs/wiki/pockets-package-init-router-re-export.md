@@ -40,6 +40,7 @@ The `# noqa: F401` suppresses the "imported but unused" linting warning — the 
 This allows the application entrypoint to mount the router with:
 ```python
 from ee.cloud.pockets import router
+
 app.include_router(router)
 ```
 

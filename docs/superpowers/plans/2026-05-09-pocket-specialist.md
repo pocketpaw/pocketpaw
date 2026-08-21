@@ -71,6 +71,7 @@ Create `backend/tests/ee/agent/test_pocket_specialist/test_settings.py`:
 
 ```python
 """Pocket-specialist settings — defaults, env var resolution, model fallback."""
+
 from pocketpaw.config import Settings
 
 
@@ -83,9 +84,7 @@ class TestPocketSpecialistSettings:
 
     def test_env_var_override(self, monkeypatch):
         monkeypatch.setenv("POCKETPAW_POCKET_SPECIALIST_BACKEND", "claude_agent_sdk")
-        monkeypatch.setenv(
-            "POCKETPAW_POCKET_SPECIALIST_MODEL", "openai_compatible:deepseek-v4-pro"
-        )
+        monkeypatch.setenv("POCKETPAW_POCKET_SPECIALIST_MODEL", "openai_compatible:deepseek-v4-pro")
         monkeypatch.setenv("POCKETPAW_POCKET_SPECIALIST_MAX_VALIDATION_RETRIES", "5")
         s = Settings()
         assert s.pocket_specialist_backend == "claude_agent_sdk"
@@ -263,6 +262,7 @@ Create `backend/tests/ee/agent/test_pocket_specialist/test_events.py`:
 
 ```python
 """Pocket-specialist status events — names and emit helper."""
+
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -305,9 +305,7 @@ class TestEmitSpecialistEvent:
             "ee.agent.pocket_specialist.events.event_bus",
         ) as mock_bus:
             mock_bus.publish = AsyncMock()
-            await emit_specialist_event(
-                SpecialistEvent.DECIDED, {"action": "create"}
-            )
+            await emit_specialist_event(SpecialistEvent.DECIDED, {"action": "create"})
             event = mock_bus.publish.await_args.args[0]
             assert event["type"] == "specialist:decided"
             assert event["data"] == {"action": "create"}
@@ -411,6 +409,7 @@ Create `backend/tests/ee/agent/test_pocket_specialist/test_tools.py`:
 
 ```python
 """Specialist-internal tool wrappers — workspace closure, schema, return shape."""
+
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -429,9 +428,7 @@ class TestListPocketsTool:
             "ee.agent.pocket_specialist.tools._agent_list_pockets",
             new=AsyncMock(return_value=[{"id": "p1", "name": "X"}]),
         ) as mocked:
-            tool = make_list_pockets_tool(
-                workspace_id="ws-1", user_id="user-A"
-            )
+            tool = make_list_pockets_tool(workspace_id="ws-1", user_id="user-A")
             result = await tool.ainvoke({})
             mocked.assert_awaited_once_with("ws-1", "user-A")
             assert result == [{"id": "p1", "name": "X"}]
@@ -469,17 +466,15 @@ class TestPersistPocketTool:
     async def test_create_path(self):
         with patch(
             "ee.agent.pocket_specialist.tools._agent_create",
-            new=AsyncMock(
-                return_value=({"id": "new-1", "name": "Created"}, None, None)
-            ),
+            new=AsyncMock(return_value=({"id": "new-1", "name": "Created"}, None, None)),
         ) as mocked:
-            tool = make_persist_pocket_tool(
-                workspace_id="ws-1", user_id="user-A"
+            tool = make_persist_pocket_tool(workspace_id="ws-1", user_id="user-A")
+            result = await tool.ainvoke(
+                {
+                    "name": "Created",
+                    "ripple_spec": {"version": "1.0", "ui": {"type": "text"}},
+                }
             )
-            result = await tool.ainvoke({
-                "name": "Created",
-                "ripple_spec": {"version": "1.0", "ui": {"type": "text"}},
-            })
             mocked.assert_awaited_once()
             assert result["id"] == "new-1"
 
@@ -487,17 +482,15 @@ class TestPersistPocketTool:
     async def test_update_path(self):
         with patch(
             "ee.agent.pocket_specialist.tools._agent_update",
-            new=AsyncMock(
-                return_value={"id": "p1", "name": "Updated"}
-            ),
+            new=AsyncMock(return_value={"id": "p1", "name": "Updated"}),
         ) as mocked:
-            tool = make_persist_pocket_tool(
-                workspace_id="ws-1", user_id="user-A"
+            tool = make_persist_pocket_tool(workspace_id="ws-1", user_id="user-A")
+            result = await tool.ainvoke(
+                {
+                    "target_pocket_id": "p1",
+                    "ripple_spec": {"version": "1.0", "ui": {"type": "text"}},
+                }
             )
-            result = await tool.ainvoke({
-                "target_pocket_id": "p1",
-                "ripple_spec": {"version": "1.0", "ui": {"type": "text"}},
-            })
             mocked.assert_awaited_once()
             assert result["id"] == "p1"
 ```
@@ -544,6 +537,7 @@ from ee.cloud.ripple_validator import validate_ripple_spec
 # list_pockets
 # ------------------------------------------------------------------
 
+
 class _ListPocketsArgs(BaseModel):
     """No arguments — workspace is closed over by the factory."""
 
@@ -568,6 +562,7 @@ def make_list_pockets_tool(*, workspace_id: str, user_id: str) -> StructuredTool
 # ------------------------------------------------------------------
 # validate_spec
 # ------------------------------------------------------------------
+
 
 class _ValidateSpecArgs(BaseModel):
     spec: dict[str, Any] = Field(..., description="The rippleSpec to validate.")
@@ -597,6 +592,7 @@ def make_validate_spec_tool() -> StructuredTool:
 # ------------------------------------------------------------------
 # persist_pocket
 # ------------------------------------------------------------------
+
 
 class _PersistPocketArgs(BaseModel):
     name: str | None = Field(
@@ -709,9 +705,7 @@ class TestDeepAgentsAttachSpecialistTools:
         backend._cached_agent = MagicMock(name="prev")
         backend._cached_model_key = ("anthropic:x", (), ())
 
-        new_tool = StructuredTool.from_function(
-            func=lambda: "hi", name="extra", description="x"
-        )
+        new_tool = StructuredTool.from_function(func=lambda: "hi", name="extra", description="x")
         backend.attach_specialist_tools([new_tool])
 
         assert backend._custom_tools[-1] is new_tool
@@ -809,12 +803,8 @@ class TestCreateIsolatedBackend:
         from pocketpaw.agents.router import AgentRouter
         from pocketpaw.config import Settings
 
-        a = AgentRouter.create_isolated_backend(
-            "deep_agents", Settings(), settings_override=None
-        )
-        b = AgentRouter.create_isolated_backend(
-            "deep_agents", Settings(), settings_override=None
-        )
+        a = AgentRouter.create_isolated_backend("deep_agents", Settings(), settings_override=None)
+        b = AgentRouter.create_isolated_backend("deep_agents", Settings(), settings_override=None)
         assert a is not b
 
     def test_applies_model_override(self):
@@ -833,9 +823,7 @@ class TestCreateIsolatedBackend:
         from pocketpaw.config import Settings
 
         with pytest.raises(ValueError, match="not registered"):
-            AgentRouter.create_isolated_backend(
-                "nonexistent_backend", Settings()
-            )
+            AgentRouter.create_isolated_backend("nonexistent_backend", Settings())
 ```
 
 - [ ] **Step 3: Run test to verify failure**
@@ -850,34 +838,33 @@ Expected: FAIL — `AttributeError: type object 'AgentRouter' has no attribute '
 In `backend/src/pocketpaw/agents/router.py`, after the `_get_fallback_backend` method (around line 89), add:
 
 ```python
-    @classmethod
-    def create_isolated_backend(
-        cls,
-        backend_name: str,
-        settings: Settings,
-        *,
-        settings_override: dict[str, Any] | None = None,
-    ) -> Any:
-        """Build a fresh, non-cached AgentBackend with optional settings overrides.
+@classmethod
+def create_isolated_backend(
+    cls,
+    backend_name: str,
+    settings: Settings,
+    *,
+    settings_override: dict[str, Any] | None = None,
+) -> Any:
+    """Build a fresh, non-cached AgentBackend with optional settings overrides.
 
-        Used for short-lived specialist runs that should not share state with
-        the main chat backend. Each call returns a new instance; nothing is
-        cached on the router.
-        """
-        backend_cls = get_backend_class(backend_name)
-        if backend_cls is None:
-            raise ValueError(
-                f"Backend '{backend_name}' is not registered or its dependencies "
-                "are not installed."
-            )
+    Used for short-lived specialist runs that should not share state with
+    the main chat backend. Each call returns a new instance; nothing is
+    cached on the router.
+    """
+    backend_cls = get_backend_class(backend_name)
+    if backend_cls is None:
+        raise ValueError(
+            f"Backend '{backend_name}' is not registered or its dependencies are not installed."
+        )
 
-        if settings_override:
-            # Settings is a Pydantic BaseSettings; copy with overrides.
-            effective = settings.model_copy(update=settings_override)
-        else:
-            effective = settings
+    if settings_override:
+        # Settings is a Pydantic BaseSettings; copy with overrides.
+        effective = settings.model_copy(update=settings_override)
+    else:
+        effective = settings
 
-        return backend_cls(effective)
+    return backend_cls(effective)
 ```
 
 - [ ] **Step 5: Run test to verify pass**
@@ -912,6 +899,7 @@ Create `backend/tests/ee/agent/test_pocket_specialist/test_runtime.py`:
 
 ```python
 """run_specialist end-to-end with a mocked backend."""
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -927,9 +915,11 @@ from pocketpaw.config import Settings
 
 def _stream(events: list[AgentEvent]):
     """Build an async generator that yields the given events."""
+
     async def gen(*args, **kwargs):
         for e in events:
             yield e
+
     return gen
 
 
@@ -1068,6 +1058,7 @@ log = logging.getLogger(__name__)
 # Tool I/O schemas
 # ------------------------------------------------------------------
 
+
 class PocketSpecialistHints(BaseModel):
     name: str | None = None
     description: str | None = None
@@ -1094,6 +1085,7 @@ class PocketSpecialistCreateOutput(BaseModel):
 # Run
 # ------------------------------------------------------------------
 
+
 async def run_specialist(
     input: PocketSpecialistCreateInput,
     *,
@@ -1119,13 +1111,17 @@ async def run_specialist(
         override[f"{backend_name}_model"] = model_id
 
     backend = AgentRouter.create_isolated_backend(
-        backend_name, settings, settings_override=override or None,
+        backend_name,
+        settings,
+        settings_override=override or None,
     )
-    backend.attach_specialist_tools([
-        make_list_pockets_tool(workspace_id=workspace_id, user_id=user_id),
-        make_validate_spec_tool(),
-        make_persist_pocket_tool(workspace_id=workspace_id, user_id=user_id),
-    ])
+    backend.attach_specialist_tools(
+        [
+            make_list_pockets_tool(workspace_id=workspace_id, user_id=user_id),
+            make_validate_spec_tool(),
+            make_persist_pocket_tool(workspace_id=workspace_id, user_id=user_id),
+        ]
+    )
 
     system_prompt = _build_system_prompt(input.hints)
     user_message = _build_user_message(input)
@@ -1141,13 +1137,9 @@ async def run_specialist(
                 if tool_name == "list_pockets":
                     await emit_specialist_event(SpecialistEvent.LISTING, {})
                 elif tool_name == "validate_spec":
-                    await emit_specialist_event(
-                        SpecialistEvent.VALIDATING, {}
-                    )
+                    await emit_specialist_event(SpecialistEvent.VALIDATING, {})
                 elif tool_name == "persist_pocket":
-                    await emit_specialist_event(
-                        SpecialistEvent.PERSISTING, {}
-                    )
+                    await emit_specialist_event(SpecialistEvent.PERSISTING, {})
             elif event.type == "tool_result":
                 meta = event.metadata or {}
                 if meta.get("name") == "persist_pocket":
@@ -1164,9 +1156,7 @@ async def run_specialist(
 
     if not persist_called or captured_pocket is None:
         # Safety net (Task 8 expands this).
-        log.warning(
-            "specialist run finished without persist_pocket; using fallback"
-        )
+        log.warning("specialist run finished without persist_pocket; using fallback")
         captured_pocket = await _force_persist_fallback(
             workspace_id=workspace_id,
             user_id=user_id,
@@ -1175,9 +1165,7 @@ async def run_specialist(
 
     duration_ms = int((time.monotonic() - started) * 1000)
     action: Literal["created", "extended"] = (
-        "extended"
-        if (input.hints and input.hints.target_pocket_id)
-        else "created"
+        "extended" if (input.hints and input.hints.target_pocket_id) else "created"
     )
 
     await emit_specialist_event(
@@ -1220,8 +1208,7 @@ def _build_user_message(input: PocketSpecialistCreateInput) -> str:
         "Create a pocket per the brief below. Follow the workflow in your "
         "system prompt: list existing pockets, decide extend-vs-create, "
         "draft, validate, persist. You MUST end by calling persist_pocket "
-        "exactly once.\n\nBRIEF:\n"
-        + input.brief
+        "exactly once.\n\nBRIEF:\n" + input.brief
     )
 
 
@@ -1293,9 +1280,7 @@ class TestRunSpecialistSafetyNet:
             ),
             patch(
                 "ee.agent.pocket_specialist.runtime._agent_create_for_fallback",
-                new=AsyncMock(
-                    return_value=(force_persisted, None, None)
-                ),
+                new=AsyncMock(return_value=(force_persisted, None, None)),
             ) as mock_create,
         ):
             out = await run_specialist(
@@ -1338,9 +1323,7 @@ async def _force_persist_fallback(
     persist_pocket. Always ships output.
     """
     name = (input.hints and input.hints.name) or _derive_name_from_brief(input.brief)
-    description = (
-        input.hints and input.hints.description
-    ) or input.brief[:200]
+    description = (input.hints and input.hints.description) or input.brief[:200]
     minimal_spec = {
         "version": "1.0",
         "state": {},
@@ -1378,19 +1361,17 @@ def _derive_name_from_brief(brief: str) -> str:
 Also update the call site in `run_specialist` to surface the fallback in warnings:
 
 ```python
-    if not persist_called or captured_pocket is None:
-        log.warning(
-            "specialist run finished without persist_pocket; using fallback"
-        )
-        captured_pocket = await _force_persist_fallback(
-            workspace_id=workspace_id,
-            user_id=user_id,
-            input=input,
-        )
-        captured_warnings.append(
-            "Specialist did not call persist_pocket; force-persisted a "
-            "minimal pocket. Ask the user to refine."
-        )
+if not persist_called or captured_pocket is None:
+    log.warning("specialist run finished without persist_pocket; using fallback")
+    captured_pocket = await _force_persist_fallback(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        input=input,
+    )
+    captured_warnings.append(
+        "Specialist did not call persist_pocket; force-persisted a "
+        "minimal pocket. Ask the user to refine."
+    )
 ```
 
 - [ ] **Step 4: Run test to verify pass**
@@ -1425,6 +1406,7 @@ Create `backend/tests/ee/agent/test_pocket_specialist/test_mcp_tool.py`:
 
 ```python
 """MCP server registration + handler tests."""
+
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -1437,6 +1419,7 @@ class TestPocketSpecialistMcpServer:
             POCKET_SPECIALIST_TOOL_IDS,
             SERVER_NAME,
         )
+
         assert SERVER_NAME == "pocketpaw_pocket_specialist"
         assert CREATE_TOOL_ID == "mcp__pocketpaw_pocket_specialist__create"
         assert CREATE_TOOL_ID in POCKET_SPECIALIST_TOOL_IDS
@@ -1445,6 +1428,7 @@ class TestPocketSpecialistMcpServer:
         from ee.agent.pocket_specialist.mcp_tool import (
             build_pocket_specialist_server,
         )
+
         server = build_pocket_specialist_server()
         # Just check it's a non-None object — exact type depends on the
         # claude-agent-sdk version. Server has a name attribute.
@@ -1548,9 +1532,7 @@ async def _create_handler(args: dict[str, Any]) -> dict[str, Any]:
 
     raw_hints = args.get("hints")
     hints = PocketSpecialistHints(**raw_hints) if raw_hints else None
-    payload = PocketSpecialistCreateInput(
-        brief=args.get("brief", ""), hints=hints
-    )
+    payload = PocketSpecialistCreateInput(brief=args.get("brief", ""), hints=hints)
 
     try:
         out = await run_specialist(
@@ -1562,9 +1544,7 @@ async def _create_handler(args: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         log.exception("pocket specialist run failed")
         return {
-            "content": [
-                {"type": "text", "text": f"Error: {exc}"}
-            ],
+            "content": [{"type": "text", "text": f"Error: {exc}"}],
             "is_error": True,
         }
 
@@ -1625,27 +1605,27 @@ In `backend/src/pocketpaw/agents/claude_sdk.py`, find `_get_mcp_servers` (around
 Add a sibling block immediately after, gated to register only when the operator hasn't disabled the specialist (we do not have an `enabled` setting per the spec — gate is "if backend can run"):
 
 ```python
-            # Pocket specialist server — exposes pocket_specialist__create.
-            try:
-                from ee.agent.pocket_specialist.mcp_tool import (
-                    SERVER_NAME as _PS_SERVER_NAME,
-                    build_pocket_specialist_server,
-                )
-                if self._policy.is_mcp_server_allowed(_PS_SERVER_NAME):
-                    servers[_PS_SERVER_NAME] = build_pocket_specialist_server()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "pocket_specialist MCP server skipped: %s", exc
-                )
+# Pocket specialist server — exposes pocket_specialist__create.
+try:
+    from ee.agent.pocket_specialist.mcp_tool import (
+        SERVER_NAME as _PS_SERVER_NAME,
+        build_pocket_specialist_server,
+    )
+
+    if self._policy.is_mcp_server_allowed(_PS_SERVER_NAME):
+        servers[_PS_SERVER_NAME] = build_pocket_specialist_server()
+except Exception as exc:  # noqa: BLE001
+    logger.warning("pocket_specialist MCP server skipped: %s", exc)
 ```
 
 Then find the existing `POCKET_TOOL_IDS` import (around line 894) and extend the allowlist:
 
 ```python
-            from ee.agent.pocket_specialist.mcp_tool import (
-                POCKET_SPECIALIST_TOOL_IDS,
-            )
-            allowed_tools.extend(POCKET_SPECIALIST_TOOL_IDS)
+from ee.agent.pocket_specialist.mcp_tool import (
+    POCKET_SPECIALIST_TOOL_IDS,
+)
+
+allowed_tools.extend(POCKET_SPECIALIST_TOOL_IDS)
 ```
 
 (Splice into the existing pocket-tool allowlist block — read the surrounding 20 lines first to match the pattern in this file exactly.)
@@ -1693,6 +1673,7 @@ Create `backend/tests/ee/agent/test_pocket_specialist/test_cli_tool.py`:
 
 ```python
 """CLI shell command tests for cloud_pocket_specialist_create."""
+
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -1749,11 +1730,13 @@ class TestCloudPocketSpecialistCreate:
             "ee.agent.pocket_specialist.cli_tool.run_specialist",
             new=AsyncMock(return_value=fake_out),
         ) as mock_run:
-            await _cloud_pocket_specialist_create([
-                "Track my GitHub PRs",
-                "--hints",
-                '{"name": "PR Tracker", "color": "#0ea5e9"}',
-            ])
+            await _cloud_pocket_specialist_create(
+                [
+                    "Track my GitHub PRs",
+                    "--hints",
+                    '{"name": "PR Tracker", "color": "#0ea5e9"}',
+                ]
+            )
         # Verify hints were parsed and passed
         called_input = mock_run.await_args.args[0]
         assert called_input.hints is not None
@@ -1819,10 +1802,12 @@ async def _cloud_pocket_specialist_create(argv: list[str]) -> str:
     workspace_id = workspace_id_var.get(None)
     user_id = user_id_var.get(None)
     if not workspace_id or not user_id:
-        return json.dumps({
-            "ok": False,
-            "error": "missing workspace/user context",
-        })
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "missing workspace/user context",
+            }
+        )
 
     out = await run_specialist(
         PocketSpecialistCreateInput(brief=brief, hints=hints),

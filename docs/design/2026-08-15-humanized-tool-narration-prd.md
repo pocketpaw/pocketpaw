@@ -75,9 +75,9 @@ These bind every build chunk and flow verbatim into the stage-③ tasks doc. No 
 ```python
 @dataclass(frozen=True)
 class Narration:
-    active: str                        # "Searching the web for {query}"
-    bare: str                          # "Searching the web"  (args missing/redacted)
-    safe_args: tuple[str, ...] = ()    # allowlist — ONLY these may interpolate
+    active: str  # "Searching the web for {query}"
+    bare: str  # "Searching the web"  (args missing/redacted)
+    safe_args: tuple[str, ...] = ()  # allowlist — ONLY these may interpolate
 ```
 
 **Why:** which of a tool's arguments are safe to display is knowledge only the tool has, and it is

@@ -190,6 +190,12 @@ dependencies = [
     # uses it for the per-workspace keypair + subscribe/unsubscribe endpoints.
     "py-vapid>=1.9.0",
     "pywebpush>=2.3.0",
+    # --- fal.ai client — /studio canvas EDIT ops (cloud.studio.fal_edit) ---
+    # LiteLLM serves the text-to-image generation models but has no route for
+    # fal's image-EDIT endpoints (nano-banana-2/edit, birefnet/v2, esrgan, …),
+    # so those run DIRECTLY against fal through the official fal-client SDK.
+    # Only imported by ee/pocketpaw_ee/cloud/studio/fal_edit.py.
+    "fal-client>=0.3.0",
     "hcloud>=2.23.0",
 ]
 

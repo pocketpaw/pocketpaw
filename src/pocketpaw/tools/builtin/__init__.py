@@ -121,6 +121,12 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # up in ``pocketpaw.tools.code_mode``; the ``..code_mode`` relative path
     # resolves against this package's ``pocketpaw.tools.builtin`` anchor.
     "CodeModeTool": ("..code_mode", "CodeModeTool"),
+    # Studio — agent-drawn /studio Flow node graphs. The agent builds a
+    # model→text→[picture]→image/video→[toolcall]→output pipeline from a
+    # natural-language goal; the loop fans a dedicated ``studio_flow`` SSE
+    # event so paw-enterprise materialises the canvas. No generation happens
+    # here — "Run all" does that later.
+    "StudioFlowTool": (".studio_flow_tool", "StudioFlowTool"),
 }
 
 # Enterprise tools (require ee/ module) — guarded so community installs don't break.

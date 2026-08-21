@@ -79,7 +79,7 @@ Maps the `FileObj` model to the `files` MongoDB collection. Without this, Beanie
        path_in_bucket="workspaces/123/uploads/report-uuid.xlsx",
        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
        size=2048576,
-       public=False
+       public=False,
    )
    await file_obj.create()
    ```
@@ -106,8 +106,7 @@ local_files = await FileObj.find(FileObj.provider == "local").to_list()
 
 # Combined: workspace files that are public
 public_workspace_files = await FileObj.find(
-    FileObj.owner == "workspace_456",
-    FileObj.public == True
+    FileObj.owner == "workspace_456", FileObj.public == True
 ).to_list()
 ```
 

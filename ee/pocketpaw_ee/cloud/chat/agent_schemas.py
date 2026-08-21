@@ -149,6 +149,13 @@ class CloudAgentChatRequest(BaseModel):
     # malformed id fails as a 422 instead of reaching the process spawn. The
     # pattern's ``+`` also rejects the empty string.
     model: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9._:/-]+$")
+    # Studio Flow build context — the /studio Flow canvas the user is on when
+    # they ask the agent to scaffold a graph. ``flow_context.flow_id`` is the
+    # flow project id the build belongs to; the executor injects it into the
+    # agent's system prompt (ACTIVE FLOW ID) so ``build_studio_flow`` passes it
+    # and the MCP handler persists the graph into THAT project. ``None`` (every
+    # non-studio surface) leaves the run byte-identical.
+    flow_context: dict[str, Any] | None = None
 
     @field_validator("intent")
     @classmethod

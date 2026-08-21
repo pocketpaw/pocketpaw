@@ -33,11 +33,15 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pocketpaw_ee.agent.mcp_servers.media as media
 import pytest
+from pocketpaw_ee.cloud.media import storage as media_storage
+
+from pocketpaw.uploads.local import LocalStorageAdapter
 
 # pytest-asyncio runs in auto mode (see pyproject [tool.pytest] asyncio_mode),
 # so async tests are detected automatically — no module-level mark needed (a
@@ -53,6 +57,19 @@ def proxy_env(monkeypatch):
     key, so the Bearer header is exercised end-to-end through catalog.config."""
     monkeypatch.setenv("POCKETPAW_LITELLM_API_BASE", _PROXY_BASE)
     monkeypatch.setenv("POCKETPAW_LITELLM_API_KEY", _PROXY_KEY)
+
+
+@pytest.fixture
+def media_store(tmp_path, monkeypatch) -> Path:
+    """Redirect the media storage adapter to a tmp-backed LOCAL adapter so the
+    MCP's generated blobs land at <media_root>/generated/<name> — the same key
+    layout the deployed S3 adapter uses ("generated/<name>"). Returns the
+    on-disk generated dir for assertions."""
+    media_root = tmp_path / "media-root"
+    generated = media_root / "generated"
+    generated.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(media_storage, "_ADAPTER", LocalStorageAdapter(root=media_root))
+    return generated
 
 
 def _install_transport(monkeypatch, handler) -> dict:
@@ -98,7 +115,7 @@ async def test_image_generate_error_when_no_identity() -> None:
 
 
 async def test_image_generate_routes_to_proxy_with_model_and_bearer(
-    tmp_path, monkeypatch, proxy_env
+    media_store, monkeypatch, proxy_env
 ) -> None:
     """A successful image generation POSTs the catalog model id to the proxy's
     /v1/images/generations with the Bearer key + the tenant in `user`, decodes
@@ -120,7 +137,6 @@ async def test_image_generate_routes_to_proxy_with_model_and_bearer(
 
     with (
         patch.object(media, "_identity", return_value=("ws-1", "u-1")),
-        patch.object(media, "_generated_dir", return_value=tmp_path),
         patch(
             "pocketpaw_ee.cloud.chat.agent_service.current_session_mongo_id",
             return_value="sess-1",
@@ -142,7 +158,7 @@ async def test_image_generate_routes_to_proxy_with_model_and_bearer(
     # The Bearer proxy key rode on the request.
     assert captured["requests"][0].headers.get("authorization") == f"Bearer {_PROXY_KEY}"
     # The PNG was written with the decoded image bytes.
-    pngs = list(tmp_path.glob("*.png"))
+    pngs = list(media_store.glob("*.png"))
     assert len(pngs) == 1
     assert pngs[0].read_bytes() == b"png-bytes"
     # agent_create was called with the trusted-create STUDIO gallery contract.
@@ -154,7 +170,7 @@ async def test_image_generate_routes_to_proxy_with_model_and_bearer(
 
 
 async def test_image_generate_backward_compat_default_model(
-    tmp_path, monkeypatch, proxy_env
+    media_store, monkeypatch, proxy_env
 ) -> None:
     """No `model` arg (the existing studio skill/preamble call shape) →
     settings.image_model is used as the catalog model id."""
@@ -171,7 +187,6 @@ async def test_image_generate_backward_compat_default_model(
 
     with (
         patch.object(media, "_identity", return_value=("ws-1", "u-1")),
-        patch.object(media, "_generated_dir", return_value=tmp_path),
         patch(
             "pocketpaw.config.get_settings",
             return_value=MagicMock(image_model="google/imagen-4"),
@@ -189,7 +204,7 @@ async def test_image_generate_backward_compat_default_model(
     assert seen_model["model"] == "google/imagen-4"
 
 
-async def test_image_generate_relays_proxy_error(tmp_path, monkeypatch, proxy_env) -> None:
+async def test_image_generate_relays_proxy_error(media_store, monkeypatch, proxy_env) -> None:
     """A proxy 4xx (e.g. unknown model) is relayed plainly, no asset, no gallery
     write."""
 
@@ -201,7 +216,6 @@ async def test_image_generate_relays_proxy_error(tmp_path, monkeypatch, proxy_en
 
     with (
         patch.object(media, "_identity", return_value=("ws-1", "u-1")),
-        patch.object(media, "_generated_dir", return_value=tmp_path),
         patch("pocketpaw_ee.cloud.pockets.service.agent_create", agent_create),
     ):
         result = await media._image_generate_handler(
@@ -215,7 +229,7 @@ async def test_image_generate_relays_proxy_error(tmp_path, monkeypatch, proxy_en
     agent_create.assert_not_called()
 
 
-async def test_image_generate_url_return_shape(tmp_path, monkeypatch, proxy_env) -> None:
+async def test_image_generate_url_return_shape(media_store, monkeypatch, proxy_env) -> None:
     """When the proxy returns a URL instead of b64_json (dall-e-style), the bytes
     are fetched from the CDN — and the proxy Bearer key must NOT ride the CDN GET
     (the key is for the proxy, not arbitrary asset hosts)."""
@@ -238,7 +252,6 @@ async def test_image_generate_url_return_shape(tmp_path, monkeypatch, proxy_env)
 
     with (
         patch.object(media, "_identity", return_value=("ws-1", "u-1")),
-        patch.object(media, "_generated_dir", return_value=tmp_path),
         patch(
             "pocketpaw_ee.cloud.chat.agent_service.current_session_mongo_id",
             return_value="sess-1",
@@ -249,12 +262,14 @@ async def test_image_generate_url_return_shape(tmp_path, monkeypatch, proxy_env)
         result = await media._image_generate_handler({"prompt": "a cat", "model": "dall-e-3"})
 
     assert result.get("is_error") is not True
-    pngs = list(tmp_path.glob("*.png"))
+    pngs = list(media_store.glob("*.png"))
     assert len(pngs) == 1
     assert pngs[0].read_bytes() == b"cdn-png-bytes"
 
 
-async def test_image_generate_aspect_ratio_maps_to_size(tmp_path, monkeypatch, proxy_env) -> None:
+async def test_image_generate_aspect_ratio_maps_to_size(
+    media_store, monkeypatch, proxy_env
+) -> None:
     """The bundled skill passes `aspect_ratio` (not `size`); it must be mapped to
     an OpenAI-compatible size rather than silently dropped. 16:9 → 1792x1024."""
     monkeypatch.setattr(media, "_GALLERY_STATE", {})
@@ -269,7 +284,6 @@ async def test_image_generate_aspect_ratio_maps_to_size(tmp_path, monkeypatch, p
 
     with (
         patch.object(media, "_identity", return_value=("ws-1", "u-1")),
-        patch.object(media, "_generated_dir", return_value=tmp_path),
         patch(
             "pocketpaw_ee.cloud.chat.agent_service.current_session_mongo_id",
             return_value="sess-1",
@@ -289,7 +303,7 @@ async def test_image_generate_aspect_ratio_maps_to_size(tmp_path, monkeypatch, p
 
 
 async def test_image_generate_explicit_size_wins_over_aspect_ratio(
-    tmp_path, monkeypatch, proxy_env
+    media_store, monkeypatch, proxy_env
 ) -> None:
     """When both `size` and `aspect_ratio` are given, the explicit `size` wins."""
     monkeypatch.setattr(media, "_GALLERY_STATE", {})
@@ -304,7 +318,6 @@ async def test_image_generate_explicit_size_wins_over_aspect_ratio(
 
     with (
         patch.object(media, "_identity", return_value=("ws-1", "u-1")),
-        patch.object(media, "_generated_dir", return_value=tmp_path),
         patch(
             "pocketpaw_ee.cloud.chat.agent_service.current_session_mongo_id",
             return_value="sess-1",
@@ -326,7 +339,9 @@ async def test_image_generate_explicit_size_wins_over_aspect_ratio(
 # --- audio_generate (TTS) ---
 
 
-async def test_audio_generate_routes_to_speech_endpoint(tmp_path, monkeypatch, proxy_env) -> None:
+async def test_audio_generate_routes_to_speech_endpoint(
+    media_store, monkeypatch, proxy_env
+) -> None:
     """A successful TTS POSTs to /v1/audio/speech with the model + Bearer + tenant,
     saves the raw audio bytes, and lands an audio tile in the gallery."""
     monkeypatch.setattr(media, "_GALLERY_STATE", {})
@@ -345,7 +360,6 @@ async def test_audio_generate_routes_to_speech_endpoint(tmp_path, monkeypatch, p
 
     with (
         patch.object(media, "_identity", return_value=("ws-1", "u-1")),
-        patch.object(media, "_generated_dir", return_value=tmp_path),
         patch(
             "pocketpaw_ee.cloud.chat.agent_service.current_session_mongo_id",
             return_value="sess-1",
@@ -364,14 +378,14 @@ async def test_audio_generate_routes_to_speech_endpoint(tmp_path, monkeypatch, p
     assert body["model"] == "openai/tts-1-hd"
     assert body["pocket_id"] == "pkt-audio-1"
     assert captured["requests"][0].headers.get("authorization") == f"Bearer {_PROXY_KEY}"
-    mp3s = list(tmp_path.glob("*.mp3"))
+    mp3s = list(media_store.glob("*.mp3"))
     assert len(mp3s) == 1
     assert mp3s[0].read_bytes() == b"mp3-bytes"
     _, kwargs = agent_create.call_args
     assert kwargs["trusted"] is True
 
 
-async def test_audio_generate_default_model(tmp_path, monkeypatch, proxy_env) -> None:
+async def test_audio_generate_default_model(media_store, monkeypatch, proxy_env) -> None:
     """No `model` → the built-in TTS default (tts-1)."""
     monkeypatch.setattr(media, "_GALLERY_STATE", {})
     seen: dict = {}
@@ -384,7 +398,6 @@ async def test_audio_generate_default_model(tmp_path, monkeypatch, proxy_env) ->
 
     with (
         patch.object(media, "_identity", return_value=("ws-1", "u-1")),
-        patch.object(media, "_generated_dir", return_value=tmp_path),
         patch(
             "pocketpaw_ee.cloud.chat.agent_service.current_session_mongo_id",
             return_value="sess-1",

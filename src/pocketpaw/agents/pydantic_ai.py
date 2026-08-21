@@ -390,6 +390,10 @@ _TENANT_SAFE_TOOLS = frozenset(
         "create_pocket",
         "start_flow",
         "run_step_pipeline",
+        # /studio flow canvas — the agent scaffolds a node graph for the
+        # tenant's own /studio workspace; server-side persist (when EE is
+        # present) is scoped to the caller's workspace.
+        "build_studio_flow",
         # widget authoring reference — in-process reads of a static manifest
         # and a static design catalog. No tenant data, no host state.
         "get_widget_spec",

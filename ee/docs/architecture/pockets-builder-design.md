@@ -69,15 +69,15 @@ from typing import Any, Literal
 
 
 class IntentKind(StrEnum):
-    CREATE   = "pocket_create"
-    UPDATE   = "pocket_update"
-    NONE     = "none"       # not a pocket intent; fall through to normal run
+    CREATE = "pocket_create"
+    UPDATE = "pocket_update"
+    NONE = "none"  # not a pocket intent; fall through to normal run
 
 
 @dataclass(frozen=True)
 class WidgetSpec:
     name: str
-    type: str                            # metric | chart | table | feed | etc.
+    type: str  # metric | chart | table | feed | etc.
     icon: str = ""
     color: str = ""
     span: str = "col-span-1"
@@ -96,9 +96,10 @@ class PocketSpec:
     this; ``service.py:run_intent_from_message`` converts it to a
     ``CreatePocketRequest`` and calls ``pockets.service.create``.
     """
+
     name: str
     description: str = ""
-    type: str = "custom"                 # UISpec category / pocket type
+    type: str = "custom"  # UISpec category / pocket type
     icon: str = ""
     color: str = ""
     visibility: str = "workspace"
@@ -109,6 +110,7 @@ class PocketSpec:
 @dataclass(frozen=True)
 class PocketUpdatePatch:
     """Partial patch spec produced when intent is ``pocket_update``."""
+
     name: str | None = None
     description: str | None = None
     icon: str | None = None
@@ -119,11 +121,12 @@ class PocketUpdatePatch:
 @dataclass(frozen=True)
 class BuilderResult:
     """Terminal value from ``run_intent_from_message``."""
+
     intent: IntentKind
-    pocket_id: str | None = None        # set on successful create/update
-    pocket_view: dict[str, Any] | None = None   # agent-view dict, set on success
-    spec: PocketSpec | None = None      # the validated spec that was applied
-    error: str | None = None            # human-readable on failure
+    pocket_id: str | None = None  # set on successful create/update
+    pocket_view: dict[str, Any] | None = None  # agent-view dict, set on success
+    spec: PocketSpec | None = None  # the validated spec that was applied
+    error: str | None = None  # human-readable on failure
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +149,7 @@ class BuilderEvent:
       pocket.updated   — Mongo write succeeded (update path); data: {pocket_id}
       error            — builder failure; data: {code, message}
     """
+
     name: str
     data: dict[str, Any]
 ```
@@ -166,17 +170,19 @@ class BuildRequest(BaseModel):
     Carries everything the builder needs from the SSE request context without
     importing ``ScopeContext`` (which would create a cycle with ``chat``).
     """
+
     user_message: str
     workspace_id: str
     user_id: str
     session_mongo_id: str | None = None
-    pocket_id: str | None = None        # set when editing an existing pocket
-    provider: str                       # "anthropic" | "openai" | "ollama" | ...
-    model: str | None = None            # override; None = provider default
+    pocket_id: str | None = None  # set when editing an existing pocket
+    provider: str  # "anthropic" | "openai" | "ollama" | ...
+    model: str | None = None  # override; None = provider default
 
 
 class IntentDetectionResult(BaseModel):
     """Schema that the classifier LLM call must return (structured output)."""
+
     intent: str = Field(
         description="One of: pocket_create, pocket_update, none",
         pattern="^(pocket_create|pocket_update|none)$",
@@ -190,6 +196,7 @@ class IntentDetectionResult(BaseModel):
 class BuildResponse(BaseModel):
     """Final result shape returned by service-layer callers that want a
     plain dict instead of iterating the async generator."""
+
     intent: str
     pocket_id: str | None = None
     pocket_view: dict[str, Any] | None = None
@@ -253,6 +260,8 @@ async def _anthropic_call(
     model: str,
     api_key: str,
 ) -> BaseModel: ...
+
+
 # Uses tool_use with strict input_schema derived from schema.model_json_schema().
 # The tool name is "emit_result". Returns tool_use.input validated by schema.
 
@@ -264,6 +273,8 @@ async def _openai_call(
     base_url: str | None,
     api_key: str | None,
 ) -> BaseModel: ...
+
+
 # Uses response_format={"type": "json_schema", "json_schema": {...}}.
 # Covers: openai, openai_compatible, openrouter, litellm proxy.
 
@@ -274,6 +285,8 @@ async def _ollama_native_call(
     model: str,
     host: str,
 ) -> BaseModel: ...
+
+
 # Uses Ollama /api/chat with format=schema.model_json_schema() (Ollama >=0.5).
 
 
@@ -284,6 +297,8 @@ async def _plain_text_call(
     settings: Settings,
     model: str | None,
 ) -> BaseModel: ...
+
+
 # Used for codex_cli, copilot_sdk, deep_agents, opencode when no native
 # structured-output API is available. Appends to the user message:
 # "Respond with a single JSON object matching this schema: <schema_json>".
@@ -325,7 +340,8 @@ Model defaults when caller passes `model=None`:
 ```python
 class ProviderError(Exception):
     def __init__(self, code: str, message: str, *, retryable: bool = False) -> None: ...
-    code: str       # e.g. "no_key", "api_error", "parse_failed_twice", "timeout"
+
+    code: str  # e.g. "no_key", "api_error", "parse_failed_twice", "timeout"
     message: str
     retryable: bool
 ```
@@ -836,9 +852,7 @@ async def _run_agent_stream(
             user_message=body.content,
             workspace_id=ctx.workspace_id,
             user_id=ctx.user_id,
-            session_mongo_id=(
-                ctx.scope_id if ctx.kind is ScopeKind.SESSION else None
-            ),
+            session_mongo_id=(ctx.scope_id if ctx.kind is ScopeKind.SESSION else None),
             pocket_id=ctx.pocket_id,
             provider=_provider,
             # intent_hint skips classify call when pre-set
@@ -867,33 +881,39 @@ async def _run_agent_stream(
                 yield ("chunk", {"content": chunk_text, "type": "text"})
             else:
                 yield (builder_event.name, builder_event.data)
-                if builder_event.name in ("pocket.created", "pocket.updated",
-                                          "error"):
+                if builder_event.name in ("pocket.created", "pocket.updated", "error"):
                     # Builder finished (success or failure). Do NOT fall through
                     # to pool.run — the stream ends here.
                     if builder_event.name == "error":
-                        yield ("stream_end", {
-                            "assistant_message_id": None,
-                            "usage": {},
-                            "cancelled": False,
-                        })
-                    else:
-                        # Persist the confirmation chunk as assistant message.
-                        if full_text.strip():
-                            assistant_msg = await _persist_assistant_message(
-                                ctx, full_text, []
-                            )
-                            yield ("stream_end", {
-                                "assistant_message_id": str(assistant_msg.id),
-                                "usage": {},
-                                "cancelled": False,
-                            })
-                        else:
-                            yield ("stream_end", {
+                        yield (
+                            "stream_end",
+                            {
                                 "assistant_message_id": None,
                                 "usage": {},
                                 "cancelled": False,
-                            })
+                            },
+                        )
+                    else:
+                        # Persist the confirmation chunk as assistant message.
+                        if full_text.strip():
+                            assistant_msg = await _persist_assistant_message(ctx, full_text, [])
+                            yield (
+                                "stream_end",
+                                {
+                                    "assistant_message_id": str(assistant_msg.id),
+                                    "usage": {},
+                                    "cancelled": False,
+                                },
+                            )
+                        else:
+                            yield (
+                                "stream_end",
+                                {
+                                    "assistant_message_id": None,
+                                    "usage": {},
+                                    "cancelled": False,
+                                },
+                            )
                     await _broadcast_agent_typing(ctx, active=False)
                     return
 

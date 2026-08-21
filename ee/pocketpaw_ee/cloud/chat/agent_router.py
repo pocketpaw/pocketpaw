@@ -271,6 +271,10 @@ async def post_agent_chat(
         # the request body; ``None`` for every older client leaves model selection
         # to the backend.
         model_override=body.model,
+        # Studio Flow build context — ride the spec to the executor so the agent
+        # knows the ACTIVE FLOW ID and ``build_studio_flow`` persists into the
+        # flow project the user is on (``None`` on every non-studio surface).
+        flow_context=body.flow_context,
     )
     # create_run is idempotent on (workspace, client_message_id) — when a doc
     # already exists, re-use its run_id so the executor + SSE stream both

@@ -274,7 +274,9 @@ async def test_create_invite_hashes_token_at_rest(mongo_db: Any, captured_legacy
     assert row.token in (None, "")  # plaintext column is not populated for new invites
 
 
-async def test_validate_invite_accepts_plaintext_by_hash(mongo_db: Any, captured_legacy_events) -> None:
+async def test_validate_invite_accepts_plaintext_by_hash(
+    mongo_db: Any, captured_legacy_events
+) -> None:
     owner = await _seed_user(email="o2@x.c")
     ws = await workspace_service.create(
         _ctx(str(owner.id)),
@@ -398,11 +400,13 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
 4f. Bump the notification source so it doesn't leak plaintext. Around `:472-476`:
 
 ```python
-source=NotificationSource(
-    type="invite",
-    id=invite.id,  # the invite document id, not the token
-    room_id=invite.group_id,
-),
+source = (
+    NotificationSource(
+        type="invite",
+        id=invite.id,  # the invite document id, not the token
+        room_id=invite.group_id,
+    ),
+)
 ```
 
 (Audit if anything reads `source.id` expecting a token. Quick grep: `grep -rn "source.id" ee/pocketpaw_ee/cloud/notifications/`. If something does, fix it to pull the token from the email URL, not from the notification.)
@@ -588,12 +592,16 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
         },
     )
     wid = invite.workspace_id
-    await emit(WorkspaceInviteAccepted(
-        data={"workspace_id": wid, "invite_id": invite.id, "user_id": ctx.user_id}
-    ))
-    await emit(WorkspaceMemberAdded(
-        data={"workspace_id": wid, "user_id": ctx.user_id, "role": invite.role}
-    ))
+    await emit(
+        WorkspaceInviteAccepted(
+            data={"workspace_id": wid, "invite_id": invite.id, "user_id": ctx.user_id}
+        )
+    )
+    await emit(
+        WorkspaceMemberAdded(
+            data={"workspace_id": wid, "user_id": ctx.user_id, "role": invite.role}
+        )
+    )
     get_resolver().invalidate_workspace(wid)
 ```
 
@@ -785,7 +793,7 @@ class InvitePreviewResponse(BaseModel):
         "already_accepted",
         "not_found",
     ]
-    email: str | None = None         # the invitee's email; surfaces in UI for confirmation
+    email: str | None = None  # the invitee's email; surfaces in UI for confirmation
     role: str | None = None
     workspace_name: str | None = None
     group: str | None = None
@@ -878,7 +886,9 @@ async def test_preview_states(mongo_db: Any) -> None:
     assert out["email"] == "m@x.c"
 
     # Logged in as matching
-    out = await workspace_service.preview_invite(invite.token, viewer_user_id=str(matching_viewer.id))
+    out = await workspace_service.preview_invite(
+        invite.token, viewer_user_id=str(matching_viewer.id)
+    )
     assert out["state"] == "ready_existing"
     assert out["viewer_email"] == "m@x.c"
 

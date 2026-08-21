@@ -286,6 +286,77 @@ async def _publish_pocket_event(
         )
 
 
+def _flow_ctx_id(metadata: dict | None) -> str | None:
+    """Read the flow_id a chat request carried (``flow_context.flow_id``)."""
+    if not isinstance(metadata, dict):
+        return None
+    ctx = metadata.get("flow_context")
+    if not isinstance(ctx, dict):
+        return None
+    fid = ctx.get("flow_id")
+    return str(fid) if fid else None
+
+
+async def _publish_studio_flow_event(
+    bus: "MessageBus",
+    content: str,
+    session_key: str,
+    trace_id: str | None = None,
+    flow_id: str | None = None,
+) -> None:
+    """Detect a ``build_studio_flow`` tool result and publish a dedicated
+    ``studio_flow`` SystemEvent.
+
+    The StudioFlowTool returns ``{"studio_flow": {goal, nodes, edges}}`` — the
+    full node/edge spec for the /studio Flow canvas. ``tool_result`` truncates
+    to 200 chars (far too small for a graph), so this mirrors the
+    ``pocket_created`` pattern: detect the marker envelope in the full tool
+    output and fan the whole spec as its own SystemEvent, which the chat SSE
+    bridge forwards to paw-enterprise so the canvas materialises live.
+
+    ``flow_id`` (from the tool envelope or the session's flow_context) tells
+    the frontend WHICH flow project the graph belongs to, so ``applyFlowSpec``
+    materialises it into that project and the existing flow-projects sync
+    persists it under the same id.
+
+    The spec is persisted server-side by the /studio flow-projects store the
+    moment ``applyFlowSpec`` runs (client → PUT /studio/flow-projects/{id});
+    this event is the transport that gets it onto the canvas.
+    """
+    if '"studio_flow"' not in content:
+        return
+    data = _extract_pocket_json(content)
+    if not data:
+        return
+    spec = data.get("studio_flow")
+    if not isinstance(spec, dict):
+        return
+    # Prefer the id the tool echoed; fall back to the session's flow context.
+    spec_flow_id = spec.get("flow_id")
+    resolved_flow_id = str(spec_flow_id) if spec_flow_id else (str(flow_id) if flow_id else "")
+    logger.info(
+        "Studio flow event detected: nodes=%d, edges=%d, goal=%r, flow_id=%r",
+        len(spec.get("nodes") or []),
+        len(spec.get("edges") or []),
+        spec.get("goal"),
+        resolved_flow_id,
+    )
+    payload: dict[str, Any] = {
+        "spec": spec,
+        "session_key": session_key,
+    }
+    if resolved_flow_id:
+        payload["flow_id"] = resolved_flow_id
+    if trace_id:
+        payload["trace_id"] = trace_id
+    await bus.publish_system(
+        SystemEvent(
+            event_type="studio_flow",
+            data=payload,
+        )
+    )
+
+
 def _extract_pocket_tool_policy(content: str) -> dict[str, bool] | None:
     """Extract toolPolicy from [context:pocket] marker in message content."""
     import json as _json
@@ -1173,6 +1244,25 @@ class AgentLoop:
             )
             system_prompt = assembled_prompt.text
 
+            # 2a0. Studio Flow build context — tell the agent WHICH flow this
+            # request belongs to so its build_studio_flow call carries the id the
+            # desktop project owns (flow_context.flow_id threaded from the chat
+            # request). The tool upserts the spec under that id, the SSE event
+            # echoes it, and the canvas saves into the same project. Without this
+            # the agent would fork a random flow the user never asked about.
+            flow_ctx = (message.metadata or {}).get("flow_context")
+            if isinstance(flow_ctx, dict) and flow_ctx.get("flow_id"):
+                _fid = str(flow_ctx["flow_id"])
+                _fname = str(flow_ctx.get("project_name") or "Untitled flow")
+                system_prompt = (
+                    f"{system_prompt}\n\n[studio flow context]\n"
+                    f"You are building a Studio Flow on the desktop canvas.\n"
+                    f"ACTIVE FLOW ID: {_fid}\n"
+                    f"ACTIVE FLOW NAME: {_fname}\n"
+                    f'Call build_studio_flow with flow_id="{_fid}" so the graph '
+                    f"saves into that flow project. Do NOT invent a different id."
+                )
+
             # 2a. Emit AGENTS.md event for the dashboard Activity panel
             try:
                 from pocketpaw.agents_md import AgentsMdLoader
@@ -1567,6 +1657,16 @@ class AgentLoop:
                             session_key,
                             metadata=message.metadata,
                             trace_id=trace_id,
+                        )
+                        # Detect build_studio_flow tool output and fan the full
+                        # flow spec as a dedicated SystemEvent (tool_result
+                        # truncates to 200 chars — too small for a node graph).
+                        await _publish_studio_flow_event(
+                            self.bus,
+                            econtent,
+                            session_key,
+                            trace_id=trace_id,
+                            flow_id=_flow_ctx_id(message.metadata),
                         )
                         media_paths.extend(_extract_media_paths(econtent))
 

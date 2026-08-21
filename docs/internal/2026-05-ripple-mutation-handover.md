@@ -132,8 +132,10 @@ Per `pocketpaw/CLAUDE.md` ee/cloud 4-file shape, the implementation lives in:
 def find_by_id(node: dict, target_id: str) -> tuple[dict, list[int]] | None:
     """Return (node, path) where path is the index trail from root."""
 
+
 def insert_after(parent: dict, after_id: str | None, child: dict) -> None:
     """Insert child into parent.children. None => append."""
+
 
 def replace_at(node: dict, path: list[int], new_node: dict) -> None: ...
 def remove_at(node: dict, path: list[int]) -> dict: ...  # returns removed
@@ -147,6 +149,7 @@ These stay pure (no DB, no events, no logging). The service wraps them with pers
 ```python
 # ee/cloud/pockets/service.py — sketch
 
+
 async def agent_set_node_prop(ctx, body):
     body = SetNodePropRequest.model_validate(body)
     doc = await _PocketDoc.find_one(_id=body.pocket_id, workspace=ctx.workspace_id)
@@ -159,13 +162,15 @@ async def agent_set_node_prop(ctx, body):
     node, _path = found
     old = spec_ops.set_prop(node, body.prop, body.value)
     await doc.save()
-    await emit(NodePropChanged(
-        pocket_id=body.pocket_id,
-        node_id=body.node_id,
-        prop=body.prop,
-        old_value=old,
-        new_value=body.value,
-    ))
+    await emit(
+        NodePropChanged(
+            pocket_id=body.pocket_id,
+            node_id=body.node_id,
+            prop=body.prop,
+            old_value=old,
+            new_value=body.value,
+        )
+    )
     return SetNodePropResponse(subtree=node, old_value=old)
 ```
 
@@ -173,11 +178,13 @@ async def agent_set_node_prop(ctx, body):
 
 ```python
 async def _push_op(action: str, pocket_id: str, payload: dict) -> None:
-    push_pocket_mutation({
-        "action": action,             # "node_added" | "node_replaced" | etc.
-        "pocket_id": pocket_id,
-        **payload,                    # subtree / removed_id / etc.
-    })
+    push_pocket_mutation(
+        {
+            "action": action,  # "node_added" | "node_replaced" | etc.
+            "pocket_id": pocket_id,
+            **payload,  # subtree / removed_id / etc.
+        }
+    )
 ```
 
 The renderer needs a corresponding switch — see [Renderer integration](#renderer-integration) below.
@@ -313,23 +320,29 @@ Lift the `pocket_specialist` registration out of `claude_sdk.py` so all backends
 ```python
 # src/pocketpaw/agents/specialist.py
 
+
 @dataclass
 class SpecialistDefinition:
     name: str
     description: str
     system_prompt: str
-    tool_ids: list[str]            # MCP tool ids the specialist owns
-    main_agent_filter: list[str]   # tool ids to filter off main agent
+    tool_ids: list[str]  # MCP tool ids the specialist owns
+    main_agent_filter: list[str]  # tool ids to filter off main agent
+
 
 class SpecialistHandle(Protocol):
-    async def delegate(self, prompt: str, *, context: dict | None = None) -> AsyncIterator[AgentEvent]:
-        ...
+    async def delegate(
+        self, prompt: str, *, context: dict | None = None
+    ) -> AsyncIterator[AgentEvent]: ...
+
 
 def build_pocket_specialist_definition() -> SpecialistDefinition:
     """One source of truth for the specialist's prompt + tools."""
     ...
 
+
 # Backend integration — each backend implements one of these.
+
 
 class BackendSpecialistAdapter(Protocol):
     def register(self, defn: SpecialistDefinition) -> SpecialistHandle: ...
