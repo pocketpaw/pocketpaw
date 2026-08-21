@@ -151,6 +151,13 @@ Changes:
     recurring checkout; the subscription webhook reverses it (product_id ->
     plan key) to know which tier renewed. A before-validator degrades a
     malformed env string to {} so a typo can't crash settings load.
+  - 2026-08-21: Added ``sites_billing_enforced`` (default False, env
+    ``POCKETPAW_SITES_BILLING_ENFORCED``) — the PER-SITE paywall switch, so the
+    Paw Sites seams (custom-domain capability + count caps, concierge
+    entitlement) can be turned on without also 402ing chat runs, seats, pockets,
+    connectors, calls or uploads. Every sites seam reads ``billing_enforced OR
+    sites_billing_enforced``, so the global flag keeps working exactly as
+    documented and this is additive for existing tenants.
   - 2026-06-24: Added ``billing_enforced`` (default False, env
     POCKETPAW_BILLING_ENFORCED) — the BC-4 run-start hard-block flag. When
     True the cloud rejects STARTING a new chat run on a zero-or-negative
@@ -2375,7 +2382,29 @@ class Settings(BaseSettings):
             "that ceiling) -> 402 credits.quota_exceeded. In-flight runs are never "
             "killed. Default False so OSS / self-host deployments (which run no "
             "credit ledger) are unaffected; the cloud / subscription (PEE) "
-            "deployments turn it on via POCKETPAW_BILLING_ENFORCED."
+            "deployments turn it on via POCKETPAW_BILLING_ENFORCED. Does NOT "
+            "gate the PER-SITE seams on its own any more — those read "
+            "billing_enforced OR sites_billing_enforced, so this flag still turns "
+            "them on and nothing changes for a deployment already setting it."
+        ),
+    )
+    sites_billing_enforced: bool = Field(
+        default=False,
+        description=(
+            "Per-SITE billing enforcement, independent of billing_enforced. When "
+            "True, the Paw Sites seams enforce: the custom-domain capability gate, "
+            "the custom-domain count cap (how many SITES in a workspace may carry "
+            "one, and how many hostnames a free site may carry), and the visitor "
+            "concierge entitlement. Every one of those reads billing_enforced OR "
+            "this flag, so setting either turns them on. It exists because the two "
+            "decisions are unrelated: charging for custom domains should not also "
+            "start rejecting chat runs with 402, and needing one switch for both is "
+            "why the sites paywall could not be turned on at all. Explicitly OUTSIDE "
+            "its scope, all still governed by billing_enforced alone: chat-run "
+            "credit blocks, the seat cap, the pocket cap, the connector cap, the "
+            "daily call budget and the storage cap. Default False, so OSS / "
+            "self-host sees no paywall and the seams do no extra database read. Set "
+            "via POCKETPAW_SITES_BILLING_ENFORCED."
         ),
     )
 

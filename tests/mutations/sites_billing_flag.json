@@ -1,0 +1,79 @@
+[
+  {
+    "label": "the sites-only flag is never read — the seams answer to the global switch alone",
+    "file": "ee/pocketpaw_ee/cloud/billing/enforcement.py",
+    "find": "        getattr(settings, \"billing_enforced\", False)\n        or getattr(settings, \"sites_billing_enforced\", False)",
+    "replace": "        getattr(settings, \"billing_enforced\", False)",
+    "tests": [
+      "tests/cloud/sites/test_sites_billing_flag.py::test_either_flag_turns_the_sites_seams_on",
+      "tests/cloud/sites/test_sites_billing_flag.py::test_the_sites_flag_alone_makes_the_domain_cap_bite",
+      "tests/cloud/sites/test_sites_billing_flag.py::test_the_sites_flag_alone_makes_the_concierge_gate_bite"
+    ]
+  },
+  {
+    "label": "the global flag stops counting — an existing tenant loses its sites enforcement",
+    "file": "ee/pocketpaw_ee/cloud/billing/enforcement.py",
+    "find": "        getattr(settings, \"billing_enforced\", False)\n        or getattr(settings, \"sites_billing_enforced\", False)",
+    "replace": "        getattr(settings, \"sites_billing_enforced\", False)",
+    "tests": [
+      "tests/cloud/sites/test_sites_billing_flag.py::test_either_flag_turns_the_sites_seams_on",
+      "tests/cloud/sites/test_sites_billing_flag.py::test_the_global_flag_alone_still_enforces_the_domain_cap",
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_second_free_site_is_refused"
+    ]
+  },
+  {
+    "label": "the OR becomes an AND — both flags are needed and neither alone works",
+    "file": "ee/pocketpaw_ee/cloud/billing/enforcement.py",
+    "find": "        getattr(settings, \"billing_enforced\", False)\n        or getattr(settings, \"sites_billing_enforced\", False)",
+    "replace": "        getattr(settings, \"billing_enforced\", False)\n        and getattr(settings, \"sites_billing_enforced\", False)",
+    "tests": [
+      "tests/cloud/sites/test_sites_billing_flag.py::test_either_flag_turns_the_sites_seams_on"
+    ]
+  },
+  {
+    "label": "a settings stub missing the new field raises instead of reading as off",
+    "file": "ee/pocketpaw_ee/cloud/billing/enforcement.py",
+    "find": "        or getattr(settings, \"sites_billing_enforced\", False)",
+    "replace": "        or settings.sites_billing_enforced",
+    "tests": [
+      "tests/cloud/sites/test_sites_billing_flag.py::test_settings_missing_the_new_field_read_as_off"
+    ]
+  },
+  {
+    "label": "the flag defaults ON — every self-host install acquires the sites paywall on upgrade",
+    "file": "src/pocketpaw/config.py",
+    "find": "    sites_billing_enforced: bool = Field(\n        default=False,",
+    "replace": "    sites_billing_enforced: bool = Field(\n        default=True,",
+    "tests": [
+      "tests/cloud/sites/test_sites_billing_flag.py::test_the_setting_defaults_off_and_reads_its_env_var",
+      "tests/cloud/sites/test_custom_domain_cap.py::test_with_billing_off_a_second_site_attaches_freely"
+    ]
+  },
+  {
+    "label": "the sites flag leaks into the chat-run credit gate",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if not get_settings().billing_enforced:\n        return None\n    if not workspace_id:",
+    "replace": "    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced\n\n    if not sites_enforced():\n        return None\n    if not workspace_id:",
+    "tests": [
+      "tests/cloud/sites/test_sites_billing_flag.py::test_the_sites_flag_does_not_start_402ing_chat_runs"
+    ]
+  },
+  {
+    "label": "the sites flag leaks into the pocket cap",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    from pocketpaw.config import get_settings\n\n    if not get_settings().billing_enforced:\n        return (False, 0, None)\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = await entitlements_service.resolve_entitlements(workspace_id)\n    limit = ent.max_pockets",
+    "replace": "    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced\n\n    if not sites_enforced():\n        return (False, 0, None)\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = await entitlements_service.resolve_entitlements(workspace_id)\n    limit = ent.max_pockets",
+    "tests": [
+      "tests/cloud/sites/test_sites_billing_flag.py::test_the_sites_flag_does_not_turn_on_the_pocket_cap"
+    ]
+  },
+  {
+    "label": "the sites flag leaks into the connector cap",
+    "file": "ee/pocketpaw_ee/cloud/connectors/service.py",
+    "find": "    from pocketpaw.config import get_settings\n\n    if not get_settings().billing_enforced:\n        return (False, 0, None)\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = await entitlements_service.resolve_entitlements(workspace_id)\n    limit = ent.max_connectors",
+    "replace": "    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced\n\n    if not sites_enforced():\n        return (False, 0, None)\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = await entitlements_service.resolve_entitlements(workspace_id)\n    limit = ent.max_connectors",
+    "tests": [
+      "tests/cloud/sites/test_sites_billing_flag.py::test_the_sites_flag_does_not_turn_on_the_connector_cap"
+    ]
+  }
+]

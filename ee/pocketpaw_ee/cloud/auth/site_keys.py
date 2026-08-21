@@ -167,10 +167,12 @@ def concierge_available(site: _SiteDoc) -> bool:
     ``site.concierge_enabled`` directly and no plan was consulted anywhere, so a free
     site served a concierge indefinitely.
 
-    Gated on ``billing_enforced``, matching the workspace caps
-    (``PocketLimitError`` / ``ConnectorLimitError`` / the credit guards): with billing
-    off — OSS, self-host, and every in-repo deploy today — only the owner's switch
-    applies, exactly as before.
+    Gated on ``billing.enforcement.sites_enforced()``, which is ``billing_enforced``
+    OR the sites-only ``sites_billing_enforced``: with both off — OSS, self-host, and
+    every in-repo deploy today — only the owner's switch applies, exactly as before.
+    The second flag exists so the sites paywall can be turned on without the
+    workspace caps (``PocketLimitError`` / ``ConnectorLimitError`` / the credit
+    guards) coming on with it.
 
     Worth knowing that this is NOT universal: the badge stamper
     (``sites.service._stamp_free_badge``) resolves the same per-site entitlements and
@@ -187,9 +189,9 @@ def concierge_available(site: _SiteDoc) -> bool:
     if not site.concierge_enabled:
         return False
 
-    from pocketpaw.config import get_settings
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
 
-    if not get_settings().billing_enforced:
+    if not sites_enforced():
         return True
 
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
@@ -327,7 +329,7 @@ async def resolve_site_key_with_site(
     # after the owner's switch and refused the same way. Same 403 and the same
     # silence to a visitor — only the detail differs, because an owner who switched
     # it off and an owner whose subscription lapsed need different remedies. A
-    # no-op unless ``billing_enforced``.
+    # no-op unless ``billing_enforced`` or ``sites_billing_enforced``.
     if not concierge_available(site):
         raise HTTPException(status_code=403, detail="concierge_not_entitled")
 
