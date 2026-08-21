@@ -173,17 +173,18 @@
   {
     "label": "the billing_enforced guard is dropped from the count — OSS/self-host inherits the cap",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if not get_settings().billing_enforced:\n        return (False, 0, None)\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    limit = entitlements_service.site_domain_allowance(",
+    "find": "    if not sites_enforced():\n        return (False, 0, None)\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    limit = entitlements_service.site_domain_allowance(",
     "replace": "    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    limit = entitlements_service.site_domain_allowance(",
     "tests": [
       "tests/cloud/sites/test_custom_domain_cap.py::test_with_billing_off_a_second_site_attaches_freely",
-      "tests/cloud/sites/test_custom_domain_cap.py::test_with_billing_off_the_census_query_never_runs"
+      "tests/cloud/sites/test_custom_domain_cap.py::test_with_billing_off_the_census_query_never_runs",
+      "tests/cloud/sites/test_sites_billing_flag.py::test_with_both_flags_off_the_census_query_never_runs"
     ]
   },
   {
     "label": "the billing_enforced guard is dropped from the capability gate",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if not get_settings().billing_enforced:\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
+    "find": "    if not sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
     "replace": "    from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
     "tests": [
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_with_billing_off_even_a_zero_floor_attaches"
@@ -192,8 +193,8 @@
   {
     "label": "the capability guard inverts — the gate fires ONLY when billing is off",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if not get_settings().billing_enforced:\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(",
-    "replace": "    if get_settings().billing_enforced:\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(",
+    "find": "    if not sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(",
+    "replace": "    if sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(",
     "tests": [
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_catalog_granting_no_domain_at_all_still_refuses",
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_with_billing_off_the_gate_never_fires"

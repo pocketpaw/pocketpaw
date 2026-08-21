@@ -1,6 +1,15 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-08-21 (feat/sites-billing-flag, PW-2): every billing seam in this
+# module now asks ``cloud.billing.enforcement.sites_enforced()`` instead of reading
+# ``billing_enforced`` itself. That function is the OR of the global flag and the
+# new sites-only ``sites_billing_enforced``, so a deployment already setting the
+# global one behaves identically and a deployment that wants to charge for custom
+# domains no longer has to start 402ing chat runs to do it. The badge stamper
+# (``_stamp_free_badge``) is deliberately NOT wired to it — it reads no flag today,
+# and giving it one would strip the attribution badge off every self-host site.
+#
 # Updated 2026-08-21 (feat/site-free-custom-domain, PW-1): the free floor now
 # includes a custom domain, so ``add_domain`` gained a COUNT gate beside the
 # existing capability gate. ``_domain_cap_exceeded`` answers "does this workspace
@@ -2679,7 +2688,8 @@ async def _embed_concierge_bar(
         # function that owns the Site doc — ``entitlements`` may not import
         # ``models.site`` (EE cloud rule 2), and ``embed`` has no business loading it.
         #
-        # A no-op unless ``billing_enforced``: with billing off (OSS / self-host, and
+        # A no-op unless ``sites_enforced()`` — ``billing_enforced`` OR the
+        # sites-only ``sites_billing_enforced``. With both off (OSS / self-host, and
         # every in-repo deploy today) this stays True and the publish path is byte
         # for byte what it was.
         #
@@ -2711,9 +2721,9 @@ async def _embed_concierge_bar(
         # and self-correcting in the right direction. The inverse (refuse at publish,
         # allow at runtime) does not self-correct at all.
         concierge_entitled = True
-        from pocketpaw.config import get_settings
+        from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
 
-        if get_settings().billing_enforced:
+        if sites_enforced():
             from pocketpaw_ee.cloud.entitlements import service as entitlements_service
 
             status = getattr(doc, "subscription_status", None)
@@ -4099,18 +4109,18 @@ def _assert_entitled_to_custom_domain(site: Any) -> None:
     paid. That resolver had exactly one caller (the badge stamper); this is the
     second, and both paid per-site capabilities now answer to the same function.
 
-    Gated on ``billing_enforced``, matching every other cap in this codebase: OSS /
-    self-host has no billing and must not acquire a paywall. The lazy ``get_settings``
-    import mirrors the connector cap — it keeps the billing posture off this module's
-    import path.
+    Gated on ``sites_enforced()`` (``billing_enforced`` OR the sites-only
+    ``sites_billing_enforced``), matching every other cap in this codebase: OSS /
+    self-host has no billing and must not acquire a paywall. The lazy import mirrors
+    the connector cap — it keeps the billing posture off this module's import path.
 
     Synchronous and passed the loaded doc, because the resolver is pure and
     ``entitlements`` may not import ``models.site`` (EE cloud rule 2): the caller
     that owns the document passes what it owns.
     """
-    from pocketpaw.config import get_settings
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
 
-    if not get_settings().billing_enforced:
+    if not sites_enforced():
         return
 
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
@@ -4179,13 +4189,13 @@ async def _domain_cap_exceeded(workspace_id: str, site: Any) -> tuple[bool, int,
     read): they are dedupe tombstones of a live site, so counting them would charge
     a workspace twice for one site it can only see once.
 
-    GATED on ``billing_enforced``: OSS / self-host gets ``(False, 0, None)`` with
+    GATED on ``sites_enforced()``: OSS / self-host gets ``(False, 0, None)`` with
     no DB read at all. Returns the tuple rather than raising, mirroring
     ``pockets.service._pocket_cap_exceeded``.
     """
-    from pocketpaw.config import get_settings
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
 
-    if not get_settings().billing_enforced:
+    if not sites_enforced():
         return (False, 0, None)
 
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
@@ -4230,11 +4240,11 @@ def _hostname_cap_exceeded(site: Any) -> tuple[bool, int, int | None]:
 
     This cap is a judgement the build made rather than a rule handed down, so it is
     one constant and one comparison — raising it or removing it changes nothing
-    else. Gated on ``billing_enforced`` like every other cap here.
+    else. Gated on ``sites_enforced()`` like every other cap here.
     """
-    from pocketpaw.config import get_settings
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
 
-    if not get_settings().billing_enforced:
+    if not sites_enforced():
         return (False, 0, None)
 
     from pocketpaw_ee.cloud.billing import site_plans as _site_plans
