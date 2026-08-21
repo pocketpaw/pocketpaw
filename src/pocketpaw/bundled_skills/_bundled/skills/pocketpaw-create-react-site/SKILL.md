@@ -203,6 +203,14 @@ ship a photo-free wireframe when the page calls for imagery.
 5. Set `width`/`height` (or `aspect-ratio`) on every image so the page does not
    jump as assets load.
 
+**Video and other media are allowed.** If the brief's asset manifest carries a
+`video` asset (or the user hands you one), use it at its native medium - a
+`<video autoplay muted loop playsinline>` hero backdrop over a poster or CSS
+fallback is a first-class choice, not something to skip or flatten to a still.
+There is no approved-media list here. The only asset rule is that the URL has to
+be one you were actually given rather than one you invented.
+
+
 ### Lead capture (there is no `/api/submit` on this track)
 
 The React track deploys as a **purely static asset tree** — there is no server

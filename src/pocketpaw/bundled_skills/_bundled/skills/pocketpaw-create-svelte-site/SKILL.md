@@ -253,6 +253,14 @@ free stock photos:
 
 One hero photo plus a couple of section images is plenty — don't over-request.
 
+**Video and other media are allowed.** If the brief's asset manifest carries a
+`video` asset (or the user hands you one), use it at its native medium - a
+`<video autoplay muted loop playsinline>` hero backdrop over a poster or CSS
+fallback is a first-class choice, not something to skip or flatten to a still.
+There is no approved-media list here. The only asset rule is that the URL has to
+be one you were actually given rather than one you invented.
+
+
 ## STEP 2 — Assemble the `source` map (the §4.3 contract)
 
 `source` is a flat object: **`{ relative_path: file_contents }`**, paths
