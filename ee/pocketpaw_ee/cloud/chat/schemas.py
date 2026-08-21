@@ -1,4 +1,21 @@
-"""Request/response and WebSocket message schemas for chat."""
+"""Request/response and WebSocket message schemas for chat.
+
+Changes: 2026-08-21 (fix/uncap-chat-message-content) — ``SendMessageRequest.content``
+and ``EditMessageRequest.content`` LOST their ``max_length=10_000``. The cap was
+never a sized decision: it arrived with the ee/cloud rebuild bulk merge (#778,
+2026-04-10) in the same pass that stamped ``name<=100`` / ``emoji<=50`` /
+``q<=200`` across this module, and the runtime API has always taken 100_000 on
+the identical field (``pocketpaw.api.v1.schemas.chat``). 10k characters is
+roughly 2.5k tokens, which a site-authoring or "recreate this page" prompt
+clears easily — and the frontend composer has no matching guard, so the only
+thing the cap produced was a raw pydantic ``string_too_long`` 422 mid-compose.
+
+``min_length=1`` STAYS on both: an empty message is still a real rejection.
+There is no app-level ceiling on message content any more. The effective
+ceiling is MongoDB's 16MB BSON document limit, which surfaces as a 500 at
+insert rather than a 422 at the edge, and no proxy body cap was found in the
+deploy config.
+"""
 
 from __future__ import annotations
 
@@ -59,7 +76,7 @@ class CreateThreadRequest(BaseModel):
 
 
 class SendMessageRequest(BaseModel):
-    content: str = Field(min_length=1, max_length=10_000)
+    content: str = Field(min_length=1)
     reply_to: str | None = None
     mentions: list[dict] = Field(default_factory=list)
     attachments: list[dict] = Field(default_factory=list)
@@ -67,7 +84,7 @@ class SendMessageRequest(BaseModel):
 
 
 class EditMessageRequest(BaseModel):
-    content: str = Field(min_length=1, max_length=10_000)
+    content: str = Field(min_length=1)
 
 
 class ReactRequest(BaseModel):
