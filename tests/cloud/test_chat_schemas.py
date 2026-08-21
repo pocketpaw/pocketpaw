@@ -33,9 +33,14 @@ def test_send_message_content_required():
     assert req.content == "hello" and req.reply_to is None and req.mentions == []
 
 
-def test_send_message_max_length():
-    with pytest.raises(PydanticValidationError):
-        SendMessageRequest(content="x" * 10_001)
+def test_send_message_accepts_long_content():
+    """No upper bound on message content — see fix/uncap-chat-message-content.
+
+    100_001 chars is 10x the cap this field used to carry, so a pass here means
+    "uncapped", not merely "the number went up".
+    """
+    body = "x" * 100_001
+    assert SendMessageRequest(content=body).content == body
 
 
 def test_send_message_min_length():
@@ -217,9 +222,9 @@ def test_send_message_with_attachments():
     assert len(req.attachments) == 1
 
 
-def test_edit_message_max_length():
-    with pytest.raises(PydanticValidationError):
-        EditMessageRequest(content="x" * 10_001)
+def test_edit_message_accepts_long_content():
+    body = "x" * 100_001
+    assert EditMessageRequest(content=body).content == body
 
 
 def test_edit_message_min_length():
