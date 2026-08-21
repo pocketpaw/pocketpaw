@@ -2069,6 +2069,20 @@
     },
     {
       "gist": "",
+      "how": "a user invokes it as /prefer-container-queries in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:prefer-container-queries",
+      "keywords": [
+        "prefer-container-queries"
+      ],
+      "kind": "skill",
+      "name": "prefer-container-queries",
+      "narrative": "Enforce Tailwind container queries over viewport breakpoints for responsive components. Use when writing or reviewing responsive Tailwind code, when a component needs to adapt to its available space (cards, sidebars, lists, panels, anything reused in different layouts), or when migrating sm:/md:/lg: classes to @container variants.",
+      "requires": [],
+      "summary": "Enforce Tailwind container queries over viewport breakpoints for responsive components.",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "a user invokes it as /ship in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:ship",
       "keywords": [
@@ -2093,6 +2107,20 @@
       "narrative": "Generate media — images and short videos — from a text description and lay the results out in a gallery. Invoke when the user asks to create visual media: \"generate an image of...\", \"make a video of...\", \"create a poster for...\", \"render an illustration\", \"animate...\", or any describe-to-media request (especially on the /studio surface). You do NOT build a dashboard or a ui-spec — you call a deterministic media tool that produces the asset and adds it to a gallery pocket that opens on the canvas. This is the media-generation brain: pick image vs video by intent, write a vivid prompt, call the tool, and relay any provider/key error plainly. Loading this skill keeps the chat agent's always-on system prompt small while still delivering the full media flow when generation is actually requested.",
       "requires": [],
       "summary": "Generate media — images and short videos — from a text description and lay the results out in a gallery.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /webgl-components in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:webgl-components",
+      "keywords": [
+        "webgl-components"
+      ],
+      "kind": "skill",
+      "name": "webgl-components",
+      "narrative": "Build small, always-on WebGL visuals (identity avatars, ambient orbs, glass and iridescent surfaces, animated textures) that ship inside a normal web app UI without wrecking performance, accessibility, SSR, or layout. Use whenever a shader-, GLSL-, or canvas-driven decorative element is added to a product UI, especially one rendered many times per page or per list; when reviewing or optimizing one; or when debugging one that renders blurry, aliased, all-black, or paints over the surrounding UI on machines without hardware acceleration.",
+      "requires": [],
+      "summary": "Build small, always-on WebGL visuals (identity avatars, ambient orbs, glass and iridescent surfaces, animated textures) that ship inside a normal web app UI without wrecking performance,…",
       "surface": ""
     },
     {
