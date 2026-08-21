@@ -288,6 +288,9 @@ Every edit is held to the bar the page was built to. Briefly:
   require it. On an empty result, use a gradient or solid treatment. **Never
   fabricate a photo URL**; a made-up `src` is a broken image on a live site.
   Set `width`/`height` (or `aspect-ratio`) so the page does not jump.
+- **Video and other media are allowed.** A `video` asset from the manifest (or
+  one the user supplies) belongs on the page at its native medium; there is no
+  images-only rule. The only asset rule is that the URL is one you were given.
 - **Every CTA is an anchor** — `href="#pricing"`, `tel:`, `mailto:` — not a
   bare `onClick` button.
 - **The lead form stays a native `<form>`** with flat named fields (`name`,

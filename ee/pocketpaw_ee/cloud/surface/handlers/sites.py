@@ -247,6 +247,27 @@
 # is a QUEUED build whose url is empty on a first publish and the previous deploy
 # on a re-publish — see `_refine_publish_step`. RX-3's create-side change (the
 # react `build_step` naming the edit tool) is untouched.
+#
+# Updated: 2026-08-21 (fix/sites-agent-media-freedom) - the asset instructions
+# STOPPED READING AS IMAGES-ONLY. Reported from a live build: the agent had a
+# real `.mp4` at Asset #1 of the brief's manifest and skipped it, explaining
+# that 'the rules said no video and no invented URLs'. No such no-video rule
+# exists anywhere in this repo. The agent inferred it, and the inference was
+# reasonable: `AssetRef.kind` accepts `video`, but every instruction it could
+# read said 'photography', named `<img>`, and pointed at `search_stock_images`
+# (an images-only tool with no video sibling). An absence of permission reads
+# as a prohibition, so a paid-for asset silently never reached the page.
+#
+# Both asset blocks now say what IS allowed rather than only what is banned:
+# step 3 of the create procedure states there is no approved-media list, and
+# the manifest block calls a `video` asset a first-class hero backdrop with
+# the element to render it in. The anti-fabrication rule SURVIVES, reworded
+# from 'invent image paths' to 'invent a URL' so it can never again be read
+# as a media-type ban - it guards against a made-up `src` shipping broken on
+# a live customer site, and it never applied here because the URL was real.
+# The matching skill text (design-taste + the three track skills) moved with
+# it; `_design_system_block` reads that SKILL.md at request time, so the two
+# have to agree or the embedded copy re-teaches the images-only habit.
 
 from __future__ import annotations
 
@@ -814,7 +835,11 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "3. REAL ASSETS. Use `mcp__pocketpaw_stock__search_stock_images` for "
         "hero and section photography and `mcp__pocketpaw_icons__search_icons` "
         "for feature icons. Wire the REAL returned URLs into the page — never "
-        "leave placeholders or invent image paths.\n"
+        "leave placeholders or invent asset paths. There is NO approved-media "
+        "list and no images-only rule: if the brief hands you a video, an "
+        "animation, or any other medium, it is yours to use. Render it in its "
+        "native element. The only asset rule is that a URL has to be one you "
+        "were actually given rather than one you made up.\n"
         "4. BRIEF. State a one-line brief back so the user sees the plan — e.g. "
         "'Building a [design-system vibe] site for [business] with sections "
         "[…], palette [primary].' Then build.\n"
@@ -1360,7 +1385,7 @@ def _frontend_preamble(meta: SurfaceMeta, brief: DesignBrief) -> str:
         "flat lead form → footer)"
     )
 
-    # --- Real imagery from the asset manifest (never invent placeholder URLs). ---
+    # --- Real media from the asset manifest (ANY kind; never invent a URL). ---
     if brief.asset_manifest:
         asset_lines = "\n".join(
             f"- {a.kind}: {a.url}" + (f' (alt: "{a.alt}")' if a.alt else "")
@@ -1368,7 +1393,11 @@ def _frontend_preamble(meta: SurfaceMeta, brief: DesignBrief) -> str:
         )
         assets_block = (
             "Use these REAL asset URLs from the brief's manifest verbatim — never "
-            "invent placeholder image paths:\n" + asset_lines + "\n"
+            "invent one. EVERY kind listed is fair game at its native medium: a "
+            "`video` asset is a first-class hero backdrop or section element "
+            "(`<video autoplay muted loop playsinline>` over a poster or CSS "
+            "fallback), NOT something to skip or downgrade to a still. If it is "
+            "in this list you were given it, so use it:\n" + asset_lines + "\n"
         )
     else:
         assets_block = ""
