@@ -1473,7 +1473,18 @@ def test_the_usage_event_carries_what_the_meter_actually_reads():
     assert meta["model"] == "claude-haiku-4-5-20251001"
     assert meta["output_tokens"] == 250
     assert meta["cached_input_tokens"] == 700
-    assert meta["total_cost_usd"] > 0
+
+    # The exact number, not just "> 0", and asserted HERE rather than only in the
+    # end-to-end test below, because this test carries no pocketpaw_ee import and
+    # so runs in the OSS-only CI job too. Haiku 4.5 is $1/$5/$0.10 per MTok:
+    # 300 uncached input + 250 output + 700 cache reads.
+    #
+    # ">0" would pass on the double-subtraction bug this guards. ``input_tokens``
+    # here is the INCLUSIVE 1000 and the estimator removes the cached portion
+    # itself; handing it the uncached remainder instead removes those tokens a
+    # second time, giving 0.00132 - still positive, still wrong, invisible to a
+    # truthiness check.
+    assert meta["total_cost_usd"] == pytest.approx(0.00162)
 
 
 def test_the_meter_prices_a_pydantic_ai_run_end_to_end():
@@ -1484,6 +1495,8 @@ def test_the_meter_prices_a_pydantic_ai_run_end_to_end():
     ``resolve_cost`` falling through to ``source="none"`` is exactly what
     happened in production and it raises nothing.
     """
+    pytest.importorskip("pocketpaw_ee", reason="pocketpaw-ee not installed")
+
     from pocketpaw_ee.cloud.metering.service import resolve_cost
 
     class _Usage:
@@ -1496,6 +1509,13 @@ def test_the_meter_prices_a_pydantic_ai_run_end_to_end():
     cost = resolve_cost(meta)
 
     assert cost.source != "none", "the meter could not price this run"
+    # "reported" and not "estimated": the payload now prices itself, so the meter
+    # takes the reported branch and never reaches its estimator. That is the
+    # point - the estimator expects an inclusive input_tokens while this payload
+    # carries the uncached remainder, and only pricing upstream avoids the
+    # mismatch. If this ever flips to "estimated", the cost is being computed
+    # from the wrong number.
+    assert cost.source == "reported"
     assert cost.model == "claude-haiku-4-5-20251001"
     # The exact number, not just "> 0". Haiku 4.5 is $1/$5/$0.10 per MTok, so
     # 5k uncached input + 800 output + 15k cache reads = 0.005 + 0.004 + 0.0015.

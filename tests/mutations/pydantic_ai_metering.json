@@ -14,6 +14,7 @@
     "find": "            estimated = _estimate_cost(model_name, total, output, read)",
     "replace": "            estimated = _estimate_cost(model_name, max(0, total - read - write), output, read)",
     "tests": [
+      "tests/test_pydantic_ai_backend.py::test_the_usage_event_carries_what_the_meter_actually_reads",
       "tests/test_pydantic_ai_backend.py::test_the_meter_prices_a_pydantic_ai_run_end_to_end"
     ]
   },
