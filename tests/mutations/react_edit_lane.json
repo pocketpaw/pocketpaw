@@ -133,8 +133,8 @@
   {
     "label": "the draft ArtifactVersion is never written, so there is no reviewable draft for a later publish to promote",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
-    "find": "    # ``doc.source`` whatever engine wrote it); same best-effort contract — an\n    # additive history layer, never a gate on the edit.\n    await _record_pocket_svelte_draft_version(doc, author=user_id)\n    return await _resolved_wire_dict(doc, user_id)",
-    "replace": "    # ``doc.source`` whatever engine wrote it); same best-effort contract — an\n    # additive history layer, never a gate on the edit.\n    return await _resolved_wire_dict(doc, user_id)",
+    "find": "    # ``doc.source`` whatever engine wrote it); same best-effort contract — an\n    # additive history layer, never a gate on the edit.\n    await _record_pocket_svelte_draft_version(\n        doc, author=user_id, label=_edit_label(component_path)\n    )\n    return await _resolved_wire_dict(doc, user_id)\n",
+    "replace": "    # ``doc.source`` whatever engine wrote it); same best-effort contract — an\n    # additive history layer, never a gate on the edit.\n    return await _resolved_wire_dict(doc, user_id)\n",
     "tests": [
       "tests/ee/sites/test_react_component_edit.py::test_edit_writes_a_reviewable_draft_version"
     ]
