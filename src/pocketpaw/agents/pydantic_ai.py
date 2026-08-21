@@ -2283,6 +2283,36 @@ class PydanticAIBackend:
         shape, where ``input_tokens`` is the UNCACHED remainder, so the two
         subsets come back out here. Getting this subtraction backwards inflates
         the reported hit rate, which is exactly the number the A/B turns on.
+
+        THIS EVENT IS ALSO THE INVOICE, which it was not until 2026-08-21. It was
+        written for the prompt-cache A/B and carried only what that needed, so
+        every run on this backend reached ``metering.resolve_cost`` with no
+        ``model``, no ``output_tokens`` and no ``total_cost_usd`` — which is the
+        exact set that function needs, and it fell through to
+        ``source="none"``, billing zero. Worse, it returned None entirely on a
+        turn with no cache activity, so a cold first turn persisted ``usage: {}``.
+        Measured on the dev database that day: every one of the 37 runs on this
+        backend was unbillable, the visitor concierge among them, and the credit
+        ledger had never seen one.
+
+        Three things follow from that and all three are load-bearing:
+
+        * **It always emits.** No-cache is a real, priceable turn.
+        * **The model comes off the RESPONSE**, not off configuration. The
+          configured spec can be an alias, empty, or overridden per turn; only
+          the response says which model actually priced these tokens. Same
+          reason ``claude_sdk`` takes it from the CLI's own report.
+        * **The cost is computed here** rather than left to the meter's
+          estimator. ``resolve_cost``'s fallback expects an INCLUSIVE
+          ``input_tokens`` while every Anthropic-shaped payload in this codebase
+          reports the uncached remainder, so letting it estimate would subtract
+          the cached tokens a second time and undercount. Pricing where the
+          inclusive total is still in scope avoids the ambiguity; the table is
+          the same one the meter would have used.
+
+        Cache WRITE tokens are priced as ordinary input, which slightly
+        undercounts — Anthropic bills them at a premium. Named rather than
+        silently absorbed; the estimator has no concept of a write.
         """
         usage = getattr(getattr(event, "result", None), "usage", None)
         if usage is None:
@@ -2290,8 +2320,7 @@ class PydanticAIBackend:
         total = int(getattr(usage, "input_tokens", 0) or 0)
         read = int(getattr(usage, "cache_read_tokens", 0) or 0)
         write = int(getattr(usage, "cache_write_tokens", 0) or 0)
-        if not read and not write:
-            return None
+        output = int(getattr(usage, "output_tokens", 0) or 0)
 
         from pocketpaw.llm.caching import report_savings
 
@@ -2302,23 +2331,44 @@ class PydanticAIBackend:
                 "cache_creation_input_tokens": write,
             }
         )
-        logger.info(
-            "[pydantic_ai] prompt-cache: read=%d write=%d hit_rate=%.1f%% "
-            "est_saved=%.0f input-tok-equiv",
-            savings.cache_read_tokens,
-            savings.cache_write_tokens,
-            savings.hit_rate * 100,
-            savings.est_tokens_saved,
-        )
+        if read or write:
+            logger.info(
+                "[pydantic_ai] prompt-cache: read=%d write=%d hit_rate=%.1f%% "
+                "est_saved=%.0f input-tok-equiv",
+                savings.cache_read_tokens,
+                savings.cache_write_tokens,
+                savings.hit_rate * 100,
+                savings.est_tokens_saved,
+            )
+
+        response = getattr(getattr(event, "result", None), "response", None)
+        model_name = getattr(response, "model_name", None)
+        model_name = model_name if isinstance(model_name, str) and model_name else None
+
+        cost = 0.0
+        if model_name is not None:
+            from pocketpaw.usage_tracker import _estimate_cost
+
+            # ``total`` and not the remainder: the estimator subtracts the cached
+            # portion itself, so handing it the already-reduced number would
+            # remove those tokens twice.
+            estimated = _estimate_cost(model_name, total, output, read)
+            if estimated:
+                cost = float(estimated)
+
         return AgentEvent(
             type="token_usage",
             content="",
             metadata={
                 "input_tokens": max(0, total - read - write),
+                "output_tokens": output,
+                "cached_input_tokens": read,
                 "cache_read_tokens": savings.cache_read_tokens,
                 "cache_write_tokens": savings.cache_write_tokens,
                 "cache_hit_rate": savings.hit_rate,
                 "cache_est_tokens_saved": savings.est_tokens_saved,
+                "total_cost_usd": cost,
+                "model": model_name,
                 "backend": "pydantic_ai",
             },
         )

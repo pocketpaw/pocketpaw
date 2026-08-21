@@ -1410,19 +1410,166 @@ def test_usage_event_reports_uncached_remainder():
     assert event.metadata["backend"] == "pydantic_ai"
 
 
-def test_usage_event_absent_when_no_cache_activity():
+def test_a_run_with_no_cache_activity_is_still_metered():
+    """This test used to assert the event was ABSENT, and that assertion was the
+    bug held in place.
+
+    ``_usage_event`` returned None unless the turn had cache reads or writes,
+    because it was written for the prompt-cache A/B rather than for metering. A
+    first turn on a cold cache therefore persisted ``usage: {}`` and swept
+    through ``bill_run`` at $0. Measured on the dev database 2026-08-21: 34 of
+    the 37 runs on this backend carried a partial payload and the rest carried
+    nothing, and not one of them was billable.
+    """
+
     class _Usage:
         input_tokens = 500
+        output_tokens = 120
         cache_read_tokens = 0
         cache_write_tokens = 0
 
-    class _Result:
-        usage = _Usage()
+    event = PydanticAIBackend(_settings())._usage_event(_event_for(_Usage()))
 
-    class _Event:
-        result = _Result()
+    assert event is not None
+    assert event.metadata["input_tokens"] == 500
+    assert event.metadata["output_tokens"] == 120
 
-    assert PydanticAIBackend(_settings())._usage_event(_Event()) is None
+
+def _event_for(usage, model_name="claude-haiku-4-5-20251001"):
+    """The shape ``_usage_event`` reads: ``event.result.usage`` for the counts and
+    ``event.result.response.model_name`` for the model that actually answered.
+
+    The model comes off the RESPONSE and not off configuration for the same
+    reason claude_sdk takes it from the CLI's own report — the configured spec
+    can be an alias, empty, or overridden per turn, and only the response says
+    which model priced the tokens.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        result=SimpleNamespace(
+            usage=usage,
+            response=SimpleNamespace(model_name=model_name),
+        )
+    )
+
+
+def test_the_usage_event_carries_what_the_meter_actually_reads():
+    """``metering.resolve_cost`` needs a reported cost, or a model plus counts.
+
+    The payload carried neither: no ``model``, no ``output_tokens``, no
+    ``cached_input_tokens``, no ``total_cost_usd``. Four fields, and their
+    absence is why every conversation on this backend was free.
+    """
+
+    class _Usage:
+        input_tokens = 1000
+        output_tokens = 250
+        cache_read_tokens = 700
+        cache_write_tokens = 100
+
+    meta = PydanticAIBackend(_settings())._usage_event(_event_for(_Usage())).metadata
+
+    assert meta["model"] == "claude-haiku-4-5-20251001"
+    assert meta["output_tokens"] == 250
+    assert meta["cached_input_tokens"] == 700
+
+    # The exact number, not just "> 0", and asserted HERE rather than only in the
+    # end-to-end test below, because this test carries no pocketpaw_ee import and
+    # so runs in the OSS-only CI job too. Haiku 4.5 is $1/$5/$0.10 per MTok:
+    # 300 uncached input + 250 output + 700 cache reads.
+    #
+    # ">0" would pass on the double-subtraction bug this guards. ``input_tokens``
+    # here is the INCLUSIVE 1000 and the estimator removes the cached portion
+    # itself; handing it the uncached remainder instead removes those tokens a
+    # second time, giving 0.00132 - still positive, still wrong, invisible to a
+    # truthiness check.
+    assert meta["total_cost_usd"] == pytest.approx(0.00162)
+
+
+def test_the_meter_prices_a_pydantic_ai_run_end_to_end():
+    """The assertion that matters, and the only one that would have caught this.
+
+    Every other test here inspects the payload. This one hands the payload to
+    the function that bills it and asserts a real number comes back —
+    ``resolve_cost`` falling through to ``source="none"`` is exactly what
+    happened in production and it raises nothing.
+    """
+    pytest.importorskip("pocketpaw_ee", reason="pocketpaw-ee not installed")
+
+    from pocketpaw_ee.cloud.metering.service import resolve_cost
+
+    class _Usage:
+        input_tokens = 20_000
+        output_tokens = 800
+        cache_read_tokens = 15_000
+        cache_write_tokens = 0
+
+    meta = PydanticAIBackend(_settings())._usage_event(_event_for(_Usage())).metadata
+    cost = resolve_cost(meta)
+
+    assert cost.source != "none", "the meter could not price this run"
+    # "reported" and not "estimated": the payload now prices itself, so the meter
+    # takes the reported branch and never reaches its estimator. That is the
+    # point - the estimator expects an inclusive input_tokens while this payload
+    # carries the uncached remainder, and only pricing upstream avoids the
+    # mismatch. If this ever flips to "estimated", the cost is being computed
+    # from the wrong number.
+    assert cost.source == "reported"
+    assert cost.model == "claude-haiku-4-5-20251001"
+    # The exact number, not just "> 0". Haiku 4.5 is $1/$5/$0.10 per MTok, so
+    # 5k uncached input + 800 output + 15k cache reads = 0.005 + 0.004 + 0.0015.
+    #
+    # ">0" would pass on the double-subtraction bug this guards: hand the
+    # estimator the uncached REMAINDER instead of the inclusive total and it
+    # subtracts the cached tokens a second time, yielding 0.0055 — still
+    # positive, still wrong by nearly half, and invisible to a truthiness check.
+    assert cost.cost_usd == pytest.approx(0.0105)
+
+
+def test_an_unpriced_model_degrades_instead_of_raising():
+    """A model missing from the pricing table must cost 0, not blow up a turn.
+
+    Metering runs in a background sweep; a raise here would stall the sweep for
+    every workspace, and a visitor's answer is worth more than its own invoice.
+    """
+
+    class _Usage:
+        input_tokens = 100
+        output_tokens = 10
+        cache_read_tokens = 0
+        cache_write_tokens = 0
+
+    meta = (
+        PydanticAIBackend(_settings())
+        ._usage_event(_event_for(_Usage(), model_name="nonesuch-model-9"))
+        .metadata
+    )
+
+    assert meta["model"] == "nonesuch-model-9"
+    assert meta["total_cost_usd"] == 0
+
+
+def test_a_missing_response_does_not_lose_the_token_counts():
+    """No response object (a failed or synthetic turn) still meters the tokens.
+
+    Losing the model costs us the price; losing the counts costs us the ability
+    to ever reconstruct it.
+    """
+    from types import SimpleNamespace
+
+    class _Usage:
+        input_tokens = 300
+        output_tokens = 40
+        cache_read_tokens = 0
+        cache_write_tokens = 0
+
+    event = SimpleNamespace(result=SimpleNamespace(usage=_Usage()))
+    meta = PydanticAIBackend(_settings())._usage_event(event).metadata
+
+    assert meta["input_tokens"] == 300
+    assert meta["output_tokens"] == 40
+    assert meta["model"] is None
 
 
 # --------------------------------------------------------------------------

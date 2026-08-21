@@ -24,6 +24,31 @@ logger = logging.getLogger(__name__)
 
 # ── Pricing (per 1M tokens, USD) ──
 # Updated 2025-05. Adjust as providers change pricing.
+# USD per MILLION tokens. ``cached_input`` is the cache-HIT (read) rate; cache
+# WRITES are billed at a premium (1.25x for 5m, 2x for 1h) that this table has no
+# column for, so an estimate slightly undercounts a write-heavy turn.
+#
+# A model missing from here estimates to None, which ``metering.resolve_cost``
+# turns into a $0 bill rather than an error. That is a quiet failure by design —
+# a run must not die over its own invoice — and it is exactly how it went unnoticed
+# that this table stopped at the mid-2025 ids while every model in production had
+# moved on. Measured 2026-08-21: claude-haiku-4-5-20251001, claude-sonnet-4-6 and
+# claude-opus-4-7 ALL priced to None, so the whole pydantic_ai backend billed
+# nothing. The claude_agent_sdk path never noticed because the SDK reports its own
+# cost and never consults this table.
+#
+# **When a model ships, add it here.** The lookup falls back to a two-way prefix
+# match, which is why the keys below are the undated family ids: they catch both
+# the dated variant (``claude-haiku-4-5-20251001``) and the context-window suffix
+# this codebase appends (``claude-opus-4-7[1m]``). New entries go AFTER the older
+# ones on purpose — a bare ``"claude"``, which the agentapi path uses as its
+# fallback name, prefix-matches the FIRST claude key in insertion order, and
+# reordering would silently reprice every run that reported it. That fallback
+# resolving to any particular model is a guess either way; it is left exactly as
+# it was rather than quietly changed here.
+#
+# Rates from https://platform.claude.com/docs/en/about-claude/pricing, read
+# 2026-08-21.
 _PRICING: dict[str, dict[str, float]] = {
     # Anthropic
     "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0, "cached_input": 0.30},
@@ -32,6 +57,18 @@ _PRICING: dict[str, dict[str, float]] = {
     "claude-3-5-sonnet-20241022": {"input": 3.0, "output": 15.0, "cached_input": 0.30},
     "claude-3-5-haiku-20241022": {"input": 0.80, "output": 4.0, "cached_input": 0.08},
     "claude-3-opus-20240229": {"input": 15.0, "output": 75.0, "cached_input": 1.50},
+    # Anthropic — current families (added 2026-08-21). Undated keys so the prefix
+    # match catches dated ids and the ``[1m]`` context suffix alike.
+    "claude-fable-5": {"input": 10.0, "output": 50.0, "cached_input": 1.0},
+    "claude-opus-5": {"input": 5.0, "output": 25.0, "cached_input": 0.50},
+    "claude-opus-4-8": {"input": 5.0, "output": 25.0, "cached_input": 0.50},
+    "claude-opus-4-7": {"input": 5.0, "output": 25.0, "cached_input": 0.50},
+    "claude-opus-4-6": {"input": 5.0, "output": 25.0, "cached_input": 0.50},
+    "claude-opus-4-5": {"input": 5.0, "output": 25.0, "cached_input": 0.50},
+    "claude-sonnet-5": {"input": 2.0, "output": 10.0, "cached_input": 0.20},
+    "claude-sonnet-4-6": {"input": 3.0, "output": 15.0, "cached_input": 0.30},
+    "claude-sonnet-4-5": {"input": 3.0, "output": 15.0, "cached_input": 0.30},
+    "claude-haiku-4-5": {"input": 1.0, "output": 5.0, "cached_input": 0.10},
     # OpenAI
     "gpt-4o": {"input": 2.50, "output": 10.0},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
