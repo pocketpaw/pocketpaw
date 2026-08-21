@@ -1178,3 +1178,85 @@ def test_zz_no_module_double_patches_the_plan_gate():
         f"test in the run: {offenders}. Either drop the patch and take the conftest "
         "default, or add the module to _OWNS_ITS_OWN_PLAN_PATCH in conftest.py."
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /sites/by-pocket/{pocket_id}/versions — the owner-facing timeline. What it
+# puts on the wire is read by a person, so a raw status token or a raw user id
+# is a defect here even though both are technically correct.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_versions_timeline_names_the_author(beanie_test_db, monkeypatch):
+    """The author goes over the wire as a name, not the ObjectId on the row.
+
+    ``author`` is stored as ``str(user.id)``, so every row in the timeline was
+    captioned with 24 characters of hex. One batched lookup covers the whole
+    timeline; an id the resolver cannot name keeps its raw value rather than
+    going blank.
+    """
+    from pocketpaw_ee.sites import router as sites_router
+    from pocketpaw_ee.versions import service as versions
+
+    await versions.write_draft(
+        scope_type="pocket",
+        scope_id="pk_names",
+        workspace_id="ws_owner",
+        content={"v": 1},
+        author="6a1f0c2e4b09d3f1a2b3c4d5",
+    )
+    await versions.write_draft(
+        scope_type="pocket",
+        scope_id="pk_names",
+        workspace_id="ws_owner",
+        content={"v": 2},
+        author="an-agent",  # not an ObjectId — the resolver skips these
+    )
+
+    async def _fake_names(user_ids):
+        assert user_ids == {"6a1f0c2e4b09d3f1a2b3c4d5", "an-agent"}, user_ids
+        return {"6a1f0c2e4b09d3f1a2b3c4d5": "Jo Blogs"}
+
+    monkeypatch.setattr(sites_router, "resolve_display_names", _fake_names)
+
+    app = _build_app("ws_owner")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk_names/versions")
+    assert resp.status_code == 200, resp.text
+
+    authors = [v["author"] for v in resp.json()["versions"]]
+    assert authors == ["Jo Blogs", "an-agent"]
+
+
+@pytest.mark.asyncio
+async def test_versions_timeline_splits_legacy_reverted_rows(beanie_test_db, monkeypatch):
+    """Rows written before the lifecycle split do not reach the client saying
+    "reverted" — the endpoint resolves them by lineage on the way out.
+
+    v1 has a descendant, so an edit replaced it; v2 is where the lineage
+    stopped. Both are stored as the same word.
+    """
+    from pocketpaw_ee.versions import service as versions
+    from pocketpaw_ee.versions.models import ArtifactVersion
+
+    v1 = await versions.write_draft(
+        scope_type="pocket", scope_id="pk_legacy", workspace_id="ws_owner", content={"v": 1}
+    )
+    v2 = await versions.write_draft(
+        scope_type="pocket", scope_id="pk_legacy", workspace_id="ws_owner", content={"v": 2}
+    )
+    for row_id in (v1.id, v2.id):
+        row = await ArtifactVersion.get(row_id)
+        assert row is not None
+        row.status = "reverted"
+        await row.save()
+
+    app = _build_app("ws_owner")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk_legacy/versions")
+    assert resp.status_code == 200, resp.text
+
+    statuses = [v["status"] for v in resp.json()["versions"]]
+    assert statuses == ["superseded", "discarded"]
+    assert "reverted" not in statuses

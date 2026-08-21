@@ -199,6 +199,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
+from pocketpaw_ee.cloud.auth.service import resolve_display_names
 from pocketpaw_ee.sites import import_service
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.dto import (
@@ -604,6 +605,12 @@ async def versions_by_pocket(
     untouched."""
     rows = await sites_service.version_history(workspace_id=ctx.workspace_id, pocket_id=pocket_id)
     shown = versions_service.resolve_legacy_statuses(rows)
+    # ``author`` on the row is ``str(user.id)``, so the timeline was captioning
+    # every version with a 24-character ObjectId — technically who did it, and
+    # unreadable. One batched lookup for the whole timeline (never per row), and
+    # ``.get(id, id)`` keeps the raw value for an author the resolver cannot
+    # name, exactly as Mission Control does it.
+    names = await resolve_display_names({r.author for r in rows if r.author})
     return VersionHistoryResponse(
         pocket_id=pocket_id,
         versions=[
@@ -613,7 +620,7 @@ async def versions_by_pocket(
                 branch=r.branch,
                 status=shown[str(r.id)],
                 label=r.label,
-                author=r.author,
+                author=names.get(r.author, r.author) if r.author else None,
                 created_at=r.created_at.isoformat(),
             )
             for r in rows
