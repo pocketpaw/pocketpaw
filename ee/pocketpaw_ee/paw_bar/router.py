@@ -1,4 +1,23 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-08-21 (fix/paw-bar-preview-frame-ancestors) — the bar renders in the
+#   builder's site preview. GET /paw-bar/frame gated the embedder on the Site's
+#   ``allowed_origins`` alone, but the builder previews a site by framing its real
+#   published page, so the bar's iframe sits TWO deep — dashboard → site page → bar —
+#   and ``frame-ancestors`` is matched against EVERY ancestor, not just the immediate
+#   parent. Nothing in the publish path knows the dashboard exists, so no Site
+#   allowlist ever named it and every preview logged "Framing '<backend>' violates
+#   ... frame-ancestors" and showed an empty box. New ``_public_frame_ancestors``
+#   appends the dashboard origin — ``PAWBAR_DASHBOARD_ORIGIN`` or, unset (the state
+#   every deploy we ship is in), the already-declared
+#   ``POCKETPAW_API_CORS_ALLOWED_ORIGINS`` — through the SAME sanitizer, and new
+#   ``_ancestor_sources`` dedupes so a dashboard that is also an allowlist entry
+#   lists once. Deliberately NOT a widening of ``allowed_origins``: that list also
+#   gates chat and lead capture via ``origin_allowed``, so this widens the render
+#   gate and nothing else. Fail-closed still reads the Site's allowlist alone, so a
+#   Site with no embedders stays unrenderable. Neither var set → the header is
+#   byte-identical to before. The session-authed owner preview
+#   (``/paw-bar/admin/site/{id}/preview-frame``) is untouched and still framed by
+#   ``_dashboard_origin`` alone.
 # Updated: 2026-08-16 (fix/paw-bar-role-gates) — the last nine ``require_scope`` gates
 #   in this router become ROLE gates, so the ``require_scope`` import is gone. The
 #   two admin site-settings routes (the concierge kill switch) and the seven widget
@@ -418,6 +437,7 @@ import re
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -425,6 +445,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from pocketpaw.paw_bar.appearance import ConciergeAppearance
 from pocketpaw.paw_bar.models import (
     MAX_PAYLOAD_BYTES,
     ConversationState,
@@ -665,6 +686,55 @@ def _sanitize_ancestor(raw: Any) -> str | None:
     return v
 
 
+def _sanitize_dashboard_ancestor(raw: Any) -> str | None:
+    """``_sanitize_ancestor``, but KEEPING an explicit http/https scheme.
+
+    This is the difference between the fix working and not working. A schemeless
+    host-source resolves against the FRAME's OWN scheme (see ``_sanitize_ancestor``),
+    so on an https backend the bare source ``localhost:5173`` means
+    ``https://localhost:5173`` — and a dashboard served over plain http, which is
+    every local dev session pointed at a deployed backend, is refused by a policy
+    that appears to name it. That is exactly the reported failure: the blocked
+    request's header already listed ``localhost:*`` and ``127.0.0.1:*``.
+
+    ``allowed_origins`` cannot carry a scheme (``_normalize_origin_hosts`` reduces it
+    to bare hosts upstream) and shouldn't — a customer's site is https in production
+    and the schemeless form is the https-tight one there. The dashboard origin is
+    different: it is declared BY the operator, complete with the scheme they serve
+    it on, so it is honored as declared. A non-browser scheme (``tauri://localhost``)
+    has no host-source spelling and is dropped rather than guessed at.
+    """
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip().lower()
+    if "://" not in value:
+        return _sanitize_ancestor(value)
+    scheme, _, rest = value.partition("://")
+    if scheme not in ("http", "https"):
+        return None
+    host = _sanitize_ancestor(rest)
+    return f"{scheme}://{host}" if host else None
+
+
+def _ancestor_sources(origins: list[str], sanitize: Any = _sanitize_ancestor) -> list[str]:
+    """Sanitize origins into frame-ancestors host-sources: drop the unusable, collapse
+    repeats (first occurrence wins, order otherwise preserved).
+
+    Dedup earns its keep now that the dashboard origin is appended to the Site's
+    allowlist — in local dev it IS one of the seeded hosts. A repeated source is
+    harmless to a browser but turns the header into a puzzle in a console error,
+    which is the only place anyone ever reads one.
+    """
+    seen: set[str] = set()
+    sources: list[str] = []
+    for origin in origins or []:
+        source = sanitize(origin)
+        if source and source not in seen:
+            seen.add(source)
+            sources.append(source)
+    return sources
+
+
 def _frame_ancestors_csp(allowed_origins: list[str]) -> str | None:
     """Build the ``frame-ancestors`` CSP value from a Site's ``allowed_origins``.
 
@@ -673,10 +743,69 @@ def _frame_ancestors_csp(allowed_origins: list[str]) -> str | None:
     source-less directive. Mirrors ``site_keys.origin_allowed``'s empty=deny model,
     NOT the router's ``_origin_allowed`` empty=allow-all footgun.
     """
-    sources = [s for s in (_sanitize_ancestor(o) for o in (allowed_origins or [])) if s]
+    sources = _ancestor_sources(allowed_origins)
     if not sources:
         return None
     return "frame-ancestors " + " ".join(sources)
+
+
+def _dashboard_preview_ancestors() -> list[str]:
+    """Origins allowed to frame the PUBLIC bar because they are our own dashboard.
+
+    The builder previews a site by framing its real published page, so the bar's
+    iframe sits TWO deep — dashboard → site page → bar — and ``frame-ancestors`` is
+    matched against EVERY ancestor, not just the immediate parent. Nothing in the
+    publish path knows the dashboard exists (``_default_allowed_origins`` seeds the
+    local hosts, ``_with_deployed_host`` adds the site's own), so no Site allowlist
+    ever named it and the bar was refused in every preview.
+
+    Two sources, in order:
+      1. ``PAWBAR_DASHBOARD_ORIGIN`` — explicit, comma-separated. The SAME var the
+         session-authed owner preview reads (``_dashboard_origin``), minus its
+         ``localhost:5173`` default: unset must mean unset here, or every public
+         customer bar would name a visitor's own machine as a permitted embedder.
+      2. ``POCKETPAW_API_CORS_ALLOWED_ORIGINS`` — the origins the operator has
+         ALREADY declared as first-party browsers for this API, i.e. the
+         paw-enterprise frontend. Falling back to it is what makes a correctly
+         configured deploy work with no new variable, and that matters because no
+         deploy we ship sets PAWBAR_DASHBOARD_ORIGIN — which is how this broke.
+
+    The env is read raw rather than through ``Settings.load()``: load() re-reads
+    config.json and the credential store on every call, and this is a public,
+    per-request path. That means parsing the list here, so both the JSON shape
+    pydantic writes and the CSV operators write are accepted — every entry lands in
+    ``_sanitize_ancestor`` regardless, so a malformed one is dropped, never injected.
+    Never the request's own Origin/Referer, never a wildcard.
+    """
+    raw = os.environ.get("PAWBAR_DASHBOARD_ORIGIN", "").strip()
+    if not raw:
+        raw = os.environ.get("POCKETPAW_API_CORS_ALLOWED_ORIGINS", "").strip()
+    if not raw:
+        return []
+    parts = raw.strip("[]").split(",")
+    return [p.strip().strip('"').strip("'") for p in parts if p.strip()]
+
+
+def _public_frame_ancestors(allowed_origins: list[str]) -> str | None:
+    """``frame-ancestors`` for the PUBLIC visitor frame: the Site's allowlist, plus
+    our own dashboard so an owner can actually see the bar in the builder preview.
+
+    Fail-closed is still decided on the SITE's allowlist ALONE — a Site with no
+    embedders stays unrenderable, and a declared dashboard origin never revives it
+    (the owner preview has its own session-authed endpoint for that). The dashboard
+    entry is only ever ADDITIVE, on top of a policy that already had one source.
+
+    Deliberately NOT done by widening ``Site.allowed_origins``: that list also gates
+    chat and lead capture through ``site_keys.origin_allowed``, so writing the
+    dashboard into it would hand the dashboard origin authority it has no need for.
+    This widens the render gate and nothing else.
+    """
+    site_sources = _ancestor_sources(allowed_origins)
+    if not site_sources:
+        return None
+    dashboard = _ancestor_sources(_dashboard_preview_ancestors(), _sanitize_dashboard_ancestor)
+    extra = [s for s in dashboard if s not in site_sources]
+    return "frame-ancestors " + " ".join([*site_sources, *extra])
 
 
 def _configured_frame_origin(request: Request) -> str:
@@ -773,13 +902,12 @@ def _safe_parent_origin(po: str, allowed_origins: list[str]) -> str:
     return f"{scheme}://{hostport}"
 
 
-# Dark page background for the OWNER preview frame only (not the public embed), so
-# the transparent glass bar sits on a dark surface matching the dashboard instead of
-# a white canvas. A near-black neutral tuned to the paw-enterprise dark theme.
-_PREVIEW_PAGE_BG = "#0d0e12"
-
-
-def _pawbar_bootstrap_html(config: dict[str, Any], asset_mount: str, page_bg: str = "") -> str:
+def _pawbar_bootstrap_html(
+    config: dict[str, Any],
+    asset_mount: str,
+    page_bg: str = "",
+    scene_url: str = "",
+) -> str:
     """Render the glass frame document: seed ``window.__PAWBAR__`` then load the app.
 
     The config dict is ``json.dumps``'d with ``<`` escaped to ``\\u003c`` so no
@@ -798,6 +926,37 @@ def _pawbar_bootstrap_html(config: dict[str, Any], asset_mount: str, page_bg: st
     """
     config_json = json.dumps(config).replace("<", "\\u003c")
     v = _asset_version()
+    # THE SITE ITSELF, behind the bar (owner preview only). The owner judges a
+    # theme on the page it will actually sit on — scrolling, responding, current
+    # — rather than on a screenshot of it or on a colour we chose. Composed HERE
+    # rather than in the dashboard because this is where the URL already is: the
+    # route has the Site document open.
+    #
+    # ?pawbar=off keeps the page's OWN embedded bar down. A published site
+    # auto-embeds the public one, and without this the owner sees two — the public
+    # bar on the SAVED look behind the one being edited, and the wrong one is what
+    # responds to the controls.
+    #
+    # Sandboxed. It is the owner's own page, but still a whole third-party
+    # document running inside our frame: allow-scripts so it renders as it really
+    # does, and deliberately NOT allow-same-origin beside it, which would hand it
+    # this document.
+    scene_html = (
+        f'<iframe class="pawbar-scene" src="{escape(scene_url, quote=True)}" '
+        f'title="Your site" '
+        f'sandbox="allow-scripts allow-popups allow-forms"></iframe>'
+        if scene_url
+        else ""
+    )
+    # The scene fills the document and the bar app draws over it. Fixed rather
+    # than absolute so the bar stays put while the framed page scrolls under it,
+    # which is how it behaves on a real page.
+    scene_style = (
+        "<style>html,body{margin:0;height:100%}iframe.pawbar-scene{position:fixed;inset:0;width:100%;height:100%;border:0}</style>"
+        + chr(10)
+        if scene_url
+        else ""
+    )
     preview_style = (
         f"<style>html,body{{background:{page_bg};color-scheme:dark}}</style>\n" if page_bg else ""
     )
@@ -809,9 +968,11 @@ def _pawbar_bootstrap_html(config: dict[str, Any], asset_mount: str, page_bg: st
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         "<title>Paw Bar</title>\n"
         f'<link rel="stylesheet" href="{asset_mount}/pawbar.css?v={v}">\n'
+        f"{scene_style}"
         f"{preview_style}"
         "</head>\n"
         "<body>\n"
+        f"{scene_html}"
         '<div id="pawbar-root"></div>\n'
         f"<script>window.__PAWBAR__ = {config_json};</script>\n"
         f'<script src="{asset_mount}/pawbar.js?v={v}"></script>\n'
@@ -828,6 +989,8 @@ def _pawbar_frame_config(
     parent_origin: str,
     greeting: str,
     starters: list[str] | None = None,
+    appearance: ConciergeAppearance | None = None,
+    preview: bool = False,
 ) -> dict[str, Any]:
     """Build the ``window.__PAWBAR__`` bootstrap config shared by the public frame
     and the owner preview frame (D5).
@@ -843,19 +1006,49 @@ def _pawbar_frame_config(
     no starters is unchanged. On this branch the Agent model carries no
     ``conversation_starters`` field (the ASG-1 identity fields are absent), so
     callers pass ``[]`` today — the wire is in place for when those fields land.
+
+    ``appearance`` is the owner's white-label settings (2026-08-19). ``None``
+    renders the defaults, which reproduce the look every bar had before this
+    existed — so a Site nobody has styled is byte-identical to before apart from
+    the token map now carrying the base values explicitly.
     """
+    look = appearance or ConciergeAppearance()
     return {
         "siteKey": site_key,
         "widgetId": widget_id or "",
         "endpoint": api_base,
         "parentOrigin": parent_origin,
         "mode": "concierge",
+        # 2026-08-20 — TRUE only for the owner preview frame (D5), never the
+        # public embed. It is what lets the glass app accept live --pawbar-*
+        # updates postMessage'd by the appearance editor as the owner drags a
+        # slider. A public bar must refuse those: its parent is the customer's
+        # own page, and an embed that restyles itself on request from whatever
+        # framed it is a wider surface than this feature needs. Origin is checked
+        # too — this flag decides whether the listener exists at all.
+        "preview": bool(preview),
         # D1 / SS-6 — the owner's opening line; the glass app renders it (D4) and
         # falls back to its own default when "".
         "greeting": greeting or "",
         # E3 — the bound agent's conversation starters (capped 4).
         "starters": (starters or [])[:4],
-        "tokens": {},
+        # 2026-08-19 — the owner's appearance, rendered to --pawbar-* custom
+        # properties. This line answered ``{}`` from the day the glass bar
+        # shipped: the widget read the map and injected it, and nothing ever
+        # filled it, so the whole white-label path was dead wire. ``theme`` was
+        # never emitted at all, which is why every bar was dark regardless.
+        "tokens": look.tokens(),
+        "theme": look.surface_mode,
+        "agentName": look.agent_name,
+        "agentSubtitle": look.agent_subtitle,
+        "agentAvatar": look.agent_avatar_url,
+        "avatars": list(look.team_avatar_urls),
+        # The resting pill's own copy. LauncherAppearance.label has been stored
+        # and bound-checked since the appearance model landed; it had nowhere to
+        # go until the bar rested as a labelled pill rather than a wide input
+        # slab. "" means the widget falls back to its own generic wording, so an
+        # owner who never set one still gets a finished sentence.
+        "launcherLabel": look.launcher.label,
     }
 
 
@@ -972,8 +1165,10 @@ async def frame(
 
     # (2) The embedder gate: the CSP frame-ancestors header. Fail closed when no
     # allowlisted origin survives sanitization — refuse to render (same
-    # invisible-shell shape: this body also lands in a visible iframe).
-    csp = _frame_ancestors_csp(site.allowed_origins)
+    # invisible-shell shape: this body also lands in a visible iframe). The Site's
+    # allowlist plus OUR dashboard, which frames the site's real page in the builder
+    # preview and so becomes a second ancestor the browser matches too.
+    csp = _public_frame_ancestors(site.allowed_origins)
     if csp is None:
         return _dead_frame_response(po, site.allowed_origins)
 
@@ -996,6 +1191,9 @@ async def frame(
         parent_origin=_safe_parent_origin(po, site.allowed_origins),
         greeting=site.concierge_greeting or "",
         starters=[],
+        # Read off the Site every request, never cached, so an owner saving a
+        # colour sees it on the next reload rather than after a redeploy.
+        appearance=getattr(site, "concierge_appearance", None),
     )
     html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT)
     return HTMLResponse(
@@ -1354,11 +1552,36 @@ class ConciergeSettingsUpdate(BaseModel):
 
     concierge_enabled: bool | None = None
     concierge_greeting: str | None = None
+    # 2026-08-19. Sent WHOLE rather than per-field: the editor round-trips the
+    # block it was handed, and every field validates itself into a safe literal
+    # (see paw_bar/appearance.py), so a partial merge would only add a way for
+    # half a theme to be stored.
+    concierge_appearance: ConciergeAppearance | None = None
     # Retention switch for the VISITOR half of a transcript. Off means the
     # concierge keeps working and keeps storing its own replies, but the visitor's
     # words are never written down. Turning it off does NOT purge what is already
     # stored — that is a delete operation, not a settings change.
     concierge_store_transcripts: bool | None = None
+
+
+class ConciergePreviewTokensRequest(BaseModel):
+    """An UNSAVED appearance to render, for the editor's live preview (2026-08-20)."""
+
+    concierge_appearance: ConciergeAppearance = Field(default_factory=ConciergeAppearance)
+
+
+class ConciergePreviewTokensResponse(BaseModel):
+    """The rendered ``--pawbar-*`` map, plus the appearance as VALIDATED.
+
+    Both halves matter. The tokens are what the widget applies; the normalized
+    appearance is what the owner actually gets, and returning it means the editor
+    can show a clamped radius or a rejected image URL the moment it happens
+    rather than at save time, which is the point at which it currently surprises
+    people.
+    """
+
+    tokens: dict[str, str]
+    concierge_appearance: ConciergeAppearance
 
 
 class ConciergeSettingsResponse(BaseModel):
@@ -1368,6 +1591,7 @@ class ConciergeSettingsResponse(BaseModel):
     concierge_enabled: bool
     concierge_greeting: str
     concierge_store_transcripts: bool
+    concierge_appearance: ConciergeAppearance = Field(default_factory=ConciergeAppearance)
 
 
 async def _load_site_scoped(site_id: str, workspace_id: str) -> Any:
@@ -1411,6 +1635,10 @@ async def get_site_concierge_settings(
         concierge_enabled=site.concierge_enabled,
         concierge_greeting=site.concierge_greeting,
         concierge_store_transcripts=site.concierge_store_transcripts,
+        # getattr, not attribute access: a Site document written before this
+        # field existed deserializes without it, and the settings page must open
+        # for those rather than 500 on the owner who has not saved a theme yet.
+        concierge_appearance=getattr(site, "concierge_appearance", None) or ConciergeAppearance(),
     )
 
 
@@ -1460,7 +1688,45 @@ async def update_site_concierge_settings(
         concierge_enabled=site.concierge_enabled,
         concierge_greeting=site.concierge_greeting,
         concierge_store_transcripts=site.concierge_store_transcripts,
+        # getattr, not attribute access: a Site document written before this
+        # field existed deserializes without it, and the settings page must open
+        # for those rather than 500 on the owner who has not saved a theme yet.
+        concierge_appearance=getattr(site, "concierge_appearance", None) or ConciergeAppearance(),
     )
+
+
+@router.post(
+    "/paw-bar/admin/site/{site_id}/appearance/preview-tokens",
+    response_model=ConciergePreviewTokensResponse,
+    dependencies=[Depends(_require_paw_bar_manage)],
+)
+async def render_preview_tokens(
+    site_id: str,
+    req: ConciergePreviewTokensRequest,
+    workspace_id: str = Depends(current_workspace_id),
+) -> ConciergePreviewTokensResponse:
+    """Render an unsaved appearance to its ``--pawbar-*`` tokens. WRITES NOTHING.
+
+    The appearance editor's preview is the real widget in a cross-origin iframe,
+    so it can only be repainted by telling it what to paint. What it needs is the
+    token map — and ``ConciergeAppearance.tokens()`` is the ONE renderer for that.
+    Re-expressing it in the client would put a second copy of the mapping on the
+    other side of a network boundary, where the two would drift silently and the
+    preview would stop being evidence of anything.
+
+    So the draft comes here, gets validated by exactly the model a save would
+    validate it with, and goes back as tokens. That the validation is the same is
+    the reason this is trustworthy: the preview shows the CLAMPED value, not the
+    one the owner typed, so it cannot promise a look that a save would not store.
+
+    Tenancy: the site is resolved workspace-scoped and the result is discarded.
+    We do not need the document to render — the appearance is in the body — but
+    loading it is what makes a cross-tenant or bogus site id a 404 here exactly
+    as it is on the settings PATCH, rather than an open rendering oracle.
+    """
+    await _load_site_scoped(site_id, workspace_id)
+    look = req.concierge_appearance
+    return ConciergePreviewTokensResponse(tokens=look.tokens(), concierge_appearance=look)
 
 
 # ---------------------------------------------------------------------------
@@ -1759,6 +2025,11 @@ class ConversationItem(BaseModel):
     """
 
     customer_ref: str
+    # WHICH conversation this row is (2026-08-19). A visitor may hold several, so
+    # ``customer_ref`` names the person and no longer identifies the row. Empty
+    # only for a conversation with no state row and no identified run — the
+    # legacy shape, kept listable rather than dropped.
+    conversation_id: str = ""
     last_message_at: str
     preview: str
     state: str = "open"
@@ -1892,6 +2163,11 @@ class ConversationPatchRequest(BaseModel):
     tags: list[str] | None = None
     note: str | None = None
     bot_paused: bool | None = None
+    # WHICH of the visitor's conversations to file (2026-08-19). Absent means the
+    # one in progress, which is what every pre-identity client sends and what the
+    # store has always written. It is not a patchable FIELD — it is the address —
+    # so it is stripped before the field whitelist ever sees it.
+    conversation_id: str | None = None
 
 
 class ConversationPatchResponse(BaseModel):
@@ -1928,9 +2204,17 @@ class TranscriptMessage(BaseModel):
 
 
 class ConversationReplyRequest(BaseModel):
-    """Body of POST .../conversations/{customer_ref}/reply — the owner's own turn."""
+    """Body of POST .../conversations/{customer_ref}/reply — the owner's own turn.
+
+    ``conversation_id`` names the thread being answered (2026-08-19). Absent means
+    the visitor's active one — the pre-identity behaviour, kept so a cached
+    dashboard bundle keeps working. Sending it is how an owner answers a question
+    from a conversation the visitor has since moved on from without that answer
+    materializing inside the conversation they are typing in right now.
+    """
 
     text: str
+    conversation_id: str | None = None
 
 
 class ConversationReplyResponse(BaseModel):
@@ -2202,20 +2486,18 @@ async def patch_site_conversation(
         raise HTTPException(404, "conversation_not_found")
 
     store = _store()
-    conversation = await store.get_conversation(widget.id, customer_ref, workspace_id=workspace_id)
-    if conversation is None:
-        # No row yet — only mint one if this ref actually HAS a conversation here.
-        runs = await _concierge_runs_for_visitor(
-            site.pocket_id, customer_ref, workspace_id, limit=1
-        )
-        if not runs:
-            raise HTTPException(404, "conversation_not_found")
-        conversation = await store.ensure_conversation(widget.id, customer_ref, workspace_id)
+    conversation = await _resolve_owner_conversation(
+        store, site, widget, customer_ref, workspace_id, req.conversation_id or ""
+    )
 
     if fields:
         before = conversation
         updated = await store.update_conversation(
-            widget.id, customer_ref, workspace_id=workspace_id, **fields
+            widget.id,
+            customer_ref,
+            workspace_id=workspace_id,
+            conversation_id=conversation.id,
+            **fields,
         )
         conversation = updated or conversation
         # AL-2 — record whichever ledger beats this patch actually crossed
@@ -2301,19 +2583,18 @@ async def post_site_conversation_reply(
         raise HTTPException(404, "conversation_not_found")
 
     store = _store()
-    conversation = await store.get_conversation(widget.id, customer_ref, workspace_id=workspace_id)
-    if conversation is None:
-        runs = await _concierge_runs_for_visitor(
-            site.pocket_id, customer_ref, workspace_id, limit=1
-        )
-        if not runs:
-            raise HTTPException(404, "conversation_not_found")
-        conversation = await store.ensure_conversation(widget.id, customer_ref, workspace_id)
+    conversation = await _resolve_owner_conversation(
+        store, site, widget, customer_ref, workspace_id, req.conversation_id or ""
+    )
 
     message = await store.add_owner_message(
         widget.id,
         customer_ref,
         text,
+        # The line is said IN a conversation (2026-08-19). Without this it was
+        # said to the VISITOR, and surfaced in every thread they owned — including
+        # ones they started after it was written.
+        conversation_id=conversation.id,
         role=OwnerMessageRole.OWNER,
         author=getattr(user, "id", "") or "",
         workspace_id=workspace_id,
@@ -2331,7 +2612,11 @@ async def post_site_conversation_reply(
         fields["snooze_until"] = ""
     before = conversation
     updated = await store.update_conversation(
-        widget.id, customer_ref, workspace_id=workspace_id, **fields
+        widget.id,
+        customer_ref,
+        workspace_id=workspace_id,
+        conversation_id=conversation.id,
+        **fields,
     )
     conversation = updated or conversation
     # AL-2 — typing IS taking over, so this is where ``paw.conversation.takeover``
@@ -2457,6 +2742,9 @@ async def get_agent_conversations(
 async def get_site_conversation_transcript(
     site_id: str,
     customer_ref: str,
+    conversation_id: str = Query(
+        "", description="Read ONE conversation, not the visitor's whole history"
+    ),
     workspace_id: str = Depends(current_workspace_id),
 ) -> ConversationTranscriptResponse:
     """One visitor's concierge transcript on a site, oldest-first (D2 drill-in).
@@ -2482,7 +2770,13 @@ async def get_site_conversation_transcript(
     # No concierge widget on this site → no conversation exists to read.
     if widget is None:
         raise HTTPException(404, "conversation_not_found")
-    messages = await _load_transcript(site.pocket_id, customer_ref, workspace_id, widget=widget)
+    messages = await _load_transcript(
+        site.pocket_id,
+        customer_ref,
+        workspace_id,
+        widget=widget,
+        conversation_id=conversation_id,
+    )
     if messages is None:
         # No concierge run for this (pocket, customer_ref) — the ref has no
         # conversation on this site's widget.
@@ -2665,11 +2959,22 @@ async def get_site_preview_frame(
         parent_origin=_safe_parent_origin(dash, [dash]),
         greeting=site.concierge_greeting or "",
         starters=await _bound_agent_starters(widget.agent_id),
+        appearance=getattr(site, "concierge_appearance", None),
+        preview=True,
     )
     # Preview-only dark page so the transparent bar reads as sitting on the dark
-    # dashboard, not a white canvas. The public /paw-bar/frame passes no page_bg
-    # (stays transparent over the customer's real site).
-    html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT, page_bg=_PREVIEW_PAGE_BG)
+    # TRANSPARENT, exactly like the public embed. The dashboard composes the
+    # preview now: it frames the site's own published page and lays this frame
+    # over it, so the bar sits on the real page rather than on a colour we chose
+    # for it. A page background here would paint over that site.
+    # The site's own published URL, straight off the document this route already
+    # loaded. "" when the site has never deployed, or deployed with no dispatch
+    # domain configured — there is genuinely nothing to frame then, and the bar
+    # previews on a plain surface rather than in an empty white box.
+    scene = getattr(site, "url", "") or ""
+    if scene:
+        scene += ("&" if "?" in scene else "?") + "pawbar=off"
+    html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT, scene_url=scene)
     return HTMLResponse(
         content=html,
         headers={"Content-Security-Policy": csp, "Cache-Control": "no-store"},
@@ -2677,6 +2982,51 @@ async def get_site_preview_frame(
 
 
 # --- D2 aggregation data-source helpers -------------------------------------
+
+
+async def _resolve_owner_conversation(
+    store: Any,
+    site: Any,
+    widget: Any,
+    customer_ref: str,
+    workspace_id: str,
+    conversation_id: str = "",
+) -> Any:
+    """The conversation an owner's write addresses. Raises 404 if there isn't one.
+
+    ONE resolver for the PATCH and the reply (2026-08-19), because they were
+    resolving separately and both resolved to the visitor's ACTIVE row — so an
+    owner acting on the thread they were reading silently acted on a different
+    one the moment the visitor started a new conversation.
+
+    With ``conversation_id`` the named row must belong to this widget AND this
+    visitor; a mismatch is a 404 rather than a silent fallback. The fallback is
+    right on the VISITOR path (telling an anonymous caller that an id was real is
+    the only thing a refusal there would leak), and wrong here: this caller is
+    authenticated and already workspace-scoped, so answering their explicit
+    address with a different conversation's data is a correctness bug, not
+    defence.
+
+    Without it, the visitor's conversation in progress — the pre-identity
+    behaviour, kept so a cached dashboard bundle keeps working. LAZY ROW
+    CREATION is preserved on that path only: a conversation that predates the
+    state table is minted on first touch rather than 404ing the owner's first
+    snooze.
+    """
+    if conversation_id:
+        named = await store.get_conversation_by_id(conversation_id, workspace_id=workspace_id)
+        if named is None or named.widget_id != widget.id or named.customer_ref != customer_ref:
+            raise HTTPException(404, "conversation_not_found")
+        return named
+    conversation = await store.get_conversation(widget.id, customer_ref, workspace_id=workspace_id)
+    if conversation is None:
+        runs = await _concierge_runs_for_visitor(
+            site.pocket_id, customer_ref, workspace_id, limit=1
+        )
+        if not runs:
+            raise HTTPException(404, "conversation_not_found")
+        conversation = await store.ensure_conversation(widget.id, customer_ref, workspace_id)
+    return conversation
 
 
 def _validated_conversation_fields(req: ConversationPatchRequest, author: str) -> dict[str, Any]:
@@ -2799,17 +3149,49 @@ def _display_name(contact_email: str, customer_ref: str) -> str:
     return f"visitor-{customer_ref[:_DISPLAY_REF_CHARS]}" if customer_ref else "visitor"
 
 
+def _conversation_of_run(run: Any, pocket_id: str, widget: PawBarWidget | None) -> str:
+    """The conversation token encoded in a run's ``session_key``.
+
+    The key is ``cloud:concierge:{pocket}:{conversation}:{agent}``. Before
+    conversation identity the middle slot held the VISITOR's handle, so this
+    returns whatever is there and the caller decides what it is by looking for a
+    matching conversation row — a token that resolves to no row is a legacy run,
+    not an error. Parsed by stripping the known prefix and the last segment
+    rather than splitting on ``:``, because a pocket id is not guaranteed to be
+    colon-free and a naive split would mis-slice it.
+
+    Returns ``""`` for a key this function does not recognize, which groups that
+    run under its visitor exactly as the pre-identity code did.
+    """
+    key = getattr(run, "session_key", "") or ""
+    prefix = f"cloud:concierge:{pocket_id}:"
+    if not pocket_id or not key.startswith(prefix):
+        return ""
+    rest = key[len(prefix) :]
+    agent_id = getattr(widget, "agent_id", "") if widget is not None else ""
+    if agent_id and rest.endswith(f":{agent_id}"):
+        return rest[: -len(agent_id) - 1]
+    head, _, _tail = rest.rpartition(":")
+    return head
+
+
 async def _conversation_side_data(
     widget: PawBarWidget | None, workspace_id: str, refs: list[str]
 ) -> tuple[dict[str, Any], set[str], dict[str, str]]:
     """Load the per-visitor extras a conversation list row needs.
 
-    Returns ``(state rows by ref, refs with a pending action, contact email by
-    ref)``. Two bounded store reads for the WHOLE page, never one per row:
+    Returns ``(state rows by CONVERSATION ID, refs with a pending action, contact
+    email by ref)``. Two bounded store reads for the WHOLE page, never one per
+    row:
 
       * the ``paw_bar_conversations`` rows for exactly the refs on this page, and
       * this widget's decision rows, which answer both "is something waiting on
         the owner" and "did this visitor ever leave an email".
+
+    The state map is keyed by conversation id (2026-08-19). It was keyed by
+    ``customer_ref``, which silently kept ONE row per visitor — the same collapse
+    the list itself was making, one layer down, so fixing only the list would
+    have joined every one of a visitor's conversations to the same state.
 
     The email is READ from the decision row rather than copied onto the
     conversation row — it stays in the one place the PII invariant names, and this
@@ -2821,9 +3203,16 @@ async def _conversation_side_data(
         return states, set(), {}
     try:
         rows = await _store().list_conversations(
-            widget.id, workspace_id=workspace_id, limit=len(refs), customer_refs=refs
+            widget.id,
+            workspace_id=workspace_id,
+            # A visitor may hold several conversations, so the page's row budget
+            # is no longer one-per-ref. Bounded by the same scan cap the run
+            # window uses rather than by len(refs), which would truncate a busy
+            # visitor's threads out of their own state join.
+            limit=_CONVERSATION_SCAN_CAP,
+            customer_refs=refs,
         )
-        states = {row.customer_ref: row for row in rows}
+        states = {row.id: row for row in rows}
     except Exception:  # noqa: BLE001 — queue metadata is additive, never fatal
         logger.warning("conversation state read failed for widget %s", widget.id, exc_info=True)
     pending, emails = await _decision_side_data(widget, refs)
@@ -2924,15 +3313,53 @@ async def _list_conversations(
         logger.warning("conversations read failed for pocket %s", pocket_id, exc_info=True)
         return ConversationsResponse(items=[], cursor=None, unsupported=False)
 
-    # Dedupe the scanned window first (most-recent run per customer wins), THEN
-    # join and filter, THEN cut to `limit` — cutting first would hide a matching
-    # conversation behind a page of non-matching ones.
-    candidates: list[tuple[str, str, str]] = []
-    seen: set[str] = set()
+    # Dedupe the scanned window first (most-recent run per CONVERSATION wins),
+    # THEN join and filter, THEN cut to `limit` — cutting first would hide a
+    # matching conversation behind a page of non-matching ones.
+    #
+    # 2026-08-19: the dedupe key is the conversation, not the visitor. It was
+    # ``run.user_id``, which was right exactly while a visitor could hold one
+    # conversation; once they could hold several it silently discarded all but
+    # their most recent, and the owner's inbox showed one row for a person who
+    # had asked four separate questions. The other three were not collapsed
+    # behind a disclosure — they were absent, with no way to reach them.
+    parsed: list[tuple[str, str, Any]] = []  # (customer_ref, conversation token, run)
+    refs: list[str] = []
     for run in runs:
-        if run.user_id in seen:
+        if run.user_id not in refs:
+            refs.append(run.user_id)
+        parsed.append((run.user_id, _conversation_of_run(run, pocket_id, widget), run))
+
+    states, pending, emails = await _conversation_side_data(widget, workspace_id, refs)
+
+    # A token is a real conversation id only if a row confirms it. Anything else
+    # is a run from before conversations had identity, whose session_key carries
+    # the visitor's handle in that slot — those keep the old behaviour and group
+    # per visitor, resolving to that visitor's conversation in progress.
+    active_by_ref = {
+        row.customer_ref: row for row in states.values() if getattr(row, "active", True)
+    }
+
+    candidates: list[tuple[str, str, str, str]] = []  # ref, conversation_id, when, preview
+    seen: set[str] = set()
+    for ref, token, run in parsed:
+        if states.get(token) is not None:
+            conversation_id = token
+        else:
+            legacy = active_by_ref.get(ref)
+            conversation_id = legacy.id if legacy is not None else ""
+        # Group by the CONVERSATION we resolved to, falling back to the visitor
+        # only when there is no conversation to name. Grouping by the raw token
+        # instead splits one thread in two on the shape this deploy creates: a
+        # visitor mid-conversation at the migration has runs of both spellings —
+        # older ones carrying their handle in the session_key's conversation
+        # slot, newer ones carrying the real id — and both resolve HERE to the
+        # same row. Two rows, one id, and a client keying its list on the id has
+        # duplicate keys.
+        group = conversation_id or ref
+        if group in seen:
             continue
-        seen.add(run.user_id)
+        seen.add(group)
         when = run.ended_at or run.createdAt
         # Prefer the agent's reply as the row preview (unchanged). Fall back to the
         # visitor's own question when there is no reply — a run that failed or was
@@ -2940,16 +3367,17 @@ async def _list_conversations(
         # question at least says what the visitor wanted.
         preview = (run.partial_text or "") or (getattr(run, "user_text", "") or "")
         candidates.append(
-            (run.user_id, when.isoformat() if when else "", preview[:_CONVERSATION_PREVIEW_CHARS])
+            (
+                ref,
+                conversation_id,
+                when.isoformat() if when else "",
+                preview[:_CONVERSATION_PREVIEW_CHARS],
+            )
         )
 
-    states, pending, emails = await _conversation_side_data(
-        widget, workspace_id, [ref for ref, _, _ in candidates]
-    )
-
     items: list[ConversationItem] = []
-    for ref, last_message_at, preview in candidates:
-        row = states.get(ref)
+    for ref, conversation_id, last_message_at, preview in candidates:
+        row = states.get(conversation_id)
         row_state = row.state.value if row is not None else "open"
         if state and row_state != state:
             continue
@@ -2957,6 +3385,7 @@ async def _list_conversations(
         items.append(
             ConversationItem(
                 customer_ref=ref,
+                conversation_id=conversation_id,
                 last_message_at=last_message_at,
                 preview=preview,
                 state=row_state,
@@ -2997,7 +3426,12 @@ async def _conversation_counts(widget: PawBarWidget | None, workspace_id: str) -
 
 
 async def _concierge_runs_for_visitor(
-    pocket_id: str, customer_ref: str, workspace_id: str, *, limit: int
+    pocket_id: str,
+    customer_ref: str,
+    workspace_id: str,
+    *,
+    limit: int,
+    session_key: str = "",
 ) -> list[Any]:
     """One visitor's concierge runs on one site, most-recent first.
 
@@ -3013,19 +3447,31 @@ async def _concierge_runs_for_visitor(
       * ``user_id``       — the anonymous customer handle; a sibling VISITOR of
                             the same widget never matches.
 
+    ``session_key`` narrows further, to ONE conversation of that visitor
+    (2026-08-19). It is optional because the two callers want different things:
+    the owner's transcript read wants the visitor's whole history with the site,
+    while the agent's memory rehydration must see only the conversation actually
+    in progress — replaying an abandoned thread into a fresh one is the bug this
+    parameter exists to fix. The key already encodes the conversation id, so this
+    needs no new field on the run doc.
+
     Callers pass ``workspace_id`` / ``pocket_id`` from the authenticated
     authority (the resolved site key or the session's workspace), never from the
     request body. Index-backed and always bounded by ``limit``.
     """
     from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 
+    predicates = [
+        ChatRunDoc.workspace == workspace_id,
+        ChatRunDoc.context_type == _CONCIERGE_CONTEXT_TYPE,
+        ChatRunDoc.scope_id == pocket_id,
+        ChatRunDoc.user_id == customer_ref,
+    ]
+    if session_key:
+        predicates.append(ChatRunDoc.session_key == session_key)
+
     return (
-        await ChatRunDoc.find(
-            ChatRunDoc.workspace == workspace_id,
-            ChatRunDoc.context_type == _CONCIERGE_CONTEXT_TYPE,
-            ChatRunDoc.scope_id == pocket_id,
-            ChatRunDoc.user_id == customer_ref,
-        )
+        await ChatRunDoc.find(*predicates)
         .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
         .limit(limit)
         .to_list()
@@ -3033,9 +3479,9 @@ async def _concierge_runs_for_visitor(
 
 
 async def _load_concierge_history(
-    pocket_id: str, customer_ref: str, workspace_id: str
+    pocket_id: str, customer_ref: str, workspace_id: str, session_key: str = ""
 ) -> list[dict[str, str]]:
-    """Rehydrate one visitor's prior turns as ``RunSpec.history``.
+    """Rehydrate this CONVERSATION's prior turns as ``RunSpec.history``.
 
     The concierge visitor is anonymous and has no ``Message`` rows, so the authed
     surfaces' ``load_history_for_scope`` has nothing to read and every turn was
@@ -3057,6 +3503,13 @@ async def _load_concierge_history(
     writes this turn's doc, so the visitor's message rides in ``RunSpec.content``
     exactly once.
 
+    ``session_key`` scopes the replay to ONE conversation (2026-08-19). Before it,
+    the read was per-VISITOR, so a visitor who started over still had their
+    abandoned thread replayed into the agent — the loudest half of the reported
+    "every session is one session" bug, because it is the half the visitor could
+    actually feel. Passing "" restores the old visitor-wide behaviour and is what
+    a caller with no conversation in hand gets.
+
     Failure-soft: any read error degrades to no memory and logs. A visitor's chat
     must not 500 because the run collection hiccuped.
     """
@@ -3067,7 +3520,11 @@ async def _load_concierge_history(
 
     try:
         runs = await _concierge_runs_for_visitor(
-            pocket_id, customer_ref, workspace_id, limit=_HISTORY_TURN_CAP
+            pocket_id,
+            customer_ref,
+            workspace_id,
+            limit=_HISTORY_TURN_CAP,
+            session_key=session_key,
         )
 
         history: list[dict[str, str]] = []
@@ -3130,6 +3587,7 @@ async def _load_transcript(
     customer_ref: str,
     workspace_id: str,
     widget: PawBarWidget | None = None,
+    conversation_id: str = "",
 ) -> list[TranscriptMessage] | None:
     """Build one visitor's full conversation, oldest-first (D2 drill-in + slice 2).
 
@@ -3155,9 +3613,23 @@ async def _load_transcript(
 
     Returns ``None`` only when the ref has NOTHING here (the caller 404s) —
     distinct from an empty list, which means rows exist but none carried text.
+
+    ``conversation_id`` narrows BOTH sources to one thread (2026-08-19). Narrowing
+    only one would be worse than narrowing neither: the owner would read one
+    conversation's questions interleaved with every reply a human ever sent that
+    visitor, and the timestamps would make it look like a coherent exchange.
     """
+    session_key = (
+        f"cloud:concierge:{pocket_id}:{conversation_id}:{getattr(widget, 'agent_id', '')}"
+        if conversation_id and widget is not None
+        else ""
+    )
     runs = await _concierge_runs_for_visitor(
-        pocket_id, customer_ref, workspace_id, limit=_TRANSCRIPT_CAP
+        pocket_id,
+        customer_ref,
+        workspace_id,
+        limit=_TRANSCRIPT_CAP,
+        session_key=session_key,
     )
 
     messages: list[TranscriptMessage] = []
@@ -3194,6 +3666,7 @@ async def _load_transcript(
                 customer_ref,
                 workspace_id=workspace_id,
                 limit=_TRANSCRIPT_CAP,
+                conversation_id=conversation_id or None,
             )
         except Exception:  # noqa: BLE001 — the run-derived half must still render
             logger.warning("owner message read failed for widget %s", widget.id, exc_info=True)
@@ -3596,6 +4069,18 @@ class ConciergeChatRequest(BaseModel):
     # NEVER an authenticated principal.
     customer_ref: str
     message: str
+    # Which of this visitor's conversations the turn belongs to (2026-08-19).
+    #
+    # OPTIONAL on purpose, and it must stay optional: widget bundles cached on
+    # visitors' devices predate the field, and a required one would 422 every one
+    # of them the moment this deploys. Absent means "the conversation in
+    # progress", which the store resolves-or-creates — exactly the behaviour
+    # before conversations had identities.
+    #
+    # An id belonging to another visitor or another tenant does not resolve, and
+    # the turn falls back to the caller's own active conversation rather than
+    # erroring: the value is client-supplied, so it is a hint, never an authority.
+    conversation_id: str = ""
 
 
 def _sse(event: str, data: dict[str, Any], *, entry_id: str | None = None) -> bytes:
@@ -3868,6 +4353,30 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     except Exception:
         logger.warning("conversation state upsert failed (non-fatal)", exc_info=True)
 
+    # Which conversation is this turn part of (2026-08-19)? The body's id is a
+    # client-supplied HINT and is verified against this visitor's own rows before
+    # it is honoured — a caller naming a stranger's (or another tenant's)
+    # conversation gets their own active one instead of a refusal, because the
+    # only thing a refusal would tell them is that the id was real.
+    #
+    # Everything downstream keys off ``conversation_key``: the run's session_key,
+    # the history replay, and the ledger's conversation id. It is derived HERE,
+    # once, so those three can never drift apart again.
+    if body.conversation_id and conversation is not None:
+        try:
+            named = await store.get_conversation_by_id(
+                body.conversation_id, workspace_id=ctx.workspace_id
+            )
+            if (
+                named is not None
+                and named.widget_id == body.widget_id
+                and named.customer_ref == body.customer_ref
+            ):
+                conversation = named
+        except Exception:
+            logger.warning("conversation id lookup failed (non-fatal)", exc_info=True)
+    conversation_key = conversation.id if conversation is not None else body.customer_ref
+
     # Owner notification #1 of 3 (slice 3): a NEW conversation started. Not every
     # turn — a bar that pinged on each message would train the owner to ignore the
     # badge, which costs them the two escalations that actually need them. Awaited
@@ -3983,11 +4492,20 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     stored_user_text = (
         body.message[:_STORED_USER_TEXT_CHARS] if site.concierge_store_transcripts else ""
     )
-    # ``history`` is THIS visitor's prior turns on THIS site (see
+    # The agent session this turn belongs to. It carries ``conversation_key`` —
+    # the conversation's own id — where it used to carry ``customer_ref``
+    # (2026-08-19). That one substitution is the identity fix at the run layer:
+    # with the visitor's handle in this slot, every conversation they ever had
+    # was ONE agent session, which is precisely what "multiple sessions are
+    # treated as a single session" described. Built here rather than inline in
+    # the RunSpec because the history read below must scope to the same value.
+    session_key = f"cloud:concierge:{ctx.pocket_id}:{conversation_key}:{widget.agent_id}"
+    # ``history`` is THIS CONVERSATION's prior turns (see
     # ``_load_concierge_history``). Read BEFORE ``create_run`` below writes this
     # turn's doc, so the current message rides in ``content`` and appears exactly
-    # once. Scoped to (workspace, concierge, pocket, customer_ref) — a sibling
-    # visitor's, a sibling site's, and another tenant's turns can never appear.
+    # once. Scoped to (workspace, concierge, pocket, customer_ref, session) — a
+    # sibling visitor's, a sibling site's, another tenant's, and now this
+    # visitor's OWN earlier conversations can never appear.
     #
     # Gated on the SAME retention toggle as the write: an owner who turned
     # transcript storage off gets no memory, because there is nothing stored to
@@ -3995,7 +4513,12 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     # conversation with the questions missing. That degradation is the owner's
     # privacy choice working, not a bug to route around.
     prior_history = (
-        await _load_concierge_history(ctx.pocket_id or "", body.customer_ref, ctx.workspace_id)
+        await _load_concierge_history(
+            ctx.pocket_id or "",
+            body.customer_ref,
+            ctx.workspace_id,
+            session_key=session_key,
+        )
         if site.concierge_store_transcripts
         else []
     )
@@ -4004,7 +4527,7 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
         workspace_id=ctx.workspace_id,
         context_type="concierge",
         scope_id=ctx.pocket_id or "",
-        session_key=f"cloud:concierge:{ctx.pocket_id}:{body.customer_ref}:{widget.agent_id}",
+        session_key=session_key,
         group=None,
         user_id=body.customer_ref,
         agent_id=widget.agent_id,
@@ -4224,7 +4747,7 @@ async def get_cart(
     results); no cart yet returns an empty cart with the rendered checkout_url."""
     from pocketpaw_ee.paw_bar.actions import cart_wire
 
-    origin = request.headers.get("origin")
+    origin = _request_origin(request)
     widget, _ctx, _site = await _front_gate_for_key(
         widget_id=w,
         signed_key=key,
@@ -4245,6 +4768,247 @@ async def get_cart(
         logger.debug("cart-read marker record failed (non-fatal)", exc_info=True)
     cart = await store.get_cart(w, customer_ref)
     return JSONResponse(cart_wire(widget, customer_ref, cart))
+
+
+# ---------------------------------------------------------------------------
+# Public conversation endpoints (2026-08-19) — the visitor's own Messages list
+#
+# The visitor half of the conversation-identity fix. Before it, a visitor had
+# exactly one conversation per widget forever, so there was nothing to list and
+# no way to start another; the widget's "New conversation" wiped its own
+# localStorage and the backend never heard about it.
+#
+# Same armor class as chat and the cart, through the shared
+# ``_front_gate_for_key`` (404 unknown widget → 429 rate limit → 401 bad key →
+# 403 origin/binding). Both endpoints are strictly visitor-scoped: the caller can
+# only ever read or write conversations belonging to the ``customer_ref`` the
+# gate already bound, so there is no id to enumerate and nothing to reach across.
+# ---------------------------------------------------------------------------
+
+
+class VisitorConversationItem(BaseModel):
+    """One row of the widget's Messages list."""
+
+    id: str
+    state: str = "open"
+    # The last thing said, from the visitor's point of view. "" for a conversation
+    # opened but never used — the widget renders its own empty-state copy rather
+    # than a blank row.
+    preview: str = ""
+    last_message_at: str = ""
+    # Is this the conversation in progress? The widget resumes into it and sends
+    # turns against it by default.
+    active: bool = False
+
+
+class VisitorConversationsResponse(BaseModel):
+    conversations: list[VisitorConversationItem] = Field(default_factory=list)
+
+
+class VisitorTranscriptResponse(BaseModel):
+    """One of THIS visitor's conversations, oldest-first (2026-08-21).
+
+    The widget's own history. Same messages the owner drill-in renders, through
+    the same loader — a visitor and the site owner reading one thread must not
+    be reading two different reconstructions of it.
+    """
+
+    conversation_id: str
+    messages: list[TranscriptMessage] = Field(default_factory=list)
+
+
+class OpenConversationRequest(BaseModel):
+    key: str
+    w: str
+    customer_ref: str
+
+
+async def _visitor_conversation_previews(
+    widget: PawBarWidget, pocket_id: str, customer_ref: str, workspace_id: str
+) -> dict[str, tuple[str, str]]:
+    """Map ``conversation_id -> (preview, last_message_at)`` in ONE query.
+
+    The conversation rows carry lifecycle state but deliberately no messages, so
+    the preview comes from the run docs. Rather than a query per conversation
+    (which would be N round-trips for a list of N), this reads the visitor's
+    recent runs once, bounded by ``_CONVERSATION_SCAN_CAP``, and buckets them by
+    the conversation encoded in each run's ``session_key``. Runs arrive
+    newest-first, so the FIRST run seen for a conversation is its latest.
+
+    A conversation whose only turns are the owner's own replies (those live in
+    ``paw_bar_owner_messages``, never as run docs — the metering sweeper bills
+    runs, and an owner reply shaped as one would charge the owner for typing)
+    resolves to no preview here and renders from its state instead.
+
+    Failure-soft: the list is worth showing without previews.
+    """
+    out: dict[str, tuple[str, str]] = {}
+    if not pocket_id:
+        return out
+    try:
+        runs = await _concierge_runs_for_visitor(
+            pocket_id, customer_ref, workspace_id, limit=_CONVERSATION_SCAN_CAP
+        )
+    except Exception:
+        logger.warning("visitor conversation previews failed (non-fatal)", exc_info=True)
+        return out
+
+    prefix = f"cloud:concierge:{pocket_id}:"
+    suffix = f":{widget.agent_id}"
+    for run in runs:
+        key = getattr(run, "session_key", "") or ""
+        if not key.startswith(prefix) or not key.endswith(suffix):
+            continue
+        conversation_id = key[len(prefix) : len(key) - len(suffix)]
+        if not conversation_id or conversation_id in out:
+            continue  # newest-first, so the first hit is the latest turn
+        text = (run.partial_text or "") or (getattr(run, "user_text", "") or "")
+        when = getattr(run, "createdAt", None)
+        out[conversation_id] = (
+            text[:_CONVERSATION_PREVIEW_CHARS],
+            when.isoformat() if when else "",
+        )
+    return out
+
+
+@router.get("/paw-bar/conversations", response_model=VisitorConversationsResponse)
+async def list_visitor_conversations(
+    request: Request,
+    w: str,
+    key: str,
+    customer_ref: str,
+) -> VisitorConversationsResponse:
+    """This visitor's own conversations on this bar, newest first.
+
+    What the widget's Messages tab reads. Scoped twice over — the store filters to
+    one (widget, visitor) pair and the front gate has already bound that visitor
+    to the resolved key — so a sibling visitor's or a sibling site's conversations
+    can never appear in the answer.
+    """
+    origin = _request_origin(request)
+    widget, ctx, _site = await _front_gate_for_key(
+        widget_id=w,
+        signed_key=key,
+        customer_ref=customer_ref,
+        origin=origin,
+        request=request,
+    )
+    store = _store()
+    rows = await store.list_conversations_for_visitor(
+        widget.id, customer_ref, workspace_id=ctx.workspace_id
+    )
+    previews = await _visitor_conversation_previews(
+        widget, ctx.pocket_id or "", customer_ref, ctx.workspace_id
+    )
+    conversations = []
+    for row in rows:
+        preview, last_at = previews.get(row.id, ("", ""))
+        conversations.append(
+            VisitorConversationItem(
+                id=row.id,
+                state=row.state.value,
+                preview=preview,
+                last_message_at=last_at or (row.last_visitor_at or ""),
+                active=row.active,
+            )
+        )
+    return VisitorConversationsResponse(conversations=conversations)
+
+
+@router.post("/paw-bar/conversations", response_model=VisitorConversationItem)
+async def open_visitor_conversation(
+    body: OpenConversationRequest, request: Request
+) -> VisitorConversationItem:
+    """Start a fresh conversation for this visitor and return it.
+
+    The backend half of the widget's "New conversation". The visitor's current
+    conversation is RETIRED rather than deleted — it stays in their Messages list
+    and in the owner's inbox — and the new one becomes active, so the next turn
+    lands on it and the agent starts cold instead of replaying the thread the
+    visitor just walked away from.
+    """
+    origin = request.headers.get("origin")
+    widget, ctx, _site = await _front_gate_for_key(
+        widget_id=body.w,
+        signed_key=body.key,
+        customer_ref=body.customer_ref,
+        origin=origin,
+        request=request,
+    )
+    store = _store()
+    conversation = await store.open_conversation(
+        widget.id, body.customer_ref, workspace_id=ctx.workspace_id
+    )
+    return VisitorConversationItem(
+        id=conversation.id,
+        state=conversation.state.value,
+        preview="",
+        last_message_at="",
+        active=True,
+    )
+
+
+@router.get(
+    "/paw-bar/conversations/{conversation_id}/messages",
+    response_model=VisitorTranscriptResponse,
+)
+async def get_visitor_conversation_messages(
+    conversation_id: str,
+    request: Request,
+    w: str,
+    key: str,
+    customer_ref: str,
+) -> VisitorTranscriptResponse:
+    """This visitor's own messages in one conversation, oldest-first.
+
+    WHY THIS EXISTS. The widget had no way to ask. Its thread lived only in the
+    frame's localStorage, so anything that lost that storage lost the history
+    outright — and plenty does: the bar is a third-party iframe, which Safari
+    blocks storage for and Chrome/Firefox partition per top-level site, and the
+    stored row carries a 7-day TTL besides. The server had every message the
+    whole time (it is what the owner's inbox reads); nothing could fetch them.
+
+    So a visitor who chatted, navigated, and came back saw an empty panel with
+    their conversation id still in localStorage pointing at turns nobody could
+    load. This is the read that was missing. localStorage becomes a cache for
+    the first paint rather than the record.
+
+    Scoped twice, like the list beside it: the front gate binds this visitor to
+    the resolved key, and the conversation is checked against the ones the store
+    holds for that (widget, visitor) pair. A conversation id belonging to another
+    visitor or another site 404s rather than returning an empty thread — the
+    loader would answer empty anyway (it filters on customer_ref), but a 404 says
+    the honest thing instead of implying the conversation exists and is silent.
+    """
+    origin = _request_origin(request)
+    widget, ctx, _site = await _front_gate_for_key(
+        widget_id=w,
+        signed_key=key,
+        customer_ref=customer_ref,
+        origin=origin,
+        request=request,
+    )
+    if not conversation_id:
+        raise HTTPException(status_code=404, detail="conversation_not_found")
+
+    store = _store()
+    rows = await store.list_conversations_for_visitor(
+        widget.id, customer_ref, workspace_id=ctx.workspace_id
+    )
+    if conversation_id not in {row.id for row in rows}:
+        raise HTTPException(status_code=404, detail="conversation_not_found")
+
+    messages = await _load_transcript(
+        ctx.pocket_id or "",
+        customer_ref,
+        ctx.workspace_id,
+        widget=widget,
+        conversation_id=conversation_id,
+    )
+    # None means the ref has nothing stored at all; for a conversation the store
+    # DOES know about, that is an empty thread rather than a missing one — a bot
+    # muted the whole time, or a site with transcripts off and no owner replies.
+    return VisitorTranscriptResponse(conversation_id=conversation_id, messages=messages or [])
 
 
 # ---------------------------------------------------------------------------
@@ -4387,6 +5151,7 @@ async def get_visitor_messages(
     request: Request,
     signed_key: str = Query("", description="The public Site.signed_key"),
     after: str = Query("", description="Only messages stamped strictly later"),
+    conversation_id: str = Query("", description="Only lines said in this conversation"),
 ) -> VisitorMessagesResponse:
     """Poll for owner/system messages on this visitor's thread.
 
@@ -4425,9 +5190,26 @@ async def get_visitor_messages(
     store = _store()
     try:
         await store.auto_resume_bot_if_idle(widget.id, customer_ref, ctx.workspace_id)
-        conversation = await store.get_conversation(
-            widget.id, customer_ref, workspace_id=ctx.workspace_id
-        )
+        # ``bot_paused`` belongs to the conversation on screen, not to the
+        # visitor's most recent one — otherwise a visitor reading an old thread a
+        # human had taken over is told the assistant is muted in the thread they
+        # are actually typing into. A named conversation must still be THEIRS;
+        # a stranger's id reads as no conversation rather than as its state.
+        conversation = None
+        if conversation_id:
+            named = await store.get_conversation_by_id(
+                conversation_id, workspace_id=ctx.workspace_id
+            )
+            if (
+                named is not None
+                and named.widget_id == widget.id
+                and named.customer_ref == customer_ref
+            ):
+                conversation = named
+        else:
+            conversation = await store.get_conversation(
+                widget.id, customer_ref, workspace_id=ctx.workspace_id
+            )
         messages = await store.list_owner_messages(
             widget.id,
             customer_ref,
@@ -4435,6 +5217,11 @@ async def get_visitor_messages(
             after=_normalized_after(after),
             roles=_PUBLIC_MESSAGE_ROLES,
             limit=_OWNER_POLL_CAP,
+            # Scoped to the thread on screen (2026-08-19). Omitted by a cached
+            # widget bundle, which then keeps the pre-identity behaviour of
+            # receiving every owner line on the visitor's whole thread — degraded
+            # but never silent, which is the right way round for a poll.
+            conversation_id=conversation_id or None,
         )
     except Exception:  # noqa: BLE001 — a poll that 500s stalls the visitor's thread
         logger.warning("visitor message poll failed for widget %s", widget.id, exc_info=True)

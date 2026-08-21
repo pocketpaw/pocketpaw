@@ -47,6 +47,10 @@
 #                                  (added in the same change), so the guardian
 #                                  block rides the converged path.
 #
+# Updated: 2026-08-20 (feat/coupling-alerts-to-bell review) — ``_target_url``
+# grew an explicit ``alert`` arm returning None: operational alerts have no
+# room, so the default arm was building /chat/<alert_type>, a dead link.
+#
 # LOCK-SCREEN PRIVACY. A push body lands on a lock screen, so it must never
 # carry user-authored text. Several kinds persist exactly that — ``message`` /
 # ``mention`` / ``reaction`` store ``content[:200]`` and the concierge kinds
@@ -188,6 +192,9 @@ def _target_url(data: dict[str, Any]) -> str | None:
         opened via ``approvalsStore.openTray()``, not a route, so there is no
         URL to point at. The pre-convergence handler sent ``/?view=approvals``,
         which nothing in the frontend reads.
+      * ``alert`` — omitted. Operational alerts have no route yet on either
+        side; the FE bell arm is a separate follow-up (see
+        ``notifications/bridges/alerts.py``).
     """
     source_type = data.get("source_type")
     source_id = data.get("source_id")
@@ -219,6 +226,14 @@ def _target_url(data: dict[str, Any]) -> str | None:
         # Without this arm the default below builds /chat/<site_id> — a room
         # that cannot exist.
         return f"/sites/{nav_target}?view=leads"
+    if source_type == "alert":
+        # Instance-scoped operational alerts (source_id is the alert_type,
+        # e.g. ``budget_exhausted``) have no entity page and no room — without
+        # this arm the default below builds /chat/<alert_type>, a room that
+        # cannot exist. No alerts route exists yet, so a push with no URL is
+        # honest; the FE bell arm lands separately (see the FE follow-up note
+        # in notifications/bridges/alerts.py).
+        return None
     # Same default arm as the frontend: unknown source types resolve to the
     # chat room, which is where every other current backend kind lives.
     return f"/chat/{nav_target}"

@@ -1,0 +1,9 @@
+# transcript: `dokku redis:link demo-db demo` — injects REDIS_URL (secret DSN in
+# the echo; driver must redact it from logs and keep it off DTOs).
+EXIT: 0
+--- stdout ---
+-----> Setting config vars
+       REDIS_URL:  redis://:s3cr3tpass8f2a@dokku-redis-demo-db:6379
+-----> Restarting app demo
+-----> Releasing demo...
+--- stderr ---

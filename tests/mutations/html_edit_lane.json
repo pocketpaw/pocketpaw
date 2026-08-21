@@ -96,5 +96,26 @@
     "find": "    return {\"pocket_id\": pocket_id, \"file_path\": file_path, \"created\": create}",
     "replace": "    await publish_pocket(workspace_id=\"\", user_id=user_id, pocket_id=pocket_id, name=\"\")\n    return {\"pocket_id\": pocket_id, \"file_path\": file_path, \"created\": create}",
     "tests": ["tests/ee/sites/test_html_file_edit.py"]
+  },
+  {
+    "label": "the html refine branch is dropped, so an html site's chat falls back to the engine-unknown routing table instead of naming its own edit tool",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "    elif engine == \"html\":",
+    "replace": "    elif False:  # html refine branch dropped",
+    "tests": ["tests/cloud/surface/test_sites_handler.py::test_html_refine_routes_the_edit_to_the_html_edit_tool", "tests/cloud/surface/test_sites_handler.py::test_html_refine_can_offer_to_publish_the_change"]
+  },
+  {
+    "label": "the html create step stops naming the edit tool, so a follow-up change in the same conversation goes back to a second create_html_site and a second site pocket",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "            \"page' \u2014 is `mcp__pocketpaw_sites_manager__edit_html_file` with the \"",
+    "replace": "            \"page' \u2014 is `create_html_site` again with the \"",
+    "tests": ["tests/cloud/surface/test_sites_handler.py::test_html_create_routes_follow_up_changes_to_the_edit_tool"]
+  },
+  {
+    "label": "the publish step is withheld from html again, so a saved html edit has no route to live and the agent cannot tell the user how to publish it",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "    publish_step = \"\" if engine is None else _refine_publish_step(engine, pocket_id)",
+    "replace": "    publish_step = \"\" if engine in (None, \"html\") else _refine_publish_step(engine, pocket_id)",
+    "tests": ["tests/cloud/surface/test_sites_handler.py::test_html_refine_can_offer_to_publish_the_change"]
   }
 ]

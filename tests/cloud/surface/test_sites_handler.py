@@ -104,6 +104,19 @@
 # concierge (provisioning is live-publish-only) and must not name a configuration
 # tool that does not exist (catalog/actions are owner-authored only).
 
+# Updated: 2026-08-18 (fix/sites-html-refine-names-the-edit-tool) — the html
+# refine branch was denying a tool that exists. ``edit_html_file`` shipped in
+# db083bfc without touching the handler, so the preamble kept telling the agent an
+# html site had no edit tool and the agent relayed that to users. Three tests here
+# changed: ``test_html_refine_admits_it_has_no_edit_tool`` became
+# ``test_html_refine_routes_the_edit_to_the_html_edit_tool`` (it had been
+# certifying the stale prompt as correct on every run), and two new ones pin the
+# publish step html now earns and the unknown-engine fallback that listed html as
+# uneditable. The gate that should have caught this gained its missing direction:
+# ``test_every_registered_edit_tool_is_named_by_its_refine_branch`` fails when a
+# REGISTERED tool goes unnamed, where the existing gate only failed when a NAMED
+# tool was unregistered.
+
 from __future__ import annotations
 
 import pytest
@@ -1339,6 +1352,7 @@ async def test_ripple_refine_keeps_the_rippleSpec_merge(mongo_db: object) -> Non
 
 REACT_TOOL = "mcp__pocketpaw_sites_manager__edit_react_component"
 SVELTE_TOOL = "mcp__pocketpaw_sites_manager__edit_svelte_component"
+HTML_TOOL = "mcp__pocketpaw_sites_manager__edit_html_file"
 RIPPLE_TOOL = "mcp__pocketpaw_pocket_specialist__edit"
 SOURCE_MAP_ENGINES = ("svelte", "react", "html")
 ALL_REFINE_ENGINES = ("ripple", "svelte", "react", "html", None)
@@ -1735,30 +1749,81 @@ async def test_svelte_refine_names_its_own_tool_and_calls_the_edit_a_draft() -> 
     assert "new_source" in preamble
 
 
-async def test_html_refine_admits_it_has_no_edit_tool() -> None:
-    """html is the DEFAULT create engine and has NO chat-reachable edit tool:
-    ``create_html_site`` takes no pocket id (it mints a second site),
-    ``edit_svelte_component``'s guard is svelte-only by design, and the uid-splice
-    path behind the native editor is a svelte-gated REST route. So the branch says
-    so — the one thing it must not do is name a tool to fill the gap.
+async def test_html_refine_routes_the_edit_to_the_html_edit_tool() -> None:
+    """html refine applies the change with ``edit_html_file``.
 
-    THE MUTATION THAT BREAKS THIS: point the html branch's edit step at
-    ``mcp__pocketpaw_sites_manager__create_html_site``. Run: a create tool was named
-    as the apply path and this failed. (Applied 2026-08-11.)
+    This test used to assert the OPPOSITE — that the branch admits it has no edit
+    tool — and it was correct when written. ``edit_html_file`` shipped in db083bfc
+    without touching the handler, so the assertion outlived the gap it described
+    and certified the stale prompt as correct on every run. Rewritten rather than
+    deleted: the html branch still has rules the other engines do not, and they are
+    pinned below.
+
+    THE MUTATION THAT BREAKS THIS: point the html branch's edit step back at
+    ``mcp__pocketpaw_pocket__get_pocket`` + "hand the user the markup". Run: the
+    branch stopped naming a write tool and this failed.
     """
     preamble = sites_handler._refine_preamble(_refine_meta(), "html")
     lower = preamble.lower()
 
-    assert "cannot write this site's files from this chat" in lower
-    # No write tool is named — including the create tool that would look like one.
-    assert "create_html_site" not in preamble
+    assert HTML_TOOL in preamble
+    # The html argument is `file_path` — react's `component_path` is a different
+    # tool's schema and a wrong-argument call is rejected.
+    assert "`file_path`" in preamble
+    assert "component_path" not in preamble
+    # Root-relative paths: the `src/` prefix belongs to the react track.
+    assert "root-relative" in lower
+    # The wrong tools stay unnamed: create mints a SECOND site, and the specialist
+    # merges a rippleSpec this pocket does not have.
     assert "pocket_specialist__edit" not in preamble
     assert SVELTE_TOOL not in preamble
     assert REACT_TOOL not in preamble
-    # It still does the useful half: read the current source and hand back markup.
-    assert "mcp__pocketpaw_pocket__get_pocket" in preamble
-    # And it must not offer to publish a change it never applied.
-    assert "mcp__pocketpaw_sites_manager__publish" not in preamble
+    # `create_html_site` IS named, but only as the thing never to call for a change.
+    assert "NEVER call `create_html_site` again to apply a change" in preamble
+    # The edit stages a draft, so the branch must not report it live.
+    assert "not published" in lower
+    assert "is_live:false" in preamble
+
+
+async def test_html_refine_can_offer_to_publish_the_change() -> None:
+    """A saved html edit is publishable, so the branch must say how.
+
+    While html had no edit tool the publish step was deliberately withheld: naming
+    one would have invited the agent to publish the LAST build as if it carried a
+    change it never applied. That reasoning expires with the gap — withholding it
+    now strands the user with a saved draft and no route to live.
+
+    THE MUTATION THAT BREAKS THIS: restore ``engine in (None, "html")`` on the
+    ``publish_step`` gate. Run: html saved a change it could not take live and this
+    failed.
+    """
+    preamble = sites_handler._refine_preamble(_refine_meta(), "html")
+
+    assert "mcp__pocketpaw_sites_manager__publish" in preamble
+    # Publishing stays the user's call — an edit must not auto-publish.
+    assert "the user's call" in preamble.lower()
+    # html builds INLINE (`build_runs_async` is react-only), so it must NOT carry
+    # react's queued-build paragraph or the status tool that only async needs.
+    assert "get_site_build_status" not in preamble
+    assert "asynchronous" not in preamble.lower()
+
+
+async def test_the_unknown_engine_step_no_longer_calls_html_uneditable() -> None:
+    """The engine-lookup fallback listed html as the engine with no edit tool.
+
+    It is reached whenever the pocket read fails, so its stale half sent every
+    unresolvable html site down the same dead end the html branch did.
+
+    THE MUTATION THAT BREAKS THIS: put "html has no edit tool at all yet" back.
+    Run: the fallback denied a registered tool and this failed.
+    """
+    step = sites_handler._refine_unknown_engine_step("pkt-1")
+
+    assert HTML_TOOL in step
+    assert "no edit tool" not in step.lower()
+    # It still names the other three, and still makes the agent look first.
+    assert SVELTE_TOOL in step and REACT_TOOL in step and RIPPLE_TOOL in step
+    assert "mcp__pocketpaw_pocket__get_pocket" in step
 
 
 async def test_ripple_refine_is_unchanged_apart_from_the_publish_claim() -> None:
@@ -1848,3 +1913,71 @@ async def test_every_tool_a_refine_branch_names_is_a_registered_tool() -> None:
         "a refine branch names tools that no MCP server registers — the agent "
         f"cannot call these and will improvise instead of erroring: {sorted(unresolved)}"
     )
+
+
+# --- HE-10 follow-through (fix/sites-html-refine-names-the-edit-tool) ---------
+#
+# THE REPORTED BUG: on an html site's refine chat the agent answered an edit
+# request with "editing an html site's files from chat is not wired up yet" and
+# handed back a code block instead of applying the change.
+#
+# It was never a missing tool. ``edit_html_file`` shipped in db083bfc wired all
+# the way through — service, MCP tool, ``sites_manager`` registration,
+# ``SITES_TOOL_IDS``, the /sites allow-list — but that commit never touched
+# ``handlers/sites.py``. Compare 34582e73, which shipped the react edit tool AND
+# +137 lines of this handler in the same commit. So the prompt kept the pre-HE-10
+# text and the agent believed the prompt over its own tool list.
+#
+# It shipped clean because the gate below ran one way only:
+# ``test_every_tool_a_refine_branch_names_is_a_registered_tool`` catches a
+# preamble naming a tool that does not exist, and nothing caught a tool that
+# exists and no preamble names.
+#
+# The tests above pin the fixed branch. The one below is the missing direction of
+# the gate, and it is the one that would have caught this on the day it landed.
+
+
+async def test_every_registered_edit_tool_is_named_by_its_refine_branch() -> None:
+    """The INVERSE gate: a registered edit tool no preamble names is unreachable.
+
+    The failure has no error to notice — the agent simply reports the capability
+    as missing, which is indistinguishable from the product genuinely lacking it.
+    Derived from the MCP tool schemas, never a hand-kept list, so a fourth edit
+    tool joins this gate by being registered rather than by being remembered.
+
+    THE MUTATION THAT BREAKS THIS: drop ``edit_html_file`` from the html refine
+    branch. Run: a registered tool went unnamed and this failed.
+    """
+    registered = await _registered_mcp_tool_ids()
+    assert registered, "no MCP tools enumerated — the derivation broke, not the prompt"
+
+    for engine, tool_id in (
+        ("svelte", SVELTE_TOOL),
+        ("react", REACT_TOOL),
+        ("html", HTML_TOOL),
+    ):
+        text = sites_handler._refine_preamble(_refine_meta(), engine)
+        assert tool_id in registered, f"{tool_id} is not registered — fix the server"
+        assert tool_id in text, (
+            f"{tool_id} is a REGISTERED tool that the {engine} refine branch never "
+            "names, so the agent cannot reach it and will tell the user the "
+            "capability does not exist"
+        )
+
+
+async def test_html_create_routes_follow_up_changes_to_the_edit_tool() -> None:
+    """The create side had the same hole: html got no "changes go through the edit
+    tool" clause, so a follow-up change in the SAME conversation re-created the
+    site. react has carried this clause since RX-3; html now does too.
+
+    THE MUTATION THAT BREAKS THIS: delete the clause from the html build step.
+    Run: the create branch let a follow-up change mint a second site and this
+    failed.
+    """
+    preamble = await _preamble_for(None)  # no engine hint == the html default
+
+    assert HTML_TOOL in preamble
+    assert "CHANGES GO THROUGH THE EDIT TOOL" in preamble
+    assert "SAME pocket_id" in preamble
+    # Create is still the FIRST thing named — this is a create preamble.
+    assert preamble.index("create_html_site") < preamble.index("edit_html_file")

@@ -1,4 +1,5 @@
 {
+  "_comment": "primitives.json — hand-authored primitive cards for the atlas OS self-model (AT-1). Updated 2026-08-17 (feat/ast-1-atlas-primitives, AST-1): added primitive:source-truth (per-property provenance + trust ladder under Fabric) and primitive:verify-loop (verify-on-completion outcome verdicts with bounded retry); both carry a primer gist and the NOT-<LLM-default meaning> disambiguator. Updated 2026-08-17 (AST-5a, review fix V7): primitive:source-truth's how is hedged like primitive:fabric's — include_provenance exists only on the EE fabric MCP fabric_query, so the how names where it is bound instead of implying every deployment has it. Only ONE fabric capability name may carry the token 'Fabric' (see capabilities.json) so the name-IDF damper keeps primitive:fabric #1 on 'what is fabric'.",
   "schema": "paw.atlas/v1",
   "entries": [
     {
@@ -256,6 +257,75 @@
         "propose change",
         "coding",
         "autonomous"
+      ]
+    },
+    {
+      "id": "primitive:source-truth",
+      "kind": "primitive",
+      "name": "Source-truth",
+      "summary": "Per-property provenance, trust, and conflict resolution for Fabric facts: every value carries its source, a trust ladder picks the winner, and disputes go to a human steward.",
+      "gist": "per-property provenance for Fabric facts — a trust ladder ranks sources, flags disputes",
+      "narrative": "Source-truth is the provenance primitive under Fabric: every property value is a statement — the value plus its source, a writer_class (human | connector | mirror | agent | inferred), and an observed_at. When sources disagree, ONE resolver ranks the statements on the trust ladder human-pin > human > connector > mirror > agent > inferred, then recency on observed_at, then a deterministic tiebreak, and computes the winner plus an is_disputed flag. Freshness (fresh / aging / stale) is computed at read time from observed_at + a per-type TTL — never stored. Reach for it when a user or agent asks where a value came from, whether it is disputed, or how stale it is. Un-rankable conflicts (same tier, both fresh, materially different values) open a stewardship proposal through the Instinct gate — resolved at /decisions — with the steward verbs PIN (this statement wins) and IGNORE (deprecate a source); CHANGE / CORRECT never hard-delete, so losing statements stay as ranked history. The flat properties dict is a resolver-computed cache, so every existing reader keeps working unchanged. It pairs with Fabric (the objects whose properties it ranks) and Instinct (which gates the stewardship decisions). NOT a knowledge base and NOT a fact-checker — it ranks SOURCES, it does not judge truth.",
+      "how": "fabric_query with include_provenance=true returns the winner, is_disputed, freshness, and the competing statements' sources per object (where an EE fabric MCP server is bound; the OSS builtin fabric tools have no provenance flag)",
+      "surface": "",
+      "requires": [
+        "primitive:fabric"
+      ],
+      "keywords": [
+        "provenance",
+        "disputed",
+        "is this disputed",
+        "is this fact disputed",
+        "which source wins",
+        "which source wins for this field",
+        "trust",
+        "trust ladder",
+        "source of truth",
+        "where did this number come from",
+        "where did this value come from",
+        "who said this",
+        "stale",
+        "fresh",
+        "freshness",
+        "aging",
+        "conflict",
+        "competing values",
+        "pin",
+        "ignore",
+        "steward",
+        "statement",
+        "writer class",
+        "observed at"
+      ]
+    },
+    {
+      "id": "primitive:verify-loop",
+      "kind": "primitive",
+      "name": "Verify loop",
+      "summary": "Verify-on-completion: a finished task gets an outcome verdict (SOLVED / PARTIAL / NOT_SOLVED / UNKNOWN) against its success criteria, with bounded retry on a miss.",
+      "gist": "outcome verdicts on task completion — SOLVED/PARTIAL/NOT_SOLVED/UNKNOWN, bounded retry",
+      "narrative": "The Verify loop is the OS's self-verifying outcome check: when a task completes, a VerdictProvider computes an OutcomeVerdict — SOLVED / PARTIAL / NOT_SOLVED / UNKNOWN — against the task's success criteria. On PARTIAL or NOT_SOLVED the task is requeued with diagnostic feedback, bounded by a retry budget, and a convergence guard escalates no-progress or oscillation early instead of burning the budget. SOLVED and UNKNOWN go to DONE — a passing result is never mutated. An LLM-as-judge provider runs in SHADOW mode: its verdict is recorded (\"judge: shadow\") but does not yet drive requeue. It runs at two terminals — the OSS deep-work executor and the cloud planner. Reach for it when a user asks whether a task actually got done, why it was retried, or how the OS checks its own work. It pairs with Instinct (humans approve ACTIONS at the gate; the loop verifies OUTCOMES afterwards) and Deep Work (/deep-work, where a task's verdict shows). NOT a test runner and NOT the Instinct approval gate — it verifies OUTCOMES after the fact; humans still approve ACTIONS through Instinct.",
+      "how": "the deep_work_verify_mode / cloud_plan_verify_mode settings turn it on; verdicts surface on the task (verify_verdict; TaskResponse.verify)",
+      "surface": "/deep-work",
+      "requires": [],
+      "keywords": [
+        "verify",
+        "verification",
+        "verdict",
+        "what is a verdict",
+        "outcome",
+        "did it work",
+        "did the task actually get done",
+        "solved",
+        "not solved",
+        "partial",
+        "requeue",
+        "retry",
+        "judge",
+        "llm judge",
+        "convergence",
+        "self-verifying",
+        "verify loop"
       ]
     }
   ]

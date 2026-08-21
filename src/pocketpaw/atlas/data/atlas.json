@@ -367,6 +367,49 @@
     },
     {
       "gist": "",
+      "how": "propose via the Instinct gate; approve/reject at /decisions",
+      "id": "capability:fabric.conflict_steward",
+      "keywords": [
+        "resolve conflict",
+        "pin",
+        "ignore",
+        "disputed value",
+        "which is right",
+        "arbitrate",
+        "steward",
+        "competing sources"
+      ],
+      "kind": "capability",
+      "name": "Arbitrate a source conflict",
+      "narrative": "When two equally-trusted, fresh sources disagree on a Fabric property, atlas / agents PROPOSE a resolution and a human approves it in the Instinct tray — PIN a statement (it wins) or IGNORE a source (deprecate it). NEVER applied from chat: the approval executes as a Fabric statement operation, and losing statements stay as ranked history. Reach for it when the user asks which competing value is right and wants it settled; tell the user it needs approval, do not claim it is done.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Resolve two equally-trusted, fresh Fabric sources that disagree: propose PIN or IGNORE, a human approves it in the Instinct tray. Member-level, human-gated.",
+      "surface": "/decisions"
+    },
+    {
+      "gist": "",
+      "how": "call fabric_query with include_provenance=true",
+      "id": "capability:fabric.provenance_read",
+      "keywords": [
+        "provenance",
+        "where did this come from",
+        "source of this value",
+        "is this stale",
+        "who wrote this"
+      ],
+      "kind": "capability",
+      "name": "See where a Fabric fact came from",
+      "narrative": "Reads the provenance behind any Fabric object's properties: the resolver's winner value, whether it is disputed, its freshness (fresh / aging / stale), and every competing statement with its source, writer_class, and observed_at. A MEMBER-level read that runs directly (reads are not human-gated). Reach for it when the user asks where a value came from, who wrote it, or how old it is; arbitrating a dispute is a separate, human-gated stewardship action.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Read a Fabric object's winner value, whether it is contested, its freshness, and the competing statements with their sources. A member-level read.",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'airtable' connector once it is bound",
       "id": "connector:airtable",
       "keywords": [
@@ -839,6 +882,23 @@
     },
     {
       "gist": "",
+      "how": "list_connector_actions / connector_execute over the 'mailtrap' connector once it is bound",
+      "id": "connector:mailtrap",
+      "keywords": [
+        "mailtrap",
+        "email"
+      ],
+      "kind": "connector",
+      "name": "Mailtrap",
+      "narrative": "The Mailtrap connector (email) wires Mailtrap data into the workspace. ACTIONS: .",
+      "requires": [
+        "primitive:connector"
+      ],
+      "summary": "Mailtrap (email) connector — 0 actions: .",
+      "surface": "/settings/workspace/integrations"
+    },
+    {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'mongodb' connector once it is bound",
       "id": "connector:mongodb",
       "keywords": [
@@ -1117,6 +1177,23 @@
         "primitive:connector"
       ],
       "summary": "SharePoint (knowledge) connector — 10 actions: list_sites, get_site, list_drives, list_files, +6 more.",
+      "surface": "/settings/workspace/integrations"
+    },
+    {
+      "gist": "",
+      "how": "list_connector_actions / connector_execute over the 'ship' connector once it is bound",
+      "id": "connector:ship",
+      "keywords": [
+        "ship",
+        "infrastructure"
+      ],
+      "kind": "connector",
+      "name": "Ship",
+      "narrative": "The Ship connector (infrastructure) wires Ship data into the workspace. ACTIONS: .",
+      "requires": [
+        "primitive:connector"
+      ],
+      "summary": "Ship (infrastructure) connector — 0 actions: .",
       "surface": "/settings/workspace/integrations"
     },
     {
@@ -1506,6 +1583,75 @@
       "requires": [],
       "summary": "Persistent agent identity/memory (.soul files, OCEAN personality, 5-tier memory: core/episodic/semantic/procedural/…).",
       "surface": ""
+    },
+    {
+      "gist": "per-property provenance for Fabric facts — a trust ladder ranks sources, flags disputes",
+      "how": "fabric_query with include_provenance=true returns the winner, is_disputed, freshness, and the competing statements' sources per object (where an EE fabric MCP server is bound; the OSS builtin fabric tools have no provenance flag)",
+      "id": "primitive:source-truth",
+      "keywords": [
+        "provenance",
+        "disputed",
+        "is this disputed",
+        "is this fact disputed",
+        "which source wins",
+        "which source wins for this field",
+        "trust",
+        "trust ladder",
+        "source of truth",
+        "where did this number come from",
+        "where did this value come from",
+        "who said this",
+        "stale",
+        "fresh",
+        "freshness",
+        "aging",
+        "conflict",
+        "competing values",
+        "pin",
+        "ignore",
+        "steward",
+        "statement",
+        "writer class",
+        "observed at"
+      ],
+      "kind": "primitive",
+      "name": "Source-truth",
+      "narrative": "Source-truth is the provenance primitive under Fabric: every property value is a statement — the value plus its source, a writer_class (human | connector | mirror | agent | inferred), and an observed_at. When sources disagree, ONE resolver ranks the statements on the trust ladder human-pin > human > connector > mirror > agent > inferred, then recency on observed_at, then a deterministic tiebreak, and computes the winner plus an is_disputed flag. Freshness (fresh / aging / stale) is computed at read time from observed_at + a per-type TTL — never stored. Reach for it when a user or agent asks where a value came from, whether it is disputed, or how stale it is. Un-rankable conflicts (same tier, both fresh, materially different values) open a stewardship proposal through the Instinct gate — resolved at /decisions — with the steward verbs PIN (this statement wins) and IGNORE (deprecate a source); CHANGE / CORRECT never hard-delete, so losing statements stay as ranked history. The flat properties dict is a resolver-computed cache, so every existing reader keeps working unchanged. It pairs with Fabric (the objects whose properties it ranks) and Instinct (which gates the stewardship decisions). NOT a knowledge base and NOT a fact-checker — it ranks SOURCES, it does not judge truth.",
+      "requires": [
+        "primitive:fabric"
+      ],
+      "summary": "Per-property provenance, trust, and conflict resolution for Fabric facts: every value carries its source, a trust ladder picks the winner, and disputes go to a human steward.",
+      "surface": ""
+    },
+    {
+      "gist": "outcome verdicts on task completion — SOLVED/PARTIAL/NOT_SOLVED/UNKNOWN, bounded retry",
+      "how": "the deep_work_verify_mode / cloud_plan_verify_mode settings turn it on; verdicts surface on the task (verify_verdict; TaskResponse.verify)",
+      "id": "primitive:verify-loop",
+      "keywords": [
+        "verify",
+        "verification",
+        "verdict",
+        "what is a verdict",
+        "outcome",
+        "did it work",
+        "did the task actually get done",
+        "solved",
+        "not solved",
+        "partial",
+        "requeue",
+        "retry",
+        "judge",
+        "llm judge",
+        "convergence",
+        "self-verifying",
+        "verify loop"
+      ],
+      "kind": "primitive",
+      "name": "Verify loop",
+      "narrative": "The Verify loop is the OS's self-verifying outcome check: when a task completes, a VerdictProvider computes an OutcomeVerdict — SOLVED / PARTIAL / NOT_SOLVED / UNKNOWN — against the task's success criteria. On PARTIAL or NOT_SOLVED the task is requeued with diagnostic feedback, bounded by a retry budget, and a convergence guard escalates no-progress or oscillation early instead of burning the budget. SOLVED and UNKNOWN go to DONE — a passing result is never mutated. An LLM-as-judge provider runs in SHADOW mode: its verdict is recorded (\"judge: shadow\") but does not yet drive requeue. It runs at two terminals — the OSS deep-work executor and the cloud planner. Reach for it when a user asks whether a task actually got done, why it was retried, or how the OS checks its own work. It pairs with Instinct (humans approve ACTIONS at the gate; the loop verifies OUTCOMES afterwards) and Deep Work (/deep-work, where a task's verdict shows). NOT a test runner and NOT the Instinct approval gate — it verifies OUTCOMES after the fact; humans still approve ACTIONS through Instinct.",
+      "requires": [],
+      "summary": "Verify-on-completion: a finished task gets an outcome verdict (SOLVED / PARTIAL / NOT_SOLVED / UNKNOWN) against its success criteria, with bounded retry on a miss.",
+      "surface": "/deep-work"
     },
     {
       "gist": "the durable async-work primitive — ARQ-backed long-running jobs that survive restarts and write back under a system identity",
@@ -1923,6 +2069,34 @@
     },
     {
       "gist": "",
+      "how": "a user invokes it as /prefer-container-queries in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:prefer-container-queries",
+      "keywords": [
+        "prefer-container-queries"
+      ],
+      "kind": "skill",
+      "name": "prefer-container-queries",
+      "narrative": "Enforce Tailwind container queries over viewport breakpoints for responsive components. Use when writing or reviewing responsive Tailwind code, when a component needs to adapt to its available space (cards, sidebars, lists, panels, anything reused in different layouts), or when migrating sm:/md:/lg: classes to @container variants.",
+      "requires": [],
+      "summary": "Enforce Tailwind container queries over viewport breakpoints for responsive components.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /ship in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:ship",
+      "keywords": [
+        "ship"
+      ],
+      "kind": "skill",
+      "name": "ship",
+      "narrative": "Deploy and run apps on real infrastructure from inside a pocket/room that has the Ship connector bound. Invoke when the user wants something built to actually RUN — \"deploy this app\", \"put it on a server\", \"point my domain at it\", \"give it a database\", \"why is it down\", \"show me the logs\", \"how much is this box costing\". This skill teaches the /ship verb surface (provision a box, register and deploy an app, route a domain with TLS, attach a database, read logs and metrics) and the safety rule that governs it: reads and reversible writes run immediately, but tearing anything down only ever files a proposal for a human to approve. Auto-surfaced into a room when the Ship connector is bound to that pocket, so you only see it when /ship is actually available.",
+      "requires": [],
+      "summary": "Deploy and run apps on real infrastructure from inside a pocket/room that has the Ship connector bound.",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "a user invokes it as /studio in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:studio",
       "keywords": [
@@ -1933,6 +2107,20 @@
       "narrative": "Generate media — images and short videos — from a text description and lay the results out in a gallery. Invoke when the user asks to create visual media: \"generate an image of...\", \"make a video of...\", \"create a poster for...\", \"render an illustration\", \"animate...\", or any describe-to-media request (especially on the /studio surface). You do NOT build a dashboard or a ui-spec — you call a deterministic media tool that produces the asset and adds it to a gallery pocket that opens on the canvas. This is the media-generation brain: pick image vs video by intent, write a vivid prompt, call the tool, and relay any provider/key error plainly. Loading this skill keeps the chat agent's always-on system prompt small while still delivering the full media flow when generation is actually requested.",
       "requires": [],
       "summary": "Generate media — images and short videos — from a text description and lay the results out in a gallery.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /webgl-components in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:webgl-components",
+      "keywords": [
+        "webgl-components"
+      ],
+      "kind": "skill",
+      "name": "webgl-components",
+      "narrative": "Build small, always-on WebGL visuals (identity avatars, ambient orbs, glass and iridescent surfaces, animated textures) that ship inside a normal web app UI without wrecking performance, accessibility, SSR, or layout. Use whenever a shader-, GLSL-, or canvas-driven decorative element is added to a product UI, especially one rendered many times per page or per list; when reviewing or optimizing one; or when debugging one that renders blurry, aliased, all-black, or paints over the surrounding UI on machines without hardware acceleration.",
+      "requires": [],
+      "summary": "Build small, always-on WebGL visuals (identity avatars, ambient orbs, glass and iridescent surfaces, animated textures) that ship inside a normal web app UI without wrecking performance,…",
       "surface": ""
     },
     {

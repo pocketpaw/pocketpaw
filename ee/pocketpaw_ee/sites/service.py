@@ -1,6 +1,38 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-08-21 (feat/sites-billing-flag, PW-2): every billing seam in this
+# module now asks ``cloud.billing.enforcement.sites_enforced()`` instead of reading
+# ``billing_enforced`` itself. That function is the OR of the global flag and the
+# new sites-only ``sites_billing_enforced``, so a deployment already setting the
+# global one behaves identically and a deployment that wants to charge for custom
+# domains no longer has to start 402ing chat runs to do it. The badge stamper
+# (``_stamp_free_badge``) is deliberately NOT wired to it — it reads no flag today,
+# and giving it one would strip the attribution badge off every self-host site.
+#
+# Updated 2026-08-21 (feat/site-free-custom-domain, PW-1): the free floor now
+# includes a custom domain, so ``add_domain`` gained a COUNT gate beside the
+# existing capability gate. ``_domain_cap_exceeded`` answers "does this workspace
+# have room for another site carrying a custom domain", and the unit is the SITE:
+# apex and ``www`` both live on one site and spend one allowance between them.
+# Three counting rules carry the whole behaviour and each one is load-bearing —
+# see that function. ``_hostname_cap_exceeded`` is its companion, capping how many
+# hostnames a single floor site may carry, which the site-unit rule otherwise
+# leaves unbounded. Both sit AFTER the already-connected early return, so neither
+# is retroactive and neither can block the re-Add route repair, and both are gated
+# on ``billing_enforced`` so self-host reads nothing extra.
+#
+# Updated 2026-08-19 (fix/sites-read-source-tool): added ``read_site_source`` — the
+# READ primitive beside ``apply_edits``. The three ``edit_*`` functions below all
+# resolve an agent-authored diff against the CURRENT file, and nothing on the /sites
+# surface could hand the agent that file: ``get_pocket`` carries ``source`` but sits
+# on a server the /sites allowlist excludes, and the profile drops the file/shell
+# built-ins. The reachable fallback was a whole-file rewrite from memory, which is how
+# a site loses its capture-form plumbing with no error raised. Two modes — a manifest
+# (paths + byte sizes, no contents, ``_paw/`` filtered) and one file verbatim — so the
+# read cannot itself flood the context the edit needs. Engine-agnostic on purpose:
+# only a pocket with no source map at all (ripple) is rejected.
+#
 # Updated 2026-08-12 (sites Settings consolidation): added ``get_site_client`` /
 # ``update_site_client`` / ``record_site_invoice`` — the owner's record of who a
 # site is FOR and what they have billed them. Two decisions worth knowing before
@@ -836,10 +868,12 @@ from typing import Any
 
 from bson import ObjectId
 from bson.errors import InvalidId
+from pydantic import BaseModel
 
 from pocketpaw.sites_capture.contact_form import CONTACT_FORM_TYPE, default_event_mapping
 from pocketpaw_ee.cloud._core.errors import (
     CloudError,
+    CustomDomainLimitError,
     CustomDomainNotEntitled,
     Forbidden,
     Internal,
@@ -870,7 +904,11 @@ from pocketpaw_ee.sites.dto import (
     SiteStatusResponse,
 )
 from pocketpaw_ee.sites.engines import content_key, is_source_engine, normalize_engine
-from pocketpaw_ee.sites.generator_client import BuildResult, GeneratorClient
+from pocketpaw_ee.sites.generator_client import (
+    BuildResult,
+    GeneratorClient,
+    svelte_source_is_dynamic,
+)
 from pocketpaw_ee.sites.html_paths import (
     html_path_rejection,
     is_reserved_html_path,
@@ -1669,6 +1707,7 @@ async def _promote_pocket_draft_to_published(
 
 def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResponse:
     deployed_at = getattr(doc, "deployed_at", None)
+    created_at = getattr(doc, "createdAt", None)
     return SiteResponse(
         id=str(doc.id),
         pocket_id=doc.pocket_id,
@@ -1683,6 +1722,13 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # P2b: ISO string of the last successful live deploy, or None before the
         # first deploy (pre-P2b rows read null via the getattr default).
         deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
+        # When the row was made. The gallery orders by "most recent", and
+        # ``deployed_at`` above is None for every draft — so without this the whole
+        # draft half of a workspace had no ordering key and sorted alphabetically,
+        # which put a site created a minute ago below one created last month. Read
+        # via getattr for the same reason deployed_at is: a doc that predates the
+        # field reads None rather than raising.
+        created_at=created_at.isoformat() if created_at is not None else None,
         # DS-1a: the source pocket's authoring pattern ("dynamic" | "landing" |
         # ...), resolved by the caller from Pocket.pattern (it lives on the pocket,
         # not the Site). "" when unset / unresolved so the gallery is empty-safe.
@@ -2335,7 +2381,7 @@ async def _deploy_site_doc(
     # SL-3: fork to the EPHEMERAL BUILD LANE for the engines whose artifact can
     # actually be deployed from it. A prebuilt dir means the worker already ran this
     # build and is calling back in to finish the publish, so it must NOT re-fork.
-    if prebuilt_project_dir is None and build_runs_async(engine):
+    if prebuilt_project_dir is None and build_runs_async(engine, source=source, pattern=pattern):
         return await _enqueue_static_build(
             workspace_id=workspace_id,
             user_id=user_id,
@@ -2642,7 +2688,8 @@ async def _embed_concierge_bar(
         # function that owns the Site doc — ``entitlements`` may not import
         # ``models.site`` (EE cloud rule 2), and ``embed`` has no business loading it.
         #
-        # A no-op unless ``billing_enforced``: with billing off (OSS / self-host, and
+        # A no-op unless ``sites_enforced()`` — ``billing_enforced`` OR the
+        # sites-only ``sites_billing_enforced``. With both off (OSS / self-host, and
         # every in-repo deploy today) this stays True and the publish path is byte
         # for byte what it was.
         #
@@ -2674,9 +2721,9 @@ async def _embed_concierge_bar(
         # and self-correcting in the right direction. The inverse (refuse at publish,
         # allow at runtime) does not self-correct at all.
         concierge_entitled = True
-        from pocketpaw.config import get_settings
+        from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
 
-        if get_settings().billing_enforced:
+        if sites_enforced():
             from pocketpaw_ee.cloud.entitlements import service as entitlements_service
 
             status = getattr(doc, "subscription_status", None)
@@ -3183,34 +3230,122 @@ async def _provision_dynamic_site(
 # ---------------------------------------------------------------------------
 
 
-def build_runs_async(engine: str | None) -> bool:
-    """Does publishing this engine ENQUEUE its build instead of running it inline?
+def build_runs_async(
+    engine: str | None,
+    *,
+    source: dict[str, Any] | None = None,
+    pattern: str | None = None,
+) -> bool:
+    """Does publishing this site ENQUEUE its build instead of running it inline?
 
-    True for exactly the engines whose ephemeral-lane artifact can actually be
-    DEPLOYED, which today is react alone. This is a narrow answer to a broad-sounding
-    question, and the narrowness is the whole content of the predicate:
+    True for the engines whose ephemeral-lane artifact can actually be DEPLOYED. That is
+    react, and — since SL-4 — a STATIC svelte site. The predicate is about the ARTIFACT,
+    not about the queue, and every line below follows from that:
 
-    * ``html`` runs no build at all (``needs_node_build`` is False), so there is
-      nothing to enqueue. Flipping it would add a queue wait to the one engine that
-      never needed one.
-    * ``ripple`` and DYNAMIC ``svelte`` build on adapter-cloudflare, whose output's
-      pages are rendered by a ``_worker.js`` whose imports sit OUTSIDE the tarred
-      directory. The artifact therefore cannot serve — which is not a guess: it is why
-      ``truth_lane`` refuses to even PREVIEW one (``REASON_WORKER_RENDERED``). Queueing
-      those builds would replace a working publish with one nothing can deploy.
-    * STATIC ``svelte`` (adapter-static) IS self-sufficient, and is still excluded,
-      because which adapter ran is a property of the built SITE and is not knowable at
-      enqueue time — only after the build. A gate has to decide before it spends the
-      queue, so svelte stays inline until the artifact question is settled for the
-      whole track.
-    * ``react`` emits a prerendered, assets-only ``dist`` with no server entry, so the
-      tar is the whole deployable site.
+    * ``html`` runs no build at all (``needs_node_build`` is False), so there is nothing
+      to enqueue. Flipping it would add a queue wait to the one engine that never needed
+      one.
+    * ``ripple`` builds on adapter-cloudflare unconditionally. Its pages are rendered by a
+      ``_worker.js`` whose imports sit OUTSIDE the tarred directory, so the artifact
+      cannot serve — which is not a guess: it is why ``truth_lane`` refuses to even
+      PREVIEW one (``REASON_WORKER_RENDERED``). Queueing it would replace a working
+      publish with one nothing can deploy.
+    * ``react`` emits a prerendered, assets-only ``dist`` with no server entry, so the tar
+      is the whole deployable site.
+    * ``svelte`` DEPENDS ON THE SITE, and reading that dependency is the whole of SL-4.
 
-    Widen this ONLY together with the artifact: the moment an adapter-cloudflare
-    artifact can serve, ripple and svelte belong here too, and this predicate is the
-    one place that changes.
+    ── WHAT CHANGED FOR SVELTE, AND WHY THE OLD REASON NO LONGER HOLDS ──────────────────
+
+    This docstring used to say static svelte was excluded "because which adapter ran is a
+    property of the built SITE and is not knowable at enqueue time — only after the
+    build". That premise was wrong, and it was wrong in a checkable way. The adapter is
+    picked by ``paw-sites/src/index.ts`` from ``parseBindings(...).isDynamic``, computed
+    from ``objects``/``sources``/``actions``/``auth`` — which ride the publish as sibling
+    keys on the ``source`` envelope (``generator_client._SVELTE_BINDING_KEYS``) and are in
+    this function's hand before a queue slot is spent. Nothing has to be built to know.
+
+    So the fork is:
+
+      * static svelte  → adapter-static     → ``build``, self-contained, NO worker → QUEUE
+      * dynamic svelte → adapter-cloudflare → worker-rendered, cannot serve       → INLINE
+
+    THE DYNAMIC ANSWER IS THE LOAD-BEARING ONE. ``_deploy_site_doc`` forks a dynamic site
+    to ``_provision_dynamic_site`` before it ever reaches here, but that fork calls
+    ``_is_dynamic``, which reads the ``ripple_spec`` — and a svelte pocket carries its
+    bindings on the ``source`` envelope instead, so for svelte that fork sees only the
+    ``pattern == "dynamic"`` stamp. An unstamped dynamic svelte pocket therefore arrives
+    here looking static to every check that came before, and a gate keying on the engine
+    name alone would queue it and deploy a worker shell that cannot start. Both signals
+    are read for that reason, not for symmetry.
+
+    ``source`` DEFAULTING TO None ANSWERS "QUEUED" FOR SVELTE, deliberately. The caller
+    that has no source in scope is ``cloud/surface/handlers/sites.py::_publish_runs_async``,
+    which documents why it degrades that way: telling the agent a build is queued when the
+    publish was inline costs one extra click, while telling it a url is live when the build
+    is still queued announces a page that does not exist yet — on a first publish there is
+    no url at all, and on a re-publish the url still serves the PREVIOUS page. The publish
+    path itself always holds the source and never relies on this default.
+
+    Widen this further ONLY together with the artifact: the moment an adapter-cloudflare
+    artifact can serve, ripple and dynamic svelte belong here too, and this predicate is
+    the one place that changes.
     """
-    return normalize_engine(engine) == "react"
+    normalized = normalize_engine(engine)
+    if normalized == "react":
+        return True
+    if normalized != "svelte":
+        return False
+    if not svelte_async_build_enabled():
+        return False
+    if pattern == "dynamic":
+        return False
+    if source is None:
+        return True
+    return not svelte_source_is_dynamic(source)
+
+
+def svelte_async_build_enabled() -> bool:
+    """Is the static svelte track routed to the ephemeral build lane? (SL-4)
+
+    ``PAW_SITES_SVELTE_ASYNC_BUILD``, DEFAULT OFF. Read per call rather than cached at
+    import so an operator can flip it without a redeploy, and so a test can set it with
+    ``monkeypatch.setenv`` and get the behaviour it asked for.
+
+    ── WHY THIS SHIPS BEHIND A FLAG AND react DID NOT ──────────────────────────────────
+
+    Not caution for its own sake. Moving a svelte publish into the lane DROPS TWO
+    PUBLISH-TIME CHECKS that an inline publish runs, because ``paw-sites``'s
+    ``runWorkerdSmokeRender`` is what performs them and it does not exist inside the
+    sandbox:
+
+      1. The known-workerd-marker scan. RECOVERED — the wrapper now greps the full build
+         log for the same markers ``generator_client._WORKERD_SSR_MARKERS`` carries and
+         fails the build on a hit, so this one is not lost. It is better than the inline
+         check on one axis: the wrapper reads the WHOLE log, while the sentinel only ever
+         carries a tail.
+      2. The RESTING-VISIBILITY guard (``checkRestingVisibility`` /
+         ``judgeRestingVisibility``) — the check that a marketing page is not blank at
+         rest. NOT recovered. It judges a CLEAN build by reading the prerendered
+         ``index.html`` and the emitted CSS, so nothing about a non-zero exit code
+         substitutes for it, and porting it to Python would make a third implementation of
+         a rule that already exists twice.
+
+    react never had either check, so the lane cost it nothing. svelte has both today, and
+    a default-on flip would have removed one of them from every marketing site the product
+    publishes without anything failing to say so.
+
+    THE FLAG IS THEREFORE A STAGING DEVICE, NOT A PERMANENT SWITCH. Turning it on is safe
+    and useful right now — the offload is real and the lane's own gates (build exit,
+    artifact verification, the server-entry refusal) all apply. Making it the DEFAULT is
+    blocked on giving the lane a resting-visibility verdict, whose clean shape is a
+    ``paw-sites-gen`` subcommand that judges an already-built tree, invoked by the worker
+    on the unpacked artifact. That is a paw-sites change plus a vendor refresh, so it is
+    its own PR in its own repo rather than a silent gap here.
+    """
+    import os
+
+    raw = os.environ.get("PAW_SITES_SVELTE_ASYNC_BUILD", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 async def _enqueue_static_build(
@@ -3974,18 +4109,18 @@ def _assert_entitled_to_custom_domain(site: Any) -> None:
     paid. That resolver had exactly one caller (the badge stamper); this is the
     second, and both paid per-site capabilities now answer to the same function.
 
-    Gated on ``billing_enforced``, matching every other cap in this codebase: OSS /
-    self-host has no billing and must not acquire a paywall. The lazy ``get_settings``
-    import mirrors the connector cap — it keeps the billing posture off this module's
-    import path.
+    Gated on ``sites_enforced()`` (``billing_enforced`` OR the sites-only
+    ``sites_billing_enforced``), matching every other cap in this codebase: OSS /
+    self-host has no billing and must not acquire a paywall. The lazy import mirrors
+    the connector cap — it keeps the billing posture off this module's import path.
 
     Synchronous and passed the loaded doc, because the resolver is pure and
     ``entitlements`` may not import ``models.site`` (EE cloud rule 2): the caller
     that owns the document passes what it owns.
     """
-    from pocketpaw.config import get_settings
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
 
-    if not get_settings().billing_enforced:
+    if not sites_enforced():
         return
 
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
@@ -4010,6 +4145,122 @@ def _assert_entitled_to_custom_domain(site: Any) -> None:
         plan_tier=ent.plan_tier,
         subscription_active=ent.subscription_active,
     )
+
+
+class _DomainedSiteProjection(BaseModel):
+    """The two billing fields of a site that already holds a custom domain.
+
+    Sites carry generated source, and the census below reads every domained site
+    in the workspace on the attach path — pulling whole documents to look at two
+    strings would drag entire built sites across the wire and discard them. The
+    query filters on ``domains.0`` existing, so the projection does not need the
+    domain rows themselves: presence is the whole question.
+    """
+
+    plan_tier: str | None = None
+    subscription_status: str = "none"
+
+
+async def _domain_cap_exceeded(workspace_id: str, site: Any) -> tuple[bool, int, int | None]:
+    """Would attaching a domain here exceed the workspace cap? -> (exceeded, count, limit).
+
+    The cap counts SITES, not hostnames: "only 1 site is allowed to have a custom
+    domain in free" (captain, 2026-08-21). Getting the unit wrong is the easiest
+    mistake this function can make, because ``SiteDomain`` is one row per hostname,
+    so anything that counts rows refuses apex + ``www`` — the pair almost every
+    customer wants.
+
+    Three rules, all load-bearing:
+
+    1. **Count sites holding at least one domain**, not domains. The query does it
+       with ``domains.0 exists`` rather than loading the arrays.
+    2. **Count floor sites only.** A site paying for its own uncapped allowance
+       does not spend the workspace's floor one. Without this, a workspace whose
+       paid site has a domain could never give its free site the one free includes.
+       The floor-vs-paid question is asked through
+       ``entitlements.site_domain_allowance`` so the rule is not written twice.
+    3. **Exclude the site being attached to.** It is already inside the allowance
+       if it holds a domain, so its second hostname is free; and if it holds none
+       it contributes nothing to the count anyway. Excluding it unconditionally is
+       therefore the same answer as excluding it conditionally, with one less
+       branch to get wrong.
+
+    Archived sites are excluded (``archived: {"$ne": True}``, matching the gallery
+    read): they are dedupe tombstones of a live site, so counting them would charge
+    a workspace twice for one site it can only see once.
+
+    GATED on ``sites_enforced()``: OSS / self-host gets ``(False, 0, None)`` with
+    no DB read at all. Returns the tuple rather than raising, mirroring
+    ``pockets.service._pocket_cap_exceeded``.
+    """
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
+
+    if not sites_enforced():
+        return (False, 0, None)
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    limit = entitlements_service.site_domain_allowance(
+        plan_tier=site.plan_tier, subscription_status=site.subscription_status
+    )
+    if limit is None:
+        return (False, 0, None)
+
+    cursor = _SiteDoc.find(
+        {
+            "workspace": workspace_id,
+            "archived": {"$ne": True},
+            "_id": {"$ne": site.id},
+            "domains.0": {"$exists": True},
+        }
+    ).project(_DomainedSiteProjection)
+    count = 0
+    async for row in cursor:
+        if (
+            entitlements_service.site_domain_allowance(
+                plan_tier=row.plan_tier, subscription_status=row.subscription_status
+            )
+            is not None
+        ):
+            count += 1
+    return (count >= limit, count, limit)
+
+
+def _hostname_cap_exceeded(site: Any) -> tuple[bool, int, int | None]:
+    """Would this be one hostname too many ON THIS SITE? -> (exceeded, count, limit).
+
+    The companion to ``_domain_cap_exceeded``, and it exists because that one caps
+    SITES: on its own it lets a free workspace point fifty hostnames at its one
+    allowed site, each costing a Cloudflare custom hostname and a Worker route at
+    $0 revenue. The limit is apex + ``www``.
+
+    Applies only to a site riding a CAPPED allowance, which today is exactly the
+    free floor — every paid tier is uncapped, so a paying site is never subject to
+    it. Synchronous and reads no database: everything it needs is on the loaded doc.
+
+    This cap is a judgement the build made rather than a rule handed down, so it is
+    one constant and one comparison — raising it or removing it changes nothing
+    else. Gated on ``sites_enforced()`` like every other cap here.
+    """
+    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
+
+    if not sites_enforced():
+        return (False, 0, None)
+
+    from pocketpaw_ee.cloud.billing import site_plans as _site_plans
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    if (
+        entitlements_service.site_domain_allowance(
+            plan_tier=site.plan_tier, subscription_status=site.subscription_status
+        )
+        is None
+    ):
+        return (False, 0, None)
+
+    limit = _site_plans.free_max_hostnames_per_site()
+    count = len(site.domains)
+    return (count >= limit, count, limit)
 
 
 async def add_domain(
@@ -4111,6 +4362,41 @@ async def add_domain(
     #     the product, and it makes the customer's next legitimate attach fail on a
     #     1406 duplicate they can neither see nor clear.
     _assert_entitled_to_custom_domain(site)
+
+    # Then the COUNT. The capability gate above asks whether this site may have a
+    # custom domain at all; this asks whether the workspace has room for another
+    # site carrying one — a different question, a different remedy, and a different
+    # 402 code, so the UI can say "renew your subscription" and "you've used your
+    # free domain" as the distinct things they are.
+    #
+    # Same position and the same reasons: after the already-connected return (never
+    # retroactive, and the re-Add route repair stays reachable), before
+    # ``create_custom_hostname`` (a refusal after Cloudflare accepts the hostname
+    # strands it on the shared zone, invisible to the product and blocking the
+    # customer's next legitimate attach with a 1406 they cannot clear).
+    exceeded, _count, limit = await _domain_cap_exceeded(workspace_id, site)
+    if exceeded:
+        logger.info(
+            "sites: refused a custom domain for site %s — workspace %s already has "
+            "%s site(s) with a custom domain, limit %s",
+            site.id,
+            workspace_id,
+            _count,
+            limit,
+        )
+        raise CustomDomainLimitError(limit=limit)  # type: ignore[arg-type]  # int when exceeded
+
+    # And the per-site hostname cap, which only a floor site can trip.
+    host_exceeded, _hosts, host_limit = _hostname_cap_exceeded(site)
+    if host_exceeded:
+        logger.info(
+            "sites: refused a custom domain for site %s — it already carries %s "
+            "hostnames, limit %s on the free floor",
+            site.id,
+            _hosts,
+            host_limit,
+        )
+        raise CustomDomainLimitError(limit=host_limit, scope="site")  # type: ignore[arg-type]
 
     # Resolve the site's tier → its cloudflare_features and provision them on the
     # custom hostname. A base-tier (or unknown) site resolves to an empty set, so
@@ -4678,6 +4964,31 @@ async def _apply_site_plan(
                 str(doc.id),
                 existing_tier.key,
             )
+    # An UNPURCHASABLE paid tier is not recorded. A priced tier with no configured
+    # Dodo product cannot open a checkout, so ``publish_pocket`` deliberately
+    # publishes live rather than strand the buyer — but stamping the tier anyway
+    # wrote a claim the site could not back: ``plan_tier="pro"`` with
+    # ``subscription_status="none"``, which every entitlement resolves as the free
+    # floor. The buyer picked a paid plan, was charged nothing, received nothing,
+    # and the plan card said "pro". The publish still succeeds and the site still
+    # goes live; what changes is that the record stays true.
+    #
+    # Falls back exactly like the unknown-key path above — to the site's existing
+    # tier, and only then to the floor — so this never downgrades a site that is
+    # already paying for something.
+    if tier is not None and not tier.purchasable:
+        unbuyable = tier.key
+        existing_tier = site_plans.get_site_plan(getattr(doc, "plan_tier", None))
+        tier = existing_tier or site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)
+        logger.warning(
+            "sites: publish for site %s asked for tier %s, which has no configured "
+            "Dodo product and so cannot be bought — recording %s instead of a paid "
+            "tier the site would not actually hold",
+            str(doc.id),
+            unbuyable,
+            tier.key if tier is not None else site_plans.BASE_SITE_PLAN_KEY,
+        )
+
     plan_key = tier.key if tier is not None else site_plans.BASE_SITE_PLAN_KEY
 
     site_id = str(doc.id)
@@ -5147,6 +5458,112 @@ def apply_edits(source: str, edits: list[dict[str, str]]) -> str:
             )
         result = result.replace(old, new, 1)
     return result
+
+
+# The svelte ``source`` envelope keeps a dynamic site's live-data bindings as
+# SIBLING keys beside the file map. Reused here (rather than importing the
+# generator client) so a read never drags the generator's import graph in.
+_SOURCE_BINDING_KEYS = ("objects", "sources", "actions", "auth")
+
+
+async def read_site_source(
+    *,
+    user_id: str,
+    pocket_id: str,
+    file_path: str | None = None,
+) -> dict[str, Any]:
+    """Read an existing Paw Site's source map — the READ half of the edit lane.
+
+    This is the counterpart the three ``edit_*`` tools were written against and
+    that did not exist. Each of them PREFERS its ``edits`` (search/replace) form,
+    whose ``old_string`` must be copied VERBATIM from the current file and match
+    exactly once; their descriptions duly say "read it first". On /sites there was
+    nothing to read with: ``sites_allow`` is a hard whitelist that excludes the
+    ``pockets`` server (so ``get_pocket``, which does carry ``source``, is filtered
+    out), and the profile drops the file/shell built-ins on the stated assumption
+    that "the source map is a tool ARGUMENT" — true when the agent authored the
+    site in the same context, false for every later turn and every imported site.
+    The only reachable edit form was therefore a blind full-file ``new_source``
+    rewrite, which is precisely the shape that silently drops a ``<form>``'s
+    ``action`` and its hidden ``paw_*`` inputs and sends future leads nowhere.
+
+    TWO MODES, because a react site's whole source map would flood the context
+    window that has to hold it:
+
+      * ``file_path=None`` → the MANIFEST: ``{files: [{path, bytes}, ...],
+        file_count, bindings}``. Paths and sizes only, NO contents.
+      * ``file_path="index.html"`` → that ONE file's contents, byte-for-byte.
+
+    Engine-agnostic on purpose: unlike the edit tools (each pinned to its own
+    engine) a read is safe everywhere, and the agent frequently does not know the
+    engine until it looks. Only a pocket with no source map at all — a ripple site
+    — is rejected, and by code so the agent stops rather than retries.
+
+    The generated ``_paw/`` namespace is filtered out of the manifest: the edit
+    tools reject it on the path alone, so listing it only invites a call that
+    cannot succeed. Reading one by explicit path is still allowed — seeing the
+    generated manifest is occasionally useful and never destructive.
+
+    Raises ``ValidationError("pocket.no_source_map")`` for a ripple pocket and
+    ``NotFound`` for an unknown ``file_path``. Tenancy is the pockets service's
+    public ``get``, which raises NotFound / Forbidden for a missing or
+    cross-tenant pocket, so this adds no isolation rules of its own.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    source = pocket.get("source")
+    engine = pocket.get("engine") or "ripple"
+    if not isinstance(source, dict) or not source:
+        raise ValidationError(
+            "pocket.no_source_map",
+            f"This pocket has no raw source map to read (engine={engine!r}). Only "
+            "html, react and svelte Paw Sites keep one; a ripple site is authored "
+            "as a rippleSpec, so read it with the pocket tools instead.",
+        )
+
+    # Files are the str-valued entries. A dynamic svelte envelope's bindings
+    # (objects/sources/actions/auth) are list/bool siblings on the SAME dict — the
+    # agent must not be handed `objects` as though it were a component to edit.
+    files = {k: v for k, v in source.items() if k not in _SOURCE_BINDING_KEYS}
+    bindings = [k for k in _SOURCE_BINDING_KEYS if k in source]
+
+    if file_path is None:
+        listed = sorted(k for k in files if not is_reserved_html_path(k))
+        return {
+            "pocket_id": pocket_id,
+            "engine": engine,
+            # The react edit skill's orientation step reads engine + source +
+            # keeps_client_bundle off ONE call. It used to name get_pocket, which
+            # /sites filters out, so the manifest carries the third field too and
+            # the step stops depending on an unreachable tool.
+            "keeps_client_bundle": pocket.get("keeps_client_bundle"),
+            "files": [{"path": k, "bytes": len(str(files[k]).encode("utf-8"))} for k in listed],
+            "file_count": len(listed),
+            "bindings": bindings,
+        }
+
+    # Single-file read. Try the path as spelled first, then normalized, so
+    # './index.html' and 'img\\logo.svg' resolve to the file the agent meant —
+    # the same courtesy the html edit path extends on write.
+    key = file_path if file_path in files else normalize_html_path(file_path)
+    if key not in files:
+        # Name what DOES exist: a typo must not read as "the file is empty", and a
+        # blind retry is just another guess.
+        available = ", ".join(sorted(k for k in files if not is_reserved_html_path(k))[:40])
+        raise NotFound(
+            "site_file",
+            f"{file_path} (this site's files are: {available})",
+        )
+
+    contents = str(files[key])
+    return {
+        "pocket_id": pocket_id,
+        "engine": engine,
+        "file_path": key,
+        "bytes": len(contents.encode("utf-8")),
+        "contents": contents,
+    }
 
 
 async def apply_leaf_edits(

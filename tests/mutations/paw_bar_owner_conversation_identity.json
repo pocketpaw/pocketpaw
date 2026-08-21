@@ -1,0 +1,102 @@
+[
+  {
+    "label": "the inbox dedupes by visitor again — a visitor's several conversations collapse to one row",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        group = conversation_id or ref",
+    "replace": "        group = ref",
+    "tests": [
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_the_inbox_lists_each_conversation_not_each_visitor"
+    ]
+  },
+  {
+    "label": "the state join is keyed by visitor again — every conversation reads one row's state",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        states = {row.id: row for row in rows}",
+    "replace": "        states = {row.customer_ref: row for row in rows}",
+    "tests": [
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_the_inbox_lists_each_conversation_not_each_visitor"
+    ]
+  },
+  {
+    "label": "an owner reply is addressed to the visitor again — it surfaces in every thread they own",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        conversation_id=conversation.id,\n        role=OwnerMessageRole.OWNER,",
+    "replace": "        role=OwnerMessageRole.OWNER,",
+    "tests": [
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_an_owner_reply_lands_on_the_conversation_it_names"
+    ]
+  },
+  {
+    "label": "the owner's write resolves to the active row — taking over one thread mutes another",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "        if conversation_id:\n            existing = await self.get_conversation_by_id(",
+    "replace": "        if False:\n            existing = await self.get_conversation_by_id(",
+    "tests": [
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_taking_over_one_conversation_leaves_the_others_bot_live"
+    ]
+  },
+  {
+    "label": "the UPDATE targets the active row rather than the named one",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "        if conversation_id:\n            sql = f\"UPDATE paw_bar_conversations SET {', '.join(assignments)} WHERE id = ?\"\n            values.append(existing.id)",
+    "replace": "        if False:\n            sql = f\"UPDATE paw_bar_conversations SET {', '.join(assignments)} WHERE id = ?\"\n            values.append(existing.id)",
+    "tests": [
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_taking_over_one_conversation_leaves_the_others_bot_live"
+    ]
+  },
+  {
+    "label": "the owner-line read ignores the conversation — every thread shows every reply",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "        if conversation_id is not None:\n            conditions += \" AND conversation_id = ?\"\n            params.append(conversation_id)",
+    "replace": "        if False:\n            conditions += \" AND conversation_id = ?\"\n            params.append(conversation_id)",
+    "tests": [
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_an_owner_reply_belongs_to_one_conversation",
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_the_visitor_poll_only_returns_this_conversations_lines"
+    ]
+  },
+  {
+    "label": "the visitor's poll stops naming its conversation — owner lines land in the wrong thread",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "            # but never silent, which is the right way round for a poll.\n            conversation_id=conversation_id or None,",
+    "replace": "            # but never silent, which is the right way round for a poll.\n            conversation_id=None,",
+    "tests": [
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_the_visitor_poll_only_returns_this_conversations_lines"
+    ]
+  },
+  {
+    "label": "a named conversation is taken on trust — another visitor's thread is writable",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        if named is None or named.widget_id != widget.id or named.customer_ref != customer_ref:\n            raise HTTPException(404, \"conversation_not_found\")\n        return named",
+    "replace": "        if named is None:\n            raise HTTPException(404, \"conversation_not_found\")\n        return named",
+    "tests": [
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_an_owner_cannot_address_another_visitors_conversation"
+    ]
+  },
+  {
+    "label": "the transcript's runs stop scoping — one thread's questions merge with another's",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        limit=_TRANSCRIPT_CAP,\n        session_key=session_key,\n    )",
+    "replace": "        limit=_TRANSCRIPT_CAP,\n        session_key=\"\",\n    )",
+    "tests": [
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_the_transcript_reads_one_conversation_not_the_visitors_history"
+    ]
+  },
+  {
+    "label": "the transcript's owner lines stop scoping — every reply shows in every thread",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "                limit=_TRANSCRIPT_CAP,\n                conversation_id=conversation_id or None,",
+    "replace": "                limit=_TRANSCRIPT_CAP,\n                conversation_id=None,",
+    "tests": [
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_the_transcript_reads_one_conversation_not_the_visitors_history"
+    ]
+  },
+  {
+    "label": "one conversation splits in two across the migration — same id, duplicate keys",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        group = conversation_id or ref",
+    "replace": "        group = token",
+    "tests": [
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_a_conversation_spanning_the_migration_is_ONE_row"
+    ]
+  }
+]

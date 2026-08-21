@@ -49,6 +49,33 @@
 # role-gated id like an unknown id, and the known-ids error listing excludes
 # them. Belt-and-braces: admin capabilities can never leak from ANY atlas server
 # wiring, provider or not (matches DefaultEntitlementProvider's role hiding).
+#
+# Updated: 2026-08-17 (feat/ast-2-atlas-trust-aggregate, AST-2) — the describe
+# handler awaits ``describe_fabric_id_async`` instead of the sync
+# ``describe_fabric_id``: same registry payload for ``fabric:<type>`` ids, plus
+# the additive ``source_truth`` field (live per-property disputed / stale /
+# aging counts + winner writer mix from the OSS FabricStore) when the
+# introspector exposes the optional ``entity_type_source_truth``. Handlers are
+# already async, so the aiosqlite read runs in the handler's own loop — no sync
+# bridge. Search is untouched (properties-only, FINDING B).
+#
+# Updated: 2026-08-17 (feat/ast-3-atlas-flag-aware, AST-3) — the two
+# rollout-flagged primitives (``primitive:source-truth`` / ``primitive:verify-loop``)
+# now come through the overlay with ``available`` (flag not off) and a tri-state
+# ``mode`` (off | shadow | enforce). Search cards and the describe payload carry
+# ``mode`` whenever the overlay set it; an OFF primitive's describe payload adds
+# ``enable_hint`` (the env-flag pointer from ``overlay.FLAG_ENABLE_HINTS``) —
+# the same shape as an unavailable connector's ``connect_hint``, different
+# pointer — and NEVER the integrations-surface hint. Discovery hints only; the
+# ``provider is None`` global path is unchanged (production always passes a
+# provider — claude_sdk.py builds one per run).
+#
+# Updated: 2026-08-17 (AST-5a — review fix V9) — no code change here: the
+# ``mode``/``enable_hint`` rendering keys on ``overlaid.mode``, so the two
+# ``capability:fabric.*`` cards the overlay now flag-marks (they inherit
+# ``primitive:source-truth``'s mode via ``overlay.FLAGGED_CAPABILITY_MODES``)
+# render exactly like the primitive — mode on search cards and describe, the
+# source-truth ``enable_hint`` when off.
 
 from __future__ import annotations
 
@@ -144,7 +171,7 @@ async def _atlas_search_handler(
         from pocketpaw.atlas.overlay import entry_role_requirement
 
         overlaid = [
-            (entry, None)
+            (entry, None, None)
             for entry in store.search(intent, limit=5)
             if entry_role_requirement(entry) is None
         ]
@@ -154,7 +181,8 @@ async def _atlas_search_handler(
         # WA-3: resolve the caller's role (async) before the sync grant filter.
         await _prime_provider(provider)
         overlaid = [
-            (o.entry, o.available) for o in AtlasOverlay.search(store, intent, provider, limit=5)
+            (o.entry, o.available, o.mode)
+            for o in AtlasOverlay.search(store, intent, provider, limit=5)
         ]
 
     fabric_cards: list[dict[str, Any]] = []
@@ -168,7 +196,7 @@ async def _atlas_search_handler(
         return _text_result(f"No atlas entries matched intent: {intent!r}. Try broader wording.")
 
     cards: list[dict[str, Any]] = []
-    for entry, available in overlaid:
+    for entry, available, mode in overlaid:
         card: dict[str, Any] = {
             "id": entry.id,
             "kind": entry.kind,
@@ -179,6 +207,10 @@ async def _atlas_search_handler(
             card["surface"] = entry.surface
         if available is not None:
             card["available"] = available
+        if mode is not None:
+            # AST-3: rollout-flagged primitive — its tri-state mode is a
+            # discovery hint (off | shadow | enforce), not a grant.
+            card["mode"] = mode
         cards.append(card)
     # Fabric cards ride AFTER every compiled-entry card (AT-7): live
     # ontology hits are additive context, never displacing OS answers.
@@ -217,9 +249,12 @@ async def _atlas_describe_handler(
     if introspector is not None:
         # Fail-closed inside: a miss OR a raising introspector returns None,
         # and the id falls through to the normal unknown-id error below.
-        from pocketpaw.atlas.fabric import describe_fabric_id
+        # AST-2: the async sibling ALSO awaits the optional type-level
+        # ``source_truth`` aggregate (only when the introspector exposes it;
+        # any raise leaves the key absent and the schema payload intact).
+        from pocketpaw.atlas.fabric import describe_fabric_id_async
 
-        fabric_payload = describe_fabric_id(introspector, entry_id.strip())
+        fabric_payload = await describe_fabric_id_async(introspector, entry_id.strip())
         if fabric_payload is not None:
             return _text_result(json.dumps(fabric_payload, ensure_ascii=False))
 
@@ -257,7 +292,19 @@ async def _atlas_describe_handler(
         )
 
     payload = overlaid.entry.model_dump(mode="json", by_alias=True)
-    if overlaid.available is not None:
+    if overlaid.mode is not None:
+        # AST-3: rollout-flagged primitive — always described (discoverable),
+        # honestly marked live or not for THIS deployment. Off → the env-flag
+        # pointer, never the connector's integrations-surface hint.
+        from pocketpaw.atlas.overlay import FLAG_ENABLE_HINTS
+
+        payload["available"] = overlaid.available
+        payload["mode"] = overlaid.mode
+        if overlaid.available is False:
+            payload["enable_hint"] = FLAG_ENABLE_HINTS.get(
+                overlaid.entry.id, "Off in this deployment (see docs/atlas.md)."
+            )
+    elif overlaid.available is not None:
         payload["available"] = overlaid.available
         if overlaid.available is False:
             # Route the lookup through the overlay: a provider that filters

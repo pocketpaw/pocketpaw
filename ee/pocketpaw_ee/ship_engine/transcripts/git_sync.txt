@@ -1,0 +1,24 @@
+# transcript: `dokku git:sync --build demo <repo> <ref>` — successful source
+# clone + build (buildpack auto-detected) + deploy. NOTE: real dokku does NOT
+# echo the clone URL's credentials back, so no token appears here — the token
+# only ever lives in the COMMAND string, which the driver redacts.
+EXIT: 0
+--- stdout ---
+-----> Cloning demo from the specified git repository...
+       Cloning into bare repository...
+-----> Building demo from herokuish
+-----> Python app detected
+-----> Installing python
+-----> Installing dependencies with Pip
+-----> Discovering process types
+       Procfile declares types -> web
+-----> Releasing demo...
+-----> Deploying demo via the docker-local scheduler...
+-----> Creating new app virtual host file...
+-----> Creating http nginx.conf
+       Reloading nginx
+-----> Renaming containers
+       Renaming container demo.web.1.upcoming-4321 (2c9f7d1a3b) to demo.web.1
+=====> Application deployed:
+       http://demo.paw.example
+--- stderr ---

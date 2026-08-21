@@ -64,23 +64,36 @@ nothing else.
 You cannot write a correct diff against a file you have not read, and
 `old_string` has to match the file **verbatim** — including indentation.
 
+Two calls. First the manifest, to see what the site actually contains:
+
 ```
-mcp__pocketpaw_pocket__get_pocket(pocket_id = <the site pocket's id>)
+read_site_source(pocket_id = <the site pocket's id>)
 ```
 
-Read three things off the returned pocket:
+Read three things off it:
 
 - **`engine`** — must be `"react"`. If it is `"svelte"`, `"ripple"`, `"html"`
   or `"dynamic"`, you are on the wrong skill; see the bottom of this file.
-- **`source`** — the `{path: contents}` map. Find the file that owns the
-  section the user named (`src/components/Hero.tsx` for the hero) and read its
-  current contents. This is where `old_string` comes from.
+- **`files`** — each file's path and byte size (no contents; a whole react
+  source map would swallow the context you need for the edit). Find the file
+  that owns the section the user named — `src/components/Hero.tsx` for the hero.
 - **`keeps_client_bundle`** — needed only if your edit introduces the page's
   first client behaviour; see the interactivity section below.
+
+Then read that one file in full — this is where `old_string` comes from:
+
+```
+read_site_source(pocket_id = <id>, file_path = "src/components/Hero.tsx")
+```
 
 If the user named a section but you cannot tell which file owns it, read
 `src/App.tsx` — it is the composition root and imports every section in
 order, so it is the site's table of contents.
+
+**Do not reach for `get_pocket` here.** It is not on the /sites allow-list, so
+the call does not reach a tool — and skipping the read to write `old_string`
+from memory does not fail loudly, it fails as a zero-match error or, worse, as
+a `new_source` rewrite that quietly drops whatever you did not carry over.
 
 ## STEP 2 — Choose the edit shape
 
@@ -275,6 +288,9 @@ Every edit is held to the bar the page was built to. Briefly:
   require it. On an empty result, use a gradient or solid treatment. **Never
   fabricate a photo URL**; a made-up `src` is a broken image on a live site.
   Set `width`/`height` (or `aspect-ratio`) so the page does not jump.
+- **Video and other media are allowed.** A `video` asset from the manifest (or
+  one the user supplies) belongs on the page at its native medium; there is no
+  images-only rule. The only asset rule is that the URL is one you were given.
 - **Every CTA is an anchor** — `href="#pricing"`, `tel:`, `mailto:` — not a
   bare `onClick` button.
 - **The lead form stays a native `<form>`** with flat named fields (`name`,
@@ -386,8 +402,9 @@ Never fall back to another engine's tool, and never fall back to
 ## Related tools (via MCP)
 
 - `mcp__pocketpaw_sites_manager__edit_react_component` — the edit itself (STEP 3)
-- `mcp__pocketpaw_pocket__get_pocket` — read the current `source`, `engine` and
-  `keeps_client_bundle` (STEP 1)
+- `mcp__pocketpaw_sites_manager__read_site_source` — read the current `source`,
+  `engine` and `keeps_client_bundle` (STEP 1). The /sites counterpart of
+  `get_pocket`, which is NOT on this surface's allow-list
 - `mcp__pocketpaw_sites_manager__publish` — deploy, on explicit request (STEP 4)
 - `mcp__pocketpaw_sites_manager__edit_svelte_component` — the svelte-track sibling
 - `mcp__pocketpaw_stock__search_stock_images` — real photography for a new section

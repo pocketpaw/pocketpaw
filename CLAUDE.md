@@ -225,6 +225,23 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   env-configurable), marking queued/running `ChatRunDoc`s older than 10 minutes as
   `interrupted` so runs abandoned by a backend restart surface a retry affordance
   instead of leaving clients subscribed forever.
+- **Growth outbound config (`GROWTH_SENDING_DOMAIN`)**: the secondary domain the
+  `/growth` engine sends cold outreach from — **required**, with no default. The
+  dispatch worker fails closed when it is unset (nothing goes out), validates the
+  from-address against it at send time, and refuses a value equal to the
+  deployment's own host (`POCKETPAW_PUBLIC_BASE_URL`). Never point it at the apex:
+  cold outreach draws spam complaints at rates transactional mail never sees, and
+  the complaints land on the *sending* domain's reputation — a burnt secondary
+  domain costs a DNS record and a warm-up, a burnt apex takes password resets,
+  invoices and receipts with it. The provider credential itself is **not** an env
+  var: it is per-workspace connector state on the workspace's `mailtrap` connector
+  row (`MAILTRAP_API_TOKEN`, plus optional `MAILTRAP_FROM_EMAIL` /
+  `MAILTRAP_FROM_NAME`, `MAILTRAP_REPLY_TO`, and `MAILTRAP_PROJECT_SENDERS` — a
+  `{project_id: {from_email, from_name, reply_to}}` map so an agency sends as the
+  client whose project owns the prospect, resolved per field with the workspace
+  values as the fallback), so disabling the connector revokes sending immediately
+  for every project at once.
+  See `ee/pocketpaw_ee/cloud/growth/connector.py` and `docs/api-reference.md`.
 - **Session supervisor config**: `POCKETPAW_SESSION_SUPERVISOR` (default OFF). When
   truthy (`1`/`true`/`yes`/`on`), the cloud chat executor drives every agent turn
   through the `SessionSupervisor` + the durable `(workspace, session, agent) ->
@@ -331,6 +348,33 @@ When you touch any `ee/pocketpaw_ee/cloud/<entity>/*.py` file for any reason —
 3. Ship the original change + the consolidation in the same PR.
 
 `pockets/` is the canonical reference. Copy its shape.
+
+### Atlas touch-time rule — the OS self-model must not drift
+
+atlas (`src/pocketpaw/atlas/`) is the runtime OS self-model: the compiled corpus
+agents query via `atlas_search` / `atlas_describe` and the always-on Paw OS
+Primer. **A primitive, surface, or agent-facing capability that isn't in atlas is
+undiscoverable to agents — and its CI drift check only proves the compiled
+`atlas.json` matches the authored JSON, NOT that the authored facts match the
+live OS.** Two whole subsystems (Fabric source-truth, the verify loop) shipped
+after atlas was seeded and stayed invisible for weeks; three live routes were
+once missing/stale while the check stayed green.
+
+When you **add, rename, or remove a primitive, a user-facing surface/route, or
+an agent-facing capability** — in the same PR:
+
+1. Update `src/pocketpaw/atlas/authored/{primitives,surfaces,capabilities}.json`
+   (all 10 `AtlasEntry` fields; primitives carry a `gist`; capabilities carry a
+   `role:*` marker in `requires`; verify every route/fact against the real
+   frontend routes, not just that it recompiles).
+2. Recompile: `uv run pocketpaw atlas build`, then `atlas build --check` green;
+   commit `src/pocketpaw/atlas/data/atlas.json`.
+3. Pin the new intent(s) in `tests/atlas/eval_cases.json` (both directions — the
+   new entry wins its intents, existing primitives still win theirs).
+
+Routine refactors and bug fixes don't need atlas updates. If a subsystem ships
+behind a rollout flag, keep the entry discoverable and let the overlay mark its
+live `mode` (see `docs/atlas.md`) — never hide it.
 
 ---
 

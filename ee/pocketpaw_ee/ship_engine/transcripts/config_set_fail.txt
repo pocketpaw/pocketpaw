@@ -1,0 +1,5 @@
+# transcript: `dokku config:set --no-restart demo ...` rejecting a bad pair.
+EXIT: 1
+--- stdout ---
+--- stderr ---
+ !     Invalid var name

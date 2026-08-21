@@ -78,13 +78,15 @@ async def test_message_new_not_delivered_to_non_group_member():
     conn = AsyncMock()
     bus = InProcessBus(resolver=resolver, conn_manager=conn)
 
-    # message.new excludes the sender from the audience; u-bob should still get it.
+    # message.new includes the sender: their OTHER devices/tabs share the same
+    # user_id and must see the persisted message to stay in sync. The originating
+    # socket dedups the echo against its optimistic row (message.sent covers the
+    # local-{ts} → real id swap).
     await bus.publish(MessageNew(data={"group_id": "g1", "sender": "u-alice"}))
 
     recipients = {call.args[0] for call in conn.send_to_user.await_args_list}
-    assert recipients == {"u-bob"}
+    assert recipients == {"u-alice", "u-bob"}
     assert "u-mallory" not in recipients
-    assert "u-alice" not in recipients  # sender excluded by resolver
 
 
 @pytest.mark.asyncio

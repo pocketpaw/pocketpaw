@@ -70,7 +70,10 @@ async def test_env_override_wins(widget_client, tmp_path, monkeypatch):
     """PAW_BAR_WIDGET_JS is the seam for serving a freshly built bundle without a
     redeploy."""
     custom = tmp_path / "built-widget.js"
-    custom.write_text("/* a newer build */\n", encoding="utf-8")
+    # write_bytes, not write_text: text mode translates "\n" to "\r\n" on Windows,
+    # so the route served CRLF and this assertion failed on a Windows dev box while
+    # passing in Linux CI. The route copies bytes; the fixture must write bytes.
+    custom.write_bytes(b"/* a newer build */\n")
     monkeypatch.setenv("PAW_BAR_WIDGET_JS", str(custom))
 
     res = await widget_client.get("/paw-bar/widget.js")
@@ -115,13 +118,103 @@ def test_vendored_loader_keeps_its_globals_to_itself():
     source = paw_bar_widget_file().read_text(encoding="utf-8")
     body = [ln for ln in source.splitlines() if ln and not ln.startswith("//")]
 
-    assert body[0].startswith("(function")
+    # esbuild emits `"use strict";` then an arrow IIFE; the hand-vendored copy
+    # opened with `(function`. Either is a wrapper — what matters is that the
+    # file opens with one and declares nothing at column 0 outside it.
+    opener = [ln for ln in body if ln != '"use strict";'][0]
+    assert opener.startswith("(function") or opener.startswith("(() =>")
     # Nothing declared at column 0 except the wrapper itself and its close.
     stray = [
         ln for ln in body[1:] if (ln.startswith(("const ", "let ", "var ", "function ", "class ")))
     ]
     assert stray == []
     assert "win.PawBar" in source
+
+
+def test_the_vendored_loader_docks_a_column_rather_than_covering_the_page():
+    """The bug this exists for: the vendored copy was hand-transcribed from the
+    paw-bar source with the type annotations stripped BY HAND, so it drifted
+    silently. It sat a whole session behind, still calling ``goFullscreen()`` on
+    ``pawbar:open`` — a real published site opened the messenger over the entire
+    viewport and made the page unclickable, while the source it claimed to mirror
+    had docked it to a 400px column for days.
+
+    Nothing could see it. paw-bar's own tests load paw-bar's build, not this
+    file, and this file is what every published site actually downloads.
+
+    Asserting on the specific behaviours the served widget depends on, rather
+    than diffing against a sibling checkout that is not present on a CI box.
+    """
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    code = chr(10).join(ln for ln in source.splitlines() if not ln.lstrip().startswith("//"))
+
+    # The open panel is a sized column. A full-viewport iframe swallows every
+    # click on the host page whether or not the app paints a backdrop.
+    assert "PANEL_W = 400" in code
+    assert "PANEL_MAX_H = 720" in code
+
+    # Both doors into the widget — the app's message and the host's own button —
+    # must dock. goFullscreen() survives ONLY in the drag protocol.
+    assert code.count("goFullscreen()") == 1, "goFullscreen belongs to drag alone"
+
+    # The opt-in big reading surface, and the box animation, both reached here.
+    assert "pawbar:expand" in code
+    assert "BOX_MS" in code
+
+
+def test_the_vendored_loader_speaks_the_frame_protocol_the_app_expects():
+    """The loader and the glass app are two halves of one protocol shipped from two
+    places, and only this half lives in this repo. The app is built in paw-bar and
+    dropped into ``PAWBAR_APP_DIR``; nothing here can see its version. So when the
+    loader falls behind, the app keeps sending messages into a copy with no case for
+    them and the failures are all silent and all cosmetic-looking.
+
+    That is not hypothetical. The vendored copy sat two loader commits behind while
+    the app had already moved, and every symptom was a half of this protocol going
+    unanswered:
+
+      * ``scheme.ts`` reads the ``s`` query param off its own iframe URL. Only the
+        loader can know the HOST page's colour scheme — the iframe's own
+        ``prefers-color-scheme`` is the visitor's OS, not the site's. Without ``s``
+        a light site got a dark widget bolted to it.
+      * the app posts ``pawbar:overlay`` whenever a menu opens, expecting
+        ``pawbar:host-pointerdown`` back when the visitor clicks the page outside
+        the frame. An old loader ignores the first and never sends the second, so
+        popovers stay open forever.
+
+    Asserting on the wire vocabulary rather than diffing against a sibling checkout,
+    which is not present on a CI box. This is the same reasoning as the dock test
+    above, applied to the messages instead of the geometry.
+    """
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    code = chr(10).join(ln for ln in source.splitlines() if not ln.lstrip().startswith("//"))
+
+    # The host's scheme rides the frame URL, and it is DERIVED from the host page
+    # rather than read off the iframe's own media query.
+    assert '"&s=" + hostScheme(win)' in code
+
+    # ...and it stays live: a host that changes theme after load tells the frame.
+    assert "pawbar:scheme" in code
+
+    # The overlay handshake, both directions.
+    assert "pawbar:overlay" in code, "app announces menus; loader must have a case"
+    assert "pawbar:host-pointerdown" in code, "loader must report host clicks back"
+
+
+def test_the_vendored_loader_is_generated_not_hand_edited():
+    """A header that says where it came from is the only thing standing between
+    this file and the silent drift above. If someone hand-edits it again, the
+    next reader has no way to know which source it is behind."""
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    header = paw_bar_widget_file().read_text(encoding="utf-8").split('"use strict";')[0]
+
+    assert "GENERATED, DO NOT EDIT BY HAND" in header
+    assert "loader/src/loader.ts" in header
 
 
 # --------------------------------------------------------------------------- #

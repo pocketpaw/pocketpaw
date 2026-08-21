@@ -1,0 +1,7 @@
+# transcript: `docker stats ...` failing (old Docker / no permission). The
+# driver treats this as best-effort — metrics degrade to process-state-only
+# (cpu_pct/mem_pct None), never a failed read (SHIP-12).
+EXIT: 1
+--- stdout ---
+--- stderr ---
+Cannot connect to the Docker daemon

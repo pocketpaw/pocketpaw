@@ -51,6 +51,17 @@
 #   existing smart-routing / ``claude_sdk_model`` logic — behavior byte-identical.
 #   It rides ``RunSpec.model_override`` → ``ScopeContext`` → ``AgentPool.run`` to
 #   the Claude SDK backend, where it wins over ALL other model sources.
+# Changes: 2026-08-21 (fix/uncap-chat-message-content) — ``content`` LOST its
+#   ``max_length=10_000``. The cap dated to this file's first commit and was a
+#   scaffolded default, not a sized decision — the runtime API has always taken
+#   100_000 on the identical field. 10k characters is roughly 2.5k tokens, well
+#   under a site-authoring prompt, and the composer has no matching client-side
+#   guard, so the cap only ever surfaced as a raw pydantic ``string_too_long``
+#   422 after the user had already written the thing. ``min_length=1`` stays.
+#   With no app-level ceiling the effective one is MongoDB's 16MB BSON document
+#   limit at insert (a 500, not a 422); no proxy body cap exists in the deploy
+#   config. ``model`` keeps its own ``max_length=100`` — that one guards a
+#   subprocess launch arg and is a real gate.
 """Request and SSE-event payload schemas for the enterprise agent chat endpoint.
 
 The endpoint lives at ``POST /cloud/chat/{scope}/{scope_id}/agent`` and streams
@@ -70,7 +81,7 @@ from pydantic import BaseModel, Field, field_validator
 class CloudAgentChatRequest(BaseModel):
     """Body of ``POST /cloud/chat/{scope}/{scope_id}/agent``."""
 
-    content: str = Field(min_length=1, max_length=10_000)
+    content: str = Field(min_length=1)
     attachments: list[dict[str, Any]] = Field(default_factory=list)
     reply_to: str | None = None
     mentions: list[dict[str, Any]] = Field(default_factory=list)

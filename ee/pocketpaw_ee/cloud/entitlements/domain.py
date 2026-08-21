@@ -34,6 +34,14 @@
 #   ``concierge_enabled`` was a PASS-THROUGH of the owner's toggle that consulted no
 #   plan at all, so a free site served a concierge indefinitely. The two questions
 #   stay separate fields on purpose — see the class docstring.
+# Updated 2026-08-21 (feat/site-free-custom-domain, PW-1): added
+#   ``SiteEntitlements.max_domained_sites`` (``int | None``, None = uncapped) — how
+#   many SITES in the workspace may carry a custom domain, counted in SITES rather
+#   than hostnames so apex + ``www`` on one site spend one. Unlike every other
+#   field here it is a FLOOR GRANT: the base tier's 1 resolves with no subscription
+#   at all, because free now includes a custom domain. ``custom_domain`` stays, now
+#   derived as ``max_domained_sites != 0`` — it answers "may this site have one at
+#   all", which is a different question from "has the workspace room for another".
 # Updated 2026-08-13 (feat/sites-site-entitlements): added ``SiteEntitlements`` —
 #   the PER-SITE shape, a second scope beside the workspace one. Sites are the
 #   only thing billed per-object (``Site.plan_tier`` + ``subscription_status``),
@@ -107,6 +115,20 @@ class SiteEntitlements:
     not deployed yet (the charge-first flow deploys on activation), so failing
     closed on it cannot badge a live paying site.
 
+    ``max_domained_sites`` is the odd one out and worth reading twice. Every other
+    capability here is a PAID grant, gated on an active subscription. This one is a
+    FLOOR grant: the base tier confers 1 with no subscription, because free now
+    includes a custom domain. An active paid subscription replaces the floor with
+    the tier's own value (None = uncapped). A LAPSED paid site therefore falls back
+    to the floor's 1 rather than to 0 — it keeps what free would have given it.
+    The unit is the SITE: how many hostnames sit on one site is a separate cap,
+    enforced at the attach seam, not here.
+
+    ``custom_domain`` is derived from it (``!= 0``) rather than stored separately.
+    It answers "may this site have a custom domain at all"; whether the WORKSPACE
+    has room for another is a count the resolver cannot answer, because counting
+    needs the site collection and ``entitlements`` may not import ``models.site``.
+
     Deliberately ABSENT: ``conv_allowance``, ``conv_rate_usd`` and
     ``white_label``. The first two wait on which meter owns a concierge run, and
     the third on an org entity that does not exist. A field that always returns
@@ -128,6 +150,7 @@ class SiteEntitlements:
     subscription_active: bool
     badge_required: bool
     custom_domain: bool
+    max_domained_sites: int | None
     concierge_enabled: bool
     concierge_entitled: bool
 

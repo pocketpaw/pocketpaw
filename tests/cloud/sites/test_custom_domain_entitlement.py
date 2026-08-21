@@ -18,6 +18,18 @@
 # pricing-spec rekey (basic/pro/business → free/site/staff) moves these tests with
 # the catalog instead of breaking them.
 #
+# Updated 2026-08-21 (feat/site-free-custom-domain, PW-1). Free now INCLUDES a
+# custom domain — one site's worth — so the headline assertions here invert: a free
+# site attaches its domain and the refusal moves to the SECOND site that wants one.
+# That count gate has its own tree (test_custom_domain_cap.py); what stays here is
+# the capability gate and the postures around it, which are unchanged.
+#
+# The lapsed-subscription cases invert too, and that one is worth reading twice: a
+# paid site whose subscription stopped falls to the FLOOR, not to zero. It keeps
+# what free would have given it and loses the uncapped allowance, which is what it
+# was actually paying for. Refusing it outright would leave a former customer worse
+# off than someone who never paid.
+#
 # Two postures inherited from the siblings this gate copies (``PocketLimitError``,
 # ``ConnectorLimitError``) and pinned here because both are easy to "fix" wrongly
 # later:
@@ -52,11 +64,17 @@ pytestmark = pytest.mark.usefixtures("mongo_db")
 
 
 def _a_tier_granting_custom_domain() -> str:
-    """The cheapest catalog tier that resells ``custom_domain``."""
+    """The cheapest catalog tier whose domain allowance is UNCAPPED.
+
+    Since free includes a domained site, "grants a custom domain" no longer picks
+    out a paid tier — every tier grants one. What a paid tier sells is the absence
+    of a ceiling, so that is what this selects on. Still read off the catalog, never
+    hardcoded, so the pricing-spec rekey moves it instead of breaking it.
+    """
     for tier in site_plans.list_site_plans():
-        if "custom_domain" in tier.cloudflare_features:
+        if tier.max_domained_sites is None:
             return tier.key
-    raise AssertionError("no site plan tier resells custom_domain — catalog changed")
+    raise AssertionError("no site plan tier has an uncapped domain allowance — catalog changed")
 
 
 def _the_free_tier() -> str:
@@ -118,6 +136,7 @@ async def _seed_site(
     plan_tier: str | None,
     subscription_status: str = "none",
     deployed: bool = True,
+    pocket_id: str = "pk_1",
 ) -> str:
     """Insert a real Site doc and return its id string.
 
@@ -127,7 +146,7 @@ async def _seed_site(
     """
     doc = Site(
         workspace=workspace_id,
-        pocket_id="pk_1",
+        pocket_id=pocket_id,
         owner="u1",
         name="My Site",
         plan_tier=plan_tier,
@@ -143,43 +162,49 @@ async def _seed_site(
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_free_site_cannot_attach_a_custom_domain(monkeypatch):
-    """The headline case. A base-tier site resells no custom_domain, so the attach
-    is refused with a 402 the UI can turn into an upgrade prompt."""
+async def test_a_free_site_attaches_its_one_custom_domain(monkeypatch):
+    """The captain's rule, end to end at the seam that enforces it.
+
+    This assertion is the inverse of the one that stood here until 2026-08-21, and
+    the inversion IS the feature: free includes a custom domain on one site. What
+    free does not include is a second site with one, which is a count and lives in
+    test_custom_domain_cap.py.
+    """
     _enforce(monkeypatch, on=True)
     ws = "ws_free_domain"
     site_id = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier())
     cf = _RecordingCF()
 
-    with pytest.raises(CloudError) as exc:
-        await sites_service.add_domain(
-            workspace_id=ws,
-            site_id=site_id,
-            hostname="www.freeloader.com",
-            _cloudflare=cf,
-        )
+    res = await sites_service.add_domain(
+        workspace_id=ws,
+        site_id=site_id,
+        hostname="www.freeloader.com",
+        _cloudflare=cf,
+    )
 
-    assert exc.value.status_code == 402
-    assert exc.value.code == "billing.custom_domain_not_entitled"
+    assert res.hostname == "www.freeloader.com"
+    assert len(cf.create_calls) == 1
+    doc = await Site.get(site_id)
+    assert [d.hostname for d in doc.domains] == ["www.freeloader.com"]
 
 
-async def test_an_unset_tier_cannot_attach_a_custom_domain(monkeypatch):
+async def test_an_unset_tier_gets_the_floor_allowance(monkeypatch):
     """A site with no ``plan_tier`` at all (pre-BC-9 rows, and every first publish)
-    resolves to the floor. Fail-closed: absent is free, not exempt."""
+    resolves to the floor — and the floor now carries a domain. Absent is free, and
+    free includes one."""
     _enforce(monkeypatch, on=True)
     ws = "ws_untiered_domain"
     site_id = await _seed_site(workspace_id=ws, plan_tier=None)
     cf = _RecordingCF()
 
-    with pytest.raises(CloudError) as exc:
-        await sites_service.add_domain(
-            workspace_id=ws,
-            site_id=site_id,
-            hostname="www.untiered.com",
-            _cloudflare=cf,
-        )
+    res = await sites_service.add_domain(
+        workspace_id=ws,
+        site_id=site_id,
+        hostname="www.untiered.com",
+        _cloudflare=cf,
+    )
 
-    assert exc.value.status_code == 402
+    assert res.hostname == "www.untiered.com"
 
 
 async def test_a_refused_attach_never_reaches_cloudflare(monkeypatch):
@@ -189,16 +214,23 @@ async def test_a_refused_attach_never_reaches_cloudflare(monkeypatch):
     shared zone with no Site row pointing at it — invisible to the product, and it
     makes the customer's next legitimate attach fail on a 1406 duplicate they
     cannot see or clear.
+
+    Driven through the COUNT gate now, since that is the one a free workspace can
+    actually trip: one site already holds a domain, a second one asks.
     """
     _enforce(monkeypatch, on=True)
     ws = "ws_no_cf_call"
-    site_id = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier())
+    first = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier())
+    await sites_service.add_domain(
+        workspace_id=ws, site_id=first, hostname="www.first.com", _cloudflare=_RecordingCF()
+    )
+    second = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier(), pocket_id="pk_2")
     cf = _RecordingCF()
 
     with pytest.raises(CloudError):
         await sites_service.add_domain(
             workspace_id=ws,
-            site_id=site_id,
+            site_id=second,
             hostname="www.nocall.com",
             _cloudflare=cf,
         )
@@ -213,18 +245,22 @@ async def test_a_refused_attach_writes_nothing_to_the_site(monkeypatch):
     host to POST captures at the site."""
     _enforce(monkeypatch, on=True)
     ws = "ws_no_write"
-    site_id = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier())
+    first = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier())
+    await sites_service.add_domain(
+        workspace_id=ws, site_id=first, hostname="www.taken.com", _cloudflare=_RecordingCF()
+    )
+    second = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier(), pocket_id="pk_2")
     cf = _RecordingCF()
 
     with pytest.raises(CloudError):
         await sites_service.add_domain(
             workspace_id=ws,
-            site_id=site_id,
+            site_id=second,
             hostname="www.nowrite.com",
             _cloudflare=cf,
         )
 
-    doc = await Site.get(site_id)
+    doc = await Site.get(second)
     assert doc.domains == []
     assert "www.nowrite.com" not in doc.allowed_origins
 
@@ -235,11 +271,15 @@ async def test_a_refused_attach_writes_nothing_to_the_site(monkeypatch):
 
 
 @pytest.mark.parametrize("status", ["none", "pending", "cancelled"])
-async def test_a_paid_tier_without_an_active_subscription_is_refused(monkeypatch, status):
+async def test_a_paid_tier_without_an_active_subscription_falls_to_the_floor(monkeypatch, status):
     """Cancellation never resets ``plan_tier``, and an unconfigured Dodo product
-    records a paid tier with no charge at all. Reading the tier alone therefore
-    hands a free custom domain to sites that have never paid — permanently. The
-    resolver gates on tier AND subscription; this proves the attach seam does too.
+    records a paid tier with no charge at all — so the tier alone still cannot be
+    trusted, and the resolver still gates the PAID grants on the subscription.
+
+    What changed is where the site lands when it fails that gate: on the free
+    floor, which now includes one domained site. So this attach SUCCEEDS, and the
+    thing the lapsed site lost is its uncapped allowance — the next test proves it
+    is genuinely capped rather than silently still uncapped.
     """
     _enforce(monkeypatch, on=True)
     ws = f"ws_paid_{status}"
@@ -250,16 +290,42 @@ async def test_a_paid_tier_without_an_active_subscription_is_refused(monkeypatch
     )
     cf = _RecordingCF()
 
+    res = await sites_service.add_domain(
+        workspace_id=ws,
+        site_id=site_id,
+        hostname=f"www.{status}.com",
+        _cloudflare=cf,
+    )
+
+    assert res.hostname == f"www.{status}.com"
+
+
+async def test_a_lapsed_paid_site_is_capped_like_a_free_one(monkeypatch):
+    """The other half: falling to the floor means being SUBJECT to the floor.
+
+    A lapsed ``pro`` site keeps one domained site, not its old uncapped allowance,
+    so a second site in the same workspace is refused exactly as it would be under
+    free. Without this the previous test would pass just as happily if lapsing did
+    nothing at all.
+    """
+    _enforce(monkeypatch, on=True)
+    ws = "ws_lapsed_capped"
+    lapsed = await _seed_site(
+        workspace_id=ws,
+        plan_tier=_a_tier_granting_custom_domain(),
+        subscription_status="cancelled",
+    )
+    await sites_service.add_domain(
+        workspace_id=ws, site_id=lapsed, hostname="www.lapsed.com", _cloudflare=_RecordingCF()
+    )
+    other = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier(), pocket_id="pk_2")
+
     with pytest.raises(CloudError) as exc:
         await sites_service.add_domain(
-            workspace_id=ws,
-            site_id=site_id,
-            hostname=f"www.{status}.com",
-            _cloudflare=cf,
+            workspace_id=ws, site_id=other, hostname="www.other.com", _cloudflare=_RecordingCF()
         )
 
-    assert exc.value.status_code == 402
-    assert cf.create_calls == []
+    assert exc.value.code == "billing.custom_domain_limit"
 
 
 # --------------------------------------------------------------------------- #
@@ -358,6 +424,67 @@ async def test_an_already_connected_domain_still_repairs_its_route(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# The capability gate's remaining job.
+#
+# Free includes a domain, so ``_assert_entitled_to_custom_domain`` fires on no tier
+# the catalog currently ships — what bites is the COUNT. That makes the gate easy
+# to read as dead code and delete. It is not dead: it is the fail-closed floor for
+# a catalog that grants zero, which is exactly what reverting the captain's rule
+# would produce. These two prove it still works, so the guard is pinned rather than
+# merely present.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_catalog_granting_no_domain_at_all_still_refuses(monkeypatch):
+    """Floor allowance 0 → the capability gate is the whole defence again."""
+    _enforce(monkeypatch, on=True)
+    monkeypatch.setitem(site_plans._SITE_PLAN_MAX_DOMAINED_SITES, _the_free_tier(), 0)
+    ws = "ws_zero_floor"
+    site_id = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier())
+    cf = _RecordingCF()
+
+    with pytest.raises(CloudError) as exc:
+        await sites_service.add_domain(
+            workspace_id=ws,
+            site_id=site_id,
+            hostname="www.zerofloor.com",
+            _cloudflare=cf,
+        )
+
+    assert exc.value.status_code == 402
+    assert exc.value.code == "billing.custom_domain_not_entitled"
+    assert cf.create_calls == []
+
+
+async def test_with_a_zero_floor_a_lapsed_paid_site_is_refused_too(monkeypatch):
+    """And the fall-to-the-floor rule falls to whatever the floor actually says.
+
+    The lapsed site is not special-cased anywhere — it simply resolves to the base
+    tier's allowance. Set that to 0 and a cancelled subscription refuses again,
+    which is the pre-2026-08-21 behaviour, reachable by one catalog edit.
+    """
+    _enforce(monkeypatch, on=True)
+    monkeypatch.setitem(site_plans._SITE_PLAN_MAX_DOMAINED_SITES, _the_free_tier(), 0)
+    ws = "ws_zero_floor_lapsed"
+    site_id = await _seed_site(
+        workspace_id=ws,
+        plan_tier=_a_tier_granting_custom_domain(),
+        subscription_status="cancelled",
+    )
+    cf = _RecordingCF()
+
+    with pytest.raises(CloudError) as exc:
+        await sites_service.add_domain(
+            workspace_id=ws,
+            site_id=site_id,
+            hostname="www.zerolapsed.com",
+            _cloudflare=cf,
+        )
+
+    assert exc.value.code == "billing.custom_domain_not_entitled"
+
+
+# --------------------------------------------------------------------------- #
 # OSS / self-host — billing off means no paywall.
 # --------------------------------------------------------------------------- #
 
@@ -380,6 +507,31 @@ async def test_with_billing_off_the_gate_never_fires(monkeypatch):
 
     assert res.hostname == "www.selfhost.com"
     assert len(cf.create_calls) == 1
+
+
+async def test_with_billing_off_even_a_zero_floor_attaches(monkeypatch):
+    """The pair to the zero-floor refusal above, and the only test that can see
+    the capability gate's own flag check.
+
+    On the catalog as shipped, dropping ``if not billing_enforced: return`` from
+    that gate changes nothing: every tier grants a domain, so the gate returns
+    either way and a mutation deleting the check escapes unnoticed. Zero the floor
+    and the two paths finally differ — enforced refuses, self-host attaches.
+    """
+    _enforce(monkeypatch, on=False)
+    monkeypatch.setitem(site_plans._SITE_PLAN_MAX_DOMAINED_SITES, _the_free_tier(), 0)
+    ws = "ws_oss_zero_floor"
+    site_id = await _seed_site(workspace_id=ws, plan_tier=_the_free_tier())
+    cf = _RecordingCF()
+
+    res = await sites_service.add_domain(
+        workspace_id=ws,
+        site_id=site_id,
+        hostname="www.ossfloor.com",
+        _cloudflare=cf,
+    )
+
+    assert res.hostname == "www.ossfloor.com"
 
 
 # --------------------------------------------------------------------------- #

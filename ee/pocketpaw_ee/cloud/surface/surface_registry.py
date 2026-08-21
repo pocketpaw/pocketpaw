@@ -33,6 +33,15 @@
 # guarantees every ``SurfaceKind`` has exactly one row and no row names a bogus
 # kind — resolving the design's open question (keep the enum + assert).
 #
+# Changes: 2026-07-23 (feat/ship-surface-kind, SHIP-8a) — registered the SHIP
+# surface (/ship — the managed-deploy control plane). Its handler
+# (``ship.build_preamble``) joins the handler-import list + the ``SURFACES`` row,
+# and a new ``_ship_profile`` resolver gives it a ripple-OFF ``SurfaceProfile``
+# scoped to the ship verb tools: ``_McpToolIds`` grows a ``ship_allow`` field,
+# loaded from ``SHIP_TOOL_IDS`` (importable on this branch, so it rides the same
+# try/except None-degrade path as the loom/media ids) and surfaced via the
+# ``ship`` skill. Ripple OFF so the agent drives managed deploys instead of
+# building a dashboard.
 # Changes: 2026-07-14 (Paw Bar concierge seam, T2) — registered the CONCIERGE
 # surface (/paw-bar — the public concierge widget). Its handler
 # (``concierge.build_preamble``) joins the row list and ``_concierge_profile``
@@ -132,6 +141,7 @@ from pocketpaw_ee.cloud.surface.handlers import (
     pockets_list,
     quickask,
     settings,
+    ship,
     sidepanel,
     sites,
     studio,
@@ -379,6 +389,11 @@ class _McpToolIds(NamedTuple):
     sites_allow: frozenset[str] | None
     studio_allow: frozenset[str] | None
     belt_allow: frozenset[str] | None
+    # Defaulted, unlike the fields above: a test that pins the cache by naming
+    # only the fields it knows (test_sites_handler builds one with five) must not
+    # break when a NEW surface adds an allow-list. ``None`` is the degrade value
+    # (no MCP restriction), which is the safe direction to default toward.
+    ship_allow: frozenset[str] | None = None
 
 
 # Built lazily + memoized: pulling the EE mcp-server tool-id constants at module
@@ -405,6 +420,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
         from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.media import MEDIA_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.palette import PALETTE_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.ship import SHIP_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.stock_images import STOCK_TOOL_IDS
 
@@ -440,6 +456,13 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             # (so the agent grounds itself before coding) UNION the Instinct
             # gate tool (so it proposes the diff through the gate).
             belt_allow=frozenset(LOOM_TOOL_IDS) | _BELT_GATE_TOOL_IDS,
+            # /ship (the managed-deploy control plane) scopes to the ship verb
+            # tools (list/provision boxes, list/create/deploy apps, add domain,
+            # create db, logs, metrics, request-destroy). Crossed over as a plain
+            # frozenset[str] — no pocketpaw_ee symbol leaks into the OSS surface
+            # service. Unlike belt's gate id, SHIP_TOOL_IDS IS importable here, so
+            # it rides the same try/except None-degrade path as the others.
+            ship_allow=frozenset(SHIP_TOOL_IDS),
         )
     except Exception:  # noqa: BLE001 — degrade to no restriction, never break chat
         logger.warning(
@@ -452,6 +475,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             sites_allow=None,
             studio_allow=None,
             belt_allow=None,
+            ship_allow=None,
         )
 
 
@@ -509,6 +533,22 @@ def _belt_profile(_meta: SurfaceMeta) -> SurfaceProfile:
         skill_names=frozenset({"belt"}),
         allowed_sdk_tools=frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep"}),
         allow_mcp_tool_ids=_mcp_tool_ids().belt_allow,
+    )
+
+
+def _ship_profile(_meta: SurfaceMeta) -> SurfaceProfile:
+    # Ship: the managed-deploy control plane. Ripple OFF so the agent drives
+    # managed deploys through the ship verb tools instead of building a
+    # dashboard; the `ship` skill carries the full playbook (the verb loop + the
+    # safety rule); the MCP allow-list is scoped to the ship verb tools
+    # (SHIP_TOOL_IDS — list/provision boxes, list/create/deploy apps, add domain,
+    # create db, logs, metrics, request-destroy). No SDK-tool allowlist: ship
+    # drives infra purely through MCP verbs, not code. ship_allow is None when the
+    # import degraded (no MCP restriction — never break chat).
+    return SurfaceProfile(
+        ripple_mode="off",
+        skill_names=frozenset({"ship"}),
+        allow_mcp_tool_ids=_mcp_tool_ids().ship_allow,
     )
 
 
@@ -793,6 +833,12 @@ SURFACES: list[SurfaceSpec] = [
         _route_for(SurfaceKind.BELT),
         belt.build_preamble,
         profile_resolver=_belt_profile,
+    ),
+    SurfaceSpec(
+        SurfaceKind.SHIP,
+        _route_for(SurfaceKind.SHIP),
+        ship.build_preamble,
+        profile_resolver=_ship_profile,
     ),
     SurfaceSpec(
         SurfaceKind.CONCIERGE,

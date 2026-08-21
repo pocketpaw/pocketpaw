@@ -1680,7 +1680,10 @@ The pocket already exists.
 
 _CREATION_EXAMPLES_MCP = """\
 <creation-examples>
-Two minimal examples showing the ``create_pocket`` envelope.
+Four examples: two minimal (prop shapes) + two rich patterns (a
+composite dashboard and a full app). The rich ones exist because the
+#1 pocket-quality miss is rebuilding a composite/app shape out of
+flex/card/table primitives instead of reaching for the typed widget.
 
 These show PROP SHAPES — how state seeds work, how a controls row
 wires to actions, how `accessorKey` maps to row keys, how `stat` and
@@ -1773,6 +1776,75 @@ recipes, notes, articles, profile cards, how-to references, runbooks.
           "variant": "body"
         }}
       ]
+    }
+  )
+
+## Dashboard pocket (composite widget — ALL data in PROPS, no sibling rebuild)
+
+A "sales pipeline / quota / revenue dashboard" brief is ONE
+``pipeline-dashboard`` at the root — NOT a grid of ``stat`` tiles + a
+``chart`` + a ``table``. The composite renders its own funnel,
+leaderboard, deals table, and ticker internally; pass data via props and
+do NOT surround it with sibling ``stat`` / ``funnel`` / ``chart`` nodes
+(that duplicates its internals). Same rule for ``analytics-dashboard``,
+``exec-dashboard``, ``ops-dashboard``, ``project-dashboard``.
+
+  create_pocket(
+    name="Sales pipeline",
+    type="deep-work",
+    ripple_spec={"type": "pipeline-dashboard", "props": {
+      "title": "Sales pipeline", "period": "Q3 2026",
+      "quota": {"label": "Team quota", "current": 1820000,
+        "target": 2500000, "currency": "$"},
+      "funnel": {"stages": [
+        {"label": "Leads", "value": 1240}, {"label": "Qualified", "value": 480},
+        {"label": "Proposal", "value": 180}, {"label": "Closed won", "value": 38}]},
+      "leaderboard": {"items": [
+        {"name": "Alex Liu", "value": "$420k", "sublabel": "12 deals"},
+        {"name": "Sam Patel", "value": "$380k", "sublabel": "9 deals"}]},
+      "deals": {"columns": [
+        {"key": "name", "label": "Deal"}, {"key": "stage", "label": "Stage"},
+        {"key": "value", "label": "Value", "align": "right"}],
+        "rows": [{"name": "Globex Q3", "stage": "Negotiation", "value": "$120k"}]}
+    }}
+  )
+
+## Full app pocket (app-shell chrome + master-detail — NOT a flex rebuild)
+
+An "app for triaging X" brief (tickets, leads, inbox, moderation queue)
+is an ``app-shell`` root with a ``sidebar`` (grouped nav, NOT a column of
+``button`` widgets), a ``master-detail`` for the list, and a
+``comment-thread`` beside it for the selected item (NOT a flex of
+``card`` widgets). ``master-detail`` has NO ``detail`` prop — it owns the
+list only (``items`` + ``valueKey``/``labelKey``); put the detail widgets
+next to it in the content and bind them to the selection. Reach for these
+structural widgets — do NOT rebuild the shell / list / thread from
+``split`` / ``flex`` / ``each`` / ``card``.
+
+  create_pocket(
+    name="Support inbox",
+    type="deep-work",
+    ripple_spec={
+      "state": {"selected": 1, "tickets": [
+        {"id": 1, "title": "Webhook 500s", "customer": "Globex", "status": "in-progress"},
+        {"id": 2, "title": "Slow exports", "customer": "Stark", "status": "open"}]},
+      "ui": {"type": "app-shell", "children": [
+        {"slot": "sidebar", "type": "sidebar", "props": {"title": "Inbox", "items": [
+            {"label": "All tickets", "value": "all", "group": "INBOX", "badge": "47"},
+            {"label": "Assigned to me", "value": "mine", "group": "INBOX", "badge": "12"}]}},
+        {"type": "split", "props": {"direction": "horizontal", "defaultSize": 40}, "children": [
+          {"type": "master-detail", "bind": "selected", "props": {
+            "items": "{state.tickets}", "valueKey": "id", "labelKey": "title",
+            "descriptionKey": "customer", "badgeKey": "status", "width": "100%"}},
+          {"type": "flex", "props": {"direction": "column", "gap": 12}, "children": [
+            {"type": "heading", "props": {"text": "Webhook 500s", "level": 3}},
+            {"type": "comment-thread", "props": {"comments": [
+              {"id": 1, "author": "Customer", "body": "Webhooks 500 for 2h.", "timestamp": "2h ago"},
+              {"id": 2, "author": "Alex", "body": "On it — retry storm from the outage.",
+               "timestamp": "12m ago"}]}}
+          ]}
+        ]}
+      ]}
     }
   )
 </creation-examples>

@@ -61,6 +61,13 @@
 # so the belt handler's ``build_preamble`` injects them into the preamble and
 # tells the agent NOT to ask for the repo (and to pass exactly these into
 # ``belt_propose_change``). Absent → the handler keeps the ask-first behavior.
+# Changes: 2026-07-23 (feat/ship-surface-kind, SHIP-8a) — added the ``SHIP``
+# surface (/ship — the managed-deploy control plane). Its ripple-OFF profile in
+# ``surface_registry`` scopes the agent to the ``pocketpaw_ship`` MCP verbs so it
+# drives managed deploys (provision boxes, deploy apps, route domains, attach
+# DBs, read logs/metrics) instead of building a dashboard — and every teardown
+# only files a proposal for human approval. SHIP carries no surface-specific
+# ``SurfaceMeta`` fields (the ship tools resolve tenancy from the chat session).
 # Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — added
 # ``SurfacePreamble``, the value object every ``build_preamble`` handler now
 # returns: the rendered text AND the ``cache_key`` that says what the handler
@@ -123,6 +130,7 @@ class SurfaceKind(StrEnum):
     STUDIO = "studio"  # /studio — describe→generate media (image + video)
     CODE = "code"  # /code — agent edits + runs code in the workspace
     BELT = "belt"  # /belt — the develop station (orient→develop→propose via gate)
+    SHIP = "ship"  # /ship — the managed-deploy control plane (drive deploys via ship MCP verbs)
     # A PUBLIC, anonymous Paw Bar concierge chat (T2) — a foreign site's embedded
     # widget, answering visitors grounded in the Site's pocket ONLY. Its profile
     # (``surface_registry._concierge_profile``) is ripple-OFF and PUBLIC-SAFE: it

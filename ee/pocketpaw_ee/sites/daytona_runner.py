@@ -274,6 +274,7 @@ async def run_build(
     disk_gb: int = 10,
     install_command: str = "bun install",
     build_command: str = "bun run build",
+    artifact_rel: str | None = None,
 ) -> BuildRunResult:
     """Build ``files`` in a fresh Daytona sandbox and return the verdict + artifact.
 
@@ -284,6 +285,12 @@ async def run_build(
     ``timeout_seconds`` is a parameter and deliberately has no default: the value comes
     from ``daytona_build.build_timeout_seconds`` over measured p95s, and baking a guess
     in here would quietly become the real policy.
+
+    ``artifact_rel`` (SL-4) names which output dir this build will write, for the one
+    engine whose builds have two shapes. It is threaded straight through to the wrapper's
+    include-list and sentinel; ``None`` keeps the nominal per-engine value. The caller
+    predicts it — this module does not, because the prediction reads the pocket's bindings
+    and this module is deliberately ignorant of everything but files and a sandbox.
 
     Never raises for a build outcome — a failed build, a timeout and a lost sandbox are
     all *results*, and the caller needs the classification to decide between reporting
@@ -306,10 +313,18 @@ async def run_build(
         artifact_path=SANDBOX_ARTIFACT_PATH,
         install_command=install_command,
         build_command=build_command,
+        artifact_rel=artifact_rel,
     )
     # Rendered here rather than inside the wrapper so an engine whose output is the
     # project root fails BEFORE a sandbox is created and billed.
-    artifact_tar_command(engine, SANDBOX_PROJECT_DIR, SANDBOX_ARTIFACT_PATH)
+    #
+    # ``artifact_rel`` is passed (SL-4) rather than left to default. Validating the NOMINAL
+    # rel while the wrapper packs an OVERRIDDEN one would make this pre-flight check the
+    # one place in the lane that disagrees with what actually runs — it would clear an
+    # override the tar then refuses, which is the opposite of what a pre-flight is for.
+    artifact_tar_command(
+        engine, SANDBOX_PROJECT_DIR, SANDBOX_ARTIFACT_PATH, output_rel=artifact_rel
+    )
 
     name = sandbox_name or f"paw-build-{int(time.time() * 1000)}"
     idle_minutes = _lifecycle_minutes(timeout_seconds)

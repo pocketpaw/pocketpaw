@@ -1,0 +1,108 @@
+[
+  {
+    "label": "the session key reverts to the visitor handle — every conversation is one agent session again (the original bug)",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    session_key = f\"cloud:concierge:{ctx.pocket_id}:{conversation_key}:{widget.agent_id}\"",
+    "replace": "    session_key = f\"cloud:concierge:{ctx.pocket_id}:{body.customer_ref}:{widget.agent_id}\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_session_key_is_scoped_to_the_conversation_not_the_visitor",
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_a_fresh_conversation_starts_cold"
+    ]
+  },
+  {
+    "label": "history stops scoping to the conversation — an abandoned thread replays into a fresh one",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if session_key:\n        predicates.append(ChatRunDoc.session_key == session_key)",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_a_fresh_conversation_starts_cold"
+    ]
+  },
+  {
+    "label": "the client-supplied conversation id is trusted without checking whose it is",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "            if (\n                named is not None\n                and named.widget_id == body.widget_id\n                and named.customer_ref == body.customer_ref\n            ):\n                conversation = named",
+    "replace": "            if named is not None:\n                conversation = named",
+    "tests": [
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_a_stranger_conversation_id_falls_back_to_your_own"
+    ]
+  },
+  {
+    "label": "opening a conversation stops retiring the previous one — two actives, and the upsert picks arbitrarily",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "            await db.execute(\n                \"UPDATE paw_bar_conversations SET active = 0, updated_at = ?\"\n                \" WHERE widget_id = ? AND customer_ref = ? AND active = 1\",\n                (now, widget_id, customer_ref),\n            )",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_opening_a_conversation_mints_a_genuinely_new_row",
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_visitor_conversations_list_newest_first"
+    ]
+  },
+  {
+    "label": "an owner action loses its active scope — closing one conversation closes the visitor's whole history",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "                \" WHERE widget_id = ? AND customer_ref = ? AND active = 1\"\n            )\n            values.extend([widget_id, customer_ref])",
+    "replace": "                \" WHERE widget_id = ? AND customer_ref = ?\"\n            )\n            values.extend([widget_id, customer_ref])",
+    "tests": [
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_owner_actions_touch_only_the_conversation_in_progress"
+    ]
+  },
+  {
+    "label": "the visitor turn lands on any conversation, not the one in progress",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "        conditions = \"widget_id = ? AND customer_ref = ? AND active = 1\"\n        params: list[Any] = [widget_id, customer_ref]\n        ws_cond, ws_params = _conversation_workspace_scope(workspace_id)\n        if ws_cond:\n            conditions += f\" AND {ws_cond}\"\n            params.extend(ws_params)\n        sql, bound = self._conversation_select(conditions, params, order=\"LIMIT 1\")",
+    "replace": "        conditions = \"widget_id = ? AND customer_ref = ?\"\n        params: list[Any] = [widget_id, customer_ref]\n        ws_cond, ws_params = _conversation_workspace_scope(workspace_id)\n        if ws_cond:\n            conditions += f\" AND {ws_cond}\"\n            params.extend(ws_params)\n        sql, bound = self._conversation_select(conditions, params, order=\"LIMIT 1\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_visitor_turns_land_on_the_active_conversation",
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_owner_actions_touch_only_the_conversation_in_progress",
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_a_retired_conversation_is_not_the_one_in_progress"
+    ]
+  },
+  {
+    "label": "the visitor list stops filtering by visitor — a stranger's conversations become listable",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "        conditions = \"widget_id = ? AND customer_ref = ?\"\n        params: list[Any] = [widget_id, customer_ref]\n        ws_cond, ws_params = _conversation_workspace_scope(workspace_id)\n        if ws_cond:\n            conditions += f\" AND {ws_cond}\"\n            params.extend(ws_params)\n        bounded = max(1, min(int(limit or _VISITOR_CONVERSATIONS_CAP), _VISITOR_CONVERSATIONS_CAP))",
+    "replace": "        conditions = \"widget_id = ?\"\n        params: list[Any] = [widget_id]\n        ws_cond, ws_params = _conversation_workspace_scope(workspace_id)\n        if ws_cond:\n            conditions += f\" AND {ws_cond}\"\n            params.extend(ws_params)\n        bounded = max(1, min(int(limit or _VISITOR_CONVERSATIONS_CAP), _VISITOR_CONVERSATIONS_CAP))",
+    "tests": [
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_visitor_conversations_list_newest_first",
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_visitor_conversations_never_leak_across_visitors"
+    ]
+  },
+  {
+    "label": "the legacy pair UNIQUE is never dropped — a deployed DB still cannot hold a second conversation",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "            await PawBarStore._drop_legacy_conversation_pair_unique(db)",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_legacy_db_sheds_the_pair_unique_and_keeps_its_row",
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_the_rebuild_is_idempotent"
+    ]
+  },
+  {
+    "label": "the rebuild drops the rows it was meant to carry across",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "        await db.execute(\n            f\"INSERT INTO paw_bar_conversations_rebuild ({columns})\"",
+    "replace": "        await db.execute(\n            f\"INSERT INTO paw_bar_conversations_rebuild ({columns}) SELECT NULL WHERE 0 --\"\n            f\" ignored: (\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_legacy_db_sheds_the_pair_unique_and_keeps_its_row"
+    ]
+  },
+  {
+    "label": "the partial unique index loses its WHERE — a retired conversation now collides with the active one",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "CREATE UNIQUE INDEX IF NOT EXISTS idx_pp_conversations_active\n    ON paw_bar_conversations(widget_id, customer_ref) WHERE active = 1;",
+    "replace": "CREATE UNIQUE INDEX IF NOT EXISTS idx_pp_conversations_active\n    ON paw_bar_conversations(widget_id, customer_ref);",
+    "tests": [
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_opening_a_conversation_mints_a_genuinely_new_row",
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_visitor_conversations_list_newest_first"
+    ]
+  },
+  {
+    "label": "the active invariant is dropped entirely — two conversations in progress at once",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "CREATE UNIQUE INDEX IF NOT EXISTS idx_pp_conversations_active\n    ON paw_bar_conversations(widget_id, customer_ref) WHERE active = 1;",
+    "replace": "CREATE INDEX IF NOT EXISTS idx_pp_conversations_active\n    ON paw_bar_conversations(widget_id, customer_ref) WHERE active = 1;",
+    "tests": [
+      "tests/cloud/test_paw_bar_conversation_identity.py::test_the_active_invariant_survives_the_rebuild"
+    ]
+  }
+]

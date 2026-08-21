@@ -593,6 +593,13 @@ class Conversation(BaseModel):
     # uses it to say when the bot hands itself back.
     bot_paused_at: str = ""
     unread_for_owner: int = 0
+    # 2026-08-19 (conversation identity): is this the visitor's conversation IN
+    # PROGRESS? A visitor may own several — starting over retires the current one
+    # (``active = False``) and opens a fresh one — and a partial unique index
+    # keeps at most one active per (widget, visitor), so a chat turn that names no
+    # conversation still resolves to exactly one row. Defaults True because every
+    # row written before this existed was that visitor's only conversation.
+    active: bool = True
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
@@ -647,6 +654,11 @@ class OwnerMessage(BaseModel):
     id: str = Field(default_factory=_gen_owner_message_id)
     widget_id: str
     customer_ref: str
+    #: The conversation this line was said in (2026-08-19). Empty only for lines
+    #: written before the column existed and never backfilled — see the store's
+    #: migration. It is what stops an owner's reply appearing in a thread it does
+    #: not belong to.
+    conversation_id: str = ""
     workspace_id: str = ""
     role: OwnerMessageRole = OwnerMessageRole.OWNER
     content: str = ""
