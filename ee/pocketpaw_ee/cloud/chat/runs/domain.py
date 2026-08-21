@@ -78,6 +78,11 @@ class RunSpec(BaseModel):
     # must ride the spec to survive the submit. ``None`` = backend picks the model
     # (the legacy path). Validated at the HTTP edge before it ever reaches here.
     model_override: str | None = None
+    # Studio Flow build context, mirrored from ``CloudAgentChatRequest.flow_context``
+    # so the executor (which rebuilds its own ctx from this spec) can inject the
+    # ACTIVE FLOW ID into the agent's prompt and drive ``build_studio_flow`` into
+    # the right flow project. ``None`` = no flow context (every non-studio run).
+    flow_context: dict[str, Any] | None = None
 
 
 class RunActivityRow(BaseModel):

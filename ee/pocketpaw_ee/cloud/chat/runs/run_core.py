@@ -748,6 +748,69 @@ async def _maybe_handle_specialist_response(
         )
 
 
+def _studio_flow_payload(output: Any) -> dict[str, Any] | None:
+    """Extract the ``build_studio_flow`` result from a tool_result's output.
+
+    Mirrors the OSS ``agents/loop.py::_publish_studio_flow_event``: the MCP
+    handler returns ``{"studio_flow": {goal, nodes, edges, flow_id}}`` — the
+    full node/edge graph for the /studio Flow canvas. ``tool_result`` fans to
+    the client as a truncated 200-char chip, far too small for a graph, so we
+    detect the marker envelope here and emit a DEDICATED ``studio_flow`` SSE
+    frame (the same shape the paw-enterprise ``onStudioServerEvent`` handler
+    reads: ``{spec, flow_id}``). Returns None when the output is not a studio
+    flow build (every other tool_result passes through untouched).
+    """
+    text = output if isinstance(output, str) else ""
+    if isinstance(output, dict) and isinstance(output.get("result"), str):
+        text = output["result"]
+    if not isinstance(text, str) or '"studio_flow"' not in text:
+        return None
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    data = json.loads(text[start : i + 1])
+                except (json.JSONDecodeError, ValueError):
+                    return None
+                spec = data.get("studio_flow")
+                if not isinstance(spec, dict):
+                    return None
+                payload: dict[str, Any] = {"spec": spec}
+                spec_fid = spec.get("flow_id")
+                if spec_fid:
+                    payload["flow_id"] = str(spec_fid)
+                logger.info(
+                    "studio_flow event detected: nodes=%d edges=%d goal=%r flow_id=%r",
+                    len(spec.get("nodes") or []),
+                    len(spec.get("edges") or []),
+                    spec.get("goal"),
+                    payload.get("flow_id"),
+                )
+                return payload
+    return None
+
+
 _DEFAULT_TITLES = ("", "New Chat", "Chat")
 _TITLE_PLACEHOLDER_LIMIT = 60
 
@@ -1024,7 +1087,7 @@ def _agent_tool_policy(instance: Any) -> tuple[bool, frozenset[str]]:
     return (True, frozenset(tools))
 
 
-async def _prewarm_session(ctx: ScopeContext) -> None:
+async def _prewarm_session(ctx: ScopeContext, flow_context: dict[str, Any] | None = None) -> None:
     """Eagerly warm the agent's CLI subprocess for this run's session BEFORE the
     first model turn (feat/claude-sdk-prewarm).
 
@@ -1074,6 +1137,19 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
 
         # Mirror _drive_agent_loop's resolution EXACTLY so the cache key matches.
         behavior_instructions = build_behavior_instructions(ctx, backend_name=backend_name)
+        # Mirror the studio-flow-context injection below so the prewarmed
+        # client's cache key MATCHES turn 1's (a mismatch would evict it).
+        if isinstance(flow_context, dict) and flow_context.get("flow_id"):
+            _fid = str(flow_context["flow_id"])
+            behavior_instructions = (
+                f"{behavior_instructions}\n\n[studio flow context]\n"
+                f"You are building a Studio Flow on the desktop canvas.\n"
+                f"ACTIVE FLOW ID: {_fid}\n"
+                f"ACTIVE FLOW NAME: "
+                f"{str(flow_context.get('project_name') or 'Untitled flow')}\n"
+                f'Call build_studio_flow with flow_id="{_fid}" so the graph '
+                f"saves into that flow project. Do NOT invent a different id."
+            )
         surface_deny: frozenset[str] = frozenset()
         surface_allow: frozenset[str] = frozenset()
         surface_allow_mcp: frozenset[str] | None = None
@@ -1156,6 +1232,7 @@ async def _drive_agent_loop(
     history: list[dict[str, str]] | None,
     is_cancelled: Any,
     emit_stream_start: bool,
+    flow_context: dict[str, Any] | None = None,
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     """Drive ``AgentPool.run`` and yield ``(event_name, event_data)`` tuples."""
     pool = get_agent_pool()
@@ -1202,6 +1279,25 @@ async def _drive_agent_loop(
         instance.config.get("backend", "claude_agent_sdk") if hasattr(instance, "config") else None
     )
     behavior_instructions = build_behavior_instructions(ctx, backend_name=backend_name)
+
+    # Studio Flow build context — tell the agent WHICH flow project this
+    # request belongs to so its build_studio_flow call carries the id the
+    # /studio canvas owns (flow_context.flow_id threaded from the chat
+    # request). The MCP handler then persists the graph under that id, the
+    # SSE studio_flow event echoes it, and the canvas saves into the same
+    # project. Without this the agent forks a random flow the user never
+    # asked about (mirrors the OSS AgentLoop's system-prompt injection).
+    if isinstance(flow_context, dict) and flow_context.get("flow_id"):
+        _fid = str(flow_context["flow_id"])
+        _fname = str(flow_context.get("project_name") or "Untitled flow")
+        behavior_instructions = (
+            f"{behavior_instructions}\n\n[studio flow context]\n"
+            f"You are building a Studio Flow on the desktop canvas.\n"
+            f"ACTIVE FLOW ID: {_fid}\n"
+            f"ACTIVE FLOW NAME: {_fname}\n"
+            f'Call build_studio_flow with flow_id="{_fid}" so the graph '
+            f"saves into that flow project. Do NOT invent a different id."
+        )
 
     # HTN-5: one id for the whole invocation. It was previously minted inline in
     # the ``stream_start`` payload, so it existed only when ``emit_stream_start``
@@ -1603,6 +1699,14 @@ async def _drive_agent_loop(
                     output=output,
                     handled_pocket_ids=handled_pocket_ids,
                 )
+                # Detect build_studio_flow tool output and fan the full graph as
+                # a dedicated studio_flow SSE frame (tool_result truncates to
+                # 200 chars — too small for a node graph). Mirrors the OSS
+                # loop's _publish_studio_flow_event so the /studio canvas
+                # materialises the agent's build live on the EE chat path too.
+                _sf_payload = _studio_flow_payload(output)
+                if _sf_payload is not None:
+                    yield ("studio_flow", _sf_payload)
                 # The ask_user ack is internal (the question UI already rendered
                 # from the tool_use); don't surface a tool_result chip for it.
                 if name != _ASK_USER_TOOL_ID:
@@ -1763,6 +1867,10 @@ async def _iter_agent_events(
         history=list(spec.history),
         is_cancelled=_is_cancelled,
         emit_stream_start=True,
+        # Studio Flow build context (flow_id / project_name) so the agent's
+        # prompt carries the ACTIVE FLOW ID and build_studio_flow persists into
+        # the flow project the user is on. None on every non-studio run.
+        flow_context=spec.flow_context,
     ):
         yield ev
 
@@ -2000,7 +2108,7 @@ async def execute_run(spec: RunSpec) -> None:
         # and turn 1 reuses it instead of paying the ~12s cold connect. Fire-and-
         # forget: _prewarm_session swallows every error, so it can never delay or
         # break this run; the task is intentionally not awaited.
-        asyncio.create_task(_prewarm_session(ctx))
+        asyncio.create_task(_prewarm_session(ctx, flow_context=spec.flow_context))
 
         await _mark_running(spec.run_id)
         await _broadcast_agent_typing(ctx, active=True)

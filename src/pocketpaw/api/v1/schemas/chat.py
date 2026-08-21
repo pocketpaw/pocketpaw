@@ -28,6 +28,21 @@ class PocketContext(BaseModel):
     model: str | None = None
 
 
+class FlowContext(BaseModel):
+    """Studio Flow context sent from the desktop client in flow mode.
+
+    Tells the agent WHICH flow a ``build_studio_flow`` request belongs to, so
+    the returned graph persists into the project the user was on rather than a
+    random fork. ``flow_id`` is the desktop ``StudioFlowProject.id``; the agent
+    echoes it in the tool call and the SSE event carries it back for the canvas.
+    """
+
+    flow_id: str = Field(alias="flowId")
+    project_name: str | None = Field(default=None, alias="projectName")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ChatRequest(BaseModel):
     """Send a message for processing.
 
@@ -45,6 +60,7 @@ class ChatRequest(BaseModel):
     media: list[str] = []
     file_context: FileContext | None = Field(default=None, alias="fileContext")
     pocket_context: PocketContext | None = Field(default=None, alias="pocketContext")
+    flow_context: FlowContext | None = Field(default=None, alias="flowContext")
 
     # Enterprise overrides (all optional, ignored in community mode)
     agent_id: str | None = Field(default=None, alias="agentId")
