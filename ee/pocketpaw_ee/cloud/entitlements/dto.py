@@ -140,6 +140,13 @@ class SitePlanTierResponse(BaseModel):
     resells (deterministic JSON; BC-10 provisions these when a domain is added).
     ``dodo_product_id`` is None until config populates it.
 
+    ``purchasable`` is whether a customer can buy this tier at all: a $0 tier
+    always can, a priced tier only once a Dodo recurring product is configured for
+    it. False means the storefront should mark the tier unavailable rather than
+    offer an upgrade button — selecting an unpurchasable paid tier publishes live,
+    takes no money, and grants nothing, which reads to the buyer as a successful
+    upgrade that silently did not work.
+
     ``badge_removal`` and ``sells_concierge`` are what the tier SELLS, not what any
     particular site has: they say a tier may drop the attribution badge and may run
     a visitor concierge. A site gets neither until its own subscription is active —
@@ -154,6 +161,7 @@ class SitePlanTierResponse(BaseModel):
     cloudflare_features: list[str] = Field(default_factory=list)
     badge_removal: bool = False
     sells_concierge: bool = False
+    purchasable: bool = True
 
 
 class SitePlanCatalogResponse(BaseModel):
@@ -171,4 +179,5 @@ def site_plan_tier_to_dto(tier: SitePlanTier) -> SitePlanTierResponse:
         cloudflare_features=sorted(tier.cloudflare_features),
         badge_removal=tier.badge_removal,
         sells_concierge=tier.sells_concierge,
+        purchasable=tier.purchasable,
     )

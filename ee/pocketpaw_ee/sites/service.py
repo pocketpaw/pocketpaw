@@ -4964,6 +4964,31 @@ async def _apply_site_plan(
                 str(doc.id),
                 existing_tier.key,
             )
+    # An UNPURCHASABLE paid tier is not recorded. A priced tier with no configured
+    # Dodo product cannot open a checkout, so ``publish_pocket`` deliberately
+    # publishes live rather than strand the buyer — but stamping the tier anyway
+    # wrote a claim the site could not back: ``plan_tier="pro"`` with
+    # ``subscription_status="none"``, which every entitlement resolves as the free
+    # floor. The buyer picked a paid plan, was charged nothing, received nothing,
+    # and the plan card said "pro". The publish still succeeds and the site still
+    # goes live; what changes is that the record stays true.
+    #
+    # Falls back exactly like the unknown-key path above — to the site's existing
+    # tier, and only then to the floor — so this never downgrades a site that is
+    # already paying for something.
+    if tier is not None and not tier.purchasable:
+        unbuyable = tier.key
+        existing_tier = site_plans.get_site_plan(getattr(doc, "plan_tier", None))
+        tier = existing_tier or site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)
+        logger.warning(
+            "sites: publish for site %s asked for tier %s, which has no configured "
+            "Dodo product and so cannot be bought — recording %s instead of a paid "
+            "tier the site would not actually hold",
+            str(doc.id),
+            unbuyable,
+            tier.key if tier is not None else site_plans.BASE_SITE_PLAN_KEY,
+        )
+
     plan_key = tier.key if tier is not None else site_plans.BASE_SITE_PLAN_KEY
 
     site_id = str(doc.id)
