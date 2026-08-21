@@ -316,3 +316,37 @@ async def test_resolver_does_not_write(beanie_test_db):
     versions.resolve_legacy_statuses(rows)
 
     assert (await _statuses()) == {1: "reverted"}
+
+
+async def test_revert_while_a_draft_is_open_supersedes_that_draft(beanie_test_db):
+    """The ordinary case: the owner has unsaved work and rolls back anyway.
+
+    This is the state the Deploy tab is usually in — a live site, an unpublished
+    draft on top of it, and revert buttons down the timeline. Revert goes
+    through write_draft, so the open draft is REPLACED by the revert draft, and
+    the row says so. It was the one case where the old word came closest to
+    making sense, and it was still wrong: v2 was not reverted, it was overtaken.
+    """
+    v1 = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"n": 1}
+    )
+    await versions.publish(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, version_id=str(v1.id)
+    )
+    v2 = await versions.write_draft(  # unpublished work in progress
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"n": 2}
+    )
+
+    revert_draft = await versions.revert(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, version_id=str(v1.id)
+    )
+
+    assert await _statuses() == {1: "published", 2: "superseded", 3: "draft"}
+    # The revert draft is now the one live draft, carrying v1's content.
+    draft = await versions.get_draft(scope_type="pocket", scope_id=POCKET)
+    assert draft is not None and draft.id == revert_draft.id
+    assert draft.content == {"n": 1}
+    # v1 is still online: the revert has not been published yet.
+    live = await versions.get_published(scope_type="pocket", scope_id=POCKET)
+    assert live is not None and live.id == v1.id
+    assert v2.id not in (draft.id, live.id)

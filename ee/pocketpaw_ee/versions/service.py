@@ -203,6 +203,62 @@ def _emit_version_event(
 # ---------------------------------------------------------------------------
 
 
+async def _supersede_draft_head(head: ArtifactVersion | None) -> ArtifactVersion | None:
+    """Flip a DRAFT branch head to ``"superseded"``; return it, or None.
+
+    P2a's invariant is that AT MOST ONE live draft exists per (scope, branch).
+    write_draft held it and ``revert`` did not, because revert hand-rolled its
+    own copy of the insert and the copy was missing this step — so reverting
+    while the owner had unsaved work left TWO rows saying "draft", one of which
+    had been overtaken. Shared by both writers now so they cannot drift again.
+
+    A published / merged / superseded / discarded head is left alone: a new
+    draft on top of a published version is a reviewable change that must keep
+    the published pointer live.
+    """
+    if head is None or head.status != "draft":
+        return None
+    head.status = "superseded"
+    await head.save()
+    return head
+
+
+def _emit_superseded(
+    *,
+    superseded: ArtifactVersion,
+    scope_type: str,
+    scope_id: str,
+    branch: str,
+    author: str | None,
+    by_row: ArtifactVersion,
+) -> None:
+    """Announce that ``superseded`` was replaced by ``by_row``.
+
+    Call AFTER the replacement is inserted, so the event can name it — a reader
+    asking "what happened to v3" wants the answer, not just the fact that
+    something did. The workspace stamped is the SUPERSEDED row's, not the
+    writer's: the event is a fact about that row, and the projection filters
+    history on the stamped workspace.
+    """
+    _emit_version_event(
+        action="artifact.version.superseded",
+        scope_type=scope_type,
+        scope_id=scope_id,
+        workspace_id=superseded.workspace_id,
+        author=author,
+        payload={
+            "version_id": str(superseded.id),
+            "scope_type": scope_type,
+            "scope_id": scope_id,
+            "branch": branch,
+            "version_no": superseded.version_no,
+            "status": "superseded",
+            "superseded_by_version_id": str(by_row.id),
+            "superseded_by_version_no": by_row.version_no,
+        },
+    )
+
+
 def resolve_legacy_statuses(rows: list[ArtifactVersion]) -> dict[str, str]:
     """Map every row id → the status a reader should be shown.
 
@@ -277,10 +333,7 @@ async def write_draft(
     version_no = (head.version_no + 1) if head else 1
 
     # Supersede the prior DRAFT head so only one live draft survives (P2a B).
-    superseded = head if (head is not None and head.status == "draft") else None
-    if superseded is not None:
-        superseded.status = "superseded"
-        await superseded.save()
+    superseded = await _supersede_draft_head(head)
 
     row = ArtifactVersion(
         scope_type=scope_type,
@@ -313,30 +366,14 @@ async def write_draft(
             "label": label,
         },
     )
-    # Emitted AFTER the insert so the event can name the row that replaced it —
-    # a history reader following "what happened to v3" wants the answer, not
-    # just the fact that something did.
     if superseded is not None:
-        _emit_version_event(
-            action="artifact.version.superseded",
+        _emit_superseded(
+            superseded=superseded,
             scope_type=scope_type,
             scope_id=scope_id,
-            # The SUPERSEDED row's tenant, not the writer's. The event is a fact
-            # about that row, and the projection filters history on the stamped
-            # workspace — stamping the writer would file it under a tenant the
-            # row does not belong to.
-            workspace_id=superseded.workspace_id,
+            branch=branch,
             author=author,
-            payload={
-                "version_id": str(superseded.id),
-                "scope_type": scope_type,
-                "scope_id": scope_id,
-                "branch": branch,
-                "version_no": superseded.version_no,
-                "status": "superseded",
-                "superseded_by_version_id": str(row.id),
-                "superseded_by_version_no": version_no,
-            },
+            by_row=row,
         )
     return row
 
@@ -681,6 +718,10 @@ async def revert(
         scope_type=scope_type, scope_id=scope_id, branch_name=target.branch
     )
     version_no = (head.version_no + 1) if head else 1
+    # A revert is a write like any other, so it takes the draft pointer off
+    # whatever held it. Without this the owner's in-progress draft stayed marked
+    # "draft" alongside the revert draft.
+    superseded = await _supersede_draft_head(head)
 
     new_draft = ArtifactVersion(
         scope_type=scope_type,
@@ -715,6 +756,15 @@ async def revert(
             "label": revert_label,
         },
     )
+    if superseded is not None:
+        _emit_superseded(
+            superseded=superseded,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            branch=target.branch,
+            author=author,
+            by_row=new_draft,
+        )
     return new_draft
 
 
