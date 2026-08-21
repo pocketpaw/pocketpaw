@@ -201,7 +201,6 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
 from pocketpaw_ee.sites import import_service
 from pocketpaw_ee.sites import service as sites_service
-from pocketpaw_ee.versions import service as versions_service
 from pocketpaw_ee.sites.dto import (
     AuditResponse,
     DevPreviewResponse,
@@ -228,6 +227,7 @@ from pocketpaw_ee.sites.dto import (
     SiteVersionResponse,
     VersionHistoryResponse,
 )
+from pocketpaw_ee.versions import service as versions_service
 
 router = APIRouter(
     tags=["Sites"],
