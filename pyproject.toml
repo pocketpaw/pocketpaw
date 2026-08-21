@@ -697,4 +697,13 @@ ignore_imports = [
     "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud._core.errors",
     "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud.file_versions.service",
     "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud.file_versions.dto",
+    # Studio — /studio Flow canvas: build_studio_flow persists the agent-drawn
+    # flow project server-side through the EE cloud store when the workspace
+    # has EE (cloud.studio.fal_edit pattern). Every EE reach is a lazy
+    # try/except runtime import inside the method — the module top-level
+    # imports only OSS (pocketpaw.tools.protocol); a community install
+    # degrades to "nothing to save" and never imports EE statically.
+    "pocketpaw.tools.builtin.studio_flow_tool -> pocketpaw_ee.cloud.chat.agent_service",
+    "pocketpaw.tools.builtin.studio_flow_tool -> pocketpaw_ee.cloud.studio.schemas",
+    "pocketpaw.tools.builtin.studio_flow_tool -> pocketpaw_ee.cloud.studio.service",
 ]
