@@ -151,6 +151,14 @@ Changes:
     recurring checkout; the subscription webhook reverses it (product_id ->
     plan key) to know which tier renewed. A before-validator degrades a
     malformed env string to {} so a typo can't crash settings load.
+  - 2026-08-21: Added ``dodo_site_products`` (default {}, env
+    POCKETPAW_DODO_SITE_PRODUCTS as a JSON object) — the PER-SITE analogue of
+    ``dodo_plan_products``. ``site_plans._dodo_product_for`` has read
+    ``getattr(get_settings(), "dodo_site_products", None)`` since BC-9 and the
+    field it reads was never declared, so the getattr always returned None, every
+    site tier's ``dodo_product_id`` was None, and no per-site plan could be
+    purchased on any deployment however it was configured. Declaring it makes the
+    env var mean something for the first time.
   - 2026-08-21: Added ``sites_billing_enforced`` (default False, env
     ``POCKETPAW_SITES_BILLING_ENFORCED``) — the PER-SITE paywall switch, so the
     Paw Sites seams (custom-domain capability + count caps, concierge
@@ -2317,7 +2325,7 @@ class Settings(BaseSettings):
             "denomination). Set via POCKETPAW_DODO_CREDIT_PRODUCT_ID."
         ),
     )
-    dodo_plan_products: dict[str, str] = Field(
+    dodo_plan_products: Annotated[dict[str, str], NoDecode] = Field(
         default_factory=dict,
         description=(
             "Mapping of plan tier key -> Dodo RECURRING product id (BC-7 "
@@ -2328,6 +2336,25 @@ class Settings(BaseSettings):
             "POCKETPAW_DODO_PLAN_PRODUCTS as a JSON object, e.g. "
             '{"team":"prod_team","business":"prod_biz"}. Default empty disables '
             "subscriptions (subscribe raises a clear ValidationError)."
+        ),
+    )
+    dodo_site_products: Annotated[dict[str, str], NoDecode] = Field(
+        default_factory=dict,
+        description=(
+            "Mapping of PER-SITE plan tier key -> Dodo RECURRING product id (BC-9 "
+            "per-site subscriptions), the per-site analogue of "
+            "dodo_plan_products. ``sites.service.publish_pocket`` looks the "
+            "product up here to decide whether a paid site tier can open a "
+            "checkout at all: with a product it goes charge-first (the site is "
+            "created PENDING and deployed by the subscription.active webhook), "
+            "without one it publishes live and records the tier with NO charge. "
+            "Set via POCKETPAW_DODO_SITE_PRODUCTS as a JSON object, e.g. "
+            '{"pro":"prod_site_pro","business":"prod_site_biz"}. Default empty '
+            "means no per-site tier is purchasable, which is what every "
+            "deployment has been until now — this field was READ by "
+            "site_plans._dodo_product_for from the day per-site plans shipped and "
+            "never DECLARED, so the read always found nothing and setting the env "
+            "var did nothing at all."
         ),
     )
     dodo_checkout_return_base: str = Field(
@@ -2797,17 +2824,45 @@ class Settings(BaseSettings):
         ),
     )
 
+    @field_validator("dodo_site_products", mode="before")
+    @classmethod
+    def _parse_dodo_site_products(cls, v: object) -> object:
+        """Same degrade as the workspace-plan map: a malformed env string becomes
+        an empty mapping rather than crashing settings load at boot.
+
+        The consequence of an empty mapping is milder here and worth knowing: no
+        per-site tier is purchasable, so a paid selection publishes live and
+        records the tier without a charge. It does not raise.
+        """
+        if v is None or v == "":
+            return {}
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+            except ValueError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return v
+
     @field_validator("dodo_plan_products", mode="before")
     @classmethod
     def _parse_dodo_plan_products(cls, v: object) -> object:
         """Accept a JSON-object env string for the plan->product map.
 
-        pydantic-settings parses JSON for dict fields, but a hand-set
-        ``POCKETPAW_DODO_PLAN_PRODUCTS`` that isn't valid JSON (or isn't an
-        object) should degrade to an empty mapping — subscriptions then fail
+        A hand-set ``POCKETPAW_DODO_PLAN_PRODUCTS`` that isn't valid JSON (or
+        isn't an object) degrades to an empty mapping — subscriptions then fail
         loudly at ``subscribe`` time with a clear ``plan_unconfigured`` error
         rather than crashing the entire settings load at boot. A dict passes
         straight through.
+
+        THE FIELD NEEDS ``NoDecode`` FOR ANY OF THAT TO HAPPEN, and it did not
+        carry it until 2026-08-21. ``EnvSettingsSource`` JSON-decodes a complex
+        field's raw value at SOURCE time, before a single field validator runs,
+        and raises ``SettingsError`` on failure — so this validator was
+        unreachable for exactly the malformed input it was written to absorb, and
+        the docstring claiming otherwise was wrong for as long as it existed. A
+        typo in the env var took the server down at boot. Measured, not inferred:
+        see tests/cloud/billing/test_site_plan_purchasable.py.
         """
         if v is None or v == "":
             return {}

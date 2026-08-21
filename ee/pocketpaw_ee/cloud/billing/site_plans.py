@@ -51,6 +51,19 @@
 #   that BC-10 provisions. Also added ``_FREE_MAX_HOSTNAMES_PER_SITE`` — see its
 #   own comment for why a site-unit cap needs a hostname-unit companion.
 
+# Updated 2026-08-21 (feat/site-plan-purchasable): added the ``purchasable``
+# property — "can a customer actually buy this tier right now". It is not a new
+# rule, it is an existing one that had no name: a paid tier with no configured
+# Dodo product cannot open a checkout, so ``publish_pocket`` skips charge-first
+# and publishes live with no charge. Nothing on the wire said so, which meant the
+# storefront happily offered an upgrade button that took no money and granted no
+# capability. Naming it lets the card say so instead.
+#
+# It was unbuyable everywhere until today for a duller reason than "unconfigured":
+# ``_dodo_product_for`` reads ``dodo_site_products`` off settings, and that field
+# was never declared, so the read always found None no matter what the environment
+# said. The field exists now.
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -137,9 +150,10 @@ class SitePlanTier:
     is the set of Cloudflare features the tier resells (BC-10 provisions them).
     ``badge_removal`` is whether a site on this tier may ship without the
     attribution badge — read by ``sites.badge.badge_required``. ``sells_concierge``
-    is derived, not stored (see the property). ``max_domained_sites`` is how many
-    SITES in the workspace may carry a custom domain on this tier (None =
-    uncapped) — the site, not the hostname, so apex + ``www`` on one site spend one.
+    and ``purchasable`` are derived, not stored (see the properties).
+    ``max_domained_sites`` is how many SITES in the workspace may carry a custom
+    domain on this tier (None = uncapped) — the site, not the hostname, so apex +
+    ``www`` on one site spend one.
     """
 
     key: str
@@ -148,6 +162,24 @@ class SitePlanTier:
     cloudflare_features: frozenset[str]
     badge_removal: bool = False
     max_domained_sites: int | None = 0
+
+    @property
+    def purchasable(self) -> bool:
+        """Can a customer actually buy this tier right now?
+
+        A $0 tier is always purchasable — there is nothing to buy, so selecting it
+        always succeeds. A priced tier needs a configured Dodo recurring product,
+        because without one ``publish_pocket`` cannot open a checkout and falls
+        back to publishing live and recording the tier with no charge. The site
+        then holds a paid ``plan_tier`` with ``subscription_status="none"``, which
+        every entitlement resolves against as the free floor.
+
+        Derived rather than stored, so it tracks configuration rather than a
+        deploy-time snapshot. Surfaced on the plan-catalog DTO so a buyer-facing
+        card can mark a tier unavailable instead of offering a button that quietly
+        does nothing.
+        """
+        return self.annual_price_usd == 0 or self.dodo_product_id is not None
 
     @property
     def sells_concierge(self) -> bool:
