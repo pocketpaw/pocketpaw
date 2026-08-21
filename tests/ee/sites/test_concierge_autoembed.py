@@ -361,11 +361,23 @@ async def test_a_broken_injection_never_costs_the_site_its_deploy(
 # ``concierge_snippet`` directly, so deleting the whole
 # ``if get_settings().billing_enforced:`` block left the suite green. That block is
 # also exactly where the charge-first bug lived, which is why it went unnoticed.
+#
+# Updated 2026-08-21 (fix/sites-concierge-flag): the block now reads
+# ``concierge_enforced()``, the concierge's own switch. It briefly rode on
+# ``sites_billing_enforced`` and enabling that flag for the DOMAIN caps took the
+# concierge off every production site. Neither paywall flag reaches this gate any
+# more, which is why the stub below sets all three rather than one.
 # --------------------------------------------------------------------------- #
 
 
 def _billing(monkeypatch, *, on: bool) -> None:
-    """Point the lazily-imported ``get_settings`` at a billing-posture stub."""
+    """Point the lazily-imported ``get_settings`` at a billing-posture stub.
+
+    ``sites_concierge_enforced`` is the one that arms this gate. The other two are
+    set alongside it only so the stub resembles a real Settings; a test proving
+    they must NOT arm it lives in
+    tests/cloud/sites/test_concierge_not_on_the_domain_flag.py.
+    """
     from types import SimpleNamespace
 
     import pocketpaw.config as ppconfig
@@ -373,7 +385,12 @@ def _billing(monkeypatch, *, on: bool) -> None:
     monkeypatch.setattr(
         ppconfig,
         "get_settings",
-        lambda: SimpleNamespace(billing_enforced=on, dodo_site_products=None),
+        lambda: SimpleNamespace(
+            billing_enforced=on,
+            sites_billing_enforced=on,
+            sites_concierge_enforced=on,
+            dodo_site_products=None,
+        ),
     )
 
 

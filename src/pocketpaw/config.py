@@ -151,6 +151,12 @@ Changes:
     recurring checkout; the subscription webhook reverses it (product_id ->
     plan key) to know which tier renewed. A before-validator degrades a
     malformed env string to {} so a typo can't crash settings load.
+  - 2026-08-21: Added ``sites_concierge_enforced`` (default False, env
+    ``POCKETPAW_SITES_CONCIERGE_ENFORCED``) — the VISITOR CONCIERGE entitlement
+    switch, split back out of ``sites_billing_enforced`` after enabling the
+    latter in production took the concierge off every site. Neither paywall flag
+    gates the concierge any more; only this one does. See its docstring for why
+    it must stay off until a tier can sell a concierge.
   - 2026-08-21: Added ``sites_billing_enforced`` (default False, env
     ``POCKETPAW_SITES_BILLING_ENFORCED``) — the PER-SITE paywall switch, so the
     Paw Sites seams (custom-domain capability + count caps, concierge
@@ -2404,7 +2410,27 @@ class Settings(BaseSettings):
             "credit blocks, the seat cap, the pocket cap, the connector cap, the "
             "daily call budget and the storage cap. Default False, so OSS / "
             "self-host sees no paywall and the seams do no extra database read. Set "
-            "via POCKETPAW_SITES_BILLING_ENFORCED."
+            "via POCKETPAW_SITES_BILLING_ENFORCED. Does NOT gate the visitor "
+            "concierge — that has its own flag, for the reason in its docstring."
+        ),
+    )
+    sites_concierge_enforced: bool = Field(
+        default=False,
+        description=(
+            "Per-site VISITOR CONCIERGE entitlement enforcement. When True, a site "
+            "may serve its concierge only if its own plan tier sells one AND its "
+            "per-site subscription is active; the owner's concierge_enabled switch "
+            "is checked first either way and always wins. Deliberately its OWN "
+            "flag, gated by neither billing_enforced nor sites_billing_enforced: "
+            "no catalog tier below the (unbuilt) staff tier sells the concierge, "
+            "and POCKETPAW_DODO_SITE_PRODUCTS is configured in no deployment, so "
+            "no site can reach an active per-site subscription. Turning this on "
+            "today removes the concierge from every site with no way for any "
+            "customer to buy it back, which is an outage rather than a paywall — "
+            "and it is exactly what happened on 2026-08-21 when the concierge rode "
+            "on sites_billing_enforced. Set it on the day a tier can actually sell "
+            "a concierge, not before. Default False. Set via "
+            "POCKETPAW_SITES_CONCIERGE_ENFORCED."
         ),
     )
 

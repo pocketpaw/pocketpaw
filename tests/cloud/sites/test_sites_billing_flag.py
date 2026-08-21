@@ -11,7 +11,9 @@
 # seam is the OR of the two. Three properties matter, and the middle one is the
 # whole point of the flag:
 #
-#   1. Setting the sites flag alone makes the sites seams enforce.
+#   1. Setting the sites flag alone makes the DOMAIN seams enforce. Domain only:
+#      the visitor concierge was on this switch for one day and it caused an
+#      outage — see test_concierge_not_on_the_domain_flag.py.
 #   2. Setting the sites flag alone leaves EVERY workspace cap untouched. Tested
 #      as an explicit negative, not inferred — a flag that quietly widened would
 #      pass every positive test in this file.
@@ -75,6 +77,11 @@ def _flags(monkeypatch, *, glob: bool, sites: bool) -> None:
         lambda: SimpleNamespace(
             billing_enforced=glob,
             sites_billing_enforced=sites,
+            # Off in every case here. The concierge has its own switch since
+            # 2026-08-21 and neither flag under test reaches it — proven in
+            # test_concierge_not_on_the_domain_flag.py, and asserted negatively
+            # below alongside the workspace caps.
+            sites_concierge_enforced=False,
             dodo_site_products=None,
             max_pockets=None,
         ),
@@ -177,23 +184,6 @@ async def test_the_sites_flag_alone_makes_the_hostname_guard_bite(monkeypatch):
     assert exc.value.code == "billing.custom_domain_limit"
 
 
-def test_the_sites_flag_alone_makes_the_concierge_gate_bite(monkeypatch):
-    """The visitor-facing seam, which is a different module from the domain caps
-    and therefore a genuinely separate wiring."""
-    from pocketpaw_ee.cloud.auth.site_keys import concierge_available
-
-    _flags(monkeypatch, glob=False, sites=True)
-    free_site = SimpleNamespace(
-        id="6512c1f0e4b0a1b2c3d4e5f6",
-        workspace="ws_1",
-        concierge_enabled=True,
-        plan_tier=site_plans.BASE_SITE_PLAN_KEY,
-        subscription_status="none",
-    )
-
-    assert concierge_available(free_site) is False
-
-
 # --------------------------------------------------------------------------- #
 # 2. The negative. This is the flag's entire reason for existing.
 # --------------------------------------------------------------------------- #
@@ -224,6 +214,32 @@ async def test_the_sites_flag_does_not_turn_on_the_connector_cap(monkeypatch):
     _flags(monkeypatch, glob=False, sites=True)
 
     assert await _connector_cap_exceeded("ws_1") == (False, 0, None)
+
+
+def test_the_sites_flag_does_not_switch_off_the_visitor_concierge(monkeypatch):
+    """The negative that cost a production outage to learn.
+
+    This file originally asserted the OPPOSITE — that the sites flag armed the
+    concierge gate too, filed under "the sites seams". Enabling the flag for the
+    DOMAIN caps on 2026-08-21 then took the concierge off every site at once, with
+    no customer able to buy it back: no tier below the unbuilt ``staff`` sells a
+    concierge and no Dodo product exists to charge for one. The concierge has its
+    own switch now. Full reasoning and the rest of the coverage live in
+    tests/cloud/sites/test_concierge_not_on_the_domain_flag.py; this line is here
+    so the boundary is visible in the flag's own scope list.
+    """
+    from pocketpaw_ee.cloud.auth.site_keys import concierge_available
+
+    _flags(monkeypatch, glob=False, sites=True)
+    free_site = SimpleNamespace(
+        id="6512c1f0e4b0a1b2c3d4e5f6",
+        workspace="ws_1",
+        concierge_enabled=True,
+        plan_tier=site_plans.BASE_SITE_PLAN_KEY,
+        subscription_status="none",
+    )
+
+    assert concierge_available(free_site) is True
 
 
 # --------------------------------------------------------------------------- #

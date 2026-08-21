@@ -78,7 +78,7 @@
   {
     "label": "the billing_enforced guard is dropped — OSS/self-host loses its concierge",
     "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
-    "find": "    if not sites_enforced():\n        return True",
+    "find": "    if not concierge_enforced():\n        return True",
     "replace": "    if False:\n        return True",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_frame_is_unaffected_when_billing_is_off"
@@ -87,8 +87,8 @@
   {
     "label": "the guard inverts — the gate fires ONLY when billing is off",
     "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
-    "find": "    if not sites_enforced():\n        return True",
-    "replace": "    if sites_enforced():\n        return True",
+    "find": "    if not concierge_enforced():\n        return True",
+    "replace": "    if concierge_enforced():\n        return True",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_chat_is_refused_for_a_free_site",
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_frame_is_unaffected_when_billing_is_off"
@@ -125,7 +125,7 @@
   {
     "label": "the publish-path resolver is deleted entirely",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        if sites_enforced():\n            from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
+    "find": "        if concierge_enforced():\n            from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
     "replace": "        if False:\n            from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
     "tests": [
       "tests/ee/sites/test_concierge_autoembed.py::test_a_free_site_publishes_with_no_bar_when_billing_is_enforced",
@@ -157,6 +157,26 @@
     "replace": "                subscription_status=\"active\",",
     "tests": [
       "tests/ee/sites/test_concierge_autoembed.py::test_a_cancelled_paid_site_loses_its_bar_on_the_next_publish"
+    ]
+  },
+  {
+    "label": "the concierge is re-attached to the domain paywall flag",
+    "file": "ee/pocketpaw_ee/cloud/billing/enforcement.py",
+    "find": "    return bool(getattr(get_settings(), \"sites_concierge_enforced\", False))",
+    "replace": "    return sites_enforced()",
+    "tests": [
+      "tests/cloud/sites/test_concierge_not_on_the_domain_flag.py::test_the_domain_flag_does_not_switch_off_the_concierge",
+      "tests/cloud/sites/test_concierge_not_on_the_domain_flag.py::test_the_global_billing_flag_does_not_switch_off_the_concierge",
+      "tests/cloud/sites/test_sites_billing_flag.py::test_the_sites_flag_does_not_switch_off_the_visitor_concierge"
+    ]
+  },
+  {
+    "label": "the concierge flag defaults ON — every deployment loses its concierge on upgrade",
+    "file": "src/pocketpaw/config.py",
+    "find": "    sites_concierge_enforced: bool = Field(\n        default=False,",
+    "replace": "    sites_concierge_enforced: bool = Field(\n        default=True,",
+    "tests": [
+      "tests/cloud/sites/test_concierge_not_on_the_domain_flag.py::test_the_setting_itself_defaults_off_and_reads_its_env_var"
     ]
   }
 ]

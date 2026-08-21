@@ -59,11 +59,25 @@ def _free_tier() -> str:
 
 
 def _enforce(monkeypatch, *, on: bool) -> None:
-    """Point the lazily-imported ``get_settings`` at a billing-posture stub."""
+    """Point the lazily-imported ``get_settings`` at a billing-posture stub.
+
+    ``sites_concierge_enforced`` is the flag that arms this gate, and since
+    2026-08-21 it is the ONLY one — neither ``billing_enforced`` nor
+    ``sites_billing_enforced`` reaches it. Both are still set here so the stub
+    matches a real Settings object, and so a regression that re-attaches the
+    concierge to a paywall flag shows up as a behaviour change in
+    tests/cloud/sites/test_concierge_not_on_the_domain_flag.py rather than as a
+    quietly-still-green suite here.
+    """
     monkeypatch.setattr(
         ppconfig,
         "get_settings",
-        lambda: SimpleNamespace(billing_enforced=on, dodo_site_products=None),
+        lambda: SimpleNamespace(
+            billing_enforced=on,
+            sites_billing_enforced=on,
+            sites_concierge_enforced=on,
+            dodo_site_products=None,
+        ),
     )
 
 

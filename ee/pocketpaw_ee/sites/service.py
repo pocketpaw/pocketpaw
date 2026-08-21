@@ -20,7 +20,12 @@
 # hostnames a single floor site may carry, which the site-unit rule otherwise
 # leaves unbounded. Both sit AFTER the already-connected early return, so neither
 # is retroactive and neither can block the re-Add route repair, and both are gated
-# on ``billing_enforced`` so self-host reads nothing extra.
+# on the flag so self-host reads nothing extra.
+#
+# The CONCIERGE seams are NOT on that switch — see
+# ``cloud/billing/enforcement.concierge_enforced``. Putting them there took the
+# concierge off every production site the first time the flag was enabled, on
+# 2026-08-21, because no tier a customer can buy sells a concierge.
 #
 # Updated 2026-08-19 (fix/sites-read-source-tool): added ``read_site_source`` — the
 # READ primitive beside ``apply_edits``. The three ``edit_*`` functions below all
@@ -2688,10 +2693,11 @@ async def _embed_concierge_bar(
         # function that owns the Site doc — ``entitlements`` may not import
         # ``models.site`` (EE cloud rule 2), and ``embed`` has no business loading it.
         #
-        # A no-op unless ``sites_enforced()`` — ``billing_enforced`` OR the
-        # sites-only ``sites_billing_enforced``. With both off (OSS / self-host, and
-        # every in-repo deploy today) this stays True and the publish path is byte
-        # for byte what it was.
+        # A no-op unless ``concierge_enforced()`` — the concierge's OWN switch,
+        # and deliberately neither paywall flag. It rode on ``sites_billing_enforced``
+        # for a day and enabling that for the DOMAIN caps stopped every publish from
+        # embedding a bar. With the flag off (everywhere, today) this stays True and
+        # the publish path is byte for byte what it was.
         #
         # Fail-closed on a FIRST publish, the same way the badge stamper does: no doc
         # means no ``plan_tier``, which resolves to the free floor and ships the page
@@ -2721,9 +2727,9 @@ async def _embed_concierge_bar(
         # and self-correcting in the right direction. The inverse (refuse at publish,
         # allow at runtime) does not self-correct at all.
         concierge_entitled = True
-        from pocketpaw_ee.cloud.billing.enforcement import sites_enforced
+        from pocketpaw_ee.cloud.billing.enforcement import concierge_enforced
 
-        if sites_enforced():
+        if concierge_enforced():
             from pocketpaw_ee.cloud.entitlements import service as entitlements_service
 
             status = getattr(doc, "subscription_status", None)
