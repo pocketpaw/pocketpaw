@@ -896,6 +896,7 @@ from pocketpaw_ee.sites.dto import (
     SiteDataRowsResponse,
     SiteDataTableInfo,
     SiteDataTablesResponse,
+    SiteEntitlementsResponse,
     SiteInvoiceCreate,
     SiteInvoiceOut,
     SitePreviewRefreshResponse,
@@ -1746,6 +1747,15 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # for a free/live publish and for any list/status read (those docs are
         # loaded from Mongo, where the PrivateAttr defaults to None).
         checkout_url=getattr(doc, "_checkout_url", None),
+        # The per-site billing state. Read straight off the doc — no extra query.
+        # These were declared in the frontend and branched on, and never sent.
+        plan_tier=getattr(doc, "plan_tier", None) or "",
+        subscription_status=getattr(doc, "subscription_status", None) or "none",
+        annual_renewal_date=(
+            _renewal.isoformat()
+            if (_renewal := getattr(doc, "annual_renewal_date", None)) is not None
+            else None
+        ),
         # DP0-4: the dynamic-site provision state (persisted) + the id of the job a
         # dynamic publish just enqueued (transient ``_provision_job_id`` PrivateAttr,
         # None for a static publish / any DB-loaded doc / a single-flight no-op).
@@ -3522,6 +3532,60 @@ async def _load(workspace_id: str, site_id: str) -> _SiteDoc:
     if doc is None:
         raise NotFound("site", site_id)
     return doc
+
+
+async def site_entitlements(*, workspace_id: str, site_id: str) -> SiteEntitlementsResponse:
+    """What this site is allowed to do, resolved — the read the UI needs to disable
+    a control and explain itself instead of offering it and rendering the 402.
+
+    ``resolve_site_entitlements`` has answered most of this since BC-9 and nothing
+    exposed it per site, so the frontend fetched entitlements nowhere and could only
+    discover a refusal by attempting the action.
+
+    The domain slot answer comes from ``_domain_cap_exceeded`` — the SAME function
+    ``add_domain`` calls — rather than a second copy of the counting rule here. Two
+    copies would eventually disagree, and the failure mode is the ugly direction: a
+    button that looks enabled and 402s. Reusing it also inherits its three subtle
+    rules for free (count sites not hostnames, floor sites only, exclude this site).
+
+    ``max_domained_sites`` reports what the PLAN grants, while
+    ``domain_slots_available`` reports what the gate will actually do. They differ when
+    enforcement is off: nothing is capped operationally even though the tier still
+    has a number. Reporting both keeps the plan card honest without making the
+    button lie.
+    """
+    # ``_load`` is the tenant-scoped read the rest of this module uses: a missing,
+    # cross-tenant, or malformed site id raises NotFound rather than leaking one
+    # workspace's entitlements to another.
+    doc = await _load(workspace_id, site_id)
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    resolved = entitlements_service.resolve_site_entitlements(
+        site_id=site_id,
+        workspace_id=workspace_id,
+        plan_tier=getattr(doc, "plan_tier", None),
+        subscription_status=getattr(doc, "subscription_status", None),
+        concierge_enabled=bool(getattr(doc, "concierge_enabled", False)),
+    )
+    exceeded, used, _limit = await _domain_cap_exceeded(workspace_id, doc)
+
+    return SiteEntitlementsResponse(
+        site_id=site_id,
+        plan_tier=resolved.plan_tier,
+        subscription_active=resolved.subscription_active,
+        badge_required=resolved.badge_required,
+        custom_domain=resolved.custom_domain,
+        max_domained_sites=resolved.max_domained_sites,
+        domained_sites_used=used,
+        # A site with no custom-domain capability at all has no slot either, however
+        # empty the workspace is — otherwise the UI would enable the button for a
+        # tier that cannot hold a domain and hand back
+        # ``billing.custom_domain_not_entitled``.
+        domain_slots_available=resolved.custom_domain and not exceeded,
+        concierge_entitled=resolved.concierge_entitled,
+        concierge_enabled=resolved.concierge_enabled,
+    )
 
 
 async def mark_site_subscription(

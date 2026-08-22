@@ -1,0 +1,66 @@
+[
+  {
+    "label": "plan_tier stops reaching the wire — the Billing tab is blind again",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        plan_tier=getattr(doc, \"plan_tier\", None) or \"\",",
+    "replace": "",
+    "tests": [
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_the_site_response_carries_the_plan_the_ui_renders"
+    ]
+  },
+  {
+    "label": "subscription_status stops reaching the wire — the awaiting-checkout bar never shows",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        subscription_status=getattr(doc, \"subscription_status\", None) or \"none\",",
+    "replace": "",
+    "tests": [
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_a_pending_site_says_pending_rather_than_nothing",
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_the_site_response_carries_the_plan_the_ui_renders"
+    ]
+  },
+  {
+    "label": "the renewal date is dropped — the plan card cannot say when it renews",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        annual_renewal_date=(\n            _renewal.isoformat()\n            if (_renewal := getattr(doc, \"annual_renewal_date\", None)) is not None\n            else None\n        ),",
+    "replace": "",
+    "tests": [
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_the_site_response_carries_the_plan_the_ui_renders"
+    ]
+  },
+  {
+    "label": "a slot is offered on a tier that cannot hold a domain at all",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        domain_slots_available=resolved.custom_domain and not exceeded,",
+    "replace": "        domain_slots_available=not exceeded,",
+    "tests": [
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_no_capability_means_no_slot_however_empty_the_workspace"
+    ]
+  },
+  {
+    "label": "the used count is hardcoded to zero — the UI never says the allowance is spent",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    exceeded, used, _limit = await _domain_cap_exceeded(workspace_id, doc)",
+    "replace": "    exceeded, used, _limit = (False, 0, None)",
+    "tests": [
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_the_free_allowance_reads_as_spent_once_another_site_holds_a_domain"
+    ]
+  },
+  {
+    "label": "the entitlements read drops its tenant scope — any workspace can read any site's plan",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    doc = await _load(workspace_id, site_id)\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
+    "replace": "    from bson import ObjectId\n\n    doc = await _SiteDoc.find_one({\"_id\": ObjectId(site_id)})\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
+    "tests": [
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_another_workspace_cannot_read_this_site_s_entitlements"
+    ]
+  },
+  {
+    "label": "a lapsed subscription still reports as paying",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        subscription_active=resolved.subscription_active,\n        badge_required=resolved.badge_required,",
+    "replace": "        subscription_active=True,\n        badge_required=resolved.badge_required,",
+    "tests": [
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_a_lapsed_paid_site_loses_the_capability_and_says_so"
+    ]
+  }
+]
