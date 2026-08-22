@@ -199,6 +199,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
+from pocketpaw_ee.cloud.auth.service import resolve_display_names
 from pocketpaw_ee.sites import import_service
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.dto import (
@@ -219,6 +220,7 @@ from pocketpaw_ee.sites.dto import (
     SiteClientUpdate,
     SiteDataRowsResponse,
     SiteDataTablesResponse,
+    SiteEntitlementsResponse,
     SiteInvoiceCreate,
     SitePreviewRefreshResponse,
     SitePreviewResponse,
@@ -227,6 +229,7 @@ from pocketpaw_ee.sites.dto import (
     SiteVersionResponse,
     VersionHistoryResponse,
 )
+from pocketpaw_ee.versions import service as versions_service
 
 router = APIRouter(
     tags=["Sites"],
@@ -260,6 +263,11 @@ async def publish_site(
         pocket_id=body.pocket_id,
         site_plan_key=body.site_plan_key,
         prewarm_origin=request.headers.get("origin") or None,
+        # Also the checkout's return base for a PAID publish. The frontend sends the
+        # whole page to ``checkout_url``, so with no return_url the buyer pays and
+        # has no route back into the app. Falls back to the
+        # ``dodo_checkout_return_base`` config inside the service when absent.
+        origin=request.headers.get("origin") or None,
     )
     return sites_service._to_response(doc)
 
@@ -593,8 +601,22 @@ async def versions_by_pocket(
 ) -> VersionHistoryResponse:
     """The ordered version timeline for a pocket (BP-4): every ArtifactVersion of
     the source pocket (scope_type="pocket"), oldest → newest, tenant-scoped on
-    ctx.workspace_id. An unversioned pocket reads an empty list (not a 404)."""
+    ctx.workspace_id. An unversioned pocket reads an empty list (not a 404).
+
+    Statuses go over the wire through ``resolve_legacy_statuses``: rows written
+    before 2026-08-21 say ``"reverted"`` whether an edit replaced them or the
+    owner discarded them, and this endpoint feeds the owner-facing timeline,
+    where that word reads as a rollback that never happened. The resolver splits
+    them by lineage. Rows written since carry their own status and pass through
+    untouched."""
     rows = await sites_service.version_history(workspace_id=ctx.workspace_id, pocket_id=pocket_id)
+    shown = versions_service.resolve_legacy_statuses(rows)
+    # ``author`` on the row is ``str(user.id)``, so the timeline was captioning
+    # every version with a 24-character ObjectId — technically who did it, and
+    # unreadable. One batched lookup for the whole timeline (never per row), and
+    # ``.get(id, id)`` keeps the raw value for an author the resolver cannot
+    # name, exactly as Mission Control does it.
+    names = await resolve_display_names({r.author for r in rows if r.author})
     return VersionHistoryResponse(
         pocket_id=pocket_id,
         versions=[
@@ -602,9 +624,9 @@ async def versions_by_pocket(
                 id=str(r.id),
                 version_no=r.version_no,
                 branch=r.branch,
-                status=r.status,
+                status=shown[str(r.id)],
                 label=r.label,
-                author=r.author,
+                author=names.get(r.author, r.author) if r.author else None,
                 created_at=r.created_at.isoformat(),
             )
             for r in rows
@@ -770,6 +792,23 @@ async def domain_status(
     return await sites_service.domain_status(
         workspace_id=ctx.workspace_id, site_id=site_id, hostname=hostname
     )
+
+
+@router.get("/sites/{site_id}/entitlements", response_model=SiteEntitlementsResponse)
+async def get_site_entitlements(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteEntitlementsResponse:
+    """What this site may do, so the UI can disable a control and say why.
+
+    Its own endpoint rather than fields on the list response: the domain-slot
+    answer needs a workspace-wide count of sites already holding a domain, and
+    riding that on ``GET /sites`` would run one count per card. The gallery stays a
+    single query; only a surface that actually offers a gated control pays for the
+    lookup.
+    """
+    return await sites_service.site_entitlements(workspace_id=ctx.workspace_id, site_id=site_id)
 
 
 @router.get("/sites/{site_id}/client", response_model=SiteClientResponse)

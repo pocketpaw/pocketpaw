@@ -2204,7 +2204,9 @@ async def set_svelte_source_file(
     # version model's ``content`` accepts either a rippleSpec dict OR a svelte
     # source map). Same best-effort try/except as the rippleSpec hook —
     # versioning is an additive history layer, never a gate on the edit.
-    await _record_pocket_svelte_draft_version(doc, author=user_id)
+    await _record_pocket_svelte_draft_version(
+        doc, author=user_id, label=_edit_label(component_path)
+    )
     return await _resolved_wire_dict(doc, user_id), previous_source
 
 
@@ -2281,7 +2283,9 @@ async def set_react_source_file(
     # a later publish promotes. The helper is engine-agnostic (it snapshots
     # ``doc.source`` whatever engine wrote it); same best-effort contract — an
     # additive history layer, never a gate on the edit.
-    await _record_pocket_svelte_draft_version(doc, author=user_id)
+    await _record_pocket_svelte_draft_version(
+        doc, author=user_id, label=_edit_label(component_path)
+    )
     return await _resolved_wire_dict(doc, user_id)
 
 
@@ -2357,7 +2361,7 @@ async def set_html_source_file(
     # a later publish promotes. The helper is engine-agnostic despite its name (it
     # snapshots ``doc.source`` whatever engine wrote it) — the same reuse
     # ``set_react_source_file`` makes.
-    await _record_pocket_svelte_draft_version(doc, author=user_id)
+    await _record_pocket_svelte_draft_version(doc, author=user_id, label=_edit_label(file_path))
     return await _resolved_wire_dict(doc, user_id)
 
 
@@ -2546,7 +2550,7 @@ async def merge_spec(
     # draft/history snapshot so the artifact can later have draft/published/
     # rollback (BP-3/BP-4). Best-effort: a version-store failure must NOT break
     # the merge, so it is wrapped and only logged.
-    await _record_pocket_draft_version(doc, author=user_id)
+    await _record_pocket_draft_version(doc, author=user_id, label="Edited the page")
     resolved = await _resolved_wire_dict(doc, user_id)
     return {
         "ok": True,
@@ -2557,7 +2561,20 @@ async def merge_spec(
     }
 
 
-async def _record_pocket_draft_version(doc: _PocketDoc, *, author: str | None) -> None:
+def _edit_label(path: str) -> str:
+    """The version-timeline line for an edit to one source file.
+
+    A version history that reads "v4, v5, v6" tells its owner nothing about
+    which one to roll back to; the file name is the cheapest true thing we can
+    say, and every source-edit callsite already has it. Only the basename — the
+    timeline row is narrow and the directory is noise at this width.
+    """
+    return f"Edited {path.rsplit('/', 1)[-1]}"
+
+
+async def _record_pocket_draft_version(
+    doc: _PocketDoc, *, author: str | None, label: str | None = None
+) -> None:
     """Snapshot a pocket's current rippleSpec as a draft ArtifactVersion.
 
     Branch-primitive hook (BP-1). Lazy-imports the versions service so the
@@ -2579,6 +2596,7 @@ async def _record_pocket_draft_version(doc: _PocketDoc, *, author: str | None) -
             workspace_id=doc.workspace,
             content=doc.rippleSpec or {},
             author=author,
+            label=label,
         )
     except Exception:  # noqa: BLE001 — versioning must not break the merge
         logger.warning(
@@ -2589,7 +2607,9 @@ async def _record_pocket_draft_version(doc: _PocketDoc, *, author: str | None) -
         )
 
 
-async def _record_pocket_svelte_draft_version(doc: _PocketDoc, *, author: str | None) -> None:
+async def _record_pocket_svelte_draft_version(
+    doc: _PocketDoc, *, author: str | None, label: str | None = None
+) -> None:
     """Snapshot a svelte pocket's current ``source`` map as a draft ArtifactVersion.
 
     Branch-primitive hook (BP-3). The svelte analog of
@@ -2613,6 +2633,7 @@ async def _record_pocket_svelte_draft_version(doc: _PocketDoc, *, author: str | 
             workspace_id=doc.workspace,
             content=dict(doc.source) if isinstance(doc.source, dict) else {},
             author=author,
+            label=label,
         )
     except Exception:  # noqa: BLE001 — versioning must not break the edit
         logger.warning(

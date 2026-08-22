@@ -35,7 +35,7 @@
 #       3. mark the Action ``executed`` (success) or ``failed`` (any error) on
 #          the Instinct store, so The Tray shows the outcome.
 #   * discard_rejected_change(action) — REJECT = DISCARD: flip the candidate
-#       (``to_version_id``) status="reverted" so it leaves the draft pointer; the
+#       (``to_version_id``) status="discarded" so it leaves the draft pointer; the
 #       PUBLISHED pointer is left UNTOUCHED (a rejection never moves what is
 #       live). No deploy. Best-effort store nudge — the router already closed the
 #       chain on the reject path.
@@ -199,7 +199,7 @@ async def discard_rejected_change(action: Any) -> None:
     (one per edit); the old single-row discard reverted only ``to_version_id``, so
     ``get_draft`` stayed non-None and the unpublished-changes bar never cleared →
     "discard needs N clicks". One ``discard_all_drafts`` flips every draft above
-    published to ``status="reverted"`` so the bar clears on click 1, and it
+    published to ``status="discarded"`` so the bar clears on click 1, and it
     back-handles pockets already carrying a pile of accumulated drafts.
 
     The PUBLISHED pointer is left untouched (a rejection must never move what is

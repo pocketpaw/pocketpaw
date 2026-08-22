@@ -896,6 +896,7 @@ from pocketpaw_ee.sites.dto import (
     SiteDataRowsResponse,
     SiteDataTableInfo,
     SiteDataTablesResponse,
+    SiteEntitlementsResponse,
     SiteInvoiceCreate,
     SiteInvoiceOut,
     SitePreviewRefreshResponse,
@@ -1689,6 +1690,10 @@ async def _promote_pocket_draft_to_published(
                 workspace_id=workspace_id,
                 content=content or {},
                 author=author,
+                # This branch only runs when a publish found no draft to
+                # promote, so the row exists because of the publish and nothing
+                # else. Saying so beats leaving the timeline's first line blank.
+                label="Snapshot at publish",
             )
         await versions_service.publish(
             scope_type=_VERSION_SCOPE_TYPE,
@@ -1742,6 +1747,15 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # for a free/live publish and for any list/status read (those docs are
         # loaded from Mongo, where the PrivateAttr defaults to None).
         checkout_url=getattr(doc, "_checkout_url", None),
+        # The per-site billing state. Read straight off the doc — no extra query.
+        # These were declared in the frontend and branched on, and never sent.
+        plan_tier=getattr(doc, "plan_tier", None) or "",
+        subscription_status=getattr(doc, "subscription_status", None) or "none",
+        annual_renewal_date=(
+            _renewal.isoformat()
+            if (_renewal := getattr(doc, "annual_renewal_date", None)) is not None
+            else None
+        ),
         # DP0-4: the dynamic-site provision state (persisted) + the id of the job a
         # dynamic publish just enqueued (transient ``_provision_job_id`` PrivateAttr,
         # None for a static publish / any DB-loaded doc / a single-flight no-op).
@@ -3520,6 +3534,60 @@ async def _load(workspace_id: str, site_id: str) -> _SiteDoc:
     return doc
 
 
+async def site_entitlements(*, workspace_id: str, site_id: str) -> SiteEntitlementsResponse:
+    """What this site is allowed to do, resolved — the read the UI needs to disable
+    a control and explain itself instead of offering it and rendering the 402.
+
+    ``resolve_site_entitlements`` has answered most of this since BC-9 and nothing
+    exposed it per site, so the frontend fetched entitlements nowhere and could only
+    discover a refusal by attempting the action.
+
+    The domain slot answer comes from ``_domain_cap_exceeded`` — the SAME function
+    ``add_domain`` calls — rather than a second copy of the counting rule here. Two
+    copies would eventually disagree, and the failure mode is the ugly direction: a
+    button that looks enabled and 402s. Reusing it also inherits its three subtle
+    rules for free (count sites not hostnames, floor sites only, exclude this site).
+
+    ``max_domained_sites`` reports what the PLAN grants, while
+    ``domain_slots_available`` reports what the gate will actually do. They differ when
+    enforcement is off: nothing is capped operationally even though the tier still
+    has a number. Reporting both keeps the plan card honest without making the
+    button lie.
+    """
+    # ``_load`` is the tenant-scoped read the rest of this module uses: a missing,
+    # cross-tenant, or malformed site id raises NotFound rather than leaking one
+    # workspace's entitlements to another.
+    doc = await _load(workspace_id, site_id)
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    resolved = entitlements_service.resolve_site_entitlements(
+        site_id=site_id,
+        workspace_id=workspace_id,
+        plan_tier=getattr(doc, "plan_tier", None),
+        subscription_status=getattr(doc, "subscription_status", None),
+        concierge_enabled=bool(getattr(doc, "concierge_enabled", False)),
+    )
+    exceeded, used, _limit = await _domain_cap_exceeded(workspace_id, doc)
+
+    return SiteEntitlementsResponse(
+        site_id=site_id,
+        plan_tier=resolved.plan_tier,
+        subscription_active=resolved.subscription_active,
+        badge_required=resolved.badge_required,
+        custom_domain=resolved.custom_domain,
+        max_domained_sites=resolved.max_domained_sites,
+        domained_sites_used=used,
+        # A site with no custom-domain capability at all has no slot either, however
+        # empty the workspace is — otherwise the UI would enable the button for a
+        # tier that cannot hold a domain and hand back
+        # ``billing.custom_domain_not_entitled``.
+        domain_slots_available=resolved.custom_domain and not exceeded,
+        concierge_entitled=resolved.concierge_entitled,
+        concierge_enabled=resolved.concierge_enabled,
+    )
+
+
 async def mark_site_subscription(
     *,
     workspace_id: str,
@@ -4667,6 +4735,9 @@ async def publish_pocket(
     site_plan_key: str | None = None,
     builder_origin: str | None = None,
     prewarm_origin: str | None = None,
+    # The buyer's app origin (the router reads it off the Origin / Referer header),
+    # used to build the checkout's return_url so a paid publish can send them back.
+    origin: str | None = None,
     preview: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
@@ -4829,8 +4900,53 @@ async def publish_pocket(
             tier.key if tier is not None else site_plan_key,
         )
 
-    if is_paid and dodo_configured:
-        # PAID + chargeable → defer the deploy until subscription.active.
+    # Is this site ALREADY paying? A republish of a live paid site is a content
+    # edit, not a purchase, and the charge-first branch below used to treat the two
+    # identically: it re-ran ``create_subscription`` on every republish, opening a
+    # SECOND subscription that billed alongside the first (which was never
+    # cancelled, and whose id had just been overwritten with the new checkout
+    # session id, so nothing could ever cancel it). It also reset the status to
+    # "pending" — read as unpaid by every entitlement — and withheld the new content
+    # until a second payment that no honest customer would make.
+    #
+    # Gate on "active" specifically, not on "has a subscription_id": a site that is
+    # still PENDING has never been paid for, so a republish there SHOULD open a
+    # fresh checkout (the abandoned session simply expires unused).
+    existing_doc = await _SiteDoc.find_one(
+        {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
+    )
+    already_paying = (
+        existing_doc is not None
+        and existing_doc.subscription_status == "active"
+        and bool(existing_doc.subscription_id)
+    )
+
+    if already_paying and is_paid and dodo_configured and existing_doc.plan_tier != tier.key:
+        # A genuine TIER CHANGE on a paying site. Move the existing subscription
+        # rather than buying a second one; the gateway prorates, so the buyer keeps
+        # the term they already paid for. Cancel-then-create would forfeit it.
+        #
+        # Deliberately NOT wrapped in a try/except that falls back to
+        # ``create_subscription``: that fallback is precisely the double-billing
+        # this branch exists to remove. A gateway refusal propagates, the site keeps
+        # the tier it is actually paying for, and the caller sees the error.
+        prov = _billing_provider or _default_billing_provider()
+        await prov.change_plan(
+            subscription_id=existing_doc.subscription_id,
+            product_id=tier.dodo_product_id,
+            plan_key=tier.key,
+        )
+        logger.info(
+            "sites.publish: site %s moved %s → %s on subscription %s (no new checkout)",
+            str(existing_doc.id),
+            existing_doc.plan_tier,
+            tier.key,
+            existing_doc.subscription_id,
+        )
+
+    if is_paid and dodo_configured and not already_paying:
+        # PAID + chargeable + not yet paying → defer the deploy until
+        # subscription.active.
         return await _publish_pending_site(
             workspace_id=workspace_id,
             user_id=user_id,
@@ -4845,6 +4961,7 @@ async def publish_pocket(
             keeps_client_bundle=keeps_client_bundle,
             tier=tier,
             provider=_billing_provider,
+            origin=origin,
         )
 
     # FREE/base (or paid-but-unconfigured fallback) → publish LIVE now.
@@ -4997,7 +5114,24 @@ async def _apply_site_plan(
     # recurring product. metadata.site_id is the per-site discriminator the
     # webhook routes on. No product configured (v1 default) → record the tier
     # without a live charge; never crash the publish.
-    if tier is not None and tier.dodo_product_id:
+    # A site that is ALREADY paying must not be charged again by the stamp path.
+    #
+    # This guard is here and not only in the caller on purpose. Until the republish
+    # fix, a paid+configured tier could never REACH this function — the dispatcher
+    # always routed it to ``_publish_pending_site`` — so the branch below was
+    # effectively dead for paying sites. Routing same-tier republishes through the
+    # live path is what arms it, and without this check it would open a fresh
+    # checkout, take the ``if subscription_id`` arm of the stamp below, overwrite
+    # the authoritative gateway id with a checkout session id, and knock the status
+    # back to "pending". That is the whole defect, reintroduced one layer down.
+    #
+    # With no new checkout, ``subscription_id`` stays None and the stamp falls to
+    # the ``elif`` — whose existing ``!= "active"`` carve-out then preserves both
+    # the id and the status untouched.
+    already_paying = getattr(doc, "subscription_status", None) == "active" and bool(
+        getattr(doc, "subscription_id", None)
+    )
+    if tier is not None and tier.dodo_product_id and not already_paying:
         try:
             prov = provider or _default_billing_provider()
             checkout = await prov.create_subscription(
@@ -5057,6 +5191,29 @@ async def _apply_site_plan(
     return doc
 
 
+def _site_checkout_return_urls(origin: str | None) -> tuple[str | None, str | None]:
+    """Build (return_url, cancel_url) for a per-site checkout, or (None, None).
+
+    The frontend navigates the WHOLE PAGE to the checkout url
+    (``window.location.href = site.checkout_url``), so without these the buyer pays
+    and is left sitting on the gateway with no route back into the app.
+
+    Deliberately not ``billing._checkout_return_urls``: that one lands the buyer on
+    ``/settings/billing``, which is right for a workspace plan and wrong here — the
+    buyer just bought a SITE and expects to see it. Same origin/config fallback
+    chain, different destination.
+    """
+    base = (origin or "").strip()
+    if not base:
+        from pocketpaw.config import get_settings
+
+        base = (getattr(get_settings(), "dodo_checkout_return_base", "") or "").strip()
+    if not base:
+        return None, None
+    base = base.rstrip("/")
+    return (f"{base}/sites?checkout=success", f"{base}/sites?checkout=cancel")
+
+
 async def _publish_pending_site(
     *,
     workspace_id: str,
@@ -5072,6 +5229,7 @@ async def _publish_pending_site(
     keeps_client_bundle: bool,
     tier: Any,
     provider: Any | None,
+    origin: str | None = None,
 ) -> _SiteDoc:
     """Charge-first: create a PAID-tier site as PENDING and open its checkout,
     WITHOUT deploying it live.
@@ -5171,6 +5329,7 @@ async def _publish_pending_site(
     # raises, it PROPAGATES (no swallow) and NO pending doc is created — never an
     # orphan pending row with no subscription_id. The buyer can simply retry.
     prov = provider or _default_billing_provider()
+    return_url, cancel_url = _site_checkout_return_urls(origin)
     checkout = await prov.create_subscription(
         plan_key=plan_key,
         product_id=tier.dodo_product_id,
@@ -5181,6 +5340,8 @@ async def _publish_pending_site(
             "site_id": site_id,
             "plan_key": plan_key,
         },
+        return_url=return_url,
+        cancel_url=cancel_url,
     )
     checkout_url: str | None = checkout.checkout_url or None
     subscription_id: str | None = checkout.subscription_id or None
@@ -5231,6 +5392,7 @@ async def activate_site(
     *,
     workspace_id: str,
     site_id: str,
+    subscription_id: str | None = None,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -5311,6 +5473,21 @@ async def activate_site(
     # opposite direction, and it is the lesser of the two: a paid site that retries
     # its deploy beats a paid site permanently branded as free.
     doc.subscription_status = "active"
+    # Persist the AUTHORITATIVE gateway subscription id from the verified webhook.
+    #
+    # What the doc holds until this point is the checkout SESSION id (``cks_``)
+    # that ``create_subscription`` returned — Dodo creates the subscription at
+    # PAYMENT time, so the real ``sub_`` id does not exist yet when the checkout
+    # opens. It arrives here, on subscription.active, and was previously dropped on
+    # the floor: the webhook called this function without it.
+    #
+    # A session id cannot cancel a subscription and cannot change its plan — the
+    # gateway rejects it. So every downstream lifecycle operation was unbuildable
+    # until this line existed, and any subscription opened before it shipped is
+    # unreachable from our side. ``mark_site_subscription`` already does the same
+    # thing on renewed/cancelled; activation was the gap.
+    if subscription_id:
+        doc.subscription_id = subscription_id
     await doc.save()
 
     deployed = await _deploy_site_doc(
@@ -6395,6 +6572,10 @@ async def _ensure_pocket_draft(*, workspace_id: str, user_id: str, pocket_id: st
             workspace_id=workspace_id,
             content=content or {},
             author=user_id,
+            # Arming for edit, not an edit: this snapshots what the site looked
+            # like BEFORE the owner started, which is the version they will want
+            # to roll back to if the session goes wrong.
+            label="Opened for editing",
         )
     except Exception:  # noqa: BLE001 — versioning must not break arming for edit
         logger.warning(

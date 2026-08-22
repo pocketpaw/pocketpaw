@@ -51,6 +51,12 @@ _VERSION_ACTIONS = frozenset(
         "artifact.version.branched",
         "artifact.version.merged",
         "artifact.version.discarded",
+        # 2026-08-21: the supersede (a later edit replacing the draft head) used
+        # to change a row's status while emitting nothing, so replaying the
+        # journal could not explain why a draft stopped being the draft. The
+        # allowlist DROPS anything unlisted, so registering the action here is
+        # what actually closes that hole.
+        "artifact.version.superseded",
         "artifact.version.reverted",
         "artifact.version.published",
     }
@@ -62,7 +68,7 @@ class VersionEvent:
     """One folded version-lifecycle event — a row in the history timeline.
 
     ``action`` is the short verb ("created" / "branched" / "merged" /
-    "discarded" / "reverted" / "published"), stripped of the
+    "discarded" / "superseded" / "reverted" / "published"), stripped of the
     ``artifact.version.`` prefix so a UI/audit reader gets a clean label.
     ``version_id`` / ``branch`` / ``version_no`` identify the version the event
     acted on; ``actor_id`` is who did it (the journal actor); ``payload`` keeps

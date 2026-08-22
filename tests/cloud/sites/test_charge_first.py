@@ -75,7 +75,15 @@ class _RecordingBillingProvider:
         self.calls: list[dict] = []
 
     async def create_subscription(
-        self, *, plan_key, product_id, workspace_id, customer_email, metadata
+        self,
+        *,
+        plan_key,
+        product_id,
+        workspace_id,
+        customer_email,
+        metadata,
+        return_url=None,
+        cancel_url=None,
     ) -> SubscriptionCheckout:
         self.calls.append(
             {
@@ -443,7 +451,12 @@ async def test_paid_tier_without_dodo_product_publishes_live(mongo_db):
     assert doc.deployed is True
     assert len(gen.build_calls) == 1
     assert cf.put_calls == [str(doc.id)]
-    assert doc.plan_tier == "pro"
+    # Records the FLOOR, not "pro" (#1995). A priced tier with no Dodo product
+    # cannot be bought, and stamping it anyway wrote a claim the site could not
+    # back: plan_tier="pro" with subscription_status="none", which every
+    # entitlement resolves as free. The buyer picked a paid plan, was charged
+    # nothing, received nothing, and the plan card said pro.
+    assert doc.plan_tier == site_plans.BASE_SITE_PLAN_KEY
     assert doc.subscription_id is None  # no charge opened
     assert getattr(doc, "_checkout_url", None) is None
     assert sites_service._to_response(doc).checkout_url is None
