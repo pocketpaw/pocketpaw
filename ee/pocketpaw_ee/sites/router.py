@@ -220,6 +220,7 @@ from pocketpaw_ee.sites.dto import (
     SiteClientUpdate,
     SiteDataRowsResponse,
     SiteDataTablesResponse,
+    SiteEntitlementsResponse,
     SiteInvoiceCreate,
     SitePreviewRefreshResponse,
     SitePreviewResponse,
@@ -791,6 +792,23 @@ async def domain_status(
     return await sites_service.domain_status(
         workspace_id=ctx.workspace_id, site_id=site_id, hostname=hostname
     )
+
+
+@router.get("/sites/{site_id}/entitlements", response_model=SiteEntitlementsResponse)
+async def get_site_entitlements(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteEntitlementsResponse:
+    """What this site may do, so the UI can disable a control and say why.
+
+    Its own endpoint rather than fields on the list response: the domain-slot
+    answer needs a workspace-wide count of sites already holding a domain, and
+    riding that on ``GET /sites`` would run one count per card. The gallery stays a
+    single query; only a surface that actually offers a gated control pays for the
+    lookup.
+    """
+    return await sites_service.site_entitlements(workspace_id=ctx.workspace_id, site_id=site_id)
 
 
 @router.get("/sites/{site_id}/client", response_model=SiteClientResponse)

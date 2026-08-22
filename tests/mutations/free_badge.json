@@ -53,8 +53,8 @@
   {
     "label": "a first publish (no Site row yet) is read as a paid ACTIVE site",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        plan_tier=getattr(doc, \"plan_tier\", None),\n        subscription_status=getattr(doc, \"subscription_status\", None),",
-    "replace": "        plan_tier=getattr(doc, \"plan_tier\", \"pro\"),\n        subscription_status=getattr(doc, \"subscription_status\", \"active\"),",
+    "find": "    ent = entitlements_service.resolve_site_entitlements(\n        site_id=site_id,\n        workspace_id=workspace_id,\n        plan_tier=getattr(doc, \"plan_tier\", None),\n        subscription_status=getattr(doc, \"subscription_status\", None),",
+    "replace": "    ent = entitlements_service.resolve_site_entitlements(\n        site_id=site_id,\n        workspace_id=workspace_id,\n        plan_tier=getattr(doc, \"plan_tier\", \"pro\"),\n        subscription_status=getattr(doc, \"subscription_status\", \"active\"),",
     "tests": [
       "tests/ee/sites/test_free_badge.py::test_a_first_publish_badges_before_it_deploys"
     ]

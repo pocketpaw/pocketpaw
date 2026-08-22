@@ -233,6 +233,22 @@ class SiteResponse(BaseModel):
     # publish (which deploys immediately) and for any non-publish response.
     checkout_url: str | None = None
     # DP0-4: where a dynamic site sits in the durable D1 provision job
+    # ---- per-site billing state (BC-9) -------------------------------------
+    # The frontend has declared and branched on these since BC-9: SiteSummary types
+    # all three, and the [siteId] page gates its "awaiting checkout" bar on
+    # ``subscription_status === "pending"``. None of them was ever mapped onto the
+    # wire, so every read came back ``undefined``, every fallback took the "no
+    # per-site sub" branch, and a paid site rendered identically to a free one. The
+    # optional ``?`` on the TS fields is what kept it quiet — nothing throws when a
+    # field that is always absent is always absent.
+    #
+    # All three live on the Site document already, so sending them costs no query.
+    #
+    # ``plan_tier`` is "" rather than None when unstamped, so "this site has no
+    # tier" and "the backend did not send a tier" stay distinguishable on the wire.
+    plan_tier: str = ""
+    subscription_status: str = "none"
+    annual_renewal_date: str | None = None
     # (none | provisioning | provisioned | failed). A DYNAMIC-site publish does NOT
     # deploy inline — it enqueues the ``provision_site`` job and returns immediately
     # with ``provision_status="provisioning"`` (``deployed=False``); the site goes
@@ -616,6 +632,44 @@ class SiteInvoiceOut(BaseModel):
     currency: str
     paid: bool
     note: str = ""
+
+
+class SiteEntitlementsResponse(BaseModel):
+    """What this site is allowed to do, resolved — so the UI can disable a control
+    and say WHY instead of offering it and rendering the 402 that comes back.
+
+    ``resolve_site_entitlements`` has computed most of this since BC-9 and nothing
+    ever exposed it per site; the frontend fetched entitlements nowhere at all. The
+    result was a UI that could only discover a refusal by attempting the action.
+
+    The two fields that are NOT on ``SiteEntitlements`` are the ones that make the
+    difference between a usable message and a useless one:
+
+    * ``domained_sites_used`` — how many sites in this workspace already spend the
+      floor allowance. "You cannot add a domain" and "your one free domain is on
+      another site" are different sentences, and only the count separates them.
+    * ``domain_slots_available`` — the same answer ``add_domain`` will give,
+      computed by the SAME function it calls (``_domain_cap_exceeded``), so the
+      button's enabled state and the endpoint's verdict cannot drift apart. A
+      second copy of the rule here would eventually disagree with the gate, and
+      the UI would confidently offer a button that 402s.
+
+    ``max_domained_sites`` is None for an uncapped (paid) tier, mirroring the
+    catalog. ``subscription_active`` distinguishes a lapsed paid site from a site
+    that never had the capability — the tier stays recorded, only the payment
+    stopped, and the UI should say so.
+    """
+
+    site_id: str
+    plan_tier: str = ""
+    subscription_active: bool = False
+    badge_required: bool = True
+    custom_domain: bool = False
+    max_domained_sites: int | None = 0
+    domained_sites_used: int = 0
+    domain_slots_available: bool = False
+    concierge_entitled: bool = False
+    concierge_enabled: bool = False
 
 
 class SiteClientResponse(BaseModel):
