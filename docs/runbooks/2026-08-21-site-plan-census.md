@@ -143,3 +143,46 @@ each hold a domain, which puts that workspace over the cap of 1 already — on d
 with one hostname apiece. **These are dev numbers and say nothing about
 production.** They are recorded only as proof the queries run and as a worked
 example of what the output looks like.
+
+## The rekey happened — and the migration is optional
+
+**Updated 2026-08-22 (feat/site-pricing-ladder).** The rekey shipped:
+`basic`/`pro`/`business` are now `free`/`site`/`staff`, and the catalog gained two
+per-ORG flats (`studio`, `agency`) that are not legal `Site.plan_tier` values at
+all.
+
+**It did not wait for these numbers, and it did not need to.** The catalog
+resolves every legacy key permanently through `_LEGACY_SITE_TIER_ALIASES`, mapped
+by capability rather than ladder position — `pro` sells what `site` sells,
+`business` sells what `staff` sells. A database that is never touched keeps
+working: the entitlement resolver answers identically for the old key and the new
+one, and `_dodo_product_for` looks through the alias so an environment still keyed
+`{"pro": ..., "business": ...}` keeps opening checkouts.
+
+So question 1 above is no longer a gate. It is now just "how many rows will the
+tidy-up move", and the answer changes nothing about whether it is safe.
+
+### Running the migration
+
+```bash
+# Dry run — connects, counts, prints what it WOULD change, writes nothing.
+CLOUD_MONGODB_URI=... uv run python scripts/migrate_site_plan_keys.py
+
+# Then, once the dry run reads right:
+CLOUD_MONGODB_URI=... uv run python scripts/migrate_site_plan_keys.py --apply
+```
+
+Re-running is a no-op: each update filters on the OLD value, so a second pass
+matches nothing. Verify with the census above — a migrated database reports zero
+rows on the legacy keys.
+
+**What it deliberately will not touch:** any `plan_tier` that is neither a legacy
+key nor a current one. An unrecognised value is reported and left exactly as
+found, because rewriting an unplanned value to the floor silently revokes
+whatever it was granting, and the script cannot tell a typo from a restored
+backup written by a newer schema.
+
+**What it buys:** reads stop going through an alias and dashboards stop showing a
+key the catalog no longer lists. Nothing more. The aliases stay in the code
+afterwards — they are permanent, not transitional, because a restored backup or a
+replayed webhook can still present one years from now.

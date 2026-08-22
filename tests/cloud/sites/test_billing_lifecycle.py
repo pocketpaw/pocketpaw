@@ -126,10 +126,10 @@ async def _make_pocket(*, workspace_id: str, owner: str = "u1", ripple_spec=None
     return str(doc.id)
 
 
-def _enable_pro_product(monkeypatch) -> None:
+def _enable_paid_site_product(monkeypatch) -> None:
     """Make the 'pro' site tier a chargeable PAID tier (price + a Dodo product)."""
     monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
+        site_plans, "_dodo_product_for", lambda key: {"site": "prod_site_pro"}.get(key)
     )
 
 
@@ -139,7 +139,7 @@ def _enable_pro_product(monkeypatch) -> None:
 
 
 async def test_oversized_deploy_inputs_raise_and_persist_nothing(mongo_db, monkeypatch):
-    _enable_pro_product(monkeypatch)
+    _enable_paid_site_product(monkeypatch)
     # A rippleSpec that serializes well past the 4MB cap.
     big_blob = "x" * (sites_service._MAX_PENDING_DEPLOY_INPUT_BYTES + 1)
     ripple_spec = {"bloat": big_blob}
@@ -153,7 +153,7 @@ async def test_oversized_deploy_inputs_raise_and_persist_nothing(mongo_db, monke
             workspace_id=ws,
             user_id="u1",
             pocket_id=pocket_id,
-            site_plan_key="pro",
+            site_plan_key="site",
             _generator=_RecordingGenerator(),
             _cloudflare=_RecordingCF(),
             _bundle_reader=lambda d: b"x",
@@ -174,7 +174,7 @@ async def test_oversized_deploy_inputs_raise_and_persist_nothing(mongo_db, monke
 
 
 async def test_pending_publish_persists_doc_with_subscription_id(mongo_db, monkeypatch):
-    _enable_pro_product(monkeypatch)
+    _enable_paid_site_product(monkeypatch)
     ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
 
@@ -183,7 +183,7 @@ async def test_pending_publish_persists_doc_with_subscription_id(mongo_db, monke
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=_RecordingGenerator(),
         _cloudflare=_RecordingCF(),
         _bundle_reader=lambda d: b"x",
@@ -203,7 +203,7 @@ async def test_pending_publish_persists_doc_with_subscription_id(mongo_db, monke
 
 
 async def test_checkout_failure_leaves_no_orphan_doc(mongo_db, monkeypatch):
-    _enable_pro_product(monkeypatch)
+    _enable_paid_site_product(monkeypatch)
     ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
 
@@ -213,7 +213,7 @@ async def test_checkout_failure_leaves_no_orphan_doc(mongo_db, monkeypatch):
             workspace_id=ws,
             user_id="u1",
             pocket_id=pocket_id,
-            site_plan_key="pro",
+            site_plan_key="site",
             _generator=_RecordingGenerator(),
             _cloudflare=_RecordingCF(),
             _bundle_reader=lambda d: b"x",
@@ -266,7 +266,7 @@ async def _insert_site(
         name=pocket_id,
         deployed=deployed,
         subscription_status=subscription_status,
-        plan_tier="pro",
+        plan_tier="site",
     )
     await doc.insert()
     # Backdate createdAt so the staleness threshold can be exercised.

@@ -53,8 +53,12 @@ from typing import Any
 # The tier keys as the catalog ships them today. Imported rather than hardcoded
 # where possible, but this script has to run on a host that may not have the ee
 # package installed, so it degrades to the literals with a note in the output.
-_FALLBACK_BASE_KEY = "basic"
-_FALLBACK_KNOWN_KEYS = ("basic", "pro", "business")
+# Both the current keys AND the pre-2026-08-22 ones. A census run on a host with
+# no ee package must not report every legacy row as "unknown tier" — that is the
+# exact number this script exists to measure, and getting it wrong in the
+# pessimistic direction would look like a migration emergency.
+_FALLBACK_BASE_KEY = "free"
+_FALLBACK_KNOWN_KEYS = ("free", "site", "staff", "studio", "agency", "basic", "pro", "business")
 
 # Statuses that mean money is actually moving. Mirrors
 # ``entitlements.service._ACTIVE_SITE_SUBSCRIPTION_STATUSES``; duplicated for the

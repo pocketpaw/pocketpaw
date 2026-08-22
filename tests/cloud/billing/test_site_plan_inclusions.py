@@ -36,18 +36,36 @@ def test_base_tier_does_not_sell_the_concierge():
     assert base.sells_concierge is False
 
 
-def test_only_the_top_tier_sells_the_concierge():
-    """Was "every tier above the floor", which held only while nothing actually
-    sold the concierge. Under the $0/$5/$19 ladder (2026-08-22) the concierge is
-    the whole difference between the two paid rungs, so the middle one must not
-    have it — that derivation would have given the $5 tier a $19 feature."""
-    tiers = catalog.list_site_plans()
-    assert len(tiers) > 2, "needs at least two paid rungs to say anything"
+def test_only_the_top_per_site_rung_sells_the_concierge():
+    """The concierge is what separates the two PAID PER-SITE rungs, so the cheaper
+    one must not have it.
 
-    selling = [t.key for t in tiers if t.sells_concierge]
-    assert selling == [tiers[-1].key], (
-        f"expected only the top tier to sell the concierge, got {selling}"
+    Written against ``list_site_scoped_plans`` rather than the whole catalog, and
+    that is the point of the 2026-08-22 edit rather than a detail of it. The old
+    assertion was ``selling == [tiers[-1].key]`` — "only the last row in the
+    catalog" — which was a statement about POSITION that happened to coincide with
+    the rule while the catalog was one ladder. The five-tier catalog holds two
+    ladders: the per-site rungs (free/site/staff) and the org flats
+    (studio/agency), and ``agency`` legitimately sells the concierge too. Under the
+    old wording that reads as a violation, and "fixing" it by appending agency to
+    the expected list would have quietly permitted the actual regression this test
+    exists to catch — ``site`` gaining a ``staff`` feature.
+
+    So the rule is asserted where it lives: among the rungs a single site can be
+    put on, exactly one sells the concierge, and it is the most expensive one.
+    """
+    rungs = catalog.list_site_scoped_plans()
+    assert len(rungs) > 2, "needs at least two paid rungs to say anything"
+
+    selling = [t.key for t in rungs if t.sells_concierge]
+    assert selling == [rungs[-1].key], (
+        f"expected only the top per-site rung to sell the concierge, got {selling}"
     )
+    # And the rung below it must be a PAID one — otherwise "only the top rung"
+    # is satisfied by a two-rung ladder of free + one paid tier, where there is
+    # no cheaper paid rung to wrongly grant anything to.
+    assert rungs[-2].monthly_price_usd > 0
+    assert rungs[-2].sells_concierge is False
 
 
 def test_an_unknown_tier_sells_no_concierge():

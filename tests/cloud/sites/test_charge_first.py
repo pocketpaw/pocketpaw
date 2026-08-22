@@ -158,7 +158,7 @@ def _site_subscription_body(*, event_type: str, workspace_id: str, site_id: str)
                 "metadata": {
                     "workspace_id": workspace_id,
                     "site_id": site_id,
-                    "plan_key": "pro",
+                    "plan_key": "site",
                 },
             },
         }
@@ -176,7 +176,7 @@ async def test_paid_publish_is_pending_and_returns_checkout_url(
     # Configure a Dodo product for the "pro" site tier so it is a chargeable PAID
     # tier (positive price + a product) → charge-first defers the deploy.
     monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
+        site_plans, "_dodo_product_for", lambda key: {"site": "prod_site_pro"}.get(key)
     )
     ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
@@ -189,7 +189,7 @@ async def test_paid_publish_is_pending_and_returns_checkout_url(
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=gen,
         _cloudflare=cf,
         _bundle_reader=lambda d: b"x",
@@ -199,7 +199,7 @@ async def test_paid_publish_is_pending_and_returns_checkout_url(
     # The site is PENDING — created but NOT deployed live.
     assert doc.deployed is False
     assert doc.subscription_status == "pending"
-    assert doc.plan_tier == "pro"
+    assert doc.plan_tier == "site"
     assert doc.subscription_id == SITE_SUB_ID
 
     # The deploy was DEFERRED — neither the generator nor Cloudflare ran.
@@ -238,7 +238,7 @@ async def test_paid_publish_is_pending_and_returns_checkout_url(
 async def test_active_webhook_deploys_pending_site(mongo_db, recording_bus, monkeypatch):
     # PAID tier → pending publish (deploy deferred).
     monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
+        site_plans, "_dodo_product_for", lambda key: {"site": "prod_site_pro"}.get(key)
     )
     # Force local deploy mode + fake the generator/local-server so the webhook-driven
     # activation (which can't take injected seams) needs no Bun/workerd/Cloudflare.
@@ -261,7 +261,7 @@ async def test_active_webhook_deploys_pending_site(mongo_db, recording_bus, monk
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=_RecordingGenerator(),  # publish path generator (must NOT run)
         _billing_provider=_RecordingBillingProvider(),
     )
@@ -302,7 +302,7 @@ async def test_active_webhook_deploys_pending_site(mongo_db, recording_bus, monk
 async def test_active_webhook_is_idempotent(mongo_db, monkeypatch):
     """A replayed subscription.active does not re-deploy an already-active site."""
     monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
+        site_plans, "_dodo_product_for", lambda key: {"site": "prod_site_pro"}.get(key)
     )
     monkeypatch.setenv("PAW_SITES_LOCAL", "1")
     activation_gen = _RecordingGenerator()
@@ -319,7 +319,7 @@ async def test_active_webhook_is_idempotent(mongo_db, monkeypatch):
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=_RecordingGenerator(),
         _billing_provider=_RecordingBillingProvider(),
     )
@@ -347,7 +347,7 @@ async def test_activate_site_invokes_cloudflare(mongo_db, monkeypatch):
     """Direct activate_site with an injected CF client proves the Cloudflare deploy
     branch runs at activation (the CF-injected path the webhook can't reach)."""
     monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
+        site_plans, "_dodo_product_for", lambda key: {"site": "prod_site_pro"}.get(key)
     )
     ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
@@ -355,7 +355,7 @@ async def test_activate_site_invokes_cloudflare(mongo_db, monkeypatch):
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=_RecordingGenerator(),
         _cloudflare=_RecordingCF(),
         _bundle_reader=lambda d: b"x",
@@ -378,6 +378,68 @@ async def test_activate_site_invokes_cloudflare(mongo_db, monkeypatch):
     assert gen.build_calls and cf.put_calls == [site_id]
     assert activated.deployed is True
     assert activated.subscription_status == "active"
+
+
+async def test_activation_stamps_a_MONTHLY_renewal_not_an_annual_one(mongo_db, monkeypatch):
+    """The site plans bill monthly. This path stamped +365 days.
+
+    ``billing.service`` was corrected to ``relativedelta(months=1)`` when the
+    ladder moved to a monthly interval on 2026-08-22, and this second writer was
+    missed — it lives in ``sites.service.activate_site``, not in the billing
+    module, so a grep of the billing package does not find it.
+
+    What it costs is not a wrong date on a card. ``renewal_date`` is the stamp the
+    renewal webhook advances and the UI reads to say when the next charge lands;
+    a site activated through charge-first got a renewal a YEAR out on a $7/month
+    subscription. Every monthly renewal after it would then look overdue by
+    eleven months, and any future job that gates on the stamp would keep the paid
+    capabilities alive for the whole year regardless of the card.
+
+    ``relativedelta`` rather than ``timedelta(days=30)`` for the same reason
+    ``billing.service`` uses it: 30-day steps walk the renewal backwards through
+    the calendar, losing five days a year.
+
+    Breaks on: restoring ``timedelta(days=365)`` — or ``days=30``, which the
+    two-day tolerance below is deliberately tight enough to catch on a
+    month-boundary activation.
+    """
+    from dateutil.relativedelta import relativedelta
+
+    monkeypatch.setattr(
+        site_plans, "_dodo_product_for", lambda key: {"site": "prod_site_paid"}.get(key)
+    )
+    ws = await _make_workspace(plan="pro")
+    pocket_id = await _make_pocket(workspace_id=ws)
+    doc = await sites_service.publish_pocket(
+        workspace_id=ws,
+        user_id="u1",
+        pocket_id=pocket_id,
+        site_plan_key="site",
+        _generator=_RecordingGenerator(),
+        _cloudflare=_RecordingCF(),
+        _bundle_reader=lambda d: b"x",
+        _billing_provider=_RecordingBillingProvider(),
+    )
+
+    before = datetime.now(UTC)
+    activated = await sites_service.activate_site(
+        workspace_id=ws,
+        site_id=str(doc.id),
+        _generator=_RecordingGenerator(),
+        _cloudflare=_RecordingCF(),
+        _bundle_reader=lambda d: b"x",
+    )
+
+    assert activated.renewal_date is not None
+    stamped = activated.renewal_date
+    if stamped.tzinfo is None:
+        stamped = stamped.replace(tzinfo=UTC)
+
+    expected = before + relativedelta(months=1)
+    assert abs((stamped - expected).total_seconds()) < 2 * 86400, (
+        f"expected a renewal about one month out ({expected.isoformat()}), "
+        f"got {stamped.isoformat()}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -428,8 +490,8 @@ async def test_paid_tier_without_dodo_product_publishes_live(mongo_db):
     a checkout, so charge-first degrades to an immediate live publish — the user is
     never stranded with a pending, never-deployable site."""
     # No _dodo_product_for monkeypatch → pro has a price but NO configured product.
-    assert site_plans.get_site_plan("pro").monthly_price_usd > 0
-    assert site_plans.get_site_plan("pro").dodo_product_id is None
+    assert site_plans.get_site_plan("site").monthly_price_usd > 0
+    assert site_plans.get_site_plan("site").dodo_product_id is None
 
     ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
@@ -441,7 +503,7 @@ async def test_paid_tier_without_dodo_product_publishes_live(mongo_db):
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=gen,
         _cloudflare=cf,
         _bundle_reader=lambda d: b"x",
@@ -453,7 +515,7 @@ async def test_paid_tier_without_dodo_product_publishes_live(mongo_db):
     assert cf.put_calls == [str(doc.id)]
     # Records the FLOOR, not "pro" (#1995). A priced tier with no Dodo product
     # cannot be bought, and stamping it anyway wrote a claim the site could not
-    # back: plan_tier="pro" with subscription_status="none", which every
+    # back: plan_tier="site" with subscription_status="none", which every
     # entitlement resolves as free. The buyer picked a paid plan, was charged
     # nothing, received nothing, and the plan card said pro.
     assert doc.plan_tier == site_plans.BASE_SITE_PLAN_KEY
@@ -487,7 +549,7 @@ async def test_the_subscription_reads_active_before_the_activation_deploy_runs(
     is to look at the doc AT DEPLOY TIME, which is what the stampers do.
     """
     monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
+        site_plans, "_dodo_product_for", lambda key: {"site": "prod_site_pro"}.get(key)
     )
     ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
@@ -495,7 +557,7 @@ async def test_the_subscription_reads_active_before_the_activation_deploy_runs(
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=_RecordingGenerator(),
         _cloudflare=_RecordingCF(),
         _bundle_reader=lambda d: b"x",
