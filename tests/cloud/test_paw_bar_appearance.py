@@ -21,6 +21,7 @@ import pytest
 
 from pocketpaw.paw_bar.appearance import (
     FONT_STACKS,
+    ColorAppearance,
     ConciergeAppearance,
     HeroAppearance,
     LauncherAppearance,
@@ -37,7 +38,14 @@ def test_defaults_reproduce_todays_look():
     makes the field additive and the migration unnecessary."""
     look = ConciergeAppearance()
 
-    assert look.surface_mode == "dark"
+    # "auto" — follow the customer's own site. It reads like a changed default
+    # and is actually the SHIPPED behaviour finally being stated honestly: the
+    # frame emitted this as ``theme``, the widget has read ``scheme`` since the
+    # one-theme change, so no bar has ever received this field and every one of
+    # them resolved light-or-dark off the host page. Defaulting to "auto" is
+    # what keeps that true now that the frame really sends it.
+    assert look.surface_mode == "auto"
+    assert look.bar_resting == "compact"
     assert look.radius == 20
     assert look.blur == 28
     assert look.motion.preset == "lively"
@@ -140,7 +148,7 @@ def test_an_unknown_font_falls_back_rather_than_being_stored():
 @pytest.mark.parametrize(
     ("field", "cls", "hostile", "expected"),
     [
-        ("surface_mode", ConciergeAppearance, "neon", "dark"),
+        ("surface_mode", ConciergeAppearance, "neon", "auto"),
         ("style", HeroAppearance, "iframe", "gradient"),
         ("position", LauncherAppearance, "middle-of-the-screen", "bottom-right"),
         ("preset", MotionAppearance, "seizure", "lively"),
@@ -245,7 +253,10 @@ def test_a_site_with_no_appearance_still_frames():
     and the public frame must render for those rather than 500 the visitor."""
     config = _config(appearance=None)
 
-    assert config["theme"] == "dark"
+    # See test_defaults_reproduce_todays_look: "auto" is what these sites have
+    # effectively been getting all along.
+    assert config["theme"] == "auto"
+    assert config["scheme"] == "auto"
     assert config["tokens"]["--pawbar-radius"] == "20px"
     assert config["agentName"] == ""
 
@@ -299,3 +310,157 @@ def test_a_hostile_appearance_reaches_the_frame_defanged():
     assert "--pawbar-accent" not in tokens
     assert "--pawbar-hero-image" not in tokens
     assert not any("evil.test" in v for v in tokens.values())
+
+
+# --------------------------------------------------------------------------- #
+# The light/dark choice reaches the widget at all (2026-08-22)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_scheme_key_is_what_the_widget_actually_reads():
+    """THE REGRESSION THIS EXISTS FOR, and it went unnoticed for months.
+
+    The frame emitted the owner's light/dark choice as ``theme``. The widget
+    stopped reading ``theme`` on 2026-08-19 — the one-theme change moved it to
+    ``scheme`` and left ``theme`` explicitly ignored so older frame HTML would
+    keep booting — and nothing ever sent ``scheme``. Both halves had tests.
+    Both halves passed. The setting still did nothing, because no test on
+    either side asserted that the key one wrote is the key the other reads.
+
+    Mutation that must break this: drop the ``"scheme"`` line from
+    ``_pawbar_frame_config``.
+    """
+    config = _config(appearance=ConciergeAppearance(surface_mode="light"))
+
+    assert config["scheme"] == "light"
+    # Still emitted alongside, for a bundle deployed before the rename that is
+    # already sitting on a customer's page.
+    assert config["theme"] == "light"
+
+
+def test_the_resting_mode_reaches_the_widget():
+    config = _config(appearance=ConciergeAppearance(bar_resting="full"))
+    assert config["barResting"] == "full"
+
+
+# --------------------------------------------------------------------------- #
+# Colours — the whole palette, not just the accent
+# --------------------------------------------------------------------------- #
+
+
+def test_unset_colours_are_absent_so_the_stylesheet_still_owns_them():
+    """The rule the whole token map follows. A colour we restate at its default
+    freezes every site to the value current at save time, and a later retune of
+    the base scale reaches nobody."""
+    tokens = ColorAppearance().tokens()
+
+    for absent in (
+        "--pawbar-surface",
+        "--pawbar-ink",
+        "--pawbar-user-bubble",
+        "--pawbar-ring",
+        "--pawbar-unread",
+    ):
+        assert absent not in tokens
+
+    # The two that ARE always emitted: numbers with a working default rather
+    # than overrides, and the widget derives a second step from each.
+    assert tokens["--pawbar-line-strength"] == "11%"
+    assert tokens["--pawbar-wash-strength"] == "5%"
+
+
+def test_one_surface_colour_produces_a_legible_widget():
+    """Setting a light panel and nothing else used to be white type on a white
+    panel — tokens.css documents that footgun, and a colour picker cannot warn
+    anyone about it. So the ink is derived from the ground rather than left to
+    the owner to work out."""
+    light = ColorAppearance(surface="#f7f7fb").tokens()
+    dark = ColorAppearance(surface="#101018").tokens()
+
+    # Four surface steps and an ink, every time, from the one input.
+    for token in (
+        "--pawbar-surface",
+        "--pawbar-surface-strong",
+        "--pawbar-surface-raised",
+        "--pawbar-surface-sunken",
+        "--pawbar-ink",
+    ):
+        assert token in light and token in dark
+
+    def _channels(value: str) -> tuple[int, int, int]:
+        inner = value[value.index("(") + 1 : value.index(")")]
+        r, g, b = (int(p.strip()) for p in inner.split(",")[:3])
+        return r, g, b
+
+    # The ink flips with the ground. This is the assertion that actually
+    # prevents the bug: a light panel must not get light type.
+    assert sum(_channels(light["--pawbar-ink"])) < 200, "dark ink on a light panel"
+    assert sum(_channels(dark["--pawbar-ink"])) > 550, "light ink on a dark panel"
+
+
+def test_an_explicit_ink_beats_the_derived_one():
+    """Derivation is a floor, not a ceiling — an owner who wants warm-grey type
+    on a near-black panel says so and wins."""
+    tokens = ColorAppearance(surface="#101018", ink="#c8b8a0").tokens()
+    assert tokens["--pawbar-ink"] == "rgba(200, 184, 160, 1)"
+
+
+def test_every_colour_field_refuses_a_value_that_is_not_hex():
+    """Each of these becomes the right-hand side of a CSS custom property in a
+    document the widget serves, so a value that is not a colour is a style
+    injection. Refused to "" — which means "the widget decides" — rather than
+    stored and emitted.
+
+    Mutation that must break this: widen _HEX_RE, or drop a field name from the
+    validator's list.
+    """
+    hostile = "red; background-image: url(https://evil.test/x.png)"
+    look = ColorAppearance(
+        surface=hostile,
+        ink=hostile,
+        accent_fg=hostile,
+        user_bubble=hostile,
+        assistant_bubble=hostile,
+        owner_bubble=hostile,
+        ring=hostile,
+        unread=hostile,
+        danger=hostile,
+    )
+    assert look.surface == ""
+    assert look.ink == ""
+    tokens = look.tokens()
+    assert not any("url(" in v or ";" in v for v in tokens.values())
+
+
+def test_named_colours_reach_the_token_map():
+    tokens = ColorAppearance(
+        user_bubble="#e2662a",
+        owner_bubble="#123",
+        unread="#ff0044",
+    ).tokens()
+
+    assert tokens["--pawbar-user-bubble"] == "rgba(226, 102, 42, 1)"
+    # Three-digit hex expands rather than being echoed.
+    assert tokens["--pawbar-owner-bubble"] == "rgba(17, 34, 51, 1)"
+    assert tokens["--pawbar-unread"] == "rgba(255, 0, 68, 1)"
+
+
+@pytest.mark.parametrize(
+    ("field", "given", "expected"),
+    [
+        ("surface_opacity", 5, 55),
+        ("surface_opacity", 400, 100),
+        ("line_strength", -3, 0),
+        ("line_strength", 900, 30),
+        ("wash_strength", 999, 20),
+    ],
+)
+def test_numeric_colour_fields_are_clamped(field, given, expected):
+    assert getattr(ColorAppearance(**{field: given}), field) == expected
+
+
+def test_colours_ride_through_the_full_appearance():
+    """The sub-model is wired into the appearance the frame actually renders,
+    not merely present on the class."""
+    look = ConciergeAppearance(colors=ColorAppearance(user_bubble="#e2662a"))
+    assert look.tokens()["--pawbar-user-bubble"] == "rgba(226, 102, 42, 1)"

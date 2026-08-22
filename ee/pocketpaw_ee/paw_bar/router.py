@@ -1038,7 +1038,21 @@ def _pawbar_frame_config(
         # filled it, so the whole white-label path was dead wire. ``theme`` was
         # never emitted at all, which is why every bar was dark regardless.
         "tokens": look.tokens(),
+        # ``scheme``, not ``theme`` (2026-08-22). This line said ``theme`` from
+        # the day the appearance model landed, and the widget stopped reading
+        # that key on 2026-08-19 — the one-theme change moved it to ``scheme``
+        # and left ``theme`` explicitly ignored so old frame HTML would keep
+        # booting. Nothing ever sent ``scheme``. So the owner's light/dark
+        # choice has never once reached a bar: every widget fell through to
+        # 'auto' and resolved off the host page instead.
+        #
+        # ``theme`` stays alongside it, carrying the same value, because a
+        # deployed bundle older than the one-theme change still reads it and a
+        # frame is served to whatever is already on the customer's page.
+        "scheme": look.surface_mode,
         "theme": look.surface_mode,
+        # How the docked bar rests — narrow-and-widens-on-hover, or full width.
+        "barResting": look.bar_resting,
         "agentName": look.agent_name,
         "agentSubtitle": look.agent_subtitle,
         "agentAvatar": look.agent_avatar_url,
