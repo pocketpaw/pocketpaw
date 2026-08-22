@@ -169,7 +169,9 @@ async def test_search_fallback_meta_tools_appended(mock_composio_client):
     surface a specific action."""
     mock_composio_client.tools.get.side_effect = _mock_tools_get  # returns toolkit tools per call
     reset_cache_for_tests()
-    tools = build_tools_for_backend(BACKEND_CLAUDE_SDK, settings=_settings_with(["gmail", "github"]))
+    tools = build_tools_for_backend(
+        BACKEND_CLAUDE_SDK, settings=_settings_with(["gmail", "github"])
+    )
     tool_names = {_tool_name(t) for t in tools}
     assert "COMPOSIO_SEARCH_TOOLS" in tool_names
     assert "COMPOSIO_GET_TOOL_SCHEMAS" in tool_names
@@ -252,12 +254,14 @@ Composio does **not** expose a uniform `whoami(user_id, toolkit)` primitive. `co
   ```python
   IDENTITY_PROBES: dict[str, IdentityProbe] = {
       "github": IdentityProbe(action="GITHUB_GET_AUTHENTICATED_USER", field="login"),
-      "gmail":  IdentityProbe(action="GMAIL_USERS_GET_PROFILE",       field="emailAddress"),
-      "slack":  IdentityProbe(action="SLACK_AUTH_TEST",               field="user"),
+      "gmail": IdentityProbe(action="GMAIL_USERS_GET_PROFILE", field="emailAddress"),
+      "slack": IdentityProbe(action="SLACK_AUTH_TEST", field="user"),
       "googlecalendar": IdentityProbe(action="GOOGLECALENDAR_GET_CURRENT_USER", field="email"),
-      "googledrive":    IdentityProbe(action="GOOGLEDRIVE_GET_ABOUT",           field="user.emailAddress"),
+      "googledrive": IdentityProbe(action="GOOGLEDRIVE_GET_ABOUT", field="user.emailAddress"),
       # extend per toolkit added to the allow-list
   }
+
+
   async def probe_identity(ctx, toolkit: str) -> str | None: ...
   ```
 - Create: `backend/ee/cloud/composio/domain.py` — extend with `ComposioConnection` value object (frozen, fields: `workspace_id`, `paw_user_id`, `toolkit`, `external_identity`, `verified_at`).

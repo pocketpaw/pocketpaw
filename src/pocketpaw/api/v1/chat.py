@@ -244,6 +244,22 @@ class _APISessionBridge:
                         },
                     }
                 )
+            elif evt.event_type == "studio_flow":
+                # /studio Flow canvas: the agent's build_studio_flow tool
+                # produced a full node/edge graph. tool_result truncates to 200
+                # chars so the whole spec rides its own event — paw-enterprise
+                # materialises the nodes on the canvas. ``flow_id`` names the
+                # project the graph belongs to, so the frontend applies it to
+                # the right flow (and the flow-projects sync persists it there).
+                sk = data.get("session_key", "")
+                safe_key = sk.replace(":", "_") if sk else ""
+                out_data: dict = {
+                    "spec": data.get("spec", {}),
+                    "session_id": safe_key,
+                }
+                if data.get("flow_id"):
+                    out_data["flow_id"] = str(data["flow_id"])
+                await self.queue.put({"event": "studio_flow", "data": out_data})
             elif evt.event_type == "error":
                 await self.queue.put(
                     {"event": "error", "data": {"detail": data.get("message", "")}}
@@ -289,6 +305,11 @@ async def _build_inbound_message(
         meta["file_context"] = chat_request.file_context.model_dump(exclude_none=True)
     if chat_request.agent_id:
         meta["agent_id"] = chat_request.agent_id
+    # Studio Flow build context: which flow the agent should save its graph to.
+    # The loop injects it into the system prompt so the agent knows the flow_id
+    # and passes it to build_studio_flow, and the studio_flow SSE event echoes it.
+    if chat_request.flow_context:
+        meta["flow_context"] = chat_request.flow_context.model_dump(exclude_none=True)
 
     # Thread the authenticated user + active workspace through to the agent
     # loop so downstream code (agent pocket creation, audit logging, etc.)

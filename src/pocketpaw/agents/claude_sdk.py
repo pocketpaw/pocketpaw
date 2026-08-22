@@ -688,6 +688,65 @@ def _prune_spilled_prompts(
             logger.debug("could not prune spilled system prompt %s", candidate)
 
 
+def _mcp_result_text(content: object) -> str:
+    """Extract the plain-text payload from a tool-result content envelope.
+
+    Handles EVERY shape the CLI/SDK can put on a tool result, so a payload is
+    never dropped for an unexpected wrapper:
+
+    * a plain ``str`` (Bash ``tool_result`` content) — passes through unchanged;
+    * a ``dict`` MCP envelope (``{"content": [{"type": "text", "text":
+      "..."}], "is_error": bool}`` — what ``ServerToolResultBlock.content``
+      carries for in-process SDK MCP tools like ``build_studio_flow``);
+    * a BARE ``list`` of text blocks (``[{"type": "text", "text": ...}]`` —
+      what the CLI emits for an MCP ``tool_result`` inside a ``user`` message,
+      parsed by the SDK as ``ToolResultBlock.content``).
+
+    Unwraps the text blocks so the loop's detector sees the bare payload
+    (e.g. ``{"studio_flow": {...}}``) rather than the wrapper — which would
+    otherwise win the brace-match and hide the marker.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        inner = content.get("content")
+        if isinstance(inner, str):
+            return inner
+        if isinstance(inner, list):
+            parts: list[str] = []
+            for item in inner:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif hasattr(item, "text"):
+                    parts.append(getattr(item, "text"))
+            return "\n".join(parts)
+        # Unknown shape (e.g. a bare is_error marker) — surface the raw JSON so
+        # nothing is silently swallowed.
+        try:
+            import json as _json
+
+            return _json.dumps(content)
+        except Exception:  # noqa: BLE001
+            return ""
+    if isinstance(content, list):
+        # Bare list of text blocks — items can be dicts (``{"type": "text",
+        # "text": ...}``) OR dataclass blocks with a ``.text`` attribute.
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                _t = item.get("text")
+                if isinstance(_t, str) and _t:
+                    parts.append(_t)
+            elif hasattr(item, "text"):
+                _t = getattr(item, "text")
+                if isinstance(_t, str) and _t:
+                    parts.append(_t)
+        return "\n".join(parts)
+    return ""
+
+
 class ClaudeSDKBackend(BaseAgentBackend):
     """Claude Agent SDK backend — the recommended default.
 
@@ -822,6 +881,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
         self._TextBlock = None
         self._ToolUseBlock = None
         self._ToolResultBlock = None
+        self._ServerToolUseBlock = None
+        self._ServerToolResultBlock = None
         self._StreamEvent = None
 
         self._initialize()
@@ -865,6 +926,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 ClaudeSDKClient,
                 HookMatcher,
                 ResultMessage,
+                ServerToolResultBlock,
+                ServerToolUseBlock,
                 SystemMessage,
                 TextBlock,
                 ToolResultBlock,
@@ -885,6 +948,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
             self._TextBlock = TextBlock
             self._ToolUseBlock = ToolUseBlock
             self._ToolResultBlock = ToolResultBlock
+            self._ServerToolUseBlock = ServerToolUseBlock
+            self._ServerToolResultBlock = ServerToolResultBlock
 
             # StreamEvent for token-by-token streaming (optional)
             try:
@@ -1173,14 +1238,17 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     {
                         "name": getattr(block, "name", "unknown"),
                         "input": getattr(block, "input", {}),
+                        "id": getattr(block, "id", ""),
                     }
                 )
             elif hasattr(block, "name") and hasattr(block, "input"):
-                # Fallback check
+                # Fallback check (also catches ``ServerToolUseBlock`` — the
+                # MCP-tool announcement on the SDK transcript).
                 tools.append(
                     {
                         "name": block.name,
                         "input": block.input,
+                        "id": getattr(block, "id", ""),
                     }
                 )
         return tools
@@ -1335,6 +1403,25 @@ class ClaudeSDKBackend(BaseAgentBackend):
         except Exception as exc:  # noqa: BLE001
             logger.debug("pocketpaw_atlas MCP server not registered: %s", exc)
 
+        # In-process MCP server: /studio flow building (build_studio_flow).
+        # The agent scaffolds a node graph (model → text → [picture] →
+        # image/video → [toolcall] → output) from a natural-language goal;
+        # the loop fans a dedicated ``studio_flow`` SSE event so paw-enterprise
+        # materialises the canvas. Pure core — no cloud dependency. Mirrors the
+        # atlas/widgets wiring below it.
+        try:
+            from pocketpaw.agents.sdk_mcp_studio import build_studio_context_server
+
+            studio_server = build_studio_context_server()
+            if studio_server is not None:
+                name, cfg_entry = studio_server
+                if self._policy.is_mcp_server_allowed(name):
+                    servers[name] = cfg_entry
+                else:
+                    logger.info("MCP server '%s' blocked by tool policy", name)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pocketpaw_studio MCP server not registered: %s", exc)
+
         # EE-provided in-process MCP servers — cloud pocket context, Mission
         # Control tasks, the planner, and the pocket specialist. Discovered
         # via the ``pocketpaw.mcp_servers`` entry-point (see
@@ -1413,9 +1500,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
         """
         from pocketpaw._registry import providers as _ext_providers
         from pocketpaw.agents.sdk_mcp_atlas import ATLAS_TOOL_IDS
+        from pocketpaw.agents.sdk_mcp_studio import STUDIO_TOOL_IDS
         from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
 
-        ids: list[str] = list(WIDGET_TOOL_IDS) + list(ATLAS_TOOL_IDS)
+        ids: list[str] = list(WIDGET_TOOL_IDS) + list(ATLAS_TOOL_IDS) + list(STUDIO_TOOL_IDS)
         for provider in _ext_providers("pocketpaw.mcp_servers"):
             try:
                 tool_ids = list(provider.tool_ids())
@@ -2243,6 +2331,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 )
         elif allow_mcp_tool_ids is not None:
             from pocketpaw.agents.sdk_mcp_atlas import ATLAS_TOOL_IDS
+            from pocketpaw.agents.sdk_mcp_studio import STUDIO_TOOL_IDS
             from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
 
             grant = (
@@ -2250,6 +2339,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 | POCKET_CREATION_GRANT
                 | frozenset(WIDGET_TOOL_IDS)
                 | frozenset(ATLAS_TOOL_IDS)
+                | frozenset(STUDIO_TOOL_IDS)
             )
             before_count = len(allowed_tools)
             allowed_tools = [
@@ -3134,6 +3224,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # once per run (from the SDK's turn-1 init/system message). Gated on
             # an opted-in ``session_handle`` so the legacy stream is byte-identical.
             _session_id_emitted = False
+            # tool_use_id → MCP tool id. The SDK's ServerToolResultBlock carries
+            # only ``tool_use_id`` (no name); the AssistantMessage's resolved
+            # tool_use carries the id+name. Correlate so the loop's tool_result
+            # name-match pops the right pending entry (and the UI shows the real
+            # tool, not a fallback).
+            _server_tool_names: dict[str, str] = {}
 
             # Stream responses — release the persistent client guard when done
             try:
@@ -3224,31 +3320,51 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     # ========== UserMessage - extract media from tool results ==========
                     if self._UserMessage and isinstance(event, self._UserMessage):
                         # UserMessages in multi-turn SDK flow contain ToolResultBlocks
-                        # with the raw output of Bash commands (including media tags).
+                        # with the raw output of tool calls. Bash results are a plain
+                        # str; MCP-server tool results ride as a LIST OF DICTS
+                        # (``[{"type": "text", "text": ...}]``) — the exact shape the
+                        # CLI emits for ``mcp__pocketpaw_studio__build_studio_flow``.
+                        # ``_mcp_result_text`` unwraps str/list/dict so a tool_result
+                        # is NEVER dropped for an unexpected wrapper.
                         if hasattr(event, "content") and isinstance(event.content, list):
                             for block in event.content:
-                                if not (
-                                    self._ToolResultBlock
-                                    and isinstance(block, self._ToolResultBlock)
+                                if self._ToolResultBlock and isinstance(
+                                    block, self._ToolResultBlock
                                 ):
-                                    continue
-                                block_content = getattr(block, "content", "")
-                                if isinstance(block_content, str):
-                                    result_text = block_content
-                                elif isinstance(block_content, list):
-                                    result_text = " ".join(
-                                        getattr(b, "text", "")
-                                        for b in block_content
-                                        if hasattr(b, "text")
+                                    _t_result = _mcp_result_text(getattr(block, "content", None))
+                                    _t_name = _server_tool_names.get(
+                                        getattr(block, "tool_use_id", ""), "bash"
                                     )
-                                else:
+                                    if _t_result:
+                                        yield AgentEvent(
+                                            type="tool_result",
+                                            content=_t_result,
+                                            metadata={"name": _t_name},
+                                        )
                                     continue
-                                if result_text:
-                                    yield AgentEvent(
-                                        type="tool_result",
-                                        content=result_text,
-                                        metadata={"name": "bash"},
+                                # MCP-server tool results (SDK >= 0.1.5x surface
+                                # these as ServerToolResultBlock, which is NOT a
+                                # ToolResultBlock subclass and was previously
+                                # dropped — so MCP tool calls never emitted a
+                                # tool_result event and the loop could not fan
+                                # the result to a dedicated SystemEvent. This is
+                                # the pipeline that powers agent-built /studio
+                                # flows (build_studio_flow) and pocket creation
+                                # on the default claude_agent_sdk backend.)
+                                if self._ServerToolResultBlock and isinstance(
+                                    block, self._ServerToolResultBlock
+                                ):
+                                    _mcp_text = _mcp_result_text(getattr(block, "content", None))
+                                    _tool_name = _server_tool_names.get(
+                                        getattr(block, "tool_use_id", ""),
+                                        "mcp_server",
                                     )
+                                    if _mcp_text:
+                                        yield AgentEvent(
+                                            type="tool_result",
+                                            content=_mcp_text,
+                                            metadata={"name": _tool_name},
+                                        )
                         logger.debug("UserMessage processed")
                         continue
 
@@ -3281,6 +3397,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         tools = self._extract_tool_info(event)
                         for tool in tools:
                             logger.info(f"🔧 Tool: {tool['name']}")
+                            # Correlate the MCP tool_use_id → tool id so the
+                            # later ServerToolResultBlock (which carries only
+                            # the id) resolves to its real name.
+                            _tid = tool.get("id")
+                            if _tid:
+                                _server_tool_names[_tid] = tool["name"]
                             yield AgentEvent(
                                 type="tool_use",
                                 content=f"Using {tool['name']}...",
@@ -3290,6 +3412,34 @@ class ClaudeSDKBackend(BaseAgentBackend):
                                     "input_pending": False,
                                 },
                             )
+
+                        # MCP (advisor) tool results ride INSIDE AssistantMessage
+                        # content as ``ServerToolResultBlock`` (message_parser.py
+                        # maps ``advisor_tool_result`` there). Emit a tool_result
+                        # event so the loop's detector (``_publish_studio_flow_event``
+                        # / ``_publish_pocket_event``) can fan the payload to a
+                        # dedicated SystemEvent. Without this, an MCP tool call on
+                        # the default SDK backend silently produced no result event
+                        # — the canvas never materialised the graph.
+                        _am_content = getattr(event, "content", None)
+                        if _am_content and isinstance(_am_content, list):
+                            for _srv_block in _am_content:
+                                if not (
+                                    self._ServerToolResultBlock
+                                    and isinstance(_srv_block, self._ServerToolResultBlock)
+                                ):
+                                    continue
+                                _mcp_text = _mcp_result_text(getattr(_srv_block, "content", None))
+                                _tool_name = _server_tool_names.get(
+                                    getattr(_srv_block, "tool_use_id", ""),
+                                    "mcp_server",
+                                )
+                                if _mcp_text:
+                                    yield AgentEvent(
+                                        type="tool_result",
+                                        content=_mcp_text,
+                                        metadata={"name": _tool_name},
+                                    )
 
                         _streamed_via_events = False
                         continue

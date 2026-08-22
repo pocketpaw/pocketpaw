@@ -43,6 +43,7 @@ This module is intentionally minimal—it does **not** define any classes or met
 - **Usage**: The main application (likely in a top-level `main.py` or similar) imports this router and registers it with the FastAPI app:
   ```python
   from ee.cloud.chat import router
+
   app.include_router(router, prefix="/api/chat")
   ```
 

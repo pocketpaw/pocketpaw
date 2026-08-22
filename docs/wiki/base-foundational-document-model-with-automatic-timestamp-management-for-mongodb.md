@@ -113,6 +113,7 @@ Downstream authorization systems (not in this module) should use these fields to
 # Example from workspace.py or similar:
 from ee.cloud.models.base import TimestampedDocument
 
+
 class Workspace(TimestampedDocument):
     name: str
     # ... other fields ...

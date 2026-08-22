@@ -268,8 +268,10 @@ logger = logging.getLogger(__name__)
 
 _sweeper_task: asyncio.Task | None = None
 
+
 async def _sweeper_loop() -> None:
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
+
     while True:
         try:
             await asyncio.sleep(300)
@@ -279,13 +281,16 @@ async def _sweeper_loop() -> None:
         except Exception:
             logger.exception("sweep_stale_runs tick failed")
 
+
 async def start_run_sweeper() -> None:
     """Call from cloud startup. Sweeps once, then ticks every 5 minutes."""
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
+
     global _sweeper_task
     with suppress(Exception):
         await sweep_stale_runs()  # initial pass
     _sweeper_task = asyncio.create_task(_sweeper_loop())
+
 
 async def stop_run_sweeper() -> None:
     """Call from cloud shutdown."""

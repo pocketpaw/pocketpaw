@@ -118,9 +118,9 @@ sitting — without keeping the central file. No generated line ships unread.
 ```python
 @dataclass(frozen=True)
 class Narration:
-    active: str                        # "Searching the web for {query}"
-    bare: str                          # "Searching the web"  (args missing/redacted)
-    safe_args: tuple[str, ...] = ()    # allowlist — ONLY these may interpolate
+    active: str  # "Searching the web for {query}"
+    bare: str  # "Searching the web"  (args missing/redacted)
+    safe_args: tuple[str, ...] = ()  # allowlist — ONLY these may interpolate
 ```
 
 Exposed as an optional property on `BaseTool` (default `None`), alongside `trust_level`.

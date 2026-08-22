@@ -248,6 +248,7 @@ PATTERNS = [
     (re.compile(r"^(\s*)import ee\."), r"\1import pocketpaw_ee."),
 ]
 
+
 def rewrite(path: Path) -> int:
     text = path.read_text(encoding="utf-8")
     new = text
@@ -264,6 +265,7 @@ def rewrite(path: Path) -> int:
         return 1
     return 0
 
+
 def main() -> int:
     root = Path(".").resolve()
     changed = 0
@@ -273,6 +275,7 @@ def main() -> int:
         changed += rewrite(py)
     print(f"Modified {changed} files")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

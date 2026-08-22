@@ -181,10 +181,10 @@ Both should appear. Then verify `POCKETPAW_REDIS_URL` is set in the dev env (req
 class APIKey(Document):
     workspace: Indexed(str)
     owner_user_id: str
-    name: str                 # human label
-    prefix: Indexed(str)      # first 8 chars for identification (not secret)
-    hashed_secret: str        # bcrypt of the full key
-    scopes: list[str]         # ["chat.send", "files.read", ...]
+    name: str  # human label
+    prefix: Indexed(str)  # first 8 chars for identification (not secret)
+    hashed_secret: str  # bcrypt of the full key
+    scopes: list[str]  # ["chat.send", "files.read", ...]
     expires_at: datetime | None
     last_used_at: datetime | None
     revoked: bool = False
@@ -229,11 +229,11 @@ Key format: `paw_<prefix><secret>` — total ~32 chars. Stored: prefix (plain) +
 ```python
 class SsoConfig(BaseModel):
     provider: Literal["okta", "google", "azure", "generic_oidc"]
-    issuer: str               # https://acme.okta.com
+    issuer: str  # https://acme.okta.com
     client_id: str
-    client_secret: str        # encrypted at rest (Fernet w/ a key derived from the deploy secret)
+    client_secret: str  # encrypted at rest (Fernet w/ a key derived from the deploy secret)
     allowed_domains: list[str]  # @acme.com — auto-join
-    enforced: bool            # if true, password login is disabled for matching emails
+    enforced: bool  # if true, password login is disabled for matching emails
 ```
 
 **Step 2: Endpoints.**

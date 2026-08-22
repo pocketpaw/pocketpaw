@@ -114,9 +114,7 @@ def get_redis() -> Redis:
     if _client is None:
         url = os.environ.get("POCKETPAW_REDIS_URL", "").strip()
         if not url:
-            raise RuntimeError(
-                "POCKETPAW_REDIS_URL is not set — resumable chat runs need Redis."
-            )
+            raise RuntimeError("POCKETPAW_REDIS_URL is not set — resumable chat runs need Redis.")
         # decode_responses=False: Redis Stream entry IDs and our JSON payloads
         # are handled as bytes/str explicitly in redis_stream.py.
         _client = Redis.from_url(url, decode_responses=True)
@@ -227,7 +225,7 @@ def _utcnow() -> datetime:
 class ChatRunDoc(Document):
     run_id: str
     workspace: str
-    context_type: str          # "dm" | "group" | "pocket" | "session"
+    context_type: str  # "dm" | "group" | "pocket" | "session"
     scope_id: str
     session_key: str
     group: str | None = None
@@ -293,10 +291,19 @@ from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 
 def test_run_spec_roundtrips_json():
     spec = RunSpec(
-        run_id="r1", workspace_id="w1", context_type="session", scope_id="s1",
-        session_key="session:s1", group=None, user_id="u1", agent_id="a1",
-        client_message_id="c1", user_message_id="m1", content="hello",
-        history=[{"role": "user", "content": "hi"}], intent=None,
+        run_id="r1",
+        workspace_id="w1",
+        context_type="session",
+        scope_id="s1",
+        session_key="session:s1",
+        group=None,
+        user_id="u1",
+        agent_id="a1",
+        client_message_id="c1",
+        user_message_id="m1",
+        content="hello",
+        history=[{"role": "user", "content": "hi"}],
+        intent=None,
     )
     restored = RunSpec.model_validate(spec.model_dump())
     assert restored == spec
@@ -458,7 +465,7 @@ TERMINAL_EVENTS = {"stream_end", "error", "interrupted"}
 
 @dataclass(frozen=True)
 class StreamEvent:
-    entry_id: str            # opaque cursor — Redis entry id, JetStream seq, ...
+    entry_id: str  # opaque cursor — Redis entry id, JetStream seq, ...
     event: str
     data: dict[str, Any]
 
@@ -495,9 +502,7 @@ def get_stream_transport() -> RunStreamTransport:
 
             _transport = RedisStreamTransport(get_redis())
         else:
-            raise RuntimeError(
-                f"unknown POCKETPAW_CLOUD_STREAM_TRANSPORT={backend!r}"
-            )
+            raise RuntimeError(f"unknown POCKETPAW_CLOUD_STREAM_TRANSPORT={backend!r}")
     return _transport
 
 
@@ -562,9 +567,7 @@ class RedisStreamTransport:
         the caller loops and emits a heartbeat between calls."""
         cursor = after
         while True:
-            resp = await self._redis.xread(
-                {_events_key(run_id): cursor}, block=block_ms, count=64
-            )
+            resp = await self._redis.xread({_events_key(run_id): cursor}, block=block_ms, count=64)
             if not resp:
                 return
             _key, entries = resp[0]
@@ -633,10 +636,19 @@ pytestmark = pytest.mark.asyncio
 
 def _spec(run_id="r1", scope_id="s1"):
     return RunSpec(
-        run_id=run_id, workspace_id="w1", context_type="session", scope_id=scope_id,
-        session_key=f"session:{scope_id}", group=None, user_id="u1", agent_id="a1",
-        client_message_id=f"c-{run_id}", user_message_id="m1", content="hi",
-        history=[], intent=None,
+        run_id=run_id,
+        workspace_id="w1",
+        context_type="session",
+        scope_id=scope_id,
+        session_key=f"session:{scope_id}",
+        group=None,
+        user_id="u1",
+        agent_id="a1",
+        client_message_id=f"c-{run_id}",
+        user_message_id="m1",
+        content="hi",
+        history=[],
+        intent=None,
     )
 
 
@@ -739,7 +751,9 @@ async def mark_running(run_id: str) -> None:
     await doc.save()
 
 
-async def mark_completed(run_id: str, *, assistant_message_id: str | None, partial_text: str) -> None:
+async def mark_completed(
+    run_id: str, *, assistant_message_id: str | None, partial_text: str
+) -> None:
     doc = await get_run(run_id)
     doc.status = "completed"
     doc.assistant_message_id = assistant_message_id
@@ -770,12 +784,16 @@ async def find_active_run_for_scope(
     *, workspace_id: str, context_type: str, scope_id: str
 ) -> ChatRunDoc | None:
     """Newest non-terminal run for a scope — drives frontend auto-resume."""
-    return await ChatRunDoc.find(
-        ChatRunDoc.workspace == workspace_id,
-        ChatRunDoc.context_type == context_type,
-        ChatRunDoc.scope_id == scope_id,
-        {"status": {"$in": ["queued", "running"]}},
-    ).sort(-ChatRunDoc.createdAt).first_or_none()
+    return (
+        await ChatRunDoc.find(
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.context_type == context_type,
+            ChatRunDoc.scope_id == scope_id,
+            {"status": {"$in": ["queued", "running"]}},
+        )
+        .sort(-ChatRunDoc.createdAt)
+        .first_or_none()
+    )
 
 
 async def find_stale_running(older_than: datetime) -> list[ChatRunDoc]:
@@ -826,10 +844,19 @@ pytestmark = pytest.mark.asyncio
 
 def _spec():
     return RunSpec(
-        run_id="r1", workspace_id="w1", context_type="session", scope_id="s1",
-        session_key="session:s1", group=None, user_id="u1", agent_id="a1",
-        client_message_id="c1", user_message_id="m1", content="hi",
-        history=[], intent=None,
+        run_id="r1",
+        workspace_id="w1",
+        context_type="session",
+        scope_id="s1",
+        session_key="session:s1",
+        group=None,
+        user_id="u1",
+        agent_id="a1",
+        client_message_id="c1",
+        user_message_id="m1",
+        content="hi",
+        history=[],
+        intent=None,
     )
 
 
@@ -842,6 +869,7 @@ async def test_execute_run_writes_chunks_then_stream_end(monkeypatch):
 
     # See implementation notes — patch the seams run_core exposes:
     from pocketpaw_ee.cloud.chat.runs.redis_stream import RedisStreamTransport
+
     transport = RedisStreamTransport(redis)
 
     monkeypatch.setattr(run_core, "_iter_agent_events", fake_agent_events)
@@ -930,10 +958,19 @@ pytestmark = pytest.mark.asyncio
 
 def _spec():
     return RunSpec(
-        run_id="r1", workspace_id="w1", context_type="session", scope_id="s1",
-        session_key="session:s1", group=None, user_id="u1", agent_id="a1",
-        client_message_id="c1", user_message_id="m1", content="hi",
-        history=[], intent=None,
+        run_id="r1",
+        workspace_id="w1",
+        context_type="session",
+        scope_id="s1",
+        session_key="session:s1",
+        group=None,
+        user_id="u1",
+        agent_id="a1",
+        client_message_id="c1",
+        user_message_id="m1",
+        content="hi",
+        history=[],
+        intent=None,
     )
 
 
@@ -1071,6 +1108,7 @@ pytestmark = pytest.mark.asyncio
 async def test_stream_replays_buffered_events(cloud_app, monkeypatch, seed_run):
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     from pocketpaw_ee.cloud.chat.runs.redis_stream import RedisStreamTransport
+
     transport = RedisStreamTransport(redis)
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.chat.runs.router.get_stream_transport", lambda: transport
@@ -1088,6 +1126,7 @@ async def test_stream_replays_buffered_events(cloud_app, monkeypatch, seed_run):
 async def test_stop_sets_cancel_flag(cloud_app, monkeypatch, seed_run):
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     from pocketpaw_ee.cloud.chat.runs.redis_stream import RedisStreamTransport
+
     transport = RedisStreamTransport(redis)
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.chat.runs.router.get_stream_transport", lambda: transport
@@ -1227,6 +1266,7 @@ async def post_run_stop(
 
 ```python
 from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
+
 ...
 app.include_router(runs_router, prefix="/api/v1")
 ```
@@ -1349,7 +1389,7 @@ async def post_agent_chat(
         mentions=body.mentions or [],
         reply_to=body.reply_to,
     )
-    run = await run_service.create_run(spec)          # idempotent
+    run = await run_service.create_run(spec)  # idempotent
     await get_executor().submit(spec)
 
     return {
@@ -1420,9 +1460,7 @@ Expected: FAIL — `active_run` key absent.
 active = await run_service.find_active_run_for_scope(
     workspace_id=workspace_id, context_type="session", scope_id=session_scope_id
 )
-result["active_run"] = (
-    {"run_id": active.run_id, "status": active.status} if active else None
-)
+result["active_run"] = {"run_id": active.run_id, "status": active.status} if active else None
 ```
 
 Do the same for the group-messages endpoint (`chat/router.py` `get_messages` → `message_service.get_messages`) so `dm`/`group` scopes resume too.
@@ -1454,12 +1492,14 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```python
 async def test_shutdown_drains_in_process_executor(monkeypatch):
     from pocketpaw_ee.cloud.chat.runs import executor as ex
+
     ex._reset_for_tests()
     monkeypatch.delenv("POCKETPAW_CLOUD_RUN_EXECUTOR", raising=False)
     inproc = ex.get_executor()
     assert isinstance(inproc, ex.InProcessExecutor)
     # a slow run still in flight
     import asyncio
+
     done = []
 
     async def slow(spec):
@@ -1850,6 +1890,7 @@ async def test_execute_run_job_calls_execute_run(monkeypatch):
 
 async def test_sweep_marks_stale_runs_interrupted(cloud_db, monkeypatch):
     from pocketpaw_ee.cloud.chat.runs import service as run_service
+
     await run_service.create_run(_spec())
     await run_service.mark_running("r1")
     await worker.sweep_interrupted_runs()
@@ -1950,7 +1991,7 @@ class WorkerSettings:
     functions = [execute_run_job]
     on_startup = _startup
     on_shutdown = _shutdown
-    max_tries = 1          # crash policy: no auto-retry
+    max_tries = 1  # crash policy: no auto-retry
     redis_settings = RedisSettings.from_dsn(
         os.environ.get("POCKETPAW_REDIS_URL", "redis://localhost:6379/0")
     )
@@ -1990,6 +2031,7 @@ async def test_web_startup_sweeps_when_inprocess(cloud_db, monkeypatch):
     monkeypatch.delenv("POCKETPAW_CLOUD_RUN_EXECUTOR", raising=False)
     from pocketpaw_ee.cloud.chat.runs import service as run_service
     from pocketpaw_ee.cloud.chat.runs.worker import sweep_interrupted_runs
+
     await run_service.create_run(_spec())
     await run_service.mark_running("r1")
     await sweep_interrupted_runs()
@@ -2007,9 +2049,11 @@ Expected: PASS already (sweep exists) — this test pins the behaviour; the wiri
 @app.on_event("startup")
 async def _sweep_orphaned_runs() -> None:
     import os as _os
+
     if _os.environ.get("POCKETPAW_CLOUD_RUN_EXECUTOR", "inprocess").lower() == "arq":
         return  # the arq worker owns the sweep in Tier 2
     from pocketpaw_ee.cloud.chat.runs.worker import sweep_interrupted_runs
+
     try:
         await sweep_interrupted_runs()
     except Exception:

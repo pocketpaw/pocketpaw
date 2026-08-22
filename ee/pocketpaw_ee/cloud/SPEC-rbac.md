@@ -94,6 +94,7 @@ SPEC-rbac.md                       # This file (ee/cloud/SPEC-rbac.md)
 from pocketpaw.ee.guards.deps import require_role
 from pocketpaw.ee.guards.rbac import WorkspaceRole
 
+
 @router.patch("/workspaces/{workspace_id}")
 async def update_workspace(
     workspace_id: str,
@@ -122,6 +123,8 @@ async def update(self, workspace_id: str, payload: WorkspaceUpdate) -> Workspace
     ws.apply(payload)
     await ws.save()
     return ws
+
+
 # No role checks here — the route dependency already enforced it.
 ```
 
@@ -130,17 +133,17 @@ async def update(self, workspace_id: str, payload: WorkspaceUpdate) -> Workspace
 ```python
 # pocketpaw/ee/guards/actions.py
 ACTIONS: dict[str, ActionRule] = {
-    "workspace.update":          ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
-    "workspace.delete":          ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
-    "workspace.member.remove":   ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
-    "group.post":                ActionRule(GroupRole.MEMBER,    "group.view_only"),
-    "group.admin":               ActionRule(GroupRole.ADMIN,     "group.not_admin"),
-    "group.delete":              ActionRule(GroupRole.OWNER,     "group.not_owner"),
-    "pocket.read":               ActionRule(PocketAccess.VIEW,   "pocket.access_denied"),
-    "pocket.edit":               ActionRule(PocketAccess.EDIT,   "pocket.access_denied"),
-    "pocket.share":              ActionRule(PocketAccess.OWNER,  "pocket.not_owner"),
-    "agent.create":              ActionRule(WorkspaceRole.MEMBER,"agent.ceiling_exceeded"),
-    "billing.manage":            ActionRule(WorkspaceRole.OWNER, "billing.owner_only"),
+    "workspace.update": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    "workspace.delete": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
+    "workspace.member.remove": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    "group.post": ActionRule(GroupRole.MEMBER, "group.view_only"),
+    "group.admin": ActionRule(GroupRole.ADMIN, "group.not_admin"),
+    "group.delete": ActionRule(GroupRole.OWNER, "group.not_owner"),
+    "pocket.read": ActionRule(PocketAccess.VIEW, "pocket.access_denied"),
+    "pocket.edit": ActionRule(PocketAccess.EDIT, "pocket.access_denied"),
+    "pocket.share": ActionRule(PocketAccess.OWNER, "pocket.not_owner"),
+    "agent.create": ActionRule(WorkspaceRole.MEMBER, "agent.ceiling_exceeded"),
+    "billing.manage": ActionRule(WorkspaceRole.OWNER, "billing.owner_only"),
     # ... full matrix below
 }
 ```

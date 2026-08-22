@@ -130,6 +130,7 @@ from pocketpaw_ee.agent.pocket_specialist.mcp_tool import (
 
 from pocketpaw.agents.claude_sdk import ClaudeAgentSDK
 from pocketpaw.agents.sdk_mcp_atlas import SERVER_NAME as _ATLAS_MCP_SERVER_NAME
+from pocketpaw.agents.sdk_mcp_studio import SERVER_NAME as _STUDIO_MCP_SERVER_NAME
 from pocketpaw.agents.sdk_mcp_widgets import SERVER_NAME as _WIDGETS_MCP_SERVER_NAME
 from pocketpaw.config import Settings
 from pocketpaw.mcp.config import MCPServerConfig
@@ -232,6 +233,11 @@ def _strip_builtin_servers(result: dict) -> dict:
     # measures what it claims to measure: EXTERNAL config.
     out.pop(_CODE_MCP_SERVER_NAME, None)
     out.pop(_SHIP_MCP_SERVER_NAME, None)
+    # ``pocketpaw_studio`` is always-on too — the /studio flow canvas agent
+    # surface (build_studio_flow) is registered unconditionally in core
+    # ``claude_sdk._get_mcp_servers`` so the default agent backend can scaffold
+    # flow graphs. In-process, no external config.
+    out.pop(_STUDIO_MCP_SERVER_NAME, None)
     return out
 
 
@@ -650,6 +656,12 @@ class TestMcpProviderLoadFailures:
             # scenario stays truly empty.
             patch(
                 "pocketpaw.agents.sdk_mcp_atlas.build_atlas_context_server",
+                return_value=None,
+            ),
+            # The studio server is always-on too — patch its builder to None
+            # (same regime as atlas) so the empty-server scenario stays empty.
+            patch(
+                "pocketpaw.agents.sdk_mcp_studio.build_studio_context_server",
                 return_value=None,
             ),
             caplog.at_level(logging.INFO, logger="pocketpaw.agents.claude_sdk"),

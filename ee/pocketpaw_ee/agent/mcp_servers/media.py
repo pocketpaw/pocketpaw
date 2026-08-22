@@ -68,11 +68,12 @@ import asyncio
 import base64
 import json
 import logging
-import uuid
 from pathlib import Path
 from typing import Any
 
 import httpx
+
+from pocketpaw_ee.cloud.media import storage as media_storage
 
 from ._audit import record_tool_call
 
@@ -311,16 +312,6 @@ _PROXY_TRANSPORT: httpx.BaseTransport | None = None
 _GALLERY_STATE: dict[str, dict[str, Any]] = {}
 
 
-def _generated_dir() -> Path:
-    """Get (and create) the directory for generated media assets — same location
-    the OSS ImageGenerateTool uses (``get_config_dir()/generated``)."""
-    from pocketpaw.config import get_config_dir
-
-    d = get_config_dir() / "generated"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
 def _build_gallery_spec(media: list[dict[str, Any]]) -> dict[str, Any]:
     """Assemble a STUDIO gallery rippleSpec from the accumulated media list.
 
@@ -523,7 +514,8 @@ async def _image_generate_handler(args: dict) -> dict:
     (the picker / studio skill selects one). Routes through the LiteLLM proxy's
     ``/v1/images/generations``; ``aspect_ratio`` is mapped to ``size`` (an
     explicit ``size`` wins) so the bundled skill's aspect hint is honoured rather
-    than silently dropped. Saves the PNG under get_config_dir()/generated, then
+    than silently dropped. Saves the PNG through the media storage adapter
+    (local disk in dev, S3 in a POCKETPAW_UPLOAD_ADAPTER=s3 deployment), then
     lands it in the STUDIO gallery. When no model is passed it falls back to a
     known-served default, then ``settings.image_model``. Sets ``is_error`` when
     identity is missing or the proxy call fails.
@@ -560,18 +552,17 @@ async def _image_generate_handler(args: dict) -> dict:
         return _error_response(err or "image generation returned no data")
 
     try:
-        out_path = _generated_dir() / f"{uuid.uuid4()}.png"
-        out_path.write_bytes(image_bytes)
-        logger.info("media: generated image %s via proxy model %s", out_path, model)
+        media_url = await media_storage.save_generated(image_bytes, mime="image/png")
+        logger.info("media: generated image %s via proxy model %s", media_url, model)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("media: writing generated image failed", exc_info=True)
+        logger.warning("media: saving generated image failed", exc_info=True)
         return _error_response(f"could not save the generated image: {exc}")
 
     result, err = await _land_in_gallery(
         workspace_id=workspace_id,
         user_id=user_id,
         kind="image",
-        src=str(out_path),
+        src=media_url,
         prompt=prompt,
     )
     if err is not None or result is None:
@@ -582,7 +573,7 @@ async def _image_generate_handler(args: dict) -> dict:
             "ok": True,
             "kind": "image",
             "model": model,
-            "path": str(out_path),
+            "path": media_url,
             "pocket_id": result["pocket_id"],
             "gallery_count": result["count"],
         }
@@ -590,6 +581,15 @@ async def _image_generate_handler(args: dict) -> dict:
 
 
 # ── Audio TTS (POST {proxy}/v1/audio/speech) ─────────────────────────────────
+
+_AUDIO_MIME_MAP = {
+    "mp3": "audio/mpeg",
+    "wav": "audio/wav",
+    "opus": "audio/ogg",
+    "flac": "audio/flac",
+    "aac": "audio/aac",
+    "pcm": "audio/pcm",
+}
 
 
 async def _proxy_audio_speech(
@@ -635,9 +635,10 @@ async def _audio_generate_handler(args: dict) -> dict:
     """MCP handler for ``media__audio_generate`` (text-to-speech).
 
     Routes through ``/v1/audio/speech`` with the catalog model id from
-    ``args['model']`` (default ``tts-1``), saves the audio under
-    get_config_dir()/generated, then lands it in the STUDIO gallery as an audio
-    tile. Sets ``is_error`` when identity is missing or the proxy call fails.
+    ``args['model']`` (default ``tts-1``), saves the audio through the media
+    storage adapter (local disk in dev, S3 in a POCKETPAW_UPLOAD_ADAPTER=s3
+    deployment), then lands it in the STUDIO gallery as an audio tile. Sets
+    ``is_error`` when identity is missing or the proxy call fails.
     """
     workspace_id, user_id = _identity()
     if not workspace_id or not user_id:
@@ -665,18 +666,21 @@ async def _audio_generate_handler(args: dict) -> dict:
         return _error_response(err or "audio synthesis returned no data")
 
     try:
-        out_path = _generated_dir() / f"{uuid.uuid4()}.{response_format}"
-        out_path.write_bytes(audio_bytes)
-        logger.info("media: generated audio %s via proxy model %s", out_path, model)
+        media_url = await media_storage.save_generated(
+            audio_bytes,
+            mime=_AUDIO_MIME_MAP.get(response_format, "audio/mpeg"),
+            ext=response_format,
+        )
+        logger.info("media: generated audio %s via proxy model %s", media_url, model)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("media: writing generated audio failed", exc_info=True)
+        logger.warning("media: saving generated audio failed", exc_info=True)
         return _error_response(f"could not save the generated audio: {exc}")
 
     result, err = await _land_in_gallery(
         workspace_id=workspace_id,
         user_id=user_id,
         kind="audio",
-        src=str(out_path),
+        src=media_url,
         prompt=text,
     )
     if err is not None or result is None:
@@ -687,7 +691,7 @@ async def _audio_generate_handler(args: dict) -> dict:
             "ok": True,
             "kind": "audio",
             "model": model,
-            "path": str(out_path),
+            "path": media_url,
             "pocket_id": result["pocket_id"],
             "gallery_count": result["count"],
         }
