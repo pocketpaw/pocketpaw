@@ -121,5 +121,68 @@
     "tests": [
       "tests/cloud/test_paw_bar_appearance.py::test_an_overlong_launcher_label_is_bounded_before_it_reaches_the_frame"
     ]
+  },
+  {
+    "label": "the frame stops sending `scheme` — the light/dark choice is invisible to the widget again",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        \"scheme\": look.surface_mode,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_the_scheme_key_is_what_the_widget_actually_reads"
+    ]
+  },
+  {
+    "label": "the resting mode never reaches the frame — the bar can only rest one way",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        \"barResting\": look.bar_resting,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_the_resting_mode_reaches_the_widget"
+    ]
+  },
+  {
+    "label": "the colour fields echo whatever they are given — nine style-injection points",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "    @field_validator(\n        \"surface\",\n        \"ink\",\n        \"accent_fg\",\n        \"user_bubble\",\n        \"assistant_bubble\",\n        \"owner_bubble\",\n        \"ring\",\n        \"unread\",\n        \"danger\",\n    )\n    @classmethod\n    def _hex_only(cls, v: str) -> str:\n        v = (v or \"\").strip()\n        return v if _HEX_RE.match(v) else \"\"",
+    "replace": "    @field_validator(\n        \"surface\",\n        \"ink\",\n        \"accent_fg\",\n        \"user_bubble\",\n        \"assistant_bubble\",\n        \"owner_bubble\",\n        \"ring\",\n        \"unread\",\n        \"danger\",\n    )\n    @classmethod\n    def _hex_only(cls, v: str) -> str:\n        return (v or \"\").strip()",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_every_colour_field_refuses_a_value_that_is_not_hex"
+    ]
+  },
+  {
+    "label": "the ink stops following the ground — a light panel gets light type",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "    dark = _luminance(base) < 0.5",
+    "replace": "    dark = True",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_one_surface_colour_produces_a_legible_widget"
+    ]
+  },
+  {
+    "label": "an explicitly named ink is discarded in favour of the derived one",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "            out[\"--pawbar-ink\"] = _rgba(_hex_to_rgb(self.ink), 100)",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_an_explicit_ink_beats_the_derived_one"
+    ]
+  },
+  {
+    "label": "the owner's colours never reach the appearance the frame renders",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "        out.update(self.colors.tokens())",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_colours_ride_through_the_full_appearance"
+    ]
+  },
+  {
+    "label": "unset colours are restated at their defaults, freezing every site to today's base",
+    "file": "src/pocketpaw/paw_bar/appearance.py",
+    "find": "            if value:\n                out[token] = _rgba(_hex_to_rgb(value), 100)",
+    "replace": "            out[token] = _rgba(_hex_to_rgb(value or \"#3b6fe0\"), 100)",
+    "tests": [
+      "tests/cloud/test_paw_bar_appearance.py::test_unset_colours_are_absent_so_the_stylesheet_still_owns_them"
+    ]
   }
 ]
