@@ -336,6 +336,49 @@ async def test_republishing_a_paying_site_keeps_its_paid_status_and_goes_live(
     assert doc._checkout_url is None
 
 
+async def test_republishing_a_site_that_never_paid_still_opens_a_checkout(
+    mongo_db, recording_bus, monkeypatch
+):
+    """The guard keys on "active", not on "has a subscription_id" — and it has to.
+
+    A site published on a paid tier but never paid for sits PENDING holding the
+    checkout SESSION id of an abandoned checkout. If that counted as "already
+    paying", the republish would skip billing entirely and the buyer would be left
+    with a site they cannot pay for and that never goes live: the deploy waits on a
+    subscription.active that no unpaid checkout will ever produce.
+
+    Opening a fresh checkout is correct here. The abandoned session simply expires.
+    """
+    _configure_products(monkeypatch, {"pro": "prod_site_pro"})
+    ws = await _make_workspace()
+    pocket_id = await _make_pocket(workspace_id=ws)
+    provider = _RecordingBillingProvider()
+
+    async def _publish():
+        return await sites_service.publish_pocket(
+            workspace_id=ws,
+            user_id="u1",
+            pocket_id=pocket_id,
+            site_plan_key="pro",
+            _generator=_RecordingGenerator(),
+            _cloudflare=_RecordingCF(),
+            _bundle_reader=lambda d: b"x",
+            _billing_provider=provider,
+        )
+
+    first = await _publish()
+    assert first.subscription_status == "pending"  # published, never paid
+
+    second = await _publish()
+
+    assert len(provider.calls) == 2, (
+        "a site that never paid was treated as already paying — it can now neither pay nor go live"
+    )
+    assert second.subscription_status == "pending"
+    assert second.deployed is False
+    assert second._checkout_url == CHECKOUT_URL
+
+
 # ---------------------------------------------------------------------------
 # A real tier change is a plan change, not a second purchase.
 # ---------------------------------------------------------------------------
@@ -350,9 +393,7 @@ async def test_moving_a_paying_site_to_another_tier_changes_the_plan(
     term they already paid for; a second create bills them twice. The gateway's
     atomic plan change is the only option that does neither.
     """
-    _configure_products(
-        monkeypatch, {"pro": "prod_site_pro", "business": "prod_site_business"}
-    )
+    _configure_products(monkeypatch, {"pro": "prod_site_pro", "business": "prod_site_business"})
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
     provider = _RecordingBillingProvider()
@@ -390,9 +431,7 @@ async def test_a_failed_plan_change_leaves_the_subscription_alone(
 ):
     """When the gateway refuses the change, the site keeps the tier it is paying
     for — and we never 'recover' by opening a second subscription."""
-    _configure_products(
-        monkeypatch, {"pro": "prod_site_pro", "business": "prod_site_business"}
-    )
+    _configure_products(monkeypatch, {"pro": "prod_site_pro", "business": "prod_site_business"})
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
 

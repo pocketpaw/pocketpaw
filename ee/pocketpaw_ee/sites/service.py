@@ -5060,9 +5060,8 @@ async def _apply_site_plan(
     # With no new checkout, ``subscription_id`` stays None and the stamp falls to
     # the ``elif`` — whose existing ``!= "active"`` carve-out then preserves both
     # the id and the status untouched.
-    already_paying = (
-        getattr(doc, "subscription_status", None) == "active"
-        and bool(getattr(doc, "subscription_id", None))
+    already_paying = getattr(doc, "subscription_status", None) == "active" and bool(
+        getattr(doc, "subscription_id", None)
     )
     if tier is not None and tier.dodo_product_id and not already_paying:
         try:
