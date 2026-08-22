@@ -3,7 +3,7 @@
 #
 # The defect (found 2026-08-22, feat/site-entitlement-ui-state): the frontend's
 # SiteSummary and SiteStatusResponse both declare ``plan_tier``,
-# ``subscription_status`` and ``annual_renewal_date``, and the [siteId] page
+# ``subscription_status`` and ``renewal_date``, and the [siteId] page
 # branches on them — an "awaiting checkout" bar keys on
 # ``subscription_status === "pending"``, and the Billing tab renders the current
 # plan. Neither backend DTO carried a single one of those fields:
@@ -95,7 +95,7 @@ async def _seed_site(
         signed_key="site_key_wire",
         plan_tier=plan_tier,
         subscription_status=subscription_status,
-        annual_renewal_date=renewal,
+        renewal_date=renewal,
         domains=[SiteDomain(hostname=h) for h in (domains or [])],
     )
     await doc.insert()
@@ -121,8 +121,8 @@ async def test_the_site_response_carries_the_plan_the_ui_renders(mongo_db):
 
     assert resp.plan_tier == "pro"
     assert resp.subscription_status == "active"
-    assert resp.annual_renewal_date is not None
-    assert resp.annual_renewal_date.startswith("2027-01-15")
+    assert resp.renewal_date is not None
+    assert resp.renewal_date.startswith("2027-01-15")
 
 
 async def test_a_pending_site_says_pending_rather_than_nothing(mongo_db):

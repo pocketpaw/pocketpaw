@@ -5,7 +5,7 @@
 #
 # This is the read-only catalog the per-site subscription flow (publish_pocket)
 # builds on. For each site tier it pairs:
-#   * ``annual_price_usd`` — the recurring annual price for the tier (USD,
+#   * ``monthly_price_usd`` — the recurring MONTHLY price for the tier (USD,
 #     whole dollars). The intended sticker; the live charge runs through Dodo.
 #   * ``dodo_product_id`` — the Dodo recurring-product id for the tier, or None
 #     until config populates it (read from the ``POCKETPAW_DODO_SITE_PRODUCTS``
@@ -77,10 +77,18 @@ from dataclasses import dataclass
 #   pro      — $120/yr  — adds analytics + uncapped custom domains.
 #   business — $480/yr  — adds the WAF + edge cache controls on top of pro.
 # ---------------------------------------------------------------------------
-_SITE_PLAN_ANNUAL_PRICE_USD: dict[str, int] = {
+# MONTHLY, and the rename is load-bearing rather than cosmetic: a field called
+# ``annual_price_usd`` holding 5 reads as $5/YEAR to every future caller, which is
+# below the Cloudflare floor for a single custom hostname ($0.10/hostname/month
+# past the first 100). The old $120/$480 annual figures had no cost basis at all.
+#
+# Decided 2026-08-22. See docs/design/drafts/2026-08-21-paw-sites-pricing-revision.md
+# for the floor, the market comparables, and why annual-only billing was its own
+# conversion problem.
+_SITE_PLAN_MONTHLY_PRICE_USD: dict[str, int] = {
     "basic": 0,
-    "pro": 120,
-    "business": 480,
+    "pro": 5,
+    "business": 19,
 }
 
 # The Cloudflare features each tier resells (BC-10 provisions them on publish).
@@ -95,6 +103,19 @@ _SITE_PLAN_CF_FEATURES: dict[str, frozenset[str]] = {
 # free floor and keeps its badge — that is the whole difference between free and
 # paid. Absent/unknown keys resolve False in ``_build``, so a typo means BADGED:
 # fail-closed, matching ``sites.badge``'s posture everywhere else.
+# The concierge is the ENTIRE difference between the $5 and $19 rungs, so it has
+# to be mapped per tier rather than derived. It used to be "any tier above the
+# floor", which was correct only while the tier meant to sell it did not exist;
+# once the ladder has two paid rungs that derivation hands the cheap one the
+# expensive one's feature.
+#
+# ``.get(key, False)`` fails CLOSED: an unknown tier sells no concierge.
+_SITE_PLAN_SELLS_CONCIERGE: dict[str, bool] = {
+    "basic": False,
+    "pro": False,
+    "business": True,
+}
+
 _SITE_PLAN_BADGE_REMOVAL: dict[str, bool] = {
     "basic": False,
     "pro": True,
@@ -144,7 +165,7 @@ BASE_SITE_PLAN_KEY = "basic"
 class SitePlanTier:
     """One row of the per-site plan catalog — the declarative view of a site tier.
 
-    ``key`` matches the ``Site.plan_tier`` string. ``annual_price_usd`` is the
+    ``key`` matches the ``Site.plan_tier`` string. ``monthly_price_usd`` is the
     recurring annual sticker (USD, whole dollars). ``dodo_product_id`` is the
     recurring-product id, or None until config populates it. ``cloudflare_features``
     is the set of Cloudflare features the tier resells (BC-10 provisions them).
@@ -157,7 +178,7 @@ class SitePlanTier:
     """
 
     key: str
-    annual_price_usd: int
+    monthly_price_usd: int
     dodo_product_id: str | None
     cloudflare_features: frozenset[str]
     badge_removal: bool = False
@@ -179,25 +200,24 @@ class SitePlanTier:
         card can mark a tier unavailable instead of offering a button that quietly
         does nothing.
         """
-        return self.annual_price_usd == 0 or self.dodo_product_id is not None
+        return self.monthly_price_usd == 0 or self.dodo_product_id is not None
 
     @property
     def sells_concierge(self) -> bool:
         """Does this tier sell the visitor concierge at all?
 
-        Derived from the floor rather than a per-tier catalog dict like
-        ``badge_removal``: no tier grants concierge today and the tier that will
-        (``staff``) does not exist until the pricing-spec rekey, which is blocked
-        on an open decision. A dict would need a basic/pro/business mapping
-        invented now and rewritten then; "any tier above the floor" needs no
-        mapping and survives the rekey untouched.
+        Mapped per tier as of 2026-08-22, having previously been derived as "any
+        tier above the floor". That derivation was right only while no tier
+        actually sold the concierge — under the $0/$5/$19 ladder the concierge IS
+        the difference between the two paid rungs, so deriving it would give the
+        $5 tier the thing the $19 tier is for.
 
         This is the CATALOG question — "does this tier sell it" — and on its own
         entitles nobody. ``resolve_site_entitlements`` ANDs it with an active
         subscription to answer "may THIS site serve one", which is the question
         every public seam asks.
         """
-        return self.key != BASE_SITE_PLAN_KEY
+        return _SITE_PLAN_SELLS_CONCIERGE.get(self.key, False)
 
 
 def _dodo_product_for(key: str) -> str | None:
@@ -231,7 +251,7 @@ def _build(key: str) -> SitePlanTier:
     """
     return SitePlanTier(
         key=key,
-        annual_price_usd=_SITE_PLAN_ANNUAL_PRICE_USD.get(key, 0),
+        monthly_price_usd=_SITE_PLAN_MONTHLY_PRICE_USD.get(key, 0),
         dodo_product_id=_dodo_product_for(key),
         cloudflare_features=_SITE_PLAN_CF_FEATURES.get(key, frozenset()),
         badge_removal=_SITE_PLAN_BADGE_REMOVAL.get(key, False),
@@ -270,7 +290,7 @@ def get_site_plan(key: str | None) -> SitePlanTier | None:
     NOT silently substitute, so a typo in a lookup is visible rather than masked
     (mirrors ``billing.plans.get_plan``).
     """
-    if not key or key not in _SITE_PLAN_ANNUAL_PRICE_USD:
+    if not key or key not in _SITE_PLAN_MONTHLY_PRICE_USD:
         return None
     return _build(key)
 

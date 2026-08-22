@@ -263,7 +263,7 @@ def test_get_billing_site_plans_returns_catalog_with_cf_features(site_plans_clie
     assert set(rows.keys()) == {"basic", "pro", "business"}
 
     # Each tier carries its annual price + sorted cloudflare_features.
-    assert rows["basic"]["annual_price_usd"] == 0
+    assert rows["basic"]["monthly_price_usd"] == 0
     assert rows["basic"]["cloudflare_features"] == []
     assert "custom_domain" in rows["pro"]["cloudflare_features"]
     biz_features = rows["business"]["cloudflare_features"]

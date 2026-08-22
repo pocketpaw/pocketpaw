@@ -135,7 +135,7 @@ def entitlements_to_dto(ent: Entitlements) -> EntitlementsResponse:
 class SitePlanTierResponse(BaseModel):
     """One row of the PER-SITE plan catalog on the wire — mirrors ``SitePlanTier``.
 
-    ``annual_price_usd`` is the recurring annual sticker (USD, whole dollars).
+    ``monthly_price_usd`` is the recurring MONTHLY sticker (USD, whole dollars).
     ``cloudflare_features`` is the SORTED list of Cloudflare features the tier
     resells (deterministic JSON; BC-10 provisions these when a domain is added).
     ``dodo_product_id`` is None until config populates it.
@@ -156,7 +156,7 @@ class SitePlanTierResponse(BaseModel):
     """
 
     key: str
-    annual_price_usd: int
+    monthly_price_usd: int
     dodo_product_id: str | None = None
     cloudflare_features: list[str] = Field(default_factory=list)
     badge_removal: bool = False
@@ -174,7 +174,7 @@ def site_plan_tier_to_dto(tier: SitePlanTier) -> SitePlanTierResponse:
     """Map a frozen ``site_plans.SitePlanTier`` to its wire DTO (features sorted)."""
     return SitePlanTierResponse(
         key=tier.key,
-        annual_price_usd=tier.annual_price_usd,
+        monthly_price_usd=tier.monthly_price_usd,
         dodo_product_id=tier.dodo_product_id,
         cloudflare_features=sorted(tier.cloudflare_features),
         badge_removal=tier.badge_removal,

@@ -488,7 +488,7 @@
 #   for operator visibility of sites stuck pending past a threshold.
 #
 # Updated 2026-06-24 (feat/charge-first-sites — charge-first per-site publishing):
-# a PAID site tier (positive ``annual_price_usd`` AND a configured
+# a PAID site tier (positive ``monthly_price_usd`` AND a configured
 # ``dodo_product_id``) is now CHARGE-FIRST — published as PENDING and NOT deployed
 # live until payment confirms; a FREE/base tier still deploys instantly.
 #   * Extracted ``_deploy_site_doc`` — the generate + smoke-gate + Cloudflare/local
@@ -1751,9 +1751,9 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # These were declared in the frontend and branched on, and never sent.
         plan_tier=getattr(doc, "plan_tier", None) or "",
         subscription_status=getattr(doc, "subscription_status", None) or "none",
-        annual_renewal_date=(
+        renewal_date=(
             _renewal.isoformat()
-            if (_renewal := getattr(doc, "annual_renewal_date", None)) is not None
+            if (_renewal := getattr(doc, "renewal_date", None)) is not None
             else None
         ),
         # DP0-4: the dynamic-site provision state (persisted) + the id of the job a
@@ -3594,7 +3594,7 @@ async def mark_site_subscription(
     site_id: str,
     status: str,
     subscription_id: str | None = None,
-    annual_renewal_date: datetime | None = None,
+    renewal_date: datetime | None = None,
 ) -> _SiteDoc | None:
     """Advance a site's per-site annual subscription lifecycle (BC-9).
 
@@ -3603,7 +3603,7 @@ async def mark_site_subscription(
     the Workspace / credits writes, the sites service owns the Site write, so the
     per-site sub state is updated HERE, not by billing reaching into the Site
     model. Sets ``subscription_status`` (active | cancelled), and on an
-    activation/renewal also advances ``annual_renewal_date``. Reuses the stored
+    activation/renewal also advances ``renewal_date``. Reuses the stored
     ``subscription_id`` when the caller passes one (a renewal may re-confirm it).
 
     Tenant-scoped on ``workspace`` via ``_load`` (a missing / cross-tenant /
@@ -3614,8 +3614,8 @@ async def mark_site_subscription(
     site.subscription_status = status
     if subscription_id:
         site.subscription_id = subscription_id
-    if annual_renewal_date is not None:
-        site.annual_renewal_date = annual_renewal_date
+    if renewal_date is not None:
+        site.renewal_date = renewal_date
     await site.save()
     return site
 
@@ -4888,7 +4888,7 @@ async def publish_pocket(
     tier = site_plans.get_site_plan(site_plan_key) or site_plans.get_site_plan(
         site_plans.BASE_SITE_PLAN_KEY
     )
-    is_paid = tier is not None and tier.annual_price_usd > 0
+    is_paid = tier is not None and tier.monthly_price_usd > 0
     dodo_configured = tier is not None and bool(tier.dodo_product_id)
 
     if is_paid and not dodo_configured:
@@ -5519,7 +5519,7 @@ async def activate_site(
     # ``deployed`` is a separately-loaded doc and this save must not write back a
     # stale value it read before that flip landed.
     deployed.subscription_status = "active"
-    deployed.annual_renewal_date = datetime.now(UTC) + timedelta(days=365)
+    deployed.renewal_date = datetime.now(UTC) + timedelta(days=365)
     await deployed.save()
 
     # Promote the pocket's draft to published — the durable "this was published"

@@ -290,7 +290,7 @@ async def test_active_webhook_deploys_pending_site(mongo_db, recording_bus, monk
     assert updated is not None
     assert updated.deployed is True
     assert updated.subscription_status == "active"
-    assert updated.annual_renewal_date is not None
+    assert updated.renewal_date is not None
     assert updated.pending_deploy_inputs == {}
 
     # SitePublished is emitted now that the site is actually live.
@@ -428,7 +428,7 @@ async def test_paid_tier_without_dodo_product_publishes_live(mongo_db):
     a checkout, so charge-first degrades to an immediate live publish — the user is
     never stranded with a pending, never-deployable site."""
     # No _dodo_product_for monkeypatch → pro has a price but NO configured product.
-    assert site_plans.get_site_plan("pro").annual_price_usd > 0
+    assert site_plans.get_site_plan("pro").monthly_price_usd > 0
     assert site_plans.get_site_plan("pro").dodo_product_id is None
 
     ws = await _make_workspace(plan="pro")

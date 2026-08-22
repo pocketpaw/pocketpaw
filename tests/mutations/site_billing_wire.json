@@ -21,7 +21,7 @@
   {
     "label": "the renewal date is dropped — the plan card cannot say when it renews",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        annual_renewal_date=(\n            _renewal.isoformat()\n            if (_renewal := getattr(doc, \"annual_renewal_date\", None)) is not None\n            else None\n        ),",
+    "find": "        renewal_date=(\n            _renewal.isoformat()\n            if (_renewal := getattr(doc, \"renewal_date\", None)) is not None\n            else None\n        ),",
     "replace": "",
     "tests": [
       "tests/cloud/sites/test_billing_state_on_the_wire.py::test_the_site_response_carries_the_plan_the_ui_renders"

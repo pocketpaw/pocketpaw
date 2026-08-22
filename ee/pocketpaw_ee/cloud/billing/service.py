@@ -51,7 +51,7 @@
 #   dispatch now FORKS on a ``site_id`` in the verified event metadata. A delivery
 #   WITH a ``site_id`` is a PER-SITE annual sub (each published site has its own
 #   plan) and routes to ``_handle_site_subscription_event``, which updates the
-#   SITE's ``subscription_status`` / ``annual_renewal_date`` (active/renewed →
+#   SITE's ``subscription_status`` / ``renewal_date`` (active/renewed →
 #   active; cancelled → cancelled) via the sites service — it NEVER grants
 #   workspace credits and NEVER changes ``Workspace.plan``. A delivery WITHOUT a
 #   ``site_id`` is the unchanged BC-7 workspace-plan path. Same verified-signature
@@ -105,8 +105,9 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
+from dateutil.relativedelta import relativedelta
 from pymongo.errors import DuplicateKeyError
 
 from pocketpaw_ee.cloud._core.errors import NoActiveSubscription, ValidationError
@@ -809,13 +810,20 @@ async def _handle_site_subscription_event(event: SubscriptionEvent) -> dict:
             )
             status = "active"
         elif event.type == _SUB_RENEWED:
-            # Already live — just refresh the annual renewal date (no re-deploy).
+            # Already live — just refresh the renewal date (no re-deploy).
+            #
+            # ONE MONTH, not 365 days. Site plans went monthly on 2026-08-22; a
+            # renewal that stamps a year ahead on a monthly plan puts every
+            # subsequent renewal a year out, and the site keeps its paid
+            # capabilities for that whole year regardless of what happens to the
+            # card. relativedelta rather than timedelta(days=30) so the date does
+            # not drift backwards through the calendar over a year of renewals.
             await sites_service.mark_site_subscription(
                 workspace_id=event.workspace_id,
                 site_id=event.site_id,
                 status="active",
                 subscription_id=event.subscription_id or None,
-                annual_renewal_date=datetime.now(UTC) + timedelta(days=365),
+                renewal_date=datetime.now(UTC) + relativedelta(months=1),
             )
             status = "active"
         elif event.type == _SUB_CANCELLED:
@@ -832,7 +840,7 @@ async def _handle_site_subscription_event(event: SubscriptionEvent) -> dict:
                 site_id=event.site_id,
                 status="cancelled",
                 subscription_id=event.subscription_id or None,
-                annual_renewal_date=None,
+                renewal_date=None,
             )
             status = "cancelled"
         else:

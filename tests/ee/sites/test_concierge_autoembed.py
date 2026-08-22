@@ -433,9 +433,17 @@ async def test_a_paying_site_mid_activation_still_gets_its_bar(
     monkeypatch.setenv("PAW_SITES_LOCAL", "1")
     _billing(monkeypatch, on=True)
     _fake_store(monkeypatch, _widget())
-    paid = next(
-        t.key for t in site_plans.list_site_plans() if t.key != site_plans.BASE_SITE_PLAN_KEY
-    )
+    # A tier that SELLS THE CONCIERGE, not merely one above the floor. Those were
+    # the same set until 2026-08-22, when the ladder went $0/$5/$19 and the
+    # concierge became the difference between the two paid rungs — "first non-floor
+    # tier" now picks the $5 one, which sells no concierge.
+    #
+    # For the mid-activation test that turns into a failure. For the cancelled test
+    # it is worse: it would still pass, but because the tier sells nothing rather
+    # than because the subscription was cancelled, which is not what it claims to
+    # prove. Selecting on the property both tests actually depend on fixes one and
+    # keeps the other honest.
+    paid = next(t.key for t in site_plans.list_site_plans() if t.sells_concierge)
 
     # First publish creates the doc; then put it in the exact mid-activation state.
     site = await _publish(tmp_path)
@@ -468,9 +476,17 @@ async def test_a_cancelled_paid_site_loses_its_bar_on_the_next_publish(
     monkeypatch.setenv("PAW_SITES_LOCAL", "1")
     _billing(monkeypatch, on=True)
     _fake_store(monkeypatch, _widget())
-    paid = next(
-        t.key for t in site_plans.list_site_plans() if t.key != site_plans.BASE_SITE_PLAN_KEY
-    )
+    # A tier that SELLS THE CONCIERGE, not merely one above the floor. Those were
+    # the same set until 2026-08-22, when the ladder went $0/$5/$19 and the
+    # concierge became the difference between the two paid rungs — "first non-floor
+    # tier" now picks the $5 one, which sells no concierge.
+    #
+    # For the mid-activation test that turns into a failure. For the cancelled test
+    # it is worse: it would still pass, but because the tier sells nothing rather
+    # than because the subscription was cancelled, which is not what it claims to
+    # prove. Selecting on the property both tests actually depend on fixes one and
+    # keeps the other honest.
+    paid = next(t.key for t in site_plans.list_site_plans() if t.sells_concierge)
 
     site = await _publish(tmp_path)
     doc = await Site.get(site.id)
