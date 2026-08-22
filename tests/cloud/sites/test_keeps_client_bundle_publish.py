@@ -82,7 +82,15 @@ class _RecordingBillingProvider:
         self.calls: list[dict] = []
 
     async def create_subscription(
-        self, *, plan_key, product_id, workspace_id, customer_email, metadata
+        self,
+        *,
+        plan_key,
+        product_id,
+        workspace_id,
+        customer_email,
+        metadata,
+        return_url=None,
+        cancel_url=None,
     ) -> SubscriptionCheckout:
         self.calls.append({"metadata": dict(metadata)})
         return SubscriptionCheckout(checkout_url=CHECKOUT_URL, subscription_id=SITE_SUB_ID)

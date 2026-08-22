@@ -359,6 +359,31 @@ class DodoProvider:
         client = self._client()
         await client.subscriptions.update(subscription_id, status="cancelled")
 
+    async def change_plan(self, *, subscription_id: str, product_id: str, plan_key: str) -> None:
+        if not subscription_id:
+            raise ValidationError("billing.invalid_subscription", "subscription_id is required")
+        if not product_id:
+            raise ValidationError(
+                "billing.plan_product_unconfigured",
+                f"No Dodo product is configured for plan '{plan_key}'.",
+            )
+        client = self._client()
+        # ``quantity`` is REQUIRED by the SDK even for a plain one-seat plan.
+        #
+        # ``difference_immediately`` charges (or credits) only the delta between
+        # the two plans for the remainder of the current term, which is the whole
+        # reason to use this over cancel-then-create: the buyer keeps the time they
+        # already paid for. ``prevent_change`` means a declined card leaves the
+        # subscription on its CURRENT plan rather than moving it and then failing —
+        # the caller's persisted tier and the gateway's stay in agreement.
+        await client.subscriptions.change_plan(
+            subscription_id,
+            product_id=product_id,
+            quantity=1,
+            proration_billing_mode="difference_immediately",
+            on_payment_failure="prevent_change",
+        )
+
     # ------------------------------------------------------------------ #
     # Webhook
     # ------------------------------------------------------------------ #
