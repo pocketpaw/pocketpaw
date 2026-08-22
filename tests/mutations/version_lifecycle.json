@@ -1,0 +1,78 @@
+[
+  {
+    "label": "an edit that replaces a draft marks it reverted again, so the timeline tells the owner they rolled back when they only typed twice",
+    "file": "ee/pocketpaw_ee/versions/service.py",
+    "find": "    head.status = \"superseded\"\n    await head.save()\n    return head",
+    "replace": "    head.status = \"reverted\"\n    await head.save()\n    return head",
+    "tests": [
+      "tests/ee/versions/test_lifecycle_truthfulness.py::test_edit_supersedes_prior_draft_rather_than_reverting_it",
+      "tests/ee/versions/test_lifecycle_truthfulness.py::test_nothing_writes_the_legacy_reverted_status"
+    ]
+  },
+  {
+    "label": "revert stops superseding the open draft, so reverting with unsaved work leaves two rows both claiming to be the draft",
+    "file": "ee/pocketpaw_ee/versions/service.py",
+    "find": "    # A revert is a write like any other, so it takes the draft pointer off\n    # whatever held it. Without this the owner's in-progress draft stayed marked\n    # \"draft\" alongside the revert draft.\n    superseded = await _supersede_draft_head(head)",
+    "replace": "    superseded = None\n",
+    "tests": [
+      "tests/ee/versions/test_lifecycle_truthfulness.py::test_revert_while_a_draft_is_open_supersedes_that_draft"
+    ]
+  },
+  {
+    "label": "discarding a draft records it as reverted, collapsing a decision the owner made into the thing that happens on its own",
+    "file": "ee/pocketpaw_ee/versions/service.py",
+    "find": "    row.status = \"discarded\"\n    await row.save()\n    _emit_version_event(\n        action=\"artifact.version.discarded\",",
+    "replace": "    row.status = \"reverted\"\n    await row.save()\n    _emit_version_event(\n        action=\"artifact.version.discarded\",",
+    "tests": [
+      "tests/ee/versions/test_lifecycle_truthfulness.py::test_discard_reads_as_discarded"
+    ]
+  },
+  {
+    "label": "the supersede stops emitting its event, so a row changes status with nothing on the journal to explain why it stopped being the draft",
+    "file": "ee/pocketpaw_ee/versions/service.py",
+    "find": "    if superseded is not None:\n        _emit_superseded(\n            superseded=superseded,\n            scope_type=scope_type,\n            scope_id=scope_id,\n            branch=branch,\n            author=author,\n            by_row=row,\n        )\n    return row",
+    "replace": "    return row",
+    "tests": [
+      "tests/ee/versions/test_lifecycle_truthfulness.py::test_supersede_emits_its_own_event",
+      "tests/ee/versions/test_version_projection.py::test_projection_records_the_supersede"
+    ]
+  },
+  {
+    "label": "the superseded action leaves the projection allowlist, so the event is emitted and then silently dropped by the fold",
+    "file": "ee/pocketpaw_ee/versions/projection.py",
+    "find": "        \"artifact.version.superseded\",\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/versions/test_version_projection.py::test_projection_records_the_supersede"
+    ]
+  },
+  {
+    "label": "legacy rows pass through unresolved, so a site that predates the split still shows the old word to its owner",
+    "file": "ee/pocketpaw_ee/versions/service.py",
+    "find": "    has_descendant = {r.parent_version_id for r in rows if r.parent_version_id}\n    return {\n        str(r.id): (\n            (\"superseded\" if str(r.id) in has_descendant else \"discarded\")\n            if r.status == \"reverted\"\n            else r.status\n        )\n        for r in rows\n    }\n",
+    "replace": "    return {str(r.id): r.status for r in rows}\n",
+    "tests": [
+      "tests/ee/versions/test_lifecycle_truthfulness.py::test_legacy_reverted_rows_split_by_lineage",
+      "tests/ee/versions/test_lifecycle_truthfulness.py::test_legacy_reverted_leaf_reads_as_discarded",
+      "tests/ee/sites/test_router.py::test_versions_timeline_splits_legacy_reverted_rows"
+    ]
+  },
+  {
+    "label": "the timeline sends the raw user id again, so every line of a site's history is signed with 24 characters of hex",
+    "file": "ee/pocketpaw_ee/sites/router.py",
+    "find": "                author=names.get(r.author, r.author) if r.author else None,\n",
+    "replace": "                author=r.author,\n",
+    "tests": [
+      "tests/ee/sites/test_router.py::test_versions_timeline_names_the_author"
+    ]
+  },
+  {
+    "label": "the timeline sends the stored status verbatim, so legacy rows reach the client saying reverted and the pill renders it",
+    "file": "ee/pocketpaw_ee/sites/router.py",
+    "find": "                status=shown[str(r.id)],\n",
+    "replace": "                status=r.status,\n",
+    "tests": [
+      "tests/ee/sites/test_router.py::test_versions_timeline_splits_legacy_reverted_rows"
+    ]
+  }
+]

@@ -1689,6 +1689,10 @@ async def _promote_pocket_draft_to_published(
                 workspace_id=workspace_id,
                 content=content or {},
                 author=author,
+                # This branch only runs when a publish found no draft to
+                # promote, so the row exists because of the publish and nothing
+                # else. Saying so beats leaving the timeline's first line blank.
+                label="Snapshot at publish",
             )
         await versions_service.publish(
             scope_type=_VERSION_SCOPE_TYPE,
@@ -6395,6 +6399,10 @@ async def _ensure_pocket_draft(*, workspace_id: str, user_id: str, pocket_id: st
             workspace_id=workspace_id,
             content=content or {},
             author=user_id,
+            # Arming for edit, not an edit: this snapshots what the site looked
+            # like BEFORE the owner started, which is the version they will want
+            # to roll back to if the session goes wrong.
+            label="Opened for editing",
         )
     except Exception:  # noqa: BLE001 — versioning must not break arming for edit
         logger.warning(
