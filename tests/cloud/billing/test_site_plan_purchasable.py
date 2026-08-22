@@ -56,7 +56,7 @@ def _products(monkeypatch, mapping: dict[str, str] | None) -> None:
 
 def _a_priced_tier() -> str:
     for tier in site_plans.list_site_plans():
-        if tier.annual_price_usd > 0:
+        if tier.monthly_price_usd > 0:
             return tier.key
     raise AssertionError("no priced site tier in the catalog — ladder changed")
 
@@ -117,7 +117,7 @@ def test_the_free_tier_is_always_purchasable(monkeypatch):
     floor = site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)
 
     assert floor is not None
-    assert floor.annual_price_usd == 0
+    assert floor.monthly_price_usd == 0
     assert floor.purchasable is True
 
 
@@ -142,7 +142,7 @@ def test_a_priced_tier_becomes_purchasable_once_its_product_is_configured(monkey
 def test_configuring_one_tier_does_not_make_its_siblings_purchasable(monkeypatch):
     """Partial configuration is the likely real state during a rollout, and the
     card has to be right about each tier independently."""
-    priced = [t.key for t in site_plans.list_site_plans() if t.annual_price_usd > 0]
+    priced = [t.key for t in site_plans.list_site_plans() if t.monthly_price_usd > 0]
     if len(priced) < 2:
         pytest.skip("catalog has fewer than two priced tiers")
     _products(monkeypatch, {priced[0]: "prod_only_the_first"})
@@ -322,7 +322,7 @@ class TestThePublishRecordsWhatIsTrue:
         from pocketpaw_ee.cloud.models.site import Site
         from pocketpaw_ee.sites import service as svc
 
-        priced = [t.key for t in site_plans.list_site_plans() if t.annual_price_usd > 0]
+        priced = [t.key for t in site_plans.list_site_plans() if t.monthly_price_usd > 0]
         if len(priced) < 2:
             pytest.skip("catalog has fewer than two priced tiers")
         _products(monkeypatch, {priced[0]: "prod_site_x"})

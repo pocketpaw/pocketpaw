@@ -178,8 +178,8 @@ def test_list_site_plans_returns_tiers_with_price_and_cf_features():
 
     by_key = {t.key: t for t in tiers}
     # Each tier carries an annual price (USD) + a cloudflare_features set.
-    assert by_key["basic"].annual_price_usd == 0
-    assert by_key["pro"].annual_price_usd > 0
+    assert by_key["basic"].monthly_price_usd == 0
+    assert by_key["pro"].monthly_price_usd > 0
     assert isinstance(by_key["pro"].cloudflare_features, frozenset)
     # Higher tiers resell more Cloudflare features (a growing ladder).
     assert by_key["basic"].cloudflare_features == frozenset()
@@ -389,7 +389,7 @@ async def test_per_site_active_webhook_updates_site_not_workspace(mongo_db, monk
     assert updated is not None
     assert updated.deployed is True
     assert updated.subscription_status == "active"
-    assert updated.annual_renewal_date is not None
+    assert updated.renewal_date is not None
 
 
 async def test_per_site_cancelled_webhook_marks_site_cancelled(mongo_db, monkeypatch):

@@ -36,22 +36,35 @@ def test_base_tier_does_not_sell_the_concierge():
     assert base.sells_concierge is False
 
 
-def test_every_tier_above_the_floor_sells_the_concierge():
-    paid = [t for t in catalog.list_site_plans() if t.key != catalog.BASE_SITE_PLAN_KEY]
-    assert paid, "catalog has no paid tier — this test would assert nothing"
-    assert all(t.sells_concierge for t in paid)
+def test_only_the_top_tier_sells_the_concierge():
+    """Was "every tier above the floor", which held only while nothing actually
+    sold the concierge. Under the $0/$5/$19 ladder (2026-08-22) the concierge is
+    the whole difference between the two paid rungs, so the middle one must not
+    have it — that derivation would have given the $5 tier a $19 feature."""
+    tiers = catalog.list_site_plans()
+    assert len(tiers) > 2, "needs at least two paid rungs to say anything"
+
+    selling = [t.key for t in tiers if t.sells_concierge]
+    assert selling == [tiers[-1].key], (
+        f"expected only the top tier to sell the concierge, got {selling}"
+    )
 
 
-def test_the_rule_follows_the_floor_rather_than_the_tier_name(monkeypatch):
-    """Rekeying the floor moves the answer with it — no basic/pro/business mapping.
+def test_an_unknown_tier_sells_no_concierge():
+    """The mapping fails CLOSED.
 
-    This is the property that makes the pricing-spec rekey cheap: point
-    ``BASE_SITE_PLAN_KEY`` at another tier and that tier stops selling the
-    concierge, with nothing else edited. A per-tier dict would fail here.
+    This replaces a test asserting the opposite property — that the answer
+    followed ``BASE_SITE_PLAN_KEY`` rather than the tier name, which was the thing
+    that made the derivation cheap. That stopped being true on 2026-08-22: the
+    concierge is now mapped per tier, because it is what separates the $5 rung
+    from the $19 one and a floor comparison cannot express that.
+
+    The cost of the map is that a new tier has to be added to it. Failing closed
+    is what makes forgetting safe: an unmapped tier sells nothing rather than
+    silently selling the most expensive feature in the catalog.
     """
-    monkeypatch.setattr(catalog, "BASE_SITE_PLAN_KEY", "pro")
-    assert catalog.get_site_plan("pro").sells_concierge is False
-    assert catalog.get_site_plan("basic").sells_concierge is True
+    assert catalog.get_site_plan("nonesuch-tier") is None
+    assert catalog._SITE_PLAN_SELLS_CONCIERGE.get("nonesuch-tier", False) is False
 
 
 def test_the_resolver_reads_the_catalog_rule_rather_than_its_own(monkeypatch):
@@ -107,8 +120,15 @@ def test_the_free_tier_card_can_say_what_it_omits():
     assert dto.cloudflare_features == []
 
 
-def test_a_paid_tier_card_carries_both_paid_capabilities():
+def test_a_paid_tier_card_carries_its_paid_capabilities():
+    """The $5 rung sells the badge removal and the domain, not the concierge."""
     dto = site_plan_tier_to_dto(catalog.get_site_plan("pro"))
     assert dto.badge_removal is True
-    assert dto.sells_concierge is True
+    assert dto.sells_concierge is False
     assert "custom_domain" in dto.cloudflare_features
+
+
+def test_the_top_tier_card_is_the_one_carrying_the_concierge():
+    dto = site_plan_tier_to_dto(catalog.get_site_plan("business"))
+    assert dto.sells_concierge is True
+    assert dto.badge_removal is True

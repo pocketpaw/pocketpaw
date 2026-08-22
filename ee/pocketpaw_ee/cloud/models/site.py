@@ -81,12 +81,12 @@
 # annual plan (the Webflow model — each site has its own tier, not just the
 # workspace plan). ``plan_tier`` is the site-plan catalog key (basic | pro |
 # business — ``site_plans.SITE_PLAN_CATALOG``), ``subscription_id`` the Dodo
-# subscription this site's annual sub maps to, ``annual_renewal_date`` the next
+# subscription this site's annual sub maps to, ``renewal_date`` the next
 # renewal stamp the webhook updates, and ``subscription_status`` the lifecycle
 # (none | active | cancelled). ``service.publish_pocket`` stamps ``plan_tier`` +
 # ``subscription_id`` at publish; the per-site ``subscription.*`` webhook (routed
 # by a ``site_id`` on its metadata) advances ``subscription_status`` /
-# ``annual_renewal_date``. All default to backward-compatible values (None /
+# ``renewal_date``. All default to backward-compatible values (None /
 # "none") so every pre-BC-9 row and every workspace-plan-only site reads as having
 # no per-site sub — no migration.
 #
@@ -358,12 +358,12 @@ class Site(TimestampedDocument):
     # ``billing.site_plans``); None until a publish stamps one. ``subscription_id``
     # is the Dodo subscription id for this site's annual sub (None when Dodo is
     # unconfigured — the tier is recorded without a live charge in v1).
-    # ``annual_renewal_date`` is the next renewal stamp the per-site webhook
+    # ``renewal_date`` is the next renewal stamp the per-site webhook
     # updates; ``subscription_status`` tracks the lifecycle (none | active |
     # cancelled). Defaults keep pre-BC-9 / workspace-plan-only sites at "no sub".
     plan_tier: str | None = None
     subscription_id: str | None = None
-    annual_renewal_date: datetime | None = None
+    renewal_date: datetime | None = None
     subscription_status: str = "none"
     # charge-first: the deploy inputs captured at publish time for a PENDING paid
     # site, so the ``subscription.active`` webhook can run the deferred deploy

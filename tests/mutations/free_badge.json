@@ -12,8 +12,8 @@
   {
     "label": "the free tier is handed badge removal",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "    \"basic\": False,",
-    "replace": "    \"basic\": True,",
+    "find": "_SITE_PLAN_BADGE_REMOVAL: dict[str, bool] = {\n    \"basic\": False,",
+    "replace": "_SITE_PLAN_BADGE_REMOVAL: dict[str, bool] = {\n    \"basic\": True,",
     "tests": [
       "tests/ee/sites/test_free_badge.py::test_the_base_tier_is_badged",
       "tests/ee/sites/test_free_badge.py::test_a_basic_tier_site_is_badged"

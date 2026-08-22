@@ -248,7 +248,7 @@ class SiteResponse(BaseModel):
     # tier" and "the backend did not send a tier" stay distinguishable on the wire.
     plan_tier: str = ""
     subscription_status: str = "none"
-    annual_renewal_date: str | None = None
+    renewal_date: str | None = None
     # (none | provisioning | provisioned | failed). A DYNAMIC-site publish does NOT
     # deploy inline — it enqueues the ``provision_site`` job and returns immediately
     # with ``provision_status="provisioning"`` (``deployed=False``); the site goes
