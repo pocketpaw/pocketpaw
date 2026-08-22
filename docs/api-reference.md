@@ -1380,8 +1380,15 @@ Errors:
 
 ### `GET /sites/by-pocket/{pocket_id}/native-artifact`
 
-Serve the armed svelte build's body markup and CSS so the native editor can
+Serve the armed build's body markup and CSS so the native editor can
 shadow-render the site.
+
+Available on engines with a **native edit lane** — `svelte`, and `react` since
+RX-2. Not `html` (its served artifact IS its source, so it is selected through its
+own sandboxed `srcdoc` and has no build to render) and not `ripple` (no source
+map). Both armable engines emit a prerendered `index.html`; only the build output
+directory differs (`.svelte-kit/cloudflare` or `build` vs `dist`), and the server
+resolves that per engine.
 
 Response `200`:
 
@@ -1400,7 +1407,7 @@ Response `200`:
   stylesheet — concatenated into one string, injected as a single `<style>`.
 
 **Read-through cache — a plain view no longer rebuilds.** The endpoint hashes the
-pocket's render inputs (svelte source map + theme + builder origin + generator
+pocket's render inputs (source map + theme + builder origin + engine + generator
 version) and serves a prior render from the on-disk artifact store
 (`~/.pocketpaw/site-artifacts/<pocket_id>/<hash>.json`) on a **cache hit** — zero
 subprocess builds. It builds once only on a **cold miss** (then stores the result),
@@ -1442,7 +1449,7 @@ Errors:
 
 | HTTP | Code | When |
 |------|------|------|
-| 422 | `pocket.not_svelte_site` | The pocket is not a svelte Paw Site (no component build to render). |
+| 422 | `pocket.no_native_edit_lane` | The pocket's engine has no armable build to render (html, ripple). Renamed from `pocket.not_svelte_site` in RX-2, when react joined the lane. |
 | 404 | `pocket.not_found` | Unknown pocket id. |
 | 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
 | 500 | `sites.generator_failed` | The arm build failed (missing toolchain, non-zero build, or smoke-gate failure). |

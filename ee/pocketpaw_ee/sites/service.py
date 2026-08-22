@@ -1015,17 +1015,23 @@ def _extract_css(html: str, cloudflare_dir: Path) -> str:
     return "\n".join(parts)
 
 
-def _read_native_artifact(project_dir: str) -> tuple[str, str]:
+def _read_native_artifact(project_dir: str, engine: str = "svelte") -> tuple[str, str]:
     """Read the armed build's ``<body>`` inner HTML + concatenated CSS from the built
     static output (NE-5b) — the default ``_read_built`` seam.
 
-    ``project_dir`` is the ``BuildResult.project_dir`` the generator returns; the
-    prerendered site lives under ``<project_dir>/.svelte-kit/cloudflare/`` (the SAME
-    tree ``_default_bundle_reader`` / ``local_server`` read). Returns
-    ``(body_html, css)``."""
-    cloudflare_dir = Path(project_dir, _CLOUDFLARE_BUILD_REL)
-    html = (cloudflare_dir / "index.html").read_text(encoding="utf-8")
-    return _extract_body_inner(html), _extract_css(html, cloudflare_dir)
+    ``project_dir`` is the ``BuildResult.project_dir`` the generator returns. WHERE
+    the built page lands is per-engine and is NOT this function's business to know:
+    svelte writes ``.svelte-kit/cloudflare`` (or ``build`` for a static landing
+    site) and react writes ``dist``, so the output dir is resolved through
+    ``resolve_static_output_rel``, which probes the tree on disk. Hardcoding the
+    SvelteKit path is what made this svelte-only (RX-2 widened it for react).
+
+    Returns ``(body_html, css)``."""
+    from pocketpaw_ee.sites.engines import resolve_static_output_rel
+
+    out_dir = Path(project_dir, resolve_static_output_rel(project_dir, engine))
+    html = (out_dir / "index.html").read_text(encoding="utf-8")
+    return _extract_body_inner(html), _extract_css(html, out_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -1043,20 +1049,28 @@ def _read_native_artifact(project_dir: str) -> tuple[str, str]:
 
 
 def _artifact_content_hash(
-    *, source: dict[str, Any], theme: dict[str, Any], builder_origin: str, gen_version: str
+    *,
+    source: dict[str, Any],
+    theme: dict[str, Any],
+    builder_origin: str,
+    gen_version: str,
+    engine: str = "svelte",
 ) -> str:
     """Fingerprint the inputs that determine a native artifact's rendered output — the
-    svelte source map, the theme, the builder origin (it changes the stamped
-    data-uid + edit-bridge), and the generator version (a toolchain/dep bump changes
-    the built HTML/CSS). A stable hash for an unchanged render; it changes the moment
-    any input does, which is exactly when the cached artifact is stale and a rebuild is
-    required. The store is already keyed per pocket by path, so this need only separate
-    an unchanged render from a changed one within a pocket."""
+    source map, the theme, the builder origin (it changes the stamped
+    data-uid + edit-bridge), the ENGINE (RX-2: the same source map builds to
+    materially different HTML on the svelte and react tracks), and the generator
+    version (a toolchain/dep bump changes the built HTML/CSS). A stable hash for an
+    unchanged render; it changes the moment any input does, which is exactly when the
+    cached artifact is stale and a rebuild is required. The store is already keyed per
+    pocket by path, so this need only separate an unchanged render from a changed one
+    within a pocket."""
     import hashlib
 
     h = hashlib.sha256()
     for part in (
         gen_version,
+        engine,
         builder_origin or "",
         json.dumps(source, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
         json.dumps(theme, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
@@ -1186,8 +1200,16 @@ async def _build_native_artifact(
     builder_origin: str,
     pocket_id: str,
     read: Callable[[str], tuple[str, str]],
+    engine: str = "svelte",
 ) -> tuple[str, str]:
-    """Run the ARMED svelte build for a native artifact and extract ``(body_html, css)``.
+    """Run the ARMED build for a native artifact and extract ``(body_html, css)``.
+
+    ``engine`` selects which track is built — ``"svelte"`` or, since RX-2,
+    ``"react"``. Both arm the same way (the generator stamps ``data-uid`` and
+    embeds the manifest when ``builder_origin`` is set) and both emit a prerendered
+    ``index.html``; only the output directory differs, and the ``read`` seam owns
+    that. Anything without a native edit lane never reaches here — the callers
+    gate on ``has_native_edit_lane`` first.
 
     The single build path shared by get_native_artifact's cache MISS and the
     background pre-warm. It builds with ``builder_origin`` set (so the paw-sites
@@ -1210,7 +1232,7 @@ async def _build_native_artifact(
         title=site_name,
         capture_api_base=_capture_base(),
         capture_signed_key=f"site_key_{secrets.token_urlsafe(24)}",
-        engine="svelte",
+        engine=engine,
         source=source,
         builder_origin=builder_origin,
         pocket_id=pocket_id,
@@ -1245,10 +1267,15 @@ async def _prewarm_native_artifact(
     from pocketpaw_ee.cloud.pockets import service as pockets_service
     from pocketpaw_ee.sites import generator_client
 
+    from pocketpaw_ee.sites.engines import has_native_edit_lane, normalize_engine
+
     pocket = await pockets_service.get(pocket_id, user_id)
-    # Only svelte sites have a native shadow-render build; ripple/html don't use this
-    # path (an html site's served artifact IS its source). Nothing to arm otherwise.
-    if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
+    # Only engines with a native shadow-render BUILD use this path (svelte, and
+    # react since RX-2). ripple has no source map; html's served artifact IS its
+    # source, so it is selected through its own srcdoc and never armed. Nothing to
+    # pre-warm otherwise.
+    engine = normalize_engine(pocket.get("engine"))
+    if not has_native_edit_lane(engine) or not isinstance(pocket.get("source"), dict):
         return
     source = pocket["source"]
     ripple_spec = pocket.get("rippleSpec") or {}
@@ -1262,11 +1289,14 @@ async def _prewarm_native_artifact(
         theme=theme,
         builder_origin=origin,
         gen_version=generator_client.generator_version(),
+        engine=engine,
     )
     if store.read(pocket_id, content_hash) is not None:
         return  # already warm — no rebuild
     generator = _generator or GeneratorClient()
-    read = _read_built or _read_native_artifact
+    # The ``_read_built`` seam stays SINGLE-ARG so injected test doubles keep
+    # working; the engine is bound into the default reader instead.
+    read = _read_built or (lambda d: _read_native_artifact(d, engine))
     body_html, css = await _build_native_artifact(
         generator=generator,
         theme=theme,
@@ -1275,6 +1305,7 @@ async def _prewarm_native_artifact(
         builder_origin=origin,
         pocket_id=pocket_id,
         read=read,
+        engine=engine,
     )
     store.write(pocket_id, content_hash, body_html, css)
 
@@ -1534,15 +1565,44 @@ def _capture_base() -> str:
     return os.environ.get("PAW_CAPTURE_API_BASE", "http://localhost:8888/api/v1")
 
 
+_LOCAL_BUILDER_ORIGIN = "http://localhost:8888"
+
+
 def _builder_origin() -> str:
     """The dashboard/builder origin an editable Paw Site postMessages its
     section rects to (SE-2b). The generated edit-bridge only accepts messages
     from this exact origin. Defaults to the local dashboard; overridable via
     PAW_SITES_BUILDER_ORIGIN. Used by ``make_site_editable`` when the caller does
-    not pass an explicit origin."""
+    not pass an explicit origin.
+
+    WARNS WHEN IT FALLS BACK. The default is correct only on a developer's own
+    box, and its two failure modes in a real deployment are both SILENT:
+
+      * the armed build's bridge posts to an origin the operator's browser will
+        never deliver to, so click-to-edit dies with the page still rendering
+        perfectly and nothing in the console;
+      * this value is part of the native-artifact content hash, so publishes and
+        edits with no request Origin (chat-agent / MCP) warm the cache under a
+        hash no browser view will ever ask for — every view then stays a cold
+        miss and rebuilds the whole site.
+
+    Neither surfaces as an error, so an unset env reads exactly like a working
+    one. Logging the fallback is what makes it findable.
+    """
     import os
 
-    return os.environ.get("PAW_SITES_BUILDER_ORIGIN", "http://localhost:8888")
+    configured = os.environ.get("PAW_SITES_BUILDER_ORIGIN", "").strip()
+    if configured:
+        return configured
+    logger.warning(
+        "PAW_SITES_BUILDER_ORIGIN is unset — falling back to %s. On any "
+        "deployment where the dashboard is not that origin, editable sites arm "
+        "against the wrong origin (click-to-edit silently does nothing) and the "
+        "native-artifact cache never hits (every view triggers a full rebuild). "
+        "Set it to the dashboard origin.",
+        _LOCAL_BUILDER_ORIGIN,
+    )
+    return _LOCAL_BUILDER_ORIGIN
 
 
 # The default logical form type. The generated /api/submit endpoint sends this
@@ -5932,13 +5992,19 @@ async def get_native_artifact(
     # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
     # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
     pocket = await pockets_service.get(pocket_id, user_id)
-    # KEPT svelte-specific (not is_source_engine): this shadow-renders the SvelteKit
-    # ARMED build by reading ``.svelte-kit/cloudflare/index.html``. An html site's
-    # served artifact IS its source, so it never uses this SvelteKit render path.
-    if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
+    from pocketpaw_ee.sites.engines import has_native_edit_lane, normalize_engine
+
+    # NATIVE-EDIT engines only (not is_source_engine): this shadow-renders an ARMED
+    # BUILD, so the engine has to be one the generator builds and arms — svelte, and
+    # react since RX-2. Deliberately NOT widened to every source engine: an html
+    # site's served artifact IS its source, so it is selected through its own srcdoc
+    # and has no build to render here.
+    engine = normalize_engine(pocket.get("engine"))
+    if not has_native_edit_lane(engine) or not isinstance(pocket.get("source"), dict):
         raise ValidationError(
-            "pocket.not_svelte_site",
-            "This pocket is not a svelte Paw Site — it has no component build to render.",
+            "pocket.no_native_edit_lane",
+            "This Paw Site has no component build to render — native editing is "
+            "available on svelte and react sites.",
         )
     source = pocket["source"]
     # theme rides the build on both engine tracks (mirrors publish_pocket); a svelte
@@ -5957,6 +6023,7 @@ async def get_native_artifact(
         theme=theme,
         builder_origin=origin,
         gen_version=generator_client.generator_version(),
+        engine=engine,
     )
     # READ-THROUGH: a hit serves the prior render straight off disk — no generator, no
     # subprocess, no build. This is what makes a VIEW instant on the prod box.
@@ -5969,7 +6036,9 @@ async def get_native_artifact(
     # _build_or_cloud_error so a missing-toolchain / non-zero build / SmokeGateFailed
     # becomes a clean CloudError (sites.generator_failed → 5xx), not an opaque 500.
     generator = _generator or GeneratorClient()
-    read = _read_built or _read_native_artifact
+    # Single-arg seam preserved for injected test doubles; the engine is bound into
+    # the default reader, which resolves the per-engine output dir off disk.
+    read = _read_built or (lambda d: _read_native_artifact(d, engine))
     body_html, css = await _build_native_artifact(
         generator=generator,
         theme=theme,
@@ -5978,6 +6047,7 @@ async def get_native_artifact(
         builder_origin=origin,
         pocket_id=pocket_id,
         read=read,
+        engine=engine,
     )
     store.write(pocket_id, content_hash, body_html, css)
     return {"pocket_id": pocket_id, "body_html": body_html, "css": css}
