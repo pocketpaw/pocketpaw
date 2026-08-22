@@ -800,6 +800,12 @@ async def _handle_site_subscription_event(event: SubscriptionEvent) -> dict:
             await sites_service.activate_site(
                 workspace_id=event.workspace_id,
                 site_id=event.site_id,
+                # The authoritative gateway subscription id. Dodo creates the
+                # subscription at payment time, so this is the FIRST delivery that
+                # carries it — the site is still holding the ``cks_`` checkout
+                # session id until we hand it over. Without it nothing downstream
+                # can cancel or change the plan.
+                subscription_id=event.subscription_id or None,
             )
             status = "active"
         elif event.type == _SUB_RENEWED:

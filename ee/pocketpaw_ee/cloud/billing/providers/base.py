@@ -127,3 +127,23 @@ class IPaymentsProvider(ABC):
         webhook, NOT here, so this method only tells the gateway to stop billing.
         """
         raise NotImplementedError
+
+    @abstractmethod
+    async def change_plan(self, *, subscription_id: str, product_id: str, plan_key: str) -> None:
+        """Move an EXISTING gateway subscription onto a different product.
+
+        The alternative — cancel the old subscription and create a new one — is
+        wrong in both directions for a term subscription: the buyer forfeits the
+        remainder of a period they already paid for, and if the new checkout is
+        abandoned after the old sub is cancelled they are left on nothing. This is
+        the atomic move, with the gateway handling proration.
+
+        ``subscription_id`` MUST be the authoritative gateway subscription id, not
+        a checkout SESSION id — a session id names a checkout, not a subscription,
+        and the gateway will reject it.
+
+        Returns None; success is the absence of an exception. Callers persist the
+        new tier THEMSELVES on return — the resulting ``plan_changed`` webhook is
+        acked without action, so nothing else will record it.
+        """
+        raise NotImplementedError

@@ -4671,6 +4671,9 @@ async def publish_pocket(
     site_plan_key: str | None = None,
     builder_origin: str | None = None,
     prewarm_origin: str | None = None,
+    # The buyer's app origin (the router reads it off the Origin / Referer header),
+    # used to build the checkout's return_url so a paid publish can send them back.
+    origin: str | None = None,
     preview: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
@@ -4833,8 +4836,53 @@ async def publish_pocket(
             tier.key if tier is not None else site_plan_key,
         )
 
-    if is_paid and dodo_configured:
-        # PAID + chargeable → defer the deploy until subscription.active.
+    # Is this site ALREADY paying? A republish of a live paid site is a content
+    # edit, not a purchase, and the charge-first branch below used to treat the two
+    # identically: it re-ran ``create_subscription`` on every republish, opening a
+    # SECOND subscription that billed alongside the first (which was never
+    # cancelled, and whose id had just been overwritten with the new checkout
+    # session id, so nothing could ever cancel it). It also reset the status to
+    # "pending" — read as unpaid by every entitlement — and withheld the new content
+    # until a second payment that no honest customer would make.
+    #
+    # Gate on "active" specifically, not on "has a subscription_id": a site that is
+    # still PENDING has never been paid for, so a republish there SHOULD open a
+    # fresh checkout (the abandoned session simply expires unused).
+    existing_doc = await _SiteDoc.find_one(
+        {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
+    )
+    already_paying = (
+        existing_doc is not None
+        and existing_doc.subscription_status == "active"
+        and bool(existing_doc.subscription_id)
+    )
+
+    if already_paying and is_paid and dodo_configured and existing_doc.plan_tier != tier.key:
+        # A genuine TIER CHANGE on a paying site. Move the existing subscription
+        # rather than buying a second one; the gateway prorates, so the buyer keeps
+        # the term they already paid for. Cancel-then-create would forfeit it.
+        #
+        # Deliberately NOT wrapped in a try/except that falls back to
+        # ``create_subscription``: that fallback is precisely the double-billing
+        # this branch exists to remove. A gateway refusal propagates, the site keeps
+        # the tier it is actually paying for, and the caller sees the error.
+        prov = _billing_provider or _default_billing_provider()
+        await prov.change_plan(
+            subscription_id=existing_doc.subscription_id,
+            product_id=tier.dodo_product_id,
+            plan_key=tier.key,
+        )
+        logger.info(
+            "sites.publish: site %s moved %s → %s on subscription %s (no new checkout)",
+            str(existing_doc.id),
+            existing_doc.plan_tier,
+            tier.key,
+            existing_doc.subscription_id,
+        )
+
+    if is_paid and dodo_configured and not already_paying:
+        # PAID + chargeable + not yet paying → defer the deploy until
+        # subscription.active.
         return await _publish_pending_site(
             workspace_id=workspace_id,
             user_id=user_id,
@@ -4849,6 +4897,7 @@ async def publish_pocket(
             keeps_client_bundle=keeps_client_bundle,
             tier=tier,
             provider=_billing_provider,
+            origin=origin,
         )
 
     # FREE/base (or paid-but-unconfigured fallback) → publish LIVE now.
@@ -5001,7 +5050,24 @@ async def _apply_site_plan(
     # recurring product. metadata.site_id is the per-site discriminator the
     # webhook routes on. No product configured (v1 default) → record the tier
     # without a live charge; never crash the publish.
-    if tier is not None and tier.dodo_product_id:
+    # A site that is ALREADY paying must not be charged again by the stamp path.
+    #
+    # This guard is here and not only in the caller on purpose. Until the republish
+    # fix, a paid+configured tier could never REACH this function — the dispatcher
+    # always routed it to ``_publish_pending_site`` — so the branch below was
+    # effectively dead for paying sites. Routing same-tier republishes through the
+    # live path is what arms it, and without this check it would open a fresh
+    # checkout, take the ``if subscription_id`` arm of the stamp below, overwrite
+    # the authoritative gateway id with a checkout session id, and knock the status
+    # back to "pending". That is the whole defect, reintroduced one layer down.
+    #
+    # With no new checkout, ``subscription_id`` stays None and the stamp falls to
+    # the ``elif`` — whose existing ``!= "active"`` carve-out then preserves both
+    # the id and the status untouched.
+    already_paying = getattr(doc, "subscription_status", None) == "active" and bool(
+        getattr(doc, "subscription_id", None)
+    )
+    if tier is not None and tier.dodo_product_id and not already_paying:
         try:
             prov = provider or _default_billing_provider()
             checkout = await prov.create_subscription(
@@ -5061,6 +5127,29 @@ async def _apply_site_plan(
     return doc
 
 
+def _site_checkout_return_urls(origin: str | None) -> tuple[str | None, str | None]:
+    """Build (return_url, cancel_url) for a per-site checkout, or (None, None).
+
+    The frontend navigates the WHOLE PAGE to the checkout url
+    (``window.location.href = site.checkout_url``), so without these the buyer pays
+    and is left sitting on the gateway with no route back into the app.
+
+    Deliberately not ``billing._checkout_return_urls``: that one lands the buyer on
+    ``/settings/billing``, which is right for a workspace plan and wrong here — the
+    buyer just bought a SITE and expects to see it. Same origin/config fallback
+    chain, different destination.
+    """
+    base = (origin or "").strip()
+    if not base:
+        from pocketpaw.config import get_settings
+
+        base = (getattr(get_settings(), "dodo_checkout_return_base", "") or "").strip()
+    if not base:
+        return None, None
+    base = base.rstrip("/")
+    return (f"{base}/sites?checkout=success", f"{base}/sites?checkout=cancel")
+
+
 async def _publish_pending_site(
     *,
     workspace_id: str,
@@ -5076,6 +5165,7 @@ async def _publish_pending_site(
     keeps_client_bundle: bool,
     tier: Any,
     provider: Any | None,
+    origin: str | None = None,
 ) -> _SiteDoc:
     """Charge-first: create a PAID-tier site as PENDING and open its checkout,
     WITHOUT deploying it live.
@@ -5175,6 +5265,7 @@ async def _publish_pending_site(
     # raises, it PROPAGATES (no swallow) and NO pending doc is created — never an
     # orphan pending row with no subscription_id. The buyer can simply retry.
     prov = provider or _default_billing_provider()
+    return_url, cancel_url = _site_checkout_return_urls(origin)
     checkout = await prov.create_subscription(
         plan_key=plan_key,
         product_id=tier.dodo_product_id,
@@ -5185,6 +5276,8 @@ async def _publish_pending_site(
             "site_id": site_id,
             "plan_key": plan_key,
         },
+        return_url=return_url,
+        cancel_url=cancel_url,
     )
     checkout_url: str | None = checkout.checkout_url or None
     subscription_id: str | None = checkout.subscription_id or None
@@ -5235,6 +5328,7 @@ async def activate_site(
     *,
     workspace_id: str,
     site_id: str,
+    subscription_id: str | None = None,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -5315,6 +5409,21 @@ async def activate_site(
     # opposite direction, and it is the lesser of the two: a paid site that retries
     # its deploy beats a paid site permanently branded as free.
     doc.subscription_status = "active"
+    # Persist the AUTHORITATIVE gateway subscription id from the verified webhook.
+    #
+    # What the doc holds until this point is the checkout SESSION id (``cks_``)
+    # that ``create_subscription`` returned — Dodo creates the subscription at
+    # PAYMENT time, so the real ``sub_`` id does not exist yet when the checkout
+    # opens. It arrives here, on subscription.active, and was previously dropped on
+    # the floor: the webhook called this function without it.
+    #
+    # A session id cannot cancel a subscription and cannot change its plan — the
+    # gateway rejects it. So every downstream lifecycle operation was unbuildable
+    # until this line existed, and any subscription opened before it shipped is
+    # unreachable from our side. ``mark_site_subscription`` already does the same
+    # thing on renewed/cancelled; activation was the gap.
+    if subscription_id:
+        doc.subscription_id = subscription_id
     await doc.save()
 
     deployed = await _deploy_site_doc(

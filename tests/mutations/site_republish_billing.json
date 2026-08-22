@@ -1,0 +1,113 @@
+[
+  {
+    "label": "the dispatcher forgets to ask whether the site is already paying",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if is_paid and dodo_configured and not already_paying:",
+    "replace": "    if is_paid and dodo_configured:",
+    "tests": [
+      "tests/cloud/sites/test_republish_double_billing.py::test_republishing_a_paying_site_opens_no_second_subscription",
+      "tests/cloud/sites/test_republish_double_billing.py::test_republishing_a_paying_site_keeps_its_paid_status_and_goes_live"
+    ]
+  },
+  {
+    "label": "the stamp path re-charges a paying site one layer below the dispatcher",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if tier is not None and tier.dodo_product_id and not already_paying:",
+    "replace": "    if tier is not None and tier.dodo_product_id:",
+    "tests": [
+      "tests/cloud/sites/test_republish_double_billing.py::test_republishing_a_paying_site_opens_no_second_subscription",
+      "tests/cloud/sites/test_republish_double_billing.py::test_republishing_a_paying_site_keeps_its_paid_status_and_goes_live"
+    ]
+  },
+  {
+    "label": "\"already paying\" accepts a PENDING site — a never-paid site never gets its checkout",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    already_paying = (\n        existing_doc is not None\n        and existing_doc.subscription_status == \"active\"\n        and bool(existing_doc.subscription_id)\n    )",
+    "replace": "    already_paying = existing_doc is not None and bool(existing_doc.subscription_id)",
+    "tests": [
+      "tests/cloud/sites/test_republish_double_billing.py::test_republishing_a_site_that_never_paid_still_opens_a_checkout"
+    ]
+  },
+  {
+    "label": "activation drops the gateway subscription id again — the doc keeps a session id",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if subscription_id:\n        doc.subscription_id = subscription_id\n    await doc.save()\n\n    deployed = await _deploy_site_doc(",
+    "replace": "    await doc.save()\n\n    deployed = await _deploy_site_doc(",
+    "tests": [
+      "tests/cloud/sites/test_republish_double_billing.py::test_activation_persists_the_real_gateway_subscription_id",
+      "tests/cloud/sites/test_republish_double_billing.py::test_moving_a_paying_site_to_another_tier_changes_the_plan"
+    ]
+  },
+  {
+    "label": "the webhook stops handing the subscription id to activation",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "                subscription_id=event.subscription_id or None,\n            )",
+    "replace": "            )",
+    "tests": [
+      "tests/cloud/sites/test_republish_double_billing.py::test_activation_persists_the_real_gateway_subscription_id"
+    ]
+  },
+  {
+    "label": "a tier change buys a second subscription instead of moving the existing one",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if already_paying and is_paid and dodo_configured and existing_doc.plan_tier != tier.key:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/sites/test_republish_double_billing.py::test_moving_a_paying_site_to_another_tier_changes_the_plan"
+    ]
+  },
+  {
+    "label": "a refused plan change falls back to opening a fresh checkout",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        prov = _billing_provider or _default_billing_provider()\n        await prov.change_plan(\n            subscription_id=existing_doc.subscription_id,\n            product_id=tier.dodo_product_id,\n            plan_key=tier.key,\n        )",
+    "replace": "        prov = _billing_provider or _default_billing_provider()\n        try:\n            await prov.change_plan(\n                subscription_id=existing_doc.subscription_id,\n                product_id=tier.dodo_product_id,\n                plan_key=tier.key,\n            )\n        except Exception:\n            already_paying = False",
+    "tests": [
+      "tests/cloud/sites/test_republish_double_billing.py::test_a_failed_plan_change_leaves_the_subscription_alone"
+    ]
+  },
+  {
+    "label": "the site checkout stops sending a return url — the buyer is stranded on the gateway",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        return_url=return_url,\n        cancel_url=cancel_url,\n    )",
+    "replace": "    )",
+    "tests": [
+      "tests/cloud/sites/test_republish_double_billing.py::test_the_site_checkout_sends_the_buyer_back_to_the_app"
+    ]
+  },
+  {
+    "label": "the return url points at the workspace billing page, not the site the buyer bought",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return (f\"{base}/sites?checkout=success\", f\"{base}/sites?checkout=cancel\")",
+    "replace": "    return (None, None)",
+    "tests": [
+      "tests/cloud/sites/test_republish_double_billing.py::test_the_site_checkout_sends_the_buyer_back_to_the_app"
+    ]
+  },
+  {
+    "label": "change_plan sends no proration mode — the buyer forfeits the term they paid for",
+    "file": "ee/pocketpaw_ee/cloud/billing/providers/dodo.py",
+    "find": "            proration_billing_mode=\"difference_immediately\",",
+    "replace": "            proration_billing_mode=\"full_immediately\",",
+    "tests": [
+      "tests/cloud/billing/test_change_plan_provider.py::test_the_plan_change_prorates_the_difference"
+    ]
+  },
+  {
+    "label": "a declined card moves the plan anyway, so our tier and the gateway's disagree",
+    "file": "ee/pocketpaw_ee/cloud/billing/providers/dodo.py",
+    "find": "            on_payment_failure=\"prevent_change\",",
+    "replace": "            on_payment_failure=\"apply_change\",",
+    "tests": [
+      "tests/cloud/billing/test_change_plan_provider.py::test_a_declined_card_leaves_the_plan_where_it_was"
+    ]
+  },
+  {
+    "label": "change_plan accepts an empty subscription id and calls the gateway with it",
+    "file": "ee/pocketpaw_ee/cloud/billing/providers/dodo.py",
+    "find": "    async def change_plan(self, *, subscription_id: str, product_id: str, plan_key: str) -> None:\n        if not subscription_id:\n            raise ValidationError(\"billing.invalid_subscription\", \"subscription_id is required\")",
+    "replace": "    async def change_plan(self, *, subscription_id: str, product_id: str, plan_key: str) -> None:",
+    "tests": [
+      "tests/cloud/billing/test_change_plan_provider.py::test_an_empty_subscription_id_never_reaches_the_gateway"
+    ]
+  }
+]

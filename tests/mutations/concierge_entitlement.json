@@ -144,8 +144,8 @@
   {
     "label": "activation flips the status AFTER the deploy again (the original P0)",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    doc.subscription_status = \"active\"\n    await doc.save()\n\n    deployed = await _deploy_site_doc(",
-    "replace": "    deployed = await _deploy_site_doc(",
+    "find": "    doc.subscription_status = \"active\"\n",
+    "replace": "",
     "tests": [
       "tests/cloud/sites/test_charge_first.py::test_the_subscription_reads_active_before_the_activation_deploy_runs"
     ]

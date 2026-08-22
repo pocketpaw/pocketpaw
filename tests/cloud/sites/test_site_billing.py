@@ -72,7 +72,15 @@ class _FakeBillingProvider:
         self.calls: list[dict] = []
 
     async def create_subscription(
-        self, *, plan_key, product_id, workspace_id, customer_email, metadata
+        self,
+        *,
+        plan_key,
+        product_id,
+        workspace_id,
+        customer_email,
+        metadata,
+        return_url=None,
+        cancel_url=None,
     ) -> SubscriptionCheckout:
         self.calls.append(
             {
@@ -262,7 +270,9 @@ async def test_publish_degrades_gracefully_when_dodo_unconfigured(mongo_db, reco
         # No _billing_provider injected and no product configured → no live sub.
     )
 
-    assert doc.plan_tier == "pro"
+    # The FLOOR, not "pro" (#1995) — an unpurchasable paid tier is not recorded,
+    # because a tier the site does not actually hold is worse than no tier.
+    assert doc.plan_tier == site_plans.BASE_SITE_PLAN_KEY
     assert doc.subscription_id is None
     assert doc.subscription_status == "none"
     # The publish still emits SitePublished (the site IS published, just no charge).
