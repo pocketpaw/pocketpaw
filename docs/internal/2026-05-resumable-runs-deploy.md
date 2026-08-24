@@ -131,6 +131,8 @@ Env vars (all also documented in `backend/CLAUDE.md` → Key Conventions):
 | `POCKETPAW_CLOUD_STREAM_TRANSPORT` | `redis` | Future hook for non-Redis backends |
 | `PAW_SITES_BUILD_TIMEOUT_SEC[_<ENGINE>]` | `600` (floor) | Per-build sandbox budget for the site-build function. Read at worker **import**, so a change takes effect on the worker restart a deploy performs — see below |
 | `PAW_SITES_SVELTE_ASYNC_BUILD` | unset (off) | Routes STATIC svelte publishes to the Daytona build lane instead of building them inline. Read per call, so it takes effect without a restart — but set it on **both** the web service and the worker: the web side decides whether to enqueue, the worker side does the build. See the caveat below before turning it on |
+| `PAW_SITES_ARTIFACT_STORE` | `filesystem` | Set to `s3` to keep built preview artifacts in blob storage instead of the container's disk, so a view on one replica serves what another built and a redeploy does not empty the cache. Same `(pocket_id, content_hash)` key either way. Read per call. Only meaningful with `POCKETPAW_UPLOAD_ADAPTER=s3` — see below |
+| `PAW_SITES_ARTIFACT_S3_TIMEOUT_SEC` | `10` | Per-call deadline on one artifact blob round-trip. The store's seam is synchronous and runs on the request's event loop, so a wedged bucket must not block indefinitely; on a timeout the call degrades to a cache miss |
 
 ### Turning the svelte lane on (`PAW_SITES_SVELTE_ASYNC_BUILD`)
 
@@ -159,6 +161,36 @@ converts working svelte publishes into failures.
 That gap is why the flag is off by default rather than a straight flip. Its fix is a
 `paw-sites-gen` subcommand that judges an already-built tree, called by the worker on the
 unpacked artifact.
+
+### Sharing the preview artifact cache (`PAW_SITES_ARTIFACT_STORE`)
+
+Off by default, which keeps built preview artifacts on the container's own disk
+(`~/.pocketpaw/site-artifacts/<pocket_id>/<hash>.json`). That is correct for one box and
+wrong for several: a view routed to replica B misses what replica A built, a redeploy
+empties the cache, and a miss costs a full `bun install` + build.
+
+`PAW_SITES_ARTIFACT_STORE=s3` keeps the same `(pocket_id, content_hash)` key and puts the
+artifact in blob storage instead. **Set `POCKETPAW_UPLOAD_ADAPTER=s3` with it** — that is
+the knob that decides which backend `pocketpaw.uploads.build_adapter` returns, and with it
+left on `local` you get a local-disk adapter writing the same layout as before: no crash,
+no sharing. `cloud/uploads/bootstrap.verify_cloud_storage_backend` already warns about
+that at boot (and refuses to boot under `POCKETPAW_REQUIRE_S3_IN_CLOUD`).
+
+Nothing here is load-bearing for correctness. A miss, a corrupt object, a timeout, an
+unreachable bucket or a failed write all degrade to "rebuild this artifact" — the same
+best-effort contract the on-disk store has. A box where no adapter can be built falls back
+to the on-disk store rather than failing previews.
+
+Two behaviours differ from the on-disk store, both deliberate:
+
+- **A pocket whose rendered body or CSS carries a per-site capture key is never stored.**
+  That secret's exposure was only ever acceptable because it lives in a container that is
+  then destroyed (see the headers on `sites/build_job.py` and `sites/daytona_runner.py`);
+  a bucket is not destroyed. Such a pocket rebuilds on every view, and the refusal is
+  logged per pocket so it is visible rather than mysterious.
+- **No eviction.** `PAW_SITES_ARTIFACT_KEEP` prunes the on-disk store because a container
+  disk is small and shared. Put a lifecycle rule on the bucket's `site-artifacts/` prefix
+  instead of paying a LIST + DELETE on every write.
 
 ### The worker runs three functions, each with its own timeout
 

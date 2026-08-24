@@ -1,6 +1,15 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-08-24 (feat/sites-s3-artifact-store, SP-4): ``_default_artifact_store``
+# now consults ``artifact_store_s3.shared_artifact_store()`` before falling back to
+# ``_FilesystemArtifactStore``, so a deployment can set ``PAW_SITES_ARTIFACT_STORE=s3``
+# and have a preview artifact built on one replica served by another (and survive a
+# redeploy) on the SAME ``(pocket_id, content_hash)`` key. Unset is the default and
+# resolves the filesystem store, so OSS installs and local dev are unchanged. That one
+# function is the whole footprint here — the store, its best-effort semantics, and the
+# guard keeping a per-site capture key out of durable storage all live in the new module.
+#
 # Updated 2026-08-21 (feat/sites-billing-flag, PW-2): every billing seam in this
 # module now asks ``cloud.billing.enforcement.sites_enforced()`` instead of reading
 # ``billing_enforced`` itself. That function is the OR of the global flag and the
@@ -1185,11 +1194,20 @@ class _FilesystemArtifactStore:
 _DEFAULT_ARTIFACT_STORE = _FilesystemArtifactStore()
 
 
-def _default_artifact_store() -> _FilesystemArtifactStore:
-    """The process-wide default native-artifact store (a filesystem store). Factored so
+def _default_artifact_store() -> Any:
+    """The process-wide default native-artifact store. Factored so
     ``get_native_artifact`` / the pre-warm resolve the same instance and tests can pass
-    an in-memory ``_store`` instead."""
-    return _DEFAULT_ARTIFACT_STORE
+    an in-memory ``_store`` instead.
+
+    SP-4: a deployment may set ``PAW_SITES_ARTIFACT_STORE=s3`` to route artifacts through
+    blob storage instead, so an artifact built on one replica serves from another and
+    survives a redeploy (``artifact_store_s3``, same ``(pocket_id, content_hash)`` key).
+    UNSET IS THE DEFAULT and returns the filesystem store below — OSS installs and local
+    dev are byte-for-byte unchanged, and so is a box where the shared store cannot be
+    built (``shared_artifact_store`` returns ``None`` rather than raising)."""
+    from pocketpaw_ee.sites.artifact_store_s3 import shared_artifact_store
+
+    return shared_artifact_store() or _DEFAULT_ARTIFACT_STORE
 
 
 async def _build_native_artifact(
