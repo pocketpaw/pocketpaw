@@ -34,11 +34,13 @@ FIXTURE_KEYS = {
     "steps",
     "expect_trace",
     "expect_trace_unordered",
+    "regression_note",
 }
 PLUGIN_KEYS = {
     "provides",
     "inject",
     "effects",
+    "effects_after_delay",
     "listeners",
     "children",
     "apply_throws",
@@ -48,7 +50,7 @@ PLUGIN_KEYS = {
     "record_resolved",
 }
 INJECT_KEYS = {"required", "optional"}
-LISTENER_KEYS = {"event", "mode", "id", "action", "wrap", "value"}
+LISTENER_KEYS = {"event", "mode", "id", "action", "wrap", "value", "delay_ms"}
 STEP_KEYS = {
     "op",
     "plugin",
@@ -72,7 +74,12 @@ OPS = {
     "settle",
     "isolate",
 }
-ACTIONS = {"delegate", "shortcircuit", "wrap"}
+# Listener actions, split by the dispatch modes they are defined for. The
+# upstream README maps each action to a mode; using one against the wrong mode
+# is a fixture the harness cannot execute, so it fails loudly.
+WATERFALL_ACTIONS = {"delegate", "shortcircuit", "wrap"}
+PLAIN_ACTIONS = {"observe", "absent", "value"}
+ACTIONS = WATERFALL_ACTIONS | PLAIN_ACTIONS
 
 
 class FixtureError(AssertionError):
@@ -117,6 +124,12 @@ class FixturePlugin:
             mode = spec.get("mode", "emit")
             if mode not in MODES:
                 raise FixtureError(f"plugin {self.name!r}: unknown dispatch mode {mode!r}")
+            wants_waterfall = action in WATERFALL_ACTIONS
+            if wants_waterfall != (mode == "waterfall"):
+                raise FixtureError(
+                    f"plugin {self.name!r}: listener action {action!r} is not "
+                    f"defined for dispatch mode {mode!r}"
+                )
             for required in ("event", "id"):
                 if required not in spec:
                     raise FixtureError(f"plugin {self.name!r} listener: missing {required!r}")
@@ -179,39 +192,64 @@ class FixturePlugin:
             ctx.on(event, waterfall_listener, mode=mode)
             return
 
-        def plain_listener(value: Any = None) -> Any:
-            trace.append(f"{name}:listener:{listener_id}:enter")
-            trace.append(f"{name}:listener:{listener_id}:exit")
-            if action == "shortcircuit":
-                return short_value
-            if action == "wrap":
-                return f"{wrap}({value})"
-            return None
+        # observe / absent / value. A listener with delay_ms must actually
+        # await, otherwise `parallel` cannot be shown to fan out.
+        delay = float(spec.get("delay_ms") or 0) / 1000.0
+        result = short_value if action == "value" else None
+
+        if delay:
+
+            async def plain_listener(value: Any = None) -> Any:
+                trace.append(f"{name}:listener:{listener_id}:enter")
+                await asyncio.sleep(delay)
+                trace.append(f"{name}:listener:{listener_id}:exit")
+                return result
+
+        else:
+
+            def plain_listener(value: Any = None) -> Any:  # type: ignore[misc]
+                trace.append(f"{name}:listener:{listener_id}:enter")
+                trace.append(f"{name}:listener:{listener_id}:exit")
+                return result
 
         ctx.on(event, plain_listener, mode=mode)
 
     # -- apply ------------------------------------------------------------
     async def apply(self, ctx: Context) -> None:
+        """Run the declared body.
+
+        The order is normative (upstream README, "Ordering inside apply"):
+        provides -> record_resolved -> effects -> listeners -> children
+                 -> apply_delay_ms -> effects_after_delay -> apply_throws
+        """
         decl = self.decl
         for service in decl.get("provides") or ():
             ctx.provide(service, f"{self.name}:{service}")
 
-        effects = list(decl.get("effects") or ())
-        for index, effect_id in enumerate(effects):
-            self._make_effect(ctx, effect_id, is_first=index == 0)
+        for key in decl.get("record_resolved") or ():
+            self.run.trace.append(f"{self.name}:resolved:{key}:{ctx.get(key)}")
+
+        first = True
+        for effect_id in decl.get("effects") or ():
+            self._make_effect(ctx, effect_id, is_first=first)
+            first = False
 
         for spec in decl.get("listeners") or ():
             self._make_listener(ctx, spec)
 
-        for key in decl.get("record_resolved") or ():
-            self.run.trace.append(f"{self.name}:resolved:{key}:{ctx.get(key)}")
-
+        # Children load inline — awaited inside the parent's apply.
         for child_name in decl.get("children") or ():
             await ctx.plugin(self.run.plugin(child_name))
 
         delay = float(decl.get("apply_delay_ms") or 0) / 1000.0
         if delay:
             await asyncio.sleep(delay)
+
+        # Effects created after the yield. A runtime that tore down
+        # concurrently with apply either never sees these or rejects them.
+        for effect_id in decl.get("effects_after_delay") or ():
+            self._make_effect(ctx, effect_id, is_first=first)
+            first = False
 
         if decl.get("apply_throws"):
             self.run.trace.append(f"{self.name}:apply:throw")

@@ -6,7 +6,8 @@
     "a": {
       "provides": [
         "svcA"
-      ]
+      ],
+      "apply_delay_ms": 30
     },
     "b": {
       "inject": {
@@ -47,5 +48,6 @@
     "a:ACTIVE",
     "b:LOADING",
     "b:ACTIVE"
-  ]
+  ],
+  "regression_note": "Amended 2026-08-24: plugin a now awaits AFTER publishing, which yields the event loop mid-apply. A runtime that activates dependents immediately rather than deferring until the provider settles will emit b:LOADING before a:ACTIVE and fail."
 }

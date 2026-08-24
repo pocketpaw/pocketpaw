@@ -1,0 +1,57 @@
+{
+  "id": "parallel-awaits-all",
+  "asserts": "parallel fans out to every listener concurrently and does not resolve until all have settled. Compared as a multiset: concurrent listeners have no defined order.",
+  "semantics": "\u00a75",
+  "plugins": {
+    "a": {
+      "listeners": [
+        {
+          "event": "pev",
+          "mode": "parallel",
+          "id": "L1",
+          "action": "observe",
+          "delay_ms": 20
+        }
+      ]
+    },
+    "b": {
+      "listeners": [
+        {
+          "event": "pev",
+          "mode": "parallel",
+          "id": "L2",
+          "action": "observe",
+          "delay_ms": 5
+        }
+      ]
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "a"
+    },
+    {
+      "op": "mount",
+      "plugin": "b"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "op": "dispatch",
+      "event": "pev",
+      "mode": "parallel"
+    }
+  ],
+  "expect_trace_unordered": [
+    "a:LOADING",
+    "a:ACTIVE",
+    "b:LOADING",
+    "b:ACTIVE",
+    "a:listener:L1:enter",
+    "a:listener:L1:exit",
+    "b:listener:L2:enter",
+    "b:listener:L2:exit"
+  ]
+}

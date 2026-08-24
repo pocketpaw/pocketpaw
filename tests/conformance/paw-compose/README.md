@@ -3,11 +3,13 @@
 **These files are a copy. They are not the source of truth.**
 
 Source of truth: `paw-workspace/paw-compose/conformance/` (a different repo).
-`SEMANTICS.md` here is likewise a copy of `paw-workspace/paw-compose/SEMANTICS.md`,
-vendored so this repo's conformance suite is readable without a second checkout.
+`UPSTREAM-README.md` is that directory's README — the fixture format and harness
+contract. `SEMANTICS.md` is a copy of `paw-workspace/paw-compose/SEMANTICS.md`.
+Both are vendored so this repo's conformance suite is readable without a second
+checkout.
 
-They were copied on 2026-08-24 at spec version v0.1.0. Nothing in this repo
-verifies that the copy is still current.
+**Pinned at upstream commit `88a2730`** — 16 fixtures, spec v0.1.0, copied
+2026-08-24. Nothing in this repo verifies that the copy is still current.
 
 ## Why vendored
 
@@ -26,9 +28,16 @@ versioned artifact both repos consume — is a follow-up, not built here.
 To refresh by hand:
 
 ```sh
-cp ../../../../paw-workspace/paw-compose/conformance/*.json .
-cp ../../../../paw-workspace/paw-compose/SEMANTICS.md .
+UP=../../../../paw-workspace/paw-compose
+rm -f *.json && cp $UP/conformance/*.json .
+cp $UP/conformance/README.md UPSTREAM-README.md
+cp $UP/SEMANTICS.md .
 ```
+
+Then update `EXPECTED_FIXTURE_IDS` in `tests/pawkernel/test_conformance.py` so a
+fixture that disappears upstream reads as a failure rather than a shrinking
+suite, and re-run the mutation checks — an amended fixture is not trustworthy
+until a deliberately broken runtime makes it fail.
 
 ## What runs them
 

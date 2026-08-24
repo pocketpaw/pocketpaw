@@ -248,7 +248,8 @@ async def test_withdrawn_dependency_returns_to_pending_and_reactivates() -> None
 
 
 # --------------------------------------------------------------------------
-# §5 — the dispatch modes no fixture exercises
+# §5 — dispatch modes. The three added in the 2026-08-24 amendment now have
+# fixtures; these cover what those fixtures still cannot observe.
 # --------------------------------------------------------------------------
 async def test_emit_is_fire_and_forget_in_registration_order() -> None:
     kernel, _ = _tracing_kernel()
@@ -259,21 +260,33 @@ async def test_emit_is_fire_and_forget_in_registration_order() -> None:
     assert seen == ["1:x", "2:x"]
 
 
-async def test_parallel_awaits_every_listener() -> None:
+async def test_parallel_fans_out_concurrently_and_awaits_every_listener() -> None:
+    """Both that every listener settles AND that they genuinely overlap.
+
+    `parallel-awaits-all` compares as a multiset, so it cannot tell a
+    concurrent fan-out from a runtime that awaits each listener in turn —
+    both produce the same bag of tokens. Asserting the interleaving is what
+    makes the difference observable.
+    """
     kernel, _ = _tracing_kernel()
-    done: list[str] = []
+    order: list[str] = []
 
     async def slow(_v: object) -> None:
+        order.append("slow:enter")
         await asyncio.sleep(0.02)
-        done.append("slow")
+        order.append("slow:exit")
 
     async def quick(_v: object) -> None:
-        done.append("quick")
+        order.append("quick:enter")
+        await asyncio.sleep(0.005)
+        order.append("quick:exit")
 
     kernel.root.on("ev", slow, mode="parallel")
     kernel.root.on("ev", quick, mode="parallel")
     await kernel.root.parallel("ev", None)
-    assert sorted(done) == ["quick", "slow"]
+
+    # Sequential execution would give slow:enter, slow:exit, quick:enter, ...
+    assert order == ["slow:enter", "quick:enter", "quick:exit", "slow:exit"]
 
 
 async def test_serial_returns_the_first_non_absent_result() -> None:
