@@ -32,10 +32,10 @@ def create_api_app():
     from contextlib import asynccontextmanager
 
     from fastapi import FastAPI, Query, WebSocket
-    from fastapi.middleware.cors import CORSMiddleware
 
+    from pocketpaw.api.cors import install_cors
     from pocketpaw.api.v1 import mount_v1_routers
-    from pocketpaw.config import Settings, get_access_token
+    from pocketpaw.config import get_access_token
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -93,25 +93,11 @@ def create_api_app():
     # CSRFMiddleware added inside `mount_cloud()`. Without this, a CSRF
     # 403 short-circuits before CORS can attach Access-Control-Allow-
     # Origin and the browser reports a misleading CORS error.
-    _BUILTIN_ORIGINS = [
-        "tauri://localhost",
-        "https://tauri.localhost",
-        "http://localhost:1420",
-    ]
-    try:
-        _custom = Settings.load().api_cors_allowed_origins
-    except Exception:
-        _custom = []
-    _ORIGINS = list(set(_BUILTIN_ORIGINS + _custom))
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=_ORIGINS,
-        allow_origin_regex=r"^https?://([a-z]+\.)?localhost(:\d+)?$|^https?://127\.0\.0\.1(:\d+)?$",
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # `install_cors` also registers the CORS-aware unhandled-error handler: a 500
+    # is minted by ServerErrorMiddleware, which sits OUTSIDE this middleware, so
+    # without that handler every crash comes back header-less and the browser
+    # blames CORS instead of showing the real failure. See api/cors.py.
+    install_cors(app)
 
     # --- WebSocket handler helper ----------------------------------------
     async def _handle_ws(

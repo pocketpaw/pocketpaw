@@ -37,7 +37,6 @@ try:
     import qrcode
     import uvicorn
     from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
-    from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import Response
     from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
@@ -48,6 +47,7 @@ except ImportError as _exc:
     ) from _exc
 
 import pocketpaw.dashboard_state as _state
+from pocketpaw.api.cors import install_cors
 from pocketpaw.api.v1 import mount_v1_routers
 from pocketpaw.bootstrap import DefaultBootstrapProvider
 from pocketpaw.config import Settings, get_access_token, get_config_path
@@ -146,20 +146,11 @@ app = FastAPI(
     openapi_url="/api/v1/openapi.json",
 )
 
-# CORS — localhost + Cloudflare tunnel + Tauri desktop + custom origins from config
-_BUILTIN_ORIGINS = [
-    "tauri://localhost",
-    "https://tauri.localhost",  # Tauri v2
-    "http://localhost:1420",  # Tauri dev server
-]
-try:
-    _custom_origins = Settings.load().api_cors_allowed_origins
-except Exception as e:
-    logger.debug("Failed to load custom CORS origins: %s", e)
-    _custom_origins = []
-_EXTRA_ORIGINS = list(set(_BUILTIN_ORIGINS + _custom_origins))
-
-# NOTE: CORSMiddleware is registered AFTER AuthMiddleware below so that CORS
+# CORS — localhost + Cloudflare tunnel + Tauri desktop + custom origins from
+# config. The policy (and the CORS-aware 500 handler that goes with it) lives in
+# api/cors.py so this app and `pocketpaw serve` cannot drift apart.
+#
+# NOTE: install_cors() is called AFTER AuthMiddleware below so that CORS
 # is outermost (Starlette processes last-added first) and handles OPTIONS
 # preflight before auth can reject them.  See line ~193.
 
@@ -249,14 +240,10 @@ app.include_router(auth_router)
 # Auth must be registered BEFORE CORS so CORS is outermost and handles
 # OPTIONS preflight requests before auth can reject them.
 app.add_middleware(AuthMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_EXTRA_ORIGINS,
-    allow_origin_regex=r"^https?://([a-z]+\.)?localhost(:\d+)?$|^https?://127\.0\.0\.1(:\d+)?$",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Also registers the CORS-aware unhandled-error handler — a 500 is minted by
+# ServerErrorMiddleware, which sits OUTSIDE CORSMiddleware, so without it every
+# crash returns header-less and the browser blames CORS. See api/cors.py.
+install_cors(app)
 
 
 # ==================== MCP Server API ====================

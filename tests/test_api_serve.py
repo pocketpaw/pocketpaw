@@ -341,3 +341,73 @@ class TestSocketResourceSafety:
             run_dashboard(host="0.0.0.0", port=9999, open_browser=False)
 
         mock_sock.__exit__.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# CORS survives an unhandled 500
+# ---------------------------------------------------------------------------
+#
+# Regression: Starlette mints the 500 for an unhandled exception in
+# ServerErrorMiddleware, which sits OUTSIDE CORSMiddleware, so that response
+# carried no Access-Control-Allow-Origin. A browser reports the result as
+#
+#   "...has been blocked by CORS policy: No 'Access-Control-Allow-Origin'
+#    header is present on the requested resource."
+#
+# which points at a CORS misconfiguration that isn't there and hides the real
+# crash. Reproduced against the deployed backend on
+# POST /api/v1/sites/by-pocket/{id}/editable.
+#
+# Mutation that must break these: delete the `install_cors` call's error-handler
+# registration (api/cors.py::add_cors_aware_error_handler) — the 500 then comes
+# back header-less again.
+
+
+class TestCorsOnUnhandledError:
+    @pytest.fixture
+    def boom_client(self, api_app):
+        @api_app.get("/api/v1/_test_boom")
+        async def _boom():
+            raise RuntimeError("kaboom")
+
+        # raise_server_exceptions=False so the wire response is asserted rather
+        # than the exception re-raised into the test (Starlette re-raises after
+        # sending, which is unchanged by this fix).
+        return TestClient(api_app, raise_server_exceptions=False)
+
+    def test_unhandled_500_keeps_cors_headers(self, boom_client):
+        with patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True):
+            resp = boom_client.get(
+                "/api/v1/_test_boom", headers={"Origin": "http://localhost:1420"}
+            )
+        assert resp.status_code == 500
+        assert resp.headers.get("access-control-allow-origin") == "http://localhost:1420"
+        assert resp.headers.get("access-control-allow-credentials") == "true"
+
+    def test_unhandled_500_body_is_readable_by_the_frontend(self, boom_client):
+        """Both envelope shapes: `error.code` (machine) and `detail` (the key
+        paw-enterprise's friendlyErrorMessage actually reads)."""
+        with patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True):
+            resp = boom_client.get(
+                "/api/v1/_test_boom", headers={"Origin": "http://localhost:1420"}
+            )
+        body = resp.json()
+        assert body["error"]["code"] == "internal_error"
+        assert body["detail"]
+
+    def test_unhandled_500_does_not_leak_the_exception_message(self, boom_client):
+        """The traceback goes to the logs; the client gets a generic sentence."""
+        with patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True):
+            resp = boom_client.get(
+                "/api/v1/_test_boom", headers={"Origin": "http://localhost:1420"}
+            )
+        assert "kaboom" not in resp.text
+
+    def test_disallowed_origin_still_gets_no_cors_header_on_500(self, boom_client):
+        """The 500 path must not be more permissive than CORSMiddleware itself."""
+        with patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=True):
+            resp = boom_client.get(
+                "/api/v1/_test_boom", headers={"Origin": "https://evil.example.com"}
+            )
+        assert resp.status_code == 500
+        assert "access-control-allow-origin" not in resp.headers
