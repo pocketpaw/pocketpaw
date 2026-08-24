@@ -1,0 +1,39 @@
+{
+  "id": "dispose-during-load",
+  "asserts": "DRAGON (DeepSeek divergence #6). Disposal begun while apply is still running must await apply, then clean up everything apply collected. It must not pass through ACTIVE, abandon partial effects, or run cleanup concurrently with the rest of apply.",
+  "semantics": "\u00a74",
+  "plugins": {
+    "a": {
+      "effects": [
+        "e1"
+      ],
+      "apply_delay_ms": 50
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "a",
+      "nowait": true
+    },
+    {
+      "op": "dispose_nowait",
+      "plugin": "a"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "a": "DISPOSED"
+      }
+    }
+  ],
+  "expect_trace": [
+    "a:LOADING",
+    "a:effect:e1:setup",
+    "a:UNLOADING",
+    "a:effect:e1:dispose",
+    "a:DISPOSED"
+  ]
+}
