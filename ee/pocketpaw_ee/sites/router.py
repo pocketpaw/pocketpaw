@@ -160,9 +160,17 @@
 # editor shadow-renders the site instead of framing an iframe. fabric.write (it
 # ensures/triggers the armed build); the builder_origin is resolved from the request
 # Origin header (the service applies the PAW_SITES_BUILDER_ORIGIN env fallback),
-# mirroring /editable + /dev-preview. A non-svelte pocket → 422; a missing /
-# access-denied pocket → 404 / 403 (the pockets service raises it). Delegates to
-# sites_service.get_native_artifact.
+# mirroring /editable + /dev-preview. A pocket with no native edit lane → 422; a
+# missing / access-denied pocket → 404 / 403 (the pockets service raises it).
+# Delegates to sites_service.get_native_artifact.
+#
+# Updated 2026-08-22 (RX-2): the 422 guard is no longer svelte-only — it is now
+# ``has_native_edit_lane`` (svelte + react), and the response body's error code
+# changed from ``pocket.not_svelte_site`` to ``pocket.no_native_edit_lane``. html
+# and ripple are still rejected: html's served artifact IS its source (selected
+# through its own srcdoc, no build to render) and ripple has no source map. The
+# rest of the wire contract (request/response, origin resolution, 404/403) is
+# unchanged.
 #
 # Updated 2026-07-17 (feat/sites-native-artifact-no-build): get_native_artifact is now a
 # READ-THROUGH cache — a repeat view with unchanged source is a disk read with ZERO
@@ -382,9 +390,10 @@ async def native_artifact_by_pocket(
     needs to stamp data-uid + the manifest — is resolved from the request's ``Origin``
     header, with the service applying the ``PAW_SITES_BUILDER_ORIGIN`` env fallback when
     it is absent (the same precedence as ``/editable`` / ``/dev-preview``), so the call
-    works with no header. A non-svelte pocket is a 422; a missing / access-denied
-    pocket surfaces as a 404 / 403 (the pockets service raises it inside the
-    service)."""
+    works with no header. A pocket with no native edit lane is a 422 — svelte and
+    react are armable, html (served straight from its source) and ripple are not;
+    a missing / access-denied pocket surfaces as a 404 / 403 (the pockets service
+    raises it inside the service)."""
     # Mirror /editable + /dev-preview origin resolution: the request Origin header
     # here; the service applies the PAW_SITES_BUILDER_ORIGIN env fallback when blank.
     builder_origin = request.headers.get("origin") or ""

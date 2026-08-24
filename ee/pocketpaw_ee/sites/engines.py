@@ -191,6 +191,29 @@ def is_source_engine(engine: str | None) -> bool:
     return normalize_engine(engine) in _SOURCE_MAP_ENGINES
 
 
+#: Engines with a NATIVE EDIT LANE — a framework build that the generator can arm
+#: (stamping ``data-uid`` + embedding the ``paw-edit-manifest``), whose rendered
+#: output the native editor shadow-renders so a click resolves back to source.
+#:
+#: NOT the same question as :func:`is_source_engine`, and the difference is the
+#: whole reason this is its own set. ``html`` is a source engine but is absent
+#: here: its served artifact IS its source, so it is selected through the
+#: in-frame agent over its own srcdoc and never needs an armed build to render.
+#: ``react`` joined in RX-2, when the generator gained the seam RX-1 left empty.
+_NATIVE_EDIT_ENGINES: frozenset[str] = frozenset({"svelte", "react"})
+
+
+def has_native_edit_lane(engine: str | None) -> bool:
+    """True when this engine can be ARMED into a native-editable build.
+
+    The guard for ``/native-artifact`` and its background pre-warm. Both of those
+    read a BUILT tree, so the engine must be one the generator actually builds and
+    arms — which is why ``html`` (served straight from its source map) answers
+    False even though it is a source engine.
+    """
+    return normalize_engine(engine) in _NATIVE_EDIT_ENGINES
+
+
 def content_key(engine: str | None) -> str:
     """The pocket-dict key holding this engine's authored content.
 
