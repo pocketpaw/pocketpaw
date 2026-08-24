@@ -21,6 +21,7 @@ from pocketpaw.pawkernel import (
     Kernel,
     KernelEvent,
 )
+from pocketpaw.pawkernel.events import MODES
 from pocketpaw.pawkernel.observer import FiberStateEvent, ServiceEvent
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "conformance" / "paw-compose"
@@ -105,6 +106,20 @@ class FixturePlugin:
         if inject_spec is not None:
             _reject_unknown(f"plugin {self.name!r}.inject", inject_spec, INJECT_KEYS)
         self.inject = Inject.of(inject_spec)
+        # Validate listener declarations up front. Raising from inside apply
+        # would be caught by the kernel and reported as a FAILED fiber, which
+        # reads as a trace mismatch instead of "the harness cannot run this".
+        for spec in self.decl.get("listeners") or ():
+            _reject_unknown(f"plugin {self.name!r} listener", spec, LISTENER_KEYS)
+            action = spec.get("action", "delegate")
+            if action not in ACTIONS:
+                raise FixtureError(f"plugin {self.name!r}: unknown listener action {action!r}")
+            mode = spec.get("mode", "emit")
+            if mode not in MODES:
+                raise FixtureError(f"plugin {self.name!r}: unknown dispatch mode {mode!r}")
+            for required in ("event", "id"):
+                if required not in spec:
+                    raise FixtureError(f"plugin {self.name!r} listener: missing {required!r}")
 
     # -- effect bodies ----------------------------------------------------
     def _dispose_delay(self) -> float:
@@ -138,10 +153,8 @@ class FixturePlugin:
         ctx.effect(setup, name=effect_id)
 
     def _make_listener(self, ctx: Context, spec: dict[str, Any]) -> None:
-        _reject_unknown(f"plugin {self.name!r} listener", spec, LISTENER_KEYS)
+        # Shape already validated in __post_init__.
         action = spec.get("action", "delegate")
-        if action not in ACTIONS:
-            raise FixtureError(f"unknown listener action {action!r}")
         mode = spec.get("mode", "emit")
         listener_id = spec["id"]
         event = spec["event"]
