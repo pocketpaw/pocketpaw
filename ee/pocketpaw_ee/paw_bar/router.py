@@ -2790,11 +2790,16 @@ async def get_agent_conversations(
         for key, value in page.counts.items():
             counts[key] = counts.get(key, 0) + value
 
-    # Newest first across the whole union, then cut to the page size. Sorting on
-    # the ISO timestamp is a string sort on purpose — the values are all produced
-    # by ``datetime.isoformat`` and an empty one sorts last, where a conversation
-    # with no timestamp belongs.
-    items.sort(key=lambda i: i.last_message_at or "", reverse=True)
+    # Newest first across the whole union, then cut to the page size. Sorted on the
+    # PARSED instant, not the string: a whole-second stamp and a fractional one at
+    # the same second compare in ASCII order of "+" against "." and land backwards,
+    # and the merge that now feeds these rows (see ``_latest_out_of_band``) emits
+    # both spellings. An undated row sorts last, where a conversation nobody can
+    # time belongs.
+    items.sort(
+        key=lambda i: (bool(i.last_message_at), _as_utc(i.last_message_at) or _EPOCH),
+        reverse=True,
+    )
     return AgentConversationsResponse(
         items=items[:limit],
         counts=counts,
