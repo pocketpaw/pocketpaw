@@ -282,10 +282,17 @@ async def test_reply_persists_pauses_and_clears_unread(client):
     body = res.json()
     assert body["ok"] is True
     # The echo is a transcript message — the shape the thread already renders.
+    # The author id is carried; the name and avatar are blank because this rig's
+    # caller id ("u1") is not an ObjectId and so resolves to no user — the same
+    # degrade a deleted teammate gets. Attribution is proved against a real User
+    # doc in tests/cloud/test_paw_bar_inbox_freshness.py.
     assert body["message"] == {
         "role": "owner",
         "content": "Hi! I'm Maya, I can help.",
         "created_at": body["message"]["created_at"],
+        "author_id": "u1",
+        "author_name": "",
+        "author_avatar": "",
     }
     assert body["message"]["created_at"]
     row = body["conversation"]
@@ -1098,8 +1105,20 @@ async def test_transcript_messages_carry_no_ids(client):
 
     res = await c.get(f"/paw-bar/admin/site/{site.id}/conversations/{_REF}")
 
+    # The author block (2026-08-24) is the only thing that has been added since,
+    # and it is deliberately NOT an id for the message — it names the human who
+    # typed an owner line. Pinned as a whole set so the next field to appear here
+    # has to be argued for in a diff rather than arriving unnoticed.
     for message in res.json()["messages"]:
-        assert set(message) == {"role", "content", "created_at"}
+        assert set(message) == {
+            "role",
+            "content",
+            "created_at",
+            "author_id",
+            "author_name",
+            "author_avatar",
+        }
+        assert "id" not in message
 
 
 @pytest.mark.asyncio

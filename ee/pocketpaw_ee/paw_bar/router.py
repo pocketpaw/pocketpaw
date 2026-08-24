@@ -1,4 +1,34 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-08-24 (inbox freshness + who typed it) — the owner's conversation
+#   list stopped freezing the moment a human took over, and the thread learned to
+#   name them.
+#   (1) FRESHNESS. ``_list_conversations`` was built purely from ``ChatRunDoc``, and
+#   the two kinds of line that have NO run — an owner's takeover reply and the
+#   visitor's answer to it, which is the whole point of muting — live in
+#   ``paw_bar_owner_messages``. So a row kept the bot's last sentence at the bot's
+#   timestamp, and ordered by run recency it BURIED exactly the conversations a
+#   person was working. New ``_latest_out_of_band`` joins the newest such line per
+#   conversation (one bounded read for the page, like the state and decision joins),
+#   the row takes whichever of the two is later, and the page re-sorts on that
+#   merged clock. SYSTEM lines are excluded from the merge — see the store.
+#   (2) ONE CLOCK. New ``_as_utc`` / ``_newer``: run stamps come back from Mongo
+#   NAIVE (the client is not ``tz_aware``) while owner lines are aware-UTC ISO
+#   strings, so comparing them raw is wrong by the host's offset — and that
+#   comparison decides which line a row shows. ``last_message_at`` now goes out
+#   aware-UTC, which also fixes relative times reading wrong in any browser
+#   outside UTC.
+#   (3) A TOTAL ORDER. The run scan is re-sorted in Python with the ObjectId as the
+#   tie-break: Windows' clock advances in ~15.6ms steps, so a question and its
+#   follow-up routinely share a ``createdAt`` and the dedupe picked between them
+#   arbitrarily — which read as a flaky test rather than as a row showing the older
+#   sentence.
+#   (4) WHO TYPED IT. ``TranscriptMessage`` grows ``author_id`` / ``author_name`` /
+#   ``author_avatar``, resolved from the stored author id through the new
+#   ``auth.service.resolve_identities`` (batched per transcript, best-effort) and
+#   carried on the reply echo through the SAME resolver so the composer's optimistic
+#   append and the refetched line agree. OWNER lines only. The VISITOR's public poll
+#   is untouched and stays role + content + time — a stranger learns that a human
+#   replied, never which one.
 # Updated: 2026-08-21 (fix/paw-bar-preview-frame-ancestors) — the bar renders in the
 #   builder's site preview. GET /paw-bar/frame gated the embedder on the Site's
 #   ``allowed_origins`` alone, but the builder previews a site by framing its real
@@ -1900,6 +1930,15 @@ _CONVERSATION_PREVIEW_CHARS = 140
 # room to dedupe several runs per customer down to ``limit`` conversations.
 _CONVERSATION_SCAN_CAP = 200
 
+# Upper bound on the out-of-band lines a single conversations page reads to find
+# each row's newest one. Same shape as the run cap above: one bounded query for
+# the whole page rather than one per row.
+_OUT_OF_BAND_SCAN_CAP = 400
+
+# The sort floor for a row we cannot time. Never rendered — it only keeps the
+# comparator total so an undated row lands at the END of a newest-first list.
+_EPOCH = datetime.min.replace(tzinfo=UTC)
+
 # Max turns returned in one conversation transcript (the most recent N, presented
 # oldest-first). Bounds the drill-in read; a long-running visitor conversation
 # never ships the whole history in one response.
@@ -2210,11 +2249,28 @@ class TranscriptMessage(BaseModel):
     There is deliberately NO message id: run-derived messages have none (they are
     projections of a run doc, two per run), so an id here would exist for half the
     thread. Anything that needs to address a message keys off the RUN.
+
+    ``author_*`` names the HUMAN behind an ``owner`` line (2026-08-24). A site is
+    answered by a team, and "someone replied an hour ago" is not something a
+    second operator can act on — they cannot tell whether a colleague is still in
+    the conversation or whether it was them. Resolved from the stored author id
+    (``OwnerMessage.author``) at read time rather than denormalized onto the row,
+    so a renamed teammate is renamed everywhere and a deleted one degrades to
+    blanks instead of a stale name. Empty on every other role, and empty on an
+    owner line whose author no longer resolves — an anonymous line, never a raw id
+    in the sender slot.
+
+    OWNER-SIDE ONLY. The visitor's public poll projects :class:`VisitorMessage`,
+    which has no author fields at all: the customer learns that a human replied,
+    never which one. Do not add them there.
     """
 
     role: str
     content: str
     created_at: str
+    author_id: str = ""
+    author_name: str = ""
+    author_avatar: str = ""
 
 
 class ConversationReplyRequest(BaseModel):
@@ -2650,7 +2706,10 @@ async def post_site_conversation_reply(
     _pending, emails = await _decision_side_data(widget, [customer_ref])
     return ConversationReplyResponse(
         ok=True,
-        message=_owner_transcript_message(message),
+        # Attributed like the refetched line, from the same resolver: the composer
+        # appends this echo instead of refetching, so an unattributed echo would
+        # show the operator's own sentence as anonymous until the next poll.
+        message=_owner_transcript_message(message, await _resolve_message_authors([message])),
         conversation=_conversation_row(conversation, emails.get(customer_ref, "")),
     )
 
@@ -2731,11 +2790,16 @@ async def get_agent_conversations(
         for key, value in page.counts.items():
             counts[key] = counts.get(key, 0) + value
 
-    # Newest first across the whole union, then cut to the page size. Sorting on
-    # the ISO timestamp is a string sort on purpose — the values are all produced
-    # by ``datetime.isoformat`` and an empty one sorts last, where a conversation
-    # with no timestamp belongs.
-    items.sort(key=lambda i: i.last_message_at or "", reverse=True)
+    # Newest first across the whole union, then cut to the page size. Sorted on the
+    # PARSED instant, not the string: a whole-second stamp and a fractional one at
+    # the same second compare in ASCII order of "+" against "." and land backwards,
+    # and the merge that now feeds these rows (see ``_latest_out_of_band``) emits
+    # both spellings. An undated row sorts last, where a conversation nobody can
+    # time belongs.
+    items.sort(
+        key=lambda i: (bool(i.last_message_at), _as_utc(i.last_message_at) or _EPOCH),
+        reverse=True,
+    )
     return AgentConversationsResponse(
         items=items[:limit],
         counts=counts,
@@ -3136,18 +3200,60 @@ _TRANSCRIPT_ROLE_BY_STORED = {
 }
 
 
-def _owner_transcript_message(message: Any) -> TranscriptMessage:
+def _owner_transcript_message(
+    message: Any, authors: dict[str, Any] | None = None
+) -> TranscriptMessage:
     """Project one ``paw_bar_owner_messages`` row into the transcript's shape.
 
     Shared by the reply echo and the transcript merge so the composer's optimistic
-    append and the refetched thread can't render the same sentence two ways.
+    append and the refetched thread can't render the same sentence two ways — which
+    is also why ``authors`` is threaded through both: an echo that arrived without
+    a name would show the reply as anonymous until the next poll replaced it.
+
+    ``authors`` maps a stored author id to its :class:`UserIdentity`. Absent, or
+    missing this id, the line renders anonymously — a deleted teammate and a line
+    written before authors were stored look the same, and both are honest.
     """
     stored = getattr(message.role, "value", str(message.role))
+    role = _TRANSCRIPT_ROLE_BY_STORED.get(stored, "system")
+    author_id = getattr(message, "author", "") or ""
+    identity = (authors or {}).get(author_id) if role == "owner" else None
     return TranscriptMessage(
-        role=_TRANSCRIPT_ROLE_BY_STORED.get(stored, "system"),
+        role=role,
         content=message.content,
         created_at=message.created_at,
+        # Only an OWNER line is attributed. A visitor's muted line carries no
+        # author, and a system line was authored by nobody — stamping either with
+        # whoever happened to be in the map would invent a speaker.
+        author_id=author_id if role == "owner" else "",
+        author_name=getattr(identity, "name", "") or "",
+        author_avatar=getattr(identity, "avatar", "") or "",
     )
+
+
+async def _resolve_message_authors(messages: list[Any]) -> dict[str, Any]:
+    """Resolve the distinct OWNER authors of a set of stored lines, in one query.
+
+    One batched user read per transcript, never one per line — a long thread is
+    mostly one or two operators. Best-effort: if the lookup fails the thread still
+    renders, just without names, because a transcript is the record of what was
+    said and a missing avatar must not cost the owner the conversation.
+    """
+    ids = {
+        getattr(m, "author", "") or ""
+        for m in messages
+        if getattr(getattr(m, "role", None), "value", "") == OwnerMessageRole.OWNER.value
+    }
+    ids.discard("")
+    if not ids:
+        return {}
+    try:
+        from pocketpaw_ee.cloud.auth.service import resolve_identities
+
+        return await resolve_identities(ids)
+    except Exception:  # noqa: BLE001 — attribution is additive, never fatal
+        logger.warning("owner-message author lookup failed", exc_info=True)
+        return {}
 
 
 def _display_name(contact_email: str, customer_ref: str) -> str:
@@ -3231,6 +3337,78 @@ async def _conversation_side_data(
         logger.warning("conversation state read failed for widget %s", widget.id, exc_info=True)
     pending, emails = await _decision_side_data(widget, refs)
     return states, pending, emails
+
+
+def _as_utc(value: Any) -> datetime | None:
+    """Parse a timestamp from either store into an AWARE UTC datetime, or None.
+
+    The two halves of a conversation are stamped by different clocks and arrive in
+    different shapes. ``ChatRunDoc.createdAt`` is written aware-UTC but comes back
+    from Mongo NAIVE (the client is not ``tz_aware``), while an owner message is an
+    aware-UTC ISO string. Comparing those raw — as strings, or as datetimes — is
+    wrong by the host's offset on every machine that is not set to UTC, and the
+    comparison decides which line a conversation row shows.
+
+    A naive value is therefore read as UTC, which is what both writers meant.
+    Anything unparseable is None, and the caller keeps its existing order.
+    """
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    text = (value or "").strip() if isinstance(value, str) else ""
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _newer(candidate: Any, incumbent: Any) -> bool:
+    """Is ``candidate`` strictly later than ``incumbent``? Unparseable → False."""
+    a, b = _as_utc(candidate), _as_utc(incumbent)
+    if a is None:
+        return False
+    return b is None or a > b
+
+
+async def _latest_out_of_band(
+    widget: PawBarWidget | None, workspace_id: str, refs: list[str]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The newest line WITHOUT a run doc, per conversation and per visitor.
+
+    Returns ``(newest by conversation_id, newest by customer_ref among lines that
+    carry no conversation_id)``. The second map is the unmigrated tail: a line
+    written before conversations had identity belongs to the visitor's active
+    conversation, which is the same fallback ``_list_conversations`` applies to a
+    run whose ``session_key`` predates the id.
+
+    ONE bounded read for the whole page (see the store's
+    ``list_recent_owner_messages``), newest-first, so the first line seen for a key
+    is that key's newest. Best-effort: a store hiccup costs the freshness merge,
+    never the list — the row falls back to what the runs say, which is what it
+    showed before this existed.
+    """
+    if widget is None or not refs:
+        return {}, {}
+    try:
+        lines = await _store().list_recent_owner_messages(
+            widget.id,
+            customer_refs=refs,
+            workspace_id=workspace_id,
+            limit=_OUT_OF_BAND_SCAN_CAP,
+        )
+    except Exception:  # noqa: BLE001 — freshness is additive, never fatal
+        logger.warning("owner-message read failed for widget %s", widget.id, exc_info=True)
+        return {}, {}
+    by_conversation: dict[str, Any] = {}
+    by_ref: dict[str, Any] = {}
+    for line in lines:
+        if line.conversation_id:
+            by_conversation.setdefault(line.conversation_id, line)
+        else:
+            by_ref.setdefault(line.customer_ref, line)
+    return by_conversation, by_ref
 
 
 async def _decision_side_data(
@@ -3327,6 +3505,17 @@ async def _list_conversations(
         logger.warning("conversations read failed for pocket %s", pocket_id, exc_info=True)
         return ConversationsResponse(items=[], cursor=None, unsupported=False)
 
+    # BREAK THE TIE. The sort above orders by ``createdAt`` alone, and two runs in
+    # the same conversation routinely share one: Windows' clock advances in ~15.6ms
+    # steps, so a question and its follow-up land in the same tick. The dedupe below
+    # keeps the FIRST run it sees per conversation, so an arbitrary tie-break there
+    # is the row showing the older sentence — nondeterministically, which is how it
+    # read as a flaky test rather than as a bug. The ObjectId's tail is a
+    # per-process counter, so it orders ties by insertion.
+    runs.sort(
+        key=lambda r: (_as_utc(r.createdAt) or _EPOCH, str(getattr(r, "id", ""))), reverse=True
+    )
+
     # Dedupe the scanned window first (most-recent run per CONVERSATION wins),
     # THEN join and filter, THEN cut to `limit` — cutting first would hide a
     # matching conversation behind a page of non-matching ones.
@@ -3389,8 +3578,52 @@ async def _list_conversations(
             )
         )
 
-    items: list[ConversationItem] = []
+    # THE RUNS ARE NOT THE WHOLE CONVERSATION. An owner's takeover reply and a
+    # visitor's answer to it both dispatch no run — that is the point of muting —
+    # so a list built only from run docs freezes the moment a human steps in. It
+    # kept showing the bot's last sentence at the bot's timestamp, and ordered by
+    # run recency it buried exactly the conversations someone was working. Merge
+    # the newest out-of-band line over each row, then re-sort on the merged clock.
+    by_conversation, legacy_by_ref = await _latest_out_of_band(widget, workspace_id, refs)
+    merged: list[tuple[datetime | None, str, str, str, str]] = []
     for ref, conversation_id, last_message_at, preview in candidates:
+        line = by_conversation.get(conversation_id) if conversation_id else None
+        # An unmigrated line carries no conversation, so it belongs to the
+        # visitor's ACTIVE one — the same fallback the run stream above uses, and
+        # for the same reason: both spellings name the one thread in progress.
+        legacy_row = active_by_ref.get(ref)
+        if legacy_row is None or not conversation_id or legacy_row.id == conversation_id:
+            fallback = legacy_by_ref.get(ref)
+            incumbent = getattr(line, "created_at", "")
+            if fallback is not None and _newer(fallback.created_at, incumbent):
+                line = fallback
+        run_at = _as_utc(last_message_at)
+        if line is not None:
+            line_at = _as_utc(line.created_at)
+            if line_at is not None and (run_at is None or line_at > run_at):
+                last_message_at = line.created_at
+                preview = (line.content or "")[:_CONVERSATION_PREVIEW_CHARS]
+                run_at = line_at
+        # Normalize the stamp on the way out. A run's ``createdAt`` comes back
+        # from Mongo NAIVE (the client is not tz_aware), so it went on the wire
+        # with no offset and every browser outside UTC read it as local time —
+        # relative times on this list were wrong by the reader's own offset.
+        merged.append(
+            (
+                run_at,
+                ref,
+                conversation_id,
+                run_at.isoformat() if run_at is not None else last_message_at,
+                preview,
+            )
+        )
+
+    # Newest first on the MERGED clock. Undated rows sort last rather than to the
+    # top: a row we cannot time is not a row that just happened.
+    merged.sort(key=lambda m: (m[0] is not None, m[0] or _EPOCH), reverse=True)
+
+    items: list[ConversationItem] = []
+    for _at, ref, conversation_id, last_message_at, preview in merged:
         row = states.get(conversation_id)
         row_state = row.state.value if row is not None else "open"
         if state and row_state != state:
@@ -3686,7 +3919,8 @@ async def _load_transcript(
             logger.warning("owner message read failed for widget %s", widget.id, exc_info=True)
     if not runs and not out_of_band:
         return None
-    messages.extend(_owner_transcript_message(m) for m in out_of_band if m.content)
+    authors = await _resolve_message_authors(out_of_band)
+    messages.extend(_owner_transcript_message(m, authors) for m in out_of_band if m.content)
 
     # Stable sort on the parsed instant: two lines stamped identically keep the
     # order they were added, so a run's question still precedes its own answer.

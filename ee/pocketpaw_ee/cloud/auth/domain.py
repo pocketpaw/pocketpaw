@@ -41,4 +41,23 @@ class AuthUser:
     mfa_enabled: bool = False
 
 
-__all__ = ["AuthUser", "WorkspaceMembershipRef"]
+@dataclass(frozen=True)
+class UserIdentity:
+    """The presentational half of a user — what a message header shows.
+
+    Deliberately three fields and no more. It is handed to surfaces that attribute
+    something to a person (a Paw Bar takeover reply, an audit line) and is meant to
+    be safe to serialize outward to anyone already authorized to see WHO acted, so
+    it carries no email, no membership, no status and no auth state.
+
+    ``name`` is empty when the user has neither a full name nor an email, and the
+    whole object is simply absent when the id resolves to nobody — an unresolvable
+    author renders as anonymous rather than as a raw id.
+    """
+
+    id: str
+    name: str
+    avatar: str
+
+
+__all__ = ["AuthUser", "UserIdentity", "WorkspaceMembershipRef"]

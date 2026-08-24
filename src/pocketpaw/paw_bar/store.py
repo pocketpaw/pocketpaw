@@ -1,4 +1,10 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-08-24 (inbox freshness) — new list_recent_owner_messages: the
+#   newest out-of-band lines for a PAGE of visitors in ONE bounded read, so the
+#   owner's conversation list can say what was said LAST instead of what the last
+#   RUN said. Owner + visitor roles by default; SYSTEM is excluded, because a
+#   resume notice becoming an inbox preview replaces a person's words with
+#   boilerplate and re-sorts the queue on an automatic event.
 # Updated: 2026-07-30 (owner inbox, slice 2 — type-to-takeover) — the lines that
 #   have no run doc get a home, and a muted bot gets a deadline:
 #   * new paw_bar_owner_messages table (sibling of paw_bar_conversations, same
@@ -1849,6 +1855,63 @@ class PawBarStore:
             ) as cur:
                 rows = [self._row_to_owner_message(row) async for row in cur]
         return list(reversed(rows))
+
+    async def list_recent_owner_messages(
+        self,
+        widget_id: str,
+        *,
+        customer_refs: list[str],
+        workspace_id: str | None = None,
+        roles: list[str] | None = None,
+        limit: int = 200,
+    ) -> list[OwnerMessage]:
+        """The widget's most recent out-of-band lines for a PAGE of visitors.
+
+        NEWEST-first, and deliberately not per-thread: the owner's inbox needs the
+        latest line of every conversation on the page in ONE bounded read, the same
+        way the state rows and the decision rows are joined. Reading
+        :meth:`list_owner_messages` per row would put one query per conversation on
+        a list endpoint that already promises two.
+
+        The caller buckets: a line's thread is ``conversation_id`` where it has one
+        and the visitor's active conversation where it doesn't (an unmigrated line),
+        which is the same fallback the run stream uses — so the bucketing rule lives
+        with the reader that owns it rather than being guessed here.
+
+        ``roles`` defaults to owner + visitor. SYSTEM is excluded by default on
+        purpose: a resume notice is the product narrating itself, and letting it
+        become an inbox preview replaces what a person actually said with
+        boilerplate — and re-sorts the whole queue on an automatic event.
+        """
+        if not customer_refs:
+            return []
+        wanted = roles
+        if wanted is None:
+            wanted = [OwnerMessageRole.OWNER.value, OwnerMessageRole.VISITOR.value]
+        if not wanted:
+            return []
+        conditions = "widget_id = ?"
+        params: list[Any] = [widget_id]
+        placeholders = ", ".join("?" for _ in customer_refs)
+        conditions += f" AND customer_ref IN ({placeholders})"
+        params.extend(customer_refs)
+        role_placeholders = ", ".join("?" for _ in wanted)
+        conditions += f" AND role IN ({role_placeholders})"
+        params.extend(wanted)
+        ws_cond, ws_params = _conversation_workspace_scope(workspace_id)
+        if ws_cond:
+            conditions += f" AND {ws_cond}"
+            params.extend(ws_params)
+        params.append(limit)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM paw_bar_owner_messages"
+                f" WHERE {conditions} ORDER BY created_at DESC, id DESC LIMIT ?",
+                params,
+            ) as cur:
+                return [self._row_to_owner_message(row) async for row in cur]
 
     # ---------------- Carts (C1 — visitor-scoped commerce state) ----------------
 
