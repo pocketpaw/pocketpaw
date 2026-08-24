@@ -3,9 +3,14 @@
 #   for one mounted plugin instance. It owns the injection gate (PENDING until
 #   every required service exists), the effect stack (LIFO, run-at-most-once
 #   disposers), the child fibers (disposed BEFORE the parent's own effects),
-#   and the two dragons: dispose-during-LOADING awaits apply before cleaning
-#   up everything apply collected, and a throw in apply rolls back every
+#   and the dragons: dispose-during-LOADING awaits apply before cleaning up
+#   everything apply collected, and a throw in apply rolls back every
 #   collected effect before landing in FAILED.
+# Updated: 2026-08-24 (feat/pawkernel-compose) — §3 fourth dragon: a throwing
+#   disposer no longer aborts the LIFO chain. Errors are contained per
+#   disposer, reported through DisposerErrorEvent as they happen, and raised
+#   to dispose()'s caller as an ExceptionGroup only after the fiber has
+#   reached its target state. CancelledError is never contained.
 
 from __future__ import annotations
 
@@ -16,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pocketpaw.pawkernel.errors import EffectRejected
-from pocketpaw.pawkernel.observer import FiberStateEvent
+from pocketpaw.pawkernel.observer import DisposerErrorEvent, FiberStateEvent
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pocketpaw.pawkernel.context import Context
@@ -126,6 +131,10 @@ class Fiber:
         self.ctx = ctx
         self.state = FiberState.INIT
         self.error: BaseException | None = None
+        # Every disposer error this fiber has contained, across every teardown
+        # it has been through. This is how the FAILED and back-to-PENDING
+        # paths stay observable: they have no caller to raise at.
+        self.teardown_errors: list[Exception] = []
 
         self._effects: list[Disposer] = []
         self._children: list[Fiber] = []
@@ -228,24 +237,60 @@ class Fiber:
         self._children.append(child)
 
     # -- teardown ---------------------------------------------------------
-    async def _teardown(self) -> None:
-        """Dispose children first, then own effects LIFO. Never re-entrant."""
+    async def _teardown(self) -> list[Exception]:
+        """Dispose children first, then own effects LIFO. Never re-entrant.
+
+        §3 (fourth dragon): a throwing disposer MUST NOT abort the chain.
+        Each failure is contained, reported through the observer at the moment
+        it happens, and collected — every remaining disposer still runs and the
+        caller decides how to surface the collected errors once unwinding has
+        finished.
+
+        ``asyncio.CancelledError`` is deliberately NOT contained. It is not a
+        disposer error, and swallowing it here would mask a cancellation.
+        """
+        errors: list[Exception] = []
         self._tearing_down = True
         try:
             for child in reversed(list(self._children)):
-                await child.dispose()
+                try:
+                    await child.dispose()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    errors.append(exc)
             self._children.clear()
             for disposer in reversed(list(self._effects)):
-                await disposer.run()
+                try:
+                    await disposer.run()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    errors.append(exc)
+                    self.kernel.notify(
+                        DisposerErrorEvent(owner=self.name, effect=disposer.name, error=exc)
+                    )
             self._effects.clear()
         finally:
             self._tearing_down = False
+        self.teardown_errors.extend(errors)
+        return errors
+
+    def _report(self, errors: list[Exception]) -> None:
+        """Record teardown errors where no caller can receive them.
+
+        The FAILED and back-to-PENDING paths are driven by the kernel, not by
+        a caller awaiting cleanup, so raising would only break the transition
+        that §3 requires to complete. They stay observable on the fiber and on
+        ``kernel.errors``.
+        """
+        self.kernel.errors.extend(errors)
 
     async def _rollback(self) -> None:
         """Roll back a failed apply. Emits no UNLOADING — §4's FAILED edge
         goes straight from LOADING to FAILED, and the fixture's trace says so.
         """
-        await self._teardown()
+        self._report(await self._teardown())
 
     # -- unload (dependency withdrawn) ------------------------------------
     async def _unload_to_pending(self) -> None:
@@ -258,8 +303,9 @@ class Fiber:
             if self.state in (FiberState.DISPOSED, FiberState.FAILED):
                 return
             self._enter(FiberState.UNLOADING)
-            await self._teardown()
+            errors = await self._teardown()
             self._enter(FiberState.PENDING)
+            self._report(errors)
         finally:
             self._unload_requested = False
 
@@ -283,6 +329,13 @@ class Fiber:
         Single-flight: every caller awaits the same shielded future, so
         repeated disposal — including disposal racing a cancellation — is
         idempotent rather than an error.
+
+        If any disposer raised, cleanup still completed in full and the fiber
+        still reached DISPOSED; the collected errors are then raised here as
+        an ``ExceptionGroup``. §3 requires the error be observable, and this
+        is the caller who asked for the cleanup, so it is reported — never
+        swallowed. Silent success would tell a caller awaiting cleanup that
+        it finished cleanly when it did not.
         """
         if self._dispose_future is None:
             self._dispose_future = self.kernel.spawn(self._do_dispose())
@@ -301,9 +354,10 @@ class Fiber:
             self._unwatch_deps()
             return
 
+        errors: list[Exception] = []
         if self.state in (FiberState.ACTIVE, FiberState.LOADING):
             self._enter(FiberState.UNLOADING)
-            await self._teardown()
+            errors = await self._teardown()
         elif self.state in (FiberState.PENDING, FiberState.INIT):
             # Nothing was ever collected; there is nothing to unwind.
             pass
@@ -312,3 +366,8 @@ class Fiber:
         if self.parent is not None and self in self.parent._children:
             self.parent._children.remove(self)
         self._enter(FiberState.DISPOSED)
+
+        # Reported only after unwinding has completed and the fiber has
+        # reached its target state — never instead of them.
+        if errors:
+            raise ExceptionGroup(f"disposer(s) failed while unloading {self.name!r}", errors)

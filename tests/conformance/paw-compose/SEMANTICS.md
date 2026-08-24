@@ -68,6 +68,16 @@ kernel; a runtime that gets this wrong is not conformant regardless of what else
 - **[dragon]** Creating a new effect while the owner is `UNLOADING` MUST be rejected.
   Creation while `PENDING` or `LOADING` remains legal. Without this, a cleanup-time
   registration escapes the unload snapshot and leaks.
+- **[dragon]** A **throwing disposer MUST NOT abort the chain.** Disposer errors are
+  contained per disposer: every remaining disposer still runs, in order, and the fiber
+  still reaches its target state (§4). The error MUST be observable — reported after
+  unwinding completes, never swallowed. If several disposers throw, all errors are
+  reported, not just the first.
+
+  Without this, one badly-behaved plugin leaks every effect registered before it and
+  strands the fiber mid-teardown. Both first-generation runtimes had this bug, and they
+  disagreed about whether `dispose()` raised or resolved silently — which made a caller
+  awaiting cleanup believe it had finished when it had not.
 
 Publishing a service, registering an event listener, and mounting a child plugin are all
 effects and all obey the rules above.
@@ -152,6 +162,31 @@ The two fixtures that matter most are `dispose-during-load` and `failed-apply-ro
 They encode DeepSeek divergence entry #6 — the reentrant-disposal gaps found in production.
 A runtime that passes everything except those two is not close to done; it is missing the
 part that bites.
+
+## 7a. Runtime-specific obligations (NOT in the shared suite)
+
+Some hazards are real but not language-neutral, so they cannot live in
+`conformance/`. A runtime is **not** conformant merely by passing the shared fixtures; it
+must also cover the obligations below **in its own test suite**, and say so in its README.
+
+**Python / asyncio — cancellation.** A disposer that awaits MUST survive
+`asyncio.CancelledError` in the enclosing task. Unload MUST be idempotent under repeated
+cancellation, and cleanup MUST NOT be abandoned partway. Use `asyncio.shield` where
+required.
+
+This is not expressible in the shared fixtures: JavaScript promises have no cancellation,
+so a `cancel` op would be meaningless for the TypeScript runtime. It was found by
+mutation-testing during the first build — removing `asyncio.shield` from `dispose()` left
+**all 16 fixtures green**. That is exactly the class of bug the shared suite cannot see, and
+the reason this section exists.
+
+**Any runtime with a concurrent scheduler** — `parallel` dispatch MUST genuinely fan out,
+not await listeners in turn. `parallel-awaits-all` checks this via a deliberate 4x delay
+margin; a runtime whose scheduler differs should add its own check.
+
+The rule: **when a runtime discovers a hazard the shared fixtures cannot express, it adds a
+native test AND records the obligation here.** A gap that lives only in one runtime's test
+file is a gap the next runtime will rediscover the hard way.
 
 ## 8. Explicit non-requirements
 

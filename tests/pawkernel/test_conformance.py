@@ -17,6 +17,7 @@ EXPECTED_FIXTURE_IDS = {
     "dep-appears",
     "dep-disappears",
     "dispose-during-load",
+    "disposer-throws-still-unwinds",
     "effect-disposed-on-unload",
     "effect-rejected-while-unloading",
     "emit-fire-and-forget",

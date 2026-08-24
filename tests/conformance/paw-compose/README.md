@@ -8,7 +8,7 @@ contract. `SEMANTICS.md` is a copy of `paw-workspace/paw-compose/SEMANTICS.md`.
 Both are vendored so this repo's conformance suite is readable without a second
 checkout.
 
-**Pinned at upstream commit `88a2730`** — 16 fixtures, spec v0.1.0, copied
+**Pinned at upstream commit `730e593`** — 17 fixtures, spec v0.1.0, copied
 2026-08-24. Nothing in this repo verifies that the copy is still current.
 
 ## Why vendored
@@ -38,6 +38,25 @@ Then update `EXPECTED_FIXTURE_IDS` in `tests/pawkernel/test_conformance.py` so a
 fixture that disappears upstream reads as a failure rather than a shrinking
 suite, and re-run the mutation checks — an amended fixture is not trustworthy
 until a deliberately broken runtime makes it fail.
+
+## Runtime-specific obligations (SEMANTICS.md §7a)
+
+Passing the 17 shared fixtures is not sufficient for conformance. §7a requires
+each runtime to cover the hazards the language-neutral fixtures cannot express,
+in its own suite, and to record them here. For Python / asyncio:
+
+| Obligation | Covered by |
+|---|---|
+| A disposer that awaits survives `CancelledError` in the enclosing task; unload is idempotent under repeated cancellation and cleanup is never abandoned partway | `test_async_disposer_is_not_abandoned_when_the_caller_is_cancelled` |
+| A disposer error never masks a cancellation, and `CancelledError` is not contained as if it were a failed cleanup step | `test_a_disposer_error_does_not_mask_a_cancelled_caller`, `test_a_cancelled_disposer_is_not_contained_as_a_disposer_error` |
+| `parallel` genuinely fans out rather than awaiting listeners in turn | `test_parallel_fans_out_concurrently_and_awaits_every_listener` |
+
+All live in `tests/pawkernel/test_kernel_semantics.py`.
+
+That file also covers three §3 paths the shared suite does not reach. The
+`disposer-throws-still-unwinds` fixture exercises `dispose()` to DISPOSED, but
+the same teardown is shared by the rollback-to-FAILED path, the
+back-to-PENDING path, and child disposal.
 
 ## What runs them
 

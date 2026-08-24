@@ -23,7 +23,11 @@ from pocketpaw.pawkernel import (
     Kernel,
     SimplePlugin,
 )
-from pocketpaw.pawkernel.observer import FiberStateEvent, ServiceEvent
+from pocketpaw.pawkernel.observer import (
+    DisposerErrorEvent,
+    FiberStateEvent,
+    ServiceEvent,
+)
 
 
 def _tracing_kernel() -> tuple[Kernel, list[str]]:
@@ -323,3 +327,195 @@ async def test_dispatch_mode_cannot_vary_by_call_site() -> None:
         kernel.root.on("ev", lambda v, *, next: next(), mode="waterfall")
     with pytest.raises(DispatchModeConflict):
         kernel.root.waterfall("ev", "base")
+
+
+# --------------------------------------------------------------------------
+# §3 fourth dragon — a throwing disposer must not abort the chain.
+# `disposer-throws-still-unwinds` covers the dispose()-to-DISPOSED path. The
+# same _teardown is shared by the rollback-to-FAILED and back-to-PENDING
+# paths, which no fixture reaches, and by child disposal.
+# --------------------------------------------------------------------------
+def _effect(ctx, log: list[str], name: str, *, throws: bool = False) -> None:
+    def setup():
+        log.append(f"setup:{name}")
+
+        def dispose() -> None:
+            log.append(f"dispose:{name}")
+            if throws:
+                raise RuntimeError(f"boom:{name}")
+
+        return dispose
+
+    ctx.effect(setup, name=name)
+
+
+async def test_dispose_reports_every_error_after_the_chain_has_unwound() -> None:
+    kernel, trace = _tracing_kernel()
+    log: list[str] = []
+
+    def apply(ctx) -> None:
+        _effect(ctx, log, "e1", throws=True)
+        _effect(ctx, log, "e2")
+        _effect(ctx, log, "e3", throws=True)
+
+    fiber = await kernel.mount(SimplePlugin(name="a", apply_fn=apply))
+
+    with pytest.raises(ExceptionGroup) as caught:
+        await fiber.dispose()
+
+    # Every disposer ran, in LIFO order, despite two of them throwing.
+    assert log == [
+        "setup:e1",
+        "setup:e2",
+        "setup:e3",
+        "dispose:e3",
+        "dispose:e2",
+        "dispose:e1",
+    ]
+    # All errors reported, not just the first.
+    assert len(caught.value.exceptions) == 2
+    assert {str(e) for e in caught.value.exceptions} == {"boom:e3", "boom:e1"}
+    # The fiber still reached its target state, and reached it before the
+    # error was reported.
+    assert fiber.state == FiberState.DISPOSED
+    assert trace == ["a:LOADING", "a:ACTIVE", "a:UNLOADING", "a:DISPOSED"]
+    assert fiber._effects == []
+
+
+async def test_failed_apply_with_a_throwing_disposer_still_reaches_failed() -> None:
+    """The rollback path: no caller to raise at, so errors stay observable."""
+    kernel, _ = _tracing_kernel()
+    log: list[str] = []
+
+    def apply(ctx) -> None:
+        _effect(ctx, log, "e1")
+        _effect(ctx, log, "e2", throws=True)
+        raise RuntimeError("apply boom")
+
+    fiber = await kernel.mount(SimplePlugin(name="a", apply_fn=apply))
+    await kernel.settle()
+
+    assert log == ["setup:e1", "setup:e2", "dispose:e2", "dispose:e1"]
+    assert fiber.state == FiberState.FAILED
+    assert fiber._effects == []
+    assert [str(e) for e in fiber.teardown_errors] == ["boom:e2"]
+    assert [str(e) for e in kernel.errors] == ["boom:e2"]
+
+
+async def test_withdrawn_dependency_with_a_throwing_disposer_reaches_pending() -> None:
+    """The unload-to-PENDING path, likewise driven by the kernel."""
+    kernel, _ = _tracing_kernel()
+    log: list[str] = []
+
+    def apply(ctx) -> None:
+        _effect(ctx, log, "e1")
+        _effect(ctx, log, "e2", throws=True)
+
+    kernel.root.provide("svcX", "impl")
+    fiber = await kernel.mount(
+        SimplePlugin(name="b", apply_fn=apply, inject=Inject(required=("svcX",)))
+    )
+    await kernel.settle()
+
+    kernel.root.withdraw("svcX")
+    await kernel.settle()
+
+    assert log == ["setup:e1", "setup:e2", "dispose:e2", "dispose:e1"]
+    assert fiber.state == FiberState.PENDING
+    assert [str(e) for e in fiber.teardown_errors] == ["boom:e2"]
+
+
+async def test_a_child_disposer_error_does_not_block_the_parents_effects() -> None:
+    kernel, _ = _tracing_kernel()
+    log: list[str] = []
+
+    def child_apply(ctx) -> None:
+        _effect(ctx, log, "child", throws=True)
+
+    async def parent_apply(ctx) -> None:
+        _effect(ctx, log, "parent")
+        await ctx.plugin(SimplePlugin(name="c", apply_fn=child_apply))
+
+    fiber = await kernel.mount(SimplePlugin(name="p", apply_fn=parent_apply))
+
+    with pytest.raises(ExceptionGroup):
+        await fiber.dispose()
+
+    # The child's failure must not strand the parent's own effect.
+    assert log == ["setup:parent", "setup:child", "dispose:child", "dispose:parent"]
+    assert fiber.state == FiberState.DISPOSED
+
+
+async def test_a_disposer_error_reports_the_kernel_event_as_it_is_contained() -> None:
+    seen: list[object] = []
+    kernel = Kernel(observer=seen.append)
+    log: list[str] = []
+
+    fiber = await kernel.mount(
+        SimplePlugin(name="a", apply_fn=lambda ctx: _effect(ctx, log, "e1", throws=True))
+    )
+    with pytest.raises(ExceptionGroup):
+        await fiber.dispose()
+
+    errors = [e for e in seen if isinstance(e, DisposerErrorEvent)]
+    assert len(errors) == 1
+    assert errors[0].owner == "a"
+    assert errors[0].effect == "e1"
+    assert str(errors[0].error) == "boom:e1"
+
+
+# --------------------------------------------------------------------------
+# The cancellation interaction: containment must not swallow a CancelledError,
+# and shielded cleanup must still finish when a disposer throws.
+# --------------------------------------------------------------------------
+async def test_a_disposer_error_does_not_mask_a_cancelled_caller() -> None:
+    kernel, _ = _tracing_kernel()
+    log: list[str] = []
+
+    def apply(ctx) -> None:
+        _effect(ctx, log, "e1", throws=True)
+
+        def slow_setup():
+            async def dispose() -> None:
+                await asyncio.sleep(0.05)
+                log.append("dispose:slow")
+
+            return dispose
+
+        ctx.effect(slow_setup, name="slow")
+
+    fiber = await kernel.mount(SimplePlugin(name="a", apply_fn=apply))
+
+    first = asyncio.ensure_future(fiber.dispose())
+    await asyncio.sleep(0.01)
+    first.cancel()
+    # The cancelled caller sees CancelledError, never the ExceptionGroup.
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    # Cleanup was not abandoned: the slow disposer settled and the throwing
+    # one still ran, and the error is still reported to the next caller.
+    with pytest.raises(ExceptionGroup):
+        await fiber.dispose()
+    assert log == ["setup:e1", "dispose:slow", "dispose:e1"]
+    assert fiber.state == FiberState.DISPOSED
+
+
+async def test_a_cancelled_disposer_is_not_contained_as_a_disposer_error() -> None:
+    """CancelledError is a cancellation, not a failed cleanup step."""
+    kernel, _ = _tracing_kernel()
+
+    def apply(ctx) -> None:
+        def setup():
+            def dispose() -> None:
+                raise asyncio.CancelledError
+
+            return dispose
+
+        ctx.effect(setup, name="e1")
+
+    fiber = await kernel.mount(SimplePlugin(name="a", apply_fn=apply))
+    with pytest.raises(asyncio.CancelledError):
+        await fiber.dispose()
+    # Not swallowed into an ExceptionGroup, and not recorded as one.
+    assert fiber.teardown_errors == []

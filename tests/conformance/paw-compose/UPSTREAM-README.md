@@ -4,7 +4,7 @@
 
 # Conformance fixtures — format and harness contract
 
-Every paw composition runtime executes these 16 fixtures. Same JSON, same expected traces,
+Every paw composition runtime executes these 17 fixtures. Same JSON, same expected traces,
 every language. This is the mechanical enforcement the workspace charter asks for: two
 runtimes that both claim to implement the semantics either agree here or one of them is
 wrong.
@@ -50,6 +50,7 @@ A plugin entry is declarative. The harness turns it into a real plugin.
 | `apply_throws` | if true, `apply` raises after creating its declared effects |
 | `apply_delay_ms` | `apply` awaits this long before completing. Yields the event loop mid-apply. |
 | `dispose_delay_ms` | this plugin's disposers await this long (async cleanup) |
+| `disposer_throws` | an effect id whose disposer raises after emitting its `:dispose` token. The chain MUST continue and the fiber MUST still reach its target state. |
 
 ### Listener declarations
 
@@ -123,6 +124,7 @@ performed directly on the root context by a step (not by a plugin), and **the sc
 | `<plugin>:effect:<id>:setup` | an effect's setup body runs |
 | `<plugin>:effect:<id>:dispose` | an effect's disposer runs |
 | `<plugin>:effect:<id>:rejected` | effect creation refused because the owner is UNLOADING |
+| `<plugin>:effect:<id>:dispose:error` | that disposer raised; the chain continues regardless (§3) |
 | `<plugin>:listener:<id>:enter` | a waterfall/serial listener is entered |
 | `<plugin>:listener:<id>:exit` | that listener returns |
 | `<plugin>:apply:throw` | `apply` raises |
@@ -169,9 +171,41 @@ first runtime build, not by review. Both are recorded in the fixtures' own
 `waterfall`, `parallel` and `serial` as MUSTs; only `waterfall` had coverage.
 Added `emit-fire-and-forget`, `parallel-awaits-all`, `serial-first-non-absent`.
 
+**2026-08-24 (second pass) — `parallel-awaits-all` could not see concurrency.**
+Its multiset compare proved "awaits all" but not "fans out concurrently": a
+runtime awaiting each listener strictly in turn produced the same bag of tokens
+and passed. Now an ordered trace, relying on the deliberate 4x delay margin
+(20ms vs 5ms) to make the concurrent interleaving deterministic. This is the one
+fixture with a timing dependency — that trade is worth it against a check that
+could not fail.
+
+No fixture currently uses `expect_trace_unordered`. It stays documented as an
+option, but note what this episode showed: an unordered compare hides mechanism,
+so reach for it only when order is genuinely undefined AND nothing important
+depends on it.
+
+**2026-08-24 — cancellation moved out of scope, deliberately.** Removing
+`asyncio.shield` from the Python runtime's `dispose()` left all 16 fixtures
+green. It cannot be fixed here: JS promises have no cancellation, so a `cancel`
+op would be meaningless for the TypeScript runtime. It is now a **runtime-specific
+obligation** in `SEMANTICS.md` §7a, tested natively by each runtime.
+
+**2026-08-24 (third pass) — a throwing disposer aborted the whole chain.**
+Found by the TypeScript runtime while writing its §7a obligation tests, then
+reproduced independently on Python. In BOTH runtimes a disposer that raised
+prevented every earlier disposer from running and stranded the fiber in
+`UNLOADING` — and the two **disagreed** on whether `dispose()` raised (Python) or
+resolved silently (TypeScript). Neither was wrong: §3 never defined disposer-error
+behavior. It does now, and `disposer-throws-still-unwinds` enforces it.
+
+That divergence is the clearest argument for this suite existing. Two runtimes,
+built the same night from the same document, drifted on a real teardown guarantee,
+and nothing but a shared fixture would have surfaced it.
+
 The lesson is in the suite now: **a fixture that passes on a deliberately broken
 runtime is worse than no fixture**, because it converts an untested rule into a
-green check. Mutation-test every new fixture before trusting it.
+green check. Mutation-test every new fixture before trusting it — every amendment
+above was found that way, and not one by review.
 
 ## The two that matter
 

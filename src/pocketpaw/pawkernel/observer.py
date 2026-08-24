@@ -3,6 +3,10 @@
 #   lifecycle events through an Observer callable. The kernel itself knows
 #   nothing about conformance trace strings; the conformance harness (and any
 #   other consumer) translates these events into whatever it needs.
+# Updated: 2026-08-24 (feat/pawkernel-compose) — added DisposerErrorEvent for
+#   SEMANTICS.md §3's fourth dragon: a throwing disposer does not abort the
+#   chain, but the error must be observable rather than swallowed. The kernel
+#   reports each one as it contains it.
 
 from __future__ import annotations
 
@@ -32,7 +36,21 @@ class ServiceEvent:
     kind: str  # "provide" | "withdraw"
 
 
-KernelEvent = FiberStateEvent | ServiceEvent
+@dataclass(frozen=True)
+class DisposerErrorEvent:
+    """A disposer raised while unwinding (SEMANTICS.md §3, fourth dragon).
+
+    The chain continues regardless and the fiber still reaches its target
+    state; this event is how the error stays observable at the moment it is
+    contained. ``effect`` is the name given to ``Context.effect``, or None.
+    """
+
+    owner: str
+    effect: str | None
+    error: BaseException
+
+
+KernelEvent = FiberStateEvent | ServiceEvent | DisposerErrorEvent
 Observer = Callable[[KernelEvent], None]
 
 

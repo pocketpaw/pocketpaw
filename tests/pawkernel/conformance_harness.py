@@ -22,7 +22,11 @@ from pocketpaw.pawkernel import (
     KernelEvent,
 )
 from pocketpaw.pawkernel.events import MODES
-from pocketpaw.pawkernel.observer import FiberStateEvent, ServiceEvent
+from pocketpaw.pawkernel.observer import (
+    DisposerErrorEvent,
+    FiberStateEvent,
+    ServiceEvent,
+)
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "conformance" / "paw-compose"
 
@@ -47,6 +51,7 @@ PLUGIN_KEYS = {
     "apply_delay_ms",
     "dispose_delay_ms",
     "effect_during_dispose",
+    "disposer_throws",
     "record_resolved",
 }
 INJECT_KEYS = {"required", "optional"}
@@ -98,6 +103,10 @@ class ApplyThrew(RuntimeError):
     """Raised by a fixture plugin whose declaration says apply_throws."""
 
 
+class DisposerThrew(RuntimeError):
+    """Raised by a disposer whose declaration says disposer_throws."""
+
+
 @dataclass
 class FixturePlugin:
     """A plugin built from a declarative fixture entry."""
@@ -143,6 +152,7 @@ class FixturePlugin:
         name = self.name
         delay = self._dispose_delay()
         during = self.decl.get("effect_during_dispose")
+        throws = self.decl.get("disposer_throws")
 
         def setup() -> Any:
             trace.append(f"{name}:effect:{effect_id}:setup")
@@ -151,6 +161,8 @@ class FixturePlugin:
                 if delay:
                     await asyncio.sleep(delay)
                 trace.append(f"{name}:effect:{effect_id}:dispose")
+                if throws == effect_id:
+                    raise DisposerThrew(f"{name}:{effect_id}")
                 if during and is_first:
                     # DRAGON (§3): registering an effect from inside cleanup
                     # must be refused, not silently leaked past the snapshot.
@@ -268,6 +280,7 @@ class ConformanceRun:
         self.kernel = Kernel(observer=self._observe)
         self.contexts: dict[str, Context] = {"root": self.kernel.root}
         self.fibers: dict[str, Fiber] = {}
+        self.dispose_errors: list[BaseException] = []
         self._plugins: dict[str, FixturePlugin] = {}
         for name, decl in (fixture.get("plugins") or {}).items():
             self._plugins[name] = FixturePlugin(name=name, decl=decl, run=self)
@@ -278,6 +291,11 @@ class ConformanceRun:
             self.trace.append(f"{event.fiber}:{event.state}")
         elif isinstance(event, ServiceEvent):
             self.trace.append(f"{event.owner}:{event.kind}:{event.key}")
+        elif isinstance(event, DisposerErrorEvent):
+            # §3 fourth dragon: the kernel contained a disposer error. The
+            # token comes from the kernel, not the harness, so a runtime that
+            # swallowed the error silently would not produce it.
+            self.trace.append(f"{event.owner}:effect:{event.effect}:dispose:error")
         else:  # pragma: no cover - defensive
             raise FixtureError(f"unknown kernel event {event!r}")
 
@@ -323,7 +341,14 @@ class ConformanceRun:
             # Child plugins mounted during apply must be addressable too.
             self._index_children(fiber)
         elif op == "dispose":
-            await self._fiber(step["plugin"]).dispose()
+            # §3 requires disposer errors be reported, and the Python runtime
+            # reports them by raising once unwinding has completed. That is
+            # the behaviour under test, not a harness failure — capture it and
+            # let the trace and expect_state assertions do the judging.
+            try:
+                await self._fiber(step["plugin"]).dispose()
+            except Exception as exc:
+                self.dispose_errors.append(exc)
         elif op == "dispose_nowait":
             self.kernel.spawn(self._fiber(step["plugin"]).dispose())
         elif op == "provide":
