@@ -38,6 +38,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import re
@@ -53,7 +54,7 @@ from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
 from pocketpaw_ee.cloud.media import storage as media_storage
 
-from . import fal_edit, fal_elements, fal_video, schemas
+from . import fal_edit, fal_elements, fal_motion, fal_video, schemas
 
 logger = logging.getLogger(__name__)
 
@@ -869,6 +870,57 @@ async def _resolve_source_data_url(source_url: str) -> tuple[str, str]:
     return fal_edit.encode_bytes(data, mime), mime
 
 
+# fal's motion-control image cap (from the endpoint schema): images up to
+# 3850×3850px are accepted. Oversized uploads (e.g. a ~12K×18K photo) would be
+# rejected, so we downscale the long side to fit before dispatch. We never
+# upscale — a too-small image is left for fal to flag with a clear 400.
+FAL_IMAGE_MAX_DIM = 3850
+
+
+def _fit_character_image(data_url: str, mime: str) -> tuple[str, str]:
+    """Downscale an oversized character image to fal's 3850px cap (aspect
+    preserving), re-encoding as JPEG. Images already within the cap pass through
+    untouched. A non-decoding image also passes through (fal's own validation
+    then reports it) rather than turning into a 500."""
+    header, sep, b64 = data_url.partition(",")
+    if not sep:
+        return data_url, mime
+    try:
+        raw = base64.b64decode(b64)
+    except ValueError as exc:
+        raise ValueError("could not decode the character image") from exc
+
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover — Pillow is a pocketpaw dep
+        return data_url, mime
+
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            width, height = img.size
+            if width <= FAL_IMAGE_MAX_DIM and height <= FAL_IMAGE_MAX_DIM:
+                return data_url, mime
+            scale = FAL_IMAGE_MAX_DIM / max(width, height)
+            new_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+            if img.mode in ("RGBA", "LA", "P"):
+                rgba = img.convert("RGBA")
+                flattened = Image.new("RGB", rgba.size, (255, 255, 255))
+                flattened.paste(rgba, mask=rgba.split()[-1])
+                img = flattened
+            else:
+                img = img.convert("RGB")
+            img = img.resize(new_size, Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=90)
+    except Exception:  # noqa: BLE001 — never 500 the request over image processing
+        logger.warning("character image downscale failed (serving original)", exc_info=True)
+        return data_url, mime
+    return (
+        f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}",
+        "image/jpeg",
+    )
+
+
 async def edit(req: schemas.EditRequest, *, workspace_id: str) -> schemas.Generation:
     """Run a canvas edit op (inpaint/expand/upscale/variations/remove-bg/edit/
     sketch-to-image) DIRECTLY against fal.ai — the LiteLLM gateway serves
@@ -1028,6 +1080,94 @@ async def generate_video_elements(
     return record
 
 
+# ── Motion control (Kling Motion Control) ───────────────────────────────────
+# The /studio "Motion control" panel: a character image (visible face and body)
+# is animated to follow a reference motion clip, dispatched DIRECTLY against
+# fal's Kling Motion Control endpoint (``fal_motion``). Inputs resolve to
+# ``data:`` URLs (media path / http / data pass through via
+# ``_resolve_source_data_url``) so fal never needs a route back into the
+# deployment's private media storage. The produced video (+ optional poster)
+# persists through media storage like every other generation.
+
+
+async def generate_video_motion(
+    req: schemas.VideoMotionRequest, *, workspace_id: str
+) -> schemas.Generation:
+    """Run a Kling Motion Control call and return a NEW ``succeeded`` Generation.
+
+    The character image and reference motion video are resolved to ``data:`` URLs
+    and passed to fal_motion; the returned video is saved through media storage
+    (with a poster frame when the endpoint produced one) and the record lands in
+    the workspace history. A missing character image / motion video is a
+    ValueError (router → 400); a fal upstream failure surfaces as
+    StudioUpstreamError (router → 502).
+    """
+    image_url = (req.imageUrl or "").strip()
+    video_url = (req.videoUrl or "").strip()
+    if not image_url:
+        raise ValueError("a character image is required for motion control")
+    if not video_url:
+        raise ValueError("a motion reference video is required for motion control")
+
+    image_data_url, image_mime = await _resolve_source_data_url(image_url)
+    image_data_url, _ = _fit_character_image(image_data_url, image_mime)
+
+    # The reference motion video is typically a PUBLIC URL (the hardcoded preset).
+    # fal fetches public URLs directly (and re-encoding a multi-MB clip into a
+    # base64 data URI both wastes bandwidth and risks hitting request limits), so
+    # pass a hosted URL straight through. Private media paths still resolve to
+    # data URLs so fal never needs a route back into our storage.
+    if video_url.startswith(("http://", "https://")):
+        video_arg = video_url
+    else:
+        video_arg, _ = await _resolve_source_data_url(video_url)
+
+    model = (req.model or "").strip() or fal_motion.DEFAULT_MOTION_MODEL
+    try:
+        video_bytes, video_mime, poster_bytes, poster_mime = await fal_motion.run_fal_motion(
+            image_url=image_data_url,
+            video_url=video_arg,
+            character_orientation=req.characterOrientation,
+            model=model,
+        )
+    except fal_motion.FalMotionValidationError as exc:
+        raise ValueError(str(exc)) from exc
+    except fal_motion.FalMotionError as exc:
+        raise StudioUpstreamError(str(exc)) from exc
+
+    if not video_bytes:
+        raise StudioUpstreamError("fal motion-control returned no video data")
+
+    mime = video_mime or "video/mp4"
+    video_url_out = await _save_image_bytes(video_bytes, mime=mime, ext=_video_ext(mime))
+    assets: list[dict[str, Any]] = [{"id": _seq_id("asset"), "url": video_url_out, "mime": mime}]
+    if poster_bytes:
+        poster_mime_val = poster_mime or "image/jpeg"
+        poster_url_out = await _save_image_bytes(
+            poster_bytes, mime=poster_mime_val, ext=_video_poster_ext(poster_mime_val)
+        )
+        assets[0]["posterUrl"] = poster_url_out
+
+    params: dict[str, Any] = {
+        "kind": "video",
+        "model": model,
+        "aspectRatio": req.aspectRatio,
+        "count": 1,
+        "durationSec": req.durationSec,
+    }
+    record = _new_generation(
+        gen_id=_seq_id("gen"),
+        prompt="Motion control",
+        kind="video",
+        model=model,
+        params=params,
+        assets=assets,
+        status="succeeded",
+    )
+    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    return record
+
+
 def suggest_prompt(sentence: str) -> schemas.PromptSuggestion:
     """Enrich a plain sentence into a generation prompt + inferred media kind.
     Heuristic mirror of the mock (no LLM call): a motion/reel vocabulary implies
@@ -1057,5 +1197,6 @@ __all__ = [
     "generate",
     "edit",
     "generate_video_elements",
+    "generate_video_motion",
     "suggest_prompt",
 ]

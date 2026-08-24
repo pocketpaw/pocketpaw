@@ -17,7 +17,10 @@
 #
 # The "Edit video" panel drives Kling Elements (``fal_elements``) directly
 # against fal the same way — a source video + element/reference images + a
-# prompt, dispatched through ``POST /studio/video-elements``.
+# prompt, dispatched through ``POST /studio/video-elements``. The "Motion
+# control" panel drives Kling Motion Control (``fal_motion``) — a character image
+# + reference motion video, dispatched through
+# ``POST /studio/video-motion-control``.
 #
 # Wire shapes match paw-enterprise ``src/lib/core/studio/types.ts`` exactly
 # (models/styles/generations/GenerateRequest/EditRequest/PromptSuggestion), so
