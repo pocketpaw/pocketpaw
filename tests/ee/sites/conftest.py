@@ -1,5 +1,10 @@
 # tests/ee/sites/conftest.py
 # Created: 2026-06-18 (feat/sites-dedupe-migration, PERF-2).
+# Updated 2026-08-24 (feat/sites-s3-artifact-store, SP-4): ``_artifact_store_tmp`` also
+#   clears PAW_SITES_ARTIFACT_STORE. PAW_SITES_ARTIFACT_DIR only points the store
+#   somewhere; the new knob SELECTS it, so an operator with it set to ``s3`` would send
+#   every cache write in this tree at their own bucket. Same class of leak as
+#   OPERATOR_ENV_VARS, kept in this fixture because it belongs to the artifact store.
 # Updated 2026-08-11 (fix/tests-ignore-operator-env): added the autouse
 #   ``_operator_env_cleared`` fixture. Nothing in this tree isolated the test process
 #   from the developer's own environment: ``config.py`` declares ``env_file=".env"`` and
@@ -188,8 +193,15 @@ def _artifact_store_tmp(tmp_path, monkeypatch):
     temp dir (feat/sites-native-artifact-no-build), mirroring how the build dir is kept
     out of the real ~/.pocketpaw. get_native_artifact's default filesystem store writes
     the rendered {body_html, css} here on a cache MISS, so without this a test that
-    exercises the miss path would pollute the developer's real home."""
+    exercises the miss path would pollute the developer's real home.
+
+    SP-4: also clears PAW_SITES_ARTIFACT_STORE, which SELECTS the store rather than
+    pointing it somewhere. An operator with it set to ``s3`` would otherwise send every
+    cache write in this tree at their own bucket — the same class of leak
+    OPERATOR_ENV_VARS exists for, kept here because it belongs to the artifact store
+    rather than to Cloudflare / Daytona."""
     monkeypatch.setenv("PAW_SITES_ARTIFACT_DIR", str(tmp_path / "site-artifacts"))
+    monkeypatch.delenv("PAW_SITES_ARTIFACT_STORE", raising=False)
     yield
 
 

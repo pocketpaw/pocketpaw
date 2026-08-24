@@ -1417,6 +1417,23 @@ miss's build is keyed on `pocket_id` in a stable directory, so `node_modules` /
 `bun install` stay cached; it skips the SSR smoke fail-gate (`smoke=False`) but still
 emits the static output that is read.
 
+**Shared store (opt-in) — `PAW_SITES_ARTIFACT_STORE=s3`.** The on-disk store above is
+per-container, so on a multi-replica deploy a view routed to replica B misses what
+replica A built, and a redeploy empties the cache entirely. Setting
+`PAW_SITES_ARTIFACT_STORE=s3` keeps the same `(pocket_id, content_hash)` key but puts
+the artifact in blob storage through the configured `StorageAdapter`, so it is shared
+across replicas and survives a redeploy. **Unset (the default) is the on-disk store** —
+OSS installs and local dev are unchanged. The adapter itself is chosen by
+`POCKETPAW_UPLOAD_ADAPTER`, which must also be `s3` for this to be remote storage; a box
+that sets only the first knob gets a local-disk adapter writing the same
+`~/.pocketpaw/site-artifacts/` layout. Both sides stay best-effort: a miss, a corrupt
+object, a timeout, or a failed write degrades to a rebuild and never fails a preview.
+The store also **refuses to persist an artifact whose rendered body or CSS carries a
+per-site capture key** — that secret is only acceptable because it lives in a container
+that is then destroyed, so such a pocket rebuilds on every view instead of caching. No
+eviction runs here (the on-disk store's `PAW_SITES_ARTIFACT_KEEP` does not apply); put a
+bucket lifecycle rule on the `site-artifacts/` prefix.
+
 **Auth is `fabric.write`, not a read scope,** because a cold miss still **arms a
 build**: it builds the pocket with a builder origin set so the generator stamps
 `data-uid` on the editable leaves and embeds the edit manifest — the endpoint can
