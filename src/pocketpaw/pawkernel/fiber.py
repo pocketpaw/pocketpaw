@@ -1,0 +1,314 @@
+# pawkernel fiber — SEMANTICS.md §2, §3, §4.
+# Created: 2026-08-24 (feat/pawkernel-compose) — a fiber is the runtime handle
+#   for one mounted plugin instance. It owns the injection gate (PENDING until
+#   every required service exists), the effect stack (LIFO, run-at-most-once
+#   disposers), the child fibers (disposed BEFORE the parent's own effects),
+#   and the two dragons: dispose-during-LOADING awaits apply before cleaning
+#   up everything apply collected, and a throw in apply rolls back every
+#   collected effect before landing in FAILED.
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Protocol
+
+from pocketpaw.pawkernel.errors import EffectRejected
+from pocketpaw.pawkernel.observer import FiberStateEvent
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from pocketpaw.pawkernel.context import Context
+    from pocketpaw.pawkernel.kernel import Kernel
+
+
+class FiberState:
+    """The lifecycle states of SEMANTICS.md §4, plus an unemitted INIT."""
+
+    INIT = "INIT"
+    PENDING = "PENDING"
+    LOADING = "LOADING"
+    ACTIVE = "ACTIVE"
+    UNLOADING = "UNLOADING"
+    DISPOSED = "DISPOSED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True)
+class Inject:
+    """A plugin's injection declaration (§2)."""
+
+    required: tuple[str, ...] = ()
+    optional: tuple[str, ...] = ()
+
+    @classmethod
+    def of(cls, spec: Any) -> Inject:
+        if spec is None:
+            return cls()
+        if isinstance(spec, Inject):
+            return spec
+        if isinstance(spec, dict):
+            return cls(
+                required=tuple(spec.get("required") or ()),
+                optional=tuple(spec.get("optional") or ()),
+            )
+        if isinstance(spec, (list, tuple)):
+            return cls(required=tuple(spec))
+        raise TypeError(f"cannot read an inject declaration from {spec!r}")
+
+
+class Plugin(Protocol):
+    """A unit of composition: a name, an inject declaration, an apply body."""
+
+    name: str
+    inject: Inject
+
+    async def apply(self, ctx: Context) -> None: ...
+
+
+@dataclass
+class SimplePlugin:
+    """Callable-backed plugin, for callers that do not need a class."""
+
+    name: str
+    apply_fn: Callable[[Context], Any]
+    inject: Inject = field(default_factory=Inject)
+
+    async def apply(self, ctx: Context) -> None:
+        result = self.apply_fn(ctx)
+        if inspect.isawaitable(result):
+            await result
+
+
+class Disposer:
+    """A collected disposer. Runs at most once; repeat disposal is a no-op."""
+
+    __slots__ = ("_fn", "_done", "name")
+
+    def __init__(self, fn: Any, name: str | None = None) -> None:
+        self._fn = fn if callable(fn) else None
+        self._done = False
+        self.name = name
+
+    @property
+    def done(self) -> bool:
+        return self._done
+
+    async def run(self) -> None:
+        if self._done:
+            return
+        self._done = True
+        if self._fn is None:
+            return
+        result = self._fn()
+        if inspect.isawaitable(result):
+            # An async disposer MUST settle. Shield it so a cancellation of
+            # the awaiting frame cannot abandon half-finished cleanup.
+            await asyncio.shield(asyncio.ensure_future(result))
+
+
+class Fiber:
+    """The runtime handle for one mounted plugin instance."""
+
+    def __init__(
+        self,
+        kernel: Kernel,
+        plugin: Plugin,
+        ctx: Context,
+        parent: Fiber | None = None,
+    ) -> None:
+        self.kernel = kernel
+        self.plugin = plugin
+        self.name = getattr(plugin, "name", plugin.__class__.__name__)
+        self.inject = Inject.of(getattr(plugin, "inject", None))
+        self.parent = parent
+        self.ctx = ctx
+        self.state = FiberState.INIT
+        self.error: BaseException | None = None
+
+        self._effects: list[Disposer] = []
+        self._children: list[Fiber] = []
+        self._tearing_down = False
+        self._load_task: asyncio.Future | None = None
+        self._dispose_future: asyncio.Future | None = None
+        self._unload_requested = False
+        self._watched: list[Any] = []
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<Fiber {self.name} {self.state}>"
+
+    # -- state ------------------------------------------------------------
+    def _enter(self, state: str) -> None:
+        self.state = state
+        self.kernel.notify(FiberStateEvent(fiber=self.name, state=state))
+
+    @property
+    def children(self) -> Sequence[Fiber]:
+        return tuple(self._children)
+
+    # -- injection --------------------------------------------------------
+    def _watch_deps(self) -> None:
+        # Only required keys gate activation, so only required keys are
+        # watched: an optional service appearing MUST NOT force a reload.
+        for key in self.inject.required:
+            cell = self.ctx._cell(key)
+            cell.watch(self)
+            self._watched.append(cell)
+
+    def _unwatch_deps(self) -> None:
+        for cell in self._watched:
+            cell.unwatch(self)
+        self._watched.clear()
+
+    def _deps_met(self) -> bool:
+        return all(self.ctx.get(key) is not None for key in self.inject.required)
+
+    # -- start ------------------------------------------------------------
+    def begin(self) -> None:
+        """Synchronously decide PENDING vs LOADING and start apply if ready.
+
+        Creating the load task here (rather than inside a coroutine that has
+        not run yet) is what makes ``dispose`` during LOADING deterministic:
+        a dispose issued immediately after a no-wait mount always finds a load
+        task to await.
+        """
+        self._watch_deps()
+        if not self._deps_met():
+            self._enter(FiberState.PENDING)
+            return
+        self._start_load()
+
+    def _start_load(self) -> None:
+        self._load_task = self.kernel.spawn(self._load())
+
+    async def wait_ready(self) -> None:
+        """Await the current load, if any. Never propagates apply's error."""
+        if self._load_task is not None and not self._load_task.done():
+            await asyncio.shield(self._load_task)
+
+    async def _load(self) -> None:
+        self._enter(FiberState.LOADING)
+        try:
+            await self.plugin.apply(self.ctx)
+        except asyncio.CancelledError:  # pragma: no cover - defensive
+            raise
+        except BaseException as exc:
+            # §3 dragon: roll every collected effect back, then FAILED.
+            self.error = exc
+            await self._rollback()
+            self._enter(FiberState.FAILED)
+            return
+        if self._dispose_future is not None or self._unload_requested:
+            # §4 dragon: a disposal was requested while we were LOADING. Do
+            # NOT pass through ACTIVE; the disposer owns the cleanup and runs
+            # it only after this coroutine has fully returned.
+            return
+        self._enter(FiberState.ACTIVE)
+
+    # -- effects ----------------------------------------------------------
+    def effect(self, setup: Callable[[], Any], name: str | None = None) -> Disposer:
+        """Run ``setup`` and collect its disposer (§3).
+
+        Creation while PENDING or LOADING is legal. Creation while the fiber
+        is tearing down (UNLOADING, or rolling back a failed apply) is
+        rejected, and creation on a settled fiber is rejected too.
+        """
+        if self._tearing_down or self.state in (
+            FiberState.UNLOADING,
+            FiberState.DISPOSED,
+            FiberState.FAILED,
+        ):
+            raise EffectRejected(self.name, FiberState.UNLOADING)
+        disposer = Disposer(setup(), name=name)
+        self._effects.append(disposer)
+        return disposer
+
+    def adopt_child(self, child: Fiber) -> None:
+        self._children.append(child)
+
+    # -- teardown ---------------------------------------------------------
+    async def _teardown(self) -> None:
+        """Dispose children first, then own effects LIFO. Never re-entrant."""
+        self._tearing_down = True
+        try:
+            for child in reversed(list(self._children)):
+                await child.dispose()
+            self._children.clear()
+            for disposer in reversed(list(self._effects)):
+                await disposer.run()
+            self._effects.clear()
+        finally:
+            self._tearing_down = False
+
+    async def _rollback(self) -> None:
+        """Roll back a failed apply. Emits no UNLOADING — §4's FAILED edge
+        goes straight from LOADING to FAILED, and the fixture's trace says so.
+        """
+        await self._teardown()
+
+    # -- unload (dependency withdrawn) ------------------------------------
+    async def _unload_to_pending(self) -> None:
+        if self.state not in (FiberState.ACTIVE, FiberState.LOADING):
+            return
+        self._unload_requested = True
+        try:
+            if self._load_task is not None and not self._load_task.done():
+                await asyncio.shield(self._load_task)
+            if self.state in (FiberState.DISPOSED, FiberState.FAILED):
+                return
+            self._enter(FiberState.UNLOADING)
+            await self._teardown()
+            self._enter(FiberState.PENDING)
+        finally:
+            self._unload_requested = False
+
+    async def recheck(self) -> None:
+        """Re-evaluate the injection gate after a watched service changed."""
+        if self.state in (FiberState.DISPOSED, FiberState.FAILED):
+            return
+        if self._dispose_future is not None:
+            return
+        met = self._deps_met()
+        if met and self.state == FiberState.PENDING:
+            self._start_load()
+            await self.wait_ready()
+        elif not met and self.state in (FiberState.ACTIVE, FiberState.LOADING):
+            await self._unload_to_pending()
+
+    # -- dispose ----------------------------------------------------------
+    async def dispose(self) -> None:
+        """Dispose this fiber. Resolves only once all cleanup has settled.
+
+        Single-flight: every caller awaits the same shielded future, so
+        repeated disposal — including disposal racing a cancellation — is
+        idempotent rather than an error.
+        """
+        if self._dispose_future is None:
+            self._dispose_future = self.kernel.spawn(self._do_dispose())
+        await asyncio.shield(self._dispose_future)
+
+    async def _do_dispose(self) -> None:
+        # §4 dragon: if apply is still running, await it to completion first.
+        # Cleanup must not run concurrently with the remainder of apply.
+        if self._load_task is not None and not self._load_task.done():
+            await asyncio.shield(self._load_task)
+
+        if self.state in (FiberState.DISPOSED,):
+            return
+        if self.state == FiberState.FAILED:
+            # A FAILED fiber already holds no live effects.
+            self._unwatch_deps()
+            return
+
+        if self.state in (FiberState.ACTIVE, FiberState.LOADING):
+            self._enter(FiberState.UNLOADING)
+            await self._teardown()
+        elif self.state in (FiberState.PENDING, FiberState.INIT):
+            # Nothing was ever collected; there is nothing to unwind.
+            pass
+
+        self._unwatch_deps()
+        if self.parent is not None and self in self.parent._children:
+            self.parent._children.remove(self)
+        self._enter(FiberState.DISPOSED)
