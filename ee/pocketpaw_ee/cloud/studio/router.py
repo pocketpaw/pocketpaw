@@ -11,6 +11,7 @@
 #   POST /studio/generate        → Generation             (LiteLLM + fal.ai)
 #   GET  /studio/generations/{id}→ Generation
 #   POST /studio/edit            → Generation             (fal.ai edit endpoints)
+#   POST /studio/video-elements  → Generation             (fal.ai Kling Elements)
 #   POST /studio/suggest-prompt  → PromptSuggestion       (heuristic, no LLM)
 #
 # The tenant is attached per-request via ``current_workspace_id`` (the frontend
@@ -112,6 +113,25 @@ async def edit(
         raise HTTPException(501, str(exc)) from exc
     except service.StudioUpstreamError as exc:
         raise HTTPException(502, f"Image edit failed: {exc}") from exc
+
+
+@router.post("/video-elements", response_model=schemas.Generation)
+async def video_elements(
+    req: schemas.VideoElementsRequest,
+    workspace_id: str = Depends(current_workspace_id),
+) -> schemas.Generation:
+    """Run the "Edit video" panel's Kling Elements call directly against fal.ai.
+
+    Accepts a source video (≤30s), up to 20 element/reference images, and a
+    prompt; the result video is persisted as a NEW generation. Bad input (too
+    many images / source over 30s / missing everything) returns 400; a fal
+    upstream failure 502."""
+    try:
+        return await service.generate_video_elements(req, workspace_id=workspace_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except service.StudioUpstreamError as exc:
+        raise HTTPException(502, f"Video edit failed: {exc}") from exc
 
 
 @router.post("/suggest-prompt", response_model=schemas.PromptSuggestion)

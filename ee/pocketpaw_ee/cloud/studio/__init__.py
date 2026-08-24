@@ -15,6 +15,10 @@
 # official fal-client SDK), and their outputs persist through the same media
 # storage so the gallery + flow grow on every edit.
 #
+# The "Edit video" panel drives Kling Elements (``fal_elements``) directly
+# against fal the same way — a source video + element/reference images + a
+# prompt, dispatched through ``POST /studio/video-elements``.
+#
 # Wire shapes match paw-enterprise ``src/lib/core/studio/types.ts`` exactly
 # (models/styles/generations/GenerateRequest/EditRequest/PromptSuggestion), so
 # flipping the frontend's ``USE_MOCK`` flag is the only change needed there.

@@ -53,7 +53,7 @@ from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
 from pocketpaw_ee.cloud.media import storage as media_storage
 
-from . import fal_edit, fal_video, schemas
+from . import fal_edit, fal_elements, fal_video, schemas
 
 logger = logging.getLogger(__name__)
 
@@ -933,6 +933,101 @@ async def edit(req: schemas.EditRequest, *, workspace_id: str) -> schemas.Genera
     return record
 
 
+# ── Video editing (Kling Elements) ───────────────────────────────────────────
+# The /studio "Edit video" panel: a source video (≤30s) + up to 20 element/
+# reference images + a prompt, dispatched DIRECTLY against fal's Kling Elements
+# endpoint (``fal_elements``). Inputs resolve to ``data:`` URLs (media path /
+# http / data pass through via ``_resolve_source_data_url``) so fal never needs
+# a route back into the deployment's private media storage. The produced video
+# (+ optional poster) persists through media storage like every other generation.
+
+
+async def generate_video_elements(
+    req: schemas.VideoElementsRequest, *, workspace_id: str
+) -> schemas.Generation:
+    """Run a Kling Elements video edit and return a NEW ``succeeded`` Generation.
+
+    The source video (optional) and each element image (max 20) are resolved to
+    ``data:`` URLs and passed to fal_elements; the returned video is saved through
+    media storage (with a poster frame when the endpoint produced one) and the
+    record lands in the workspace history. A source video longer than 30s or more
+    than 20 element images is a ValueError (router → 400); a fal upstream failure
+    surfaces as StudioUpstreamError (router → 502).
+    """
+    prompt = (req.prompt or "").strip()
+    image_urls = [u for u in (req.inputImageUrls or []) if u and u.strip()]
+    video_url = (req.videoUrl or "").strip()
+
+    if not prompt and not video_url and not image_urls:
+        raise ValueError("prompt, a source video, or element images are required")
+    if len(image_urls) > fal_elements.MAX_ELEMENT_IMAGES:
+        raise ValueError(f"at most {fal_elements.MAX_ELEMENT_IMAGES} element images are allowed")
+    if req.sourceDurationSec is not None and req.sourceDurationSec > 30:
+        raise ValueError("source video must be 30 seconds or less")
+
+    # Kling Elements needs a prompt to describe the edit; fall back to a default
+    # motion instruction when the user edited a video without typing one.
+    effective_prompt = prompt or "edit the video with the provided elements"
+    final_prompt = await _apply_style(effective_prompt, None)
+
+    input_data_urls: list[str] | None = None
+    if image_urls:
+        input_data_urls = []
+        for url in image_urls:
+            data_url, _ = await _resolve_source_data_url(url)
+            input_data_urls.append(data_url)
+
+    video_data_url: str | None = None
+    if video_url:
+        video_data_url, _ = await _resolve_source_data_url(video_url)
+
+    model = (req.model or "").strip() or fal_elements.DEFAULT_ELEMENTS_MODEL
+    try:
+        video_bytes, video_mime, poster_bytes, poster_mime = await fal_elements.run_fal_elements(
+            prompt=final_prompt,
+            input_image_urls=input_data_urls,
+            video_url=video_data_url,
+            duration_sec=req.durationSec,
+            aspect_ratio=req.aspectRatio,
+            model=model,
+        )
+    except fal_elements.FalElementsError as exc:
+        raise StudioUpstreamError(str(exc)) from exc
+
+    if not video_bytes:
+        raise StudioUpstreamError("fal elements returned no video data")
+
+    mime = video_mime or "video/mp4"
+    video_url_out = await _save_image_bytes(video_bytes, mime=mime, ext=_video_ext(mime))
+    assets: list[dict[str, Any]] = [{"id": _seq_id("asset"), "url": video_url_out, "mime": mime}]
+    if poster_bytes:
+        poster_mime_val = poster_mime or "image/jpeg"
+        poster_url_out = await _save_image_bytes(
+            poster_bytes, mime=poster_mime_val, ext=_video_poster_ext(poster_mime_val)
+        )
+        assets[0]["posterUrl"] = poster_url_out
+
+    params: dict[str, Any] = {
+        "kind": "video",
+        "model": model,
+        "aspectRatio": req.aspectRatio,
+        "count": 1,
+        "durationSec": req.durationSec,
+        "inputImageCount": len(input_data_urls) if input_data_urls else None,
+    }
+    record = _new_generation(
+        gen_id=_seq_id("gen"),
+        prompt=final_prompt,
+        kind="video",
+        model=model,
+        params=params,
+        assets=assets,
+        status="succeeded",
+    )
+    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    return record
+
+
 def suggest_prompt(sentence: str) -> schemas.PromptSuggestion:
     """Enrich a plain sentence into a generation prompt + inferred media kind.
     Heuristic mirror of the mock (no LLM call): a motion/reel vocabulary implies
@@ -961,5 +1056,6 @@ __all__ = [
     "tracked_generation_filenames",
     "generate",
     "edit",
+    "generate_video_elements",
     "suggest_prompt",
 ]

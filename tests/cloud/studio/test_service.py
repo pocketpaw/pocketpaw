@@ -37,7 +37,7 @@ from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.litellm_client import CatalogUpstreamError
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry, Pricing
 from pocketpaw_ee.cloud.media import storage as media_storage
-from pocketpaw_ee.cloud.studio import fal_edit, fal_video, schemas
+from pocketpaw_ee.cloud.studio import fal_edit, fal_elements, fal_video, schemas
 
 from pocketpaw.uploads.local import LocalStorageAdapter
 
@@ -598,6 +598,102 @@ async def test_edit_no_output_is_upstream_error(monkeypatch, studio_env) -> None
     req = schemas.EditRequest(op="upscale", sourceUrl=_DATA_URL)
     with pytest.raises(service.StudioUpstreamError, match="no output images"):
         await service.edit(req, workspace_id="ws-1")
+    assert service._load_history() == []
+
+
+# ── video elements (direct fal.ai Kling Elements dispatch) ───────────────────
+
+
+async def test_generate_video_elements_happy_path(monkeypatch, studio_env) -> None:
+    """A fal elements result → the mp4 (+ poster) is saved, a succeeded video
+    Generation is returned, and every input (video + elements) is forwarded."""
+    generated, history = studio_env
+    seen: dict = {}
+
+    async def _fake_elements(
+        *, prompt, input_image_urls, video_url, duration_sec, aspect_ratio, model, key=None
+    ):
+        seen.update(
+            prompt=prompt,
+            input_image_urls=input_image_urls,
+            video_url=video_url,
+            duration_sec=duration_sec,
+            aspect_ratio=aspect_ratio,
+            model=model,
+        )
+        return b"mp4", "video/mp4", b"png-poster", "image/png"
+
+    monkeypatch.setattr(fal_elements, "run_fal_elements", _fake_elements)
+
+    req = schemas.VideoElementsRequest(
+        prompt="add a cow",
+        videoUrl=_DATA_URL,
+        inputImageUrls=[_DATA_URL, _DATA_URL],
+        aspectRatio="16:9",
+        durationSec=5,
+        sourceDurationSec=4.2,
+    )
+    gen = await service.generate_video_elements(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert gen.kind == "video"
+    assert gen.params.inputImageCount == 2
+    assert gen.assets[0].mime == "video/mp4"
+    assert gen.assets[0].url.startswith("/api/v1/media/")
+    assert gen.assets[0].posterUrl.startswith("/api/v1/media/")
+    assert seen["input_image_urls"] == [_DATA_URL, _DATA_URL]
+    assert seen["video_url"] == _DATA_URL
+    assert seen["duration_sec"] == 5
+    assert service.list_generations("ws-1")[0].id == gen.id
+
+
+async def test_generate_video_elements_prompt_only(monkeypatch, studio_env) -> None:
+    """A prompt-only request is valid (text-to-video through Elements)."""
+    seen: dict = {}
+
+    async def _fake_elements(
+        *, prompt, input_image_urls, video_url, duration_sec, aspect_ratio, model, key=None
+    ):
+        seen["prompt"] = prompt
+        return b"mp4", "video/mp4", None, None
+
+    monkeypatch.setattr(fal_elements, "run_fal_elements", _fake_elements)
+    req = schemas.VideoElementsRequest(prompt="a wave", aspectRatio="1:1")
+    gen = await service.generate_video_elements(req, workspace_id="ws-1")
+    assert gen.status == "succeeded"
+    assert seen["prompt"] == "a wave"
+
+
+async def test_generate_video_elements_rejects_too_many_images(monkeypatch, studio_env) -> None:
+    req = schemas.VideoElementsRequest(
+        prompt="x", inputImageUrls=[_DATA_URL] * (fal_elements.MAX_ELEMENT_IMAGES + 1)
+    )
+    with pytest.raises(ValueError, match="at most 20"):
+        await service.generate_video_elements(req, workspace_id="ws-1")
+
+
+async def test_generate_video_elements_rejects_overlong_source(monkeypatch, studio_env) -> None:
+    req = schemas.VideoElementsRequest(prompt="x", videoUrl=_DATA_URL, sourceDurationSec=30.1)
+    with pytest.raises(ValueError, match="30 seconds or less"):
+        await service.generate_video_elements(req, workspace_id="ws-1")
+
+
+async def test_generate_video_elements_requires_something(monkeypatch, studio_env) -> None:
+    req = schemas.VideoElementsRequest(prompt="  ")
+    with pytest.raises(ValueError, match="required"):
+        await service.generate_video_elements(req, workspace_id="ws-1")
+
+
+async def test_generate_video_elements_fal_failure_is_upstream_error(
+    monkeypatch, studio_env
+) -> None:
+    async def _boom(**kwargs):
+        raise fal_elements.FalElementsError("fal elements 'x' failed: bad key")
+
+    monkeypatch.setattr(fal_elements, "run_fal_elements", _boom)
+    req = schemas.VideoElementsRequest(prompt="a scene")
+    with pytest.raises(service.StudioUpstreamError, match="bad key"):
+        await service.generate_video_elements(req, workspace_id="ws-1")
     assert service._load_history() == []
 
 
