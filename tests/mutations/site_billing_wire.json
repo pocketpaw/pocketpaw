@@ -2,7 +2,7 @@
   {
     "label": "plan_tier stops reaching the wire — the Billing tab is blind again",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        plan_tier=getattr(doc, \"plan_tier\", None) or \"\",",
+    "find": "        plan_tier=_canonical_plan_tier(getattr(doc, \"plan_tier\", None)),",
     "replace": "",
     "tests": [
       "tests/cloud/sites/test_billing_state_on_the_wire.py::test_the_site_response_carries_the_plan_the_ui_renders"

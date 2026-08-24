@@ -119,7 +119,7 @@ async def test_the_site_response_carries_the_plan_the_ui_renders(mongo_db):
 
     resp = sites_service._to_response(doc)
 
-    assert resp.plan_tier == "pro"
+    assert resp.plan_tier == "site"
     assert resp.subscription_status == "active"
     assert resp.renewal_date is not None
     assert resp.renewal_date.startswith("2027-01-15")
@@ -167,7 +167,7 @@ async def test_entitlements_say_whether_this_site_may_take_a_domain(mongo_db, mo
 
     assert ent.custom_domain is True
     assert ent.subscription_active is True
-    assert ent.plan_tier == "pro"
+    assert ent.plan_tier == "site"
 
 
 async def test_a_free_site_reports_its_floor_allowance_not_a_flat_no(mongo_db, monkeypatch):
@@ -178,7 +178,7 @@ async def test_a_free_site_reports_its_floor_allowance_not_a_flat_no(mongo_db, m
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
     doc = await _seed_site(
-        workspace_id=ws, pocket_id=pocket_id, plan_tier="basic", subscription_status="none"
+        workspace_id=ws, pocket_id=pocket_id, plan_tier="free", subscription_status="none"
     )
 
     ent = await sites_service.site_entitlements(workspace_id=ws, site_id=str(doc.id))
@@ -202,12 +202,12 @@ async def test_the_free_allowance_reads_as_spent_once_another_site_holds_a_domai
     await _seed_site(
         workspace_id=ws,
         pocket_id=other_pocket,
-        plan_tier="basic",
+        plan_tier="free",
         subscription_status="none",
         domains=["already.example.com"],
     )
     doc = await _seed_site(
-        workspace_id=ws, pocket_id=this_pocket, plan_tier="basic", subscription_status="none"
+        workspace_id=ws, pocket_id=this_pocket, plan_tier="free", subscription_status="none"
     )
 
     ent = await sites_service.site_entitlements(workspace_id=ws, site_id=str(doc.id))
@@ -230,12 +230,12 @@ async def test_a_paid_site_is_not_capped_by_the_free_allowance(mongo_db, monkeyp
     await _seed_site(
         workspace_id=ws,
         pocket_id=other_pocket,
-        plan_tier="basic",
+        plan_tier="free",
         subscription_status="none",
         domains=["already.example.com"],
     )
     doc = await _seed_site(
-        workspace_id=ws, pocket_id=this_pocket, plan_tier="pro", subscription_status="active"
+        workspace_id=ws, pocket_id=this_pocket, plan_tier="site", subscription_status="active"
     )
 
     ent = await sites_service.site_entitlements(workspace_id=ws, site_id=str(doc.id))
@@ -251,14 +251,14 @@ async def test_a_lapsed_paid_site_loses_the_capability_and_says_so(mongo_db, mon
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
     doc = await _seed_site(
-        workspace_id=ws, pocket_id=pocket_id, plan_tier="pro", subscription_status="cancelled"
+        workspace_id=ws, pocket_id=pocket_id, plan_tier="site", subscription_status="cancelled"
     )
 
     ent = await sites_service.site_entitlements(workspace_id=ws, site_id=str(doc.id))
 
     assert ent.subscription_active is False
     assert ent.concierge_entitled is False
-    assert ent.plan_tier == "pro", "the tier is still recorded; only the payment stopped"
+    assert ent.plan_tier == "site", "the tier is still recorded; only the payment stopped"
 
 
 async def test_another_workspace_cannot_read_this_site_s_entitlements(mongo_db, monkeypatch):
@@ -301,7 +301,7 @@ async def test_no_capability_means_no_slot_however_empty_the_workspace(mongo_db,
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
     doc = await _seed_site(
-        workspace_id=ws, pocket_id=pocket_id, plan_tier="basic", subscription_status="none"
+        workspace_id=ws, pocket_id=pocket_id, plan_tier="free", subscription_status="none"
     )
 
     monkeypatch.setattr(
@@ -310,7 +310,7 @@ async def test_no_capability_means_no_slot_however_empty_the_workspace(mongo_db,
         lambda **kw: SiteEntitlements(
             site_id=kw["site_id"],
             workspace_id=kw["workspace_id"],
-            plan_tier="basic",
+            plan_tier="free",
             subscription_active=False,
             badge_required=True,
             custom_domain=False,

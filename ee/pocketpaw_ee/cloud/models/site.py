@@ -354,8 +354,13 @@ class Site(TimestampedDocument):
     build_reason: str | None = None
     # BC-9: per-site annual plan (the Webflow model — each published site has its
     # OWN recurring annual plan on a tier, distinct from the workspace plan).
-    # ``plan_tier`` is the site-plan catalog key (basic | pro | business — see
-    # ``billing.site_plans``); None until a publish stamps one. ``subscription_id``
+    # ``plan_tier`` is the site-plan catalog key — one of the SITE-SCOPED rungs
+    # (free | site | staff — see ``billing.site_plans``), never one of the org
+    # flats (studio | agency), which cover a whole workspace and are refused here
+    # by ``site_plans.site_scoped_tier``. Documents written before 2026-08-22 hold
+    # the old names (basic | pro | business); those resolve through the catalog's
+    # permanent legacy aliases, and ``scripts/migrate_site_plan_keys.py`` rewrites
+    # them. None until a publish stamps one. ``subscription_id``
     # is the Dodo subscription id for this site's annual sub (None when Dodo is
     # unconfigured — the tier is recorded without a live charge in v1).
     # ``renewal_date`` is the next renewal stamp the per-site webhook

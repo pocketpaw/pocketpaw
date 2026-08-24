@@ -174,21 +174,26 @@ def _site_subscription_body(
 def test_list_site_plans_returns_tiers_with_price_and_cf_features():
     tiers = site_plans.list_site_plans()
     keys = [t.key for t in tiers]
-    assert keys == ["basic", "pro", "business"]  # cheapest first
+    # Cheapest first, per-site rungs before the org flats.
+    assert keys == ["free", "site", "staff", "studio", "agency"]
+    # The per-site view is the subset a publish may choose from — the org flats
+    # cover a whole workspace and their keys are not legal ``Site.plan_tier``
+    # values.
+    assert [t.key for t in site_plans.list_site_scoped_plans()] == ["free", "site", "staff"]
 
     by_key = {t.key: t for t in tiers}
-    # Each tier carries an annual price (USD) + a cloudflare_features set.
-    assert by_key["basic"].monthly_price_usd == 0
-    assert by_key["pro"].monthly_price_usd > 0
-    assert isinstance(by_key["pro"].cloudflare_features, frozenset)
+    # Each tier carries a monthly price (USD) + a cloudflare_features set.
+    assert by_key["free"].monthly_price_usd == 0
+    assert by_key["site"].monthly_price_usd > 0
+    assert isinstance(by_key["site"].cloudflare_features, frozenset)
     # Higher tiers resell more Cloudflare features (a growing ladder).
-    assert by_key["basic"].cloudflare_features == frozenset()
-    assert "custom_domain" in by_key["pro"].cloudflare_features
-    assert by_key["pro"].cloudflare_features <= by_key["business"].cloudflare_features
+    assert by_key["free"].cloudflare_features == frozenset()
+    assert "custom_domain" in by_key["site"].cloudflare_features
+    assert by_key["site"].cloudflare_features <= by_key["staff"].cloudflare_features
 
 
 def test_get_site_plan_resolves_and_rejects():
-    assert site_plans.get_site_plan("pro").key == "pro"
+    assert site_plans.get_site_plan("site").key == "site"
     # An unknown / missing key resolves to None (not silently substituted).
     assert site_plans.get_site_plan("platinum") is None
     assert site_plans.get_site_plan(None) is None
@@ -207,7 +212,7 @@ async def test_publish_with_entitlement_stamps_plan_and_emits(mongo_db, recordin
 
     # Configure a Dodo product for the "pro" site tier so the per-site sub fires.
     monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
+        site_plans, "_dodo_product_for", lambda key: {"site": "prod_site_pro"}.get(key)
     )
     fake_provider = _FakeBillingProvider()
     fake_cf = _FakeCF()
@@ -216,7 +221,7 @@ async def test_publish_with_entitlement_stamps_plan_and_emits(mongo_db, recordin
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=_FakeGenerator(),
         _cloudflare=fake_cf,
         _bundle_reader=lambda d: b"x",
@@ -225,7 +230,7 @@ async def test_publish_with_entitlement_stamps_plan_and_emits(mongo_db, recordin
 
     # charge-first: a PAID tier (pro) is published as PENDING — stamped with its
     # tier + subscription id, but NOT deployed live until subscription.active.
-    assert doc.plan_tier == "pro"
+    assert doc.plan_tier == "site"
     assert doc.subscription_id == SITE_SUB_ID
     assert doc.subscription_status == "pending"
     assert doc.deployed is False
@@ -236,7 +241,7 @@ async def test_publish_with_entitlement_stamps_plan_and_emits(mongo_db, recordin
     # discriminator the renewal webhook routes on).
     assert len(fake_provider.calls) == 1
     call = fake_provider.calls[0]
-    assert call["plan_key"] == "pro"
+    assert call["plan_key"] == "site"
     assert call["product_id"] == "prod_site_pro"
     assert call["metadata"]["site_id"] == str(doc.id)
     assert call["metadata"]["workspace_id"] == ws
@@ -244,7 +249,7 @@ async def test_publish_with_entitlement_stamps_plan_and_emits(mongo_db, recordin
     # The persisted doc reflects the pending stamp.
     persisted = await Site.find_one(Site.id == doc.id)
     assert persisted is not None
-    assert persisted.plan_tier == "pro"
+    assert persisted.plan_tier == "site"
     assert persisted.deployed is False
 
     # charge-first: SitePublished is DEFERRED to activation (the site is not live
@@ -263,7 +268,7 @@ async def test_publish_degrades_gracefully_when_dodo_unconfigured(mongo_db, reco
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=_FakeGenerator(),
         _cloudflare=_FakeCF(),
         _bundle_reader=lambda d: b"x",
@@ -312,7 +317,7 @@ async def test_publish_without_entitlement_is_forbidden_and_creates_no_site(mong
             workspace_id=ws,
             user_id="u1",
             pocket_id=pocket_id,
-            site_plan_key="pro",
+            site_plan_key="site",
             _generator=_FakeGenerator(),
             _cloudflare=_FakeCF(),
             _bundle_reader=lambda d: b"x",
@@ -345,13 +350,13 @@ async def test_per_site_active_webhook_updates_site_not_workspace(mongo_db, monk
     ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
     monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
+        site_plans, "_dodo_product_for", lambda key: {"site": "prod_site_pro"}.get(key)
     )
     doc = await sites_service.publish_pocket(
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=_FakeGenerator(),
         _billing_provider=_FakeBillingProvider(),
     )
@@ -396,13 +401,13 @@ async def test_per_site_cancelled_webhook_marks_site_cancelled(mongo_db, monkeyp
     ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
     monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
+        site_plans, "_dodo_product_for", lambda key: {"site": "prod_site_pro"}.get(key)
     )
     doc = await sites_service.publish_pocket(
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=_FakeGenerator(),
         _cloudflare=_FakeCF(),
         _bundle_reader=lambda d: b"x",
@@ -440,7 +445,10 @@ async def test_workspace_plan_sub_still_routes_to_workspace_path(mongo_db):
             "data": {
                 "subscription_id": "sub_ws_plan",
                 "product_id": "prod_pro_recurring",
-                # NO site_id → workspace-plan path.
+                # NO site_id → workspace-plan path. ``plan_key`` here is a
+                # WORKSPACE tier (billing.plans: free/go/pro/pro_max/enterprise),
+                # not a site tier — the two catalogs share a field name on the
+                # webhook metadata and nothing else.
                 "metadata": {"workspace_id": ws, "plan_key": "pro"},
             },
         }

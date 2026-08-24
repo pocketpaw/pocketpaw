@@ -183,7 +183,7 @@ def _site_subscription_body(*, event_type: str, workspace_id: str, site_id: str)
                 "metadata": {
                     "workspace_id": workspace_id,
                     "site_id": site_id,
-                    "plan_key": "pro",
+                    "plan_key": "site",
                 },
             },
         }
@@ -250,7 +250,7 @@ async def test_activation_persists_the_real_gateway_subscription_id(
     Nothing can cancel or change a subscription it cannot name. Every other fix in
     this module depends on this one line of plumbing.
     """
-    _configure_products(monkeypatch, {"pro": "prod_site_pro"})
+    _configure_products(monkeypatch, {"site": "prod_site_pro"})
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
     provider = _RecordingBillingProvider()
@@ -273,7 +273,7 @@ async def test_republishing_a_paying_site_opens_no_second_subscription(
     mongo_db, recording_bus, monkeypatch
 ):
     """A content edit on a site that is already paying is not a purchase."""
-    _configure_products(monkeypatch, {"pro": "prod_site_pro"})
+    _configure_products(monkeypatch, {"site": "prod_site_pro"})
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
     provider = _RecordingBillingProvider()
@@ -286,7 +286,7 @@ async def test_republishing_a_paying_site_opens_no_second_subscription(
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=gen,
         _cloudflare=cf,
         _bundle_reader=lambda d: b"x",
@@ -304,7 +304,7 @@ async def test_republishing_a_paying_site_keeps_its_paid_status_and_goes_live(
 ):
     """The republish must not strip the capabilities the customer is paying for,
     and the new content must go live without a second payment."""
-    _configure_products(monkeypatch, {"pro": "prod_site_pro"})
+    _configure_products(monkeypatch, {"site": "prod_site_pro"})
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
     provider = _RecordingBillingProvider()
@@ -316,7 +316,7 @@ async def test_republishing_a_paying_site_keeps_its_paid_status_and_goes_live(
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=gen,
         _cloudflare=cf,
         _bundle_reader=lambda d: b"x",
@@ -327,7 +327,7 @@ async def test_republishing_a_paying_site_keeps_its_paid_status_and_goes_live(
     # entitlement resolves as unpaid while the customer is still being charged.
     assert doc.subscription_status == "active"
     assert doc.subscription_id == GATEWAY_SUB_ID
-    assert doc.plan_tier == "pro"
+    assert doc.plan_tier == "site"
 
     # And the edit actually shipped, rather than waiting on a payment that will
     # never come.
@@ -349,7 +349,7 @@ async def test_republishing_a_site_that_never_paid_still_opens_a_checkout(
 
     Opening a fresh checkout is correct here. The abandoned session simply expires.
     """
-    _configure_products(monkeypatch, {"pro": "prod_site_pro"})
+    _configure_products(monkeypatch, {"site": "prod_site_pro"})
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
     provider = _RecordingBillingProvider()
@@ -359,7 +359,7 @@ async def test_republishing_a_site_that_never_paid_still_opens_a_checkout(
             workspace_id=ws,
             user_id="u1",
             pocket_id=pocket_id,
-            site_plan_key="pro",
+            site_plan_key="site",
             _generator=_RecordingGenerator(),
             _cloudflare=_RecordingCF(),
             _bundle_reader=lambda d: b"x",
@@ -393,7 +393,7 @@ async def test_moving_a_paying_site_to_another_tier_changes_the_plan(
     term they already paid for; a second create bills them twice. The gateway's
     atomic plan change is the only option that does neither.
     """
-    _configure_products(monkeypatch, {"pro": "prod_site_pro", "business": "prod_site_business"})
+    _configure_products(monkeypatch, {"site": "prod_site_pro", "staff": "prod_site_staff"})
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
     provider = _RecordingBillingProvider()
@@ -405,7 +405,7 @@ async def test_moving_a_paying_site_to_another_tier_changes_the_plan(
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="business",
+        site_plan_key="staff",
         _generator=gen,
         _cloudflare=cf,
         _bundle_reader=lambda d: b"x",
@@ -418,11 +418,11 @@ async def test_moving_a_paying_site_to_another_tier_changes_the_plan(
     assert call["subscription_id"] == GATEWAY_SUB_ID, (
         "change_plan was handed the checkout session id, not the gateway subscription"
     )
-    assert call["product_id"] == "prod_site_business"
+    assert call["product_id"] == "prod_site_staff"
 
     # The webhook acks plan_changed without acting, so the new tier has to be
     # written synchronously here or nothing ever records it.
-    assert doc.plan_tier == "business"
+    assert doc.plan_tier == "staff"
     assert doc.subscription_status == "active"
 
 
@@ -431,7 +431,7 @@ async def test_a_failed_plan_change_leaves_the_subscription_alone(
 ):
     """When the gateway refuses the change, the site keeps the tier it is paying
     for — and we never 'recover' by opening a second subscription."""
-    _configure_products(monkeypatch, {"pro": "prod_site_pro", "business": "prod_site_business"})
+    _configure_products(monkeypatch, {"site": "prod_site_pro", "staff": "prod_site_staff"})
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
 
@@ -445,7 +445,7 @@ async def test_a_failed_plan_change_leaves_the_subscription_alone(
             workspace_id=ws,
             user_id="u1",
             pocket_id=pocket_id,
-            site_plan_key="business",
+            site_plan_key="staff",
             _generator=gen,
             _cloudflare=cf,
             _bundle_reader=lambda d: b"x",
@@ -457,7 +457,7 @@ async def test_a_failed_plan_change_leaves_the_subscription_alone(
         "double-billing this fix exists to remove"
     )
     persisted = await Site.find_one(Site.id != None)  # noqa: E711
-    assert persisted.plan_tier == "pro"
+    assert persisted.plan_tier == "site"
     assert persisted.subscription_id == GATEWAY_SUB_ID
     assert persisted.subscription_status == "active"
 
@@ -472,7 +472,7 @@ async def test_the_site_checkout_sends_the_buyer_back_to_the_app(
 ):
     """The frontend navigates the whole page to the checkout url. Without a
     return url the buyer pays and is left on the gateway with no way back."""
-    _configure_products(monkeypatch, {"pro": "prod_site_pro"})
+    _configure_products(monkeypatch, {"site": "prod_site_pro"})
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
     provider = _RecordingBillingProvider()
@@ -482,7 +482,7 @@ async def test_the_site_checkout_sends_the_buyer_back_to_the_app(
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         origin="https://app.example.com",
         _generator=gen,
         _cloudflare=cf,

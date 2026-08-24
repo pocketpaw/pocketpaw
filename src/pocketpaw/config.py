@@ -2348,8 +2348,13 @@ class Settings(BaseSettings):
             "checkout at all: with a product it goes charge-first (the site is "
             "created PENDING and deployed by the subscription.active webhook), "
             "without one it publishes live and records the tier with NO charge. "
-            "Set via POCKETPAW_DODO_SITE_PRODUCTS as a JSON object, e.g. "
-            '{"pro":"prod_site_pro","business":"prod_site_biz"}. Default empty '
+            "Set via POCKETPAW_DODO_SITE_PRODUCTS as a JSON object keyed by tier, "
+            'e.g. {"site":"pdt_...","staff":"pdt_..."}. Only the SITE-SCOPED rungs '
+            "belong here — the org flats (studio, agency) are bought through an "
+            "org subscription that does not exist yet, and site_plans refuses "
+            "them regardless of what this map says. The pre-2026-08-22 keys "
+            '("pro", "business") are still honoured, so an existing deployment '
+            "keeps charging while the env var is re-keyed. Default empty "
             "means no per-site tier is purchasable, which is what every "
             "deployment has been until now — this field was READ by "
             "site_plans._dodo_product_for from the day per-site plans shipped and "

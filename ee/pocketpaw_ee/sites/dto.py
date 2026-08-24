@@ -173,9 +173,12 @@ from pydantic import BaseModel, field_validator
 
 class PublishRequest(BaseModel):
     # ``site_plan_key`` (BC-10) is the OPTIONAL per-site plan tier the site is
-    # published on (basic | pro | business — see ``billing.site_plans``). Omitted
-    # defaults to the base tier in ``publish_pocket``; a higher tier resells its
-    # Cloudflare features when a custom domain is later added.
+    # published on. Only the SITE-SCOPED rungs are valid here (free | site | staff
+    # — see ``billing.site_plans``); an org flat (studio | agency) covers a whole
+    # workspace and ``_apply_site_plan`` refuses it rather than stamping it on one
+    # site. Legacy names (basic | pro | business) still resolve. Omitted defaults
+    # to the base tier in ``publish_pocket``; a higher tier resells its Cloudflare
+    # features when a custom domain is later added.
     pocket_id: str
     site_plan_key: str | None = None
 

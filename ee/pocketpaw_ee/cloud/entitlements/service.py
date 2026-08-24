@@ -55,6 +55,16 @@
 #   "above the free floor" here — the plan-catalog DTO needs the same answer for
 #   the buyer-facing plan cards, and two copies of one rule drift. The AND with an
 #   active subscription stays here; that is this resolver's job, not the catalog's.
+# Updated 2026-08-22 (feat/site-pricing-ladder): both per-site reads
+#   (``site_domain_allowance`` and ``resolve_site_entitlements``) now go through
+#   ``site_plans.site_scoped_tier`` instead of ``get_site_plan``. The catalog gained
+#   ORG-scoped flats (studio/agency) in the pricing rekey, and their keys are not
+#   legal ``Site.plan_tier`` values — a plain lookup would resolve one off a single
+#   site's field and grant that site an allowance the org buys once for many.
+#   ``site_scoped_tier`` returns None for them, so an org key on a site fails closed
+#   to the free floor exactly as an unknown key does. The same call also resolves
+#   the LEGACY basic/pro/business keys, which is what stops the rekey demoting every
+#   already-published site the day it deploys.
 
 from __future__ import annotations
 
@@ -166,7 +176,12 @@ def site_domain_allowance(*, plan_tier: str | None, subscription_status: str | N
     # A paying tier's own allowance REPLACES the floor — normally upward
     # (None = uncapped). Not ``max(...)``: None is not a number, and a tier that
     # deliberately sells fewer domained sites than free should be able to.
-    tier = site_plan_catalog.get_site_plan(plan_tier)
+    #
+    # ``site_scoped_tier`` and not ``get_site_plan``: the catalog now also holds
+    # ORG flats (studio/agency), whose keys are not legal ``Site.plan_tier``
+    # values. Resolving one here would read an org-wide allowance off a single
+    # site's field. It returns None for those, which lands on the floor.
+    tier = site_plan_catalog.site_scoped_tier(plan_tier)
     if tier is not None and _subscription_is_active(subscription_status):
         allowance = tier.max_domained_sites
     return allowance
@@ -204,9 +219,19 @@ def resolve_site_entitlements(
     (badged, and the base tier's own domain allowance) rather than raising or
     substituting a paid tier.
     """
-    tier = site_plan_catalog.get_site_plan(plan_tier)
-    # ``get_site_plan`` deliberately does not substitute a floor, so an unknown or
-    # missing key lands here as None — the fail-closed default.
+    # ``site_scoped_tier`` rather than ``get_site_plan``, and the difference is a
+    # security property rather than a tidiness one. The catalog now carries ORG
+    # flats (studio/agency) beside the per-site rungs, and an org key is not a
+    # legal ``Site.plan_tier``. A plain catalog lookup would resolve one and hand
+    # THIS SITE the badge removal and white-label allowance an org pays for across
+    # twenty-five. ``site_scoped_tier`` returns None for them, which is the same
+    # fail-closed answer an unknown key gets: the free floor.
+    tier = site_plan_catalog.site_scoped_tier(plan_tier)
+    # It deliberately does not substitute a floor, so an unknown, org-scoped or
+    # missing key lands here as None — the fail-closed default. A LEGACY key
+    # (basic/pro/business) does resolve, to the tier carrying the same
+    # capabilities, so ``resolved_key`` reports the current name for a site whose
+    # document still holds the old one.
     resolved_key = tier.key if tier is not None else site_plan_catalog.BASE_SITE_PLAN_KEY
 
     subscription_active = _subscription_is_active(subscription_status)

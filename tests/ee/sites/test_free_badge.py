@@ -573,7 +573,7 @@ async def test_a_first_publish_badges_before_it_deploys(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_basic_tier_site_is_badged(tmp_path, monkeypatch):
-    _site_doc_returning(monkeypatch, _Doc("basic"))
+    _site_doc_returning(monkeypatch, _Doc("free"))
     (tmp_path / "index.html").write_text("<body>home</body>", encoding="utf-8")
 
     await sites_service._stamp_free_badge(

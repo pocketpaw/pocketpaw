@@ -82,7 +82,7 @@ async def test_add_domain_passes_business_tier_features(mongo_db):
     """A business-tier site (resells WAF + edge_cache) → create_custom_hostname
     is called WITH that feature set."""
     ws = "ws_business"
-    site_id = await _seed_site(workspace_id=ws, plan_tier="business")
+    site_id = await _seed_site(workspace_id=ws, plan_tier="staff")
     cf = _RecordingCF()
 
     await sites_service.add_domain(
@@ -94,7 +94,7 @@ async def test_add_domain_passes_business_tier_features(mongo_db):
 
     assert len(cf.create_calls) == 1
     passed = cf.create_calls[0]["features"]
-    expected = site_plans.get_site_plan("business").cloudflare_features
+    expected = site_plans.get_site_plan("staff").cloudflare_features
     assert passed == set(expected)
     # The premium security features ride along.
     assert "waf" in passed
@@ -110,7 +110,7 @@ async def test_add_domain_basic_tier_passes_no_features(mongo_db):
     """A basic-tier site resells no Cloudflare features → create_custom_hostname is
     called with an EMPTY feature set (the basic path)."""
     ws = "ws_basic"
-    site_id = await _seed_site(workspace_id=ws, plan_tier="basic")
+    site_id = await _seed_site(workspace_id=ws, plan_tier="free")
     cf = _RecordingCF()
 
     await sites_service.add_domain(
@@ -140,12 +140,43 @@ async def test_add_domain_unset_tier_passes_no_features(mongo_db):
     assert cf.create_calls[0]["features"] == set()
 
 
+@pytest.mark.parametrize("org_key", ["studio", "agency"])
+async def test_add_domain_provisions_nothing_for_an_org_flat_stored_on_a_site(mongo_db, org_key):
+    """An ORG key on a site's ``plan_tier`` provisions no Cloudflare features.
+
+    ``studio`` and ``agency`` are real catalog rows and they DO resell the full
+    Cloudflare set — that is the point of the test. A plain ``get_site_plan``
+    here resolves one and provisions the WAF and edge-cache controls an org buys
+    across its whole estate onto a single site nobody billed for them, and
+    Cloudflare charges us for it. ``site_scoped_tier`` returns None, which is the
+    same answer an absent tier gets: nothing premium.
+
+    Breaks on: ``add_domain`` going back to ``site_plans.get_site_plan``.
+    """
+    assert site_plans.get_site_plan(org_key).cloudflare_features, (
+        "if the org tiers stopped reselling anything this test would pass for the wrong reason"
+    )
+
+    ws = f"ws_{org_key}"
+    site_id = await _seed_site(workspace_id=ws, plan_tier=org_key)
+    cf = _RecordingCF()
+
+    await sites_service.add_domain(
+        workspace_id=ws,
+        site_id=site_id,
+        hostname=f"www.{org_key}.com",
+        _cloudflare=cf,
+    )
+
+    assert cf.create_calls[0]["features"] == set()
+
+
 # ---------------------------------------------------------------------------
 # Criterion 3 — the tier → feature mapping is honored exactly, end to end.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("tier", ["basic", "pro", "business"])
+@pytest.mark.parametrize("tier", ["free", "site", "staff"])
 async def test_add_domain_honors_exact_tier_feature_mapping(mongo_db, tier):
     """For every tier the features add_domain passes equal that tier's catalog
     cloudflare_features — no more, no less."""
@@ -260,16 +291,23 @@ def test_get_billing_site_plans_returns_catalog_with_cf_features(site_plans_clie
     assert resp.status_code == 200
     body = resp.json()
     rows = {row["key"]: row for row in body["site_plans"]}
-    assert set(rows.keys()) == {"basic", "pro", "business"}
+    # The whole catalog, both scopes — the storefront renders the org flats beside
+    # the per-site rungs, so this endpoint must not filter them out.
+    assert set(rows.keys()) == {"free", "site", "staff", "studio", "agency"}
+    # ...and each row says WHICH it is, because an org flat's key is not a legal
+    # ``site_plan_key`` on a publish and the client needs to know that from the
+    # payload rather than from a hardcoded list of two names.
+    assert rows["site"]["scope"] == "site"
+    assert rows["studio"]["scope"] == "org"
 
-    # Each tier carries its annual price + sorted cloudflare_features.
-    assert rows["basic"]["monthly_price_usd"] == 0
-    assert rows["basic"]["cloudflare_features"] == []
-    assert "custom_domain" in rows["pro"]["cloudflare_features"]
-    biz_features = rows["business"]["cloudflare_features"]
+    # Each tier carries its monthly price + sorted cloudflare_features.
+    assert rows["free"]["monthly_price_usd"] == 0
+    assert rows["free"]["cloudflare_features"] == []
+    assert "custom_domain" in rows["site"]["cloudflare_features"]
+    biz_features = rows["staff"]["cloudflare_features"]
     assert "waf" in biz_features
     assert "edge_cache" in biz_features
     # Features arrive as a SORTED JSON array (deterministic wire payload).
     assert biz_features == sorted(biz_features)
     # The catalog matches the source-of-truth site_plans exactly.
-    assert set(biz_features) == set(site_plans.get_site_plan("business").cloudflare_features)
+    assert set(biz_features) == set(site_plans.get_site_plan("staff").cloudflare_features)
