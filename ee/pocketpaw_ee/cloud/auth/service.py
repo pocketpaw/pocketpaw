@@ -10,6 +10,14 @@ Public API is module-level ``async def`` functions:
 - ``set_active_workspace(ctx, workspace_id)``
 - ``set_avatar_path(ctx, avatar_path)``
 - ``get_home_pocket_id(user_id)`` / ``claim_home_pocket_id(user_id, id, *, expected)``
+- ``resolve_display_names(user_ids)`` / ``resolve_identities(user_ids)``
+
+Updated: 2026-08-24 — added ``resolve_identities``, the name-AND-avatar
+sibling of ``resolve_display_names``, for surfaces that put a face next to
+a name (the Paw Bar concierge thread attributes each takeover reply to the
+teammate who typed it). A separate function rather than a widened return
+type: a dozen callers already read ``resolve_display_names`` as a plain
+``dict[str, str]``.
 
 Updated: 2026-05-21 — added the ``home_pocket_id`` get + atomic-claim
 pair. The pockets service owns home-pocket provisioning but stores the
@@ -25,7 +33,7 @@ from beanie import PydanticObjectId
 
 from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
-from pocketpaw_ee.cloud.auth.domain import AuthUser, WorkspaceMembershipRef
+from pocketpaw_ee.cloud.auth.domain import AuthUser, UserIdentity, WorkspaceMembershipRef
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 
 # ---------------------------------------------------------------------------
@@ -218,7 +226,45 @@ async def resolve_display_names(user_ids: set[str]) -> dict[str, str]:
     }
 
 
+async def resolve_identities(user_ids: set[str]) -> dict[str, UserIdentity]:
+    """Batch-resolve user ids → the name AND avatar a message header needs.
+
+    :func:`resolve_display_names`' sibling, for the surfaces that put a face next
+    to the name (the Paw Bar concierge thread attributes each takeover reply to
+    the teammate who typed it). Kept separate rather than widening that function's
+    return type, because a dozen callers already read it as a plain str map.
+
+    Same tolerances: a non-ObjectId id is skipped, an id with no matching user is
+    simply absent from the map, and the caller decides what an absence renders as.
+    Unlike ``resolve_display_names`` the name here falls back to the EMPTY string
+    rather than the raw id — an unresolvable author on a message header should
+    read as anonymous, not as a 24-character hex string in the sender slot.
+
+    ``avatar`` is stored as the app serves it (an ``/uploads/...`` path for an
+    uploaded picture, an absolute URL for an OAuth one). Clients resolve it the
+    same way they resolve their own profile picture; nothing here rewrites it.
+    """
+    object_ids: list[PydanticObjectId] = []
+    for uid in user_ids:
+        try:
+            object_ids.append(PydanticObjectId(uid))
+        except Exception:
+            continue
+    if not object_ids:
+        return {}
+    docs = await _UserDoc.find({"_id": {"$in": object_ids}}).to_list()
+    return {
+        str(u.id): UserIdentity(
+            id=str(u.id),
+            name=(u.full_name or "").strip() or (u.email or "").strip(),
+            avatar=(u.avatar or "").strip(),
+        )
+        for u in docs
+    }
+
+
 __all__ = [
+    "UserIdentity",
     "claim_home_pocket_id",
     "get_home_pocket_id",
     "get_profile",
