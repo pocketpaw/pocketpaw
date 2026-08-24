@@ -31,7 +31,7 @@
   {
     "label": "the guard downgrades to the floor instead of the site's existing tier",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        unbuyable = tier.key\n        existing_tier = site_plans.get_site_plan(getattr(doc, \"plan_tier\", None))\n        tier = existing_tier or site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)",
+    "find": "        unbuyable = tier.key\n        existing_tier = site_plans.site_scoped_tier(getattr(doc, \"plan_tier\", None))\n        tier = existing_tier or site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)",
     "replace": "        unbuyable = tier.key\n        tier = site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)",
     "tests": [
       "tests/cloud/billing/test_site_plan_purchasable.py::TestThePublishRecordsWhatIsTrue::test_it_never_downgrades_a_site_that_already_has_a_tier"

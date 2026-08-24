@@ -156,7 +156,7 @@ def _site_subscription_body(*, workspace_id: str, site_id: str) -> str:
                 "metadata": {
                     "workspace_id": workspace_id,
                     "site_id": site_id,
-                    "plan_key": "pro",
+                    "plan_key": "site",
                 },
             },
         }
@@ -166,7 +166,7 @@ def _site_subscription_body(*, workspace_id: str, site_id: str) -> str:
 def _paid_tier(monkeypatch) -> None:
     """Make the "pro" site tier chargeable so publish defers the deploy."""
     monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
+        site_plans, "_dodo_product_for", lambda key: {"site": "prod_site_pro"}.get(key)
     )
 
 
@@ -358,7 +358,7 @@ async def test_paid_publish_captures_the_flag_in_the_deploy_snapshot(mongo_db, m
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=gen,
         _cloudflare=_RecordingCF(),
         _bundle_reader=lambda d: b"x",
@@ -401,7 +401,7 @@ async def test_deferred_paid_publish_preserves_the_flag(mongo_db, recording_bus,
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=_RecordingGenerator(),  # publish-path generator: must NOT run
         _billing_provider=_RecordingBillingProvider(),
     )
@@ -446,7 +446,7 @@ async def test_activation_of_a_pre_mt1_pending_site_defaults_to_false(mongo_db, 
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
+        site_plan_key="site",
         _generator=_RecordingGenerator(),
         _billing_provider=_RecordingBillingProvider(),
     )

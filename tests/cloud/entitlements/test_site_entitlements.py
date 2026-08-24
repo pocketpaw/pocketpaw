@@ -39,7 +39,7 @@ def _resolve(**ov):
     kw = {
         "site_id": _SITE,
         "workspace_id": _WS,
-        "plan_tier": "pro",
+        "plan_tier": "site",
         "subscription_status": "active",
         "concierge_enabled": True,
     }
@@ -53,16 +53,16 @@ def _resolve(**ov):
 
 
 def test_an_active_paid_site_drops_the_badge_and_gets_its_domain():
-    ent = _resolve(plan_tier="pro", subscription_status="active")
+    ent = _resolve(plan_tier="site", subscription_status="active")
 
     assert ent.subscription_active is True
     assert ent.badge_required is False
     assert ent.custom_domain is True
-    assert ent.plan_tier == "pro"
+    assert ent.plan_tier == "site"
 
 
-def test_business_is_paid_too():
-    ent = _resolve(plan_tier="business", subscription_status="active")
+def test_staff_is_paid_too():
+    ent = _resolve(plan_tier="staff", subscription_status="active")
 
     assert ent.badge_required is False
     assert ent.custom_domain is True
@@ -71,7 +71,7 @@ def test_business_is_paid_too():
 def test_what_a_paying_site_actually_buys_is_an_UNCAPPED_allowance():
     """Free includes a custom domain, so the paid tiers no longer sell the
     capability — they sell the absence of a ceiling on it. None means uncapped."""
-    assert _resolve(plan_tier="pro", subscription_status="active").max_domained_sites is None
+    assert _resolve(plan_tier="site", subscription_status="active").max_domained_sites is None
 
 
 # --------------------------------------------------------------------------- #
@@ -81,10 +81,10 @@ def test_what_a_paying_site_actually_buys_is_an_UNCAPPED_allowance():
 
 @pytest.mark.parametrize("status", ["cancelled", "none", "pending", "", None, "garbage"])
 def test_a_paid_tier_without_an_active_subscription_is_badged(status):
-    """The whole reason this resolver exists. ``plan_tier`` stays "pro" through
+    """The whole reason this resolver exists. ``plan_tier`` stays on the paid key through
     cancellation — nothing resets it — so gating on the tier alone means a
     cancelled site never sees a badge again."""
-    ent = _resolve(plan_tier="pro", subscription_status=status)
+    ent = _resolve(plan_tier="site", subscription_status=status)
 
     assert ent.subscription_active is False
     assert ent.badge_required is True
@@ -101,7 +101,7 @@ def test_a_lapsed_paid_site_falls_to_the_FLOOR_allowance_not_to_zero(status):
     """
     floor = site_plan_catalog.get_site_plan(site_plan_catalog.BASE_SITE_PLAN_KEY)
 
-    ent = _resolve(plan_tier="pro", subscription_status=status)
+    ent = _resolve(plan_tier="site", subscription_status=status)
 
     assert ent.max_domained_sites == floor.max_domained_sites
     assert ent.custom_domain is True
@@ -111,7 +111,7 @@ def test_a_tier_recorded_but_never_charged_is_badged():
     """Today's live case, not a hypothetical: no Dodo product is configured, so a
     paid publish records the intended tier and takes no money —
     ``subscription_status`` stays "none"."""
-    ent = _resolve(plan_tier="business", subscription_status="none")
+    ent = _resolve(plan_tier="staff", subscription_status="none")
 
     assert ent.badge_required is True
 
@@ -119,9 +119,9 @@ def test_a_tier_recorded_but_never_charged_is_badged():
 def test_the_tier_is_still_reported_when_it_is_not_being_paid_for():
     """Report what the row says, gate on whether it is paid. Blanking the tier
     would lose the information a reconcile/dunning view needs."""
-    ent = _resolve(plan_tier="pro", subscription_status="cancelled")
+    ent = _resolve(plan_tier="site", subscription_status="cancelled")
 
-    assert ent.plan_tier == "pro"
+    assert ent.plan_tier == "site"
     assert ent.subscription_active is False
 
 
@@ -131,7 +131,7 @@ def test_the_tier_is_still_reported_when_it_is_not_being_paid_for():
 
 
 def test_the_base_tier_is_badged_even_when_active():
-    ent = _resolve(plan_tier="basic", subscription_status="active")
+    ent = _resolve(plan_tier="free", subscription_status="active")
 
     assert ent.badge_required is True
 
@@ -171,11 +171,20 @@ def test_a_free_site_still_carries_its_badge_and_still_has_no_concierge():
     assert ent.concierge_entitled is False
 
 
-@pytest.mark.parametrize("tier", [None, "", "stduio", "site", "staff"])
+@pytest.mark.parametrize("tier", [None, "", "stduio", "stafff", "enterprise"])
 def test_an_unknown_or_absent_tier_falls_to_the_base(tier):
-    """Includes the plan ids the pricing spec proposes but the catalog does not
-    carry yet — until they are added, they must resolve to badged, not to a
-    silent upgrade."""
+    """Typos and tiers from other ladders resolve to badged, never to a silent
+    upgrade.
+
+    The parameters used to include ``site`` and ``staff``, which were then the
+    pricing spec's PROPOSED names and not in the catalog. They are real tiers now,
+    so keeping them here would have asserted that the two tiers this change adds
+    grant nothing — a test passing for the exact reason the feature was broken.
+    They are replaced with near-misses (``stafff``) and a key from the WORKSPACE
+    plan ladder (``enterprise``), which is the realistic way a wrong string
+    arrives: the two catalogs are different and a caller can reach for the wrong
+    one.
+    """
     ent = _resolve(plan_tier=tier, subscription_status="active")
 
     assert ent.plan_tier == site_plan_catalog.BASE_SITE_PLAN_KEY
@@ -183,6 +192,65 @@ def test_an_unknown_or_absent_tier_falls_to_the_base(tier):
     # Fail-closed on the ALLOWANCE too: an unknown tier gets the floor's, never the
     # uncapped one. "active" here is a red herring — there is no tier to activate.
     assert ent.max_domained_sites == 1
+
+
+@pytest.mark.parametrize("org_key", ["studio", "agency"])
+def test_an_org_flat_stored_on_a_site_grants_that_site_nothing(org_key):
+    """The security property of the two-scope catalog, at the resolver.
+
+    ``studio`` and ``agency`` are real, resolvable catalog rows that sell
+    white-label and badge removal across a whole workspace. They are NOT legal
+    ``Site.plan_tier`` values, and this is what happens when one shows up there
+    anyway — a hand-edited document, a replayed webhook, a restored backup: the
+    site is treated as having no plan of its own and lands on the free floor.
+
+    Note the ``active`` status. That is deliberate: the tier grants badge removal
+    and the subscription says paid, so every gate this resolver has would open if
+    the key were accepted. The ONLY thing refusing is the scope check.
+
+    Breaks on: ``resolve_site_entitlements`` reading ``get_site_plan`` instead of
+    ``site_scoped_tier``.
+    """
+    assert site_plan_catalog.get_site_plan(org_key) is not None, "the row must still exist"
+    assert site_plan_catalog.get_site_plan(org_key).badge_removal is True, (
+        "if the org tier stopped selling badge removal this test would pass for the wrong reason"
+    )
+
+    ent = _resolve(plan_tier=org_key, subscription_status="active")
+
+    assert ent.plan_tier == site_plan_catalog.BASE_SITE_PLAN_KEY
+    assert ent.badge_required is True
+    assert ent.concierge_entitled is False
+    assert ent.max_domained_sites == 1
+
+
+# --------------------------------------------------------------------------- #
+# The rekey — documents written before 2026-08-22 hold the old keys
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("legacy", "current"), [("basic", "free"), ("pro", "site"), ("business", "staff")]
+)
+def test_a_site_stored_on_a_legacy_key_keeps_everything_it_had(legacy, current):
+    """Every published site in production holds one of these strings.
+
+    An unrecognised key resolves to None here and lands on the free floor, which
+    means the rename alone — with no alias — would have returned the badge to
+    every paying customer's site and revoked its custom domain, at deploy time,
+    silently. The resolver has to answer identically for the old key and the new
+    one.
+
+    Breaks on: removing an entry from ``_LEGACY_SITE_TIER_ALIASES``.
+    """
+    old = _resolve(plan_tier=legacy, subscription_status="active")
+    new = _resolve(plan_tier=current, subscription_status="active")
+
+    assert old.plan_tier == current, "the answer must report the tier's CURRENT name"
+    assert old.badge_required == new.badge_required
+    assert old.custom_domain == new.custom_domain
+    assert old.max_domained_sites == new.max_domained_sites
+    assert old.concierge_entitled == new.concierge_entitled
 
 
 # --------------------------------------------------------------------------- #

@@ -36,6 +36,18 @@
 #   badge or the concierge, which are the two capabilities the paid tiers are
 #   actually sold on. A card that cannot name what a tier includes cannot name what
 #   it omits either, which is the half buyers ask about.
+# Updated 2026-08-22 (feat/site-pricing-ladder): ``SitePlanTierResponse`` carries
+#   the rest of the catalog row now that the catalog is the five-tier pricing spec
+#   — ``scope`` (site rung vs org flat), the card copy the backend owns
+#   (``display_name`` / ``tagline`` / ``highlights``), and the ladder facts a card
+#   has to state to be comparable (``white_label``, ``included_sites``,
+#   ``conversation_allowance``, ``conversation_rate_cents``). The storefront was
+#   deriving its own per-key labels and blurbs client-side, which the rekey would
+#   have blanked; owning the copy here means renaming a tier is one edit.
+#   NOTE the asymmetry with ``SiteEntitlementsResponse``, and keep it: this DTO
+#   describes what a TIER SELLS, that one describes what a SITE MAY DO. The
+#   conversation meter and white-label are unenforced claims today and appear only
+#   here, never there.
 
 from __future__ import annotations
 
@@ -153,12 +165,45 @@ class SitePlanTierResponse(BaseModel):
     that AND lives in ``resolve_site_entitlements``, and it is why these two must
     never be read as a per-site entitlement. They are here so a plan CARD can say
     what each tier includes and, by their absence, what it does not.
+
+    ``scope`` is ``"site"`` or ``"org"`` and tells the storefront which of two
+    completely different things a row is. A site-scoped row is bought one site at
+    a time and its key is a legal ``Site.plan_tier``; an org-scoped flat covers a
+    whole workspace and its key must never be sent back as a publish's
+    ``site_plan_key``. Org rows always arrive with ``purchasable: false`` because
+    no org checkout exists yet — render them as "talk to us", never as a buy
+    button.
+
+    ``white_label``, ``included_sites``, ``conversation_allowance`` and
+    ``conversation_rate_cents`` describe the LADDER, not any site's permissions.
+    Nothing meters a conversation yet and nothing enforces white-label; they are
+    here so a card can state what a tier will sell. ``SiteEntitlementsResponse`` —
+    the read that answers "what may THIS site do" — deliberately carries none of
+    them.
+
+    ``conversation_rate_cents`` is cents, not dollars: $0.05 has no exact float
+    representation and the number gets multiplied by a conversation count.
+
+    ``display_name``, ``tagline`` and ``highlights`` are the card's copy, owned by
+    the catalog rather than the client. A blurb keyed on a tier name in the
+    frontend says nothing the day the keys change, and they just did.
+    ``highlights`` are commitments a human honours (SSO, an SLA) rather than flags
+    code checks — kept apart from ``cloudflare_features`` so they cannot be
+    mistaken for something enforced.
     """
 
     key: str
     monthly_price_usd: int
     dodo_product_id: str | None = None
     cloudflare_features: list[str] = Field(default_factory=list)
+    scope: str = "site"
+    white_label: bool = False
+    included_sites: int | None = None
+    conversation_allowance: int = 0
+    conversation_rate_cents: int = 0
+    display_name: str = ""
+    tagline: str = ""
+    highlights: list[str] = Field(default_factory=list)
     badge_removal: bool = False
     sells_concierge: bool = False
     purchasable: bool = True
@@ -177,6 +222,18 @@ def site_plan_tier_to_dto(tier: SitePlanTier) -> SitePlanTierResponse:
         monthly_price_usd=tier.monthly_price_usd,
         dodo_product_id=tier.dodo_product_id,
         cloudflare_features=sorted(tier.cloudflare_features),
+        scope=tier.scope,
+        white_label=tier.white_label,
+        included_sites=tier.included_sites,
+        conversation_allowance=tier.conversation_allowance,
+        conversation_rate_cents=tier.conversation_rate_cents,
+        display_name=tier.display_name,
+        tagline=tier.tagline,
+        # ``highlights`` is a tuple on the catalog row (frozen dataclass) and a
+        # list on the wire. Order is meaningful and preserved — it is card copy,
+        # not a set — so this is a cast, not the ``sorted(...)`` the feature
+        # collections above get.
+        highlights=list(tier.highlights),
         badge_removal=tier.badge_removal,
         sells_concierge=tier.sells_concierge,
         purchasable=tier.purchasable,

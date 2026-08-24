@@ -868,6 +868,7 @@ from typing import Any
 
 from bson import ObjectId
 from bson.errors import InvalidId
+from dateutil.relativedelta import relativedelta
 from pydantic import BaseModel
 
 from pocketpaw.sites_capture.contact_form import CONTACT_FORM_TYPE, default_event_mapping
@@ -1770,6 +1771,32 @@ async def _promote_pocket_draft_to_published(
         )
 
 
+def _canonical_plan_tier(stored: str | None) -> str:
+    """A stored ``Site.plan_tier`` under the name the catalog uses TODAY.
+
+    Documents written before the 2026-08-22 rekey hold basic/pro/business. Every
+    client matches this value against the keys served by ``GET /billing/site-plans``
+    — to badge the current plan card, to decide what an upgrade costs — and the old
+    names are not in that list, so shipping the raw string makes a paying site look
+    like it is on no plan at all.
+
+    Falls back to the raw value for anything the catalog does not know, and to ""
+    for absent. Not to the floor: reporting a site as free because its tier string
+    is unrecognised is a confident wrong answer, while the odd string at least
+    tells whoever is reading a support ticket what is actually on the document.
+
+    A module-level function rather than an inline expression because both the
+    response mapper and the emitted ``SitePublished`` payload need the same answer,
+    and an event that disagrees with the response it accompanies is the kind of
+    drift nothing catches.
+    """
+    if not stored:
+        return ""
+    from pocketpaw_ee.cloud.billing import site_plans as _site_plans
+
+    return _site_plans.canonical_site_tier_key(stored) or stored
+
+
 def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResponse:
     deployed_at = getattr(doc, "deployed_at", None)
     created_at = getattr(doc, "createdAt", None)
@@ -1809,7 +1836,20 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         checkout_url=getattr(doc, "_checkout_url", None),
         # The per-site billing state. Read straight off the doc — no extra query.
         # These were declared in the frontend and branched on, and never sent.
-        plan_tier=getattr(doc, "plan_tier", None) or "",
+        #
+        # ``plan_tier`` goes out under its CURRENT catalog name, not the raw
+        # stored string. Documents written before the 2026-08-22 rekey hold
+        # basic/pro/business, and the client matches this value against the keys
+        # in ``GET /billing/site-plans`` to decide which card reads "Current". A
+        # raw "pro" matches none of them, so a paying site's plan card would show
+        # nothing selected while the entitlements endpoint — which resolves
+        # through the catalog — reported "site" for the same site. Two endpoints
+        # disagreeing about one site's plan is worse than either answer.
+        #
+        # An unrecognised value falls back to the raw string rather than to "" or
+        # the floor: it is wrong either way, and the wrong value a human can read
+        # is more useful to whoever gets the support ticket than a blank.
+        plan_tier=_canonical_plan_tier(getattr(doc, "plan_tier", None)),
         subscription_status=getattr(doc, "subscription_status", None) or "none",
         renewal_date=(
             _renewal.isoformat()
@@ -4529,7 +4569,11 @@ async def add_domain(
     # Resolve the site's tier → its cloudflare_features and provision them on the
     # custom hostname. A base-tier (or unknown) site resolves to an empty set, so
     # create_custom_hostname stays on the basic path.
-    plan = site_plans.get_site_plan(site.plan_tier)
+    # ``site_scoped_tier`` — this reads a STORED ``plan_tier``, and the catalog
+    # also holds org flats whose keys are not legal there. Resolving one would
+    # provision the WAF and edge-cache controls an org buys across its whole
+    # estate onto one site nobody billed for them.
+    plan = site_plans.site_scoped_tier(site.plan_tier)
     features = set(plan.cloudflare_features) if plan else set()
     ch = await cf.create_custom_hostname(hostname, features=features)
 
@@ -4945,7 +4989,13 @@ async def publish_pocket(
     #     LIVE immediately, exactly as before, then stamps the (free/degraded) tier.
     from pocketpaw_ee.cloud.billing import site_plans
 
-    tier = site_plans.get_site_plan(site_plan_key) or site_plans.get_site_plan(
+    # ``site_scoped_tier`` so an ORG flat (studio/agency) resolves here exactly as
+    # an unknown key does — to the free floor. Left as a plain catalog lookup it
+    # would come back priced, take the charge-first branch, and log a misleading
+    # "paid tier has no configured Dodo product" on the way to being refused
+    # downstream by ``_apply_site_plan`` anyway. Refusing it once, here, keeps the
+    # dispatcher's two branches meaning what they say.
+    tier = site_plans.site_scoped_tier(site_plan_key) or site_plans.get_site_plan(
         site_plans.BASE_SITE_PLAN_KEY
     )
     is_paid = tier is not None and tier.monthly_price_usd > 0
@@ -5131,8 +5181,25 @@ async def _apply_site_plan(
     # carrying the target tier, not the absence of one. Only the None/unknown case
     # is treated as "leave it as it is".
     tier = site_plans.get_site_plan(site_plan_key)
+    # An ORG-SCOPED flat is not a tier a site can be put on. ``studio`` and
+    # ``agency`` are one subscription covering many sites; writing either into
+    # this site's ``plan_tier`` would hand this one site the allowance the org
+    # buys once for twenty-five. There is no org checkout yet, so the only way a
+    # request carries one is a client reading the full catalog and offering every
+    # row — which the storefront must not do, and which this refuses regardless.
+    # Dropped to None so it takes the same "keep what the site already has, else
+    # the floor" path as an unknown key.
+    if tier is not None and tier.is_org_scoped:
+        logger.warning(
+            "sites: publish for site %s asked for tier %s, which is an org-wide "
+            "flat and cannot be a single site's plan — falling back to the site's "
+            "own tier",
+            str(doc.id),
+            tier.key,
+        )
+        tier = None
     if tier is None:
-        existing_tier = site_plans.get_site_plan(getattr(doc, "plan_tier", None))
+        existing_tier = site_plans.site_scoped_tier(getattr(doc, "plan_tier", None))
         tier = existing_tier or site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)
         if existing_tier is not None:
             logger.info(
@@ -5155,7 +5222,7 @@ async def _apply_site_plan(
     # already paying for something.
     if tier is not None and not tier.purchasable:
         unbuyable = tier.key
-        existing_tier = site_plans.get_site_plan(getattr(doc, "plan_tier", None))
+        existing_tier = site_plans.site_scoped_tier(getattr(doc, "plan_tier", None))
         tier = existing_tier or site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)
         logger.warning(
             "sites: publish for site %s asked for tier %s, which has no configured "
@@ -5573,13 +5640,23 @@ async def activate_site(
     )
 
     # The deploy flipped ``deployed=True`` and cleared pending_deploy_inputs; advance
-    # the annual renewal date (one year out — the next charge cycle), mirroring the
-    # renewed path. ``subscription_status`` was already set above, BEFORE the deploy,
-    # so the paid capabilities were stamped correctly; re-asserted here because
-    # ``deployed`` is a separately-loaded doc and this save must not write back a
-    # stale value it read before that flip landed.
+    # the renewal date to the next charge cycle, mirroring the renewed path.
+    # ``subscription_status`` was already set above, BEFORE the deploy, so the paid
+    # capabilities were stamped correctly; re-asserted here because ``deployed`` is a
+    # separately-loaded doc and this save must not write back a stale value it read
+    # before that flip landed.
+    #
+    # ONE MONTH, not one year. This stamped +365 days until 2026-08-22 — a leftover
+    # from the annual ladder. ``billing.service`` was corrected when the prices moved
+    # monthly and this writer was missed, because it lives in the sites service
+    # rather than the billing package. A $7/month site was being told its next
+    # renewal was a year away.
+    #
+    # ``relativedelta`` rather than ``timedelta(days=30)``, same as
+    # ``billing.service``: fixed 30-day steps walk the date backwards through the
+    # calendar, losing five days over a year of renewals.
     deployed.subscription_status = "active"
-    deployed.renewal_date = datetime.now(UTC) + timedelta(days=365)
+    deployed.renewal_date = datetime.now(UTC) + relativedelta(months=1)
     await deployed.save()
 
     # Promote the pocket's draft to published — the durable "this was published"
@@ -5609,7 +5686,11 @@ async def activate_site(
                 "site_id": site_id,
                 "pocket_id": pocket_id,
                 "owner": doc.owner,
-                "plan_tier": deployed.plan_tier or "",
+                # Canonical, matching what ``_to_response`` puts on the wire for
+                # the same site — a subscriber that stores the event's tier and a
+                # client that reads the response must not end up with two
+                # different strings for one plan.
+                "plan_tier": _canonical_plan_tier(deployed.plan_tier),
             }
         )
     )
