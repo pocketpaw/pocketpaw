@@ -1267,7 +1267,6 @@ async def _prewarm_native_artifact(
     failure (missing toolchain, a non-svelte pocket, a read error)."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service
     from pocketpaw_ee.sites import generator_client
-
     from pocketpaw_ee.sites.engines import has_native_edit_lane, normalize_engine
 
     pocket = await pockets_service.get(pocket_id, user_id)

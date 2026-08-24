@@ -41,7 +41,7 @@ _REACT_SOURCE = {
     "src/components/Hero.tsx": (
         "export default function Hero() {\n"
         "  return (\n"
-        "    <section className=\"hero\">\n"
+        '    <section className="hero">\n'
         "      <h1>Bright Smile</h1>\n"
         "    </section>\n"
         "  );\n"
