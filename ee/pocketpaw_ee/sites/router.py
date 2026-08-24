@@ -3,6 +3,16 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# Updated 2026-08-24 (SP-2 — draft preview joins the ephemeral build lane): GET
+# ``/sites/by-pocket/{pocket_id}/native-artifact`` now has TWO response shapes and
+# ``build_status`` says which. A cache hit is unchanged (the render, ``build_status``
+# ``"none"``); a cold miss queues the armed build in a Daytona sandbox and answers
+# immediately with empty ``body_html`` / ``css`` plus ``build_status`` / ``build_job_id``
+# to poll. The endpoint stops 5xxing as ``sites.generator_failed``, which is what it did
+# on every cold preview in the deployed container — there is no ``bun`` there to build
+# with. An enqueue that fails is a 503, deliberately: a job id for a job nobody will run
+# makes a client poll forever.
+#
 # Updated 2026-08-12 (the custom-domain routing lane): added DELETE
 # ``/sites/{site_id}/domains/{hostname}``. Domains could be connected and never
 # disconnected, so a removed or re-pointed domain left its Cloudflare custom hostname
@@ -384,9 +394,19 @@ async def native_artifact_by_pocket(
 
     READ-THROUGH cache (feat/sites-native-artifact-no-build): the service serves a
     prior render from disk when the pocket's render inputs are unchanged (ZERO builds
-    — a plain VIEW never triggers a build), and builds once only on a cold miss.
-    Carries fabric.write because a cold miss still triggers the armed build (mutates
-    on-disk state) — it is not a pure read. The builder origin — which the armed build
+    — a plain VIEW never triggers a build).
+
+    A COLD MISS ANSWERS WITH A BUILD TO POLL, NOT WITH A RENDER (SP-2). The armed build
+    now runs in an ephemeral Daytona sandbox rather than in this container — there is no
+    ``bun`` here, which is why a cold preview used to 5xx as ``sites.generator_failed``.
+    The response then carries empty ``body_html`` / ``css`` plus ``build_status``
+    (``queued`` / ``building`` / ``failed``) and ``build_job_id``; the client re-fetches
+    until ``build_status`` reads ``"none"``, which is the served-render shape. An enqueue
+    that fails is a 503, never a job id — a client handed one for a job nobody will run
+    would poll forever.
+
+    Carries fabric.write because a cold miss still queues the armed build (spends a
+    sandbox) — it is not a pure read. The builder origin — which the armed build
     needs to stamp data-uid + the manifest — is resolved from the request's ``Origin``
     header, with the service applying the ``PAW_SITES_BUILDER_ORIGIN`` env fallback when
     it is absent (the same precedence as ``/editable`` / ``/dev-preview``), so the call

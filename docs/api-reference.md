@@ -97,6 +97,14 @@ rebuild — dynamic-source split + input-keyspace confinement) and GET
 /sites/by-pocket/{id}/native-artifact (serve the armed build's body_html + css
 for shadow render — per-GET arm-build cost, path-traversal-guarded CSS reader).
 
+Updated: 2026-08-24 (SP-2) — GET /sites/by-pocket/{id}/native-artifact has two
+response shapes now. A cold miss no longer builds in the API container (there is
+no bun there, so it 5xx'd as sites.generator_failed on every cold preview); it
+queues the armed build in an ephemeral Daytona sandbox and returns
+build_status / build_reason / build_job_id with body_html and css empty. A cache
+hit is unchanged and still costs nothing. An enqueue that fails is a 503
+(sites.preview_build_unavailable), never a job id for a job nobody will run.
+
 Updated: 2026-07-27 (feat/growth-g1) — documented the Growth — Prospects
 section: workspace-scoped prospect store under /growth/prospects (create /
 get / list with tier|status|source filters / update), domain-deduped per
@@ -1390,13 +1398,19 @@ map). Both armable engines emit a prerendered `index.html`; only the build outpu
 directory differs (`.svelte-kit/cloudflare` or `build` vs `dist`), and the server
 resolves that per engine.
 
-Response `200`:
+**Two response shapes, and `build_status` says which.** A warm read returns the
+render; a cold one returns a build to poll.
+
+Response `200` — the **render** (cache hit):
 
 ```json
 {
   "pocket_id": "p_abc123",
   "body_html": "<div data-uid=\"Hero:root:0\">…<script id=\"paw-edit-manifest\">…</script></div>",
-  "css": "/* concatenated stylesheets */"
+  "css": "/* concatenated stylesheets */",
+  "build_status": "none",
+  "build_reason": null,
+  "build_job_id": null
 }
 ```
 
@@ -1405,17 +1419,44 @@ Response `200`:
   frontend injects it into a shadow root.
 - `css` is the built stylesheet(s) — inline `<style>` blocks plus every linked
   stylesheet — concatenated into one string, injected as a single `<style>`.
+- `build_status` is `"none"` — a served render is not a build in any state.
 
-**Read-through cache — a plain view no longer rebuilds.** The endpoint hashes the
+Response `200` — **build pending** (cache miss, SP-2):
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "body_html": "",
+  "css": "",
+  "build_status": "queued",
+  "build_reason": null,
+  "build_job_id": "site-preview-p_abc123-9f2c…"
+}
+```
+
+- `body_html` and `css` are empty strings, not null — the field types never change
+  between the two shapes.
+- `build_status` is `queued` (this call started the build), `building` (one was
+  already in flight for this exact render), or `failed` (a build of this exact
+  render already finished without producing an artifact). The vocabulary is the
+  publish lane's, unchanged, and **an unrecognised value means in-progress**.
+- `build_reason` carries a rung name on a failure (`build_failed:…`,
+  `scaffold_failed:…`, `sandbox_unavailable:…`, `preview_unreadable:…`) — never the
+  build's stderr, which stays in the worker log.
+- `build_job_id` is the handle to poll with. **Re-fetch this endpoint** until
+  `build_status` reads `"none"`, which is the render shape above.
+
+**One render is one sandbox.** The job id is derived from the same content hash the
+cache is keyed on, so polling during a build addresses the job already running
+rather than queueing another. A source change produces a different hash and
+therefore a different job.
+
+**Read-through cache — a plain view never builds.** The endpoint hashes the
 pocket's render inputs (source map + theme + builder origin + engine + generator
 version) and serves a prior render from the on-disk artifact store
 (`~/.pocketpaw/site-artifacts/<pocket_id>/<hash>.json`) on a **cache hit** — zero
-subprocess builds. It builds once only on a **cold miss** (then stores the result),
-and publishing a site plus every source-changing edit **pre-warm** the store in the
-background, so a live/clean site is a hit and a view never triggers a build. A cold
-miss's build is keyed on `pocket_id` in a stable directory, so `node_modules` /
-`bun install` stay cached; it skips the SSR smoke fail-gate (`smoke=False`) but still
-emits the static output that is read.
+builds, zero sandboxes. Publishing a site and every source-changing edit **pre-warm**
+the store in the background, so a live/clean site is a hit.
 
 **Shared store (opt-in) — `PAW_SITES_ARTIFACT_STORE=s3`.** The on-disk store above is
 per-container, so on a multi-replica deploy a view routed to replica B misses what
@@ -1434,10 +1475,24 @@ that is then destroyed, so such a pocket rebuilds on every view instead of cachi
 eviction runs here (the on-disk store's `PAW_SITES_ARTIFACT_KEEP` does not apply); put a
 bucket lifecycle rule on the `site-artifacts/` prefix.
 
-**Auth is `fabric.write`, not a read scope,** because a cold miss still **arms a
-build**: it builds the pocket with a builder origin set so the generator stamps
-`data-uid` on the editable leaves and embeds the edit manifest — the endpoint can
-still trigger on-disk work, so it is not a pure read. The builder origin is resolved
+**A cold miss builds in an ephemeral Daytona sandbox, not in this process (SP-2).**
+It used to shell out to `bun` here, which works on a laptop and cannot work in the
+deployed API container — there is no toolchain, so every cold preview raised and
+reached users as `sites.generator_failed`. The build is now handed to the same
+ephemeral lane the async publish path has used since SL-3: the API scaffolds nothing
+and returns immediately, a worker scaffolds, installs and builds in a throwaway
+sandbox, and writes the resulting `{body_html, css}` into the artifact store under
+the content hash this call looked up. The per-site capture key is scrubbed out of the
+job payload before it reaches Redis or the sandbox.
+
+Because a miss now costs a sandbox rather than a local subprocess, the cache check is
+what keeps an editing session affordable — measured in-sandbox build times are 8.70s
+(react) and 14.67s (svelte), before sandbox create, upload and teardown.
+
+**Auth is `fabric.write`, not a read scope,** because a cold miss still **queues an
+armed build**: the build carries a builder origin so the generator stamps `data-uid`
+on the editable leaves and embeds the edit manifest — the endpoint spends a sandbox,
+so it is not a pure read. The builder origin is resolved
 from the request's `Origin` header, falling back to the configured
 `PAW_SITES_BUILDER_ORIGIN` when absent (the same precedence as `/editable` and
 `/dev-preview`), so the call works with no header.
@@ -1469,7 +1524,7 @@ Errors:
 | 422 | `pocket.no_native_edit_lane` | The pocket's engine has no armable build to render (html, ripple). Renamed from `pocket.not_svelte_site` in RX-2, when react joined the lane. |
 | 404 | `pocket.not_found` | Unknown pocket id. |
 | 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
-| 500 | `sites.generator_failed` | The arm build failed (missing toolchain, non-zero build, or smoke-gate failure). |
+| 503 | `sites.preview_build_unavailable` | The armed build could not be QUEUED (the job queue is unreachable). Retryable. A failed enqueue is deliberately an error rather than a pending response — a job id for a job nobody will run makes a client poll forever. A build that queues and then FAILS is not an error here: it comes back `200` with `build_status: "failed"` and a rung in `build_reason`. |
 
 ## Ship — Managed Deploys
 

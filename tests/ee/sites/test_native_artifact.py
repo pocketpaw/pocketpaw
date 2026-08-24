@@ -1,5 +1,19 @@
 # tests/ee/sites/test_native_artifact.py — the native-artifact render path (NE-5b).
 # Created 2026-07-01 (feat/native-editing-ne4b).
+# Updated 2026-08-24 (SP-2 — the cold miss QUEUES instead of building here): every test
+# in this file that drove a cache MISS used to assert on an inline ``generator.build``.
+# That build has moved to an ephemeral Daytona sandbox, because there is no ``bun`` in
+# the deployed API container and every cold preview died as ``sites.generator_failed``.
+# So the ``_generator`` / ``_read_built`` seams are gone from ``get_native_artifact`` and
+# the pre-warm, and ``_pool`` replaces them. What each test now pins:
+#   * the HIT path is unchanged and is the one that must stay free — it is asserted
+#     against a pool that must not be called, not only against a build that must not run;
+#   * the MISS path returns the build-pending shape and queues exactly one job;
+#   * the origin precedence (request Origin > PAW_SITES_BUILDER_ORIGIN) is asserted
+#     through the CONTENT HASH, which is what it actually decides: warm at one origin and
+#     a view at the other misses.
+# The lane itself — the queued job, single-flight, the enqueue-failure arm, the worker's
+# artifact read — lives in test_preview_build_lane.py.
 # Updated 2026-07-17 (fix/sites-prewarm-origin): the pre-warm must build with the SAME
 # origin a browser VIEW resolves (its request Origin header) or the content hashes never
 # match. New tests prove: a publish given an explicit prewarm_origin warms THAT origin
@@ -82,8 +96,8 @@ _LINKED_CSS = ".hero{color:#0A84FF}"
 
 class _FakeGenerator:
     """Records the build kwargs and returns a BuildResult pointing at a pre-populated
-    ``project_dir`` (a real .svelte-kit/cloudflare/ tree the test wrote), so the REAL
-    ``_read_native_artifact`` extraction runs without Bun."""
+    ``project_dir``. Still used by the PUBLISH paths in this file (publish builds
+    inline); ``get_native_artifact`` no longer takes a generator at all."""
 
     def __init__(self, project_dir: str) -> None:
         self.project_dir = project_dir
@@ -96,12 +110,64 @@ class _FakeGenerator:
         return BuildResult(project_dir=self.project_dir, ripple_version=None)
 
 
-class _NoBuildGenerator:
-    """A generator whose build MUST NOT run — used by the reject paths (a non-svelte
-    or missing pocket must fail before any build is triggered)."""
+class _RecordingPool:
+    """An arq pool that records the enqueue instead of performing it (SP-2).
 
-    async def build(self, **kw):  # pragma: no cover - must not be reached
-        raise AssertionError("the build must not run on the reject path")
+    The replacement for ``_NoBuildGenerator`` on the reject paths: what must not happen
+    on a rejected read is no longer "a build must not run" but "a sandbox must not be
+    queued", and the two stopped being the same assertion when the build left this
+    process.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def enqueue_job(self, function: str, *args, _job_id: str | None = None, **kw):
+        self.calls.append({"function": function, "args": args, "job_id": _job_id})
+        return object()
+
+
+def _install_pool(monkeypatch) -> _RecordingPool:
+    """Make ``build_job``'s process pool a recording fake for this test.
+
+    The ``_pool`` seam only reaches ``get_native_artifact`` — a pre-warm is scheduled
+    BY ``publish_pocket`` / the edit paths, which have no pool to forward, so the
+    injection point for those is the module-level getter the enqueue falls back to.
+    """
+    from pocketpaw_ee.sites import build_job as bj
+
+    pool = _RecordingPool()
+
+    async def _fake_get_pool():
+        return pool
+
+    monkeypatch.setattr(bj, "_get_pool", _fake_get_pool)
+    return pool
+
+
+def _seed_store(store, pocket_id: str, content_hash: str, project_dir: Path, engine="svelte"):
+    """Put the REAL extraction of a built tree into the store under ``content_hash`` —
+    what the preview worker does when its build lands. Lets a test assert the endpoint
+    serves the genuine body/CSS without the extraction happening in-process."""
+    body_html, css = sites_service._read_native_artifact(str(project_dir), engine)
+    store.data[(pocket_id, content_hash)] = (body_html, css)
+    return body_html, css
+
+
+async def _hash_for(pocket_id: str, *, origin: str, engine: str = "svelte") -> str:
+    """The content hash the service will look up for this pocket at ``origin``."""
+    from pocketpaw_ee.sites import generator_client
+
+    wire = await pockets_service.get(pocket_id, "u1")
+    ripple_spec = wire.get("rippleSpec") or {}
+    theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
+    return sites_service._artifact_content_hash(
+        source=wire["source"],
+        theme=theme,
+        builder_origin=origin,
+        gen_version=generator_client.generator_version(),
+        engine=engine,
+    )
 
 
 def _write_built_output(project_dir: Path) -> None:
@@ -135,19 +201,28 @@ async def _make_svelte_pocket(workspace_id: str, user_id: str) -> str:
 
 @pytest.mark.asyncio
 async def test_native_artifact_returns_body_and_css(beanie_test_db, tmp_path):
-    """A svelte pocket → {pocket_id, body_html, css}: body_html is the built <body>
-    INNER (data-uid leaf + manifest, no <body>/<head> wrapper); css concatenates the
-    inline <style> + the linked stylesheet; and the build was ARMED with the source."""
+    """A warmed svelte pocket → {pocket_id, body_html, css}: body_html is the built
+    <body> INNER (data-uid leaf + manifest, no <body>/<head> wrapper) and css
+    concatenates the inline <style> + the linked stylesheet.
+
+    SP-2 moved the BUILD out of this call, so the render is seeded into the store the way
+    the preview worker seeds it. What is still asserted here is the ENDPOINT's contract —
+    that it hands back the stored extraction verbatim under the hash it looked up — and
+    the extraction itself runs for real inside ``_seed_store``, off the built tree."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
     _write_built_output(tmp_path)
-    gen = _FakeGenerator(str(tmp_path))
+    store = _MemoryArtifactStore()
+    origin = "https://dash.paw.example"
+    _seed_store(store, pocket_id, await _hash_for(pocket_id, origin=origin), tmp_path)
+    pool = _RecordingPool()
 
     result = await sites_service.get_native_artifact(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
-        builder_origin="https://dash.paw.example",
-        _generator=gen,
+        builder_origin=origin,
+        _store=store,
+        _pool=pool,
     )
 
     assert result["pocket_id"] == pocket_id
@@ -160,62 +235,49 @@ async def test_native_artifact_returns_body_and_css(beanie_test_db, tmp_path):
     # css concatenates the inline critical style AND the linked stylesheet.
     assert ".inline-critical{margin:0}" in result["css"]
     assert _LINKED_CSS in result["css"]
-    # The build was ARMED (the resolved builder_origin threaded through) and carried
-    # the pocket's svelte source on the svelte track, with the arm/preview smoke gate.
-    assert gen.built is not None
-    assert gen.built["builder_origin"] == "https://dash.paw.example"
-    assert gen.built["engine"] == "svelte"
-    assert gen.built["pocket_id"] == pocket_id
-    assert gen.built["smoke"] is False
-    assert gen.built["source"]["src/lib/components/Hero.svelte"] == _HERO_V1
+    # A served render is not a build in any state, and it cost nothing.
+    assert result["build_status"] == "none"
+    assert pool.calls == []
 
 
 @pytest.mark.asyncio
 async def test_native_artifact_default_origin_from_config(beanie_test_db, tmp_path, monkeypatch):
     """With no builder_origin passed, the service falls back to the configured
-    PAW_SITES_BUILDER_ORIGIN — the armed build still gets a non-empty origin so the
-    generator stamps data-uid + the manifest."""
+    PAW_SITES_BUILDER_ORIGIN.
+
+    Asserted through the CONTENT HASH, which is what the origin actually decides: an
+    artifact warmed at the configured origin HITs for a caller that passes none. Under a
+    fallback that resolved to anything else the lookup would miss and the call would
+    queue a build instead of serving one."""
     monkeypatch.setenv("PAW_SITES_BUILDER_ORIGIN", "https://configured.paw.example")
     pocket_id = await _make_svelte_pocket("ws1", "u1")
     _write_built_output(tmp_path)
-    gen = _FakeGenerator(str(tmp_path))
+    store = _MemoryArtifactStore()
+    _seed_store(
+        store,
+        pocket_id,
+        await _hash_for(pocket_id, origin="https://configured.paw.example"),
+        tmp_path,
+    )
+    pool = _RecordingPool()
 
     result = await sites_service.get_native_artifact(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
         builder_origin="",
-        _generator=gen,
+        _store=store,
+        _pool=pool,
     )
 
     assert result["pocket_id"] == pocket_id
-    assert gen.built["builder_origin"] == "https://configured.paw.example"
+    assert 'data-uid="Hero:headline:0"' in result["body_html"]
+    assert pool.calls == [], "the env fallback must resolve the same hash the warm used"
 
 
-@pytest.mark.asyncio
-async def test_native_artifact_read_seam_is_injectable(beanie_test_db):
-    """The _read_built seam is honored: the service returns whatever it yields, keyed
-    on the build's project_dir — so a caller can bypass disk entirely."""
-    pocket_id = await _make_svelte_pocket("ws1", "u1")
-    gen = _FakeGenerator("/tmp/paw-native-artifact-nonexistent")
-
-    def _fake_read(project_dir: str) -> tuple[str, str]:
-        assert project_dir == "/tmp/paw-native-artifact-nonexistent"
-        return "<h1 data-uid='x:0'>hi</h1>", ".x{color:red}"
-
-    result = await sites_service.get_native_artifact(
-        workspace_id="ws1",
-        user_id="u1",
-        pocket_id=pocket_id,
-        builder_origin="https://dash.paw.example",
-        _generator=gen,
-        _read_built=_fake_read,
-    )
-    assert result == {
-        "pocket_id": pocket_id,
-        "body_html": "<h1 data-uid='x:0'>hi</h1>",
-        "css": ".x{color:red}",
-    }
+# The ``_read_built`` seam is gone with SP-2: the built tree is read by the preview
+# worker rather than by this call, and that read is covered in
+# ``test_preview_build_lane.py::TestThePreviewJob``.
 
 
 @pytest.mark.asyncio
@@ -232,48 +294,48 @@ async def test_native_artifact_non_svelte_pocket_rejected(beanie_test_db):
     )
     assert err is None, err
 
+    pool = _RecordingPool()
     with pytest.raises(ValidationError):
         await sites_service.get_native_artifact(
             workspace_id="ws1",
             user_id="u1",
             pocket_id=pocket_id,
             builder_origin="https://dash.paw.example",
-            _generator=_NoBuildGenerator(),
+            _pool=pool,
         )
+    assert pool.calls == [], "a rejected pocket must not queue a sandbox"
 
 
 @pytest.mark.asyncio
 async def test_native_artifact_missing_pocket_raises_not_found(beanie_test_db):
     """A missing / cross-tenant pocket surfaces the pockets service's NotFound (404),
     before any build."""
+    pool = _RecordingPool()
     with pytest.raises(NotFound):
         await sites_service.get_native_artifact(
             workspace_id="ws1",
             user_id="u1",
             pocket_id="0123456789abcdef01234567",
             builder_origin="https://dash.paw.example",
-            _generator=_NoBuildGenerator(),
+            _pool=pool,
         )
+    assert pool.calls == []
 
 
-class _SmokeGateFailGenerator:
-    """A generator whose build raises SmokeGateFailed — the failure a misconfigured
-    toolchain / broken build produces. DEP-3 routes get_native_artifact's build
-    through _build_or_cloud_error, so this must surface as a clean CloudError, not an
-    opaque 500."""
+class _DeadPool:
+    """An arq pool that cannot take the job — a dead Redis, or arq refusing outright."""
 
-    async def build(self, **kw):
-        from pocketpaw_ee.sites.generator_client import SmokeGateFailed
-
-        raise SmokeGateFailed("workerd SSR render failed")
+    async def enqueue_job(self, *a, **kw):
+        raise RuntimeError("redis is gone")
 
 
 @pytest.mark.asyncio
-async def test_native_artifact_build_failure_maps_to_cloud_error(beanie_test_db):
-    """DEP-3: a generator build failure (SmokeGateFailed / missing toolchain / non-zero
-    build) is mapped to a clean CloudError (sites.generator_failed) instead of escaping
-    as an opaque unhandled 500 — get_native_artifact routes its build through
-    _build_or_cloud_error like the publish paths, NOT a bare generator.build()."""
+async def test_native_artifact_enqueue_failure_maps_to_cloud_error(beanie_test_db):
+    """DEP-3's property, on the seam that replaced the inline build (SP-2): a cold miss
+    that cannot reach the queue surfaces as a clean CloudError, not an opaque unhandled
+    500 — and NOT as a pending build, which would be worse than either. A job id for a
+    job nobody will run makes a client poll forever with the endpoint reporting
+    progress."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
 
     with pytest.raises(CloudError) as excinfo:
@@ -282,15 +344,13 @@ async def test_native_artifact_build_failure_maps_to_cloud_error(beanie_test_db)
             user_id="u1",
             pocket_id=pocket_id,
             builder_origin="https://dash.paw.example",
-            _generator=_SmokeGateFailGenerator(),
+            _store=_MemoryArtifactStore(),
+            _pool=_DeadPool(),
         )
 
-    # A structured envelope with the DEP-3 machine code + a 5xx status — not a bare
-    # RuntimeError / SmokeGateFailed escaping as an unhandled 500.
-    assert excinfo.value.code == "sites.generator_failed"
+    assert excinfo.value.code == "sites.preview_build_unavailable"
     assert excinfo.value.status_code >= 500
-    # SmokeGateFailed is a RuntimeError subclass, so confirm what surfaced is the
-    # mapped CloudError, not the raw RuntimeError.
+    # The mapped envelope, not the raw RuntimeError escaping as an unhandled 500.
     assert not isinstance(excinfo.value, RuntimeError)
 
 
@@ -339,37 +399,46 @@ def _fake_local_deploy(site_id: str, project_dir: str) -> str:  # noqa: ARG001
 
 
 @pytest.mark.asyncio
-async def test_native_artifact_repeat_call_is_cache_hit_zero_builds(beanie_test_db, tmp_path):
-    """The core DoD: a repeat GET with UNCHANGED source performs ZERO subprocess builds.
-    The first call is a MISS (build once, store); the second is a read-through HIT off
-    the default filesystem store (redirected to tmp by the conftest fixture)."""
+async def test_native_artifact_repeat_call_is_cache_hit_zero_sandboxes(beanie_test_db, tmp_path):
+    """The core DoD, in the units SP-2 made it cost: a repeat GET with UNCHANGED source
+    spends ZERO sandboxes. The first call is a MISS (queue once, pending); once the
+    worker's artifact lands under that hash the second call is a read-through HIT and
+    queues nothing.
+
+    The intermediate write is what the preview job does. Doing it here rather than
+    running the job keeps this test about the ENDPOINT's caching — the job's own half is
+    ``test_preview_build_lane.py``."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
     _write_built_output(tmp_path)
-    gen = _CountingGenerator(str(tmp_path))
-
-    r1 = await sites_service.get_native_artifact(
+    origin = "https://dash.paw.example"
+    store = _MemoryArtifactStore()
+    pool = _RecordingPool()
+    kw = dict(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
-        builder_origin="https://dash.paw.example",
-        _generator=gen,
-    )
-    r2 = await sites_service.get_native_artifact(
-        workspace_id="ws1",
-        user_id="u1",
-        pocket_id=pocket_id,
-        builder_origin="https://dash.paw.example",
-        _generator=gen,
+        builder_origin=origin,
+        _store=store,
+        _pool=pool,
     )
 
-    assert r1 == r2
-    assert gen.calls == 1, "the second identical view must be a cache HIT — zero rebuilds"
+    r1 = await sites_service.get_native_artifact(**kw)
+    assert r1["build_status"] == "queued"
+    assert len(pool.calls) == 1
+
+    # The worker lands: it writes the render under the hash the enqueue carried.
+    _seed_store(store, pocket_id, await _hash_for(pocket_id, origin=origin), tmp_path)
+
+    r2 = await sites_service.get_native_artifact(**kw)
+    assert 'data-uid="Hero:headline:0"' in r2["body_html"]
+    assert r2["build_status"] == "none"
+    assert len(pool.calls) == 1, "the second identical view must be a cache HIT — no sandbox"
 
 
 @pytest.mark.asyncio
 async def test_native_artifact_store_hit_skips_build(beanie_test_db):
     """A store that already holds the content-hashed render serves it WITHOUT any build
-    — proven by a generator whose build must never run."""
+    — proven by a pool that must never be enqueued to."""
     from pocketpaw_ee.sites import generator_client
 
     pocket_id = await _make_svelte_pocket("ws1", "u1")
@@ -383,43 +452,50 @@ async def test_native_artifact_store_hit_skips_build(beanie_test_db):
     )
     store.data[(pocket_id, content_hash)] = ("<h1>cached</h1>", ".x{color:red}")
 
+    pool = _RecordingPool()
     result = await sites_service.get_native_artifact(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
         builder_origin="https://dash.paw.example",
-        _generator=_NoBuildGenerator(),
         _store=store,
+        _pool=pool,
     )
 
     assert result == {
         "pocket_id": pocket_id,
         "body_html": "<h1>cached</h1>",
         "css": ".x{color:red}",
+        "build_status": "none",
+        "build_reason": None,
+        "build_job_id": None,
     }
     assert store.writes == 0, "a cache hit must not re-store"
+    assert pool.calls == [], "a cache hit must not queue a sandbox"
 
 
 @pytest.mark.asyncio
 async def test_native_artifact_source_change_is_cache_miss(beanie_test_db, tmp_path):
     """The content hash tracks the source: an unchanged view HITs, but a source mutation
-    changes the hash → MISS → rebuild."""
+    changes the hash → MISS → a new build queued."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
     _write_built_output(tmp_path)
-    gen = _CountingGenerator(str(tmp_path))
+    origin = "https://dash.paw.example"
     store = _MemoryArtifactStore()
+    pool = _RecordingPool()
     kw = dict(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
-        builder_origin="https://dash.paw.example",
-        _generator=gen,
+        builder_origin=origin,
         _store=store,
+        _pool=pool,
     )
 
-    await sites_service.get_native_artifact(**kw)  # MISS → build 1
+    await sites_service.get_native_artifact(**kw)  # MISS → queue 1
+    _seed_store(store, pocket_id, await _hash_for(pocket_id, origin=origin), tmp_path)
     await sites_service.get_native_artifact(**kw)  # HIT → still 1
-    assert gen.calls == 1
+    assert len(pool.calls) == 1
 
     await pockets_service.set_svelte_source_file(
         pocket_id,
@@ -427,23 +503,31 @@ async def test_native_artifact_source_change_is_cache_miss(beanie_test_db, tmp_p
         component_path="src/lib/components/Hero.svelte",
         new_source="<section class='hero'><h1>Changed</h1></section>",
     )
-    await sites_service.get_native_artifact(**kw)  # source changed → MISS → build 2
-    assert gen.calls == 2, "a source change must be a cache MISS and rebuild"
+    await sites_service.get_native_artifact(**kw)  # source changed → MISS → queue 2
+    assert len(pool.calls) == 2, "a source change must be a cache MISS and queue a build"
 
 
 @pytest.mark.asyncio
 async def test_publish_prewarms_then_native_artifact_hits(
     beanie_test_db, tmp_path, monkeypatch, _captured_prewarms
 ):
-    """DoD: a LIVE svelte publish stores an artifact (via the scheduled pre-warm) so the
-    NEXT native-artifact view is a cache HIT — no on-view build."""
+    """DoD, re-aimed by SP-2: a LIVE svelte publish schedules a pre-warm that QUEUES the
+    armed build for the SAME render the next view asks for.
+
+    The pre-warm no longer builds in-process, so what it has to get right is the JOB ID —
+    which is the content hash. A pre-warm that warmed a different render would leave the
+    view queueing a SECOND sandbox for the same page, so "same render" is asserted as
+    "same job". Once that job lands, the view is a plain cache hit."""
     # Force the LOCAL deploy branch so the live publish never shells out to a real
     # deployer (the workspace .env sets PAW_CF_DEPLOY_MODE=workers, which would route to
     # a real wrangler deploy); the fake local deploy makes doc.deployed=True.
     monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "local")
+    monkeypatch.setenv("PAW_SITES_BUILDER_ORIGIN", "https://configured.paw.example")
     pocket_id = await _make_svelte_pocket("ws1", "u1")
     _write_built_output(tmp_path)
     gen = _CountingGenerator(str(tmp_path))
+    store = _MemoryArtifactStore()
+    pool = _install_pool(monkeypatch)
 
     await sites_service.publish_pocket(
         workspace_id="ws1",
@@ -456,19 +540,31 @@ async def test_publish_prewarms_then_native_artifact_hits(
 
     # A live svelte publish scheduled exactly one background pre-warm.
     assert len(_captured_prewarms) == 1, "a live svelte publish must schedule a pre-warm"
-    # Run it — the pre-warm builds the ARMED artifact and stores it (default fs store).
+    # Run it — the pre-warm queues the ARMED build.
     await _captured_prewarms[0]
+    assert len(pool.calls) == 1, "the pre-warm must queue the armed build"
+    prewarmed_job = pool.calls[0]["job_id"]
 
-    # The next view is a read-through HIT — proven by a generator that must not build.
-    result = await sites_service.get_native_artifact(
+    # A view with no explicit origin resolves the same PAW_SITES_BUILDER_ORIGIN fallback
+    # the pre-warm used, so it addresses the job already in flight.
+    view_kw = dict(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
-        # No explicit origin → the same PAW_SITES_BUILDER_ORIGIN fallback the publish
-        # pre-warm resolved, so the content hash matches and the store hits.
         builder_origin="",
-        _generator=_NoBuildGenerator(),
+        _store=store,
     )
+    pending = await sites_service.get_native_artifact(**view_kw)
+    assert pending["build_job_id"] == prewarmed_job
+
+    # Once that job lands, the view is a read-through HIT.
+    _seed_store(
+        store,
+        pocket_id,
+        await _hash_for(pocket_id, origin="https://configured.paw.example"),
+        tmp_path,
+    )
+    result = await sites_service.get_native_artifact(**view_kw)
     assert result["pocket_id"] == pocket_id
     assert 'data-uid="Hero:headline:0"' in result["body_html"]
     assert 'id="paw-edit-manifest"' in result["body_html"]
@@ -556,8 +652,10 @@ async def test_publish_prewarm_uses_prewarm_origin_over_env(
     """A live publish given an explicit ``prewarm_origin`` warms the artifact for THAT
     origin — the one a browser view resolves from its request Origin header — NOT the
     PAW_SITES_BUILDER_ORIGIN env fallback. Proven by setting the env to a DIFFERENT
-    origin: with the pre-warm-origin bug, the pre-warm would warm at the env origin and
-    the next view AT THE REQUEST ORIGIN would MISS — the _NoBuildGenerator would fire."""
+    origin: with the pre-warm-origin bug the pre-warm would queue the env origin's render
+    and a view at the request origin would queue a SECOND sandbox for the same page.
+    Since SP-2 the job id IS the content hash, so "same render" and "same job" are one
+    assertion."""
     monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "local")
     # The env fallback is a DIFFERENT origin than the request origin: the OLD behaviour
     # warmed here, so a view at the request origin would have been a cold miss.
@@ -566,6 +664,8 @@ async def test_publish_prewarm_uses_prewarm_origin_over_env(
     pocket_id = await _make_svelte_pocket("ws1", "u1")
     _write_built_output(tmp_path)
     gen = _CountingGenerator(str(tmp_path))
+    store = _MemoryArtifactStore()
+    pool = _install_pool(monkeypatch)
 
     await sites_service.publish_pocket(
         workspace_id="ws1",
@@ -578,17 +678,24 @@ async def test_publish_prewarm_uses_prewarm_origin_over_env(
     )
 
     assert len(_captured_prewarms) == 1, "a live svelte publish must schedule a pre-warm"
-    await _captured_prewarms[0]  # build + store the armed artifact at view_origin
+    await _captured_prewarms[0]  # queue the armed build at view_origin
+    assert len(pool.calls) == 1
 
-    # The next view AT THE REQUEST ORIGIN is a read-through HIT (zero builds) — the
+    # A view AT THE REQUEST ORIGIN addresses the job the pre-warm already queued — the
     # pre-warm used prewarm_origin, not the (different) env fallback.
-    result = await sites_service.get_native_artifact(
+    view_kw = dict(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
         builder_origin=view_origin,
-        _generator=_NoBuildGenerator(),
+        _store=store,
     )
+    pending = await sites_service.get_native_artifact(**view_kw)
+    assert pending["build_job_id"] == pool.calls[0]["job_id"]
+
+    # And once that render lands it serves, which is what the origin actually decides.
+    _seed_store(store, pocket_id, await _hash_for(pocket_id, origin=view_origin), tmp_path)
+    result = await sites_service.get_native_artifact(**view_kw)
     assert result["pocket_id"] == pocket_id
     assert 'data-uid="Hero:headline:0"' in result["body_html"]
 
@@ -599,13 +706,15 @@ async def test_publish_no_prewarm_origin_keeps_env_fallback(
 ):
     """A publish with NO prewarm_origin (a chat-agent / MCP publish — no request origin)
     keeps the pre-warm's PAW_SITES_BUILDER_ORIGIN env fallback, so a view with no origin
-    (which resolves the same env fallback) still HITs. Guards the defaulted param: the
-    fix must not regress the no-request-origin path."""
+    resolves the SAME render and rides the pre-warm's job rather than queueing its own.
+    Guards the defaulted param: the fix must not regress the no-request-origin path."""
     monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "local")
     monkeypatch.setenv("PAW_SITES_BUILDER_ORIGIN", "https://configured.paw.example")
     pocket_id = await _make_svelte_pocket("ws1", "u1")
     _write_built_output(tmp_path)
     gen = _CountingGenerator(str(tmp_path))
+    store = _MemoryArtifactStore()
+    pool = _install_pool(monkeypatch)
 
     await sites_service.publish_pocket(
         workspace_id="ws1",
@@ -617,15 +726,17 @@ async def test_publish_no_prewarm_origin_keeps_env_fallback(
     )
     assert len(_captured_prewarms) == 1
     await _captured_prewarms[0]
+    assert len(pool.calls) == 1
 
     result = await sites_service.get_native_artifact(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
         builder_origin="",  # resolves the same env fallback the pre-warm used
-        _generator=_NoBuildGenerator(),
+        _store=store,
     )
     assert result["pocket_id"] == pocket_id
+    assert result["build_job_id"] == pool.calls[0]["job_id"]
 
 
 @pytest.mark.asyncio

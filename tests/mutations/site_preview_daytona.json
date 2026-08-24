@@ -1,0 +1,68 @@
+[
+  {
+    "label": "preview lane: the cache check no longer short-circuits, so every view queues a sandbox",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    cached = store.read(pocket_id, content_hash)\n    if cached is not None:\n        body_html, css = cached",
+    "replace": "    cached = None\n    if cached is not None:\n        body_html, css = cached",
+    "tests": [
+      "tests/ee/sites/test_preview_build_lane.py",
+      "tests/ee/sites/test_native_artifact.py"
+    ]
+  },
+  {
+    "label": "preview lane: a failed enqueue reads as a pending build the client polls forever",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        logger.exception(\"sites.preview: could not queue the preview build for %s\", pocket_id)\n        raise CloudError(\n            503,\n            \"sites.preview_build_unavailable\",\n            \"The preview build could not be queued. Try again in a moment.\",\n        ) from exc",
+    "replace": "        logger.exception(\"sites.preview: could not queue the preview build for %s\", pocket_id)\n        from pocketpaw_ee.sites.build_job import PreviewBuildEnqueue\n\n        enqueued = PreviewBuildEnqueue(job_id=\"site-preview-unknown\", status=\"queued\")",
+    "tests": [
+      "tests/ee/sites/test_preview_build_lane.py",
+      "tests/ee/sites/test_native_artifact.py"
+    ]
+  },
+  {
+    "label": "preview lane: a refused enqueue is assumed in flight, so a finished failure spins the poller",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if job is None:\n        status, reason = await _preview_job_outcome(pool, job_id)",
+    "replace": "    if job is None:\n        status, reason = \"building\", None",
+    "tests": [
+      "tests/ee/sites/test_preview_build_lane.py"
+    ]
+  },
+  {
+    "label": "preview lane: the job id gets a uuid tail, defeating single-flight on the content hash",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    return f\"site-preview-{pocket_id}-{content_hash}\"",
+    "replace": "    return f\"site-preview-{pocket_id}-{content_hash}-{uuid.uuid4().hex}\"",
+    "tests": [
+      "tests/ee/sites/test_preview_build_lane.py"
+    ]
+  },
+  {
+    "label": "preview lane: a build that failed still has its artifact stored as a served render",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    if settlement.status != \"built\":\n        # ``settle`` can answer None to keep a publish attempt in flight between retries.",
+    "replace": "    if settlement.status == \"never\":\n        # ``settle`` can answer None to keep a publish attempt in flight between retries.",
+    "tests": [
+      "tests/ee/sites/test_preview_build_lane.py"
+    ]
+  },
+  {
+    "label": "preview lane: the worker stores under its own key instead of the hash the enqueue carried",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "            pocket_id=pocket_id,\n            content_hash=content_hash,\n            output_rel=artifact_rel,",
+    "replace": "            pocket_id=pocket_id,\n            content_hash=\"recomputed\",\n            output_rel=artifact_rel,",
+    "tests": [
+      "tests/ee/sites/test_preview_build_lane.py"
+    ]
+  },
+  {
+    "label": "preview lane: the served-render branch reports a build in progress, badging a finished preview as pending",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            # A served render is not a build in any state. \"none\" is the same value\n            # ``pocket_status`` gives a pocket that has never built, and it is what stops\n            # a client badging a finished preview as mid-build.\n            \"build_status\": \"none\",",
+    "replace": "            \"build_status\": \"building\",",
+    "tests": [
+      "tests/ee/sites/test_preview_build_lane.py",
+      "tests/ee/sites/test_native_artifact.py"
+    ]
+  }
+]

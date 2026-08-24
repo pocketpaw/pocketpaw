@@ -114,8 +114,8 @@
   {
     "label": "an empty scaffold is no longer detected, so a sandbox is created, installed and billed to build nothing — and the empty-deploy failure is caught (if at all) only after the money is spent",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "        if not files:",
-    "replace": "        if False:",
+    "find": "        if not files:\n            logger.error(\"sites.build: scaffold of site %s produced no files\", site_id)",
+    "replace": "        if False:\n            logger.error(\"sites.build: scaffold of site %s produced no files\", site_id)",
     "tests": [
       "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_an_empty_scaffold_costs_no_sandbox"
     ]
@@ -150,8 +150,8 @@
   {
     "label": "the sandbox is held to a budget re-derived from the environment instead of the one the enqueue measured its staleness window against, so a config change mid-flight leaves a live build outside its own window and it gets re-enqueued on top of itself",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "                timeout_seconds=timeout_seconds,",
-    "replace": "                timeout_seconds=resolve_build_timeout_seconds(engine),",
+    "find": "                timeout_seconds=timeout_seconds,\n                client=_client,\n                artifact_rel=artifact_rel,\n            )\n        except Exception:\n            # Nothing ran: Daytona unconfigured, or the sandbox could not be created.",
+    "replace": "                timeout_seconds=resolve_build_timeout_seconds(engine),\n                client=_client,\n                artifact_rel=artifact_rel,\n            )\n        except Exception:\n            # Nothing ran: Daytona unconfigured, or the sandbox could not be created.",
     "tests": [
       "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_the_sandbox_is_held_to_the_budget_it_was_enqueued_with"
     ]

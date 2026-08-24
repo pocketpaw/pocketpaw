@@ -1019,6 +1019,35 @@ async def test_native_artifact_route_returns_body_and_css(beanie_test_db, monkey
 
 
 @pytest.mark.asyncio
+async def test_native_artifact_route_carries_the_build_pending_shape(beanie_test_db, monkeypatch):
+    """SP-2: a cold miss answers with a build to POLL, and the route has to carry the
+    handle. ``NativeArtifactResponse`` defaults ``build_status`` to "none", so a response
+    model that had not been widened would 200 with the pending fields silently dropped —
+    the client would see an empty render and no reason, forever."""
+
+    async def _pending(**kw):
+        return {
+            "pocket_id": "pk1",
+            "body_html": "",
+            "css": "",
+            "build_status": "queued",
+            "build_reason": None,
+            "build_job_id": "site-preview-pk1-deadbeef",
+        }
+
+    monkeypatch.setattr(sites_service, "get_native_artifact", _pending)
+    app = _build_app("ws_owner")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk1/native-artifact")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["build_status"] == "queued"
+    assert body["build_job_id"] == "site-preview-pk1-deadbeef"
+    assert body["body_html"] == ""
+
+
+@pytest.mark.asyncio
 async def test_native_artifact_route_non_svelte_is_422(beanie_test_db, monkeypatch):
     """A ripple pocket has no svelte build → 422 (the service ValidationError maps to
     422); no build is triggered (the service raises before constructing a generator)."""
