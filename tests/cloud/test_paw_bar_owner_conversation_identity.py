@@ -418,3 +418,133 @@ async def test_the_visitor_poll_only_returns_this_conversations_lines(public):
 
     assert res.status_code == 200
     assert [m["content"] for m in res.json()["messages"]] == ["About Berlin"]
+
+
+# --------------------------------------------------------------------------- #
+# Layer 5 — the row the LIST shows must OPEN
+#
+# Added 2026-08-26. Layer 2 proved the list folds a pre-identity run into the
+# conversation row it belongs to. Nothing proved the drill-in agrees, and it did
+# not: the transcript rebuilt an exact ``session_key`` from the conversation id
+# and the widget's CURRENT agent, then filtered runs on equality. A run written
+# under either an older key spelling or an earlier bound agent matched nothing,
+# ``_load_transcript`` returned None, and the endpoint 404'd — so a row an owner
+# could see in their inbox opened as "Nothing stored for this visitor yet."
+#
+# The rule these tests pin is one rule, not two: a run belongs to the
+# conversation the LIST would file it under. Anything else is the product
+# disagreeing with itself about what a conversation is, which is the same bug
+# this file was opened for.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_spanning_the_migration_opens_whole(client):
+    """The row Layer 2 merges must open with BOTH halves in it.
+
+    Same shape as ``test_a_conversation_spanning_the_migration_is_ONE_row``, one
+    step further in: the owner clicks the row. The pre-identity turn and the
+    unmigrated owner line are part of this thread — the list already says so —
+    so the transcript that opens has to contain them.
+    """
+    c, store = client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    conversation = await store.open_conversation(widget.id, _REF, workspace_id="ws-1")
+    await _mk_run(session_key=_skey(_REF), partial_text="We open at 8.")
+    await _mk_run(session_key=_skey(conversation.id), partial_text="Yes, we ship to Berlin.")
+    await store.add_owner_message(
+        widget.id, _REF, "Sorry for the wait.", workspace_id="ws-1"
+    )
+
+    res = await c.get(
+        f"/paw-bar/admin/site/{site.id}/conversations/{_REF}",
+        params={"conversation_id": conversation.id},
+    )
+
+    assert res.status_code == 200
+    contents = [m["content"] for m in res.json()["messages"]]
+    assert "We open at 8." in contents
+    assert "Yes, we ship to Berlin." in contents
+    assert "Sorry for the wait." in contents
+
+
+@pytest.mark.asyncio
+async def test_a_pre_identity_conversation_is_not_an_empty_thread(client):
+    """A site whose whole history predates conversation identity.
+
+    Every row in that inbox listed fine and every one of them opened empty,
+    which is the report this fix answers. The id under test is taken from the
+    LIST rather than hand-built, so the test asks the same question the UI does.
+    """
+    c, store = client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    await store.open_conversation(widget.id, _REF, workspace_id="ws-1")
+    await _mk_run(session_key=_skey(_REF), partial_text="We open at 8.")
+
+    listed = (await c.get(f"/paw-bar/admin/site/{site.id}/conversations")).json()["items"]
+    assert len(listed) == 1
+
+    res = await c.get(
+        f"/paw-bar/admin/site/{site.id}/conversations/{_REF}",
+        params={"conversation_id": listed[0]["conversation_id"]},
+    )
+
+    assert res.status_code == 200
+    assert [m["content"] for m in res.json()["messages"]] == ["We open at 8."]
+
+
+@pytest.mark.asyncio
+async def test_a_pre_identity_turn_stays_out_of_a_retired_conversation(client):
+    """The fix must not widen into "show the owner everything".
+
+    An unattributable turn belongs to the visitor's conversation IN PROGRESS —
+    that is where the list files it. Opening the thread they have moved on from
+    must not pull it in, or the drill-in re-creates the interleaving that
+    conversation identity was built to remove.
+    """
+    c, store = client
+    site = await _site()
+    widget, retired, current = await _two_threads(store)
+    await _mk_run(session_key=_skey(_REF), partial_text="We open at 8.")
+    await _mk_run(session_key=_skey(current.id), partial_text="Yes, we ship to Berlin.")
+
+    res = await c.get(
+        f"/paw-bar/admin/site/{site.id}/conversations/{_REF}",
+        params={"conversation_id": retired.id},
+    )
+
+    assert res.status_code == 200
+    contents = [m["content"] for m in res.json()["messages"]]
+    assert "We open at 8." not in contents
+    assert "Yes, we ship to Berlin." not in contents
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_survives_the_widget_being_rebound(client):
+    """The agent id is the LAST segment of the key, and it is not stable.
+
+    A widget created unbound gets a dedicated agent provisioned onto it later
+    (the E1/E2 hook), so turns answered before that carry a different agent in
+    their ``session_key`` than the widget carries today. Rebuilding the key from
+    the CURRENT agent and matching on equality loses every one of them. The list
+    already reads the token positionally and is unaffected; this pins the
+    transcript to the same reading.
+    """
+    c, store = client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    conversation = await store.open_conversation(widget.id, _REF, workspace_id="ws-1")
+    await _mk_run(
+        session_key=f"cloud:concierge:pocket-1:{conversation.id}:agent-before-rebind",
+        partial_text="We open at 8.",
+    )
+
+    res = await c.get(
+        f"/paw-bar/admin/site/{site.id}/conversations/{_REF}",
+        params={"conversation_id": conversation.id},
+    )
+
+    assert res.status_code == 200
+    assert [m["content"] for m in res.json()["messages"]] == ["We open at 8."]
