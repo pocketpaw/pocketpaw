@@ -8,7 +8,7 @@ contract. `SEMANTICS.md` is a copy of `paw-workspace/paw-compose/SEMANTICS.md`.
 Both are vendored so this repo's conformance suite is readable without a second
 checkout.
 
-**Pinned at upstream commit `730e593`** — 17 fixtures, spec v0.1.0, copied
+**Pinned at upstream commit `006d1df`** — 19 fixtures, spec v0.1.0, copied
 2026-08-24. Nothing in this repo verifies that the copy is still current.
 
 ## Why vendored

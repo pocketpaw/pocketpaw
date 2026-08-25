@@ -4,7 +4,7 @@
 
 # Conformance fixtures — format and harness contract
 
-Every paw composition runtime executes these 17 fixtures. Same JSON, same expected traces,
+Every paw composition runtime executes these 19 fixtures. Same JSON, same expected traces,
 every language. This is the mechanical enforcement the workspace charter asks for: two
 runtimes that both claim to implement the semantics either agree here or one of them is
 wrong.
@@ -86,6 +86,10 @@ Optional listener field `delay_ms` — the listener awaits this long, used to pr
 - `expect_trace` — the **complete, ordered** trace for the whole fixture. Exact match.
 - `expect_trace_unordered` — used **instead of** `expect_trace` when the fixture contains genuinely concurrent work (`parallel` dispatch). Compared as a multiset.
 - `expect_result` — on a `dispatch` step, the expected returned value.
+- `expect_raises` — on ANY step, asserts the operation raised / rejected. This is the only
+  assertion that can see what the *caller* was told, as opposed to what the runtime
+  internally observed. It exists because a trace token proves an error was contained, not
+  that it was reported.
 
 ### Ordering inside `apply`
 
@@ -125,6 +129,7 @@ performed directly on the root context by a step (not by a plugin), and **the sc
 | `<plugin>:effect:<id>:dispose` | an effect's disposer runs |
 | `<plugin>:effect:<id>:rejected` | effect creation refused because the owner is UNLOADING |
 | `<plugin>:effect:<id>:dispose:error` | that disposer raised; the chain continues regardless (§3) |
+| `<owner>:provide:<svc>:rejected` | publish refused because the key is already live in this scope (§1) |
 | `<plugin>:listener:<id>:enter` | a waterfall/serial listener is entered |
 | `<plugin>:listener:<id>:exit` | that listener returns |
 | `<plugin>:apply:throw` | `apply` raises |
@@ -206,6 +211,18 @@ The lesson is in the suite now: **a fixture that passes on a deliberately broken
 runtime is worse than no fixture**, because it converts an untested rule into a
 green check. Mutation-test every new fixture before trusting it — every amendment
 above was found that way, and not one by review.
+
+## Resolved — the suite can now check what a caller sees
+
+`expect_raises` closes the gap that `disposer-throws-still-unwinds` originally left open.
+The `:dispose:error` token fires at *containment* time, so it proved an error was observed
+but not that it was reported to whoever asked for cleanup — swallowing at the `dispose()`
+boundary left the whole suite green.
+
+It went into the shared suite rather than into §7a because "did this call raise or reject"
+is expressible in Python, JavaScript and Go alike. What is genuinely language-specific is
+the *carrier* — `ExceptionGroup` versus `AggregateError` — and that stays a §7a obligation.
+The rule is shared; the bundling is not.
 
 ## The two that matter
 

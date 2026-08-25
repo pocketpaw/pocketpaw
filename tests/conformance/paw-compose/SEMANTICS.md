@@ -35,6 +35,19 @@ A **context** is a repository of services.
 A **service** is any value published under a key. Publishing is an effect (§3) and
 therefore reversible.
 
+**One authority per key per scope.** Publishing a key that is already live **in the same
+scope** MUST be rejected — the publish raises, and (when it happens inside `apply`) the
+offending plugin rolls back to `FAILED` under §3 while the incumbent service and its
+dependents are left completely undisturbed. Sequential publication is fine: once a provider
+unloads and its key goes absent, another may claim it.
+
+`isolate(key)` is the sanctioned way to run a different implementation of a key — that is
+what it is *for*. Without this rule, overlapping providers force a runtime to invent a
+restore policy, and the plausible ones are all wrong: restoring unconditionally on unload
+clobbers a newer provider and resurrects a dead one, while never restoring silently
+downgrades a key to absent while an older provider is still live. Both were observed in
+first-generation runtimes, in opposite directions.
+
 ## 2. Plugins and injection
 
 A **plugin** is a unit of composition with a `name`, an optional `inject` declaration, and
@@ -118,6 +131,15 @@ Each mounted plugin instance owns a **fiber** — the runtime handle for that in
   abandon partially-collected effects, and it MUST NOT run cleanup concurrently with the
   remainder of `apply`.
 - A fiber in `FAILED` MUST hold no live effects.
+- **`dispose()` is total.** Disposing a `FAILED` fiber MUST retire the handle and enter
+  `DISPOSED`. There is nothing to unwind — `FAILED` already holds nothing live — but the
+  caller asked for disposal and disposal completed, so the terminal state is `DISPOSED`.
+  The originating error remains available on the fiber. Disposing a `PENDING` fiber
+  likewise enters `DISPOSED` without unwinding. Disposing an already-`DISPOSED` fiber is a
+  no-op, not an error.
+
+  Without this rule, `FAILED` has no outgoing edge and two runtimes will disagree about
+  whether a failed fiber can ever be retired — which is exactly what happened.
 
 ## 5. Events
 
