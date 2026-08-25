@@ -935,16 +935,74 @@ def artifact_home() -> Path:
 _ARTIFACT_FORMAT_EPOCH = "v1"
 
 
+def _generator_build_id() -> str:
+    """Identity of the paw-sites BUILD currently on disk — ``mtime_ns:size`` of the
+    resolved generator entry file, or ``"unresolved"`` when it cannot be located.
+
+    Added 2026-08-25. :func:`generator_version` claimed to identify "the paw-sites
+    GENERATOR", but every term of it was a hand-maintained constant or a dep version
+    string: rebuilding ``paw-sites/dist/cli.js`` did not move the cache key at all.
+    So a generator change that alters the built HTML — exactly what RX-2's react
+    ``data-uid`` stamping is — kept serving the render made by the OLD generator,
+    forever. Observed: two react pockets cached with ZERO ``data-uid``, which the
+    native editor reads as ``uids.size === 0`` and answers by falling back to the
+    section-level iframe editor. The symptom reaches the operator as "react selection
+    is coarse and stays armed in Browse mode", nowhere near the cache that caused it,
+    and no amount of rebuilding the generator clears it.
+
+    Stat, not hash: the bundled ``cli.js`` is ~10MB and this rides a per-view code
+    path, so a content hash would cost more than the rebuild it guards against.
+    ``mtime_ns`` moves on every rebuild, which is precisely the event that must
+    invalidate.
+
+    NOT memoised, deliberately. A module-level cache would pin the value at import
+    and reintroduce the bug for the case that matters most — a generator rebuilt
+    while the server is running, which is the normal inner loop when someone is
+    iterating on the generator itself.
+
+    ``"unresolved"`` (a CONSTANT, never a changing value) is the honest degrade: it
+    restores exactly today's behaviour rather than making the key unstable, which
+    would defeat the cache on every call."""
+    argv = _gen_cmd_argv()
+    # LAST existing-file token wins, and the direction is load-bearing. The documented
+    # local override is an INTERPRETER plus a script — the shipped one on this box is
+    # "C:/PROGRA~1/nodejs/node.exe D:/…/paw-sites/dist/cli.js" — so both tokens are
+    # real files and taking the FIRST fingerprints node.exe, whose mtime never moves
+    # on a generator rebuild. That would leave this function returning a constant and
+    # the bug entirely unfixed, while looking like it worked.
+    entry: str | None = next((tok for tok in reversed(argv) if Path(tok).is_file()), None)
+    if entry is None and argv:
+        entry = shutil.which(argv[0])
+    if not entry:
+        return "unresolved"
+    try:
+        st = Path(entry).stat()
+    except OSError:
+        return "unresolved"
+    return f"{st.st_mtime_ns}:{st.st_size}"
+
+
 def generator_version() -> str:
     """A stable identifier of the paw-sites GENERATOR + artifact-format the cache is
     keyed on, so a generator/dep upgrade (which changes the built output) invalidates
     the native-artifact store rather than serving a render from the old toolchain.
 
-    Combines the artifact-format epoch with the pinned ripple + motion dep specs —
-    the inputs that most directly move the built HTML/CSS. It rides the content hash
-    in ``service._artifact_content_hash``; a bump to any of these yields a fresh key,
-    so the next preview rebuilds once and re-caches."""
-    return f"{_ARTIFACT_FORMAT_EPOCH}|{_ripple_dep_source()}|{_ripple_motion_dep()}"
+    Combines the artifact-format epoch, the BUILD IDENTITY of the generator actually
+    on disk (see :func:`_generator_build_id`), and the pinned ripple + motion dep
+    specs — the inputs that most directly move the built HTML/CSS. It rides the
+    content hash in ``service._artifact_content_hash``; a change to any of these
+    yields a fresh key, so the next preview rebuilds once and re-caches.
+
+    The build-id term is what makes the docstring's first sentence true. Without it
+    the only generator-identifying inputs were a hand-bumped epoch and two dep
+    strings, so shipping a generator change and forgetting the manual bump served
+    stale renders indefinitely. ``_ARTIFACT_FORMAT_EPOCH`` stays for what it is
+    actually good at: invalidating when the EXTRACTION shape changes on the Python
+    side, which no amount of watching the generator file can detect."""
+    return (
+        f"{_ARTIFACT_FORMAT_EPOCH}|{_generator_build_id()}"
+        f"|{_ripple_dep_source()}|{_ripple_motion_dep()}"
+    )
 
 
 def _ripple_dep_source() -> str:

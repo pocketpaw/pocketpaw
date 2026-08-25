@@ -140,6 +140,10 @@ async def _content_hash(pocket_id: str, *, engine: str = "svelte", origin: str =
         builder_origin=origin,
         gen_version=generator_client.generator_version(),
         engine=engine,
+        # Resolved the same way the service resolves it, not hardcoded: the flag joined
+        # the hash when the preview lane started carrying it, and a literal here would
+        # drift silently the moment the default moves.
+        keeps_client_bundle=sites_service._resolve_keeps_client_bundle(wire),
     )
 
 

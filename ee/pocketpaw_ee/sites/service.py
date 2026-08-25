@@ -1084,6 +1084,44 @@ def _read_native_artifact(project_dir: str, engine: str = "svelte") -> tuple[str
 # ---------------------------------------------------------------------------
 
 
+def _resolve_keeps_client_bundle(pocket: dict[str, Any]) -> bool:
+    """Collapse a pocket's ``keepsClientBundle`` TRI-STATE to the bool the generator
+    takes — the same resolution ``publish_pocket`` performs.
+
+    Added 2026-08-26. This lived only inline in ``publish_pocket``, so the PREVIEW lane
+    never asked the question and its build fell to ``build_generator_input``'s
+    ``keeps_client_bundle=False`` default. paw-sites' ``reactPrerenderScript`` branches
+    hard on that flag: False STRIPS Vite's module script and the modulepreload hints
+    from dist/index.html, leaving the emitted chunk on disk unreferenced. So the editor
+    previewed a JavaScript-less variant of a site that ships JavaScript when published —
+    no hydration, no scroll reveals, no menu toggle — which the operator reads as broken
+    CSS. Observed on a real react site: a 215KB ``index-*.js`` in ``dist/assets`` that
+    ``index.html`` never referenced.
+
+    SP-2 moved the preview build out to the Daytona lane but did not carry the flag, so
+    the divergence survived that rewrite; it now rides ``generator_input`` like every
+    other build input.
+
+    ``None`` means the author declared nothing (every legacy pocket) and resolves to
+    ``sites_keep_client_bundle_default``, which is **True**: sites ship their own
+    JavaScript unless told otherwise. An explicit True/False is authorial and beats the
+    setting in both directions.
+
+    A shared helper rather than a second copy of the logic, because the failure mode
+    here was exactly two call sites answering the same question differently — and a
+    divergence between what you preview and what you publish stays invisible until
+    someone diffs two builds byte by byte.
+
+    ``pocket`` is the pocket WIRE dict, so the key is camelCase
+    (``keeps_client_bundle`` is the Beanie/domain name)."""
+    from pocketpaw.config import get_settings
+
+    declared = pocket.get("keepsClientBundle")
+    if declared is None:
+        return bool(get_settings().sites_keep_client_bundle_default)
+    return bool(declared)
+
+
 def _artifact_content_hash(
     *,
     source: dict[str, Any],
@@ -1091,6 +1129,7 @@ def _artifact_content_hash(
     builder_origin: str,
     gen_version: str,
     engine: str = "svelte",
+    keeps_client_bundle: bool = False,
 ) -> str:
     """Fingerprint the inputs that determine a native artifact's rendered output — the
     source map, the theme, the builder origin (it changes the stamped
@@ -1108,6 +1147,10 @@ def _artifact_content_hash(
         gen_version,
         engine,
         builder_origin or "",
+        # Materially different HTML: with it false the prerender strips Vite's module
+        # script, so the two variants differ by the whole JavaScript layer. A hash blind
+        # to it would serve whichever variant was built first, forever.
+        f"kcb={int(bool(keeps_client_bundle))}",
         json.dumps(source, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
         json.dumps(theme, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
     ):
@@ -1245,6 +1288,7 @@ async def _build_native_artifact(
     pocket_id: str,
     content_hash: str,
     engine: str = "svelte",
+    keeps_client_bundle: bool = False,
     _pool: Any | None = None,
 ) -> Any:
     """QUEUE the ARMED build for a native artifact in the ephemeral Daytona lane.
@@ -1301,6 +1345,9 @@ async def _build_native_artifact(
         ripple_spec={},
         source=source,
         builder_origin=builder_origin,
+        # The site's own declaration that its client JS is load-bearing. Without it the
+        # sandbox builds the no-JS variant of a site that ships JS when published.
+        keeps_client_bundle=keeps_client_bundle,
     )
     return await build_job.enqueue_preview_build(
         pocket_id=pocket_id,
@@ -1361,6 +1408,11 @@ async def _prewarm_native_artifact(
     site_name = (pocket.get("name") or "").strip() or "Untitled site"
     origin = (builder_origin or "").strip() or _builder_origin()
 
+    # MT-1: the site's own declaration that its client JS is load-bearing, resolved the
+    # SAME way publish resolves it. It rides BOTH the hash and the build below — the hash
+    # because the two variants are different HTML, the build because that is the bug: this
+    # lane passed nothing and silently built the no-JS variant of a site that ships JS.
+    keeps_client_bundle = _resolve_keeps_client_bundle(pocket)
     store = _store or _default_artifact_store()
     content_hash = _artifact_content_hash(
         source=source,
@@ -1368,6 +1420,7 @@ async def _prewarm_native_artifact(
         builder_origin=origin,
         gen_version=generator_client.generator_version(),
         engine=engine,
+        keeps_client_bundle=keeps_client_bundle,
     )
     if store.read(pocket_id, content_hash) is not None:
         return  # already warm — no rebuild
@@ -1379,6 +1432,7 @@ async def _prewarm_native_artifact(
         pocket_id=pocket_id,
         content_hash=content_hash,
         engine=engine,
+        keeps_client_bundle=keeps_client_bundle,
         _pool=_pool,
     )
 
@@ -6184,6 +6238,11 @@ async def get_native_artifact(
     # data-uid + embed the manifest. Default to the configured dashboard origin when
     # the caller passes none, exactly like make_site_editable.
     origin = (builder_origin or "").strip() or _builder_origin()
+    # MT-1: the site's own declaration that its client JS is load-bearing, resolved the
+    # SAME way publish resolves it. It rides BOTH the hash and the build below — the hash
+    # because the two variants are different HTML, the build because that is the bug: this
+    # lane passed nothing and silently built the no-JS variant of a site that ships JS.
+    keeps_client_bundle = _resolve_keeps_client_bundle(pocket)
     store = _store or _default_artifact_store()
     content_hash = _artifact_content_hash(
         source=source,
@@ -6191,6 +6250,7 @@ async def get_native_artifact(
         builder_origin=origin,
         gen_version=generator_client.generator_version(),
         engine=engine,
+        keeps_client_bundle=keeps_client_bundle,
     )
     # READ-THROUGH: a hit serves the prior render straight off disk — no queue, no
     # sandbox, no build. This is what makes a VIEW instant, and since SP-2 it is also
@@ -6221,6 +6281,7 @@ async def get_native_artifact(
             pocket_id=pocket_id,
             content_hash=content_hash,
             engine=engine,
+            keeps_client_bundle=keeps_client_bundle,
             _pool=_pool,
         )
     except Exception as exc:
