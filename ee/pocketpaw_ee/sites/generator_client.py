@@ -970,9 +970,7 @@ def _generator_build_id() -> str:
     # real files and taking the FIRST fingerprints node.exe, whose mtime never moves
     # on a generator rebuild. That would leave this function returning a constant and
     # the bug entirely unfixed, while looking like it worked.
-    entry: str | None = next(
-        (tok for tok in reversed(argv) if Path(tok).is_file()), None
-    )
+    entry: str | None = next((tok for tok in reversed(argv) if Path(tok).is_file()), None)
     if entry is None and argv:
         entry = shutil.which(argv[0])
     if not entry:

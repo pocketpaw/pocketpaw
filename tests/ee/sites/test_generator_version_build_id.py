@@ -63,9 +63,7 @@ def test_the_script_is_fingerprinted_not_the_interpreter(
     script = tmp_path / "dist" / "cli.js"
     script.parent.mkdir(parents=True)
     script.write_text("// generator build A", encoding="utf-8")
-    monkeypatch.setenv(
-        "PAW_SITES_GEN_CMD", f"{interpreter.as_posix()} {script.as_posix()}"
-    )
+    monkeypatch.setenv("PAW_SITES_GEN_CMD", f"{interpreter.as_posix()} {script.as_posix()}")
 
     before = _generator_build_id()
     # Rebuild ONLY the script; the interpreter is untouched, as on a real rebuild.
