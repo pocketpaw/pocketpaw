@@ -127,6 +127,40 @@ class EditRequest(BaseModel):
     model: str | None = None
 
 
+class VideoElementsRequest(BaseModel):
+    """Body of ``POST /studio/video-elements`` — the "Edit video" panel.
+
+    Drives Kling Elements (``fal-ai/kling-video/v1.6/standard/elements``): a
+    prompt plus up to 20 element/reference images, and optionally a source video
+    to edit. ``sourceDurationSec`` is echoed by the frontend so the backend can
+    enforce the 30-second source cap defensively (the frontend already reads the
+    real duration from the video element, but never trust the client)."""
+
+    prompt: str
+    videoUrl: str | None = None
+    inputImageUrls: list[str] | None = None
+    aspectRatio: str = "16:9"
+    durationSec: int | None = None
+    sourceDurationSec: float | None = None
+    model: str | None = None
+
+
+class VideoMotionRequest(BaseModel):
+    """Body of ``POST /studio/video-motion-control`` — the "Motion control" panel.
+
+    Drives Kling Motion Control (``fal-ai/kling-video/v2.6/standard/motion-control``):
+    a character image (visible face and body) is animated to follow a reference
+    motion video. ``characterOrientation`` controls whether the character keeps
+    the motion clip's orientation ("video") or its own ("image")."""
+
+    imageUrl: str
+    videoUrl: str
+    characterOrientation: str = "video"
+    aspectRatio: str = "16:9"
+    durationSec: int | None = None
+    model: str | None = None
+
+
 class PromptSuggestion(BaseModel):
     """Response of ``POST /studio/suggest-prompt``: a sentence in, an enriched
     prompt + the media kind it implies (powers the flow editor's Text node)."""
@@ -233,6 +267,8 @@ __all__ = [
     "Generation",
     "GenerateRequest",
     "EditRequest",
+    "VideoElementsRequest",
+    "VideoMotionRequest",
     "PromptSuggestion",
     "SuggestPromptRequest",
     "StudioModelsResponse",

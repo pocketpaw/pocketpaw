@@ -37,7 +37,7 @@ from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.litellm_client import CatalogUpstreamError
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry, Pricing
 from pocketpaw_ee.cloud.media import storage as media_storage
-from pocketpaw_ee.cloud.studio import fal_edit, fal_video, schemas
+from pocketpaw_ee.cloud.studio import fal_edit, fal_elements, fal_motion, fal_video, schemas
 
 from pocketpaw.uploads.local import LocalStorageAdapter
 
@@ -599,6 +599,236 @@ async def test_edit_no_output_is_upstream_error(monkeypatch, studio_env) -> None
     with pytest.raises(service.StudioUpstreamError, match="no output images"):
         await service.edit(req, workspace_id="ws-1")
     assert service._load_history() == []
+
+
+# ── video elements (direct fal.ai Kling Elements dispatch) ───────────────────
+
+
+async def test_generate_video_elements_happy_path(monkeypatch, studio_env) -> None:
+    """A fal elements result → the mp4 (+ poster) is saved, a succeeded video
+    Generation is returned, and every input (video + elements) is forwarded."""
+    generated, history = studio_env
+    seen: dict = {}
+
+    async def _fake_elements(
+        *, prompt, input_image_urls, video_url, duration_sec, aspect_ratio, model, key=None
+    ):
+        seen.update(
+            prompt=prompt,
+            input_image_urls=input_image_urls,
+            video_url=video_url,
+            duration_sec=duration_sec,
+            aspect_ratio=aspect_ratio,
+            model=model,
+        )
+        return b"mp4", "video/mp4", b"png-poster", "image/png"
+
+    monkeypatch.setattr(fal_elements, "run_fal_elements", _fake_elements)
+
+    req = schemas.VideoElementsRequest(
+        prompt="add a cow",
+        videoUrl=_DATA_URL,
+        inputImageUrls=[_DATA_URL, _DATA_URL],
+        aspectRatio="16:9",
+        durationSec=5,
+        sourceDurationSec=4.2,
+    )
+    gen = await service.generate_video_elements(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert gen.kind == "video"
+    assert gen.params.inputImageCount == 2
+    assert gen.assets[0].mime == "video/mp4"
+    assert gen.assets[0].url.startswith("/api/v1/media/")
+    assert gen.assets[0].posterUrl.startswith("/api/v1/media/")
+    assert seen["input_image_urls"] == [_DATA_URL, _DATA_URL]
+    assert seen["video_url"] == _DATA_URL
+    assert seen["duration_sec"] == 5
+    assert service.list_generations("ws-1")[0].id == gen.id
+
+
+async def test_generate_video_elements_prompt_only(monkeypatch, studio_env) -> None:
+    """A prompt-only request is valid (text-to-video through Elements)."""
+    seen: dict = {}
+
+    async def _fake_elements(
+        *, prompt, input_image_urls, video_url, duration_sec, aspect_ratio, model, key=None
+    ):
+        seen["prompt"] = prompt
+        return b"mp4", "video/mp4", None, None
+
+    monkeypatch.setattr(fal_elements, "run_fal_elements", _fake_elements)
+    req = schemas.VideoElementsRequest(prompt="a wave", aspectRatio="1:1")
+    gen = await service.generate_video_elements(req, workspace_id="ws-1")
+    assert gen.status == "succeeded"
+    assert seen["prompt"] == "a wave"
+
+
+async def test_generate_video_elements_rejects_too_many_images(monkeypatch, studio_env) -> None:
+    req = schemas.VideoElementsRequest(
+        prompt="x", inputImageUrls=[_DATA_URL] * (fal_elements.MAX_ELEMENT_IMAGES + 1)
+    )
+    with pytest.raises(ValueError, match="at most 20"):
+        await service.generate_video_elements(req, workspace_id="ws-1")
+
+
+async def test_generate_video_elements_rejects_overlong_source(monkeypatch, studio_env) -> None:
+    req = schemas.VideoElementsRequest(prompt="x", videoUrl=_DATA_URL, sourceDurationSec=30.1)
+    with pytest.raises(ValueError, match="30 seconds or less"):
+        await service.generate_video_elements(req, workspace_id="ws-1")
+
+
+async def test_generate_video_elements_requires_something(monkeypatch, studio_env) -> None:
+    req = schemas.VideoElementsRequest(prompt="  ")
+    with pytest.raises(ValueError, match="required"):
+        await service.generate_video_elements(req, workspace_id="ws-1")
+
+
+async def test_generate_video_elements_fal_failure_is_upstream_error(
+    monkeypatch, studio_env
+) -> None:
+    async def _boom(**kwargs):
+        raise fal_elements.FalElementsError("fal elements 'x' failed: bad key")
+
+    monkeypatch.setattr(fal_elements, "run_fal_elements", _boom)
+    req = schemas.VideoElementsRequest(prompt="a scene")
+    with pytest.raises(service.StudioUpstreamError, match="bad key"):
+        await service.generate_video_elements(req, workspace_id="ws-1")
+    assert service._load_history() == []
+
+
+# ── motion control (direct fal.ai Kling Motion Control dispatch) ─────────────
+
+
+async def test_generate_video_motion_happy_path(monkeypatch, studio_env) -> None:
+    """A fal motion-control result → the mp4 (+ poster) is saved, a succeeded
+    video Generation is returned, and both inputs are forwarded."""
+    generated, history = studio_env
+    seen: dict = {}
+
+    async def _fake_motion(*, image_url, video_url, character_orientation, model, key=None):
+        seen.update(
+            image_url=image_url,
+            video_url=video_url,
+            character_orientation=character_orientation,
+            model=model,
+        )
+        return b"mp4", "video/mp4", b"png-poster", "image/png"
+
+    monkeypatch.setattr(fal_motion, "run_fal_motion", _fake_motion)
+
+    req = schemas.VideoMotionRequest(
+        imageUrl=_DATA_URL,
+        videoUrl=_DATA_URL,
+        characterOrientation="video",
+        aspectRatio="16:9",
+    )
+    gen = await service.generate_video_motion(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert gen.kind == "video"
+    assert gen.assets[0].mime == "video/mp4"
+    assert gen.assets[0].url.startswith("/api/v1/media/")
+    assert gen.assets[0].posterUrl.startswith("/api/v1/media/")
+    assert seen["image_url"] == _DATA_URL
+    assert seen["video_url"] == _DATA_URL
+    assert seen["character_orientation"] == "video"
+    assert service.list_generations("ws-1")[0].id == gen.id
+
+
+async def test_generate_video_motion_requires_image(monkeypatch, studio_env) -> None:
+    req = schemas.VideoMotionRequest(imageUrl="  ", videoUrl=_DATA_URL)
+    with pytest.raises(ValueError, match="character image"):
+        await service.generate_video_motion(req, workspace_id="ws-1")
+
+
+async def test_generate_video_motion_requires_video(monkeypatch, studio_env) -> None:
+    req = schemas.VideoMotionRequest(imageUrl=_DATA_URL, videoUrl="  ")
+    with pytest.raises(ValueError, match="motion reference video"):
+        await service.generate_video_motion(req, workspace_id="ws-1")
+
+
+async def test_generate_video_motion_fal_failure_is_upstream_error(monkeypatch, studio_env) -> None:
+    async def _boom(**kwargs):
+        raise fal_motion.FalMotionError("fal motion-control 'x' failed: bad key")
+
+    monkeypatch.setattr(fal_motion, "run_fal_motion", _boom)
+    req = schemas.VideoMotionRequest(imageUrl=_DATA_URL, videoUrl=_DATA_URL)
+    with pytest.raises(service.StudioUpstreamError, match="bad key"):
+        await service.generate_video_motion(req, workspace_id="ws-1")
+    assert service._load_history() == []
+
+
+async def test_generate_video_motion_validation_error_is_value_error(
+    monkeypatch, studio_env
+) -> None:
+    """fal rejecting the inputs (a 4xx) surfaces as ValueError (→ 400), not 502."""
+
+    async def _invalid(**kwargs):
+        raise fal_motion.FalMotionValidationError(
+            "fal motion-control rejected the request: Image dimensions are too small"
+        )
+
+    monkeypatch.setattr(fal_motion, "run_fal_motion", _invalid)
+    req = schemas.VideoMotionRequest(imageUrl=_DATA_URL, videoUrl=_DATA_URL)
+    with pytest.raises(ValueError, match="dimensions are too small"):
+        await service.generate_video_motion(req, workspace_id="ws-1")
+    assert service._load_history() == []
+
+
+async def test_generate_video_motion_passes_public_video_url_through(
+    monkeypatch, studio_env
+) -> None:
+    """A hosted http(s) video URL is forwarded to fal AS-IS (not re-encoded to a
+    data URL), while the character image is still resolved to a data URL."""
+    seen: dict = {}
+    public_video = "https://cdn.higgsfield.ai/kling_motion_control_preset/x.mp4"
+
+    async def _fake_motion(*, image_url, video_url, character_orientation, model, key=None):
+        seen.update(image_url=image_url, video_url=video_url)
+        return b"mp4", "video/mp4", None, None
+
+    monkeypatch.setattr(fal_motion, "run_fal_motion", _fake_motion)
+    req = schemas.VideoMotionRequest(imageUrl=_DATA_URL, videoUrl=public_video)
+    await service.generate_video_motion(req, workspace_id="ws-1")
+
+    assert seen["image_url"] == _DATA_URL
+    assert seen["video_url"] == public_video
+
+
+def test_fit_character_image_downscales_oversized() -> None:
+    """An image over fal's 3850px cap is downscaled (aspect preserved) to a JPEG
+    whose long side equals the cap."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    im = Image.new("RGB", (5000, 2000), (10, 20, 30))
+    buf = BytesIO()
+    im.save(buf, format="JPEG")
+    data_url = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+    out_url, out_mime = service._fit_character_image(data_url, "image/jpeg")
+
+    assert out_mime == "image/jpeg"
+    out = Image.open(BytesIO(base64.b64decode(out_url.split(",", 1)[1])))
+    width, height = out.size
+    assert max(width, height) == service.FAL_IMAGE_MAX_DIM
+    assert min(width, height) == round(2000 * service.FAL_IMAGE_MAX_DIM / 5000)
+
+
+def test_fit_character_image_passes_through_within_limit() -> None:
+    """An image already within the cap is returned unchanged."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    im = Image.new("RGB", (512, 512), (200, 100, 50))
+    buf = BytesIO()
+    im.save(buf, format="JPEG")
+    data_url = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+    assert service._fit_character_image(data_url, "image/jpeg") == (data_url, "image/jpeg")
 
 
 # ── styles + suggest ─────────────────────────────────────────────────────────

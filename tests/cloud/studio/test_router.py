@@ -256,6 +256,104 @@ def test_post_edit_upstream_failure_is_502(client, monkeypatch):
     assert "Image edit failed" in resp.json()["detail"]
 
 
+def test_post_video_elements_returns_generation(client, monkeypatch):
+    async def _elements(req, *, workspace_id):
+        assert req.prompt == "add a cow"
+        assert req.inputImageUrls == ["/api/v1/media/a.png", "/api/v1/media/b.png"]
+        assert req.videoUrl == "/api/v1/media/src.mp4"
+        assert req.sourceDurationSec == 4.5
+        assert workspace_id == "ws-1"
+        return _generation()
+
+    monkeypatch.setattr(studio_service, "generate_video_elements", _elements)
+    resp = client.post(
+        "/api/v1/studio/video-elements",
+        json={
+            "prompt": "add a cow",
+            "videoUrl": "/api/v1/media/src.mp4",
+            "inputImageUrls": ["/api/v1/media/a.png", "/api/v1/media/b.png"],
+            "sourceDurationSec": 4.5,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "gen_abc"
+    assert resp.json()["status"] == "succeeded"
+
+
+def test_post_video_elements_bad_input_is_400(client, monkeypatch):
+    async def _elements(req, *, workspace_id):
+        raise ValueError("source video must be 30 seconds or less")
+
+    monkeypatch.setattr(studio_service, "generate_video_elements", _elements)
+    resp = client.post(
+        "/api/v1/studio/video-elements",
+        json={"prompt": "x", "sourceDurationSec": 31},
+    )
+    assert resp.status_code == 400
+    assert "30 seconds" in resp.json()["detail"]
+
+
+def test_post_video_elements_upstream_failure_is_502(client, monkeypatch):
+    async def _elements(req, *, workspace_id):
+        raise studio_service.StudioUpstreamError("fal elements failed: timeout")
+
+    monkeypatch.setattr(studio_service, "generate_video_elements", _elements)
+    resp = client.post(
+        "/api/v1/studio/video-elements",
+        json={"prompt": "x"},
+    )
+    assert resp.status_code == 502
+    assert "Video edit failed" in resp.json()["detail"]
+
+
+def test_post_video_motion_control_returns_generation(client, monkeypatch):
+    async def _motion(req, *, workspace_id):
+        assert req.imageUrl == "/api/v1/media/char.png"
+        assert req.videoUrl == "https://cdn.test/motion.mp4"
+        assert req.characterOrientation == "video"
+        assert workspace_id == "ws-1"
+        return _generation()
+
+    monkeypatch.setattr(studio_service, "generate_video_motion", _motion)
+    resp = client.post(
+        "/api/v1/studio/video-motion-control",
+        json={
+            "imageUrl": "/api/v1/media/char.png",
+            "videoUrl": "https://cdn.test/motion.mp4",
+            "characterOrientation": "video",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "gen_abc"
+    assert resp.json()["status"] == "succeeded"
+
+
+def test_post_video_motion_control_bad_input_is_400(client, monkeypatch):
+    async def _motion(req, *, workspace_id):
+        raise ValueError("a character image is required for motion control")
+
+    monkeypatch.setattr(studio_service, "generate_video_motion", _motion)
+    resp = client.post(
+        "/api/v1/studio/video-motion-control",
+        json={"imageUrl": "", "videoUrl": "https://cdn.test/motion.mp4"},
+    )
+    assert resp.status_code == 400
+    assert "character image" in resp.json()["detail"]
+
+
+def test_post_video_motion_control_upstream_failure_is_502(client, monkeypatch):
+    async def _motion(req, *, workspace_id):
+        raise studio_service.StudioUpstreamError("fal motion-control failed: timeout")
+
+    monkeypatch.setattr(studio_service, "generate_video_motion", _motion)
+    resp = client.post(
+        "/api/v1/studio/video-motion-control",
+        json={"imageUrl": "/api/v1/media/char.png", "videoUrl": "https://cdn.test/motion.mp4"},
+    )
+    assert resp.status_code == 502
+    assert "Motion control failed" in resp.json()["detail"]
+
+
 def test_post_suggest_prompt(client):
     resp = client.post("/api/v1/studio/suggest-prompt", json={"sentence": "a lighthouse"})
     assert resp.status_code == 200
