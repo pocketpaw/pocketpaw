@@ -26,6 +26,7 @@ from pocketpaw.pawkernel.observer import (
     DisposerErrorEvent,
     FiberStateEvent,
     ServiceEvent,
+    ServiceRejectedEvent,
 )
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "conformance" / "paw-compose"
@@ -67,6 +68,7 @@ STEP_KEYS = {
     "mode",
     "expect_result",
     "expect_state",
+    "expect_raises",
     "nowait",
 }
 OPS = {
@@ -228,7 +230,21 @@ class FixturePlugin:
 
     # -- apply ------------------------------------------------------------
     async def apply(self, ctx: Context) -> None:
-        """Run the declared body.
+        """Run the declared body, emitting `apply:throw` on any failure.
+
+        The token marks apply raising, whatever the cause — a declared
+        `apply_throws`, or a rejected duplicate publish. Emitting it here
+        rather than only at the declared raise keeps the two indistinguishable
+        to the trace, which is what `duplicate-provider-rejected` expects.
+        """
+        try:
+            await self._apply_body(ctx)
+        except Exception:
+            self.run.trace.append(f"{self.name}:apply:throw")
+            raise
+
+    async def _apply_body(self, ctx: Context) -> None:
+        """The declared body.
 
         The order is normative (upstream README, "Ordering inside apply"):
         provides -> record_resolved -> effects -> listeners -> children
@@ -236,7 +252,7 @@ class FixturePlugin:
         """
         decl = self.decl
         for service in decl.get("provides") or ():
-            ctx.provide(service, f"{self.name}:{service}")
+            ctx.provide(service, self.name)
 
         for key in decl.get("record_resolved") or ():
             self.run.trace.append(f"{self.name}:resolved:{key}:{ctx.get(key)}")
@@ -264,7 +280,6 @@ class FixturePlugin:
             first = False
 
         if decl.get("apply_throws"):
-            self.run.trace.append(f"{self.name}:apply:throw")
             raise ApplyThrew(self.name)
 
 
@@ -280,7 +295,7 @@ class ConformanceRun:
         self.kernel = Kernel(observer=self._observe)
         self.contexts: dict[str, Context] = {"root": self.kernel.root}
         self.fibers: dict[str, Fiber] = {}
-        self.dispose_errors: list[BaseException] = []
+        self.raised: list[BaseException] = []
         self._plugins: dict[str, FixturePlugin] = {}
         for name, decl in (fixture.get("plugins") or {}).items():
             self._plugins[name] = FixturePlugin(name=name, decl=decl, run=self)
@@ -291,6 +306,9 @@ class ConformanceRun:
             self.trace.append(f"{event.fiber}:{event.state}")
         elif isinstance(event, ServiceEvent):
             self.trace.append(f"{event.owner}:{event.kind}:{event.key}")
+        elif isinstance(event, ServiceRejectedEvent):
+            # §1: publish refused, the key is already live in this scope.
+            self.trace.append(f"{event.owner}:provide:{event.key}:rejected")
         elif isinstance(event, DisposerErrorEvent):
             # §3 fourth dragon: the kernel contained a disposer error. The
             # token comes from the kernel, not the harness, so a runtime that
@@ -323,11 +341,37 @@ class ConformanceRun:
             if op is not None:
                 if op not in OPS:
                     raise FixtureError(f"step {index}: unknown op {op!r}")
-                await self._run_op(index, op, step)
+                await self._run_op_checked(index, op, step)
             if "expect_state" in step:
                 self._check_state(index, step["expect_state"])
             if op is None and "expect_state" not in step:
                 raise FixtureError(f"step {index}: neither an op nor an assertion")
+
+    async def _run_op_checked(self, index: int, op: str, step: dict[str, Any]) -> None:
+        """Run one op, honouring `expect_raises`.
+
+        This is the only assertion that sees what the *caller* was told, as
+        opposed to what the runtime observed internally: a trace token proves
+        an error was contained, not that it was reported. FixtureError and
+        AssertionError are harness verdicts, never the operation's own
+        failure, so they always propagate.
+        """
+        expected = bool(step.get("expect_raises"))
+        raised: BaseException | None = None
+        try:
+            await self._run_op(index, op, step)
+        except (FixtureError, AssertionError):
+            raise
+        except Exception as exc:
+            raised = exc
+            self.raised.append(exc)
+
+        if expected:
+            assert raised is not None, (
+                f"step {index}: expected {op!r} to raise, it returned normally"
+            )
+        elif raised is not None:
+            raise raised
 
     async def _run_op(self, index: int, op: str, step: dict[str, Any]) -> None:
         if op == "mount":
@@ -341,14 +385,7 @@ class ConformanceRun:
             # Child plugins mounted during apply must be addressable too.
             self._index_children(fiber)
         elif op == "dispose":
-            # §3 requires disposer errors be reported, and the Python runtime
-            # reports them by raising once unwinding has completed. That is
-            # the behaviour under test, not a harness failure — capture it and
-            # let the trace and expect_state assertions do the judging.
-            try:
-                await self._fiber(step["plugin"]).dispose()
-            except Exception as exc:
-                self.dispose_errors.append(exc)
+            await self._fiber(step["plugin"]).dispose()
         elif op == "dispose_nowait":
             self.kernel.spawn(self._fiber(step["plugin"]).dispose())
         elif op == "provide":

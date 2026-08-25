@@ -53,6 +53,11 @@ in its own suite, and to record them here. For Python / asyncio:
 
 All live in `tests/pawkernel/test_kernel_semantics.py`.
 
+It also covers what the shared traces cannot reach: the survival of
+``fiber.error`` across a FAILED-to-DISPOSED retirement, the PENDING
+disposal edge, and that ``isolate(key)`` still permits two providers of one
+key in different scopes — the case the §1 rejection rule must not break.
+
 That file also covers three §3 paths the shared suite does not reach. The
 `disposer-throws-still-unwinds` fixture exercises `dispose()` to DISPOSED, but
 the same teardown is shared by the rollback-to-FAILED path, the

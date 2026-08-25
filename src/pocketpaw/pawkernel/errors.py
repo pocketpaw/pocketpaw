@@ -25,6 +25,24 @@ class EffectRejected(PawKernelError):
         self.state = state
 
 
+class DuplicateProvider(PawKernelError):
+    """Raised when a key already live in this scope is published again.
+
+    SEMANTICS.md §1: one authority per key per scope. Sequential publication
+    is fine — once a provider unloads and its key goes absent, another may
+    claim it. To run a second implementation concurrently, use
+    ``Context.isolate(key)``; that is what the primitive is for.
+    """
+
+    def __init__(self, key: str, owner: str) -> None:
+        super().__init__(
+            f"service {key!r} is already provided in this scope; "
+            f"{owner!r} cannot publish it again (use isolate({key!r}))"
+        )
+        self.key = key
+        self.owner = owner
+
+
 class DispatchModeConflict(PawKernelError):
     """Raised when an event name is used with two different dispatch modes.
 

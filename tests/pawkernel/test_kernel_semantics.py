@@ -12,11 +12,13 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
 from pocketpaw.pawkernel import (
     DispatchModeConflict,
+    DuplicateProvider,
     EffectRejected,
     FiberState,
     Inject,
@@ -519,3 +521,161 @@ async def test_a_cancelled_disposer_is_not_contained_as_a_disposer_error() -> No
         await fiber.dispose()
     # Not swallowed into an ExceptionGroup, and not recorded as one.
     assert fiber.teardown_errors == []
+
+
+# --------------------------------------------------------------------------
+# §4 — dispose() is total. `dispose-failed-fiber` covers the FAILED edge; the
+# error's survival and the PENDING edge are not visible in a trace.
+# --------------------------------------------------------------------------
+async def test_disposing_a_failed_fiber_retires_it_and_keeps_the_cause() -> None:
+    kernel, trace = _tracing_kernel()
+
+    def apply(ctx) -> None:
+        raise RuntimeError("apply boom")
+
+    fiber = await kernel.mount(SimplePlugin(name="a", apply_fn=apply))
+    await kernel.settle()
+    assert fiber.state == FiberState.FAILED
+
+    await fiber.dispose()
+    assert fiber.state == FiberState.DISPOSED
+    # The originating error is still available on the retired handle.
+    assert isinstance(fiber.error, RuntimeError)
+    assert str(fiber.error) == "apply boom"
+    # No unwinding: FAILED already held nothing live.
+    assert trace == ["a:LOADING", "a:FAILED", "a:DISPOSED"]
+
+    # And disposal stays idempotent from the FAILED edge too.
+    await fiber.dispose()
+    assert trace.count("a:DISPOSED") == 1
+
+
+async def test_disposing_a_pending_fiber_retires_it_without_unwinding() -> None:
+    kernel, trace = _tracing_kernel()
+    fiber = await kernel.mount(
+        SimplePlugin(name="b", apply_fn=lambda ctx: None, inject=Inject(required=("never",)))
+    )
+    assert fiber.state == FiberState.PENDING
+    await fiber.dispose()
+    assert fiber.state == FiberState.DISPOSED
+    assert trace == ["b:PENDING", "b:DISPOSED"]
+
+
+# --------------------------------------------------------------------------
+# §1 — one authority per key per scope.
+# --------------------------------------------------------------------------
+async def test_a_second_provider_of_a_live_key_is_rejected() -> None:
+    kernel, _ = _tracing_kernel()
+    kernel.root.provide("svcA", "first")
+
+    with pytest.raises(DuplicateProvider) as caught:
+        kernel.root.provide("svcA", "second")
+
+    assert caught.value.key == "svcA"
+    # The incumbent is completely undisturbed.
+    assert kernel.root.get("svcA") == "first"
+
+
+async def test_a_rejected_publish_registers_no_effect() -> None:
+    """The rejection must not leave a half-registered effect behind."""
+    kernel, _ = _tracing_kernel()
+    kernel.root.provide("svcA", "first")
+    captured: dict[str, Any] = {}
+
+    def apply(ctx) -> None:
+        captured["fiber"] = ctx.fiber
+        ctx.effect(lambda: lambda: None, name="real")
+        ctx.provide("svcA", "second")
+
+    fiber = await kernel.mount(SimplePlugin(name="p2", apply_fn=apply))
+    await kernel.settle()
+
+    assert fiber.state == FiberState.FAILED
+    assert fiber._effects == []
+    assert kernel.root.get("svcA") == "first"
+
+
+async def test_a_rejected_provider_leaves_the_incumbents_dependents_alone() -> None:
+    kernel, trace = _tracing_kernel()
+
+    await kernel.mount(SimplePlugin(name="p1", apply_fn=lambda ctx: ctx.provide("svcA", "p1")))
+    consumer = await kernel.mount(
+        SimplePlugin(name="c", apply_fn=lambda ctx: None, inject=Inject(required=("svcA",)))
+    )
+    await kernel.settle()
+    assert consumer.state == FiberState.ACTIVE
+
+    await kernel.mount(SimplePlugin(name="p2", apply_fn=lambda ctx: ctx.provide("svcA", "p2")))
+    await kernel.settle()
+
+    # The consumer never flickered through UNLOADING or PENDING.
+    assert consumer.state == FiberState.ACTIVE
+    assert "c:UNLOADING" not in trace
+    assert "c:PENDING" not in trace
+    assert kernel.root.get("svcA") == "p1"
+
+
+async def test_sequential_publication_of_the_same_key_is_legal() -> None:
+    """Once a provider unloads and the key goes absent, another may claim it."""
+    kernel, _ = _tracing_kernel()
+
+    first = await kernel.mount(
+        SimplePlugin(name="p1", apply_fn=lambda ctx: ctx.provide("svcA", "p1"))
+    )
+    await first.dispose()
+    assert kernel.root.get("svcA") is None
+
+    second = await kernel.mount(
+        SimplePlugin(name="p2", apply_fn=lambda ctx: ctx.provide("svcA", "p2"))
+    )
+    await kernel.settle()
+    assert second.state == FiberState.ACTIVE
+    assert kernel.root.get("svcA") == "p2"
+
+
+async def test_two_providers_of_one_key_in_different_scopes_are_legal() -> None:
+    """isolate(key) is the sanctioned way to run a second implementation.
+
+    This is the whole point of the rejection rule — it must not make the
+    isolate path collateral damage.
+    """
+    kernel, _ = _tracing_kernel()
+    scope = kernel.root.isolate("svcA", label="s1")
+
+    root_provider = await kernel.mount(
+        SimplePlugin(name="p_root", apply_fn=lambda ctx: ctx.provide("svcA", "rootimpl"))
+    )
+    iso_provider = await kernel.mount(
+        SimplePlugin(name="p_iso", apply_fn=lambda ctx: ctx.provide("svcA", "isoimpl")),
+        ctx=scope,
+    )
+    await kernel.settle()
+
+    assert root_provider.state == FiberState.ACTIVE
+    assert iso_provider.state == FiberState.ACTIVE
+    assert kernel.root.get("svcA") == "rootimpl"
+    assert scope.get("svcA") == "isoimpl"
+
+    # Unloading the isolated one must not touch the root's live service.
+    await iso_provider.dispose()
+    assert scope.get("svcA") is None
+    assert kernel.root.get("svcA") == "rootimpl"
+
+
+async def test_an_unloading_provider_does_not_resurrect_a_dead_predecessor() -> None:
+    """The exact shape of the bug the rejection rule replaced.
+
+    Under the old unconditional restore, p1 unloading clobbered p2's live
+    service, and p2 unloading resurrected p1's dead one. With one authority
+    per key, the sequence simply cannot arise — but assert the end state.
+    """
+    kernel, _ = _tracing_kernel()
+
+    p1 = await kernel.mount(SimplePlugin(name="p1", apply_fn=lambda ctx: ctx.provide("svcA", "p1")))
+    await p1.dispose()
+    p2 = await kernel.mount(SimplePlugin(name="p2", apply_fn=lambda ctx: ctx.provide("svcA", "p2")))
+    await kernel.settle()
+    await p2.dispose()
+
+    # Absent, not "p1" resurrected from the grave.
+    assert kernel.root.get("svcA") is None

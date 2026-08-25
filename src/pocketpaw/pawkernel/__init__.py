@@ -10,6 +10,7 @@
 from pocketpaw.pawkernel.context import Context
 from pocketpaw.pawkernel.errors import (
     DispatchModeConflict,
+    DuplicateProvider,
     EffectRejected,
     PawKernelError,
 )
@@ -24,10 +25,12 @@ from pocketpaw.pawkernel.fiber import (
 )
 from pocketpaw.pawkernel.kernel import Kernel
 from pocketpaw.pawkernel.observer import (
+    DisposerErrorEvent,
     FiberStateEvent,
     KernelEvent,
     Observer,
     ServiceEvent,
+    ServiceRejectedEvent,
 )
 
 __all__ = [
@@ -37,6 +40,8 @@ __all__ = [
     "WATERFALL",
     "Context",
     "DispatchModeConflict",
+    "DisposerErrorEvent",
+    "DuplicateProvider",
     "Disposer",
     "EffectRejected",
     "EventBus",
@@ -50,5 +55,6 @@ __all__ = [
     "PawKernelError",
     "Plugin",
     "ServiceEvent",
+    "ServiceRejectedEvent",
     "SimplePlugin",
 ]

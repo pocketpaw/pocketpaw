@@ -11,6 +11,9 @@
 #   disposer, reported through DisposerErrorEvent as they happen, and raised
 #   to dispose()'s caller as an ExceptionGroup only after the fiber has
 #   reached its target state. CancelledError is never contained.
+# Updated: 2026-08-25 (feat/pawkernel-compose) — §4: dispose() is total. A
+#   FAILED fiber now retires to DISPOSED instead of staying FAILED forever;
+#   fiber.error keeps the original cause.
 
 from __future__ import annotations
 
@@ -347,20 +350,19 @@ class Fiber:
         if self._load_task is not None and not self._load_task.done():
             await asyncio.shield(self._load_task)
 
-        if self.state in (FiberState.DISPOSED,):
-            return
-        if self.state == FiberState.FAILED:
-            # A FAILED fiber already holds no live effects.
-            self._unwatch_deps()
+        if self.state == FiberState.DISPOSED:
+            # Already retired. Repeat disposal is a no-op, not an error.
             return
 
         errors: list[Exception] = []
         if self.state in (FiberState.ACTIVE, FiberState.LOADING):
             self._enter(FiberState.UNLOADING)
             errors = await self._teardown()
-        elif self.state in (FiberState.PENDING, FiberState.INIT):
-            # Nothing was ever collected; there is nothing to unwind.
-            pass
+        # PENDING, INIT and FAILED have nothing to unwind — PENDING and INIT
+        # never collected anything, and a FAILED fiber was already rolled
+        # back. §4: dispose() is total, so they still retire to DISPOSED
+        # rather than sitting in a state with no outgoing edge. The
+        # originating failure stays on ``fiber.error``.
 
         self._unwatch_deps()
         if self.parent is not None and self in self.parent._children:

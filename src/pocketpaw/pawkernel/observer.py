@@ -7,6 +7,8 @@
 #   SEMANTICS.md §3's fourth dragon: a throwing disposer does not abort the
 #   chain, but the error must be observable rather than swallowed. The kernel
 #   reports each one as it contains it.
+# Updated: 2026-08-25 (feat/pawkernel-compose) — added ServiceRejectedEvent for
+#   SEMANTICS.md §1's one-authority-per-key-per-scope rule.
 
 from __future__ import annotations
 
@@ -50,7 +52,15 @@ class DisposerErrorEvent:
     error: BaseException
 
 
-KernelEvent = FiberStateEvent | ServiceEvent | DisposerErrorEvent
+@dataclass(frozen=True)
+class ServiceRejectedEvent:
+    """A publish was refused: the key is already live in this scope (§1)."""
+
+    owner: str
+    key: str
+
+
+KernelEvent = FiberStateEvent | ServiceEvent | DisposerErrorEvent | ServiceRejectedEvent
 Observer = Callable[[KernelEvent], None]
 
 

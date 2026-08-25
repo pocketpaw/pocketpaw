@@ -4,14 +4,20 @@
 #   an absent key resolves to None rather than raising; isolate(key) gives a
 #   child a fresh scope for that one key while every other key still resolves
 #   through the parent.
+# Updated: 2026-08-25 (feat/pawkernel-compose) — §1 one authority per key per
+#   scope: publishing a key already live in the same scope is rejected, and
+#   the provide-disposer no longer restores a previous value. The old
+#   unconditional restore let an earlier provider clobber a live later one on
+#   unload, and a later one resurrect the dead earlier one.
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from pocketpaw.pawkernel.errors import DuplicateProvider
 from pocketpaw.pawkernel.events import EMIT
-from pocketpaw.pawkernel.observer import ServiceEvent
+from pocketpaw.pawkernel.observer import ServiceEvent, ServiceRejectedEvent
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pocketpaw.pawkernel.fiber import Fiber
@@ -106,13 +112,25 @@ class Context:
         cell = self._cell(key)
         owner = self._owner_name()
 
+        # §1: one authority per key per scope. A key already live in THIS
+        # scope may not be claimed by a second provider. Rejecting is the
+        # only safe answer — every restore policy is wrong in one direction
+        # or the other: restoring the previous value on unload clobbers a
+        # newer provider and resurrects a dead one, while never restoring
+        # downgrades the key to absent while an older provider is still live.
+        # A different implementation of the same key belongs in isolate(key).
+        if cell.value is not ABSENT:
+            self._kernel.notify(ServiceRejectedEvent(owner=owner, key=key))
+            raise DuplicateProvider(key=key, owner=owner)
+
         def setup() -> Callable[[], None]:
-            previous = cell.value
             cell.set(value)
             self._kernel.notify(ServiceEvent(owner=owner, key=key, kind="provide"))
 
             def dispose() -> None:
-                cell.set(previous)
+                # No "previous" to restore: the rule above guarantees this
+                # scope held nothing when we claimed the key.
+                cell.set(ABSENT)
                 self._kernel.notify(ServiceEvent(owner=owner, key=key, kind="withdraw"))
 
             return dispose
