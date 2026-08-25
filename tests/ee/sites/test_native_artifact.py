@@ -167,6 +167,10 @@ async def _hash_for(pocket_id: str, *, origin: str, engine: str = "svelte") -> s
         builder_origin=origin,
         gen_version=generator_client.generator_version(),
         engine=engine,
+        # Resolved the same way the service resolves it, not hardcoded: the flag joined
+        # the hash when the preview lane started carrying it, and a literal here would
+        # drift silently the moment the default moves.
+        keeps_client_bundle=sites_service._resolve_keeps_client_bundle(wire),
     )
 
 
@@ -449,6 +453,7 @@ async def test_native_artifact_store_hit_skips_build(beanie_test_db):
         theme={},
         builder_origin="https://dash.paw.example",
         gen_version=generator_client.generator_version(),
+        keeps_client_bundle=sites_service._resolve_keeps_client_bundle(wire),
     )
     store.data[(pocket_id, content_hash)] = ("<h1>cached</h1>", ".x{color:red}")
 
