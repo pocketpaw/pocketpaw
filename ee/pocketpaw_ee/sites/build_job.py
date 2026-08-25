@@ -24,6 +24,38 @@
 # nothing. That is not dead code — a build queued to verify an artifact is a real use of
 # this lane, and it is what the fault-ladder tests drive.
 #
+# Edited 2026-08-24 (SP-2): THE LANE GREW A SECOND JOB — :func:`run_site_preview_build`,
+# for the DRAFT PREVIEW the native editor shadow-renders. Preview used to build inline in
+# the API container (``service._build_native_artifact`` → ``generator.build`` → ``bun``),
+# which in the deployed container fails and surfaces as ``sites.generator_failed``. It now
+# rides the same sandbox this module already drives.
+#
+# IT IS A SEPARATE JOB RATHER THAN A FLAG ON ``run_site_build``, and the reason is the
+# thing a preview does NOT have: a Site row. ``run_site_build`` opens by loading one
+# (``load_build_site``) and every step after that writes to it — ``mark_build_running``,
+# ``_record``, and the ``claim_build_queued`` its enqueue depends on. A DRAFT that was
+# never published has no Site row at all, which is precisely why ``get_native_artifact``
+# works on one. Threading "sometimes there is no row" through the publish job would put a
+# None-check on every write in the lane's most load-bearing function, to serve a caller
+# that also wants a different OUTPUT (``{body_html, css}`` in the artifact store, not a
+# deploy) and a different SINGLE-FLIGHT KEY (the content hash, not the site).
+#
+# THE SINGLE-FLIGHT KEY IS THE CONTENT HASH, AND IT IS THE arq JOB ID. The publish lane
+# guards with a conditional write to the Site row because that is the state it owns; with
+# no row, this lane spends the id instead: ``_preview_job_id`` is deterministic over
+# ``(pocket_id, content_hash)``, so arq itself refuses a second enqueue of a render that
+# is already in flight. That is not a lucky reuse of a refusal — it is the same guard,
+# keyed on the thing that actually distinguishes one preview build from another. Without
+# it a client polling a 15s build every 2s would open a sandbox per poll.
+#
+# ``_mint_job_id``'s warning about deterministic ids still stands and is answered rather
+# than ignored: a completed job's RESULT holds the id for ``keep_result`` (an hour), so a
+# refused enqueue is inspected (:func:`_preview_job_outcome`) instead of assumed to be in
+# flight. A build that already FINISHED and left the store empty is reported as failed,
+# with its reason — not as a build that is still coming. Re-enqueueing there instead
+# would put a polling client in a rebuild loop, one sandbox per build duration, on inputs
+# that just failed.
+#
 # WHICH ENGINES ARRIVE HERE IS DECIDED IN ``service.build_runs_async``, not here, and it is
 # react-only today. The reason is the artifact, not the queue: an adapter-cloudflare build
 # (ripple, dynamic svelte) emits pages rendered by a ``_worker.js`` whose imports sit
@@ -149,6 +181,7 @@ from typing import Any
 
 from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
+from arq.jobs import Job, JobStatus
 
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.build_state import BuildStatus, settle
@@ -167,6 +200,11 @@ logger = logging.getLogger(__name__)
 #: pins its own: an enqueue name and a registration name that drift produce a job that
 #: sits in Redis forever with no worker willing to claim it, and no error anywhere.
 ARQ_FUNCTION_NAME = "run_site_build"
+
+#: The preview lane's own registered name (SP-2). Separate from the publish job's for the
+#: same reason the function is: a worker that registered one name for both would run a
+#: preview payload through the publish job's signature.
+PREVIEW_ARQ_FUNCTION_NAME = "run_site_preview_build"
 
 #: Engines this lane can build. Every one needs a per-site Node build AND emits its
 #: output into a SUBDIRECTORY — ``artifact_tar_command`` refuses an engine whose output
@@ -233,6 +271,11 @@ RUNG_ENQUEUE_FAILED = "enqueue_failed"
 #: wrong, so blaming it would send them to debug a site that compiles. Retryable — a
 #: failed wrangler run or an unreachable Cloudflare is worth another publish.
 RUNG_DEPLOY_FAILED = "deploy_failed"
+#: SP-2. The preview build was clean and the artifact could not be turned into
+#: ``{body_html, css}`` — a tar that unpacked to no ``index.html``, or a store write that
+#: raised. Its own rung for the same reason :data:`RUNG_DEPLOY_FAILED` is: the user's
+#: build compiled, so naming this a build failure would send them to debug working code.
+RUNG_PREVIEW_UNREADABLE = "preview_unreadable"
 
 
 @dataclass(frozen=True)
@@ -884,24 +927,322 @@ async def enqueue_site_build(
     return job_id
 
 
+# ---------------------------------------------------------------------------
+# The PREVIEW lane (SP-2) — same sandbox, no Site row, and the artifact becomes
+# ``{body_html, css}`` in the native-artifact store instead of a deploy.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PreviewBuildEnqueue:
+    """What :func:`enqueue_preview_build` tells its caller to put on the wire.
+
+    ``status`` reuses the publish lane's vocabulary verbatim (``queued`` / ``building`` /
+    ``failed``) because the frontend already codes to it, and SL-3's contract that an
+    UNRECOGNISED status means in-progress only holds while nobody mints a second
+    vocabulary for the same idea.
+
+    ``reason`` is populated on ``failed`` only, and carries a RUNG — never stderr. The
+    same rule ``Site.build_reason`` follows, for the same reason: this value crosses to a
+    client, and a build's error text is the user's own content.
+    """
+
+    job_id: str
+    status: str
+    reason: str | None = None
+
+
+def _preview_job_id(pocket_id: str, content_hash: str) -> str:
+    """The arq id for one pocket's one render — and, being unique per render, the lane's
+    single-flight guard.
+
+    DELIBERATELY DETERMINISTIC, which is the opposite of :func:`_mint_job_id` and for a
+    reason that inverts its argument. There the id names a SITE, so a stable one refuses
+    every rebuild of that site for as long as a result lives. Here it names the exact
+    ``(pocket, render inputs)`` pair the store is keyed on, so "a job with this id already
+    exists" is exactly the question the caller is asking: is this render already being
+    built? A uuid tail would answer "no" every time and open a sandbox per poll.
+
+    The content hash is a sha256 hex digest, so the id is bounded and contains nothing
+    that needs escaping.
+    """
+    return f"site-preview-{pocket_id}-{content_hash}"
+
+
+async def _preview_job_outcome(pool: Any, job_id: str) -> tuple[str, str | None]:
+    """Read a REFUSED enqueue: is that id an in-flight build, or one that already ended?
+
+    Looked up on the module by :func:`enqueue_preview_build` (the ``_default_prewarm_scheduler``
+    convention) so a test can substitute it without faking arq's Redis surface.
+
+    Three answers, and the middle one is why this function exists at all:
+
+      * still queued / running → ``building``. The polling case, and the common one.
+      * COMPLETE → the store missed, so whatever that job did it did not leave a usable
+        artifact: report ``failed`` with its rung. Reporting ``building`` here would spin
+        a client forever on a build that is over; re-enqueueing would rebuild identical
+        inputs on a loop.
+      * gone (a result that expired between the enqueue and this read) → ``building``.
+        A pure race, and the next poll enqueues cleanly because the id is free again.
+    """
+    job = Job(job_id, pool)
+    status = await job.status()
+    if status is not JobStatus.complete:
+        return "building", None
+    info = await job.result_info()
+    if info is None:
+        return "building", None
+    if not info.success:
+        # The job raised. ``run_site_preview_build`` only re-raises for a sandbox it
+        # never reached, and the exception text can name paths, so the rung is all that
+        # travels.
+        return "failed", f"{RUNG_SANDBOX_UNAVAILABLE}:job_raised"
+    result = info.result
+    if isinstance(result, dict):
+        return str(result.get("status") or "failed"), result.get("reason")
+    return "failed", "preview_result_unreadable"
+
+
+def _store_preview_artifact(
+    artifact: bytes,
+    *,
+    engine: str,
+    pocket_id: str,
+    content_hash: str,
+    output_rel: str,
+    store: Any,
+) -> None:
+    """Turn the built tar into ``{body_html, css}`` and cache it under the content hash.
+
+    The preview lane's answer to :func:`_deploy_built_artifact`, and it borrows that
+    function's two hard-won decisions rather than re-deciding them: the tar is unpacked
+    through ``artifact_preview.unpack_artifact`` (the extractor whose path-escape and
+    zip-bomb guards each have a mutation proving they fire), and it is unpacked UNDER
+    ``output_rel`` — the same rel the tar was PACKED from — because the reader probes for
+    the engine's static output dir and a flat extraction leaves it nothing to find.
+
+    THE SERVER-ENTRY REFUSAL THE DEPLOY MAKES IS DELIBERATELY ABSENT. There it matters
+    because dropping ``_worker.js`` deploys a shell that cannot start. Here nothing is
+    deployed and the reader only ever opens ``index.html``, which is the same file the
+    inline arm build read off disk — so a worker-rendered site previews exactly as
+    poorly as it did before this lane existed, and no worse.
+
+    Synchronous, and deliberately: every step is blocking work (untar, read, write) and
+    the store seam (``service._default_artifact_store``) is sync — the same one
+    ``get_native_artifact`` reads through, so an S3 or other backend swapped in there is
+    picked up here for free. An ``async def`` with no awaits would only add indirection.
+
+    Raises on an unreadable tree or a failed read; the caller settles that as
+    :data:`RUNG_PREVIEW_UNREADABLE`.
+    """
+    from pocketpaw_ee.sites import artifact_preview
+
+    project_dir = tempfile.mkdtemp(prefix="paw-preview-")
+    try:
+        unpacked = artifact_preview.unpack_artifact(artifact, Path(project_dir, output_rel))
+        body_html, css = sites_service._read_native_artifact(project_dir, engine)
+        logger.info(
+            "sites.preview: materialised %d entries (%d bytes) under %s for pocket %s",
+            unpacked.entries,
+            unpacked.bytes_written,
+            output_rel,
+            pocket_id,
+        )
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+    store.write(pocket_id, content_hash, body_html, css)
+
+
+async def run_site_preview_build(
+    ctx: dict[str, Any],
+    pocket_id: str,
+    content_hash: str,
+    generator_input: dict[str, Any],
+    engine: str,
+    timeout_seconds: int,
+    *,
+    _runner: Any = None,
+    _client: Any = None,
+    _store: Any = None,
+) -> dict[str, str]:
+    """arq job: build a pocket's ARMED draft in a sandbox and cache the native artifact.
+
+    The same five steps :func:`run_site_build` runs — scaffold, refuse an empty tree,
+    build, classify, act on the verdict — with the last step writing ``{body_html, css}``
+    to the native-artifact store instead of deploying. ``ctx`` is unused; everything the
+    build needs rides the payload.
+
+    ``content_hash`` is carried rather than recomputed. It is the store's key AND this
+    job's id, and it was computed in the web process from the pocket read that decided to
+    enqueue. Recomputing it here from the payload would let a source that changed between
+    the enqueue and the run write this build's output under the NEW hash — caching a
+    render of the old source as if it were the new one.
+
+    RETURNS THE SETTLEMENT RATHER THAN WRITING IT. With no Site row there is nowhere to
+    record, so the outcome lives in the arq result — which is what a refused enqueue
+    reads (:func:`_preview_job_outcome`) to tell a poller "this render already failed"
+    instead of spinning it. The returned ``reason`` is a rung and never stderr, because
+    it crosses to a client.
+
+    NEVER RAISES FOR A BUILD OUTCOME, matching the publish job: a failed build, a timeout
+    and a lost sandbox are results. It DOES re-raise when the sandbox could not be reached
+    at all, after the settlement is already lost to the raise — the worker log is where
+    that condition belongs, and ``_preview_job_outcome`` maps the failed job back to the
+    ``sandbox_unavailable`` rung.
+    """
+    if not is_buildable_engine(engine):
+        # A routing bug — ``service.get_native_artifact`` gates on ``has_native_edit_lane``
+        # and every engine that passes it also builds here. Checked anyway rather than
+        # spending a sandbox to discover the day that stops being true.
+        logger.error(
+            "sites.preview: engine %r cannot build in this lane (pocket %s)", engine, pocket_id
+        )
+        return {
+            "status": "failed",
+            "reason": f"{RUNG_ENGINE_NOT_BUILDABLE}:{normalize_engine(engine)}",
+        }
+
+    from pocketpaw_ee.sites.generator_client import expected_static_output_rel
+
+    artifact_rel = expected_static_output_rel(engine, generator_input)
+    store = _store if _store is not None else sites_service._default_artifact_store()
+
+    work_dir = tempfile.mkdtemp(prefix=f"paw-preview-{pocket_id}-")
+    try:
+        try:
+            project_dir = await _scaffold(generator_input, work_dir, runner=_runner)
+        except Exception:
+            logger.exception("sites.preview: scaffold failed for pocket %s", pocket_id)
+            return {"status": "failed", "reason": f"{RUNG_SCAFFOLD_FAILED}:generator_raised"}
+
+        files = read_generated_tree(project_dir)
+        if not files:
+            logger.error("sites.preview: scaffold of pocket %s produced no files", pocket_id)
+            return {"status": "failed", "reason": f"{RUNG_SCAFFOLD_EMPTY}:no_files_generated"}
+
+        try:
+            result = await run_build(
+                files,
+                engine=normalize_engine(engine),
+                timeout_seconds=timeout_seconds,
+                client=_client,
+                artifact_rel=artifact_rel,
+            )
+        except Exception:
+            logger.exception("sites.preview: no sandbox for pocket %s", pocket_id)
+            raise
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    settlement = resolve_build_settlement(result)
+    _log_outcome(f"preview:{pocket_id}", result, settlement)
+    if settlement.status != "built":
+        # ``settle`` can answer None to keep a publish attempt in flight between retries.
+        # This lane has no attempt loop and no row to leave in flight, so the caller gets
+        # a terminal answer — a poller with nothing coming must not be told to keep
+        # waiting.
+        return {"status": settlement.status or "failed", "reason": settlement.reason}
+
+    try:
+        _store_preview_artifact(
+            result.artifact or b"",
+            engine=engine,
+            pocket_id=pocket_id,
+            content_hash=content_hash,
+            output_rel=artifact_rel,
+            store=store,
+        )
+    except Exception:
+        logger.exception(
+            "sites.preview: pocket %s built cleanly and the artifact could not be read",
+            pocket_id,
+        )
+        return {"status": "failed", "reason": f"{RUNG_PREVIEW_UNREADABLE}:read_or_store_raised"}
+
+    return {"status": "built", "reason": settlement.reason}
+
+
+async def enqueue_preview_build(
+    *,
+    pocket_id: str,
+    content_hash: str,
+    engine: str,
+    generator_input: dict[str, Any],
+    timeout_seconds: int | None = None,
+    _pool_override: Any = None,
+) -> PreviewBuildEnqueue:
+    """Queue a preview build for one render, or report the one already running.
+
+    No claim write, because there is no row to claim: the deterministic job id IS the
+    single-flight guard (see :func:`_preview_job_id`). arq refuses a duplicate id by
+    returning ``None``, and that refusal is inspected rather than assumed — a render that
+    already finished and left the store empty comes back ``failed``, not ``building``.
+
+    THE FAILURE MODE THIS EXISTS TO PREVENT IS A SILENT ONE. A dead Redis, or an arq that
+    cannot take the job, must NOT return a job id and a ``queued`` status — a client that
+    got one would poll a build nobody will run, forever, with the endpoint reporting
+    progress the whole time. So an enqueue failure RAISES, and the service turns it into
+    an error the user sees.
+    """
+    if not is_buildable_engine(engine):
+        raise RuntimeError(
+            f"engine {normalize_engine(engine)!r} cannot build in the preview lane "
+            f"(pocket {pocket_id})"
+        )
+
+    timeout = (
+        timeout_seconds if timeout_seconds is not None else resolve_build_timeout_seconds(engine)
+    )
+    job_id = _preview_job_id(pocket_id, content_hash)
+    pool = _pool_override or await _get_pool()
+    job = await pool.enqueue_job(
+        PREVIEW_ARQ_FUNCTION_NAME,
+        pocket_id,
+        content_hash,
+        scrub_build_input(generator_input),
+        normalize_engine(engine),
+        timeout,
+        _job_id=job_id,
+    )
+    if job is None:
+        status, reason = await _preview_job_outcome(pool, job_id)
+        logger.info(
+            "sites.preview: pocket %s render %s already has a job (%s) — not enqueueing",
+            pocket_id,
+            content_hash[:12],
+            status,
+        )
+        return PreviewBuildEnqueue(job_id=job_id, status=status, reason=reason)
+
+    logger.info(
+        "sites.preview: queued build %s for pocket %s (%ds budget)", job_id, pocket_id, timeout
+    )
+    return PreviewBuildEnqueue(job_id=job_id, status="queued")
+
+
 __all__ = [
     "ARQ_FUNCTION_NAME",
     "BUILDABLE_ENGINES",
     "OUT_OF_SANDBOX_MARGIN_SECONDS",
+    "PREVIEW_ARQ_FUNCTION_NAME",
     "RUNG_ARTIFACT_MISSING",
     "RUNG_ENGINE_NOT_BUILDABLE",
     "RUNG_DEPLOY_FAILED",
     "RUNG_ENQUEUE_FAILED",
+    "RUNG_PREVIEW_UNREADABLE",
     "RUNG_SANDBOX_UNAVAILABLE",
     "RUNG_SCAFFOLD_EMPTY",
     "RUNG_SCAFFOLD_FAILED",
     "SKIPPED_TREE_DIRS",
     "BuildSettlement",
+    "PreviewBuildEnqueue",
+    "enqueue_preview_build",
     "enqueue_site_build",
     "is_buildable_engine",
     "read_generated_tree",
     "resolve_build_settlement",
     "run_site_build",
+    "run_site_preview_build",
     "scrub_build_input",
     "site_build_job_timeout_seconds",
 ]

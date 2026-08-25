@@ -2,6 +2,15 @@
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
 #
+# Updated 2026-08-24 (SP-2 — draft preview joins the ephemeral build lane):
+# ``NativeArtifactResponse`` gained ``build_status`` / ``build_reason`` /
+# ``build_job_id`` and defaulted ``body_html`` / ``css`` to empty strings. A cold
+# native-artifact read no longer builds in the request — it queues a sandbox build and
+# returns a handle — so the model now carries both shapes. The status vocabulary is the
+# publish lane's, reused verbatim rather than re-minted: a client already treats an
+# unrecognised ``build_status`` as in-progress, and a second set of names for the same
+# idea is how a failure comes to read as progress.
+#
 # Updated 2026-08-12 (sites Settings consolidation — the client record gets a
 # backend): added ``SiteClientResponse`` / ``SiteClientUpdate`` / ``SiteInvoiceOut``
 # / ``SiteInvoiceCreate``, backing GET+PATCH /sites/{site_id}/client and
@@ -770,8 +779,24 @@ class NativeArtifactResponse(BaseModel):
     HTML — the data-uid-stamped editable leaves plus the embedded
     ``<script id="paw-edit-manifest">`` — which the FE injects into a shadow root.
     ``css`` is the built stylesheet(s) concatenated into one string the FE injects as
-    a single ``<style>``."""
+    a single ``<style>``.
+
+    SP-2 — THE RESPONSE HAS TWO SHAPES AND ``build_status`` IS WHICH ONE THIS IS.
+    A cold miss no longer builds in the request; it queues the build in the ephemeral
+    Daytona lane and answers immediately with ``body_html`` / ``css`` EMPTY and a job to
+    poll. A client renders the artifact when ``build_status`` is ``"none"`` (the served
+    render — not a build in any state) and shows progress otherwise, re-fetching until it
+    flips. Empty strings rather than nulls so the field's type never changes under a
+    client that reads it before checking the status.
+
+    The status vocabulary is the publish lane's, unchanged: ``queued`` / ``building`` /
+    ``failed``, with an UNRECOGNISED value meaning in-progress (SL-3's wire contract).
+    ``build_reason`` carries a rung name on a failure — never a build's stderr, which is
+    the user's own content and stays in the worker log."""
 
     pocket_id: str
-    body_html: str
-    css: str
+    body_html: str = ""
+    css: str = ""
+    build_status: str = "none"
+    build_reason: str | None = None
+    build_job_id: str | None = None

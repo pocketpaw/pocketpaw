@@ -72,26 +72,32 @@ _ARMED_DIST_HTML = """<!DOCTYPE html>
 _LINKED_CSS = ".hero{color:#0A84FF}"
 
 
-class _FakeGenerator:
-    """Records build kwargs and points at a pre-populated `dist/` tree so the REAL
-    extraction runs without Bun or Vite."""
+class _RecordingPool:
+    """An arq pool that records the enqueue instead of performing it (SP-2).
 
-    def __init__(self, project_dir: str) -> None:
-        self.project_dir = project_dir
-        self.built: dict | None = None
+    Replaces the generator fakes this file used to carry: the cold path no longer builds
+    in-process, so what a reject path must not do is QUEUE a sandbox.
+    """
 
-    async def build(self, **kw):
-        from pocketpaw_ee.sites.generator_client import BuildResult
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
 
-        self.built = kw
-        return BuildResult(project_dir=self.project_dir, ripple_version=None)
+    async def enqueue_job(self, function: str, *args, _job_id: str | None = None, **kw):
+        self.calls.append({"function": function, "args": args, "job_id": _job_id})
+        return object()
 
 
-class _NoBuildGenerator:
-    """A generator whose build MUST NOT run — the reject paths must fail first."""
+class _MemoryArtifactStore:
+    """In-memory ``_store`` seam - the read-through logic without disk."""
 
-    async def build(self, **kw):  # pragma: no cover - must not be reached
-        raise AssertionError("the build must not run on the reject path")
+    def __init__(self) -> None:
+        self.data: dict[tuple[str, str], tuple[str, str]] = {}
+
+    def read(self, pocket_id: str, content_hash: str) -> tuple[str, str] | None:
+        return self.data.get((pocket_id, content_hash))
+
+    def write(self, pocket_id: str, content_hash: str, body_html: str, css: str) -> None:
+        self.data[(pocket_id, content_hash)] = (body_html, css)
 
 
 def _write_react_dist(project_dir: Path) -> None:
@@ -122,17 +128,44 @@ async def _make_pocket(engine: str, source, workspace_id="ws1", user_id="u1") ->
 
 @pytest.mark.asyncio
 async def test_react_pocket_renders_from_dist(beanie_test_db, tmp_path):
-    """A react pocket is accepted, armed on the REACT track, and read from dist/."""
+    """A react pocket is accepted, armed on the REACT track, and read from dist/.
+
+    SP-2 split this across the two halves it now has: the ARMED ENQUEUE happens here (the
+    payload's engine + builderOrigin + source), and the dist/ read happens in the preview
+    worker — exercised here by seeding the store with the REAL extraction of a react
+    build tree, which resolves ``dist`` and not the SvelteKit path (absent here)."""
     pocket_id = await _make_pocket("react", dict(_REACT_SOURCE))
     _write_react_dist(tmp_path)
-    gen = _FakeGenerator(str(tmp_path))
+    origin = "https://dash.paw.example"
+    store = _MemoryArtifactStore()
+    pool = _RecordingPool()
+
+    # Cold: the armed build is QUEUED, on the react track, with the pocket's source.
+    pending = await sites_service.get_native_artifact(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        builder_origin=origin,
+        _store=store,
+        _pool=pool,
+    )
+    assert pending["build_status"] == "queued"
+    _pk, content_hash, generator_input, engine, _timeout = pool.calls[0]["args"]
+    assert engine == "react"
+    assert generator_input["siteConfig"]["builderOrigin"] == origin
+    assert generator_input["source"]["src/App.tsx"] == _REACT_SOURCE["src/App.tsx"]
+
+    # The worker lands: it reads dist/ off the built tree and stores the extraction.
+    body_html, css = sites_service._read_native_artifact(str(tmp_path), "react")
+    store.data[(pocket_id, content_hash)] = (body_html, css)
 
     result = await sites_service.get_native_artifact(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
-        builder_origin="https://dash.paw.example",
-        _generator=gen,
+        builder_origin=origin,
+        _store=store,
+        _pool=pool,
     )
 
     assert result["pocket_id"] == pocket_id
@@ -144,12 +177,7 @@ async def test_react_pocket_renders_from_dist(beanie_test_db, tmp_path):
     # the read resolved dist/, not the SvelteKit path (which does not exist here).
     assert ".inline-critical{margin:0}" in result["css"]
     assert _LINKED_CSS in result["css"]
-    # The build was ARMED, and on the react track.
-    assert gen.built is not None
-    assert gen.built["engine"] == "react"
-    assert gen.built["builder_origin"] == "https://dash.paw.example"
-    assert gen.built["smoke"] is False
-    assert gen.built["source"]["src/App.tsx"] == _REACT_SOURCE["src/App.tsx"]
+    assert len(pool.calls) == 1, "the warm view must not queue a second sandbox"
 
 
 @pytest.mark.asyncio
@@ -158,13 +186,15 @@ async def test_html_pocket_still_rejected(beanie_test_db):
     its source. Widening the guard to `is_source_engine` would have swept it in."""
     pocket_id = await _make_pocket("html", {"index.html": "<h1>hi</h1>"})
 
+    pool = _RecordingPool()
     with pytest.raises(ValidationError):
         await sites_service.get_native_artifact(
             workspace_id="ws1",
             user_id="u1",
             pocket_id=pocket_id,
-            _generator=_NoBuildGenerator(),
+            _pool=pool,
         )
+    assert pool.calls == [], "a rejected engine must not queue a sandbox"
 
 
 @pytest.mark.asyncio
@@ -183,13 +213,15 @@ async def test_ripple_pocket_still_rejected(beanie_test_db):
     )
     assert err is None, err
 
+    pool = _RecordingPool()
     with pytest.raises(ValidationError):
         await sites_service.get_native_artifact(
             workspace_id="ws1",
             user_id="u1",
             pocket_id=pocket_id,
-            _generator=_NoBuildGenerator(),
+            _pool=pool,
         )
+    assert pool.calls == []
 
 
 def test_content_hash_separates_engines():

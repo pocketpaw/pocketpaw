@@ -1,6 +1,32 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-08-24 (SP-2 — draft preview joins the ephemeral build lane): a cold
+# ``get_native_artifact`` no longer builds in this process. ``_build_native_artifact``
+# used to call ``generator.build``, which shells out to ``bun``; the deployed API
+# container has no toolchain, so every cold preview raised and surfaced to users as
+# ``sites.generator_failed`` on the native-editor path. It now assembles the same armed
+# generator input and QUEUES it through ``build_job.enqueue_preview_build``, returning a
+# build-pending shape (``body_html`` / ``css`` empty plus ``build_status`` /
+# ``build_reason`` / ``build_job_id``) for the client to poll. The worker writes
+# ``{body_html, css}`` into the artifact store under the SAME content hash, so the next
+# call is an ordinary cache hit. Three things about this are load-bearing:
+#
+#   * THE CACHE CHECK STAYS IN FRONT, and it now guards money rather than seconds. A
+#     miss costs a Daytona sandbox (react 8.70s, svelte 14.67s in-sandbox, before
+#     create / upload / teardown), so a bypassed check would bill one per keystroke.
+#   * THE PRE-WARM MOVED TOO. ``_prewarm_native_artifact`` shares the lane rather than
+#     keeping an inline build, because an inline build in the container fails and
+#     ``_safe_prewarm`` swallows it — the store would never warm and every view would
+#     wait on its own build. Sharing it also collapses an edit's pre-warm and the view
+#     that follows onto ONE sandbox: the lane's job id is the content hash.
+#   * A FAILED ENQUEUE IS AN ERROR, NOT A PENDING BUILD (``sites.preview_build_unavailable``,
+#     503). Handing back a job id nobody will run makes a client poll forever while the
+#     endpoint reports progress.
+#
+# The ``_generator`` / ``_read_built`` seams on this path are gone with the inline build;
+# ``_pool`` replaces them as the thing a test substitutes. The publish path is untouched.
+#
 # Updated 2026-08-24 (feat/sites-s3-artifact-store, SP-4): ``_default_artifact_store``
 # now consults ``artifact_store_s3.shared_artifact_store()`` before falling back to
 # ``_FilesystemArtifactStore``, so a deployment can set ``PAW_SITES_ARTIFACT_STORE=s3``
@@ -1212,52 +1238,77 @@ def _default_artifact_store() -> Any:
 
 async def _build_native_artifact(
     *,
-    generator: GeneratorClient,
     theme: dict[str, Any],
     source: dict[str, Any],
     site_name: str,
     builder_origin: str,
     pocket_id: str,
-    read: Callable[[str], tuple[str, str]],
+    content_hash: str,
     engine: str = "svelte",
-) -> tuple[str, str]:
-    """Run the ARMED build for a native artifact and extract ``(body_html, css)``.
+    _pool: Any | None = None,
+) -> Any:
+    """QUEUE the ARMED build for a native artifact in the ephemeral Daytona lane.
 
-    ``engine`` selects which track is built — ``"svelte"`` or, since RX-2,
-    ``"react"``. Both arm the same way (the generator stamps ``data-uid`` and
-    embeds the manifest when ``builder_origin`` is set) and both emit a prerendered
-    ``index.html``; only the output directory differs, and the ``read`` seam owns
-    that. Anything without a native edit lane never reaches here — the callers
-    gate on ``has_native_edit_lane`` first.
+    Returns a ``build_job.PreviewBuildEnqueue`` — a job id plus ``queued`` /
+    ``building`` / ``failed``. It does NOT return ``(body_html, css)``, and that is the
+    whole of SP-2: this used to run ``generator.build`` inline, which shells out to
+    ``bun``. On a laptop that works; in the deployed API container there is no toolchain,
+    so every cold preview died as ``sites.generator_failed``. The publish path solved this
+    at SL-3 by handing the build to a sandbox, and preview simply never adopted it.
 
-    The single build path shared by get_native_artifact's cache MISS and the
-    background pre-warm. It builds with ``builder_origin`` set (so the paw-sites
-    generator stamps ``data-uid`` on the editable leaves + embeds the
-    ``paw-edit-manifest``) through ``_build_or_cloud_error`` (a toolchain / non-zero /
-    SmokeGate failure becomes a clean CloudError, not an opaque 500), then reads the
-    built ``<body>`` inner HTML + concatenated CSS off disk. ``smoke=False`` is the
-    arm/preview gate — skip the SSR fail-check but still emit the static output. A
-    svelte pocket has no rippleSpec, so ``ripple_spec={}`` (mirrors the prior inline
-    call); PERF-3's stable per-pocket build dir keeps node_modules / bun install
-    cached across builds so the arm build reuses the publish build's install."""
-    build = await _build_or_cloud_error(
-        generator,
-        ripple_spec={},
+    THE CALLER MUST HAVE CHECKED THE STORE FIRST. A cache HIT has to be served without
+    reaching here — the store is what makes a VIEW a disk read, and measured in-sandbox
+    build times are 8.70s (react) / 14.67s (svelte) before create, upload and teardown.
+    An editor that queued one of those per keystroke would be unusable and expensive, in
+    that order.
+
+    ``content_hash`` is passed rather than recomputed because it is BOTH the store key
+    the finished build writes under and the job id that makes this lane single-flight
+    (``build_job._preview_job_id``). One value, decided once by the caller that read the
+    pocket, so the render that gets built and the slot it lands in cannot disagree.
+
+    ``engine`` selects the track — ``"svelte"`` or, since RX-2, ``"react"``. Both arm the
+    same way (the generator stamps ``data-uid`` and embeds the manifest when
+    ``builder_origin`` is set) and both emit a prerendered ``index.html``. Anything
+    without a native edit lane never reaches here; the callers gate on
+    ``has_native_edit_lane`` first.
+
+    No ``smoke=False`` argument survives the move, and nothing is lost with it: the
+    arm/preview gate skipped ``paw-sites``'s workerd SSR fail-check, and that check runs
+    inside ``generator.build`` — which this path no longer calls. The lane scaffolds and
+    then builds with ``bun`` in the sandbox, so there was never a smoke render to skip.
+
+    Raises whatever the enqueue raises (a dead Redis, an arq that will not take the job).
+    The callers turn that into a clean error rather than a job id nobody will run."""
+    # Lazy import: keeps the sites service free of an eager arq/Redis dependency at
+    # module load, and breaks the cycle (``build_job`` imports this module).
+    from pocketpaw_ee.sites import build_job
+    from pocketpaw_ee.sites.generator_client import build_generator_input
+
+    generator_input = build_generator_input(
+        engine=engine,
         theme=theme,
-        # Transient, per-pocket-stable id — cosmetic here (only rides the built page's
-        # capture config, which the native editor ignores). The build DIR is keyed on
-        # pocket_id (PERF-3), not this, so it does not affect where the output lands.
+        # Transient, per-pocket-stable id — cosmetic here (it only rides the built page's
+        # capture config, which the native editor ignores).
         site_id=_preview_id(pocket_id),
         title=site_name,
         capture_api_base=_capture_base(),
+        # Minted per build and immediately scrubbed by ``build_job.scrub_build_input``
+        # before the payload reaches Redis or a sandbox. A preview captures no leads, so
+        # nothing downstream reads it.
         capture_signed_key=f"site_key_{secrets.token_urlsafe(24)}",
-        engine=engine,
+        # A svelte pocket has no rippleSpec, so this mirrors the prior inline call.
+        ripple_spec={},
         source=source,
         builder_origin=builder_origin,
-        pocket_id=pocket_id,
-        smoke=False,
     )
-    return read(build.project_dir)
+    return await build_job.enqueue_preview_build(
+        pocket_id=pocket_id,
+        content_hash=content_hash,
+        engine=engine,
+        generator_input=generator_input,
+        _pool_override=_pool,
+    )
 
 
 async def _prewarm_native_artifact(
@@ -1266,23 +1317,32 @@ async def _prewarm_native_artifact(
     user_id: str,
     pocket_id: str,
     builder_origin: str | None = None,
-    _generator: GeneratorClient | None = None,
-    _read_built: Callable[[str], tuple[str, str]] | None = None,
     _store: Any | None = None,
+    _pool: Any | None = None,
 ) -> None:
-    """Produce + cache the ARMED native artifact for a pocket in the BACKGROUND so the
-    next preview/arm is a read-through cache HIT instead of an on-interaction build.
+    """QUEUE the ARMED native-artifact build for a pocket in the BACKGROUND so the next
+    preview/arm is a read-through cache HIT instead of a wait.
 
     Fired after a source mutation (leaf edit / component edit) and after a LIVE svelte
     publish. It re-reads the pocket (source is the source of truth and may have just
     changed), computes the SAME content hash ``get_native_artifact`` uses, and — only
-    if the store does not already hold that render — builds once and stores it. So a
-    mutation that lands identical source, or a re-publish of unchanged source, rebuilds
-    nothing.
+    if the store does not already hold that render — hands the build to the ephemeral
+    lane. A mutation that lands identical source, or a re-publish of unchanged source,
+    queues nothing.
+
+    SP-2 MOVED THE BUILD OUT OF THIS PROCESS, and the pre-warm had to follow
+    ``get_native_artifact`` rather than keep its own inline build. Two reasons, and the
+    second is the one that matters: an inline ``bun`` build cannot run in the deployed
+    API container at all, so a pre-warm left behind would have been a background failure
+    fired on every edit and swallowed by ``_safe_prewarm``, warming nothing — the store
+    would then miss forever and every view would wait for its own build. Sharing the lane
+    also makes the two paths COLLAPSE onto one sandbox: the job id is the content hash
+    (``build_job._preview_job_id``), so an edit's pre-warm and the view that follows it
+    are the same job rather than two builds of one render.
 
     Best-effort by contract: callers schedule it through ``_safe_prewarm`` (which
     swallows + logs) so the edit / publish they own returns regardless of a pre-warm
-    failure (missing toolchain, a non-svelte pocket, a read error)."""
+    failure (an unreachable queue, a non-svelte pocket, a read error)."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service
     from pocketpaw_ee.sites import generator_client
     from pocketpaw_ee.sites.engines import has_native_edit_lane, normalize_engine
@@ -1311,21 +1371,16 @@ async def _prewarm_native_artifact(
     )
     if store.read(pocket_id, content_hash) is not None:
         return  # already warm — no rebuild
-    generator = _generator or GeneratorClient()
-    # The ``_read_built`` seam stays SINGLE-ARG so injected test doubles keep
-    # working; the engine is bound into the default reader instead.
-    read = _read_built or (lambda d: _read_native_artifact(d, engine))
-    body_html, css = await _build_native_artifact(
-        generator=generator,
+    await _build_native_artifact(
         theme=theme,
         source=source,
         site_name=site_name,
         builder_origin=origin,
         pocket_id=pocket_id,
-        read=read,
+        content_hash=content_hash,
         engine=engine,
+        _pool=_pool,
     )
-    store.write(pocket_id, content_hash, body_html, css)
 
 
 async def _safe_prewarm(**kwargs: Any) -> None:
@@ -1367,24 +1422,25 @@ def _schedule_native_prewarm(
     user_id: str,
     pocket_id: str,
     builder_origin: str | None = None,
-    _generator: GeneratorClient | None = None,
-    _read_built: Callable[[str], tuple[str, str]] | None = None,
     _store: Any | None = None,
+    _pool: Any | None = None,
 ) -> None:
     """Fire a background native-artifact pre-warm for a pocket. A thin, non-async
     wrapper the mutation / publish call sites invoke; it never blocks or raises. The
-    injected ``_generator`` seam is forwarded so a faked-generator publish/edit
-    pre-warms with the SAME fake (unit tests never shell out). The scheduler is looked
-    up on the module (``_default_prewarm_scheduler``) so tests can patch it."""
+    scheduler is looked up on the module (``_default_prewarm_scheduler``) so tests can
+    patch it.
+
+    SP-2 replaced the forwarded ``_generator`` / ``_read_built`` seams with ``_pool``.
+    The pre-warm no longer builds in-process, so a fake generator has nothing to fake;
+    the queue is the seam a test now substitutes."""
     _default_prewarm_scheduler(
         _safe_prewarm(
             workspace_id=workspace_id,
             user_id=user_id,
             pocket_id=pocket_id,
             builder_origin=builder_origin,
-            _generator=_generator,
-            _read_built=_read_built,
             _store=_store,
+            _pool=_pool,
         )
     )
 
@@ -5128,15 +5184,14 @@ async def publish_pocket(
     #
     # Only svelte sites have a native build; a dynamic site deferred to the provision
     # job returns deployed=False, so guard on doc.deployed too. Best-effort, off the
-    # publish's path. Forwards the injected generator so a faked publish warms with the
-    # same fake (unit tests never shell out).
+    # publish's path. Since SP-2 the pre-warm QUEUES the build rather than running it
+    # here, so there is no generator to forward.
     if engine == "svelte" and getattr(doc, "deployed", False):
         _schedule_native_prewarm(
             workspace_id=workspace_id,
             user_id=user_id,
             pocket_id=pocket_id,
             builder_origin=prewarm_origin or builder_origin,
-            _generator=_generator,
         )
 
     # Stamp the per-site annual plan, open the per-site Dodo sub (degrading
@@ -6048,10 +6103,9 @@ async def get_native_artifact(
     user_id: str,
     pocket_id: str,
     builder_origin: str | None = None,
-    _generator: GeneratorClient | None = None,
-    _read_built: Callable[[str], tuple[str, str]] | None = None,
     _store: Any | None = None,
-) -> dict[str, str]:
+    _pool: Any | None = None,
+) -> dict[str, Any]:
     """Serve a svelte Paw Site's ARMED render as ``{pocket_id, body_html, css}`` so the
     native editor can shadow-render it (NE-5b) instead of framing an iframe.
 
@@ -6067,23 +6121,38 @@ async def get_native_artifact(
          like ``make_site_editable``) and hash them with the generator version into a
          content hash;
       3. CACHE HIT — the store already holds that render → return it from disk with
-         ZERO subprocess builds (the whole point). Publish and the post-edit pre-warm
-         populate the store ahead of the view, so a live/clean site is a hit;
-      4. CACHE MISS — build ONCE (armed: ``builder_origin`` set so the generator stamps
-         ``data-uid`` + embeds ``paw-edit-manifest``; ``smoke=False`` arm gate) through
-         ``_build_or_cloud_error`` (a toolchain / non-zero / SmokeGate failure becomes a
-         clean CloudError, not an opaque 500), read the built ``<body>`` inner HTML +
-         concatenated CSS, STORE it, and return. PERF-3's stable per-pocket build dir
-         keeps node_modules / bun install cached across builds.
+         ZERO builds and ZERO sandboxes (the whole point). Publish and the post-edit
+         pre-warm populate the store ahead of the view, so a live/clean site is a hit;
+      4. CACHE MISS — QUEUE the armed build in the ephemeral Daytona lane (SP-2) and
+         return the BUILD-PENDING shape: ``body_html`` / ``css`` empty, plus
+         ``build_status`` / ``build_job_id`` / ``build_reason`` for the client to poll.
+         When the job lands it writes ``{body_html, css}`` under this same content hash,
+         so the next call is step 3.
 
-    Local-mode degrade: a store miss on a box where no build has ever run just takes
-    the MISS branch (build once); a build failure still maps to a clean CloudError, so
-    the endpoint degrades cleanly rather than 500ing opaquely — unchanged from before.
+    ── WHY THE MISS NO LONGER BUILDS HERE (SP-2) ───────────────────────────────────────
 
-    ``_generator`` (defaults to a real ``GeneratorClient``), ``_read_built`` (defaults
-    to ``_read_native_artifact`` — the disk read + HTML/CSS extraction), and ``_store``
-    (defaults to the filesystem artifact store) are injectable seams so the path is
-    unit-testable without Bun / a real build / disk."""
+    It used to call ``generator.build``, which shells out to ``bun``. There is no
+    toolchain in the deployed API container, so every cold preview raised and surfaced as
+    ``sites.generator_failed`` — the endpoint's headline failure. The publish path had
+    already solved exactly this at SL-3 by handing the build to an ephemeral sandbox; the
+    preview path simply never adopted it.
+
+    THE CACHE CHECK IN STEP 3 IS LOAD-BEARING IN A WAY IT WAS NOT BEFORE. A miss used to
+    cost a local subprocess; it now costs a Daytona sandbox (measured in-sandbox build
+    times: react 8.70s, svelte 14.67s, before create / upload / teardown). Bypassing it
+    would bill a sandbox per keystroke in the editor. The lane's job id is the content
+    hash, so a client polling this endpoint during a build re-reads the SAME job instead
+    of queueing another — but that is the second guard, not a reason to weaken the first.
+
+    ``build_status`` uses the publish lane's vocabulary verbatim — ``queued`` /
+    ``building`` / ``failed``, the same values ``_to_response`` and ``pocket_status``
+    already put on the wire — because a client is told to treat an UNRECOGNISED status as
+    in-progress, and a second vocabulary for the same idea would make a failure read as
+    progress somewhere.
+
+    ``_store`` (defaults to the filesystem artifact store) and ``_pool`` (defaults to the
+    process arq pool) are injectable seams so the path is unit-testable without disk or
+    Redis."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service
     from pocketpaw_ee.sites import generator_client
 
@@ -6123,32 +6192,59 @@ async def get_native_artifact(
         gen_version=generator_client.generator_version(),
         engine=engine,
     )
-    # READ-THROUGH: a hit serves the prior render straight off disk — no generator, no
-    # subprocess, no build. This is what makes a VIEW instant on the prod box.
+    # READ-THROUGH: a hit serves the prior render straight off disk — no queue, no
+    # sandbox, no build. This is what makes a VIEW instant, and since SP-2 it is also
+    # what keeps an editing session from billing a sandbox per keystroke.
     cached = store.read(pocket_id, content_hash)
     if cached is not None:
         body_html, css = cached
-        return {"pocket_id": pocket_id, "body_html": body_html, "css": css}
+        return {
+            "pocket_id": pocket_id,
+            "body_html": body_html,
+            "css": css,
+            # A served render is not a build in any state. "none" is the same value
+            # ``pocket_status`` gives a pocket that has never built, and it is what stops
+            # a client badging a finished preview as mid-build.
+            "build_status": "none",
+            "build_reason": None,
+            "build_job_id": None,
+        }
 
-    # MISS: build once (armed), cache, return. ``_build_native_artifact`` routes through
-    # _build_or_cloud_error so a missing-toolchain / non-zero build / SmokeGateFailed
-    # becomes a clean CloudError (sites.generator_failed → 5xx), not an opaque 500.
-    generator = _generator or GeneratorClient()
-    # Single-arg seam preserved for injected test doubles; the engine is bound into
-    # the default reader, which resolves the per-engine output dir off disk.
-    read = _read_built or (lambda d: _read_native_artifact(d, engine))
-    body_html, css = await _build_native_artifact(
-        generator=generator,
-        theme=theme,
-        source=source,
-        site_name=site_name,
-        builder_origin=origin,
-        pocket_id=pocket_id,
-        read=read,
-        engine=engine,
-    )
-    store.write(pocket_id, content_hash, body_html, css)
-    return {"pocket_id": pocket_id, "body_html": body_html, "css": css}
+    # MISS: queue the armed build and hand back a handle. The job writes {body_html, css}
+    # under this exact content hash when it lands, so the next call takes the branch above.
+    try:
+        enqueued = await _build_native_artifact(
+            theme=theme,
+            source=source,
+            site_name=site_name,
+            builder_origin=origin,
+            pocket_id=pocket_id,
+            content_hash=content_hash,
+            engine=engine,
+            _pool=_pool,
+        )
+    except Exception as exc:
+        # A FAILED ENQUEUE MUST NOT READ AS A PENDING BUILD. Returning the pending shape
+        # here would hand the client a job id nobody will ever run: it would poll a build
+        # that does not exist, and the endpoint would report progress forever. An error
+        # is recoverable — the user retries and gets a real queue slot.
+        logger.exception("sites.preview: could not queue the preview build for %s", pocket_id)
+        raise CloudError(
+            503,
+            "sites.preview_build_unavailable",
+            "The preview build could not be queued. Try again in a moment.",
+        ) from exc
+
+    return {
+        "pocket_id": pocket_id,
+        # Empty rather than absent: the field is the same shape on both branches, so a
+        # client reads one response type and decides on ``build_status``.
+        "body_html": "",
+        "css": "",
+        "build_status": enqueued.status,
+        "build_reason": enqueued.reason,
+        "build_job_id": enqueued.job_id,
+    }
 
 
 async def edit_svelte_component(
@@ -6299,7 +6395,6 @@ async def edit_svelte_component(
         user_id=user_id,
         pocket_id=pocket_id,
         builder_origin=builder_origin or None,
-        _generator=_generator,
     )
     return doc
 

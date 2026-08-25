@@ -95,7 +95,11 @@ from pocketpaw_ee.sites.build_job import (
     ARQ_FUNCTION_NAME as SITE_BUILD_FUNCTION_NAME,
 )
 from pocketpaw_ee.sites.build_job import (
+    PREVIEW_ARQ_FUNCTION_NAME as SITE_PREVIEW_BUILD_FUNCTION_NAME,
+)
+from pocketpaw_ee.sites.build_job import (
     run_site_build,
+    run_site_preview_build,
     site_build_job_timeout_seconds,
 )
 
@@ -307,6 +311,17 @@ _site_build_fn = func(
     max_tries=1,
 )
 
+# SP-2: the DRAFT-PREVIEW build. Same sandbox, same budget (it is the same build — only
+# what happens to the artifact differs), and the same ``max_tries=1``: a preview is billed
+# per attempt too, and a client re-triggers by asking for the render again rather than by
+# arq silently re-running a job whose result already says why it failed.
+_site_preview_build_fn = func(
+    run_site_preview_build,
+    name=SITE_PREVIEW_BUILD_FUNCTION_NAME,
+    timeout=site_build_job_timeout_seconds(),
+    max_tries=1,
+)
+
 
 class WorkerSettings:
     """arq worker configuration. Loaded by ``arq <dotted-path>``."""
@@ -321,6 +336,7 @@ class WorkerSettings:
         _ship_provision_fn,
         _ship_deploy_fn,
         _site_build_fn,
+        _site_preview_build_fn,
     ]
     on_startup = _startup
     on_shutdown = _shutdown
