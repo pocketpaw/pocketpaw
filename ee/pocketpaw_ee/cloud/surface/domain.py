@@ -83,6 +83,18 @@
 # ``cache_key`` has NO DEFAULT and rejects ``""`` for the same reason
 # ``LayerOutput`` does — ``""`` reads as "stable forever" and is what someone
 # types when they mean "nothing".
+# Changes: 2026-08-25 (feat/other-hand-surface, Otherhand v1) — added the
+# ``OTHER_HAND`` surface (/other-hand — the notebook page the user handwrites on
+# and the agent writes/draws back onto). ``SurfaceMeta`` grows two hints the
+# page stamps per turn: ``snapshot_path`` (the absolute path the snapshot
+# endpoint wrote the page PNG to, which the agent ``Read``s to SEE the page) and
+# ``free_y`` (the y below which the page is empty, so the agent never draws over
+# the user's ink). Its profile (``surface_registry._OTHER_HAND_*``) is ripple-OFF
+# and DENIES the two pocket-creation tool ids: an allow-list cannot strip them
+# (``POCKET_CREATION_GRANT`` is unioned back and ``ALWAYS_ALLOWED_MCP_SERVERS``
+# keeps the servers alive), so without the deny "draw me a mitosis diagram"
+# builds a POCKET instead of drawing. Deny is applied BEFORE the grant union in
+# ``claude_sdk._build_options``, so a denied id cannot come back.
 # Changes: 2026-07-14 (Paw Bar concierge seam, T2) — added the ``CONCIERGE``
 # surface (/paw-bar — the public, origin-bound concierge widget). Its handler
 # (``handlers/concierge.build_preamble``) and its ripple-OFF, PUBLIC-SAFE profile
@@ -131,6 +143,12 @@ class SurfaceKind(StrEnum):
     CODE = "code"  # /code — agent edits + runs code in the workspace
     BELT = "belt"  # /belt — the develop station (orient→develop→propose via gate)
     SHIP = "ship"  # /ship — the managed-deploy control plane (drive deploys via ship MCP verbs)
+    # Otherhand (/other-hand) — a notebook page the user handwrites on. The agent
+    # READS the page as an image (the snapshot path arrives on ``SurfaceMeta``)
+    # and writes/draws back onto it as vector primitives in a ``page-ops`` block.
+    # Its profile is ripple-OFF and denies the pocket create/plan tool ids — the
+    # deliverable is ink on the page, never a pocket or a ui-spec.
+    OTHER_HAND = "other_hand"  # /other-hand — the page the agent writes back on
     # A PUBLIC, anonymous Paw Bar concierge chat (T2) — a foreign site's embedded
     # widget, answering visitors grounded in the Site's pocket ONLY. Its profile
     # (``surface_registry._concierge_profile``) is ripple-OFF and PUBLIC-SAFE: it
@@ -236,6 +254,25 @@ class SurfaceMeta:
     # and the agent emits pawbar-card fences with real ids. Only for the preamble;
     # the tools re-load the live widget, so this never feeds an effect.
     pawbar_catalog: list[dict[str, Any]] | None = None
+    # Otherhand hints — stamped by the /other-hand page on EVERY turn (the page
+    # changes every time the user lifts the pen, so neither hint is stable).
+    #
+    # ``snapshot_path`` is the absolute path ``POST /other-hand/pages/{id}/snapshot``
+    # just wrote the page PNG to. It is the agent's only way to SEE the page:
+    # attachments do not carry vision on this pipeline, but ``Read`` is in the
+    # agent's default SDK tool set and reads images natively, so the preamble
+    # points at the path and the agent reads it off disk. The client never
+    # invents this value — it echoes back what the endpoint returned, and the
+    # endpoint builds it from the workspace jail root, so a hostile client can
+    # only ever name a path inside its own workspace's scratch dir.
+    #
+    # ``free_y`` is the y coordinate (in the page's fixed 1240x1754 logical
+    # space) below which the page is empty. Carried as a STRING to match every
+    # other scalar hint on this wire — the handler coerces and drops a
+    # non-numeric value rather than raising. The agent is told to put everything
+    # it adds at y >= free_y; the frontend's placement guard enforces it anyway.
+    snapshot_path: str | None = None
+    free_y: str | None = None
 
 
 @dataclass(frozen=True)
@@ -344,10 +381,11 @@ class SurfaceProfile:
         skill-surfacing consumption lands in a later pass.
       * ``system_message_override`` — the surface's own system prompt, replacing
         the pocket-shaped DELIVERABLE stack. CONSUMED since 2026-07-22
-        (fix/code-surface-denies-pocket-authoring); set on the CODE row, ``None``
-        everywhere else. When set, ``build_behavior_instructions`` appends it
-        INSTEAD of the ripple LAW, the pocket-delegation rule, the per-backend
-        pocket prompts, the home widget prompt, and the artifact-delivery rule.
+        (fix/code-surface-denies-pocket-authoring); set on the CODE and
+        OTHER_HAND rows, ``None`` everywhere else. When set,
+        ``build_behavior_instructions`` appends it INSTEAD of the ripple LAW,
+        the pocket-delegation rule, the per-backend pocket prompts, the home
+        widget prompt, and the artifact-delivery rule.
         It does NOT displace the runtime-identity rule or the Composio rules —
         those describe the ENVIRONMENT (and the Composio ones are gated on
         Composio being enabled, so prompt and tool list agree); this field

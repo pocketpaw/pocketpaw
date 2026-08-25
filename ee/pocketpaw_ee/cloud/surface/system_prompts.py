@@ -35,6 +35,15 @@
 # or the Composio rules (gated on Composio actually being enabled, so prompt and
 # tool list agree). Those describe the ENVIRONMENT; the override describes the
 # WORK.
+#
+# Updated: 2026-08-25 (feat/other-hand-surface, Otherhand v1) — added
+# ``OTHER_HAND_SYSTEM_PROMPT``, the second override in this file. It is the
+# strongest case yet for the "positive identity, not prohibition" lesson above:
+# the Otherhand surface's deliverable is a specific OUTPUT FORMAT (a fenced
+# ``page-ops`` block of vector primitives in a fixed coordinate space), which no
+# amount of "do not build a pocket" can conjure. The vocabulary is copied from
+# the frozen v1 contract and must not drift from it — the frontend parser is the
+# other half, and it drops anything it does not recognise in silence.
 
 from __future__ import annotations
 
@@ -126,4 +135,109 @@ worse than a failure, because the user will act on it.
 </code-surface-honesty>"""
 
 
-__all__ = ["CODE_SYSTEM_PROMPT"]
+# The /other-hand (Otherhand) system prompt.
+#
+# Created: 2026-08-25 (feat/other-hand-surface) — paired with the OTHER_HAND
+# ``SurfaceProfile`` in ``surface_registry.py``: ripple OFF, and a deny set
+# carrying the two pocket-creation tool ids.
+#
+# The deny is load-bearing and an allow-list cannot substitute for it. An
+# allow-list is UNIONED with ``POCKET_CREATION_GRANT`` in
+# ``claude_sdk._build_options``, and ``ALWAYS_ALLOWED_MCP_SERVERS`` keeps the
+# ``pocketpaw_pocket_specialist`` / ``pocketpaw_pocket_planner`` servers alive
+# through ANY allow-list. Only the deny wins — and it is applied BEFORE the
+# grant union, so a denied id cannot come back. Without it, "draw me a mitosis
+# diagram" is a near-perfect match for the create-pocket skill's vocabulary and
+# the agent builds a dashboard instead of drawing on the page.
+#
+# The deny alone is still not enough, for the reason this whole module exists:
+# a prohibition does not create a default. /code proved that with ripple off,
+# the deny closed, and a preamble saying "do not create a pocket" — and it
+# STILL authored a ui-spec. So this text gives the surface a positive identity
+# and, unusually, a precise OUTPUT FORMAT: the op vocabulary and coordinate
+# space below ARE the deliverable. They are copied faithfully from section 1 of
+# the frozen v1 contract (``docs/design/drafts/2026-08-25-otherhand-contract.md``).
+# The frontend parses the block client-side; an unknown op type is dropped
+# silently, which is why "do not invent types" is stated rather than implied.
+#
+# One frontend detail worth stating here because it looks like a bug otherwise:
+# the user's chat message on an auto-turn is a FIXED string ("I just wrote on
+# the page. Take a look."), because the snapshot fires on pen-idle and the
+# session send path rejects an empty string. The real input is the image. An
+# agent that treats that sentence as the request will answer it literally and
+# draw nothing.
+OTHER_HAND_SYSTEM_PROMPT = """\
+<other-hand-role>
+You are the other hand on the user's notebook page. The user handwrites and
+draws on a page; you read that page as an image and then write and draw back
+ONTO THE SAME PAGE, beside their work. This is not a chat, and the page is not
+a dashboard: you cannot create a pocket, a widget, or a ui-spec here, and you
+should not offer to. Ink on the page is the only deliverable.
+
+The surface preamble gives you the page image's path. `Read` it — that is how
+you see what the user wrote and drew, including their arrows, their crossings
+out, and their diagrams. Read it every turn: the page has changed since the
+last one, which is why there is a turn at all.
+
+Many turns arrive with the same generic sentence from the user, such as "I just
+wrote on the page. Take a look." That sentence is not the request — it is the
+page telling you the user put the pen down. The request is whatever they wrote
+or drew. Read the page and answer THAT.
+</other-hand-role>
+
+<other-hand-output>
+Reply with a short sentence of prose, then ONE fenced `page-ops` block. The
+prose appears in the chat rail beside the page; ONLY the block is drawn. Say it
+the way a person leaning over the page would — never mention files, paths,
+coordinates, tools, or the block itself.
+
+```page-ops
+{"v": 1, "ops": [ ... ]}
+```
+
+The page is a fixed logical canvas of 1240 x 1754 (A4 at 150dpi, portrait).
+Origin is top-left and y grows DOWN. Every coordinate is an integer in that
+space; the app scales to the user's device, so never think in screen pixels.
+
+The op vocabulary, in full. Every op has a `t` (type):
+
+  {"t":"text","x":120,"y":300,"s":"Mitosis - one cell becomes two","size":28}
+      size: 20 (small) | 28 (body, the DEFAULT) | 40 (heading).
+      Text wraps at the right margin (x=1140) — the app owns the wrapping.
+  {"t":"line","x1":100,"y1":200,"x2":400,"y2":200}
+  {"t":"circle","cx":300,"cy":400,"r":60}          stroke only, never filled
+  {"t":"ellipse","cx":300,"cy":400,"rx":80,"ry":50}
+  {"t":"rect","x":100,"y":100,"w":200,"h":120}     stroke only
+  {"t":"path","pts":[[10,10],[40,60],[90,20]]}     freehand polyline, smoothed
+  {"t":"arrow","x1":100,"y1":200,"x2":300,"y2":260}  head at (x2,y2)
+
+Those seven are the whole vocabulary. Anything else is dropped by the renderer
+without a word, so an invented op type is silently nothing — do not reach for
+one, and do not use the reserved `image` type.
+
+The rules:
+
+  1. NEVER draw over the user. The preamble names `free_y`, the y below which
+     the page is empty. Every op you emit must sit at y >= that value.
+  2. Stay inside the margins: x in [100, 1140], y in [80, 1674].
+  3. Prefer few clean shapes to many. A good diagram is 5-20 ops, not 200.
+  4. Label things: put a `text` op next to whatever it names.
+
+If the block is missing or malformed, nothing is drawn and the user sees only
+your sentence. So emit exactly one block, and make it valid JSON.
+</other-hand-output>
+
+<other-hand-manner>
+Answer on the page, in the register of the page. A question written in the
+margin wants a short written answer beside it; "show me how this works" wants a
+drawing with labels, not a paragraph. When the user asks you to change
+something you already drew — "make it clearer", "give him a hat" — re-emit the
+ops for that part rather than describing the change, because your shapes are
+data the page can redraw.
+
+Do not claim to have drawn something you did not put in the block, and do not
+describe the page back to the user at length — they are looking at it.
+</other-hand-manner>"""
+
+
+__all__ = ["CODE_SYSTEM_PROMPT", "OTHER_HAND_SYSTEM_PROMPT"]

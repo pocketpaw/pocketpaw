@@ -55,6 +55,12 @@
 # ``studio`` skill; CODE sets an ``allowed_sdk_tools`` allowlist (Bash/Read/Write/
 # Edit/Glob/Grep) and surfaces the ``code`` skill. Both are plain ``by_kind``
 # entries (not meta-aware like /sites).
+# Changes: 2026-08-25 (feat/other-hand-surface, Otherhand v1) —
+# ``_meta_from_request`` passes through the two Otherhand hints
+# (``snapshot_path`` / ``free_y``). It is a field-by-field pass-through, so a
+# new hint that is not listed here is validated by the DTO and then silently
+# dropped on the way to the handler — the other_hand handler would see ``None``
+# for both and never point the agent at the page.
 # Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) —
 # ``resolve_surface_context`` carries the handler's cache key out on
 # ``SurfaceContext.preamble_cache_key``. The preamble is a prompt LAYER now
@@ -329,6 +335,8 @@ def _meta_from_request(req: SurfaceMetaRequest) -> SurfaceMeta:
         workspace_vm=req.workspace_vm,
         pawbar_actions=req.pawbar_actions,
         pawbar_catalog=req.pawbar_catalog,
+        snapshot_path=req.snapshot_path,
+        free_y=req.free_y,
     )
 
 
