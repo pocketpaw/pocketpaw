@@ -75,8 +75,8 @@
   {
     "label": "the transcript's runs stop scoping — one thread's questions merge with another's",
     "file": "ee/pocketpaw_ee/paw_bar/router.py",
-    "find": "        limit=_TRANSCRIPT_CAP,\n        session_key=session_key,\n    )",
-    "replace": "        limit=_TRANSCRIPT_CAP,\n        session_key=\"\",\n    )",
+    "find": "        if _belongs(_conversation_of_run(run, pocket_id, widget))",
+    "replace": "        if True",
     "tests": [
       "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_the_transcript_reads_one_conversation_not_the_visitors_history"
     ]
@@ -84,8 +84,8 @@
   {
     "label": "the transcript's owner lines stop scoping — every reply shows in every thread",
     "file": "ee/pocketpaw_ee/paw_bar/router.py",
-    "find": "                limit=_TRANSCRIPT_CAP,\n                conversation_id=conversation_id or None,",
-    "replace": "                limit=_TRANSCRIPT_CAP,\n                conversation_id=None,",
+    "find": "                if _belongs(getattr(line, \"conversation_id\", \"\") or \"\")",
+    "replace": "                if True",
     "tests": [
       "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_the_transcript_reads_one_conversation_not_the_visitors_history"
     ]
@@ -97,6 +97,35 @@
     "replace": "        group = token",
     "tests": [
       "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_a_conversation_spanning_the_migration_is_ONE_row"
+    ]
+  },
+  {
+    "label": "the transcript narrows by a rebuilt exact key again — the row the inbox lists cannot be opened",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        if _belongs(_conversation_of_run(run, pocket_id, widget))",
+    "replace": "        if getattr(run, \"session_key\", \"\") == f\"cloud:concierge:{pocket_id}:{conversation_id}:{getattr(widget, 'agent_id', '')}\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_a_conversation_spanning_the_migration_opens_whole",
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_a_pre_identity_conversation_is_not_an_empty_thread",
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_a_transcript_survives_the_widget_being_rebound"
+    ]
+  },
+  {
+    "label": "an unattributable turn belongs everywhere — a retired thread absorbs the visitor's history",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    return {r.id for r in rows}, active is not None and active.id == conversation_id",
+    "replace": "    return {r.id for r in rows}, True",
+    "tests": [
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_a_pre_identity_turn_stays_out_of_a_retired_conversation"
+    ]
+  },
+  {
+    "label": "an empty conversation 404s again — the client calls it 'nothing stored for this visitor'",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        return [] if conversation_id and conversation_id in known_ids else None",
+    "replace": "        return None",
+    "tests": [
+      "tests/cloud/test_paw_bar_owner_conversation_identity.py::test_a_pre_identity_turn_stays_out_of_a_retired_conversation"
     ]
   }
 ]

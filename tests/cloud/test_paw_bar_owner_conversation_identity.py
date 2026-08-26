@@ -453,9 +453,7 @@ async def test_a_conversation_spanning_the_migration_opens_whole(client):
     conversation = await store.open_conversation(widget.id, _REF, workspace_id="ws-1")
     await _mk_run(session_key=_skey(_REF), partial_text="We open at 8.")
     await _mk_run(session_key=_skey(conversation.id), partial_text="Yes, we ship to Berlin.")
-    await store.add_owner_message(
-        widget.id, _REF, "Sorry for the wait.", workspace_id="ws-1"
-    )
+    await store.add_owner_message(widget.id, _REF, "Sorry for the wait.", workspace_id="ws-1")
 
     res = await c.get(
         f"/paw-bar/admin/site/{site.id}/conversations/{_REF}",
