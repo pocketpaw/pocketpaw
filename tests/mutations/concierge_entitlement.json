@@ -144,8 +144,8 @@
   {
     "label": "activation flips the status AFTER the deploy again (the original P0)",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    doc.subscription_status = \"active\"\n",
-    "replace": "",
+    "find": "    doc.subscription_status = \"active\"\n    # Persist the AUTHORITATIVE gateway subscription id from the verified webhook.",
+    "replace": "    # Persist the AUTHORITATIVE gateway subscription id from the verified webhook.",
     "tests": [
       "tests/cloud/sites/test_charge_first.py::test_the_subscription_reads_active_before_the_activation_deploy_runs"
     ]

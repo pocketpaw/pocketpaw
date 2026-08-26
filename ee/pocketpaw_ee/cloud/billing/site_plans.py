@@ -106,6 +106,24 @@
 # meter fields below are CATALOG CLAIMS — what a tier will sell — and no seam
 # reads them as an entitlement yet. ``SiteEntitlements`` still does not carry
 # them, for the reason its own docstring gives.
+#
+# Updated 2026-08-26 (feat/site-plans-as-addons): added ``dodo_addon_id`` and its
+# resolver ``_dodo_addon_for`` (reading a new ``POCKETPAW_DODO_SITE_ADDONS``
+# map), because a paid site now bills as an ADD-ON LINE on the workspace
+# subscription instead of opening a subscription of its own.
+#
+# THE TWO IDS ARE NOT INTERCHANGEABLE and that is why this is a second field
+# rather than a reinterpretation of the first. A Dodo add-on is its own entity
+# with its own id; ``subscriptions.change_plan`` takes ``addons=[{addon_id,
+# quantity}]`` and a product id is rejected there. So the product map stays, the
+# add-on map is new, and each is read by the rail it belongs to.
+#
+# ``purchasable`` now passes on EITHER id. That is deliberate rollout slack: a
+# deployment that has the product map set and the add-on map not yet would
+# otherwise turn every paid tier unbuyable the moment this shipped, and publish
+# paid selections as the free floor — the exact failure the 2026-08-22 rekey note
+# above describes. Per-site subscriptions already sold stay live and keep
+# renewing through the product half; only NEW purchases take the add-on rail.
 
 from __future__ import annotations
 
@@ -373,6 +391,11 @@ class SitePlanTier:
     monthly_price_usd: int
     dodo_product_id: str | None
     cloudflare_features: frozenset[str]
+    # Sits here rather than next to ``dodo_product_id``, where it belongs by
+    # meaning, because a defaulted dataclass field cannot precede an undefaulted
+    # one and ``cloudflare_features`` has no default. It defaults so the existing
+    # direct constructions (tests, fixtures) keep working unchanged.
+    dodo_addon_id: str | None = None
     scope: str = ORG_SCOPE
     badge_removal: bool = False
     max_domained_sites: int | None = 0
@@ -438,7 +461,17 @@ class SitePlanTier:
         """
         if self.is_org_scoped:
             return False
-        return self.monthly_price_usd == 0 or self.dodo_product_id is not None
+        if self.monthly_price_usd == 0:
+            return True
+        # EITHER rail makes a tier buyable, and the ADD-ON one is the rail new
+        # purchases take. ``dodo_product_id`` is kept in the OR because the
+        # per-site subscriptions it opened are live in production: a deployment
+        # mid-rollout has the product map set and the add-on map not yet, and
+        # returning False there would make every paid tier abruptly unbuyable and
+        # publish paid selections as the free floor. Once the add-on map is
+        # configured everywhere, the product half is only reached by rows that
+        # already hold a per-site subscription.
+        return self.dodo_addon_id is not None or self.dodo_product_id is not None
 
 
 def canonical_site_tier_key(key: str | None) -> str | None:
@@ -493,6 +526,40 @@ def _dodo_product_for(key: str) -> str | None:
     return None
 
 
+def _dodo_addon_for(key: str) -> str | None:
+    """Resolve the Dodo ADD-ON id for a site tier, or None.
+
+    The add-on analogue of ``_dodo_product_for``, and a SEPARATE map because a
+    Dodo add-on is its own entity with its own id — it is not a product id and
+    the two are not interchangeable at the API.
+
+    Reads an optional ``POCKETPAW_DODO_SITE_ADDONS`` mapping
+    (``{tier_key: addon_id}``) off settings when present. None is the correct
+    default: a paid publish then records the tier without a live charge, exactly
+    as it does with no product configured. Lazy ``get_settings`` import and a
+    blanket degrade-to-None for the same reason the product resolver has them —
+    building the catalog must never force a config load or raise.
+
+    THE CANONICAL KEY WINS, THEN ANY LEGACY ALIAS OF IT, identically to the
+    product map. A deployment keyed ``{"pro": ..., "business": ...}`` keeps
+    resolving after the 2026-08-22 rename.
+    """
+    try:
+        from pocketpaw.config import get_settings
+
+        mapping = getattr(get_settings(), "dodo_site_addons", None)
+    except Exception:
+        return None
+    if not isinstance(mapping, dict):
+        return None
+    candidates = [key] + [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key]
+    for candidate in candidates:
+        val = mapping.get(candidate)
+        if isinstance(val, str) and val:
+            return val
+    return None
+
+
 def _build(key: str) -> SitePlanTier:
     """Construct a ``SitePlanTier`` for ``key`` from the catalog constants + config.
 
@@ -506,6 +573,7 @@ def _build(key: str) -> SitePlanTier:
         key=key,
         monthly_price_usd=_SITE_PLAN_MONTHLY_PRICE_USD.get(key, 0),
         dodo_product_id=_dodo_product_for(key),
+        dodo_addon_id=_dodo_addon_for(key),
         cloudflare_features=_SITE_PLAN_CF_FEATURES.get(key, frozenset()),
         scope=_SITE_PLAN_SCOPE.get(key, ORG_SCOPE),
         badge_removal=_SITE_PLAN_BADGE_REMOVAL.get(key, False),

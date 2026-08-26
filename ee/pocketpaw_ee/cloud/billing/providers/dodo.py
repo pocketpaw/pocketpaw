@@ -97,7 +97,13 @@
 #   subscription is created at payment; the response ``session_id`` is carried on
 #   ``SubscriptionCheckout.subscription_id``. The webhook grant is untouched (it
 #   reads the subscription_id + metadata off the event body, not this response).
-
+#
+# Updated 2026-08-26 (feat/site-plans-as-addons): ``change_plan`` now forwards an
+#   ``addons`` cart to ``subscriptions.change_plan``, ALWAYS — including when it is
+#   empty. The SDK omits an unset parameter, and an omitted add-on list is not
+#   "leave the cart alone" at this gateway, it is "empty the cart". Forwarding
+#   unconditionally means the destructive case only happens when a caller asked
+#   for it.
 from __future__ import annotations
 
 import json
@@ -359,7 +365,14 @@ class DodoProvider:
         client = self._client()
         await client.subscriptions.update(subscription_id, status="cancelled")
 
-    async def change_plan(self, *, subscription_id: str, product_id: str, plan_key: str) -> None:
+    async def change_plan(
+        self,
+        *,
+        subscription_id: str,
+        product_id: str,
+        plan_key: str,
+        addons: list[dict],
+    ) -> None:
         if not subscription_id:
             raise ValidationError("billing.invalid_subscription", "subscription_id is required")
         if not product_id:
@@ -376,12 +389,19 @@ class DodoProvider:
         # already paid for. ``prevent_change`` means a declined card leaves the
         # subscription on its CURRENT plan rather than moving it and then failing —
         # the caller's persisted tier and the gateway's stay in agreement.
+        #
+        # ``addons`` is forwarded ALWAYS, including when empty. The SDK omits an
+        # unset parameter, and an omitted add-on list is not "leave the cart
+        # alone" at this gateway — it is "empty the cart". Passing the caller's
+        # list through unconditionally means the destructive case only happens
+        # when a caller actually asked for it.
         await client.subscriptions.change_plan(
             subscription_id,
             product_id=product_id,
             quantity=1,
             proration_billing_mode="difference_immediately",
             on_payment_failure="prevent_change",
+            addons=list(addons),
         )
 
     # ------------------------------------------------------------------ #

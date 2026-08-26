@@ -23,8 +23,8 @@
   {
     "label": "_dodo_product_for stops looking through the alias — the deployed product map goes dead",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "    candidates = [key] + [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key]",
-    "replace": "    candidates = [key]",
+    "find": "        mapping = getattr(get_settings(), \"dodo_site_products\", None)\n    except Exception:\n        return None\n    if not isinstance(mapping, dict):\n        return None\n    candidates = [key] + [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key]",
+    "replace": "        mapping = getattr(get_settings(), \"dodo_site_products\", None)\n    except Exception:\n        return None\n    if not isinstance(mapping, dict):\n        return None\n    candidates = [key]",
     "tests": [
       "tests/cloud/billing/test_site_pricing_ladder.py::test_the_deployed_legacy_product_map_still_opens_a_checkout"
     ]
@@ -32,8 +32,8 @@
   {
     "label": "the legacy key wins over the canonical one — re-keying the env var does nothing",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "    candidates = [key] + [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key]",
-    "replace": "    candidates = [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key] + [key]",
+    "find": "        mapping = getattr(get_settings(), \"dodo_site_products\", None)\n    except Exception:\n        return None\n    if not isinstance(mapping, dict):\n        return None\n    candidates = [key] + [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key]",
+    "replace": "        mapping = getattr(get_settings(), \"dodo_site_products\", None)\n    except Exception:\n        return None\n    if not isinstance(mapping, dict):\n        return None\n    candidates = [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key] + [key]",
     "tests": [
       "tests/cloud/billing/test_site_pricing_ladder.py::test_the_new_key_wins_over_a_legacy_one_for_the_same_tier"
     ]
@@ -51,8 +51,8 @@
   {
     "label": "purchasable stops excluding org flats — the per-site checkout can charge $149",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "        if self.is_org_scoped:\n            return False\n        return self.monthly_price_usd == 0 or self.dodo_product_id is not None",
-    "replace": "        return self.monthly_price_usd == 0 or self.dodo_product_id is not None",
+    "find": "        if self.is_org_scoped:\n            return False\n        if self.monthly_price_usd == 0:",
+    "replace": "        if False:\n            return False\n        if self.monthly_price_usd == 0:",
     "tests": [
       "tests/cloud/billing/test_site_pricing_ladder.py::test_an_org_flat_is_never_purchasable_however_config_is_set"
     ]

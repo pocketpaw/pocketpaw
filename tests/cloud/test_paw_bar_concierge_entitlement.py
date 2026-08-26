@@ -15,12 +15,27 @@
 # reason to trigger it, and reuses that path byte for byte — a refused visitor sees
 # exactly what an owner-disabled one sees.
 #
-# The gate rule (captain's call 2026-08-15): any tier above the free floor, with an
-# active subscription. Derived from ``BASE_SITE_PLAN_KEY`` rather than a per-tier
-# catalog flag, because no tier grants concierge today and the one that will
-# (``staff``) does not exist until the pricing-spec rekey. So every criterion below
-# reads the floor out of the catalog instead of hardcoding "basic"/"pro" — the rekey
-# moves these tests with the catalog instead of breaking them.
+# The gate rule (captain's call 2026-08-15): a tier that sells the concierge, with
+# an active subscription. Every criterion below reads that tier out of the catalog
+# rather than hardcoding a key, so the ladder can be re-priced without touching
+# this file.
+#
+# Updated 2026-08-26 (feat/site-plans-as-addons): the derivation was "the cheapest
+# tier above the free floor", chosen in 2026-08-15 because no tier sold the
+# concierge yet and ``staff`` did not exist until the pricing rekey. The stated
+# intent was that "the rekey moves these tests with the catalog instead of breaking
+# them" — but that derivation is not the one that moves. The 2026-08-22 rekey gave
+# the catalog a per-tier ``sells_concierge`` map in which the cheapest paid rung
+# (``site``, $7) sells none, so the helper returned a tier with no concierge:
+#
+#   * four tests asserting an ENTITLED site failed outright, and stayed red;
+#   * two more passed for the wrong reason — "not available" for a LAPSED
+#     subscription and for a flipped OWNER SWITCH both held because the tier said
+#     no before either gate was reached. Neither gate was under test, which the
+#     mutation plan had been reporting as two escapes.
+#
+# ``_concierge_tier`` now reads ``sells_concierge``, which is the derivation the
+# header always described.
 #
 # The two questions stay SEPARATE (``concierge_enabled`` vs ``concierge_entitled``)
 # and that separation is itself pinned below: collapsing them into one boolean makes
@@ -46,12 +61,31 @@ import pocketpaw.config as ppconfig  # noqa: E402
 _VALID_KEY = "site_key_" + "a" * 24
 
 
-def _paid_tier() -> str:
-    """The cheapest catalog tier above the free floor — see the header."""
+def _concierge_tier() -> str:
+    """The cheapest SITE-SCOPED tier that actually SELLS the concierge.
+
+    This used to be "the cheapest tier above the free floor", which was correct
+    exactly as long as the catalog derived ``sells_concierge`` the same way. The
+    2026-08-22 pricing rekey replaced that derivation with a per-tier map in which
+    the cheapest paid rung (``site``, $7) sells NO concierge — the concierge is
+    precisely what separates it from ``staff`` ($19). The helper kept returning
+    ``site``, so four tests asserting an ENTITLED site went red, and two more went
+    quietly useless: they asserted "not available" for a lapsed subscription and a
+    flipped owner switch, and passed because the tier said no first. Neither the
+    subscription gate nor the switch was being tested at all, which the mutation
+    plan reported as two escapes.
+
+    Reading ``sells_concierge`` is what the module header always said this should
+    do — "the rekey moves these tests with the catalog instead of breaking them".
+    The derivation just wasn't the one that moves.
+
+    Site-scoped because an org flat can never be a single site's ``plan_tier``;
+    ``agency`` also sells the concierge and would be a legal answer here otherwise.
+    """
     for tier in site_plans.list_site_plans():
-        if tier.key != site_plans.BASE_SITE_PLAN_KEY:
+        if tier.scope == site_plans.SITE_SCOPE and tier.sells_concierge:
             return tier.key
-    raise AssertionError("catalog has no tier above the floor — catalog changed")
+    raise AssertionError("no site-scoped tier sells the concierge — catalog changed")
 
 
 def _free_tier() -> str:
@@ -71,7 +105,7 @@ def _resolve(**ov):
     kw = {
         "site_id": "6512c1f0e4b0a1b2c3d4e5f6",
         "workspace_id": "ws-1",
-        "plan_tier": _paid_tier(),
+        "plan_tier": _concierge_tier(),
         "subscription_status": "active",
         "concierge_enabled": True,
     }
@@ -108,7 +142,7 @@ def test_an_unknown_tier_is_not_entitled():
 def test_a_paid_tier_without_an_active_subscription_is_not_entitled(status):
     """Cancellation never resets ``plan_tier``, and an unconfigured Dodo product
     records a paid tier with no charge at all. Tier-alone would serve both."""
-    ent = _resolve(plan_tier=_paid_tier(), subscription_status=status)
+    ent = _resolve(plan_tier=_concierge_tier(), subscription_status=status)
 
     assert ent.subscription_active is False
     assert ent.concierge_entitled is False
@@ -117,7 +151,7 @@ def test_a_paid_tier_without_an_active_subscription_is_not_entitled(status):
 
 def test_an_active_paid_site_is_entitled():
     """The paying case still works — the gate must not become the bug."""
-    ent = _resolve(plan_tier=_paid_tier(), subscription_status="active")
+    ent = _resolve(plan_tier=_concierge_tier(), subscription_status="active")
 
     assert ent.concierge_entitled is True
     assert ent.concierge_available is True
@@ -135,7 +169,7 @@ def test_the_owner_switch_and_the_plan_are_distinguishable():
     An owner who switched it off and an owner whose plan lapsed need different
     remedies, so the dashboard has to be able to tell them apart.
     """
-    owner_off = _resolve(plan_tier=_paid_tier(), concierge_enabled=False)
+    owner_off = _resolve(plan_tier=_concierge_tier(), concierge_enabled=False)
     plan_says_no = _resolve(plan_tier=_free_tier(), concierge_enabled=True)
 
     assert owner_off.concierge_available is False
@@ -150,7 +184,8 @@ def test_the_owner_switch_and_the_plan_are_distinguishable():
 def test_an_entitled_site_with_the_switch_off_stays_off():
     """Entitlement never overrides the owner. Paying for a concierge does not force
     one onto a site whose owner silenced it."""
-    assert _resolve(plan_tier=_paid_tier(), concierge_enabled=False).concierge_available is False
+    ent = _resolve(plan_tier=_concierge_tier(), concierge_enabled=False)
+    assert ent.concierge_available is False
 
 
 # --------------------------------------------------------------------------- #
@@ -242,7 +277,7 @@ async def test_the_frame_still_renders_for_an_entitled_site(frame_client, monkey
     """A paying site is untouched — the gate must not take the bar off sites that
     bought it."""
     _enforce(monkeypatch, on=True)
-    await _site(plan_tier=_paid_tier(), subscription_status="active")
+    await _site(plan_tier=_concierge_tier(), subscription_status="active")
 
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": "pp_seed"})
 
@@ -284,7 +319,7 @@ async def test_chat_still_works_for_an_entitled_site(mongo_db, monkeypatch):
     from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key
 
     _enforce(monkeypatch, on=True)
-    await _site(plan_tier=_paid_tier(), subscription_status="active")
+    await _site(plan_tier=_concierge_tier(), subscription_status="active")
 
     ctx = await resolve_site_key(_VALID_KEY, "https://brewco.com", "cust_1")
 
@@ -369,7 +404,7 @@ async def test_the_publish_embed_treats_a_pending_subscription_as_paid(bound_wid
     ent = resolve_site_entitlements(
         site_id="6512c1f0e4b0a1b2c3d4e5f6",
         workspace_id="ws-1",
-        plan_tier=_paid_tier(),
+        plan_tier=_concierge_tier(),
         subscription_status="pending",
         concierge_enabled=True,
     )
@@ -400,7 +435,7 @@ async def test_the_runtime_gate_still_refuses_pending(mongo_db, monkeypatch):
     from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key
 
     _enforce(monkeypatch, on=True)
-    await _site(plan_tier=_paid_tier(), subscription_status="pending")
+    await _site(plan_tier=_concierge_tier(), subscription_status="pending")
 
     with pytest.raises(HTTPException) as exc:
         await resolve_site_key(_VALID_KEY, "https://brewco.com", "customer_abc123")

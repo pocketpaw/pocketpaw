@@ -101,7 +101,27 @@
 #   cancel is logged and skipped. Credits are still never clawed back. See the
 #   ``subscribe`` body for the STILL-OPEN downgrade lag-window (checkout→active
 #   webhook) that only the atomic Dodo ``change_plan`` closes.
-
+#
+# Updated 2026-08-26 (feat/site-plans-as-addons): added ``_site_addon_cart`` +
+#   ``sync_site_addons`` — a paid SITE is now a LINE on the workspace's existing
+#   subscription instead of a subscription of its own. One bill, one renewal date,
+#   one payment method, however many sites the workspace runs.
+#
+#   THE CART IS DECLARATIVE, WHICH IS THE ONLY THing worth knowing before touching
+#   this. Dodo's ``change_plan`` REPLACES the add-on list; sending nothing removes
+#   every add-on the subscription holds. So the cart is rebuilt from the ``Site``
+#   documents on every call and pushed WHOLE — never appended to, never diffed
+#   against gateway state. That also makes cancellation fall out for free: a site
+#   that stops being active stops appearing in the cart, and the next sync drops
+#   its line.
+#
+#   Sites still holding a per-site ``subscription_id`` are EXCLUDED from the cart.
+#   Those are the subscriptions the old rail sold, Dodo is already billing them,
+#   and counting one here too would charge the customer twice for one site.
+#
+#   A workspace with no active subscription is REFUSED (``NoActiveSubscription``)
+#   rather than being sold a standalone per-site subscription — that standalone
+#   subscription is exactly the separate payment this change removes.
 from __future__ import annotations
 
 import logging
@@ -256,6 +276,128 @@ async def _active_subscription(workspace_id: str) -> Subscription | None:
         .sort("-createdAt")
         .first_or_none()
     )
+
+
+async def _site_addon_cart(workspace_id: str) -> list[dict]:
+    """The COMPLETE Dodo add-on cart a workspace's sites should be billed for.
+
+    Rebuilt from the ``Site`` documents every time, never from what the gateway
+    currently holds. That is not defensiveness, it is the contract:
+    ``change_plan`` REPLACES the whole add-on list, so the only safe thing to
+    send is a full cart derived from our own source of truth. A function that
+    read the gateway's cart and appended to it would inherit any drift already
+    there and make it permanent.
+
+    Three exclusions, each load-bearing:
+
+      * A site holding a ``subscription_id`` is on a LEGACY per-site
+        subscription. Dodo is already billing it on its own rail, and counting it
+        here too would charge the customer twice for one site. Only sites with no
+        per-site subscription of their own ride the add-on rail.
+      * A site whose ``subscription_status`` is not active is not paying — a
+        cancelled site must drop off the next cart, which is precisely how a
+        cancellation stops costing money under this model.
+      * A tier with no configured ``dodo_addon_id`` cannot be expressed as an
+        add-on. It is skipped rather than guessed at; the publish path already
+        refuses to record an unpurchasable tier.
+
+    Quantities aggregate: four sites on ``site`` are one cart line of quantity 4,
+    not four lines. Dodo keys a cart line by add-on id, so emitting the same id
+    twice would be a malformed cart rather than a double charge.
+
+    Sorted by add-on id so the cart is deterministic — two calls with the same
+    sites produce byte-identical payloads, which is what makes a no-op sync
+    genuinely a no-op and keeps test assertions stable.
+    """
+    from pocketpaw_ee.cloud.billing import site_plans
+    from pocketpaw_ee.cloud.models.site import Site
+
+    counts: dict[str, int] = {}
+    async for doc in Site.find(Site.workspace == workspace_id):
+        if getattr(doc, "subscription_id", None):
+            continue
+        if (getattr(doc, "subscription_status", None) or "none") != "active":
+            continue
+        tier = site_plans.site_scoped_tier(getattr(doc, "plan_tier", None))
+        if tier is None or tier.monthly_price_usd == 0:
+            continue
+        addon_id = tier.dodo_addon_id
+        if not addon_id:
+            continue
+        counts[addon_id] = counts.get(addon_id, 0) + 1
+    return [{"addon_id": addon_id, "quantity": qty} for addon_id, qty in sorted(counts.items())]
+
+
+async def sync_site_addons(
+    workspace_id: str,
+    *,
+    provider: IPaymentsProvider | None = None,
+) -> dict:
+    """Push the workspace's full site add-on cart onto its EXISTING subscription.
+
+    This is how a paid site is billed now: as a line on the one subscription the
+    workspace already has, rather than as a subscription of its own. One bill,
+    one renewal date, one payment method, and a per-site charge that prorates
+    against the term the workspace has already paid for.
+
+    Idempotent by construction. The cart is recomputed from the ``Site``
+    documents on every call and sent whole, so calling this twice with no change
+    between sends the same cart twice and the second is a no-op at the gateway.
+    Callers do not need to know whether a sync is "needed".
+
+    RAISES ``NoActiveSubscription`` WHEN THE WORKSPACE HAS NO SUBSCRIPTION, and
+    that refusal is the deliberate shape of the feature rather than a gap in it.
+    An add-on attaches to something; there is no subscription-less add-on at this
+    gateway. A free workspace buying its first site therefore has to start a
+    workspace subscription, and the alternative — quietly opening a standalone
+    per-site subscription for it — is the separate payment this change exists to
+    remove. Reversing that trade is one branch here (create a subscription with
+    the cart attached, rather than refusing), but it needs a target workspace
+    plan that the publish request does not carry today, so it is not guessed.
+    """
+    sub = await _active_subscription(workspace_id)
+    if sub is None:
+        raise NoActiveSubscription(
+            "This workspace has no active subscription to add a site plan to."
+        )
+    # The gateway needs the plan the subscription is ALREADY on: ``change_plan``
+    # is one call that sets both the product and the cart, so "keep the plan,
+    # change the cart" is expressed by re-sending the current product. Prefer the
+    # product recorded on the row over a catalog lookup — the row is what the
+    # gateway actually charged, and a catalog remapped since the sale would
+    # otherwise silently move the workspace's plan as a side effect of publishing
+    # a site.
+    product_id = sub.product_id or _dodo_product_for_plan(sub.plan_key)
+    if not product_id:
+        raise ValidationError(
+            "billing.plan_product_unconfigured",
+            f"No Dodo product is configured for plan '{sub.plan_key}'.",
+        )
+    if not sub.gateway_subscription_id:
+        raise ValidationError(
+            "billing.invalid_subscription",
+            "The active subscription has no gateway id to attach add-ons to.",
+        )
+
+    cart = await _site_addon_cart(workspace_id)
+    prov = provider or _default_provider()
+    await prov.change_plan(
+        subscription_id=sub.gateway_subscription_id,
+        product_id=product_id,
+        plan_key=sub.plan_key,
+        addons=cart,
+    )
+    logger.info(
+        "billing.sync_site_addons: workspace=%s subscription=%s cart=%s",
+        workspace_id,
+        sub.gateway_subscription_id,
+        cart,
+    )
+    return {
+        "subscription_id": sub.gateway_subscription_id,
+        "plan_key": sub.plan_key,
+        "addons": cart,
+    }
 
 
 async def subscribe(

@@ -888,7 +888,36 @@
 #     apply_edits, and hands that to the UNCHANGED SE-2 persist + preview/republish
 #     + smoke-gate-rollback path. ``new_source`` (full rewrite) is unchanged and
 #     stays the fallback for large rewrites; exactly one of the two must be given.
-
+#
+# Updated 2026-08-26 (feat/site-plans-as-addons): a NEW paid publish bills as an
+#   ADD-ON on the workspace subscription (``_publish_addon_site``) instead of
+#   opening a per-site checkout. The per-site rail is kept for the subscriptions
+#   already sold, and the dispatcher checks the ADD-ON rail FIRST — a deployment
+#   mid-rollout has both maps configured, and checking the old one first would
+#   open exactly the subscription this replaces.
+#
+#   STILL CHARGE-FIRST, WITHOUT THE PENDING/WEBHOOK DANCE. The old rail deferred
+#   the deploy because payment happened on a hosted checkout the buyer left the
+#   app for, so "did they pay" was only answerable later, by a webhook. Attaching
+#   an add-on charges the card already on the subscription synchronously, so the
+#   answer is known inside the request and the site goes live in it. No
+#   ``checkout_url`` is returned on this rail.
+#
+#   TWO THINGS HERE ARE EASY TO GET WRONG AND BOTH COST MONEY:
+#   (1) the site is marked ``active`` BEFORE the charge, because the cart is built
+#       from the ``Site`` documents and a site absent from them is absent from the
+#       cart. A failed charge reverts it; without the revert the site keeps every
+#       paid capability for free, since nothing else rewrites that field.
+#   (2) ``activate_site`` gained ``force`` for the same reason. Its idempotency
+#       guard reads "deployed and active" as "nothing to do" — correct for a
+#       replayed webhook, wrong here, where the site is already active by the time
+#       the deploy runs. Upgrading a LIVE free site would otherwise charge the
+#       customer and ship them none of the new content.
+#
+#   ``already_paying`` now covers BOTH rails. An add-on site deliberately holds no
+#   per-site ``subscription_id`` (that absence is the cart builder's
+#   discriminator), so the old "has a subscription id" test read every add-on site
+#   as unpaid and re-ran the charge on every content edit.
 from __future__ import annotations
 
 import asyncio
@@ -5127,13 +5156,20 @@ async def publish_pocket(
     )
     is_paid = tier is not None and tier.monthly_price_usd > 0
     dodo_configured = tier is not None and bool(tier.dodo_product_id)
+    # THE ADD-ON RAIL, and it WINS over the per-site one when both are configured.
+    # A paid site is a line on the workspace's existing subscription now; the
+    # per-site product only still exists so the subscriptions already sold keep
+    # renewing. Checking the add-on first is what stops a deployment that has both
+    # maps set (the normal state during rollout) from opening exactly the separate
+    # subscription this rail replaces.
+    addon_configured = tier is not None and bool(tier.dodo_addon_id)
 
-    if is_paid and not dodo_configured:
-        # A paid tier whose Dodo product is unconfigured can't open a checkout —
-        # fall back to publishing LIVE immediately so the user is never stranded.
+    if is_paid and not dodo_configured and not addon_configured:
+        # A paid tier with neither rail configured can't charge at all — fall back
+        # to publishing LIVE immediately so the user is never stranded.
         logger.warning(
-            "sites.publish: paid tier %s has no configured Dodo product — publishing "
-            "live immediately (charge-first fallback, no checkout)",
+            "sites.publish: paid tier %s has no configured Dodo add-on or product — "
+            "publishing live immediately (no charge)",
             tier.key if tier is not None else site_plan_key,
         )
 
@@ -5152,11 +5188,59 @@ async def publish_pocket(
     existing_doc = await _SiteDoc.find_one(
         {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
     )
+    # TWO RAILS PAY, AND ONLY ONE OF THEM LEAVES A ``subscription_id``.
+    #
+    # "has an active per-site subscription id" was the whole test until add-ons
+    # existed, and it silently stopped covering half the paying sites: an add-on
+    # site deliberately holds NO per-site id (that absence is the cart builder's
+    # discriminator). Left as it was, every republish of an add-on site read as
+    # "not yet paying", took the purchase branch, and re-ran the charge. The
+    # declarative cart means that re-charge happened to be idempotent — the cart
+    # recomputes to the same quantity — but relying on that is relying on an
+    # accident, and it still churns proration at the gateway on every content
+    # edit. A paid tier with an active status IS the add-on rail's proof of
+    # payment.
+    _existing_tier = (
+        site_plans.site_scoped_tier(getattr(existing_doc, "plan_tier", None))
+        if existing_doc is not None
+        else None
+    )
+    paying_on_addon = (
+        existing_doc is not None
+        and existing_doc.subscription_status == "active"
+        and not existing_doc.subscription_id
+        and _existing_tier is not None
+        and _existing_tier.monthly_price_usd > 0
+    )
     already_paying = (
         existing_doc is not None
         and existing_doc.subscription_status == "active"
-        and bool(existing_doc.subscription_id)
+        and (bool(existing_doc.subscription_id) or paying_on_addon)
     )
+
+    if paying_on_addon and is_paid and addon_configured and existing_doc.plan_tier != tier.key:
+        # A genuine TIER CHANGE on a site paying via an add-on. There is no
+        # per-site subscription to move — the change is expressed as a different
+        # cart on the workspace's subscription, so stamp the new tier first and
+        # then re-sync. Stamp first for the same reason the purchase path does:
+        # the cart is built from the documents.
+        from pocketpaw_ee.cloud.billing import service as _billing_service
+
+        _previous_tier = existing_doc.plan_tier
+        existing_doc.plan_tier = tier.key
+        await existing_doc.save()
+        try:
+            await _billing_service.sync_site_addons(workspace_id, provider=_billing_provider)
+        except Exception:
+            existing_doc.plan_tier = _previous_tier
+            await existing_doc.save()
+            raise
+        logger.info(
+            "sites.publish: site %s moved %s -> %s on the workspace add-on cart",
+            str(existing_doc.id),
+            _previous_tier,
+            tier.key,
+        )
 
     if already_paying and is_paid and dodo_configured and existing_doc.plan_tier != tier.key:
         # A genuine TIER CHANGE on a paying site. Move the existing subscription
@@ -5172,6 +5256,13 @@ async def publish_pocket(
             subscription_id=existing_doc.subscription_id,
             product_id=tier.dodo_product_id,
             plan_key=tier.key,
+            # EMPTY ON PURPOSE, and only safe because of what this subscription is.
+            # ``existing_doc.subscription_id`` is a PER-SITE subscription — one
+            # subscription that buys one site — and nothing ever attaches an add-on
+            # to one. The workspace subscription that DOES carry site add-ons is a
+            # different row and is not touched here. Sending [] to that one would
+            # cancel every paid site in the workspace.
+            addons=[],
         )
         logger.info(
             "sites.publish: site %s moved %s → %s on subscription %s (no new checkout)",
@@ -5181,9 +5272,40 @@ async def publish_pocket(
             existing_doc.subscription_id,
         )
 
+    if is_paid and addon_configured and not already_paying:
+        # PAID + not yet paying → bill it as an ADD-ON on the workspace's own
+        # subscription and deploy in the same request.
+        #
+        # STILL CHARGE-FIRST, without the pending/webhook dance. The old rail had
+        # to defer the deploy because payment happened on a hosted checkout the
+        # buyer wandered off to, so "did they pay" was only answerable later, by a
+        # webhook. Attaching an add-on charges the card already on the
+        # subscription, synchronously, inside this request — so the answer is
+        # known here and the site can go live immediately. The buyer never leaves
+        # the app and there is no ``checkout_url`` in the response.
+        return await _publish_addon_site(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            ripple_spec=ripple_spec,
+            theme=theme,
+            engine=engine,
+            source=source,
+            pattern=pattern,
+            name=name or pocket.get("name", ""),
+            builder_origin=builder_origin,
+            keeps_client_bundle=keeps_client_bundle,
+            tier=tier,
+            provider=_billing_provider,
+            _generator=_generator,
+            _cloudflare=_cloudflare,
+            _bundle_reader=_bundle_reader,
+            _local_deploy=_local_deploy,
+        )
+
     if is_paid and dodo_configured and not already_paying:
-        # PAID + chargeable + not yet paying → defer the deploy until
-        # subscription.active.
+        # PAID + chargeable on the LEGACY per-site rail (no add-on configured for
+        # the tier) → defer the deploy until subscription.active.
         return await _publish_pending_site(
             workspace_id=workspace_id,
             user_id=user_id,
@@ -5384,7 +5506,12 @@ async def _apply_site_plan(
     already_paying = getattr(doc, "subscription_status", None) == "active" and bool(
         getattr(doc, "subscription_id", None)
     )
-    if tier is not None and tier.dodo_product_id and not already_paying:
+    # ``not tier.dodo_addon_id``: a tier that HAS an add-on rail is billed on the
+    # workspace subscription, and this live path must not also open a per-site
+    # subscription for it — that is the double charge the add-on rail removes. The
+    # add-on rail does its own charging in ``_publish_addon_site`` before the
+    # deploy; by the time a site on that rail reaches here it is already paying.
+    if tier is not None and tier.dodo_product_id and not tier.dodo_addon_id and not already_paying:
         try:
             prov = provider or _default_billing_provider()
             checkout = await prov.create_subscription(
@@ -5467,6 +5594,116 @@ def _site_checkout_return_urls(origin: str | None) -> tuple[str | None, str | No
     return (f"{base}/sites?checkout=success", f"{base}/sites?checkout=cancel")
 
 
+async def _publish_addon_site(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    ripple_spec: dict[str, Any] | None,
+    theme: dict[str, Any],
+    engine: str,
+    source: dict[str, str] | None,
+    pattern: str | None,
+    name: str,
+    builder_origin: str | None,
+    keeps_client_bundle: bool,
+    tier: Any,
+    provider: Any | None,
+    _generator: GeneratorClient | None = None,
+    _cloudflare: Any | None = None,
+    _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
+    _local_deploy: Callable[[str, str], str] | None = None,
+) -> _SiteDoc:
+    """Buy a paid site as an ADD-ON on the workspace subscription, then deploy it.
+
+    The add-on half of ``publish_pocket``, and the rail every new paid publish
+    takes. The site is not a subscription of its own: it becomes a line on the
+    subscription the workspace already pays, so the customer gets one bill, one
+    renewal date and one payment method however many sites they run.
+
+    ORDER IS THE WHOLE DESIGN HERE, so it is worth being explicit about:
+
+      1. Create the site PENDING and not deployed, exactly as the per-site rail
+         does, capturing the deploy inputs on the doc.
+      2. Mark it ``active`` BEFORE charging. This looks backwards and is not: the
+         cart is computed from the ``Site`` documents, so the site has to be in
+         the documents to be in the cart. Marking it after the charge would bill
+         the workspace for every site EXCEPT the one being bought.
+      3. Sync the cart, which charges the card on the subscription synchronously.
+      4. Only then deploy, through the SAME ``activate_site`` the per-site
+         webhook uses — one deferred-deploy implementation, not two.
+
+    A FAILED CHARGE REVERTS STEP 2 AND PROPAGATES. Leaving the site ``active``
+    after a refusal would hand it every paid capability — badge off, custom
+    domain, concierge — for free and forever, since nothing else rewrites that
+    field. The revert runs in a ``finally``-shaped except so a gateway refusal,
+    a network error and a bug all take it.
+
+    The site stays PENDING and undeployed on failure rather than being deleted:
+    the buyer can fix their card and republish onto the same deterministic
+    ``site_id``, which is the same recovery the per-site rail offers.
+    """
+    from pocketpaw_ee.cloud.billing import service as billing_service
+
+    doc = await _publish_pending_site(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        ripple_spec=ripple_spec,
+        theme=theme,
+        engine=engine,
+        source=source,
+        pattern=pattern,
+        name=name,
+        builder_origin=builder_origin,
+        keeps_client_bundle=keeps_client_bundle,
+        tier=tier,
+        provider=provider,
+        addon_rail=True,
+    )
+
+    site_id = str(doc.id)
+    previous_status = doc.subscription_status
+    doc.subscription_status = "active"
+    await doc.save()
+    try:
+        # Thread the caller's provider through rather than letting the sync fall
+        # back to the default one. The publish path takes an injectable provider
+        # and every other billing call here honours it; dropping it at this one
+        # call reaches the real gateway from a caller that explicitly supplied a
+        # substitute.
+        result = await billing_service.sync_site_addons(workspace_id, provider=provider)
+    except Exception:
+        doc.subscription_status = previous_status
+        await doc.save()
+        logger.warning(
+            "sites.publish: add-on charge failed for site %s (tier=%s) — left PENDING "
+            "and undeployed, nothing charged",
+            site_id,
+            tier.key,
+            exc_info=True,
+        )
+        raise
+
+    logger.info(
+        "sites.publish: site %s billed as an add-on on subscription %s (tier=%s, cart=%s)",
+        site_id,
+        result.get("subscription_id"),
+        tier.key,
+        result.get("addons"),
+    )
+
+    return await activate_site(
+        workspace_id=workspace_id,
+        site_id=site_id,
+        force=True,
+        _generator=_generator,
+        _cloudflare=_cloudflare,
+        _bundle_reader=_bundle_reader,
+        _local_deploy=_local_deploy,
+    )
+
+
 async def _publish_pending_site(
     *,
     workspace_id: str,
@@ -5483,6 +5720,7 @@ async def _publish_pending_site(
     tier: Any,
     provider: Any | None,
     origin: str | None = None,
+    addon_rail: bool = False,
 ) -> _SiteDoc:
     """Charge-first: create a PAID-tier site as PENDING and open its checkout,
     WITHOUT deploying it live.
@@ -5581,23 +5819,31 @@ async def _publish_pending_site(
     # metadata carries it without the doc existing yet. If opening the checkout
     # raises, it PROPAGATES (no swallow) and NO pending doc is created — never an
     # orphan pending row with no subscription_id. The buyer can simply retry.
-    prov = provider or _default_billing_provider()
-    return_url, cancel_url = _site_checkout_return_urls(origin)
-    checkout = await prov.create_subscription(
-        plan_key=plan_key,
-        product_id=tier.dodo_product_id,
-        workspace_id=workspace_id,
-        customer_email=None,
-        metadata={
-            "workspace_id": workspace_id,
-            "site_id": site_id,
-            "plan_key": plan_key,
-        },
-        return_url=return_url,
-        cancel_url=cancel_url,
-    )
-    checkout_url: str | None = checkout.checkout_url or None
-    subscription_id: str | None = checkout.subscription_id or None
+    checkout_url: str | None = None
+    subscription_id: str | None = None
+    if not addon_rail:
+        prov = provider or _default_billing_provider()
+        return_url, cancel_url = _site_checkout_return_urls(origin)
+        checkout = await prov.create_subscription(
+            plan_key=plan_key,
+            product_id=tier.dodo_product_id,
+            workspace_id=workspace_id,
+            customer_email=None,
+            metadata={
+                "workspace_id": workspace_id,
+                "site_id": site_id,
+                "plan_key": plan_key,
+            },
+            return_url=return_url,
+            cancel_url=cancel_url,
+        )
+        checkout_url = checkout.checkout_url or None
+        subscription_id = checkout.subscription_id or None
+    # ON THE ADD-ON RAIL ``subscription_id`` STAYS None, and that is load-bearing
+    # rather than incidental. It is the discriminator the cart builder reads: a
+    # site holding a per-site subscription id is billed on the old rail and is
+    # EXCLUDED from the workspace cart, so stamping the workspace's subscription
+    # id here to be informative would silently drop the site off its own invoice.
 
     # Checkout opened — NOW upsert the PENDING canonical Site doc with the
     # subscription_id already set (review fix B). The size cap (A) already ran.
@@ -5646,6 +5892,7 @@ async def activate_site(
     workspace_id: str,
     site_id: str,
     subscription_id: str | None = None,
+    force: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -5677,7 +5924,17 @@ async def activate_site(
 
     # Idempotent: an already-deployed+active site is a no-op (replayed / out-of-order
     # delivery). We treat "deployed and active" as the terminal live state.
-    if doc.deployed and doc.subscription_status == "active":
+    #
+    # ``force`` EXISTS BECAUSE THAT GUARD IS ONLY RIGHT FOR THE WEBHOOK. It reads
+    # "deployed and active" as "nothing left to do", which is true of a replayed
+    # ``subscription.active`` and false of the add-on rail: there the caller marks
+    # the site active BEFORE charging (the cart is built from the documents), so by
+    # the time the deploy runs the doc already looks terminal. An upgrade of a
+    # LIVE free site to a paid tier would hit this line, return early, and ship
+    # the customer a charge with none of the new content — the site would keep
+    # serving what it was serving before. The webhook still passes force=False and
+    # keeps its at-least-once protection unchanged.
+    if doc.deployed and doc.subscription_status == "active" and not force:
         return doc
 
     inputs = doc.pending_deploy_inputs or {}

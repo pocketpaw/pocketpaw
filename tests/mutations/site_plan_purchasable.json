@@ -2,7 +2,7 @@
   {
     "label": "purchasable is always true — an unbuyable tier is recorded again",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "        return self.monthly_price_usd == 0 or self.dodo_product_id is not None",
+    "find": "        return self.dodo_addon_id is not None or self.dodo_product_id is not None",
     "replace": "        return True",
     "tests": [
       "tests/cloud/billing/test_site_plan_purchasable.py::test_a_priced_tier_with_no_product_is_not_purchasable",
@@ -12,8 +12,8 @@
   {
     "label": "the free tier reads as unbuyable — its card goes unavailable",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "        return self.monthly_price_usd == 0 or self.dodo_product_id is not None",
-    "replace": "        return self.dodo_product_id is not None",
+    "find": "        if self.monthly_price_usd == 0:\n            return True",
+    "replace": "        if False:\n            return True",
     "tests": [
       "tests/cloud/billing/test_site_plan_purchasable.py::test_the_free_tier_is_always_purchasable",
       "tests/cloud/billing/test_site_plan_purchasable.py::TestThePublishRecordsWhatIsTrue::test_an_explicit_move_to_free_still_works"
