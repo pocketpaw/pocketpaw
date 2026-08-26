@@ -880,6 +880,8 @@ class TestProgressiveSummarization:
             assert len(fetched) == 1
             assert fetched[0]["segment_summary"] == "From Redis"
             mock_redis.lrange.assert_awaited_once()
+            # Consume-once: the key must be deleted right after reading
+            mock_redis.delete.assert_awaited_once_with("livekit:progressive:g")
 
     @pytest.mark.asyncio
     async def test_store_pushes_to_redis_with_ttl(self):
@@ -958,6 +960,69 @@ class TestProgressiveSummarization:
             assert len(fetched) == 1
             assert fetched[0]["segment_summary"] == "From Redis"
             assert fetched[0]["action_items"] == ["Redis task"]
+            mock_redis.delete.assert_awaited_once_with("livekit:progressive:g")
+
+    @pytest.mark.asyncio
+    async def test_fetch_deletes_redis_key_for_next_meeting(self):
+        """Regression: a back-to-back meeting on the same group must not
+        pick up the previous call's progressive summaries from Redis.
+
+        Simulates two sequential agent runs sharing one Redis: the first
+        run fetches (and must delete) the key, so the second run — with a
+        fresh in-memory list — sees nothing stale.
+        """
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        # Tiny fake Redis with a real list under the hood.
+        class _FakeRedis:
+            def __init__(self):
+                self.lists: dict[str, list[str]] = {}
+
+            async def rpush(self, key, value):
+                self.lists.setdefault(key, []).append(value)
+
+            async def expire(self, key, ttl):
+                pass
+
+            async def lrange(self, key, start, end):
+                return list(self.lists.get(key, []))
+
+            async def delete(self, key):
+                self.lists.pop(key, None)
+
+        fake_redis = _FakeRedis()
+        stale_summary = {
+            "segment_summary": "Old call discussion",
+            "action_items": ["Stale task"],
+            "topics": [],
+            "participants": ["Alice"],
+            "timestamp": 1000.0,
+        }
+
+        # ── First meeting: stores summaries, then finalizes ──
+        first_agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+        with patch.object(first_agent, "_get_redis", AsyncMock(return_value=fake_redis)):
+            await first_agent._store_progressive_summary(stale_summary)
+            fetched = await first_agent._fetch_progressive_summaries()
+            assert len(fetched) == 1
+            assert fetched[0]["segment_summary"] == "Old call discussion"
+
+        # Key must be gone from Redis after the fetch
+        assert "livekit:progressive:g" not in fake_redis.lists
+
+        # ── Second meeting one minute later: fresh agent, same group ──
+        second_agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+        assert second_agent._progressive_summaries == []
+        fetched = await second_agent._fetch_progressive_summaries()
+        assert fetched == [], "stale summaries from previous call leaked into new meeting"
 
     @pytest.mark.asyncio
     async def test_fetch_returns_empty_when_nothing_stored(self):
