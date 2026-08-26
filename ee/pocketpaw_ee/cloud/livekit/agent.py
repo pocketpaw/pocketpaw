@@ -1207,12 +1207,23 @@ class CallMeetingAgent:
 
         Tries Redis first; falls back to the in-memory list if Redis is
         unavailable or the call was short (no Redis entries).
+
+        The Redis key is deleted as soon as it has been read
+        (consume-once) so a back-to-back meeting on the same group never
+        picks up the previous call's stale summaries.  The in-memory list
+        still covers this agent for the rest of its lifecycle.
         """
         redis = await self._get_redis()
         if redis is not None:
             try:
                 key = _REDIS_PROGRESSIVE_KEY.format(group_id=self.group_id)
                 raw_list = await redis.lrange(key, 0, -1)
+                # Consume-once: drop the key immediately after reading it
+                # so the next meeting on this group starts clean.
+                await redis.delete(key)
+                logger.info(
+                    "Agent: cleared progressive summaries key %s after fetch", key
+                )
                 if raw_list:
                     summaries = []
                     for raw in raw_list:
