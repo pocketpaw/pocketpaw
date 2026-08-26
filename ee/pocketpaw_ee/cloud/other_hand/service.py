@@ -164,22 +164,47 @@ def _decode_png(png_base64: str) -> bytes:
     return data
 
 
-def write_snapshot(workspace_id: str, page_id: str, png_base64: str) -> str:
-    """Write the page snapshot and return the absolute path the agent can ``Read``.
+#: The two images a turn can carry. ``page`` is the notebook the agent draws
+#: on; ``book`` is the read-only source page beside it (book mode, added
+#: 2026-08-26). A closed set, because it becomes part of a FILENAME — an
+#: open-ended ``kind`` would be a second traversal vector past the page_id
+#: guard.
+SNAPSHOT_KINDS: tuple[str, ...] = ("page", "book", "mark")
 
-    Overwrites any previous snapshot for this ``page_id`` — v1 keeps exactly one
-    live snapshot per page and no history. Raises ``SnapshotError`` for every
-    rejected input; the router maps it to the cloud error envelope.
+
+def _kind_suffix(kind: str) -> str:
+    """Filename suffix for a snapshot kind, or raise on an unknown kind."""
+    if kind not in SNAPSHOT_KINDS:
+        raise SnapshotError(
+            400,
+            "other_hand.invalid_kind",
+            f"kind must be one of {', '.join(SNAPSHOT_KINDS)}",
+        )
+    # "page" keeps the original bare filename so v1 pages and their tests are
+    # byte-identical; only the new kind takes a suffix.
+    return "" if kind == "page" else f".{kind}"
+
+
+def write_snapshot(
+    workspace_id: str, page_id: str, png_base64: str, kind: str = "page"
+) -> str:
+    """Write a snapshot and return the absolute path the agent can ``Read``.
+
+    Overwrites any previous snapshot for this ``page_id`` and ``kind`` — v1
+    keeps exactly one live image per page per kind and no history. Raises
+    ``SnapshotError`` for every rejected input; the router maps it to the cloud
+    error envelope.
     """
     if not workspace_id:
         raise SnapshotError(400, "other_hand.no_workspace", "no workspace bound to this request")
 
     safe_page_id = _safe_page_id(page_id)
+    suffix = _kind_suffix(kind)
     data = _decode_png(png_base64)
 
     directory = snapshot_dir(workspace_id)
     directory.mkdir(parents=True, exist_ok=True)
-    target = directory / f"{safe_page_id}.png"
+    target = directory / f"{safe_page_id}{suffix}.png"
 
     # Belt and braces on the traversal guard: the resolved target must still sit
     # inside the resolved directory. ``_safe_page_id`` already makes this true;

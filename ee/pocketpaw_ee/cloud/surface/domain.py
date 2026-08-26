@@ -273,6 +273,30 @@ class SurfaceMeta:
     # it adds at y >= free_y; the frontend's placement guard enforces it anyway.
     snapshot_path: str | None = None
     free_y: str | None = None
+    # ``book_path`` is the absolute path of the READ-ONLY source page shown
+    # beside the notebook in book mode (added 2026-08-26). The agent Reads it
+    # to see what the user circled or underlined, and NEVER draws on it — the
+    # page-ops coordinate space still addresses the notebook alone, so the
+    # frozen contract is untouched. ``None`` on a plain notebook page.
+    book_path: str | None = None
+    # ``mark_box`` is "x1,y1,x2,y2" in the page's logical space: exactly where
+    # the reader's pen went on the book. The client already knows this, so we
+    # TELL the agent rather than make it re-derive a circled region from a
+    # rasterised page of dense body text — which it does badly.
+    mark_box: str | None = None
+    # The marked region re-rendered at high resolution (scans, figures,
+    # equations) and the exact words under the mark, read off the PDF's own
+    # text layer (born-digital pages). Two channels because they fail in
+    # different places: no text layer on a scan, no crop worth reading on a
+    # pure-text page.
+    mark_image_path: str | None = None
+    mark_text: str | None = None
+    # Compact JSON of what is already ON the page (text content with exact
+    # coordinates, shape/user-ink bounding boxes), measured client-side from
+    # the live stroke model AFTER the placement guard. The agent anchors its
+    # annotations to these coordinates rather than to its memory of what it
+    # emitted — which the guard may have shifted.
+    scene: str | None = None
 
 
 @dataclass(frozen=True)

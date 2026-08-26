@@ -35,7 +35,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Path
 from pydantic import BaseModel, Field
@@ -65,7 +65,17 @@ class SnapshotRequest(BaseModel):
     """
 
     png_base64: str = Field(min_length=1)
-    free_y: int = Field(ge=0, le=1754)
+    #: Upper bound lifted 2026-08-26: the paper GROWS downward (whole
+    #: half-sheets as ink approaches the bottom), so free_y can exceed one
+    #: A4 sheet. 30 sheets is far past any real page and still rejects a
+    #: nonsense coordinate at the wire.
+    free_y: int = Field(ge=0, le=52620)
+    #: Which image this is. ``page`` (the default, and the only v1 value) is
+    #: the notebook the agent draws on. ``book`` is the read-only source page
+    #: shown beside it in book mode — the agent reads it and never draws on it.
+    #: Defaulted so an older client that knows nothing about book mode keeps
+    #: working unchanged.
+    kind: Literal["page", "book", "mark"] = "page"
 
 
 def _to_cloud_error(exc: other_hand_service.SnapshotError) -> CloudError:
@@ -89,7 +99,9 @@ async def put_page_snapshot(
     history in v1. Any workspace member may snapshot their own page.
     """
     try:
-        path = other_hand_service.write_snapshot(workspace_id, page_id, body.png_base64)
+        path = other_hand_service.write_snapshot(
+            workspace_id, page_id, body.png_base64, body.kind
+        )
     except other_hand_service.SnapshotError as exc:
         raise _to_cloud_error(exc) from exc
     return {"path": path, "free_y": body.free_y}

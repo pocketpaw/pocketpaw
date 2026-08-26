@@ -98,6 +98,26 @@ class SurfaceMetaRequest(BaseModel):
     # match the other scalar hints. Both optional.
     snapshot_path: str | None = None
     free_y: str | None = None
+    # Book mode (2026-08-26): the read-only source page beside the notebook.
+    book_path: str | None = None
+    # ``mark_box`` is "x1,y1,x2,y2" in the page's logical space: exactly where
+    # the reader's pen went on the book. The client already knows this, so we
+    # TELL the agent rather than make it re-derive a circled region from a
+    # rasterised page of dense body text — which it does badly.
+    mark_box: str | None = None
+    # The marked region re-rendered at high resolution (scans, figures,
+    # equations) and the exact words under the mark, read off the PDF's own
+    # text layer (born-digital pages). Two channels because they fail in
+    # different places: no text layer on a scan, no crop worth reading on a
+    # pure-text page.
+    mark_image_path: str | None = None
+    mark_text: str | None = None
+    # Compact JSON of what is already ON the page (text content with exact
+    # coordinates, shape/user-ink bounding boxes), measured client-side from
+    # the live stroke model AFTER the placement guard. The agent anchors its
+    # annotations to these coordinates rather than to its memory of what it
+    # emitted — which the guard may have shifted.
+    scene: str | None = None
 
 
 class SurfaceRequest(BaseModel):

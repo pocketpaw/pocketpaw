@@ -337,6 +337,11 @@ def _meta_from_request(req: SurfaceMetaRequest) -> SurfaceMeta:
         pawbar_catalog=req.pawbar_catalog,
         snapshot_path=req.snapshot_path,
         free_y=req.free_y,
+        book_path=req.book_path,
+        mark_box=req.mark_box,
+        mark_image_path=req.mark_image_path,
+        mark_text=req.mark_text,
+        scene=req.scene,
     )
 
 

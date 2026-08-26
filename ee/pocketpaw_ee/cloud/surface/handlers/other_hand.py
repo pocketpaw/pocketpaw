@@ -36,6 +36,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
@@ -73,7 +74,9 @@ def _clamp_free_y(raw: str | None) -> int | None:
     except (TypeError, ValueError):
         logger.debug("other_hand_handler: unparseable free_y %r", raw)
         return None
-    return max(0, min(value, PAGE_HEIGHT))
+    # The paper grows downward (2026-08-26), so free_y may exceed one sheet.
+    # Clamp only to the growth ceiling the wire enforces (30 sheets).
+    return max(0, min(value, PAGE_HEIGHT * 30))
 
 
 async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
@@ -88,6 +91,17 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         route = meta.route_path or ROUTE
         snapshot_path = (meta.snapshot_path or "").strip()
         free_y = _clamp_free_y(meta.free_y)
+        book_path = (meta.book_path or "").strip()
+        mark_box = (meta.mark_box or "").strip()
+        mark_image_path = (meta.mark_image_path or "").strip()
+        mark_text = (meta.mark_text or "").strip()
+        # The tutor stance for this turn, picked in the chat panel. "teach" is
+        # the default and adds nothing — the system prompt's teaching playbook
+        # already is that stance. The other two shift the register, not the
+        # rules: quiz drives retrieval, explain suspends the hand-the-pen-back
+        # habit for a student who just wants the thing stated.
+        mode = (meta.mode or "").strip().lower()
+        scene = (meta.scene or "").strip()
 
         if not snapshot_path or free_y is None:
             # No page to look at. Say what the surface IS and stop — a preamble
@@ -109,19 +123,118 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
                 cache_key=meta_key("other_hand", route, "no-snapshot"),
             )
 
+        # Book mode: a second, READ-ONLY image sits beside the notebook. The
+        # agent reads it for what the user circled or underlined, and answers on
+        # the NOTEBOOK. Saying "never draw on the book" is not enough on its own
+        # — the ops coordinate space simply does not address the book, so the
+        # instruction and the geometry agree.
+        book_block = ""
+        if book_path:
+            # Two things make a mark legible to the agent, and it needs BOTH:
+            # the colour convention (a thin dark line on a printed page reads as
+            # part of the document) and the exact box (a sprawling hand-drawn
+            # loop over dense text is ambiguous even to a human).
+            if not mark_box:
+                mark_block = "The reader has not marked anything yet.\n"
+            else:
+                parts = [
+                    f"The reader's marks span the region {mark_box} "
+                    "(x1,y1,x2,y2 in that image's coordinates).\n"
+                ]
+                # The text layer is EXACT — it is what the PDF itself says is
+                # there, not what a vision pass thinks it read. When present it
+                # is authoritative, and saying so stops the agent second-guessing
+                # it against a downscaled raster.
+                if mark_text:
+                    parts.append(
+                        "They marked this exact passage, taken from the "
+                        f"document's own text:\n---\n{mark_text}\n---\n"
+                        "That text is authoritative. Answer about IT.\n"
+                    )
+                if mark_image_path:
+                    parts.append(
+                        "A high-resolution image of just that region is at: "
+                        f"{mark_image_path}\n"
+                        "Read it when the passage is a figure, an equation, a "
+                        "table, or a scan — anything the text above does not "
+                        "capture.\n"
+                    )
+                if not mark_text and not mark_image_path:
+                    parts.append(
+                        "Read the text inside that region on the book page.\n"
+                    )
+                mark_block = "".join(parts)
+            book_block = (
+                # "source" not "book": it may be a PDF page OR an image the
+                # user opened — a photo, a screenshot, a scan, a diagram. The
+                # agent should describe what it actually sees rather than
+                # calling a photograph a book page.
+                f"The user has a SOURCE open beside the notebook — a document "
+                f"page or an image — at: {book_path}\n"
+                "Read it too. It is READ-ONLY.\n"
+                "Everything drawn in RED on that page is the READER'S mark, "
+                "not part of the document: a loop means 'this passage', a line "
+                "under text means 'this line', a line through text means 'I do "
+                "not follow this'.\n"
+                f"{mark_block}"
+                "Answer on the NOTEBOOK page. Every coordinate you emit "
+                "addresses the notebook, never the book.\n"
+            )
+
+        mode_block = ""
+        if mode == "quiz":
+            mode_block = (
+                "MODE: quiz. Do not explain unprompted this turn — write 2-3 "
+                "retrieval questions on the page about what the student has "
+                "been working on, hardest last, each with room to answer. "
+                "Withhold the answers until they write theirs.\n"
+            )
+        elif mode == "explain":
+            mode_block = (
+                "MODE: explain. The student wants it stated plainly this turn: "
+                "give the full, direct explanation with a clear diagram. Skip "
+                "the check-question habit; do not quiz.\n"
+            )
+
         return SurfacePreamble(
             text=(
                 f'<surface kind="other_hand" route="{route}" />\n'
                 "You are writing on the user's notebook page with them. "
                 "This is not a chat.\n"
                 f"The page image is at: {snapshot_path}\n"
-                "Read it to see what the user has written and drawn.\n"
+                "Read it to see what the user has written and drawn. The image "
+                "is EXACTLY the 1240x1754 coordinate space: a thing at pixel "
+                "(x,y) in it is at coordinate (x,y) on the page.\n"
+                f"{book_block}"
                 f"The page below y={free_y} is empty. "
                 f"Put everything you add at y >= {free_y}.\n"
+                + (
+                    "What is already on the page, with EXACT coordinates "
+                    "(measure from these, not from memory — your earlier ops "
+                    "may have been shifted to avoid the user's ink):\n"
+                    f"{scene}\n"
+                    "texts: content with its anchor. shapes/user: bounding "
+                    "boxes [x1,y1,x2,y2]. Anchor every annotation arrow to "
+                    "one of these.\n"
+                    if scene
+                    else ""
+                )
+                + f"{mode_block}"
                 "Reply with a short sentence, then ONE ```page-ops``` block.\n"
                 "Never mention files, paths, coordinates, or tools to the user.\n"
             ),
-            cache_key=meta_key("other_hand", route, snapshot_path, free_y),
+            cache_key=meta_key(
+                "other_hand",
+                route,
+                snapshot_path,
+                free_y,
+                book_path or "no-book",
+                mark_box or "no-mark",
+                mark_image_path or "no-mark-image",
+                mark_text[:120] or "no-mark-text",
+                mode or "teach",
+                hashlib.md5(scene.encode()).hexdigest()[:8] if scene else "no-scene",
+            ),
         )
     except Exception:
         # No upstream to fail, so this catch is for the unforeseen only. The

@@ -154,6 +154,44 @@ async def test_resolver_carries_snapshot_hints_from_the_wire() -> None:
     assert "y >= 640" in ctx.preamble
 
 
+async def test_resolver_carries_book_mode_hints_from_the_wire() -> None:
+    """The book-mode fields ride the same field-by-field pass-through.
+
+    This is the test the 2026-08-26 live session was missing: all four fields
+    were on the dto AND the domain, every suite was green, and the resolver
+    still dropped them — the pass-through names each field explicitly, so a
+    field added to both models but not to ``_meta_from_request`` dies silently
+    and the agent answers "the page is blank" while three PNGs sit on disk.
+    Drive the real resolver and assert the fields land in the PREAMBLE, not
+    just on the meta object.
+    """
+    ctx = await resolve_surface_context(
+        WORKSPACE,
+        USER,
+        {
+            "surface": "other_hand",
+            "meta": {
+                "route_path": "/other-hand",
+                "snapshot_path": SNAPSHOT,
+                "free_y": "640",
+                "book_path": "/jail/ws/other_hand/p1.book.png",
+                "mark_box": "40,170,1180,470",
+                "mark_image_path": "/jail/ws/other_hand/p1.mark.png",
+                "mark_text": "Thank you for applying for an EIN.",
+                "scene": '{"texts":[{"s":"soma","x":750,"y":357}],"shapes":[],"user":[]}',
+            },
+        },
+    )
+
+    assert ctx.meta.book_path == "/jail/ws/other_hand/p1.book.png"
+    assert '"s":"soma"' in ctx.preamble
+    assert "EXACT coordinates" in ctx.preamble
+    assert "/jail/ws/other_hand/p1.book.png" in ctx.preamble
+    assert "40,170,1180,470" in ctx.preamble
+    assert "/jail/ws/other_hand/p1.mark.png" in ctx.preamble
+    assert "Thank you for applying for an EIN." in ctx.preamble
+
+
 # --- profile ----------------------------------------------------------------
 
 
