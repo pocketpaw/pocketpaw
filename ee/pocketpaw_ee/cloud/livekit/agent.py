@@ -1221,9 +1221,7 @@ class CallMeetingAgent:
                 # Consume-once: drop the key immediately after reading it
                 # so the next meeting on this group starts clean.
                 await redis.delete(key)
-                logger.info(
-                    "Agent: cleared progressive summaries key %s after fetch", key
-                )
+                logger.info("Agent: cleared progressive summaries key %s after fetch", key)
                 if raw_list:
                     summaries = []
                     for raw in raw_list:
