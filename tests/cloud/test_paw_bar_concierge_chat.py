@@ -1069,3 +1069,116 @@ async def test_chat_does_not_replay_the_current_message_into_history(concierge_c
 
     next_turn = await _load_concierge_history("pocket-1", "cust-1", "ws-1", session_key=key)
     assert {"role": "user", "content": message} in next_turn
+
+
+# ---------------------------------------------------------------------------
+# The monthly conversation allowance (feat/concierge-conversation-quota).
+#
+# The unit tests in test_concierge_conversation_quota.py prove the counter and
+# the ceiling in isolation. These two prove the GATE is actually wired into the
+# handler and refuses the right turn — a quota nothing calls is a quota that does
+# not exist, and the reachability is the half that silently rots.
+# ---------------------------------------------------------------------------
+
+
+def _enforce_sites_billing(monkeypatch) -> None:
+    """Turn the per-site paywall on for both gates that read it.
+
+    Patches the enforcement module's attribute rather than the settings object:
+    ``concierge_available`` and the quota both resolve ``sites_enforced`` lazily
+    from this module, and a stubbed settings namespace would also be read by
+    unrelated machinery in the chat path.
+    """
+    monkeypatch.setattr("pocketpaw_ee.cloud.billing.enforcement.sites_enforced", lambda: True)
+
+
+def _mock_run_machinery(monkeypatch):
+    """The same dispatch stubs the happy path uses, so a 200 means the handler ran
+    to completion rather than that nothing was wired."""
+    from pocketpaw_ee.cloud.chat.runs.memory_stream import InMemoryStreamTransport
+
+    transport = InMemoryStreamTransport()
+    fake_exec = _FakeExecutor(transport)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.transport.get_stream_transport", lambda: transport
+    )
+    monkeypatch.setattr("pocketpaw_ee.cloud.chat.runs.executor.get_executor", lambda: fake_exec)
+
+    async def _fake_create_run(spec):
+        return SimpleNamespace(run_id=spec.run_id)
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.chat.runs.service.create_run", _fake_create_run)
+
+
+@pytest.mark.asyncio
+async def test_a_used_up_month_refuses_a_NEW_conversation(concierge_client, monkeypatch):
+    """The 201st conversation on a 200-conversation tier is refused, with its own
+    detail so support can tell it from a disabled or unentitled concierge."""
+    client, store = concierge_client
+    _enforce_sites_billing(monkeypatch)
+    _mock_run_machinery(monkeypatch)
+    await _site(plan_tier="staff", subscription_status="active")
+    widget = await store.create_widget(_widget(agent_id="agent-xyz"))
+
+    for i in range(200):
+        await store.upsert_conversation_on_visitor_turn(widget.id, f"spent-{i}", "ws-1")
+
+    res = await client.post(
+        "/paw-bar/chat",
+        json=_payload(widget.id, customer_ref="brand-new-visitor"),
+        headers={"Origin": _ORIGIN},
+    )
+
+    assert res.status_code == 403
+    # Its OWN detail, distinct from the two refusals beside it. A visitor sees the
+    # same silence for all three; support needs to tell "the owner switched it
+    # off" from "the plan does not sell it" from "the month is used up", because
+    # the remedies are three different conversations.
+    assert res.json()["detail"] == "concierge_quota_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_already_under_way_is_not_cut_off(concierge_client, monkeypatch):
+    """THE HALF THAT MATTERS TO A VISITOR. The month is spent, but this thread was
+    counted when it began — refusing its next message would strand someone
+    mid-sentence over a number they cannot see, and the owner would read it as the
+    bot breaking rather than as a plan limit."""
+    client, store = concierge_client
+    _enforce_sites_billing(monkeypatch)
+    _mock_run_machinery(monkeypatch)
+    await _site(plan_tier="staff", subscription_status="active")
+    widget = await store.create_widget(_widget(agent_id="agent-xyz"))
+
+    for i in range(200):
+        await store.upsert_conversation_on_visitor_turn(widget.id, f"spent-{i}", "ws-1")
+
+    # spent-0 is one of the 200 already counted, so this turn continues a
+    # conversation rather than starting one.
+    res = await client.post(
+        "/paw-bar/chat",
+        json=_payload(widget.id, customer_ref="spent-0"),
+        headers={"Origin": _ORIGIN},
+    )
+
+    assert res.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_an_unenforced_deployment_serves_past_the_allowance(concierge_client, monkeypatch):
+    """OSS / self-host has no paywall, so the ceiling must not appear there."""
+    client, store = concierge_client
+    monkeypatch.setattr("pocketpaw_ee.cloud.billing.enforcement.sites_enforced", lambda: False)
+    _mock_run_machinery(monkeypatch)
+    await _site(plan_tier="staff", subscription_status="active")
+    widget = await store.create_widget(_widget(agent_id="agent-xyz"))
+
+    for i in range(250):
+        await store.upsert_conversation_on_visitor_turn(widget.id, f"spent-{i}", "ws-1")
+
+    res = await client.post(
+        "/paw-bar/chat",
+        json=_payload(widget.id, customer_ref="brand-new-visitor"),
+        headers={"Origin": _ORIGIN},
+    )
+
+    assert res.status_code == 200

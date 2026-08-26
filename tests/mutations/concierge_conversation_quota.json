@@ -1,0 +1,102 @@
+[
+  {
+    "label": "the quota gate is deleted — the 201st conversation is served free",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        if await concierge_conversation_quota_exceeded(",
+    "replace": "        if False and await concierge_conversation_quota_exceeded(",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_chat.py::test_a_used_up_month_refuses_a_NEW_conversation"
+    ]
+  },
+  {
+    "label": "the gate stops asking whether the turn STARTS a conversation — a thread in progress is cut off mid-sentence",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if is_new_conversation:\n        from pocketpaw_ee.cloud.billing.enforcement import (",
+    "replace": "    if True:\n        from pocketpaw_ee.cloud.billing.enforcement import (",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_chat.py::test_a_conversation_already_under_way_is_not_cut_off"
+    ]
+  },
+  {
+    "label": "the refusal loses its own detail and reads as an unentitled plan",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "            raise HTTPException(403, \"concierge_quota_exceeded\")",
+    "replace": "            raise HTTPException(403, \"concierge_not_entitled\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_chat.py::test_a_used_up_month_refuses_a_NEW_conversation"
+    ]
+  },
+  {
+    "label": "a 0 allowance becomes a cap — every conversation on the metered tier is refused",
+    "file": "ee/pocketpaw_ee/cloud/billing/enforcement.py",
+    "find": "    if allowance <= 0:\n        return False",
+    "replace": "    if allowance < 0:\n        return False",
+    "tests": [
+      "tests/cloud/test_concierge_conversation_quota.py::test_a_zero_allowance_is_not_a_ceiling"
+    ]
+  },
+  {
+    "label": "off by one — the tier serves 201 conversations on a 200 allowance",
+    "file": "ee/pocketpaw_ee/cloud/billing/enforcement.py",
+    "find": "    return used >= allowance",
+    "replace": "    return used > allowance",
+    "tests": [
+      "tests/cloud/test_concierge_conversation_quota.py::test_at_the_allowance_the_next_conversation_is_refused"
+    ]
+  },
+  {
+    "label": "the paywall flag is ignored — OSS and self-host get a ceiling they never bought",
+    "file": "ee/pocketpaw_ee/cloud/billing/enforcement.py",
+    "find": "    if not sites_enforced():\n        return False\n\n    from pocketpaw_ee.cloud.billing import site_plans",
+    "replace": "    from pocketpaw_ee.cloud.billing import site_plans",
+    "tests": [
+      "tests/cloud/test_concierge_conversation_quota.py::test_an_unenforced_deployment_has_no_ceiling"
+    ]
+  },
+  {
+    "label": "a broken store refuses instead of serving — a paying customer is silenced by a bookkeeping error",
+    "file": "ee/pocketpaw_ee/cloud/billing/enforcement.py",
+    "find": "            exc_info=True,\n        )\n        return False\n    return used >= allowance",
+    "replace": "            exc_info=True,\n        )\n        return True\n    return used >= allowance",
+    "tests": [
+      "tests/cloud/test_concierge_conversation_quota.py::test_a_broken_store_serves_rather_than_refuses"
+    ]
+  },
+  {
+    "label": "the month boundary goes UTC-aware — the ISO compare sorts wrong and the quota silently never fires",
+    "file": "ee/pocketpaw_ee/cloud/billing/enforcement.py",
+    "find": "    now = datetime.now()\n    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)",
+    "replace": "    from datetime import UTC\n\n    now = datetime.now(UTC)\n    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)",
+    "tests": [
+      "tests/cloud/test_concierge_conversation_quota.py::test_the_month_boundary_is_naive_local",
+      "tests/cloud/test_concierge_conversation_quota.py::test_at_the_allowance_the_next_conversation_is_refused"
+    ]
+  },
+  {
+    "label": "the count ignores the boundary — last month's traffic spends this month's allowance",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "        conditions = \"widget_id = ? AND created_at >= ?\"\n        params: list[Any] = [widget_id, since.isoformat()]",
+    "replace": "        conditions = \"widget_id = ? AND created_at >= ''\"\n        params: list[Any] = [widget_id]",
+    "tests": [
+      "tests/cloud/test_concierge_conversation_quota.py::test_conversations_before_the_boundary_do_not_count"
+    ]
+  },
+  {
+    "label": "the count excludes retired rows — \"start over\" becomes unlimited free conversations",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "        conditions = \"widget_id = ? AND created_at >= ?\"",
+    "replace": "        conditions = \"widget_id = ? AND active = 1 AND created_at >= ?\"",
+    "tests": [
+      "tests/cloud/test_concierge_conversation_quota.py::test_a_retired_conversation_still_counts"
+    ]
+  },
+  {
+    "label": "the count loses its widget scope — one widget spends another's allowance",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "                f\"SELECT COUNT(*) FROM paw_bar_conversations WHERE {conditions}\",",
+    "replace": "                \"SELECT COUNT(*) FROM paw_bar_conversations WHERE created_at >= ?\",",
+    "tests": [
+      "tests/cloud/test_concierge_conversation_quota.py::test_the_count_is_scoped_to_one_widget_and_workspace"
+    ]
+  }
+]

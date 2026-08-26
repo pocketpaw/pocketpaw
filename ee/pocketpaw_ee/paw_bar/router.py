@@ -482,7 +482,24 @@
 # widget can read the owner's decision back out — the back-half of the loop. The
 # approve/reject delivery hook lives in the instinct router (it owns the human
 # decision); see decision_loop.deliver_customer_decision.
-
+#
+# Updated 2026-08-26 (feat/concierge-conversation-quota): POST /paw-bar/chat gained
+#   gate 7c — the site's MONTHLY CONVERSATION ALLOWANCE (403
+#   ``concierge_quota_exceeded``). The ``staff`` tier sells "200 conversations a
+#   month" and until now nothing counted and nothing refused.
+#
+#   IT ONLY REFUSES A TURN THAT WOULD START A CONVERSATION. A thread already under
+#   way was counted when it began, and cutting it off part-way strands a visitor
+#   mid-sentence over a number they cannot see — which an owner reads as the bot
+#   breaking, not as a plan limit. That is why the check sits here, beside
+#   ``is_new_conversation``, and not in the shared key gate that runs every turn.
+#
+#   It is placed BEFORE ``upsert_conversation_on_visitor_turn``, which is what
+#   mints the row: refusing after it would spend the allowance on a conversation
+#   nobody was allowed to have and carry the ghost into the next month.
+#
+#   The refusal has its OWN detail. A visitor sees the same silence as a disabled
+#   or unentitled concierge, but the three are different conversations in support.
 from __future__ import annotations
 
 import asyncio
@@ -4765,6 +4782,10 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
       7b. The pocket must expose NO connectors (409) — public-safe lockdown until
           the claude_sdk untrusted-mode GA fix (a static deny can't strip dynamic
           composio connector ids). Fail-closed on a lookup error too.
+      7c. If this turn would START a conversation, the site's monthly conversation
+          allowance must not already be used up (403
+          ``concierge_quota_exceeded``). Only new conversations are refused — a
+          thread under way was counted when it began.
       8. Dispatch a CONCIERGE-scoped run over the shared machinery and stream its
          frames back as SSE.
     """
@@ -4916,6 +4937,43 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
             "a human",
             body.widget_id,
         )
+
+    # MONTHLY CONVERSATION ALLOWANCE. Asked HERE and not in the shared key gate,
+    # because the gate runs on every turn and this must only refuse a turn that
+    # would START a conversation. A thread already under way was counted when it
+    # began; cutting it off part-way would strand a visitor mid-sentence over a
+    # number they cannot see, and the owner would read it as the bot breaking.
+    #
+    # Before the upsert, which is what mints the row — refusing after it would
+    # spend the allowance on a conversation nobody was allowed to have, and the
+    # next month's count would carry the ghost.
+    #
+    # 403 with its OWN detail, like every refusal in this family: an owner who
+    # switched the concierge off, one whose plan does not sell it, and one who has
+    # used the month all read differently in support even though the visitor sees
+    # the same silence.
+    #
+    # A LOST READ SERVES THE VISITOR. ``is_new_conversation`` stays False when the
+    # read above throws (the fail-closed mute arm keeps it that way), so a storage
+    # hiccup lets a new conversation through rather than refusing one. That is the
+    # same direction the quota function takes on its own errors and the opposite of
+    # the entitlement gate's: "has this been paid for" fails to refuse, "has a paid
+    # allowance been used up" fails to serve. Charging for a tier and then
+    # withholding it because a count did not load is the worse outcome.
+    if is_new_conversation:
+        from pocketpaw_ee.cloud.billing.enforcement import (
+            concierge_conversation_quota_exceeded,
+        )
+
+        if await concierge_conversation_quota_exceeded(
+            site, widget_id=body.widget_id, workspace_id=ctx.workspace_id, store=store
+        ):
+            logger.info(
+                "paw-bar: refusing a NEW conversation for widget %s — the site's "
+                "monthly conversation allowance is used up",
+                body.widget_id,
+            )
+            raise HTTPException(403, "concierge_quota_exceeded")
 
     try:
         await store.auto_resume_bot_if_idle(body.widget_id, body.customer_ref, ctx.workspace_id)

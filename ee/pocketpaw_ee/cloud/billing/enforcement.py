@@ -27,7 +27,22 @@
 # badge from every OSS / self-host site the moment this shipped, which is a
 # product decision, not a refactor. Named here so the omission is visibly a choice.
 
+# Updated 2026-08-26 (feat/concierge-conversation-quota): added
+# ``concierge_conversation_quota_exceeded`` — the "200 conversations a month"
+# allowance on the ``staff`` tier stops being a catalog claim and starts being a
+# gate. It lives beside ``sites_enforced`` because it is the same family (a
+# per-site billing seam) and because it needs that function; the module comment
+# above already explains why ``billing`` rather than ``sites`` is the home.
+#
+# It is ASYNC and touches a store, which nothing else in the per-site entitlement
+# path does. That is why it is not in ``entitlements.service``: the resolver there
+# is deliberately pure so every branch runs without a database, and a quota is a
+# question about history, not about a plan.
+
 from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
 
 
 def sites_enforced() -> bool:
@@ -52,4 +67,87 @@ def sites_enforced() -> bool:
     )
 
 
-__all__ = ["sites_enforced"]
+def _month_start() -> datetime:
+    """Midnight on the 1st of the current month, on the clock the store writes.
+
+    NAIVE LOCAL, deliberately, and it must stay that way. ``created_at`` on a
+    conversation row is written with ``datetime.now().isoformat()`` — no timezone,
+    local clock — and the count compares ISO strings. A UTC or aware boundary
+    renders with an offset suffix that sorts after every stored value, so the
+    count would come back 0 and the quota would never fire. Same clock, same shape.
+    """
+    now = datetime.now()
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+async def concierge_conversation_quota_exceeded(
+    site: Any,
+    *,
+    widget_id: str,
+    workspace_id: str,
+    store: Any | None = None,
+) -> bool:
+    """Would STARTING another concierge conversation exceed this site's month?
+
+    Asked only when a visitor's turn would begin a NEW conversation. A thread
+    already in progress is never cut off part-way through: it was counted on the
+    turn that started it, and refusing its next message would strand a visitor
+    mid-sentence for a number they cannot see.
+
+    Returns False (allow) in four cases, each for its own reason:
+
+      * Billing is not enforced. OSS and self-host have no paywall, and this
+        returns before it reads anything.
+      * The site's tier is unresolvable, or is an org flat. The entitlement gate
+        upstream has already decided whether a concierge is served at all; this
+        function's job is only the ceiling.
+      * The tier's allowance is 0. That is NOT "no conversations" — 0 means the
+        tier sells no allowance, and reading it as a ceiling would refuse every
+        conversation on a tier that is meant to be metered from the first one.
+        ``agency`` is the tier designed that way, at its pooled rate; note it
+        cannot actually reach this line today, because it is an ORG flat and
+        ``site_scoped_tier`` refuses it above. The branch is what keeps a future
+        metered per-site rung from being silently capped at zero.
+      * The store read fails. A bookkeeping error must not silence a paying
+        customer's concierge, so the failure direction is to serve.
+
+    Fail-OPEN on error is the opposite of the entitlement gate's posture, and
+    deliberately so: that gate answers "has this been paid for", where the safe
+    error is refuse. This one answers "has a paid allowance been used up", where
+    the safe error is allow — the alternative charges a customer for a tier and
+    then withholds it because a count did not load.
+    """
+    if not sites_enforced():
+        return False
+
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    tier = site_plans.site_scoped_tier(getattr(site, "plan_tier", None))
+    if tier is None:
+        return False
+    allowance = tier.conversation_allowance
+    if allowance <= 0:
+        return False
+
+    if store is None:
+        from pocketpaw_ee.api import get_paw_bar_store
+
+        store = get_paw_bar_store()
+    try:
+        used = await store.count_conversations_started_since(
+            widget_id, _month_start(), workspace_id
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "billing.concierge_quota: could not count conversations for widget %s — "
+            "serving the concierge rather than refusing on a bookkeeping error",
+            widget_id,
+            exc_info=True,
+        )
+        return False
+    return used >= allowance
+
+
+__all__ = ["concierge_conversation_quota_exceeded", "sites_enforced"]
