@@ -32,6 +32,13 @@ Changed 2026-07-08 (feat/billing-smb-caps): added ``PocketLimitError`` (402,
 prompt a plan upgrade. Both enforce at create/enable time only (never retroactive)
 and only when ``billing_enforced`` is on.
 
+Changed 2026-08-26 (feat/site-plans-as-addons): ``NoActiveSubscription`` now takes
+an optional ``message``. It gained a SECOND caller — the site add-on rail, where a
+workspace with no subscription cannot be sold a paid site because an add-on has
+nothing to attach to — and the hardcoded "no active subscription to cancel"
+described an action that buyer never attempted. Status, code and default message
+are unchanged, so the cancel path and any client keyed on the code are untouched.
+
 Changed 2026-08-15 (fix/sites-custom-domain-entitlement): added
 ``CustomDomainNotEntitled`` (402, ``billing.custom_domain_not_entitled``) — the
 domain-attach sibling of the two above, and the first of this family keyed to a
@@ -324,13 +331,23 @@ class NoActiveSubscription(CloudError):
     subscribed. 402 (the same family as ``InsufficientCredits`` / ``QuotaExceeded``,
     "you can't do the money action right now") so the client prompts a
     not-subscribed state rather than treating it as a 404-style missing resource.
+
+    ``message`` is overridable because there are now TWO callers and the default
+    names only one of them. The site add-on rail raises this when a workspace with
+    no subscription tries to buy a paid site — the same 402, the same code, and a
+    client that reads the code keeps working — but telling that buyer there is
+    "no active subscription to cancel" describes an action they did not attempt.
+    The default is unchanged, so the cancel path and every existing test are
+    untouched.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, message: str = "No active subscription to cancel for this workspace"
+    ) -> None:
         super().__init__(
             402,
             "billing.no_active_subscription",
-            "No active subscription to cancel for this workspace",
+            message,
         )
 
 

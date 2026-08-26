@@ -108,7 +108,7 @@ class _RecordingBillingProvider:
         )
         return SubscriptionCheckout(checkout_url=CHECKOUT_URL, subscription_id=SESSION_ID)
 
-    async def change_plan(self, *, subscription_id, product_id, plan_key):
+    async def change_plan(self, *, subscription_id, product_id, plan_key, addons):
         if self._change_plan_raises is not None:
             raise self._change_plan_raises
         self.change_plan_calls.append(
@@ -116,6 +116,7 @@ class _RecordingBillingProvider:
                 "subscription_id": subscription_id,
                 "product_id": product_id,
                 "plan_key": plan_key,
+                "addons": addons,
             }
         )
 
@@ -419,6 +420,12 @@ async def test_moving_a_paying_site_to_another_tier_changes_the_plan(
         "change_plan was handed the checkout session id, not the gateway subscription"
     )
     assert call["product_id"] == "prod_site_staff"
+    assert call["addons"] == [], (
+        "a PER-SITE subscription buys exactly one site and never carries add-ons, "
+        "so an empty cart is correct HERE and only here — sending [] to the "
+        "WORKSPACE subscription would remove the billing for every paid site it "
+        "carries, which is why the provider takes the cart as a required argument"
+    )
 
     # The webhook acks plan_changed without acting, so the new tier has to be
     # written synchronously here or nothing ever records it.

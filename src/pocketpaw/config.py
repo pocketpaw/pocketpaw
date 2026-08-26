@@ -159,6 +159,12 @@ Changes:
     site tier's ``dodo_product_id`` was None, and no per-site plan could be
     purchased on any deployment however it was configured. Declaring it makes the
     env var mean something for the first time.
+  - 2026-08-26: Added ``dodo_site_addons`` (default {}, env
+    POCKETPAW_DODO_SITE_ADDONS as a JSON object) — the tier -> Dodo ADD-ON id map
+    that bills a paid site as a LINE on the workspace subscription instead of a
+    separate per-site subscription. ``dodo_site_products`` is deliberately kept
+    alongside it: per-site subscriptions are live in production and their renewal
+    and cancel webhooks still route through the product map.
   - 2026-08-21: Added ``sites_billing_enforced`` (default False, env
     ``POCKETPAW_SITES_BILLING_ENFORCED``) — the PER-SITE paywall switch, so the
     Paw Sites seams (custom-domain capability + count caps, concierge
@@ -2362,6 +2368,27 @@ class Settings(BaseSettings):
             "var did nothing at all."
         ),
     )
+    dodo_site_addons: Annotated[dict[str, str], NoDecode] = Field(
+        default_factory=dict,
+        description=(
+            "Mapping of PER-SITE plan tier key -> Dodo ADD-ON id, the rails a paid "
+            "site bills on now that it is an add-on LINE on the workspace "
+            "subscription rather than a subscription of its own. An add-on is its "
+            "own Dodo entity with its own id and is NOT a product id, so this "
+            "cannot reuse dodo_site_products (which stays, for the per-site "
+            "subscriptions already live in production). "
+            "``billing.service.sync_site_addons`` reads it to build the workspace's "
+            "full add-on cart and pushes that cart with subscriptions.change_plan. "
+            "Set via POCKETPAW_DODO_SITE_ADDONS as a JSON object keyed by tier, "
+            'e.g. {"site":"adn_...","staff":"adn_..."}. Only the SITE-SCOPED rungs '
+            "belong here — the org flats (studio, agency) are refused by site_plans "
+            'regardless of what this map says. The pre-2026-08-22 keys ("pro", '
+            '"business") are honoured through the same alias lookup the product map '
+            "uses. Default empty means no site tier is purchasable as an add-on, and "
+            "a paid publish records the tier without a charge exactly as it does "
+            "with an unconfigured product."
+        ),
+    )
     dodo_checkout_return_base: str = Field(
         default="",
         description=(
@@ -2838,6 +2865,29 @@ class Settings(BaseSettings):
         The consequence of an empty mapping is milder here and worth knowing: no
         per-site tier is purchasable, so a paid selection publishes live and
         records the tier without a charge. It does not raise.
+        """
+        if v is None or v == "":
+            return {}
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+            except ValueError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return v
+
+    @field_validator("dodo_site_addons", mode="before")
+    @classmethod
+    def _parse_dodo_site_addons(cls, v: object) -> object:
+        """Same degrade as the two product maps: a malformed env string becomes an
+        empty mapping rather than crashing settings load at boot.
+
+        Needs ``NoDecode`` on the field for this to run at all — ``EnvSettingsSource``
+        JSON-decodes a complex field at SOURCE time and raises ``SettingsError``
+        before any field validator sees the value. The field carries it.
+
+        An empty mapping means no site tier is purchasable as an add-on: a paid
+        publish records the tier with no charge. It does not raise.
         """
         if v is None or v == "":
             return {}

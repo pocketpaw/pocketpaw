@@ -54,7 +54,7 @@ async def test_the_plan_change_prorates_the_difference(monkeypatch):
     client = _fake_sdk(monkeypatch)
 
     await _provider().change_plan(
-        subscription_id=SUB_ID, product_id="prod_site_business", plan_key="business"
+        subscription_id=SUB_ID, product_id="prod_site_business", plan_key="business", addons=[]
     )
 
     args, kwargs = client.subscriptions.change_plan.call_args
@@ -75,7 +75,7 @@ async def test_a_declined_card_leaves_the_plan_where_it_was(monkeypatch):
     client = _fake_sdk(monkeypatch)
 
     await _provider().change_plan(
-        subscription_id=SUB_ID, product_id="prod_site_business", plan_key="business"
+        subscription_id=SUB_ID, product_id="prod_site_business", plan_key="business", addons=[]
     )
 
     _, kwargs = client.subscriptions.change_plan.call_args
@@ -89,7 +89,7 @@ async def test_an_empty_subscription_id_never_reaches_the_gateway(monkeypatch):
 
     with pytest.raises(ValidationError):
         await _provider().change_plan(
-            subscription_id="", product_id="prod_site_business", plan_key="business"
+            subscription_id="", product_id="prod_site_business", plan_key="business", addons=[]
         )
 
     client.subscriptions.change_plan.assert_not_called()
@@ -101,6 +101,8 @@ async def test_an_unconfigured_product_never_reaches_the_gateway(monkeypatch):
     client = _fake_sdk(monkeypatch)
 
     with pytest.raises(ValidationError):
-        await _provider().change_plan(subscription_id=SUB_ID, product_id="", plan_key="business")
+        await _provider().change_plan(
+            subscription_id=SUB_ID, product_id="", plan_key="business", addons=[]
+        )
 
     client.subscriptions.change_plan.assert_not_called()

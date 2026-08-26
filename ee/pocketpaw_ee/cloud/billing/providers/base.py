@@ -22,7 +22,13 @@
 #   ``create_subscription`` + ``cancel_subscription``, and documented that
 #   ``verify_and_parse_webhook`` now also returns a ``SubscriptionEvent`` for a
 #   verified subscription.* delivery.
-
+#
+# Updated 2026-08-26 (feat/site-plans-as-addons): ``change_plan`` gained a
+#   REQUIRED ``addons`` argument carrying the subscription's COMPLETE add-on cart.
+#   Required, not defaulted, because the gateway treats the list as declarative —
+#   omitting it removes every add-on the subscription holds. A default would make
+#   the destructive case the quiet one, and the destruction is invisible until the
+#   next invoice.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -129,8 +135,28 @@ class IPaymentsProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def change_plan(self, *, subscription_id: str, product_id: str, plan_key: str) -> None:
-        """Move an EXISTING gateway subscription onto a different product.
+    async def change_plan(
+        self,
+        *,
+        subscription_id: str,
+        product_id: str,
+        plan_key: str,
+        addons: list[dict],
+    ) -> None:
+        """Move an EXISTING gateway subscription onto a different product, and set
+        its COMPLETE add-on cart.
+
+        ``addons`` IS NOT OPTIONAL AND IS NOT A DELTA. The gateway treats the
+        add-on list as declarative: what you send becomes the whole cart, and
+        sending nothing REMOVES every add-on the subscription holds. Dodo's own
+        wording is "leaving this empty would remove any existing addons". So a
+        caller that only means to move the plan must still pass the full cart it
+        wants preserved, and ``[]`` must be written deliberately rather than
+        reached by omission. It is a required keyword for exactly that reason — a
+        default would make the destructive case the quiet one, and the destruction
+        is invisible until the next invoice.
+
+        Each entry is ``{"addon_id": str, "quantity": int}``.
 
         The alternative — cancel the old subscription and create a new one — is
         wrong in both directions for a term subscription: the buyer forfeits the

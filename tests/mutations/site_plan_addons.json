@@ -1,0 +1,92 @@
+[
+  {
+    "label": "activate_site honours its idempotency guard on the add-on rail (drops force)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if doc.deployed and doc.subscription_status == \"active\" and not force:",
+    "replace": "    if doc.deployed and doc.subscription_status == \"active\":",
+    "tests": [
+      "tests/cloud/sites/test_addon_publish.py::test_upgrading_a_live_free_site_ships_the_new_content"
+    ]
+  },
+  {
+    "label": "a declined add-on charge leaves the site marked active",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        doc.subscription_status = previous_status\n        await doc.save()",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/sites/test_addon_publish.py::test_a_declined_charge_leaves_nothing_paid_for"
+    ]
+  },
+  {
+    "label": "the cart counts sites already billed on a per-site subscription (double billing)",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        if getattr(doc, \"subscription_id\", None):\n            continue",
+    "replace": "        if False:\n            continue",
+    "tests": [
+      "tests/cloud/billing/test_site_plan_addons.py::test_a_site_on_a_legacy_per_site_subscription_stays_off_the_cart"
+    ]
+  },
+  {
+    "label": "the cart keeps billing a cancelled site",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        if (getattr(doc, \"subscription_status\", None) or \"none\") != \"active\":\n            continue",
+    "replace": "        if False:\n            continue",
+    "tests": [
+      "tests/cloud/billing/test_site_plan_addons.py::test_a_cancelled_site_drops_off_the_cart"
+    ]
+  },
+  {
+    "label": "the provider omits an empty add-on cart (wipes every site add-on)",
+    "file": "ee/pocketpaw_ee/cloud/billing/providers/dodo.py",
+    "find": "            addons=list(addons),",
+    "replace": "            **({\"addons\": list(addons)} if addons else {}),",
+    "tests": [
+      "tests/cloud/billing/test_site_plan_addons.py::test_the_provider_forwards_an_empty_cart_rather_than_omitting_it"
+    ]
+  },
+  {
+    "label": "the add-on rail also opens a per-site subscription on the live path",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if tier is not None and tier.dodo_product_id and not tier.dodo_addon_id and not already_paying:",
+    "replace": "    if tier is not None and tier.dodo_product_id and not already_paying:",
+    "tests": [
+      "tests/cloud/sites/test_addon_publish.py::test_the_stamp_path_refuses_to_open_a_per_site_sub_for_an_addon_tier"
+    ]
+  },
+  {
+    "label": "a workspace with no subscription silently skips the charge",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        raise NoActiveSubscription(\n            \"This workspace has no active subscription to add a site plan to.\"\n        )",
+    "replace": "        return {\"subscription_id\": None, \"plan_key\": None, \"addons\": []}",
+    "tests": [
+      "tests/cloud/sites/test_addon_publish.py::test_a_workspace_with_no_subscription_cannot_buy_a_site"
+    ]
+  },
+  {
+    "label": "a republish of an add-on site is treated as a fresh purchase",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        and (bool(existing_doc.subscription_id) or paying_on_addon)",
+    "replace": "        and bool(existing_doc.subscription_id)",
+    "tests": [
+      "tests/cloud/sites/test_addon_publish.py::test_republishing_a_paid_addon_site_does_not_charge_again"
+    ]
+  },
+  {
+    "label": "a tier change on the add-on rail never re-syncs the cart",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if paying_on_addon and is_paid and addon_configured and existing_doc.plan_tier != tier.key:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/sites/test_addon_publish.py::test_a_tier_change_on_the_addon_rail_resyncs_the_cart"
+    ]
+  },
+  {
+    "label": "the dispatcher checks the legacy rail before the add-on rail",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if is_paid and addon_configured and not already_paying:",
+    "replace": "    if is_paid and addon_configured and not already_paying and not dodo_configured:",
+    "tests": [
+      "tests/cloud/sites/test_addon_publish.py::test_both_rails_configured_still_never_opens_a_per_site_subscription"
+    ]
+  }
+]
