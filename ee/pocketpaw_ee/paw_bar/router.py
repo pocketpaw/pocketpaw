@@ -1,4 +1,30 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-08-26 (the row an owner can see must open, and say what it cost)
+#   (1) THE DRILL-IN AGREED WITH THE LIST AGAIN. ``_load_transcript`` narrowed to
+#   one conversation by REBUILDING an exact ``session_key`` from the conversation
+#   id plus the widget's CURRENT agent, then matching runs on equality. Every run
+#   whose key was spelled any other way was invisible to it, and two of those
+#   spellings are ordinary: a conversation that predates identity carries the
+#   VISITOR's handle in the conversation slot, and a widget bound to its dedicated
+#   agent after it started answering has older runs carrying the previous agent id
+#   in the last segment. The list has always read that token POSITIONALLY
+#   (``_conversation_of_run``) and files an unattributable one under the visitor's
+#   ACTIVE conversation — so the list showed a row and the drill-in 404'd on it,
+#   which the owner reads as "nothing to show here". The transcript now attributes
+#   through the same two helpers plus the new ``_conversation_membership``, so
+#   there is ONE definition of which conversation a turn belongs to. Owner lines
+#   are attributed here for the same reason rather than by the store's filter,
+#   which stays strict for the visitor's own poll. A conversation the visitor
+#   really holds now returns an EMPTY transcript rather than a 404 when it has
+#   nothing in it — the client renders a 404 as "nothing stored for this VISITOR",
+#   a different and here false claim.
+#   (2) + GET .../site/{id}/stats — the owner's concierge scoreboard over one
+#   window: conversations, distinct visitors, runs, messages, token volume and USD
+#   cost. Tokens and cost resolve through ``metering.service``, the same pair the
+#   workspace wallet bills with, so this panel and the invoice cannot show two
+#   arithmetics. The agent ledger is deliberately NOT the source — it excludes
+#   tokens and cost by rule. Bounded scan, and ``truncated`` says so rather than
+#   passing a partial count off as a total; a malformed window is a 422.
 # Updated: 2026-08-24 (inbox freshness + who typed it) — the owner's conversation
 #   list stopped freezing the moment a human took over, and the thread learned to
 #   name them.
@@ -1930,6 +1956,14 @@ _CONVERSATION_PREVIEW_CHARS = 140
 # room to dedupe several runs per customer down to ``limit`` conversations.
 _CONVERSATION_SCAN_CAP = 200
 
+# How many concierge runs the owner's STATS scan looks at. Larger than the
+# conversation-list cap because a scoreboard sums turns where the list only
+# needs the newest per conversation, and still bounded because an owner
+# opening a panel must never trigger an unbounded collection read. The
+# response says when the cap was reached (`truncated`) rather than passing a
+# partial scan off as a total.
+_STATS_SCAN_CAP = 1000
+
 # Upper bound on the out-of-band lines a single conversations page reads to find
 # each row's newest one. Same shape as the run cap above: one bounded query for
 # the whole page rather than one per row.
@@ -2065,6 +2099,55 @@ class SiteOverviewResponse(BaseModel):
     # a single boolean.
     store_transcripts: bool = True
     counts: OverviewCounts
+
+
+class ConciergeTokenTotals(BaseModel):
+    """Token volume a site's concierge spent inside the requested window.
+
+    The three components plus their sum, because they are not interchangeable:
+    cached input is real volume and is counted, but it is priced differently, so
+    an owner reading a cost figure needs to see the mix that produced it.
+    """
+
+    input: int = 0
+    output: int = 0
+    cached_input: int = 0
+    total: int = 0
+
+
+class ConciergeStatsResponse(BaseModel):
+    """GET /paw-bar/admin/site/{id}/stats — the owner's concierge scoreboard.
+
+    Everything here is scoped to ONE site (its own pocket and its own widget) and
+    to one time window. Nothing is workspace-wide.
+
+    ``truncated`` is load-bearing and is never hidden: the run scan is bounded, so
+    a very busy site's numbers are "the most recent ``_STATS_SCAN_CAP`` runs",
+    not an audited total. A dashboard that silently rounds a partial scan into a
+    confident number is worse than one that says it counted as far as it looked.
+    """
+
+    window: str
+    # ISO-UTC lower bound the scan used; "" when the window is unbounded.
+    since: str = ""
+    truncated: bool = False
+    # Distinct conversations, distinct visitors, and the turns inside them. A
+    # visitor may hold several conversations, so these three are genuinely
+    # different numbers and the dashboard shows all three.
+    conversations: int = 0
+    visitors: int = 0
+    runs: int = 0
+    messages: int = 0
+    tokens: ConciergeTokenTotals = Field(default_factory=ConciergeTokenTotals)
+    cost_usd: float = 0.0
+    # How many of the scanned runs carried usable token metering. A site whose
+    # backend reports no usage should read as "we cannot price this" rather than
+    # as "this cost nothing", so the client can say which one it is.
+    priced_runs: int = 0
+    # The widget's per-state queue totals, same source as the inbox chips.
+    states: dict[str, int] = Field(default_factory=dict)
+    pending_decisions: int = 0
+    handoffs: int = 0
 
 
 class ConversationItem(BaseModel):
@@ -2477,6 +2560,154 @@ async def get_site_overview(
         store_transcripts=site.concierge_store_transcripts,
         counts=counts,
     )
+
+
+@router.get(
+    "/paw-bar/admin/site/{site_id}/stats",
+    response_model=ConciergeStatsResponse,
+    dependencies=[Depends(_require_paw_bar_read)],
+)
+async def get_site_concierge_stats(
+    site_id: str,
+    window: str = Query("30d", description="24h | 7d | 30d | 2w | all"),
+    workspace_id: str = Depends(current_workspace_id),
+) -> ConciergeStatsResponse:
+    """What a site's concierge did, and what it cost, over one window.
+
+    Admin-authed (``paw_bar.read``), workspace-scoped, and site-scoped twice
+    over: the runs are read by the site's OWN pocket and the queue numbers by
+    the site's OWN widget, so a sibling site on the same workspace can never
+    contribute a turn or a cent.
+
+    WHY THE RUNS AND NOT THE LEDGER. The agent ledger is the record of what an
+    agent achieved and deliberately carries no tokens, cost, latency or model —
+    that exclusion is a rule of that entity, not an oversight. Compute volume
+    lives on ``ChatRunDoc.usage``, so that is what this reads, through the SAME
+    resolvers the workspace wallet meters with (``metering.service``). One
+    definition of a token and one of a dollar: an owner comparing this panel
+    against their bill must not find two different arithmetics.
+
+    BOUNDED, AND IT SAYS SO. The scan is capped like every other read in this
+    router; ``truncated`` reports when the cap was reached so the client can
+    label the figure as a floor rather than a total.
+
+    A malformed window is a 422, never a silently-widened answer.
+    """
+    from pocketpaw.agent_ledger.models import WindowParseError, window_start
+
+    try:
+        since = window_start(window)
+    except WindowParseError as err:
+        raise HTTPException(422, "invalid_window") from err
+
+    site, widget = await _resolve_site_and_widget(site_id, workspace_id)
+    return await _concierge_stats(site.pocket_id, widget, workspace_id, window, since)
+
+
+async def _concierge_stats(
+    pocket_id: str,
+    widget: PawBarWidget | None,
+    workspace_id: str,
+    window: str,
+    since: str | None,
+) -> ConciergeStatsResponse:
+    """Aggregate one site's concierge activity over a window.
+
+    Two halves, each degrading on its own:
+
+      * VOLUME AND COST, from the concierge run docs. One bounded, index-backed
+        scan (the same four-predicate shape ``_concierge_runs_for_visitor`` uses,
+        minus the per-visitor narrowing) folded into counters in process. Tokens
+        and cost come from ``metering.service`` so this panel and the wallet
+        agree.
+      * THE QUEUE, from the widget's own store rows — the same numbers the inbox
+        chips show, rather than a second count derived from the runs, which would
+        drift the moment an owner closed a thread.
+
+    A visitor is counted by ``user_id`` and a conversation by the session-key
+    TOKEN (``_conversation_of_run``), which is what makes "12 conversations from
+    9 visitors" a true sentence rather than the same number twice.
+    """
+    stats = ConciergeStatsResponse(window=window, since=since or "")
+
+    try:
+        from pocketpaw_ee.cloud.metering.service import _total_tokens, resolve_cost
+        from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+        predicates: list[Any] = [
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.context_type == _CONCIERGE_CONTEXT_TYPE,
+            ChatRunDoc.scope_id == pocket_id,
+        ]
+        if since:
+            # The stamp is stored aware-UTC; parse the bound the same way so the
+            # comparison is on instants rather than on two clocks.
+            predicates.append(ChatRunDoc.createdAt >= datetime.fromisoformat(since))
+
+        runs = (
+            await ChatRunDoc.find(*predicates)
+            .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
+            .limit(_STATS_SCAN_CAP)
+            .to_list()
+        )
+
+        visitors: set[str] = set()
+        conversations: set[str] = set()
+        cost = 0.0
+        for run in runs:
+            visitors.add(run.user_id)
+            # Falls back to the visitor when a run's key names no conversation —
+            # the same grouping the owner's list uses, so a pre-identity run
+            # counts once rather than not at all.
+            conversations.add(_conversation_of_run(run, pocket_id, widget) or run.user_id)
+            if getattr(run, "user_text", ""):
+                stats.messages += 1
+            if run.partial_text:
+                stats.messages += 1
+            usage = getattr(run, "usage", None) or {}
+            if not usage:
+                continue
+            stats.priced_runs += 1
+            stats.tokens.input += _int_or_zero(usage.get("input_tokens"))
+            stats.tokens.output += _int_or_zero(usage.get("output_tokens"))
+            stats.tokens.cached_input += _int_or_zero(usage.get("cached_input_tokens"))
+            stats.tokens.total += _total_tokens(usage)
+            cost += resolve_cost(usage).cost_usd
+
+        stats.runs = len(runs)
+        stats.visitors = len(visitors)
+        stats.conversations = len(conversations)
+        # Rounded at the seam, not in the client: a dashboard that renders its own
+        # rounding of a float is how two surfaces show two different totals.
+        stats.cost_usd = round(cost, 6)
+        stats.truncated = len(runs) >= _STATS_SCAN_CAP
+    except Exception:  # noqa: BLE001 — a scoreboard degrades to zeros, never 500s
+        logger.warning("concierge stats scan failed for pocket %s", pocket_id, exc_info=True)
+
+    if widget is not None:
+        try:
+            stats.states = await _store().conversation_counts(widget.id, workspace_id=workspace_id)
+        except Exception:  # noqa: BLE001 — same degrade rule, per number
+            logger.warning("concierge stats queue read failed for widget %s", widget.id)
+        try:
+            stats.pending_decisions = await _store().count_pending_decisions(widget.id)
+        except Exception:  # noqa: BLE001
+            logger.warning("concierge stats decision count failed for widget %s", widget.id)
+        stats.handoffs = await _count_handoffs(widget.id, workspace_id)
+
+    return stats
+
+
+def _int_or_zero(value: Any) -> int:
+    """A usage counter as an int, or 0 for anything that is not one.
+
+    ``usage`` is written from a backend event, so a field can be absent, null, or
+    a string. A scoreboard must not raise on any of those.
+    """
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 @router.get(
@@ -3829,6 +4060,51 @@ def _transcript_sort_key(created_at: str) -> datetime:
     return datetime.min.replace(tzinfo=UTC)
 
 
+async def _conversation_membership(
+    widget: PawBarWidget | None,
+    customer_ref: str,
+    workspace_id: str,
+    conversation_id: str,
+) -> tuple[set[str], bool]:
+    """Which conversation ids are REAL for this visitor, and does the
+    unattributed tail belong to the one being opened?
+
+    The owner's LIST already answers both questions (see ``_list_conversations``):
+    a session-key token that no conversation row confirms is a pre-identity run,
+    and the list files those under the visitor's conversation IN PROGRESS. This
+    exists so the drill-in can reach the same answer from the same evidence.
+    Before it, the two disagreed — the list merged a spanning conversation into
+    one row (proved by ``test_a_conversation_spanning_the_migration_is_ONE_row``)
+    and the transcript then refused to open it.
+
+    Returns ``(known conversation ids, unattributed lines belong here)``.
+
+    A store that cannot answer degrades to "everything belongs here", which is
+    the visitor-wide transcript this endpoint served before conversations had
+    identity. That is the right way to fail: a thread showing more than it should
+    is a legibility problem, while a thread showing nothing under a row that says
+    a visitor wrote in is the product calling itself a liar.
+    """
+    if widget is None or not conversation_id:
+        return set(), True
+    try:
+        rows = await _store().list_conversations_for_visitor(
+            widget.id, customer_ref, workspace_id=workspace_id
+        )
+    except Exception:  # noqa: BLE001 — a thread degrades wide, never empty
+        logger.warning(
+            "conversation membership read failed for widget %s", widget.id, exc_info=True
+        )
+        return set(), True
+    if not rows:
+        # Nothing can confirm or deny the id, so narrowing on it would be
+        # guessing. Read the visitor's history, exactly as this endpoint did
+        # before the parameter existed.
+        return set(), True
+    active = next((r for r in rows if getattr(r, "active", True)), None)
+    return {r.id for r in rows}, active is not None and active.id == conversation_id
+
+
 async def _load_transcript(
     pocket_id: str,
     customer_ref: str,
@@ -3858,26 +4134,64 @@ async def _load_transcript(
     store hiccups the run-derived transcript still renders, which is what it did
     before this slice.
 
-    Returns ``None`` only when the ref has NOTHING here (the caller 404s) —
-    distinct from an empty list, which means rows exist but none carried text.
+    Returns ``None`` only when there is nothing here AND the id names no
+    conversation we can confirm (the caller 404s) — distinct from an empty list,
+    which means the conversation exists and simply holds no text yet.
 
     ``conversation_id`` narrows BOTH sources to one thread (2026-08-19). Narrowing
     only one would be worse than narrowing neither: the owner would read one
     conversation's questions interleaved with every reply a human ever sent that
     visitor, and the timestamps would make it look like a coherent exchange.
+
+    HOW IT NARROWS (2026-08-26). By the run's own ``session_key`` TOKEN, read
+    positionally through ``_conversation_of_run`` and attributed through
+    ``_conversation_membership`` — the two helpers the owner's list already uses.
+    It used to rebuild an exact key from the conversation id plus the widget's
+    CURRENT agent and filter on equality, which quietly excluded every run whose
+    key was spelled any other way. Two of those are ordinary, not exotic:
+
+      * a conversation that predates identity carries the VISITOR's handle in the
+        conversation slot — the exact shape the list merges into one row, so the
+        list showed the conversation and the drill-in 404'd on it;
+      * a widget bound to its dedicated agent AFTER it started answering (the
+        E1/E2 provision hook) has older runs carrying the previous agent id in
+        the key's last segment.
+
+    Reading the token instead makes both belong to the row they are listed under,
+    and leaves the sibling-conversation isolation the parameter exists for
+    untouched: a token that a conversation row confirms is only ever its own.
+
+    THE WINDOW IS THE VISITOR'S. Runs are read per visitor and attributed in
+    process, so a narrowed transcript sees this conversation's turns within the
+    visitor's most recent ``_TRANSCRIPT_CAP`` — the same bound the unnarrowed read
+    has always had. A DB-side key filter would window per conversation instead,
+    but only by re-introducing the one-spelling-only match this fix removes.
     """
-    session_key = (
-        f"cloud:concierge:{pocket_id}:{conversation_id}:{getattr(widget, 'agent_id', '')}"
-        if conversation_id and widget is not None
-        else ""
+    known_ids, unattributed_belongs_here = await _conversation_membership(
+        widget, customer_ref, workspace_id, conversation_id
     )
-    runs = await _concierge_runs_for_visitor(
-        pocket_id,
-        customer_ref,
-        workspace_id,
-        limit=_TRANSCRIPT_CAP,
-        session_key=session_key,
-    )
+
+    def _belongs(token: str) -> bool:
+        """Is a line carrying ``token`` part of the conversation being opened?"""
+        if not conversation_id:
+            return True
+        if token == conversation_id:
+            return True
+        # A token no conversation row confirms is unattributed — a pre-identity
+        # run, or a line written before the column existed. It belongs to the
+        # thread in progress, which is where the list puts it.
+        return token not in known_ids and unattributed_belongs_here
+
+    runs = [
+        run
+        for run in await _concierge_runs_for_visitor(
+            pocket_id,
+            customer_ref,
+            workspace_id,
+            limit=_TRANSCRIPT_CAP,
+        )
+        if _belongs(_conversation_of_run(run, pocket_id, widget))
+    ]
 
     messages: list[TranscriptMessage] = []
     for run in reversed(runs):  # oldest-first
@@ -3908,17 +4222,31 @@ async def _load_transcript(
     out_of_band: list[Any] = []
     if widget is not None:
         try:
-            out_of_band = await _store().list_owner_messages(
-                widget.id,
-                customer_ref,
-                workspace_id=workspace_id,
-                limit=_TRANSCRIPT_CAP,
-                conversation_id=conversation_id or None,
-            )
+            # Read the visitor's lines and attribute them HERE rather than asking
+            # the store to filter on the column. The store's filter is strict by
+            # design — an unmigrated line carries no conversation and must never
+            # be served into a thread it was not said in — and that strictness is
+            # right for the visitor's own poll. The owner's drill-in is the one
+            # caller that knows which thread the unmigrated tail belongs to.
+            out_of_band = [
+                line
+                for line in await _store().list_owner_messages(
+                    widget.id,
+                    customer_ref,
+                    workspace_id=workspace_id,
+                    limit=_TRANSCRIPT_CAP,
+                )
+                if _belongs(getattr(line, "conversation_id", "") or "")
+            ]
         except Exception:  # noqa: BLE001 — the run-derived half must still render
             logger.warning("owner message read failed for widget %s", widget.id, exc_info=True)
     if not runs and not out_of_band:
-        return None
+        # An empty thread is not a missing one. When the id names a conversation
+        # this visitor really holds, the row exists and simply has nothing in it
+        # — say so with an empty transcript, because a 404 renders client-side as
+        # "nothing stored for this VISITOR", which is a different claim and here
+        # a false one.
+        return [] if conversation_id and conversation_id in known_ids else None
     authors = await _resolve_message_authors(out_of_band)
     messages.extend(_owner_transcript_message(m, authors) for m in out_of_band if m.content)
 
