@@ -113,7 +113,23 @@
 # nothing. The hot-lookup indexes the decision-loop needs already ship in
 # SCHEMA_SQL: idx_pp_decisions_action covers the instinct_action_id lookup and
 # idx_pp_decisions_customer covers the (widget_id, customer_ref) poll.
-
+#
+# Updated: 2026-08-26 (feat/concierge-conversation-quota) — added
+#   count_conversations_started_since(widget_id, since, workspace_id): how many
+#   conversations this widget STARTED at or after a boundary, counted by
+#   created_at. The enterprise layer's monthly concierge allowance is built on it;
+#   the counting lives here because the rows do, and no billing knowledge crosses
+#   into the OSS core.
+#
+#   TWO THINGS IT DELIBERATELY DOES NOT DO. It does not filter on ``active``: a
+#   retired row is a conversation that happened, and excluding them would make
+#   "start over" a way to loop for free. And it does not count messages or runs —
+#   the ladder sells CONVERSATIONS, so a thread carrying fifty turns is one.
+#
+#   ``since`` is compared as a NAIVE LOCAL ISO string because that is what
+#   ``created_at`` holds (the writers use ``datetime.now().isoformat()``). An
+#   aware boundary renders with an offset that sorts after every stored value and
+#   makes the count 0 — a quota that silently never fires.
 from __future__ import annotations
 
 import json
@@ -1675,6 +1691,52 @@ class PawBarStore:
                     if row[0] in counts:
                         counts[row[0]] = row[1]
         return counts
+
+    async def count_conversations_started_since(
+        self,
+        widget_id: str,
+        since: datetime,
+        workspace_id: str | None = None,
+    ) -> int:
+        """How many conversations this widget STARTED at or after ``since``.
+
+        Counts rows by ``created_at``, which is the moment
+        :meth:`upsert_conversation_on_visitor_turn` minted the row — a visitor's
+        first message. A conversation is therefore counted ONCE, on the turn that
+        began it, however long it then runs or however many messages it carries.
+        That is the unit the site-plan ladder sells ("200 conversations a month"),
+        and it is why this counts rows rather than messages or runs.
+
+        Finished conversations still count. ``active`` goes to 0 when a visitor
+        starts over, and the new thread mints a NEW row with a NEW ``created_at``
+        — so "start over" costs one from the allowance, which is correct, and
+        excluding inactive rows here would let a visitor loop for free.
+
+        ``since`` IS COMPARED AS A NAIVE LOCAL ISO STRING, because that is what
+        ``created_at`` holds: the writers use ``datetime.now().isoformat()``, not
+        UTC and not a zoned value. Passing an aware datetime produces a string
+        with an offset suffix, which sorts after every stored value and makes this
+        return 0 — a silent "never over quota". Callers build the boundary with
+        ``datetime.now()``, same clock, same shape.
+
+        No billing knowledge lives here. This is a count; whether some number of
+        conversations is too many is a question the enterprise layer asks, and
+        this module is the OSS core and cannot import it.
+        """
+        conditions = "widget_id = ? AND created_at >= ?"
+        params: list[Any] = [widget_id, since.isoformat()]
+        ws_cond, ws_params = _conversation_workspace_scope(workspace_id)
+        if ws_cond:
+            conditions += f" AND {ws_cond}"
+            params.extend(ws_params)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            async with db.execute(
+                f"SELECT COUNT(*) FROM paw_bar_conversations WHERE {conditions}",
+                params,
+            ) as cur:
+                row = await cur.fetchone()
+        return int(row[0]) if row else 0
 
     async def auto_resume_bot_if_idle(
         self, widget_id: str, customer_ref: str, workspace_id: str | None = None
