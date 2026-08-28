@@ -90,7 +90,16 @@ async def try_spend(workspace_id: str | None) -> tuple[bool, int, int]:
     day = _today()
     key = f"{workspace_id}:{day}"
     try:
-        coll = FileComprehensionUsage.get_motor_collection()
+        # ``get_pymongo_collection``, NOT ``get_motor_collection`` — the latter
+        # is beanie 1.x and this repo is on 2.1.0, where the attribute does not
+        # exist. Getting it wrong here is invisible in the worst way: the
+        # AttributeError lands in the fail-closed ``except`` below, every claim
+        # is refused, and the feature reads as "comprehension is off" rather
+        # than as a bug. ``pockets/service.py`` was bitten by the same name and
+        # carries the same note. (The one live caller of this pattern that
+        # still says ``get_motor_collection`` is other_hand's illustration
+        # budget, on an unmerged branch — it has the bug.)
+        coll = FileComprehensionUsage.get_pymongo_collection()
         doc = await coll.find_one_and_update(
             {"key": key},
             {
