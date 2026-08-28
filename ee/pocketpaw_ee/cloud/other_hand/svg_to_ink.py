@@ -91,7 +91,12 @@ def _flatten_cubic(
     net = (
         math.dist(p0, p1) + math.dist(p1, p2) + math.dist(p2, p3)
     ) * scale
-    n = max(2, min(MAX_SEGMENTS_PER_CURVE, int(net / max(FLATNESS_PX, 0.01)) ** 0.5 * 2))
+    # int() around the WHOLE expression: ``x ** 0.5`` is a float, and a float
+    # reaching range() raises TypeError. That bug shipped, and the broad except
+    # in _shapes swallowed it for 650 of a real illustration's 653 paths — the
+    # drawing came back as 17 points and looked like a thin result rather than
+    # a crash. Hence both the int() here and the narrowed except there.
+    n = int(max(2, min(MAX_SEGMENTS_PER_CURVE, 2 * math.sqrt(net / max(FLATNESS_PX, 0.01)))))
     out: list[tuple[float, float]] = []
     for i in range(1, n + 1):
         t = i / n
@@ -355,6 +360,77 @@ def _viewbox(root: ET.Element) -> tuple[float, float, float, float]:
     return 0.0, 0.0, 100.0, 100.0
 
 
+_RGB = re.compile(r"rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)")
+# A fill lighter than this is paper, not ink. Recraft's vector output is FILLED
+# art: a real illustration came back as 653 filled paths, and the pale ones are
+# highlights and soft shading that mean nothing once redrawn as bare outlines —
+# they only spend the point budget the readable dark shapes need.
+_INK_MAX_LUMA = 200
+# Below this the shape is a wash the eye would not register even in colour.
+_MIN_FILL_OPACITY = 0.25
+
+
+def _is_ink(el: ET.Element) -> bool:
+    """Whether this shape reads as a pen mark rather than as paper.
+
+    Conservative on purpose: anything we cannot parse counts as ink, because
+    dropping a real shape is a worse error than keeping a faint one.
+    """
+    try:
+        if float(el.get("fill-opacity", "1")) < _MIN_FILL_OPACITY:
+            return False
+    except ValueError:
+        pass
+    fill = (el.get("fill") or "").strip().lower()
+    if fill in ("none", ""):
+        return True  # stroked-only shape: exactly what we want.
+    m = _RGB.search(fill)
+    if not m:
+        return True
+    r, g, b = (int(m.group(i)) for i in (1, 2, 3))
+    # Rec. 601 luma, the same weighting the eye applies.
+    return (0.299 * r + 0.587 * g + 0.114 * b) <= _INK_MAX_LUMA
+
+
+def _simplify(pts: list[tuple[float, float]], tol: float) -> list[tuple[float, float]]:
+    """Ramer-Douglas-Peucker: drop points that do not change the shape.
+
+    Added after the first real generation. The budget originally dropped whole
+    SHAPES past its limit, on the reasoning that a complete drawing of fewer
+    things beats a smeared version of everything. That is right for a sparse
+    line drawing and WRONG for a dense traced one: a real illustration came
+    back as 724 shapes and the cap kept 30% of them, which is not a simpler
+    bee, it is a third of a bee. Thinning every shape keeps the whole picture.
+    """
+    if len(pts) < 3:
+        return pts
+    keep = [False] * len(pts)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        lo, hi = stack.pop()
+        if hi <= lo + 1:
+            continue
+        ax, ay = pts[lo]
+        bx, by = pts[hi]
+        dx, dy = bx - ax, by - ay
+        norm = math.hypot(dx, dy)
+        worst, worst_i = -1.0, -1
+        for i in range(lo + 1, hi):
+            px, py = pts[i]
+            if norm == 0:
+                dist = math.hypot(px - ax, py - ay)
+            else:
+                dist = abs(dy * px - dx * py + bx * ay - by * ax) / norm
+            if dist > worst:
+                worst, worst_i = dist, i
+        if worst > tol and worst_i > 0:
+            keep[worst_i] = True
+            stack.append((lo, worst_i))
+            stack.append((worst_i, hi))
+    return [p for p, k in zip(pts, keep, strict=True) if k]
+
+
 def _shapes(root: ET.Element, scale_hint: float) -> list[list[tuple[float, float]]]:
     """Every drawable element, as polylines in the SVG's own units.
 
@@ -365,6 +441,8 @@ def _shapes(root: ET.Element, scale_hint: float) -> list[list[tuple[float, float
     out: list[list[tuple[float, float]]] = []
     for el in root.iter():
         tag = el.tag.replace(_SVG_NS, "")
+        if tag in ("path", "rect", "circle", "ellipse", "polygon") and not _is_ink(el):
+            continue
         try:
             if tag == "path":
                 out.extend(parse_path(el.get("d") or "", scale_hint))
@@ -404,8 +482,15 @@ def _shapes(root: ET.Element, scale_hint: float) -> list[list[tuple[float, float
                             for i in range(steps + 1)
                         ]
                     )
-        except (TypeError, ValueError):
-            # One malformed attribute loses one shape, never the drawing.
+        except ValueError:
+            # A malformed ATTRIBUTE loses one shape, never the drawing — that
+            # is a real generator quirk and worth tolerating.
+            #
+            # TypeError is deliberately NOT caught. It means this module has a
+            # bug, and catching it here is how a crash in the flattener became
+            # "the illustration is a bit sparse" across 650 paths with nothing
+            # in the logs. A bug should reach the caller, which turns it into
+            # one clear IllustrateError instead of a quietly wrong picture.
             continue
     return out
 
@@ -458,10 +543,35 @@ def svg_to_ops(svg: str, box: Box) -> list[dict[str, Any]]:
             last = (px, py)
         if len(pts) < 2:
             continue
-        if total + len(pts) > MAX_POINTS:
-            # Budget spent. Stop at a shape boundary — see the module note on
-            # why whole shapes are dropped rather than every shape thinned.
-            break
         total += len(pts)
         ops.append({"t": "path", "pts": pts})
+
+    # Fit the budget by SIMPLIFYING every shape, not by dropping the tail. The
+    # tolerance escalates until the whole drawing fits: a slightly looser bee is
+    # a bee, and the first 30% of a bee is not.
+    tol = 0.5
+    while total > MAX_POINTS and tol <= 16:
+        thinned: list[dict[str, Any]] = []
+        total = 0
+        for op in ops:
+            pts_t = _simplify([(p[0], p[1]) for p in op["pts"]], tol)
+            if len(pts_t) < 2:
+                continue
+            total += len(pts_t)
+            thinned.append({"t": "path", "pts": [[round(a, 1), round(b, 1)] for a, b in pts_t]})
+        ops = thinned
+        tol *= 2
+
+    # Only if simplification could not get there — a genuinely pathological
+    # input — fall back to dropping the tail, so the renderer is never handed
+    # something that will hang it.
+    if total > MAX_POINTS:
+        kept: list[dict[str, Any]] = []
+        running = 0
+        for op in ops:
+            if running + len(op["pts"]) > MAX_POINTS:
+                break
+            running += len(op["pts"])
+            kept.append(op)
+        ops = kept
     return ops

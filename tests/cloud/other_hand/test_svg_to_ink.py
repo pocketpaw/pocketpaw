@@ -159,3 +159,96 @@ class TestTheOutputIsSafeToRender:
     def test_malformed_xml_is_a_clear_error_not_a_stack_trace(self):
         with pytest.raises(SvgConvertError, match="could not parse"):
             svg_to_ops("<svg><path d='M0 0", Box(x=0, y=0, w=100, h=100))
+
+
+class TestTheBugsARealGenerationFound:
+    """Written after the first live Recraft call, which returned 653 paths and
+    converted to 17 points. Every test here failed before its fix."""
+
+    def test_a_mid_sized_curve_does_not_crash_the_flattener(self):
+        # THE bug. The segment count was `int(...) ** 0.5 * 2`, which is a
+        # FLOAT, and a float reaching range() raises TypeError. The existing
+        # tests missed it because their curves were tiny or huge, so max()/min()
+        # returned an int bound either way; only a mid-sized curve — which is
+        # every curve in a real illustration — produced the float.
+        sub = parse_path("M 100 100 C 140 60, 220 60, 260 100", scale_hint=1.0)
+        assert sub and len(sub[0]) > 3
+
+    @pytest.mark.parametrize("scale", [0.05, 0.37, 1.0, 3.3, 12.0])
+    def test_the_flattener_survives_every_plausible_scale(self, scale):
+        # The float only appeared at some scales, so pin a spread rather than
+        # one lucky value.
+        sub = parse_path("M 0 0 C 30 40, 90 40, 120 0", scale_hint=scale)
+        assert sub and len(sub[0]) >= 2
+
+    def test_a_shape_level_bug_is_not_silently_swallowed(self):
+        # The second half of the same incident: _shapes caught TypeError, so the
+        # crash above was swallowed for 650 of 653 paths and the drawing came
+        # back looking merely sparse. A TypeError is OUR bug and must escape.
+        import pocketpaw_ee.cloud.other_hand.svg_to_ink as m
+
+        def _boom(*_a, **_k):
+            raise TypeError("a bug inside the converter")
+
+        original = m.parse_path
+        m.parse_path = _boom
+        try:
+            with pytest.raises(TypeError):
+                svg_to_ops(wrap('<path d="M0 0 L10 10"/>'), Box(x=0, y=0, w=100, h=100))
+        finally:
+            m.parse_path = original
+
+    def test_a_pale_fill_is_treated_as_paper_not_ink(self):
+        # Recraft returns FILLED art. Its near-white paths are highlights that
+        # mean nothing as bare outlines and only spend the point budget.
+        pale = svg_to_ops(
+            wrap('<path fill="rgb(254,253,253)" d="M10 10 L90 10 L90 90 Z"/>'),
+            Box(x=0, y=0, w=100, h=100),
+        )
+        dark = svg_to_ops(
+            wrap('<path fill="rgb(25,21,22)" d="M10 10 L90 10 L90 90 Z"/>'),
+            Box(x=0, y=0, w=100, h=100),
+        )
+        assert pale == []
+        assert dark
+
+    def test_a_nearly_transparent_shape_is_dropped(self):
+        ops = svg_to_ops(
+            wrap('<path fill="rgb(0,0,0)" fill-opacity="0.1" d="M10 10 L90 10 L90 90 Z"/>'),
+            Box(x=0, y=0, w=100, h=100),
+        )
+        assert ops == []
+
+    def test_an_unparseable_fill_counts_as_ink(self):
+        # Conservative on purpose: dropping a real shape is worse than keeping
+        # a faint one.
+        ops = svg_to_ops(
+            wrap('<path fill="url(#grad)" d="M10 10 L90 10 L90 90 Z"/>'),
+            Box(x=0, y=0, w=100, h=100),
+        )
+        assert ops
+
+    def test_an_oversized_drawing_is_thinned_whole_not_truncated(self):
+        # The design reversal. Dropping the tail kept 30% of a real bee — not a
+        # simpler bee, a third of one. Simplification must keep MOST shapes.
+        from pocketpaw_ee.cloud.other_hand.svg_to_ink import MAX_POINTS
+
+        def one(i: int) -> str:
+            x = i % 90
+            return (
+                f'<path fill="rgb(0,0,0)" '
+                f'd="M{x} 5 C {x + 3} 40, {x + 6} 40, {x + 9} 5"/>'
+            )
+
+        # 2500 curves is comfortably OVER the budget — checked, because an
+        # under-budget fixture would skip the thinning loop entirely and the
+        # assertions below would pass without ever exercising it. (That is
+        # exactly what the first version of this test did; the mutation harness
+        # caught it by removing the loop and watching the test still pass.)
+        shapes = 2500
+        body = "".join(one(i) for i in range(shapes))
+        ops = svg_to_ops(wrap(body), Box(x=0, y=0, w=1000, h=1000))
+        assert sum(len(o["pts"]) for o in ops) <= MAX_POINTS
+        # Truncation would keep roughly MAX_POINTS/11 shapes — about half.
+        # Thinning keeps nearly all of them, which is the whole point.
+        assert len(ops) > shapes * 0.9, "the budget truncated the drawing instead of thinning it"
