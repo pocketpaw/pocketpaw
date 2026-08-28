@@ -969,6 +969,20 @@ class PydanticAIBackend:
         if self._http_client is not None:
             return self._http_client
         seconds = float(getattr(self.settings, "pydantic_ai_timeout", 0) or 0)
+        # BYOK (2026-08-28): the end user's OWN upstream key rides as x-api-key
+        # alongside the proxy's own Authorization bearer. LiteLLM forwards
+        # x-api-key upstream when ``forward_llm_provider_auth_headers`` is on, so
+        # the turn bills the user's provider account while still passing through
+        # our routing, logging and guardrails — one pipeline, two payers.
+        #
+        # It lives on the CLIENT rather than in the request because that is the
+        # only place pydantic-ai lets us reach the transport. That makes the
+        # client tenant-specific, and this client is cached for the backend
+        # INSTANCE's life — which is safe for exactly one reason: a BYOK run gets
+        # a fresh isolated backend (see AgentPool.run). Never set
+        # ``byok_provider_api_key`` on a pooled backend.
+        byok_key = (getattr(self.settings, "byok_provider_api_key", None) or "").strip()
+        headers = {"x-api-key": byok_key} if byok_key else None
         try:
             import httpx
 
@@ -976,7 +990,8 @@ class PydanticAIBackend:
                 timeout=httpx.Timeout(
                     None if seconds <= 0 else seconds,
                     connect=15.0,
-                )
+                ),
+                headers=headers,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not build HTTP client, using library defaults: %s", exc)
@@ -1262,8 +1277,15 @@ class PydanticAIBackend:
         """
         import hashlib
 
-        raw = (self.settings.anthropic_api_key or "").strip()
-        if not raw:
+        # BOTH credential routes: the direct-provider key, and the BYOK key that
+        # rides to the proxy as a header. Either one makes two tenants' agents
+        # different, and the BYOK one is the case that actually ships.
+        raw = (
+            (self.settings.anthropic_api_key or "").strip()
+            + "|"
+            + (getattr(self.settings, "byok_provider_api_key", None) or "").strip()
+        )
+        if raw == "|":
             return "none"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 

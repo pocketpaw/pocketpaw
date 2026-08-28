@@ -222,9 +222,23 @@ def _hint(api_key: str) -> str:
 def build_settings_override(creds: TurnCredentials) -> dict[str, object]:
     """Turn resolved credentials into a ``create_isolated_backend`` override.
 
-    The hosted cloud runs the ``pydantic_ai`` backend, which reads its provider
-    credential straight off ``settings.anthropic_api_key`` — so BYOK needs no
-    backend-specific plumbing, only a settings copy with the tenant's key in it.
+    The hosted cloud routes every turn through the LiteLLM proxy, and LiteLLM
+    has its own BYOK path: with ``forward_llm_provider_auth_headers: true`` in
+    the proxy's ``general_settings``, an ``x-api-key`` header on the request is
+    forwarded upstream, so the user's own provider account is billed while the
+    turn still passes through our routing, logging and guardrails.
+
+    That is why this returns ``byok_provider_api_key`` rather than
+    ``anthropic_api_key``: the key is a HEADER we hand the proxy, not a
+    credential we use to call Anthropic ourselves. One pipeline, two payers —
+    and the same pipeline a purchased-token balance would ride later.
+
+    Operator note: the proxy config change is a DEPLOY step, not a code one.
+    Without it LiteLLM strips ``x-api-key`` and every BYOK turn silently bills
+    the platform. LiteLLM's own docs warn against forwarding client headers on a
+    public API; that caveat is about untrusted callers reaching the proxy
+    directly. Here the browser never sees the proxy — our server holds the key
+    and sets the header — so the trust boundary is server-to-server.
 
     MUST be paired with ``AgentRouter.create_isolated_backend``, never with the
     pooled backend. ``AgentPool`` drives every session and surface through ONE
@@ -238,4 +252,4 @@ def build_settings_override(creds: TurnCredentials) -> dict[str, object]:
     """
     if creds.source != "byok" or not creds.api_key:
         return {}
-    return {"anthropic_api_key": creds.api_key}
+    return {"byok_provider_api_key": creds.api_key}

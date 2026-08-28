@@ -125,7 +125,7 @@ class TestSettingsOverride:
 
     def test_byok_credentials_carry_the_key_to_the_backend(self):
         creds = byok.TurnCredentials(source="byok", api_key=_REAL_KEY)
-        assert byok.build_settings_override(creds) == {"anthropic_api_key": _REAL_KEY}
+        assert byok.build_settings_override(creds) == {"byok_provider_api_key": _REAL_KEY}
 
     def test_a_byok_source_with_no_key_is_treated_as_platform(self):
         # Belt and braces: a malformed TurnCredentials must not produce an
@@ -142,7 +142,7 @@ class TestNoCredentialBleedBetweenTenants:
         from pocketpaw.config import Settings
 
         backend = PydanticAIBackend.__new__(PydanticAIBackend)
-        backend.settings = Settings(anthropic_api_key=key)
+        backend.settings = Settings(byok_provider_api_key=key)
         return backend._credential_fingerprint()
 
     def test_two_tenants_keys_produce_different_cache_identities(self):
@@ -162,3 +162,36 @@ class TestNoCredentialBleedBetweenTenants:
         fp = self._fingerprint_for(_REAL_KEY)
         assert _REAL_KEY not in fp
         assert len(fp) < len(_REAL_KEY)
+
+
+class TestTheHeaderThatCarriesTheKey:
+    """LiteLLM's BYOK path is a forwarded ``x-api-key`` header, so the header
+    landing on the HTTP client IS the feature. Everything else is plumbing."""
+
+    def _client_for(self, key: str | None):
+        from pocketpaw.agents.pydantic_ai import PydanticAIBackend
+        from pocketpaw.config import Settings
+
+        backend = PydanticAIBackend.__new__(PydanticAIBackend)
+        backend.settings = Settings(byok_provider_api_key=key)
+        backend._http_client = None
+        return backend._get_http_client()
+
+    def test_a_byok_run_sends_the_users_key_as_x_api_key(self):
+        client = self._client_for(_REAL_KEY)
+        assert client is not None
+        assert client.headers.get("x-api-key") == _REAL_KEY
+
+    def test_a_platform_run_sends_no_provider_header(self):
+        # The regression that would silently bill everyone to one account: a
+        # stale header surviving onto a run that never asked for BYOK.
+        client = self._client_for(None)
+        assert client is not None
+        assert "x-api-key" not in client.headers
+
+    def test_an_empty_key_is_not_forwarded_as_a_blank_header(self):
+        # A blank x-api-key is worse than none: the proxy forwards it and the
+        # provider rejects the request with a confusing auth error.
+        client = self._client_for("   ")
+        assert client is not None
+        assert "x-api-key" not in client.headers
