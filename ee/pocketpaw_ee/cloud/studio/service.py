@@ -913,8 +913,8 @@ async def _generate_image_edit(
 
     ``referenceImageUrls`` (character/location/element consistency shots) are
     resolved to ``data:`` URLs and dispatched to the model's edit variant via
-    ``fal_image`` (seedream resolves to its layerize endpoint). Returns a NEW
-    ``succeeded`` Generation persisted to history.
+    ``fal_image`` (seedream resolves to its single-image edit endpoint). Returns
+    a NEW ``succeeded`` Generation persisted to history.
     """
     refs = [u for u in (req.referenceImageUrls or []) if u and u.strip()]
     if not refs:

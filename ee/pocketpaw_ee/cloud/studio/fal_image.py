@@ -54,7 +54,7 @@ IMAGE_MODELS: dict[str, dict[str, Any]] = {
         "description": "Near-perfect text rendering, native image sizing",
     },
     "seedream_2k": {
-        "id": "fal-ai/bytedance/seedream/v5/pro/text-to-image",
+        "id": "bytedance/seedream/v5/pro/text-to-image",
         "name": "Seedream 2K",
         "vendor": "ByteDance",
         "description": "Native 2K generation and editing",
@@ -82,14 +82,13 @@ IMAGE_MODEL_IDS: frozenset[str] = frozenset(m["id"] for m in IMAGE_MODELS.values
 # ── Edit endpoints (the "/edits" variants) ───────────────────────────────────
 # Map a curated model key → its fal EDIT endpoint. nano-banana and gpt-image-2
 # are reference-based edits (``image_urls`` + prompt); seedream's variant is the
-# LAYERIZE endpoint (single-image → layers), which splits a still into subject /
-# background layers for compositing — not a multi-reference edit. The builder
-# below handles both shapes.
+# native edit endpoint (single ``image_url`` + prompt — same shape as the
+# sketch-to-image op in fal_edit). The builder below handles both shapes.
 
 EDIT_ENDPOINTS: dict[str, str] = {
     "nano_banana": "fal-ai/nano-banana-2/edit",
     "gpt_image_2": "openai/gpt-image-2/edit",
-    "seedream_2k": "fal-ai/bytedance/seedream/v5/pro/layerize",
+    "seedream_2k": "bytedance/seedream/v5/pro/edit",
 }
 
 # Per-model ceiling on ``image_urls`` for the reference-based edit endpoints.
@@ -204,23 +203,20 @@ def build_edit_arguments(
     """Build the fal ``arguments`` dict for a reference-based edit call.
 
     nano-banana / gpt-image-2 take the references as ``image_urls`` (capped per
-    model) + prompt; seedream's layerize endpoint is a SINGLE-image op, so a
-    single reference is sent as ``image_url``. Pure + side-effect free; raises
-    ValueError when no references were supplied.
+    model) + prompt; seedream's edit endpoint is a SINGLE-image op, so a single
+    reference is sent as ``image_url`` (same shape as fal_edit's sketch-to-image
+    op). Pure + side-effect free; raises ValueError when no references were
+    supplied.
     """
     refs = [u for u in (image_urls or []) if u and u.strip()]
     if not refs:
         raise ValueError("at least one reference image is required for image edit")
     refs = cap_reference_images(model_key, refs)
 
-    endpoint = EDIT_ENDPOINTS.get(model_key or "", "")
-    if endpoint.endswith("layerize"):
+    if model_key == "seedream_2k":
         args = {
             "prompt": prompt,
             "image_url": refs[0],
-            "image_size": resolve_image_size(aspect_ratio, model_key),
-            "output_format": "png",
-            "sync_mode": False,
         }
         return args
 
@@ -357,9 +353,9 @@ async def run_fal_image_edit(
 
     ``image_urls`` are the reference images (character/location/element) the edit
     endpoint conditions on; the model is resolved to its edit variant via
-    ``EDIT_ENDPOINTS`` (seedream resolves to its layerize endpoint). Raises
-    ValueError (no references / no edit endpoint for the model) and FalImageError
-    (upstream / no output).
+    ``EDIT_ENDPOINTS`` (seedream resolves to its single-image edit endpoint).
+    Raises ValueError (no references / no edit endpoint for the model) and
+    FalImageError (upstream / no output).
     """
     text = (prompt or "").strip()
     if not text:
