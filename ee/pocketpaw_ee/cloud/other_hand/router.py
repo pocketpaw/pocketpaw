@@ -78,6 +78,30 @@ class SnapshotRequest(BaseModel):
     kind: Literal["page", "book", "mark"] = "page"
 
 
+class IllustrateRequest(BaseModel):
+    """Body for ``POST /other-hand/illustrate``.
+
+    The endpoint IS the opt-in. It exists only because a person pressed a
+    button, so reaching it is the authorisation — there is no path by which an
+    ordinary turn arrives here. That matters because each call costs real money
+    (a Recraft v4 pro generation) and, unlike LLM tokens, a user's own BYOK key
+    does NOT cover it.
+
+    ``x/y/w/h`` is where the drawing lands, in the page's 1240-wide logical
+    space. The caller picks it because only the client knows where the page is
+    empty; the box is bounded here so a nonsense rectangle is refused at the
+    wire rather than becoming coordinates nobody can see.
+    """
+
+    prompt: str = Field(min_length=2, max_length=500)
+    x: float = Field(ge=0, le=1240)
+    #: The paper grows downward, so y follows the same 30-sheet bound the
+    #: snapshot's free_y uses.
+    y: float = Field(ge=0, le=52620)
+    w: float = Field(gt=0, le=1240)
+    h: float = Field(gt=0, le=1754)
+
+
 def _to_cloud_error(exc: other_hand_service.SnapshotError) -> CloudError:
     """Map a service ``SnapshotError`` onto the cloud error envelope.
 
@@ -108,3 +132,37 @@ async def put_page_snapshot(
 
 
 __all__ = ["router"]
+
+
+@router.post("/illustrate")
+async def illustrate(
+    body: IllustrateRequest,
+    workspace_id: str = Depends(current_workspace_id),  # noqa: ARG001 — auth boundary
+) -> dict[str, Any]:
+    """Generate an illustration and return it as page-ops the caller can draw.
+
+    Returns ``{"ops": [...]}`` — ``path`` ops in page space, ready to hand
+    straight to the renderer. The drawing arrives as INK rather than a picture,
+    which is the whole point: it uses the same pen, erases like ink, and counts
+    toward free_y so the next turn will not write over it.
+
+    An empty ``ops`` list means "could not illustrate" — no key configured, or
+    nothing drawable came back. Deliberately not an error: the page should carry
+    on, and the caller has nothing useful to tell the user about a missing
+    generator.
+    """
+    from pocketpaw_ee.cloud.other_hand import illustrate as illustrator
+    from pocketpaw_ee.cloud.other_hand.svg_to_ink import Box
+    from pocketpaw_ee.cloud.studio import fal_edit
+
+    try:
+        ops = await illustrator.illustrate_as_ops(
+            body.prompt,
+            Box(x=body.x, y=body.y, w=body.w, h=body.h),
+            api_key=fal_edit.fal_api_key(),
+            # The request itself is the authorisation — see IllustrateRequest.
+            allowed=True,
+        )
+    except illustrator.IllustrateError as exc:
+        raise CloudError(502, "other_hand.illustrate_failed", str(exc)) from exc
+    return {"ops": ops}
