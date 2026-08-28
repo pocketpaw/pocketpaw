@@ -1,5 +1,16 @@
 """EE FileUpload document — Mongo metadata for blobs stored via StorageAdapter.
 
+2026-08-28 — FC-1 "File comprehension". Added ``summary`` (``str | None``,
+default ``None``): one or two sentences saying what the file IS, written by the
+comprehension pass on ingest (``uploads/comprehension.py``) and editable by a
+human through ``PATCH /uploads/{id}``. Legacy rows read back ``None`` via the
+default — the same backward-compatible Beanie field-add FL-1 relied on, so
+there is no migration. Deliberately NOT indexed: nothing filters or sorts on a
+summary, it is only ever read after a row has been resolved by ``file_id``, and
+an index on free text would cost writes for a query nobody makes. The
+comprehension pass also writes ``collections`` (declared by FL-1 but, until
+now, never written by anything).
+
 2026-07-03 — FL-11b "hide-from-AI purge". Added ``kb_article_id`` and
 ``kb_scope`` (both ``str | None``, default ``None``) so a row remembers the
 kb-go article it was ingested into. The FileReady listener records them after a
@@ -77,6 +88,13 @@ class FileUpload(TimestampedDocument):
     tags: list[str] = Field(default_factory=list)
     collections: list[str] = Field(default_factory=list)
     hide_from_ai: bool = False
+    # What this file IS, in a sentence or two (FC-1). Written by the
+    # comprehension pass on ingest and by a human through PATCH. ``None`` on
+    # legacy rows and on files that were never comprehended (hidden from AI,
+    # over the daily cap, or the model call failed) — the library UI treats
+    # ``None`` and "" alike: no summary to show. Not indexed; see the module
+    # docstring for why.
+    summary: str | None = None
     # KB tracking (FL-11b). After a successful ingest the FileReady listener
     # records the kb-go article id and the scope it landed in, so the file can
     # be retroactively purged from the KB if it's later hidden from AI. ``None``
