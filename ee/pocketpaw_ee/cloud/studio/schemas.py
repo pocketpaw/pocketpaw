@@ -111,6 +111,26 @@ class GenerateRequest(BaseModel):
     durationSec: int | None = None
     referenceAssetUrl: str | None = None
     inputImageUrls: list[str] | None = None
+    # Reference images for the curated image models' edit path (character /
+    # location / element consistency) — the backend resolves these to ``data:``
+    # URLs and dispatches the model's EDIT endpoint via fal.
+    referenceImageUrls: list[str] | None = None
+
+
+class MusicRequest(BaseModel):
+    """Body of ``POST /studio/music`` — generate a music/audio track.
+
+    ``model`` may be a catalog key (``elevenlabs_music``) or a ``fal-ai/...``
+    endpoint id; ``lyrics``/``instrumental``/``durationSec``/``steps`` map onto
+    each music endpoint's own contract (see ``fal_music``)."""
+
+    prompt: str
+    model: str | None = None
+    lyrics: str | None = None
+    instrumental: bool = True
+    durationSec: int | None = None
+    steps: int | None = None
+    tags: list[str] = Field(default_factory=list)
 
 
 class EditRequest(BaseModel):
@@ -266,6 +286,7 @@ __all__ = [
     "GenerationParams",
     "Generation",
     "GenerateRequest",
+    "MusicRequest",
     "EditRequest",
     "VideoElementsRequest",
     "VideoMotionRequest",

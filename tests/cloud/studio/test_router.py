@@ -354,6 +354,50 @@ def test_post_video_motion_control_upstream_failure_is_502(client, monkeypatch):
     assert "Motion control failed" in resp.json()["detail"]
 
 
+def test_post_music_returns_generation(client, monkeypatch):
+    async def _music(req, *, workspace_id):
+        assert req.prompt == "a tense thriller score"
+        assert req.model == "fal-ai/elevenlabs/music"
+        assert req.instrumental is True
+        assert req.durationSec == 60
+        assert workspace_id == "ws-1"
+        return _generation()
+
+    monkeypatch.setattr(studio_service, "generate_music", _music)
+    resp = client.post(
+        "/api/v1/studio/music",
+        json={
+            "prompt": "a tense thriller score",
+            "model": "fal-ai/elevenlabs/music",
+            "instrumental": True,
+            "durationSec": 60,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "gen_abc"
+    assert resp.json()["status"] == "succeeded"
+
+
+def test_post_music_bad_input_is_400(client, monkeypatch):
+    async def _music(req, *, workspace_id):
+        raise ValueError("prompt is required for music generation")
+
+    monkeypatch.setattr(studio_service, "generate_music", _music)
+    resp = client.post("/api/v1/studio/music", json={"prompt": ""})
+    assert resp.status_code == 400
+    assert "prompt is required" in resp.json()["detail"]
+
+
+def test_post_music_upstream_failure_is_502(client, monkeypatch):
+    async def _music(req, *, workspace_id):
+        raise studio_service.StudioUpstreamError("fal music failed: timeout")
+
+    monkeypatch.setattr(studio_service, "generate_music", _music)
+    resp = client.post("/api/v1/studio/music", json={"prompt": "x"})
+    assert resp.status_code == 502
+    assert "Music generation failed" in resp.json()["detail"]
+
+
 def test_post_suggest_prompt(client):
     resp = client.post("/api/v1/studio/suggest-prompt", json={"sentence": "a lighthouse"})
     assert resp.status_code == 200

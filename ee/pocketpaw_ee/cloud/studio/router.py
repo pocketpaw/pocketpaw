@@ -13,6 +13,7 @@
 #   POST /studio/edit            → Generation             (fal.ai edit endpoints)
 #   POST /studio/video-elements  → Generation             (fal.ai Kling Elements)
 #   POST /studio/video-motion-control → Generation        (fal.ai Kling Motion Control)
+#   POST /studio/music           → Generation             (fal.ai music, kind=audio)
 #   POST /studio/suggest-prompt  → PromptSuggestion       (heuristic, no LLM)
 #
 # The tenant is attached per-request via ``current_workspace_id`` (the frontend
@@ -152,6 +153,22 @@ async def video_motion_control(
         raise HTTPException(400, str(exc)) from exc
     except service.StudioUpstreamError as exc:
         raise HTTPException(502, f"Motion control failed: {exc}") from exc
+
+
+@router.post("/music", response_model=schemas.Generation)
+async def music(
+    req: schemas.MusicRequest,
+    workspace_id: str = Depends(current_workspace_id),
+) -> schemas.Generation:
+    """Generate a music/audio track directly against fal.ai (the movie-maker's
+    soundtrack). The produced audio persists as a NEW generation (kind='audio').
+    Bad input (missing prompt) returns 400; a fal upstream failure 502."""
+    try:
+        return await service.generate_music(req, workspace_id=workspace_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except service.StudioUpstreamError as exc:
+        raise HTTPException(502, f"Music generation failed: {exc}") from exc
 
 
 @router.post("/suggest-prompt", response_model=schemas.PromptSuggestion)

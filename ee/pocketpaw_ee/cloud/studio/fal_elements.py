@@ -44,6 +44,36 @@ MAX_ELEMENT_IMAGES = 20
 # accept surfaces as a clear upstream validation error rather than a silent clamp.
 SUPPORTED_DURATIONS: tuple[int, ...] = (2, 5, 10)
 
+# ── Curated video-edit catalog (movie-maker) ────────────────────────────────
+# The reduced set of video-edit endpoints the composer offers. Endpoint ids are
+# the fal model paths (verify against fal's /llms.txt when updating). Gemini's
+# edit endpoint lives under the ``google/`` provider namespace (no ``fal-ai/``
+# prefix) — ``_ENDPOINT_NAMESPACES`` lets it pass straight through resolve.
+
+_ENDPOINT_NAMESPACES: tuple[str, ...] = (
+    "fal-ai/",
+    "bytedance/",
+    "google/",
+    "openai/",
+    "xai/",
+    "recraft/",
+)
+
+CURATED_VIDEO_EDIT_MODELS: dict[str, dict[str, Any]] = {
+    "kling_elements": {
+        "id": DEFAULT_ELEMENTS_MODEL,  # fal-ai/kling-video/v1.6/standard/elements
+        "name": "Kling Elements",
+        "vendor": "Kling",
+        "kind": "video-edit",
+    },
+    "gemini_omni_flash_edit": {
+        "id": "google/gemini-omni-flash/edit",
+        "name": "Gemini Omni Flash (edit)",
+        "vendor": "Google",
+        "kind": "video-edit",
+    },
+}
+
 # Client + server-side deadlines for the fal call. Video jobs queue and render
 # for seconds to minutes, so these are generous but bounded so a hung upstream
 # fails fast instead of pinning a worker forever.
@@ -63,12 +93,12 @@ class FalElementsError(Exception):
 def resolve_endpoint(model_id: str | None) -> str:
     """Map a requested model id onto a real fal endpoint.
 
-    ``fal-ai/...`` ids pass straight through (the caller already picked an
-    endpoint); anything else — including None — falls back to the Kling Elements
-    default.
+    Endpoint-looking ids (``fal-ai/…``, ``google/…``, …) pass straight through
+    (the caller already picked an endpoint); anything else — including None —
+    falls back to the Kling Elements default.
     """
     m = (model_id or "").strip()
-    if m.startswith("fal-ai/"):
+    if m.startswith(_ENDPOINT_NAMESPACES):
         return m
     return DEFAULT_ELEMENTS_MODEL
 
@@ -256,6 +286,7 @@ __all__ = [
     "DEFAULT_ELEMENTS_MODEL",
     "MAX_ELEMENT_IMAGES",
     "SUPPORTED_DURATIONS",
+    "CURATED_VIDEO_EDIT_MODELS",
     "FalElementsError",
     "resolve_endpoint",
     "build_arguments",

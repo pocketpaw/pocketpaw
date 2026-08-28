@@ -54,7 +54,7 @@ from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
 from pocketpaw_ee.cloud.media import storage as media_storage
 
-from . import fal_edit, fal_elements, fal_motion, fal_video, schemas
+from . import fal_edit, fal_elements, fal_image, fal_motion, fal_music, fal_video, schemas
 
 logger = logging.getLogger(__name__)
 
@@ -237,14 +237,110 @@ def _fallback_video_model() -> schemas.StudioModel:
     )
 
 
+def _curated_image_models() -> list[schemas.StudioModel]:
+    """StudioModel rows for the curated fal image registry (``fal_image``).
+
+    These are the exact endpoints the movie-maker dispatches directly against fal
+    — surfaced regardless of proxy catalog config, deduplicated against the
+    LiteLLM-derived list by id."""
+    models: list[schemas.StudioModel] = []
+    for key, cfg in fal_image.IMAGE_MODELS.items():
+        models.append(
+            schemas.StudioModel(
+                id=cfg["id"],
+                label=cfg["name"],
+                kind="image",
+                provider=cfg.get("vendor", "fal"),
+                description=cfg.get("description"),
+                aspectRatios=list(fal_image.IMAGE_SIZE_MAP.keys()),
+                maxCount=_MAX_GENERATED_ASSETS,
+                supportsNegativePrompt=False,
+                credits=1,
+                tags=[cfg.get("vendor", "fal").lower(), "image", "curated"],
+                default=(key == fal_image.DEFAULT_IMAGE_MODEL),
+            )
+        )
+    return models
+
+
+def _curated_video_models() -> list[schemas.StudioModel]:
+    """StudioModel rows for the curated fal video registry (``fal_video``)."""
+    models: list[schemas.StudioModel] = []
+    for cfg in fal_video.CURATED_VIDEO_MODELS.values():
+        models.append(
+            schemas.StudioModel(
+                id=cfg["id"],
+                label=cfg["name"],
+                kind="video",
+                provider=cfg.get("vendor", "fal"),
+                description=f"{cfg.get('vendor', 'fal')} {cfg.get('kind', 'video')}",
+                aspectRatios=list(cfg.get("aspect_ratios", ("16:9", "9:16", "1:1"))),
+                maxCount=1,
+                supportsNegativePrompt=False,
+                durationsSec=list(cfg.get("durations", (5, 10))),
+                credits=1,
+                tags=[cfg.get("vendor", "fal").lower(), "video", "curated"],
+                default=(cfg["id"] == fal_video.DEFAULT_VIDEO_MODEL),
+            )
+        )
+    return models
+
+
+def _curated_video_edit_models() -> list[schemas.StudioModel]:
+    """StudioModel rows for the curated video-edit registry (``fal_elements``)."""
+    models: list[schemas.StudioModel] = []
+    for cfg in fal_elements.CURATED_VIDEO_EDIT_MODELS.values():
+        models.append(
+            schemas.StudioModel(
+                id=cfg["id"],
+                label=cfg["name"],
+                kind="video",
+                provider=cfg.get("vendor", "fal"),
+                description=f"{cfg.get('vendor', 'fal')} video edit",
+                aspectRatios=["16:9", "9:16", "1:1"],
+                maxCount=1,
+                supportsNegativePrompt=False,
+                durationsSec=list(fal_elements.SUPPORTED_DURATIONS),
+                credits=1,
+                tags=[cfg.get("vendor", "fal").lower(), "video", "edit", "curated"],
+                default=False,
+            )
+        )
+    return models
+
+
+def _curated_music_models() -> list[schemas.StudioModel]:
+    """StudioModel rows for the curated fal music registry (``fal_music``)."""
+    models: list[schemas.StudioModel] = []
+    for key, cfg in fal_music.MUSIC_MODELS.items():
+        models.append(
+            schemas.StudioModel(
+                id=cfg["id"],
+                label=cfg["name"],
+                kind="audio",
+                provider=cfg.get("vendor", "fal"),
+                description=f"{cfg.get('vendor', 'fal')} music generation",
+                aspectRatios=[],
+                maxCount=1,
+                supportsNegativePrompt=False,
+                credits=1,
+                tags=[cfg.get("vendor", "fal").lower(), "audio", "music", "curated"],
+                default=(key == fal_music.DEFAULT_MUSIC_MODEL),
+            )
+        )
+    return models
+
+
 async def list_models() -> list[schemas.StudioModel]:
     """Return the image + video models the LiteLLM proxy serves, shaped for the
-    /studio picker. The first image model is the catalog default. A proxy outage
-    propagates CatalogUpstreamError so the router can surface 502.
+    /studio picker, PLUS the curated fal image/video/video-edit/music registries
+    (the movie-maker surface). The first image model is the catalog default. A
+    proxy outage propagates CatalogUpstreamError so the router can surface 502.
 
     When the catalog serves no video entries, a fallback fal video model is
     appended so the rail's Video kind always has a picker row with the
-    2s / 5s / 10s duration set (see _fallback_video_model)."""
+    2s / 5s / 10s duration set (see _fallback_video_model). Curated models are
+    appended afterward, deduplicated by id against the LiteLLM-derived list."""
     entries = await catalog_service.list_models()
     images = [e for e in entries if e.modality == Modality.IMAGE]
     videos = [e for e in entries if e.modality == Modality.VIDEO]
@@ -255,6 +351,18 @@ async def list_models() -> list[schemas.StudioModel]:
         models.append(_map_entry(entry, default=False))
     if not videos:
         models.append(_fallback_video_model())
+
+    seen = {m.id for m in models}
+    for curated in (
+        *_curated_image_models(),
+        *_curated_video_models(),
+        *_curated_video_edit_models(),
+        *_curated_music_models(),
+    ):
+        if curated.id in seen:
+            continue
+        seen.add(curated.id)
+        models.append(curated)
     return models
 
 
@@ -660,6 +768,21 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
     if not model:
         raise ValueError("model is required")
 
+    # Reference-based generation → the curated model's EDIT endpoint (fal_image).
+    # This path carries reference images (character/location/element consistency)
+    # that the OpenAI-compatible proxy endpoint can't express.
+    if req.referenceImageUrls:
+        return await _generate_image_edit(
+            req, model=model, prompt=prompt, workspace_id=workspace_id
+        )
+
+    # Curated fal image models run DIRECTLY against fal (not the proxy) so the
+    # movie-maker's exact model set works regardless of proxy catalog config.
+    if model in fal_image.IMAGE_MODEL_IDS:
+        return await _generate_curated_image(
+            req, model=model, prompt=prompt, workspace_id=workspace_id
+        )
+
     final_prompt = await _apply_style(prompt, req.styleId)
     size = _SIZE_MAP.get(req.aspectRatio)
     auth_key = await _resolve_auth_key(workspace_id)
@@ -706,6 +829,190 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
         status="succeeded",
     )
     # Persist with the owning workspace tag (dropped by the wire model on read).
+    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    return record
+
+
+async def _generate_curated_image(
+    req: schemas.GenerateRequest, *, model: str, prompt: str, workspace_id: str
+) -> schemas.Generation:
+    """Generate images from a curated fal image model DIRECTLY against fal.
+
+    The curated registry (``fal_image``) dispatches straight to fal — no LiteLLM
+    proxy dependency — so the movie-maker's exact model set works regardless of
+    proxy catalog config. ``count`` requests are batched into ONE fal call (the
+    endpoint returns ``num_images``), and each returned image persists through
+    media storage.
+    """
+    final_prompt = await _apply_style(prompt, req.styleId)
+    count = max(1, min(int(req.count or 1), _MAX_GENERATED_ASSETS))
+    try:
+        results = await fal_image.run_fal_image(
+            prompt=final_prompt,
+            model=model,
+            aspect_ratio=req.aspectRatio,
+            count=count,
+            seed=req.seed,
+        )
+    except fal_image.FalImageError as exc:
+        raise StudioUpstreamError(str(exc)) from exc
+
+    if not results:
+        raise StudioUpstreamError("fal image generation returned no data")
+
+    assets: list[dict[str, Any]] = []
+    for data, mime in results:
+        url = await _save_image_bytes(data, mime=mime, ext=fal_edit.mime_to_ext(mime))
+        assets.append({"id": _seq_id("asset"), "url": url, "mime": mime})
+
+    params: dict[str, Any] = {
+        "kind": "image",
+        "model": model,
+        "aspectRatio": req.aspectRatio,
+        "count": len(assets),
+        "styleId": req.styleId,
+        "negativePrompt": req.negativePrompt,
+        "seed": req.seed,
+        "durationSec": req.durationSec,
+    }
+    record = _new_generation(
+        gen_id=_seq_id("gen"),
+        prompt=final_prompt,
+        kind="image",
+        model=model,
+        params=params,
+        assets=assets,
+        status="succeeded",
+    )
+    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    return record
+
+
+async def _generate_image_edit(
+    req: schemas.GenerateRequest, *, model: str, prompt: str, workspace_id: str
+) -> schemas.Generation:
+    """Run a reference-based image edit through a curated model's EDIT endpoint.
+
+    ``referenceImageUrls`` (character/location/element consistency shots) are
+    resolved to ``data:`` URLs and dispatched to the model's edit variant via
+    ``fal_image`` (seedream resolves to its layerize endpoint). Returns a NEW
+    ``succeeded`` Generation persisted to history.
+    """
+    refs = [u for u in (req.referenceImageUrls or []) if u and u.strip()]
+    if not refs:
+        raise ValueError("at least one reference image is required for an image edit")
+
+    final_prompt = await _apply_style(prompt, req.styleId)
+    data_urls: list[str] = []
+    for url in refs:
+        data_url, _ = await _resolve_source_data_url(url)
+        data_urls.append(data_url)
+
+    count = max(1, min(int(req.count or 1), _MAX_GENERATED_ASSETS))
+    try:
+        results = await fal_image.run_fal_image_edit(
+            prompt=final_prompt,
+            image_urls=data_urls,
+            model=model,
+            aspect_ratio=req.aspectRatio,
+            count=count,
+            seed=req.seed,
+        )
+    except fal_image.FalImageError as exc:
+        raise StudioUpstreamError(str(exc)) from exc
+
+    if not results:
+        raise StudioUpstreamError("fal image edit returned no data")
+
+    assets: list[dict[str, Any]] = []
+    for data, mime in results:
+        url = await _save_image_bytes(data, mime=mime, ext=fal_edit.mime_to_ext(mime))
+        assets.append({"id": _seq_id("asset"), "url": url, "mime": mime})
+
+    params: dict[str, Any] = {
+        "kind": "image",
+        "model": model,
+        "aspectRatio": req.aspectRatio,
+        "count": len(assets),
+        "styleId": req.styleId,
+        "negativePrompt": req.negativePrompt,
+        "seed": req.seed,
+    }
+    record = _new_generation(
+        gen_id=_seq_id("gen"),
+        prompt=final_prompt,
+        kind="image",
+        model=model,
+        params=params,
+        assets=assets,
+        status="succeeded",
+    )
+    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    return record
+
+
+# ── Music generation (direct fal.ai dispatch) ────────────────────────────────
+# The movie-maker's soundtrack: fal music endpoints (elevenlabs / ace-step)
+# run DIRECTLY against fal — the LiteLLM gateway has no route for music
+# generation. The produced audio persists through media storage like every other
+# generated asset, and the record lands in the workspace history (kind='audio').
+
+_MUSIC_EXT_BY_MIME: dict[str, str] = {
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+}
+
+
+async def generate_music(req: schemas.MusicRequest, *, workspace_id: str) -> schemas.Generation:
+    """Generate a music/audio track DIRECTLY against fal.ai via ``fal_music``.
+
+    The produced audio persists through media storage and the record lands in the
+    workspace history (kind='audio'). A missing prompt is a ValueError (→400); an
+    upstream fal failure surfaces as StudioUpstreamError (→502).
+    """
+    prompt = (req.prompt or "").strip()
+    if not prompt:
+        raise ValueError("prompt is required for music generation")
+
+    try:
+        audio_bytes, audio_mime = await fal_music.run_fal_music(
+            prompt=prompt,
+            model=req.model,
+            lyrics=req.lyrics,
+            instrumental=req.instrumental,
+            duration_sec=req.durationSec,
+            steps=req.steps,
+        )
+    except fal_music.FalMusicError as exc:
+        raise StudioUpstreamError(str(exc)) from exc
+
+    if not audio_bytes:
+        raise StudioUpstreamError("fal music generation returned no data")
+
+    mime = audio_mime or "audio/mpeg"
+    ext = _MUSIC_EXT_BY_MIME.get(mime, "mp3")
+    url = await _save_image_bytes(audio_bytes, mime=mime, ext=ext)
+    assets: list[dict[str, Any]] = [{"id": _seq_id("asset"), "url": url, "mime": mime}]
+
+    model = (req.model or "").strip() or fal_music.MUSIC_MODELS[fal_music.DEFAULT_MUSIC_MODEL]["id"]
+    params: dict[str, Any] = {
+        "kind": "audio",
+        "model": model,
+        "aspectRatio": "1:1",
+        "count": 1,
+        "durationSec": req.durationSec,
+    }
+    record = _new_generation(
+        gen_id=_seq_id("gen"),
+        prompt=prompt,
+        kind="audio",
+        model=model,
+        params=params,
+        assets=assets,
+        status="succeeded",
+    )
     _append_history({**record.model_dump(), "_workspace": workspace_id})
     return record
 
@@ -1195,6 +1502,7 @@ __all__ = [
     "get_generation",
     "tracked_generation_filenames",
     "generate",
+    "generate_music",
     "edit",
     "generate_video_elements",
     "generate_video_motion",

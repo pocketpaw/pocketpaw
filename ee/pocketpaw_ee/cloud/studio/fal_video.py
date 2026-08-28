@@ -98,6 +98,70 @@ _ENDPOINT_DURATIONS: dict[str, tuple[int, ...]] = {
     "fal-ai/kling-video/v1/standard/text-to-video": (5, 10),
 }
 
+# ── Curated video catalog (movie-maker) ─────────────────────────────────────
+# The reduced set of video endpoints the composer offers. Endpoint ids are the
+# fal model paths (verify against fal's /llms.txt when updating). ``kind`` groups
+# them for the model picker. ``duration_as_string`` marks endpoints that take
+# ``duration`` as a string enum ("5"/"10" — Kling) rather than an integer of
+# seconds (Seedance / Gemini).
+
+_ENDPOINT_NAMESPACES: tuple[str, ...] = (
+    "fal-ai/",
+    "bytedance/",
+    "google/",
+    "openai/",
+    "xai/",
+    "recraft/",
+)
+
+CURATED_VIDEO_MODELS: dict[str, dict[str, Any]] = {
+    "seedance_2_5": {
+        "id": "bytedance/seedance-2.5/enterprise/text-to-video",
+        "name": "Seedance 2.5",
+        "vendor": "ByteDance",
+        "kind": "text-to-video",
+        "aspect_ratios": ("16:9", "9:16", "1:1"),
+        "durations": (5, 10),
+        "duration_as_string": False,
+    },
+    "kling": {
+        "id": DEFAULT_VIDEO_MODEL,  # fal-ai/kling-video/v1/standard/text-to-video
+        "name": "Kling Video",
+        "vendor": "Kling",
+        "kind": "text-to-video",
+        "aspect_ratios": ("16:9", "9:16", "1:1"),
+        "durations": (5, 10),
+        "duration_as_string": True,
+    },
+    "seedance_2_5_i2v": {
+        "id": "bytedance/seedance-2.5/enterprise/image-to-video",
+        "name": "Seedance 2.5 (image)",
+        "vendor": "ByteDance",
+        "kind": "image-to-video",
+        "aspect_ratios": ("16:9", "9:16", "1:1"),
+        "durations": (5, 10),
+        "duration_as_string": False,
+    },
+    "kling_i2v": {
+        "id": IMAGE_TO_VIDEO_PAIR_MODEL,  # fal-ai/kling-video/v1.6/standard/image-to-video
+        "name": "Kling Video (image)",
+        "vendor": "Kling",
+        "kind": "image-to-video",
+        "aspect_ratios": ("16:9", "9:16", "1:1"),
+        "durations": (5, 10),
+        "duration_as_string": True,
+    },
+}
+
+
+def _duration_value(endpoint: str, duration_sec: int) -> int | str:
+    """Encode ``duration`` the way the endpoint expects: Kling takes a string
+    enum ("5"/"10"); Seedance / Gemini take an integer of seconds."""
+    if "kling-video" in endpoint:
+        return str(int(duration_sec))
+    return int(duration_sec)
+
+
 # Client + server-side deadlines for the fal call. Video jobs queue and render
 # for seconds to minutes, so these are generous but bounded so a hung upstream
 # fails fast instead of pinning a worker forever.
@@ -117,29 +181,34 @@ class FalVideoError(Exception):
 def resolve_endpoint(model_id: str | None) -> str:
     """Map a requested model id onto a real fal endpoint.
 
-    ``fal-ai/...`` ids pass straight through (the caller already picked an
-    endpoint); known catalog aliases resolve to their endpoint; anything unknown
-    falls back to ``DEFAULT_VIDEO_MODEL``.
+    Endpoint-looking ids (``fal-ai/…``, ``bytedance/…``, ``google/…``, …) pass
+    straight through; known catalog aliases resolve to their endpoint; anything
+    unknown falls back to ``DEFAULT_VIDEO_MODEL``.
     """
     m = (model_id or "").strip()
-    if m.startswith("fal-ai/"):
+    if m.startswith(_ENDPOINT_NAMESPACES):
         return m
     return VIDEO_MODEL_ALIASES.get(m, DEFAULT_VIDEO_MODEL)
 
 
 def build_arguments(
-    *, prompt: str, duration_sec: int | None, aspect_ratio: str | None
+    *,
+    prompt: str,
+    duration_sec: int | None,
+    aspect_ratio: str | None,
+    endpoint: str | None = None,
 ) -> dict[str, Any]:
     """Build the fal ``arguments`` dict for a text-to-video call.
 
     Pure + side-effect free so it is unit-testable in isolation. Kling standard
-    takes ``duration`` as a string ("5" / "10") and ``aspect_ratio`` as one of
-    "16:9" / "9:16" / "1:1". Unsupported values pass through and the endpoint's
-    own validation reports them (clearer than silently clamping).
+    takes ``duration`` as a string ("5" / "10"); Seedance takes an integer of
+    seconds — ``_duration_value`` encodes per-endpoint. ``aspect_ratio`` is one
+    of "16:9" / "9:16" / "1:1". Unsupported values pass through and the
+    endpoint's own validation reports them (clearer than silently clamping).
     """
     args: dict[str, Any] = {"prompt": prompt}
     if duration_sec and duration_sec > 0:
-        args["duration"] = str(int(duration_sec))
+        args["duration"] = _duration_value(endpoint or DEFAULT_VIDEO_MODEL, duration_sec)
     if aspect_ratio:
         args["aspect_ratio"] = aspect_ratio
     return args
@@ -160,7 +229,7 @@ def resolve_image_to_video_endpoint(model_id: str | None, image_count: int) -> s
     if image_count >= 2:
         return IMAGE_TO_VIDEO_PAIR_MODEL
     m = (model_id or "").strip()
-    if m.startswith("fal-ai/"):
+    if m.startswith(_ENDPOINT_NAMESPACES):
         return m
     return IMAGE_TO_VIDEO_MODEL_ALIASES.get(m, DEFAULT_IMAGE_TO_VIDEO_MODEL)
 
@@ -171,6 +240,7 @@ def build_image_to_video_arguments(
     image_urls: list[str],
     duration_sec: int | None,
     aspect_ratio: str | None,
+    endpoint: str | None = None,
 ) -> dict[str, Any]:
     """Build the fal ``arguments`` dict for ONE image-to-video clip of 1–2 frames.
 
@@ -183,7 +253,8 @@ def build_image_to_video_arguments(
     pair a 2-frame clip here) and stitching the clips (``_concat_videos``);
     passing more than 2 frames here is a ValueError instead of a silent bug.
     ``prompt``/``duration``/``aspect_ratio`` are optional (Kling animates the
-    frames even with a bare image input).
+    frames even with a bare image input). ``duration`` is encoded per-endpoint
+    via ``_duration_value`` (Kling string enum, Seedance integer seconds).
     """
     urls = [u for u in (image_urls or []) if u and u.strip()]
     if not urls:
@@ -199,7 +270,9 @@ def build_image_to_video_arguments(
     if prompt:
         args["prompt"] = prompt
     if duration_sec and duration_sec > 0:
-        args["duration"] = str(int(duration_sec))
+        args["duration"] = _duration_value(
+            endpoint or DEFAULT_IMAGE_TO_VIDEO_MODEL, duration_sec
+        )
     if aspect_ratio:
         args["aspect_ratio"] = aspect_ratio
     return args
@@ -386,6 +459,7 @@ async def _run_image_to_video(
             image_urls=frames,
             duration_sec=duration_sec,
             aspect_ratio=aspect_ratio,
+            endpoint=endpoint,
         )
         result = await _run_fal(endpoint, arguments, key=key)
         video_url = _extract_video_url(result)
@@ -510,7 +584,9 @@ async def run_fal_video(
         raise ValueError("prompt is required for video generation")
 
     endpoint = resolve_endpoint(model)
-    arguments = build_arguments(prompt=text, duration_sec=duration_sec, aspect_ratio=aspect_ratio)
+    arguments = build_arguments(
+        prompt=text, duration_sec=duration_sec, aspect_ratio=aspect_ratio, endpoint=endpoint
+    )
 
     result = await _run_fal(endpoint, arguments, key=api_key)
     video_url = _extract_video_url(result)
@@ -539,6 +615,7 @@ __all__ = [
     "VIDEO_MODEL_ALIASES",
     "IMAGE_TO_VIDEO_MODEL_ALIASES",
     "SUPPORTED_DURATIONS",
+    "CURATED_VIDEO_MODELS",
     "FalVideoError",
     "resolve_endpoint",
     "resolve_image_to_video_endpoint",
