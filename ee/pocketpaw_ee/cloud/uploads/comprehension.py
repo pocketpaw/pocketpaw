@@ -95,26 +95,35 @@ narrating. Trimmed rather than rejected — a too-long summary is still useful."
 
 _ENV_MODEL = "POCKETPAW_FILE_COMPREHENSION_MODEL"
 
-_FALLBACK_MODEL = "deepseek/deepseek-chat"
+_FALLBACK_MODEL = "deepseek/deepseek-v4-flash"
 """Last-resort model id when neither the env var nor ``settings.litellm_model``
 names one.
 
-A model id that the proxy does not serve is the WORST outcome available here:
-every call 404s, every ``comprehend`` returns ``None``, the fail-open path
-swallows it, and the feature looks installed while never once running. So the
-resolution order below prefers, in turn, (1) what the operator set explicitly,
-(2) what this deployment ALREADY talks to — ``settings.litellm_model`` is by
-definition a group that resolves on this operator's own proxy — and only then
-(3) this constant.
+A model id the proxy does not serve is the WORST outcome available here: every
+call fails, every ``comprehend`` returns ``None``, the fail-open path swallows
+it, and the feature looks installed while never once running. So the resolution
+order below prefers, in turn, (1) what the operator set explicitly, (2) what
+this deployment ALREADY talks to — ``settings.litellm_model`` is by definition
+a group that resolves on this operator's own proxy — and only then (3) this
+constant.
 
-The constant is chosen from the evidence in-repo, not from a guess: the
-2026-06-26 gateway probe (``docs/handoff/2026-06-26-mcg2-gateway-probe.md``)
-recorded ``deepseek/deepseek-chat`` serving successfully through the proxy
-while every ``claude-*``/``anthropic/*`` group returned 401 on a bad upstream
-credential and the OpenAI group was quota-exhausted. That was two months ago
-and may well have been fixed since; it is still the most recent DIRECT
-observation this repo contains. Anyone with proxy access should confirm with
-``GET {POCKETPAW_LITELLM_API_BASE}/v1/models`` and correct this line.
+VERIFIED AGAINST THE LIVE PROXY 2026-08-28, which is the only evidence worth
+having for this particular constant: ``GET /v1/models`` on the gateway returns
+80 ids, and a chat completion against this one answers 200.
+
+The previous value was ``deepseek/deepseek-chat``, taken from the 2026-06-26
+gateway-probe handoff. It is NOT served any more — the proxy returns 400 and
+the deployment has moved to the v4 line. That is precisely the silent-nothing
+failure this docstring warns about, and it survived a whole build because no
+test can reach a live proxy. Re-check it with the gateway service's own
+``SERVICE_PASSWORD_MASTERKEY``:
+
+    curl -s -H "Authorization: Bearer $KEY" {BASE}/v1/models
+
+Chat-capable groups there today: ``deepseek/deepseek-v4-flash`` (this one —
+flash is the cheap tier, and a 2-3 sentence summary is what it is for),
+``deepseek/deepseek-v4-pro``, ``Qwen3.8-27B``, ``hetzner/Qwen3.8-27B``. Every
+other id the proxy lists is an image model.
 """
 
 _TIMEOUT_SECONDS = 30.0
