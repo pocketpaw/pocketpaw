@@ -1251,6 +1251,22 @@ class PydanticAIBackend:
         self._cached_agent = None
         self._cached_agent_key = None
 
+    def _credential_fingerprint(self) -> str:
+        """A stable, non-reversible id for the provider credential in use.
+
+        Feeds the agent cache key so two tenants with different keys can never
+        share a cached agent. Hashed because the key would otherwise sit in a
+        long-lived tuple and in cache-miss log lines; the empty string is
+        reported as ``"none"`` so "no key configured" is its own bucket rather
+        than colliding with a hash.
+        """
+        import hashlib
+
+        raw = (self.settings.anthropic_api_key or "").strip()
+        if not raw:
+            return "none"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
     def attach_subprocess_env(self, env: dict[str, str]) -> None:  # noqa: ARG002
         """No-op — this backend spawns no subprocess.
 
@@ -1814,6 +1830,16 @@ class PydanticAIBackend:
             # serves every session and surface, so an agent cached under one
             # identity must not answer for another.
             system_prompt_digest,
+            # WHOSE CREDENTIAL paid for it (2026-08-28, BYOK). The model object
+            # is built with a provider key baked in, and every other component
+            # of this key can match across two tenants who bring their own keys
+            # — same model, same tools, same prompt. Without this the second
+            # tenant is served the first tenant's cached agent and their turns
+            # bill to a stranger's Anthropic account.
+            #
+            # A DIGEST, never the key: this tuple is held in memory for the
+            # process's life and lands in cache-miss logs.
+            self._credential_fingerprint(),
         )
         if self._cached_agent is not None and self._cached_agent_key == agent_key:
             return self._cached_agent

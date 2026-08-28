@@ -263,6 +263,7 @@ def mount_cloud(app: FastAPI) -> None:
         router as automations_status_router,
     )
     from pocketpaw_ee.cloud.billing.router import router as billing_router
+    from pocketpaw_ee.cloud.byok.router import router as byok_router
     from pocketpaw_ee.cloud.billing.webhooks import router as billing_webhooks_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
     from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
@@ -357,6 +358,7 @@ def mount_cloud(app: FastAPI) -> None:
     # (POST /billing/webhooks/dodo) is mounted SEPARATELY just below with NO auth
     # dependency — Dodo is the caller; trust is the Standard-Webhooks signature.
     app.include_router(billing_router, prefix="/api/v1")
+    app.include_router(byok_router, prefix="/api/v1")
     app.include_router(billing_webhooks_router, prefix="/api/v1")
     # Entitlements (BC-6, the Entitlement primitive) — the workspace-scoped
     # resolver (GET /entitlements -> the workspace's plan + features + monthly
