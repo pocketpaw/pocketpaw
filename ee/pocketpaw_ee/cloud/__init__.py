@@ -263,8 +263,8 @@ def mount_cloud(app: FastAPI) -> None:
         router as automations_status_router,
     )
     from pocketpaw_ee.cloud.billing.router import router as billing_router
-    from pocketpaw_ee.cloud.byok.router import router as byok_router
     from pocketpaw_ee.cloud.billing.webhooks import router as billing_webhooks_router
+    from pocketpaw_ee.cloud.byok.router import router as byok_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
     from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
     from pocketpaw_ee.cloud.codeagent.router import router as codeagent_router

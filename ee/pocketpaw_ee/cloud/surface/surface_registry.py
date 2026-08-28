@@ -127,6 +127,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import NamedTuple
 
+from pocketpaw_ee.agent.mcp_servers.other_hand import ILLUSTRATE_TOOL_ID
 from pocketpaw_ee.cloud.surface.domain import (
     SurfaceKind,
     SurfaceMeta,
@@ -902,16 +903,20 @@ SURFACES: list[SurfaceSpec] = [
         # off and a preamble forbidding pockets, it still authored a ui-spec,
         # because a prohibition does not create a default.
         #
-        # No ``allow_mcp_tool_ids``: the surface has no specialized MCP tools of
-        # its own (the page-ops block is parsed client-side — there is no server
-        # plumbing to call), and an allow-list here would restrict the agent's
-        # general capability without adding anything. No ``allowed_sdk_tools``
+        # ``allow_mcp_tool_ids`` carries exactly one id (2026-08-28): the
+        # illustration tool. It was true that this surface had no server-side
+        # tools — the page-ops block is parsed client-side — until generated
+        # vector illustrations needed a generator call the client cannot make.
+        # The allow-list is how the tool stays reachable HERE and nowhere else:
+        # it costs money per call, and no other surface has a page to draw on.
+        # No ``allowed_sdk_tools``
         # either — that field is ADDITIVE and ``Read`` is already in the default
         # set, which matters a lot on this surface: ``Read`` IS the vision path.
         # Static profile: no lazily-loaded ids, not meta-aware.
         profile=SurfaceProfile(
             ripple_mode="off",
             deny_mcp_tool_ids=_OTHER_HAND_POCKET_DENY,
+            allow_mcp_tool_ids=frozenset({ILLUSTRATE_TOOL_ID}),
             system_message_override=OTHER_HAND_SYSTEM_PROMPT,
         ),
     ),

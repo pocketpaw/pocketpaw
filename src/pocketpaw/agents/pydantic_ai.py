@@ -384,6 +384,10 @@ _WITHHELD_TOOLS = _LOCAL_MACHINE_TOOLS | _HOST_STATE_TOOLS
 # until someone decides which side it belongs on.
 _TENANT_SAFE_TOOLS = frozenset(
     {
+        # Otherhand's illustration tool. Tenant-scoped by construction: it draws
+        # onto the caller's own page over their own SSE stream, and its spend is
+        # bounded by a per-workspace daily budget.
+        "illustrate",
         # pockets / widgets — tenant-scoped
         "add_widget",
         "remove_widget",

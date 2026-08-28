@@ -171,6 +171,7 @@ from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
 from pocketpaw_ee.cloud.models.auth_session import AuthSession
 from pocketpaw_ee.cloud.models.belt_workspace_config import BeltWorkspaceConfig
 from pocketpaw_ee.cloud.models.builtin_widget import BuiltInWidget, BuiltInWidgetPosition
+from pocketpaw_ee.cloud.models.byok_key import ByokProviderKey
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.code_connection import CodeConnection
 from pocketpaw_ee.cloud.models.code_project import CodeProject
@@ -208,7 +209,6 @@ from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
 from pocketpaw_ee.cloud.models.instinct_workspace_config import InstinctWorkspaceConfig
 from pocketpaw_ee.cloud.models.invite import Invite, MeetingInvite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
-from pocketpaw_ee.cloud.models.byok_key import ByokProviderKey
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
 from pocketpaw_ee.cloud.models.meeting import (
     Meeting,
@@ -221,6 +221,7 @@ from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reac
 from pocketpaw_ee.cloud.models.message_log import MessageLog
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
+from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
@@ -373,6 +374,7 @@ __all__ = [
     "Lead",
     "LeadSource",
     "ByokProviderKey",
+    "IllustrationUsage",
     "LiteLLMTenantKey",
     "ShipApp",
     "ShipBox",
@@ -478,6 +480,7 @@ def get_all_documents():
         # LiteLLM per-tenant virtual-key mapping (MCG-8). Only
         # ``ee.cloud.llm_provisioning.service`` writes this.
         ByokProviderKey,
+        IllustrationUsage,
         LiteLLMTenantKey,
         # Managed-deploy boxes + their apps and deploy attempts (SHIP-2/SHIP-3).
         # Only ``ee.cloud.ship.store`` reads/writes these.

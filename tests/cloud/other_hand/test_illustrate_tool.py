@@ -1,0 +1,151 @@
+# tests/cloud/other_hand/test_illustrate_tool.py — the agent-facing tool.
+#
+# Created 2026-08-28. The tool is agent-driven, so the tests that matter are
+# about what it does NOT do: it must not put a whole drawing through the model's
+# context, and it must not spend past the day's budget.
+
+from __future__ import annotations
+
+import pytest
+from pocketpaw_ee.agent.mcp_servers import other_hand as tool_mod
+
+
+@pytest.fixture
+def captured(monkeypatch):
+    """Capture the SSE frame instead of pushing it at a live stream."""
+    frames: list[tuple[str, dict]] = []
+    import pocketpaw_ee.cloud.chat.agent_service as agent_service
+
+    monkeypatch.setattr(agent_service, "push_sse_event", lambda n, d: frames.append((n, d)))
+    return frames
+
+
+@pytest.fixture
+def generator_ready(monkeypatch):
+    from pocketpaw_ee.cloud.other_hand import illustrate as ill
+    from pocketpaw_ee.cloud.studio import fal_edit
+
+    monkeypatch.setattr(fal_edit, "fal_api_key", lambda: "test-key")
+
+    async def _ops(subject, box, **_k):
+        # Two shapes, enough points that returning them to the model would be
+        # the mistake this design exists to avoid.
+        return [
+            {"t": "path", "pts": [[float(i), float(i)] for i in range(300)]},
+            {"t": "path", "pts": [[0.0, 700.0], [700.0, 700.0]]},
+        ]
+
+    monkeypatch.setattr(ill, "illustrate_as_ops", _ops)
+
+
+@pytest.fixture
+def budget_open(monkeypatch):
+    from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+
+    async def _spend(*_a, **_k):
+        return True, 1, 20
+
+    monkeypatch.setattr(budget, "try_spend", _spend)
+
+
+class TestTheDrawingDoesNotGoThroughTheModel:
+    @pytest.mark.asyncio
+    async def test_the_ops_are_pushed_to_the_client_not_returned(
+        self, captured, generator_ready, budget_open
+    ):
+        res = await tool_mod._illustrate_handler({"subject": "a honeybee"})
+        text = res["content"][0]["text"]
+        # The frame carries the geometry...
+        assert captured and captured[0][0] == tool_mod.ILLUSTRATION_EVENT
+        assert len(captured[0][1]["ops"]) == 2
+        # ...and the model's reply does not. This is the whole architecture:
+        # a real illustration is thousands of points, and putting that in the
+        # context costs more than the picture.
+        assert "pts" not in text
+        assert len(text) < 400
+
+    @pytest.mark.asyncio
+    async def test_the_model_is_told_not_to_redraw_it(
+        self, captured, generator_ready, budget_open
+    ):
+        res = await tool_mod._illustrate_handler({"subject": "a honeybee"})
+        text = res["content"][0]["text"]
+        # Without this the agent helpfully "adds" the picture it was told about,
+        # and the page gets it twice.
+        assert "do NOT repeat" in text or "do not repeat" in text.lower()
+
+
+class TestItRefusesRatherThanSpends:
+    @pytest.mark.asyncio
+    async def test_an_empty_subject_never_reaches_the_generator(self, captured):
+        res = await tool_mod._illustrate_handler({"subject": " "})
+        assert res["isError"] is True
+        assert not captured
+
+    @pytest.mark.asyncio
+    async def test_no_key_is_a_clear_refusal_with_no_retry_advice(
+        self, captured, monkeypatch
+    ):
+        from pocketpaw_ee.cloud.studio import fal_edit
+
+        monkeypatch.setattr(fal_edit, "fal_api_key", lambda: None)
+        res = await tool_mod._illustrate_handler({"subject": "a bee"})
+        assert res["isError"] is True
+        # An agent told only "it failed" will try again, once per turn, forever.
+        assert "do not try again" in res["content"][0]["text"]
+        assert not captured
+
+    @pytest.mark.asyncio
+    async def test_an_exhausted_budget_refuses_before_generating(
+        self, captured, generator_ready, monkeypatch
+    ):
+        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+
+        async def _spent(*_a, **_k):
+            return False, 20, 20
+
+        monkeypatch.setattr(budget, "try_spend", _spent)
+        res = await tool_mod._illustrate_handler({"subject": "a bee"})
+        assert res["isError"] is True
+        assert "20/20" in res["content"][0]["text"]
+        assert not captured, "budget was refused but a generation happened anyway"
+
+
+class TestTheBudgetItself:
+    @pytest.mark.asyncio
+    async def test_a_zero_cap_disables_the_feature(self, monkeypatch):
+        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+
+        monkeypatch.setenv("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", "0")
+        allowed, _spent, cap = await budget.try_spend("ws-1")
+        assert allowed is False
+        assert cap == 0
+
+    @pytest.mark.asyncio
+    async def test_no_workspace_in_context_is_refused(self, monkeypatch):
+        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+
+        monkeypatch.setenv("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", "5")
+        # An uncharged generation is exactly the hole the budget closes.
+        allowed, _spent, _cap = await budget.try_spend("")
+        assert allowed is False
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_database_fails_CLOSED(self, monkeypatch):
+        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+
+        monkeypatch.setenv("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", "5")
+        # No monkeypatching needed: Beanie is not initialised in this suite, so
+        # the collection accessor does not exist and the counter genuinely
+        # cannot be read. That IS the degraded-database case, reached honestly.
+        # A degraded database must never become an open tab at the illustrator,
+        # so the answer is no — the cost of being wrong this way is a turn that
+        # explains in words, and the other way is money.
+        allowed, _spent, _cap = await budget.try_spend("ws-1")
+        assert allowed is False
+
+    def test_a_nonsense_cap_falls_back_to_the_default(self, monkeypatch):
+        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+
+        monkeypatch.setenv("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", "twenty")
+        assert budget.daily_cap() == 20
