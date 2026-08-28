@@ -84,7 +84,13 @@ async def try_spend(workspace_id: str | None = None) -> tuple[bool, int, int]:
 
     key = f"{workspace_id}:{_today()}"
     try:
-        coll = IllustrationUsage.get_motor_collection()
+        # get_pymongo_collection, NOT get_motor_collection: the latter is the
+        # beanie 1.x name and this repo is on 2.1.0. Calling it raises
+        # AttributeError, which the fail-closed except below swallows — so the
+        # budget refused EVERY claim and the feature read as switched off
+        # rather than broken. Shipped that way; caught 2026-08-28 by the
+        # file-comprehension build copying this file's structure.
+        coll = IllustrationUsage.get_pymongo_collection()
         doc = await coll.find_one_and_update(
             {"key": key},
             {

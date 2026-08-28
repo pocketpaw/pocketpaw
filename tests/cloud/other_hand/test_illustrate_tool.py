@@ -144,8 +144,37 @@ class TestTheBudgetItself:
         allowed, _spent, _cap = await budget.try_spend("ws-1")
         assert allowed is False
 
+    def test_the_collection_accessor_this_module_calls_actually_EXISTS(self):
+        """The bug this test exists for shipped, and the suite stayed green.
+
+        ``try_spend`` reaches Mongo through one accessor and wraps everything in
+        a fail-closed except. If that accessor is misnamed, the AttributeError
+        lands in the except and every claim is refused — the feature reads as
+        "switched off", not "broken", and the degraded-database test below
+        passes for the wrong reason. It did: the name was ``get_motor_collection``
+        (beanie 1.x) against beanie 2.1.0.
+
+        So assert the API directly, where a mismatch is loud.
+        """
+        from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
+
+        assert hasattr(IllustrationUsage, "get_pymongo_collection")
+        import inspect
+
+        src = inspect.getsource(budget_module_for_accessor_check())
+        assert "get_pymongo_collection()" in src
+        assert "get_motor_collection()" not in src
+
     def test_a_nonsense_cap_falls_back_to_the_default(self, monkeypatch):
         from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
 
         monkeypatch.setenv("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", "twenty")
         assert budget.daily_cap() == 20
+
+
+def budget_module_for_accessor_check():
+    """The budget module, imported lazily so the accessor test reads its real
+    source rather than a name this file happens to have in scope."""
+    from pocketpaw_ee.cloud.other_hand import illustration_budget
+
+    return illustration_budget
