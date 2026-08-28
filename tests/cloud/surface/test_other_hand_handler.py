@@ -240,3 +240,41 @@ def test_profile_keeps_read_available() -> None:
     profile = resolve_profile(SurfaceKind.OTHER_HAND, SurfaceMeta())
     assert "Read" not in profile.deny_mcp_tool_ids
     assert profile.allowed_sdk_tools is None
+
+
+class TestShowingDataDoctrine:
+    """The quantity-drawing rules (adapted from the Epic Infographics skill).
+
+    Pinned because a system prompt has no compiler: a block can be reworded into
+    uselessness, or dropped in a merge, and nothing fails. These assert the two
+    rules that are actually falsifiable — the area-scaling constant, which is
+    the one an author is most likely to "simplify" into being wrong, and the
+    presence of the anti-template test.
+    """
+
+    def test_the_prompt_teaches_area_scaling_by_the_square_root(self):
+        from pocketpaw_ee.cloud.surface.system_prompts import OTHER_HAND_SYSTEM_PROMPT as p
+
+        # 1.41 (not 2) is the whole point: doubling the radius quadruples the
+        # area and overstates the fact by 100%. If this constant goes, the rule
+        # has been reworded into the exact error it exists to prevent.
+        assert "1.41" in p
+        assert "AREA scales with value" in p
+
+    def test_the_prompt_forbids_the_failure_modes_that_look_generated(self):
+        from pocketpaw_ee.cloud.surface.system_prompts import OTHER_HAND_SYSTEM_PROMPT as p
+
+        # The two self-tests an author can apply without judgement calls.
+        assert "Cover the words" in p
+        assert "different dataset" in p
+
+    def test_the_prompt_does_not_carry_rules_this_medium_cannot_honour(self):
+        from pocketpaw_ee.cloud.surface.system_prompts import OTHER_HAND_SYSTEM_PROMPT as p
+
+        # The source skill is written for HTML/CSS with art-directed palettes.
+        # This surface is one ink colour on cream paper, so importing its colour
+        # and typography rules would spend tokens on instructions the renderer
+        # cannot execute — the "prompt may not command what the agent cannot do"
+        # rule in CLAUDE.md.
+        for leaked in ("hex", "Tailwind", "font-size", "CSS", "keyframe"):
+            assert leaked not in p, f"{leaked!r} leaked in from the HTML skill"
