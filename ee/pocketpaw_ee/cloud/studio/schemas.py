@@ -35,15 +35,51 @@ class StudioModel(BaseModel):
     default: bool | None = None
 
 
+class StudioStyleLook(BaseModel):
+    """The still-side signature of a style (mood / art / light / palette / grade)."""
+
+    mood: str | None = None
+    artStyle: str | None = None
+    lighting: str | None = None
+    colorPalette: list[str] = Field(default_factory=list)
+    colorGrading: str | None = None
+    medium: str | None = None
+
+
+class StudioStyleMotion(BaseModel):
+    """The camera-and-cutting signature of a style (cannot derive from a still)."""
+
+    camera: str | None = None
+    shots: str | None = None
+    pace: str | None = None
+    energy: int | None = None
+
+
+class StudioStyleConfig(BaseModel):
+    """The full visual treatment a curated style prescribes (look + motion +
+    reference works). Mirrors openstory's style-config v2 schema."""
+
+    version: int = 2
+    look: StudioStyleLook = Field(default_factory=StudioStyleLook)
+    motion: StudioStyleMotion = Field(default_factory=StudioStyleMotion)
+    references: list[str] = Field(default_factory=list)
+
+
 class StudioStyle(BaseModel):
     """A one-tap style/template. ``promptSuffix`` is appended to the user's
-    prompt so the effect stays transparent (same convention as the mock)."""
+    prompt so the effect stays transparent (same convention as the mock).
+    Curated styles additionally carry ``category`` / ``tags`` / ``config`` so the
+    movie-maker can render a full detail card (palette, mood, lighting, camera,
+    color grading, reference films) and a "Use this style" CTA."""
 
     id: str
     label: str
     description: str | None = None
     thumbnailUrl: str | None = None
     promptSuffix: str = ""
+    category: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    config: StudioStyleConfig | None = None
 
 
 # ── Generation domain ───────────────────────────────────────────────────────
@@ -282,6 +318,9 @@ class MediaListResponse(BaseModel):
 __all__ = [
     "StudioModel",
     "StudioStyle",
+    "StudioStyleLook",
+    "StudioStyleMotion",
+    "StudioStyleConfig",
     "GeneratedAsset",
     "GenerationParams",
     "Generation",

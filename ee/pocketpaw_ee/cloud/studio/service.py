@@ -54,7 +54,16 @@ from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
 from pocketpaw_ee.cloud.media import storage as media_storage
 
-from . import fal_edit, fal_elements, fal_image, fal_motion, fal_music, fal_video, schemas
+from . import (
+    fal_edit,
+    fal_elements,
+    fal_image,
+    fal_motion,
+    fal_music,
+    fal_video,
+    schemas,
+    style_catalog,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -367,8 +376,17 @@ async def list_models() -> list[schemas.StudioModel]:
 
 
 def list_styles() -> list[schemas.StudioStyle]:
-    """Return the one-tap style catalog (same set the frontend mock shipped)."""
-    return [schemas.StudioStyle.model_validate(s) for s in STYLES]
+    """Return the style catalog: the legacy one-tap quick styles first, then the
+    curated rich registry (openstory's seeded catalogue) so the movie-maker's
+    style browser and detail cards have full look/motion/references metadata."""
+    quick = [schemas.StudioStyle.model_validate(s) for s in STYLES]
+    seen = {s.id for s in quick}
+    curated: list[schemas.StudioStyle] = []
+    for s in style_catalog.CURATED_STYLES:
+        if s["id"] in seen:
+            continue
+        curated.append(schemas.StudioStyle.model_validate(s))
+    return quick + curated
 
 
 # ── Generation history (JSONL persistence) ──────────────────────────────────

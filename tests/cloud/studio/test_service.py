@@ -963,9 +963,31 @@ def test_fit_character_image_passes_through_within_limit() -> None:
 def test_list_styles_matches_mock() -> None:
     styles = service.list_styles()
     ids = [s.id for s in styles]
-    assert ids == ["none", "cinematic", "photoreal", "watercolor", "anime", "threed", "neon"]
+    # The legacy quick styles stay first (the gallery/composer depend on the
+    # "none" head + the short ids); the curated rich registry is appended.
+    assert ids[:7] == ["none", "cinematic", "photoreal", "watercolor", "anime", "threed", "neon"]
     cinematic = next(s for s in styles if s.id == "cinematic")
     assert "cinematic" in cinematic.promptSuffix
+
+
+def test_list_styles_includes_curated_registry() -> None:
+    """Curated styles carry category/tags + full look/motion/references config so
+    the movie-maker can render detail cards (the Sci-Fi Futuristic example)."""
+    styles = service.list_styles()
+    ids = {s.id for s in styles}
+    assert "sci-fi-futuristic" in ids
+    assert len(ids) > 7  # quick styles + the curated registry
+
+    sci_fi = next(s for s in styles if s.id == "sci-fi-futuristic")
+    assert sci_fi.category == "film"
+    assert "scifi" in sci_fi.tags
+    assert sci_fi.config is not None
+    assert sci_fi.config.look.mood == "Futuristic and technological"
+    assert sci_fi.config.look.colorPalette == ["#00FFFF", "#0000FF", "#C0C0C0", "#800080", "#00FF00"]
+    assert "holographic elements" in sci_fi.config.look.artStyle
+    assert sci_fi.config.motion.camera
+    assert len(sci_fi.config.references) == 3
+    assert "Art style" in sci_fi.promptSuffix  # "Use this style" appends treatment
 
 
 def test_suggest_prompt_heuristic() -> None:
