@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -33,8 +34,24 @@ from pocketpaw_ee.cloud.other_hand.svg_to_ink import Box, SvgConvertError, svg_t
 
 logger = logging.getLogger(__name__)
 
-# Recraft v4 pro, text to vector. Returns image/svg+xml.
-DEFAULT_MODEL = "fal-ai/recraft/v4/pro/text-to-vector"
+# Recraft v4 text-to-vector — NOT the "pro" tier. Both return image/svg+xml
+# with the same input schema, and the pro tier costs $0.30 an image against
+# $0.08 for this one (fal pricing, checked 2026-08-28). The page converts every
+# path to a single-weight pen stroke and throws the fills away, so most of what
+# the premium tier charges for — colour judgement, fill quality, brand polish —
+# is discarded before the reader ever sees it. We are paying for the line work,
+# and the cheaper tier draws the same lines.
+#
+# Overridable per deployment so the tier can be tuned without a code change.
+_ENV_MODEL = "POCKETPAW_OTHER_HAND_ILLUSTRATION_MODEL"
+DEFAULT_MODEL = "fal-ai/recraft/v4/text-to-vector"
+#: The premium tier, kept named so switching back is a value, not a search.
+PRO_MODEL = "fal-ai/recraft/v4/pro/text-to-vector"
+
+
+def configured_model() -> str:
+    """The endpoint this deployment generates with."""
+    return (os.environ.get(_ENV_MODEL) or "").strip() or DEFAULT_MODEL
 # Line art, because a pen has no fills: a filled illustration converts to its
 # outlines and loses whatever the fills were carrying. Asking for the style we
 # can actually draw beats converting one we cannot.
@@ -119,7 +136,7 @@ async def illustrate_as_ops(
         logger.info("other-hand: fal-client is not installed; skipping illustration")
         return []
 
-    endpoint = (model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    endpoint = (model or "").strip() or configured_model()
     try:
         client = fal_client.AsyncClient(key=api_key)
         result = await client.run(
