@@ -1,5 +1,12 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-08-28 (FC-3 "File comprehension") — added
+``FileComprehensionUsage`` (one row per workspace per UTC day, the atomic
+counter behind the comprehension daily cap) to the imports and
+``get_all_documents()`` so the ``file_comprehension_usage`` collection is
+wired into ``init_beanie``. Kept out of ``__all__``: only
+``ee.cloud.uploads.comprehension_budget`` imports the doc class directly.
+
 Updated: 2026-07-27 (integration/growth-v1) — G-6's ``WhatsAppSendLog`` is
 gone: it and G-5's ``MessageLog`` were the same send record built in parallel
 under two names, unified onto ``MessageLog`` (which gained the ``sending`` /
@@ -186,6 +193,7 @@ from pocketpaw_ee.cloud.models.fabric_ingest_state import (
     FabricIngestState,
 )
 from pocketpaw_ee.cloud.models.file import FileObj
+from pocketpaw_ee.cloud.models.file_comprehension_usage import FileComprehensionUsage
 from pocketpaw_ee.cloud.models.file_version import FileVersionDoc
 from pocketpaw_ee.cloud.models.foresight_backtest import ForesightBacktest
 from pocketpaw_ee.cloud.models.foresight_prediction_record import (
@@ -456,6 +464,9 @@ def get_all_documents():
         # Public file share links (FL-12b). Only ``uploads.share_store``
         # writes these; the public GET /share/{token} route reads by token.
         ShareLink,
+        # Per-workspace/day file-comprehension spend counter (FC-3). Only
+        # ``ee.cloud.uploads.comprehension_budget`` reads/writes this.
+        FileComprehensionUsage,
         # file_versions edit history (ART-1). Only ``file_versions.service``
         # imports this class (import-linter "FileVersions" contract).
         FileVersionDoc,
