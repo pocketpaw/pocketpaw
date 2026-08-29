@@ -205,13 +205,16 @@ _SYSTEM_PROMPT = (
     "type, and an excerpt of its contents, say what the file IS — not what it "
     "mentions.\n\n"
     "Reply with JSON only, no prose and no code fence:\n"
-    '{"summary": "<one or two sentences>", "categories": ["<category>", ...]}\n\n'
+    '{"summary": "<two to four sentences>", "categories": ["<category>", ...]}\n\n'
     f"categories must be chosen from exactly this list: {', '.join(CATEGORIES)}.\n"
     f'Use at most {MAX_CATEGORIES}, most fitting first. Use "other" when none '
     "of the rest fit rather than stretching one.\n"
-    "The summary names the kind of document and what it covers, e.g. "
-    '"A board deck reviewing Q3 revenue and the 2027 hiring plan." Never begin '
-    'with "This file" or "This document".'
+    "The summary names the kind of document and what it covers, then adds a "
+    "sentence or two of the most useful specifics — the argument, the period, "
+    "the parts. e.g. "
+    '"A board deck reviewing Q3 revenue and the 2027 hiring plan. Revenue is '
+    "flat against forecast; the plan adds five engineering roles and defers "
+    'sales hires to Q2." Never begin with "This file" or "This document".'
 )
 
 
