@@ -1278,6 +1278,17 @@ class Settings(BaseSettings):
         default=None,
         description="API key for LiteLLM proxy (the master key configured on the proxy)",
     )
+    byok_provider_api_key: str | None = Field(
+        default=None,
+        description=(
+            "BYOK: the END USER's own upstream provider key for THIS run, sent to "
+            "the LiteLLM proxy as the x-api-key header so the proxy forwards it "
+            "upstream and the user's own provider account is billed. Requires "
+            "forward_llm_provider_auth_headers on the proxy. Never set this on a "
+            "pooled/shared backend — only on one built per-run via "
+            "AgentRouter.create_isolated_backend."
+        ),
+    )
     litellm_model: str = Field(
         default="",
         description=(

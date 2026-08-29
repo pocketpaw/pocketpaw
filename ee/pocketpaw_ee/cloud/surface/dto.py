@@ -23,6 +23,12 @@
 # new ``repo`` + ``base_branch`` Belt console hints so the /belt page can stamp
 # the bound repo + branch on the wire and the belt handler injects them into the
 # preamble (agent stops asking for the repo).
+# Updated: 2026-08-25 (feat/other-hand-surface, Otherhand v1) — mirror
+# ``SurfaceMeta``'s new ``snapshot_path`` + ``free_y`` Otherhand hints so the
+# /other-hand page can stamp the page snapshot's path and the empty-below-y line
+# on the wire, and the other_hand handler can point the agent at the image and
+# tell it where it may draw. Without the mirror the fields validate away
+# silently and the handler always sees ``None``.
 
 from __future__ import annotations
 
@@ -85,6 +91,33 @@ class SurfaceMetaRequest(BaseModel):
     # Concierge catalog hint (C1) — mirror SurfaceMeta. Set server-side from the
     # widget spec (capped) so the preamble can name real products.
     pawbar_catalog: list[dict[str, Any]] | None = None
+    # Otherhand hints — mirror SurfaceMeta. Stamped by the /other-hand page on
+    # every turn. ``snapshot_path`` is the absolute path the snapshot endpoint
+    # returned for this page's PNG (the client echoes it back, it never invents
+    # one); ``free_y`` is the y below which the page is empty, as a string to
+    # match the other scalar hints. Both optional.
+    snapshot_path: str | None = None
+    free_y: str | None = None
+    # Book mode (2026-08-26): the read-only source page beside the notebook.
+    book_path: str | None = None
+    # ``mark_box`` is "x1,y1,x2,y2" in the page's logical space: exactly where
+    # the reader's pen went on the book. The client already knows this, so we
+    # TELL the agent rather than make it re-derive a circled region from a
+    # rasterised page of dense body text — which it does badly.
+    mark_box: str | None = None
+    # The marked region re-rendered at high resolution (scans, figures,
+    # equations) and the exact words under the mark, read off the PDF's own
+    # text layer (born-digital pages). Two channels because they fail in
+    # different places: no text layer on a scan, no crop worth reading on a
+    # pure-text page.
+    mark_image_path: str | None = None
+    mark_text: str | None = None
+    # Compact JSON of what is already ON the page (text content with exact
+    # coordinates, shape/user-ink bounding boxes), measured client-side from
+    # the live stroke model AFTER the placement guard. The agent anchors its
+    # annotations to these coordinates rather than to its memory of what it
+    # emitted — which the guard may have shifted.
+    scene: str | None = None
 
 
 class SurfaceRequest(BaseModel):
