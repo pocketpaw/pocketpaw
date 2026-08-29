@@ -246,8 +246,7 @@ async def load_extracted_text(
 
     if getattr(doc, "hide_from_ai", False):
         logger.info(
-            "extracted-text: file_id=%s is hidden from AI; refusing to serve "
-            "its stored text",
+            "extracted-text: file_id=%s is hidden from AI; refusing to serve its stored text",
             file_id,
         )
         return None

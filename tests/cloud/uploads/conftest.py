@@ -37,6 +37,13 @@ def no_real_storage_adapter(monkeypatch):
     adapter explicitly (``persist_extracted_text(..., adapter=...)``); every
     other test gets ``None``, which the reader treats as "re-extract" — the
     behaviour those tests already had before T0.
+
+    NOT covered by ``tests/mutations/extracted_text.json``, deliberately: the
+    mutation for this fixture is "make it inert", and running it would perform
+    the real network write the fixture exists to prevent. It was verified by
+    hand instead — before this fixture existed,
+    ``test_persist_reports_failure_with_no_adapter`` returned ``True`` and left
+    a real object in the dev bucket. That observation is the evidence.
     """
     from pocketpaw_ee.cloud.uploads import extracted_text
 
