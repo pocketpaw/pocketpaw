@@ -1,0 +1,23 @@
+[
+  {
+    "label": "packaging: drop python-pptx from the root knowledge extra",
+    "file": "pyproject.toml",
+    "find": "    \"python-pptx>=1.0.0\",\n    \"openpyxl>=3.1.0\",\n    \"pillow-heif>=0.18.0\",\n]",
+    "replace": "    \"openpyxl>=3.1.0\",\n    \"pillow-heif>=0.18.0\",\n]",
+    "tests": ["tests/packaging/test_extraction_deps_reach_the_image.py"]
+  },
+  {
+    "label": "packaging: drop openpyxl from ee's extraction extra",
+    "file": "ee/pyproject.toml",
+    "find": "    \"python-pptx>=1.0.0\",\n    \"openpyxl>=3.1.0\",",
+    "replace": "    \"python-pptx>=1.0.0\",",
+    "tests": ["tests/packaging/test_extraction_deps_reach_the_image.py"]
+  },
+  {
+    "label": "packaging: Dockerfile stops installing ee[extraction]",
+    "file": "Dockerfile",
+    "find": "pip install --no-cache-dir './ee[extraction]'",
+    "replace": "pip install --no-cache-dir './ee'",
+    "tests": ["tests/packaging/test_extraction_deps_reach_the_image.py"]
+  }
+]

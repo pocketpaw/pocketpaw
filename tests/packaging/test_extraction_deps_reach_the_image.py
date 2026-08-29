@@ -1,6 +1,15 @@
 # tests/packaging/test_extraction_deps_reach_the_image.py — the image must
 # actually install what the extraction adapters import.
 #
+# Updated 2026-08-29 (files-intelligence Track 1): extended to cover the new
+# lazy imports added to local.py — python-pptx (.pptx), openpyxl (.xlsx) and
+# pillow-heif (.heic/.heif). Each is now asserted in BOTH the root `knowledge`
+# extra and ee's `extraction` extra, because those are two independent routes
+# into the image (Dockerfile installs `.[knowledge]` AND `./ee[extraction]`)
+# and only the root extra is reachable by `uv sync --all-extras` locally. The
+# per-extra assertions are now table-driven off DUAL_HOMED_DEPS so adding a
+# dep to one extra and forgetting the other fails here rather than at runtime.
+#
 # Created 2026-08-29. pypdf was absent from the production image: the main
 # Dockerfile installs '.[all]', and `all` is a HAND-MAINTAINED list that never
 # gained the `knowledge` extra (trafilatura, bm25s, pypdf); ee was installed
@@ -19,15 +28,33 @@ import re
 import tomllib
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 # What ee/cloud/extraction imports at call time. Each maps to the extra that
 # must be installed for it to resolve.
+#
+# NOTE: these are DISTRIBUTION names as they appear in pyproject, not import
+# names — `python-pptx` imports as `pptx`, `pillow-heif` as `pillow_heif`.
+# The assertions below grep the pyproject TOML, so the distribution name is
+# what has to match.
 LAZY_IMPORTS = {
     "pypdf": "PDF text extraction (local.py)",
     "python-docx": "DOCX text extraction (local.py)",
     "trafilatura": "HTML extraction / kb ingest",
+    "python-pptx": "PPTX slide + speaker-notes extraction (local.py)",
+    "openpyxl": "XLSX sheet text extraction (local.py)",
+    "pillow-heif": "HEIC/HEIF decoding for the OCR path (local.py)",
 }
+
+# Deps that must be present in BOTH extras. Two independent install routes
+# reach the image (`.[knowledge]` and `./ee[extraction]`), and only the root
+# `knowledge` extra is reachable by a local `uv sync --all-extras` — ee is a
+# path dependency whose extras that flag does not resolve. A dep missing from
+# `knowledge` is untestable locally; one missing from `extraction` breaks an
+# ee-only install. Both are real failures, so both are asserted.
+DUAL_HOMED_DEPS = ("pypdf", "trafilatura", "python-pptx", "openpyxl", "pillow-heif")
 
 
 def _dockerfile() -> str:
@@ -54,18 +81,49 @@ def test_the_image_installs_ee_with_its_extraction_extra():
     )
 
 
-def test_knowledge_extra_still_carries_the_document_deps():
-    """If someone empties `knowledge`, naming it in the Dockerfile buys nothing."""
-    data = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    pkgs = " ".join(data["project"]["optional-dependencies"]["knowledge"])
-    assert "pypdf" in pkgs, "the knowledge extra no longer carries pypdf"
-    assert "trafilatura" in pkgs, "the knowledge extra no longer carries trafilatura"
+def _extra(pyproject: Path, name: str) -> str:
+    data = tomllib.loads(pyproject.read_text())
+    return " ".join(data["project"]["optional-dependencies"][name])
 
 
-def test_ee_extraction_extra_still_carries_the_document_deps():
-    data = tomllib.loads((ROOT / "ee" / "pyproject.toml").read_text())
-    pkgs = " ".join(data["project"]["optional-dependencies"]["extraction"])
+@pytest.mark.parametrize("dep", DUAL_HOMED_DEPS)
+def test_knowledge_extra_still_carries_the_document_deps(dep: str):
+    """If someone empties `knowledge`, naming it in the Dockerfile buys nothing.
+
+    This extra is also the only one a local `uv sync --all-extras` installs,
+    so a dep dropped from here silently downgrades every real-fixture
+    extraction test into a mock-only test that proves nothing.
+    """
+    pkgs = _extra(ROOT / "pyproject.toml", "knowledge")
+    assert dep in pkgs, (
+        f"the knowledge extra no longer carries {dep} — needed for {LAZY_IMPORTS[dep]}"
+    )
+
+
+@pytest.mark.parametrize("dep", DUAL_HOMED_DEPS)
+def test_ee_extraction_extra_still_carries_the_document_deps(dep: str):
+    pkgs = _extra(ROOT / "ee" / "pyproject.toml", "extraction")
+    assert dep in pkgs, f"ee[extraction] no longer carries {dep} — needed for {LAZY_IMPORTS[dep]}"
+
+
+def test_python_docx_is_carried_by_the_ee_extraction_extra():
+    """python-docx is ee-only (the OSS core never reads docx)."""
+    pkgs = _extra(ROOT / "ee" / "pyproject.toml", "extraction")
+    assert "python-docx" in pkgs, "ee[extraction] no longer carries python-docx"
+
+
+def test_every_lazy_import_lives_in_at_least_one_installed_extra():
+    """Catch-all: a new lazy import that lands in NEITHER extra is invisible.
+
+    The pypdf outage was exactly this shape — correct code, dependency absent,
+    build green, every PDF silently empty. Adding a name to LAZY_IMPORTS
+    without adding the dep to an extra fails here.
+    """
+    knowledge = _extra(ROOT / "pyproject.toml", "knowledge")
+    extraction = _extra(ROOT / "ee" / "pyproject.toml", "extraction")
     for dep, why in LAZY_IMPORTS.items():
-        if dep == "trafilatura":
-            continue  # lives in the main knowledge extra, asserted above
-        assert dep in pkgs, f"ee[extraction] no longer carries {dep} — needed for {why}"
+        assert dep in knowledge or dep in extraction, (
+            f"{dep} is lazy-imported for {why} but appears in neither "
+            f"pyproject `knowledge` nor ee `extraction` — it will not be in "
+            f"the image, and the failure will read as 'the feature is off'."
+        )

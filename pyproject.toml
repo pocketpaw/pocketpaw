@@ -80,7 +80,20 @@ dependencies = [
 [project.optional-dependencies]
 # --- Feature extras ---
 vector = ["chromadb", "bm25s"]
-knowledge = ["trafilatura", "bm25s", "pypdf"]
+# The Dockerfile installs `.[knowledge]` explicitly (`.[all]` is a
+# hand-maintained list that omits it), so this extra is the reliable route into
+# the production image for anything the extraction adapters lazy-import.
+# python-pptx / openpyxl / pillow-heif are duplicated in ee's `extraction`
+# extra — same as trafilatura and pypdf — because `uv sync --all-extras`
+# resolves only the ROOT project's extras and never ee's.
+knowledge = [
+    "trafilatura",
+    "bm25s",
+    "pypdf",
+    "python-pptx>=1.0.0",
+    "openpyxl>=3.1.0",
+    "pillow-heif>=0.18.0",
+]
 databases = [
     "sqlalchemy[asyncio]>=2.0.0",
     "asyncpg>=0.29.0",       # PostgreSQL
