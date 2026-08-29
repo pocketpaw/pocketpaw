@@ -63,6 +63,30 @@ class UnifiedFile:
     summary: str | None = None
     agent_id: str | None = None
 
+    def to_json(self) -> dict:
+        """The wire shape of one flat-listing row.
+
+        The router used to hand-build this dict inline, which re-dropped
+        summary/collections/tags/agent_id AFTER the service started carrying
+        them — the third hop in the same pipeline to silently narrow the row.
+        Serialization lives on the dataclass now so a new field has exactly
+        one place to be forgotten, and the carrier test pins this method.
+        """
+        return {
+            "id": self.id,
+            "source": self.source,
+            "filename": self.filename,
+            "mime": self.mime,
+            "size": self.size,
+            "url": self.url,
+            "created": self.created.isoformat() if self.created else None,
+            "chat_id": self.chat_id,
+            "tags": self.tags,
+            "collections": self.collections,
+            "summary": self.summary,
+            "agent_id": self.agent_id,
+        }
+
 
 @dataclass
 class UnifiedPage:

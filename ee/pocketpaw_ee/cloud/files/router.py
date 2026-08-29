@@ -107,19 +107,10 @@ async def list_files(
             "workspace_id": current_workspace,
             "pocket_id": pocket_id,
             "source": source or "all",
-            "files": [
-                {
-                    "id": f.id,
-                    "source": f.source,
-                    "filename": f.filename,
-                    "mime": f.mime,
-                    "size": f.size,
-                    "url": f.url,
-                    "created": f.created.isoformat() if f.created else None,
-                    "chat_id": f.chat_id,
-                }
-                for f in page.files
-            ],
+            # One serializer, on the dataclass. The inline dict this replaces
+            # silently re-dropped summary/collections/tags/agent_id after the
+            # service was fixed to carry them — same bug, one hop later.
+            "files": [f.to_json() for f in page.files],
             "warnings": page.warnings,
             "total": page.total,
             "has_more": page.has_more,

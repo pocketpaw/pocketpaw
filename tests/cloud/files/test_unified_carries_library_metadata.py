@@ -101,3 +101,49 @@ def test_a_row_with_no_metadata_is_still_valid():
 def test_the_source_record_declares_it_too(name: str):
     """FileRecord is the other half of the same hop."""
     assert name in FileRecord.__dataclass_fields__
+
+
+def test_the_wire_row_carries_every_library_metadata_field():
+    """The ROUTE hop, not just the service hop. The router used to hand-build
+    each row dict inline, so after the service was fixed the HTTP response
+    still lacked all four fields — the same narrowing, one layer later. The
+    router now serializes via UnifiedFile.to_json(); this pins it."""
+    from datetime import UTC, datetime
+
+    row = UnifiedFile(
+        id="f1",
+        source="chat",
+        filename="book.pdf",
+        mime="application/pdf",
+        size=10,
+        url="/api/v1/uploads/f1",
+        created=datetime.now(UTC),
+        chat_id=None,
+        tags=["t"],
+        collections=["media"],
+        summary="What the file is.",
+        agent_id="agent-42",
+    )
+    wire = row.to_json()
+    for name in LIBRARY_METADATA:
+        assert name in wire, f"to_json() dropped {name!r} — the panel will render blank"
+    assert wire["summary"] == "What the file is."
+    assert wire["collections"] == ["media"]
+    assert wire["agent_id"] == "agent-42"
+
+
+def test_the_router_serializes_rows_through_to_json():
+    """Pin the call site too: if list_files goes back to an inline dict,
+    to_json() coverage above stops meaning anything."""
+    import importlib
+    import inspect
+
+    # `from ..files import router` resolves to the APIRouter attribute, not
+    # the module — import the module explicitly.
+    files_router = importlib.import_module("pocketpaw_ee.cloud.files.router")
+
+    src = inspect.getsource(files_router.list_files)
+    assert "to_json()" in src, (
+        "list_files no longer serializes via UnifiedFile.to_json(); "
+        "an inline dict here is how three features shipped invisible."
+    )
