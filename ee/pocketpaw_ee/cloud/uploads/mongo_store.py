@@ -1,5 +1,15 @@
 """Mongo-backed metadata store, workspace-scoped.
 
+2026-08-29 (BA-1 "Make an agent of this book"): added ``set_book_agent`` —
+the workspace-scoped setter ``uploads.book_agent`` uses to bind a file to the
+dedicated co-reader agent made from it, shaped exactly like ``set_kb_article``
+(read the row through the workspace filter, then write). ``book_agent`` never
+touches Beanie itself; this store stays the only owner of ``FileUpload``
+writes in the package. The ``iter_by_workspace`` / ``iter_by_pocket`` dict rows
+also carry ``agent_id`` now, so the /files listing can render "open the agent"
+instead of "make one" without a second query — the same way ``tags`` is
+threaded.
+
 2026-08-04 (Living-wiki API): ``iter_by_workspace`` rows now also carry
 ``kb_article_id`` and ``kb_scope`` (the FL-11b ingest-tracking columns) so
 GET /knowledge/uploads can derive ``has_article`` without a second query,
@@ -146,6 +156,28 @@ class MongoFileStore:
             return None
         doc.kb_article_id = article_id
         doc.kb_scope = scope
+        await doc.save()
+        return doc
+
+    async def set_book_agent(
+        self,
+        file_id: str,
+        workspace: str,
+        *,
+        agent_id: str | None,
+    ) -> FileUpload | None:
+        """Bind (or clear) this file's dedicated book agent (BA-1).
+
+        Workspace-scoped like every other write here — the filter is applied on
+        the read, so a caller cannot bind another tenant's row. Pass an agent id
+        after the book's text has landed in that agent's KB scope; pass ``None``
+        to clear a bind (e.g. the agent was deleted). Returns the updated doc,
+        or ``None`` if no live row matches ``(file_id, workspace)``.
+        """
+        doc = await self.get_doc_scoped(file_id, workspace)
+        if doc is None:
+            return None
+        doc.agent_id = agent_id
         await doc.save()
         return doc
 
@@ -320,6 +352,9 @@ class MongoFileStore:
                 "kb_article_id": getattr(doc, "kb_article_id", None),
                 "kb_scope": getattr(doc, "kb_scope", None),
                 "pocket_id": getattr(doc, "pocket_id", None),
+                # BA-1: the dedicated co-reader agent made from this file, so
+                # the listing can offer "open" vs "make" without a second read.
+                "agent_id": getattr(doc, "agent_id", None),
             }
 
     async def list_by_workspace(
@@ -427,6 +462,9 @@ class MongoFileStore:
                 "tags": list(getattr(doc, "tags", []) or []),
                 "collections": list(getattr(doc, "collections", []) or []),
                 "hide_from_ai": bool(getattr(doc, "hide_from_ai", False)),
+                # BA-1: same bind the workspace listing carries — a pocket's
+                # Files panel offers the book agent on the same terms.
+                "agent_id": getattr(doc, "agent_id", None),
             }
 
     async def count_by_pocket(self, workspace: str, pocket_id: str) -> int:

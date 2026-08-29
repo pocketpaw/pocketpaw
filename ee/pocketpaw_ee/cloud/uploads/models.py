@@ -1,5 +1,16 @@
 """EE FileUpload document — Mongo metadata for blobs stored via StorageAdapter.
 
+2026-08-29 — BA-1 "Make an agent of this book". Added ``agent_id``
+(``str | None``, default ``None``) so a file REMEMBERS the dedicated
+co-reader agent provisioned from it. Without the column, pressing "Make an
+agent of this book" twice would mint two agents for one book. The bind is
+written by ``uploads.book_agent`` only AFTER the book text lands in the
+agent's KB scope — an agent that exists but hasn't read the book yet stays
+unbound on purpose, so the next press retries the ingest instead of
+returning a co-reader that knows nothing. Legacy rows read back ``None``
+via the default (Beanie field-add, no migration). Not indexed: it's read
+only after a row has already been resolved by ``file_id``.
+
 2026-07-03 — FL-11b "hide-from-AI purge". Added ``kb_article_id`` and
 ``kb_scope`` (both ``str | None``, default ``None``) so a row remembers the
 kb-go article it was ingested into. The FileReady listener records them after a
@@ -84,6 +95,13 @@ class FileUpload(TimestampedDocument):
     # a later re-index re-populates these. Legacy rows read ``None``.
     kb_article_id: str | None = None
     kb_scope: str | None = None
+    # Book-agent bind (BA-1). The id of the dedicated co-reader agent made
+    # from this file, or ``None`` when none has been made. This is the
+    # idempotency key for "Make an agent of this book": a live bind short-
+    # circuits the whole provision path. Written only after a successful
+    # ingest — see the module docstring for why a half-provisioned agent
+    # deliberately leaves this ``None``.
+    agent_id: str | None = None
 
     class Settings:
         name = "file_uploads"

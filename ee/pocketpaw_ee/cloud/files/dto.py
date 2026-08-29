@@ -1,5 +1,12 @@
 """Public schemas for the files module.
 
+2026-08-29 (BA-1 "Make an agent of this book"): ``FileEntry`` grew
+``agent_id`` (``str | None``) — the dedicated co-reader agent made from this
+file. Only the uploads provider sets it (it is the only provider whose rows
+can be turned into an agent); every other provider leaves the ``None``
+default. The listing needs it to decide between "Make an agent of this book"
+and "Open the agent" without a per-row round trip.
+
 2026-07-03 (FL-1 "Library metadata"): ``FileEntry`` grew ``collections``
 (list[str]) and ``hide_from_ai`` (bool) alongside the existing ``tags`` so a
 file's library metadata surfaces in the unified /files listing. Both default
@@ -57,6 +64,9 @@ class FileEntry(BaseModel):
     # other providers leave the defaults (empty list / False).
     collections: list[str] = Field(default_factory=list)
     hide_from_ai: bool = False
+    # BA-1 book-agent bind. ``None`` means no agent has been made from this
+    # file yet. Uploads-provider only; other providers keep the default.
+    agent_id: str | None = None
     created_at: datetime
     updated_at: datetime
     source_ref: dict[str, Any] = Field(default_factory=dict)
