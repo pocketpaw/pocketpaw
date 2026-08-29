@@ -207,6 +207,20 @@ extraction = [
     "trafilatura",
     "python-docx>=1.1.0",
     "pytesseract>=0.3.10",
+    # Office formats beyond docx (2026-08-29, files-intelligence Track 1).
+    # python-pptx reads .pptx slide shapes + speaker notes; openpyxl reads
+    # .xlsx sheets in read-only mode. Both are pure-Python wheels, no system
+    # libs. They are ALSO listed in the root `knowledge` extra — same as pypdf
+    # and trafilatura — because `uv sync --all-extras` only resolves the ROOT
+    # project's extras, so a dep that lives only here can never be exercised
+    # by a real-fixture test locally or in CI.
+    "python-pptx>=1.0.0",
+    "openpyxl>=3.1.0",
+    # HEIF/HEIC decoding for Pillow. iPhones produce .heic by default and
+    # Pillow does NOT decode it natively (`PIL.features.check("heif")` is
+    # False on Pillow 12.2), so without this an iPhone photo takes the raw
+    # read_text fallback and yields mojibake instead of OCR text.
+    "pillow-heif>=0.18.0",
     # PyMuPDF (fitz) rasterizes image-heavy PDF pages so the Gemini adapter can
     # caption scanned/diagram pages (FL-15). Pure-wheel, no system poppler.
     # Lazy-imported in gemini_flash.py, so it stays optional. Floor 1.24.0
