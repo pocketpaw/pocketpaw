@@ -49,6 +49,16 @@ absence of coverage is indistinguishable from an outage.</p>
 </article>
 <footer>copyright 2026 all rights reserved</footer></body></html>"""
 
+# Bodyless fragments — the shape trafilatura declines (returns None), which is
+# the ONLY way to reach the tag-strip fallback. Verified by the guard test
+# below; see its docstring for why the obvious "thin document" fixtures do not
+# work for this.
+FRAGMENT_HTML = "<div><b>visible</b> fragment text</div>"
+FRAGMENT_WITH_SCRIPT_HTML = (
+    "<div><script>var leak = 1;</script>"
+    "<style>.a{color:crimson}</style><b>visible</b> fragment text</div>"
+)
+
 
 # --------------------------------------------------------------------------
 # fixtures
@@ -272,36 +282,56 @@ async def test_html_no_longer_indexes_raw_markup(tmp_path: Path) -> None:
     assert "<html>" not in result.text
 
 
+async def test_trafilatura_really_declines_the_fallback_fixtures() -> None:
+    """Guard the guard: the two tests below only mean something if trafilatura
+    actually returns None for these inputs.
+
+    It does NOT for the obvious candidates — a bare `<p>hi</p>` document, or
+    one wrapped in `<html><body>`, both extract cleanly. Fixtures like those
+    make the fallback tests pass while never executing a line of the fallback,
+    which is how two mutations to that code escaped this suite on the first
+    sweep. A bodyless FRAGMENT is what trafilatura declines. If a future
+    version starts accepting them, this fails first and names the reason
+    instead of leaving the fallback quietly uncovered.
+    """
+    import trafilatura
+
+    for fixture in (FRAGMENT_HTML, FRAGMENT_WITH_SCRIPT_HTML):
+        assert (
+            trafilatura.extract(
+                fixture, output_format="markdown", include_links=True, include_tables=True
+            )
+            is None
+        )
+
+
 async def test_html_falls_back_to_tag_stripping_when_trafilatura_declines(
     tmp_path: Path,
 ) -> None:
     """trafilatura returning None is a CONTENT outcome, not a fault.
 
-    It declines thin documents. The fallback must still produce readable text
-    rather than raw markup — and must not raise.
+    It declines bodyless fragments. The fallback must still produce readable
+    text rather than raw markup — and must not raise.
     """
-    path = tmp_path / "thin.html"
-    path.write_text("<html><body><p>hi</p></body></html>", encoding="utf-8")
+    path = tmp_path / "fragment.html"
+    path.write_text(FRAGMENT_HTML, encoding="utf-8")
 
     result = await LocalExtractor().extract(path, "text/html")
 
-    assert result.text.strip() == "hi"
-    assert "<" not in result.text
+    assert "visible" in result.text
+    assert "fragment text" in result.text
+    assert "<" not in result.text and ">" not in result.text
 
 
 async def test_html_fallback_drops_script_and_style_bodies(tmp_path: Path) -> None:
-    path = tmp_path / "thin.html"
-    path.write_text(
-        "<html><head><style>.a{color:red}</style></head>"
-        "<body><script>var leak=1;</script><p>visible</p></body></html>",
-        encoding="utf-8",
-    )
+    path = tmp_path / "fragment.html"
+    path.write_text(FRAGMENT_WITH_SCRIPT_HTML, encoding="utf-8")
 
     result = await LocalExtractor().extract(path, "text/html")
 
     assert "visible" in result.text
     assert "leak" not in result.text
-    assert "color:red" not in result.text
+    assert "crimson" not in result.text
 
 
 async def test_html_routes_on_mime_when_the_suffix_lies(tmp_path: Path) -> None:

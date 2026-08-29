@@ -19,5 +19,193 @@
     "find": "pip install --no-cache-dir './ee[extraction]'",
     "replace": "pip install --no-cache-dir './ee'",
     "tests": ["tests/packaging/test_extraction_deps_reach_the_image.py"]
+  },
+
+  {
+    "label": "pptx: the size ceiling is never checked",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "        _refuse_if_too_big(path, _MAX_OFFICE_BYTES, \"pptx\")",
+    "replace": "        pass",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "xlsx: the size ceiling is never checked",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "        _refuse_if_too_big(path, _MAX_OFFICE_BYTES, \"xlsx\")",
+    "replace": "        pass",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "html: the size ceiling is never checked",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "        _refuse_if_too_big(path, _MAX_HTML_BYTES, \"html\")",
+    "replace": "        pass",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "image: the size ceiling is never checked",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "        _refuse_if_too_big(path, _MAX_IMAGE_BYTES, \"image\")",
+    "replace": "        pass",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "ceiling: a breach returns empty text instead of raising",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "    size = path.stat().st_size\n    if size > ceiling:",
+    "replace": "    size = path.stat().st_size\n    if False and size > ceiling:",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "ceiling: office ceiling widened to effectively unlimited",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "_MAX_OFFICE_BYTES = 50 * 1024 * 1024",
+    "replace": "_MAX_OFFICE_BYTES = 50 * 1024 * 1024 * 1024",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "ceiling: html ceiling widened to effectively unlimited",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "_MAX_HTML_BYTES = 10 * 1024 * 1024",
+    "replace": "_MAX_HTML_BYTES = 10 * 1024 * 1024 * 1024",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+
+  {
+    "label": "pptx: speaker notes are dropped",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "        if slide.has_notes_slide:",
+    "replace": "        if False and slide.has_notes_slide:",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "pptx: table cells are dropped",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "            if getattr(shape, \"has_table\", False):",
+    "replace": "            if False and getattr(shape, \"has_table\", False):",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "pptx: the slide cap never fires",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "        if index >= _MAX_PPTX_SLIDES:",
+    "replace": "        if False and index >= _MAX_PPTX_SLIDES:",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "pptx: mime routing removed, suffix only",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "    if suffix == \".pptx\" or norm_mime == _PPTX_MIME:",
+    "replace": "    if suffix == \".pptx\":",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+
+  {
+    "label": "xlsx: sheet NAMES are no longer emitted",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "            parts.append(f\"# {name}\")",
+    "replace": "            pass",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "xlsx: the per-sheet char cap never fires",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "                if used + len(line) > _MAX_XLSX_CHARS_PER_SHEET:",
+    "replace": "                if False and used + len(line) > _MAX_XLSX_CHARS_PER_SHEET:",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "xlsx: the per-sheet cap aborts the WHOLE workbook, not just the sheet",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "                    parts.append(\n                        f\"[truncated: sheet {name!r} exceeded \"\n                        f\"{_MAX_XLSX_CHARS_PER_SHEET} characters]\"\n                    )\n                    break",
+    "replace": "                    parts.append(\n                        f\"[truncated: sheet {name!r} exceeded \"\n                        f\"{_MAX_XLSX_CHARS_PER_SHEET} characters]\"\n                    )\n                    return _budgeted(parts)",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "xlsx: the sheet-count cap never fires",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "            if index >= _MAX_XLSX_SHEETS:",
+    "replace": "            if False and index >= _MAX_XLSX_SHEETS:",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "xlsx: handed the path again, so mime-routed uploads break",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "        with open(file_path, \"rb\") as handle:\n            return _extract_xlsx(load_workbook(handle, read_only=True, data_only=True))",
+    "replace": "        return _extract_xlsx(load_workbook(file_path, read_only=True, data_only=True))",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+
+  {
+    "label": "html: trafilatura skipped, raw markup indexed as before",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "    if suffix in (\".html\", \".htm\") or norm_mime == \"text/html\":",
+    "replace": "    if False and (suffix in (\".html\", \".htm\") or norm_mime == \"text/html\"):",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "html: mime routing removed, suffix only",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "    if suffix in (\".html\", \".htm\") or norm_mime == \"text/html\":\n        _refuse_if_too_big(path, _MAX_HTML_BYTES, \"html\")",
+    "replace": "    if suffix in (\".html\", \".htm\"):\n        _refuse_if_too_big(path, _MAX_HTML_BYTES, \"html\")",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "html: a missing trafilatura silently degrades to the regex stripper",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "    try:\n        import trafilatura\n    except ImportError as exc:\n        raise RuntimeError(\"trafilatura not installed — run: pip install trafilatura\") from exc",
+    "replace": "    try:\n        import trafilatura\n    except ImportError:\n        trafilatura = None",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "html: the tag-strip fallback returns raw markup",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "        clean = re.sub(r\"<[^>]+>\", \" \", clean)",
+    "replace": "        pass",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "html: script bodies survive the fallback strip",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "        clean = re.sub(r\"<script[^>]*>.*?</script>\", \" \", html, flags=re.DOTALL | re.IGNORECASE)",
+    "replace": "        clean = html",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+
+  {
+    "label": "image: webp/tiff/heif dropped back to the original png/jpg set",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "_IMAGE_SUFFIXES = (\".png\", \".jpg\", \".jpeg\", \".webp\", \".tif\", \".tiff\", \".heic\", \".heif\")",
+    "replace": "_IMAGE_SUFFIXES = (\".png\", \".jpg\", \".jpeg\")",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "image: heic dropped, heif kept (the iPhone suffix)",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "_HEIF_SUFFIXES = (\".heic\", \".heif\")",
+    "replace": "_HEIF_SUFFIXES = (\".heif\",)",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "image: the pillow-heif opener is never registered",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "            pillow_heif.register_heif_opener()",
+    "replace": "            pass",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+  {
+    "label": "image: pillow-heif is imported for EVERY raster, not just heif",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "        if suffix in _HEIF_SUFFIXES:",
+    "replace": "        if True:",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
+  },
+
+  {
+    "label": "budget: the global char budget never truncates",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "    if len(text) <= limit:\n        return text",
+    "replace": "    return text\n    if len(text) <= limit:\n        return text",
+    "tests": ["tests/cloud/extraction/test_local_formats.py"]
   }
 ]
