@@ -1199,6 +1199,78 @@ v1 is a plain GET for the client to poll. A push stream is the upgrade path
 if polling stops being enough — event-driven off the existing run-status
 transitions, not a faster poll.
 
+## Files — Content Search
+
+`POST /files/search` answers "which of my files says this?" — as distinct from
+the listing's filename filter, which answers "which of my files is called
+this?". It searches the caller's kb-go scopes and resolves each hit back to the
+FILE row that was ingested into it, via the `kb_article_id` the FileReady
+listener records. Rows come back in the same shape `GET /files` returns, plus a
+`match` block, so a client renders a hit with the components it already has.
+
+Why it is not a mode on `POST /kb/search`: that endpoint returns kb *articles*
+(compiled derivatives, not files) and accepts a client `scope` override bound to
+the caller by an allowlist. This one returns file rows and accepts **no scope at
+all** — its scopes are derived from the caller through the same
+`_kb_scopes_for_context` precedence the chat path uses (`user:` > `pocket:` >
+`agent:` > `workspace:`). The only partition a client may ask for is
+`pocket_id`, gated by the same membership check the listing uses.
+
+Requires a valid license and the `kb.read` action — the `match` block carries kb
+titles and summaries, so this is a kb read whichever door it comes through.
+
+**Request**
+
+```json
+{ "query": "quarterly revenue", "limit": 20, "pocket_id": null }
+```
+
+`limit` is 1–50 (default 20). A non-member `pocket_id` returns 403
+`files.pocket_forbidden`, exactly as `GET /files?pocket_id=` does.
+
+**Response**
+
+```json
+{
+  "workspace_id": "w1",
+  "pocket_id": null,
+  "query": "quarterly revenue",
+  "files": [
+    { "id": "f1", "source": "chat", "filename": "board-minutes.docx",
+      "mime": "…", "size": 1234, "url": "/api/v1/uploads/f1",
+      "created": "…", "chat_id": null, "tags": [], "collections": [],
+      "summary": "…", "agent_id": null,
+      "match": { "article_id": "board-minutes", "scope": "workspace:w1",
+                 "title": "Board minutes", "snippet": "…",
+                 "verbatim": false } }
+  ],
+  "scopes": ["user:u1", "workspace:w1"],
+  "degraded": null,
+  "limit": 20
+}
+```
+
+Results are in kb-go's BM25 rank order. Files that were never ingested (no
+`kb_article_id`), files hidden from AI, soft-deleted files, and — on a
+workspace-scoped search — pocket-scoped files are all absent by construction.
+
+**`degraded` — read this before rendering an empty list**
+
+| value | meaning | what a client must show |
+| --- | --- | --- |
+| `null` | normal search | the results, whatever their number |
+| `"kb_unavailable"` | kb-go could not be reached; the search did **not** run | "couldn't search" — never "nothing matched" |
+| `"verbatim"` | at least one hit is an uncompiled article (kb-go's keyless fallback), so it was matched on raw text | the results, plus a note that some were matched literally |
+
+The `kb_unavailable` distinction is the point of the field. An empty `files`
+array is an answer; a failed search is not one, and rendering them identically
+is how a broken feature passes for a working one with nothing to show.
+
+Source: `ee/pocketpaw_ee/cloud/files/content_search.py` (the service and the
+argument for the surface), `ee/pocketpaw_ee/cloud/files/router.py` (the route),
+`ee/pocketpaw_ee/cloud/uploads/mongo_store.py::list_by_kb_articles` (the join
+and its tenancy filters).
+
 ## Files — Versioned Writes
 
 The `file_versions` entity layers a versioned write path over the uploads

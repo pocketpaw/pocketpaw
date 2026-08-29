@@ -12,6 +12,20 @@ of ``FileUpload`` writes in the package. Deliberately NOT threaded into
 nothing in a listing renders it, and ``FileRecord`` is a ``src/`` type whose
 shape ripples well past this package.
 
+2026-08-29 (T3 "Files content search"): added ``list_by_kb_articles`` — the
+reverse of ``set_kb_article``. Given the article ids a kb-go search returned,
+it resolves them back to the FILE rows that were ingested into them, so the
+Files panel can answer "which of my files contains this?" instead of "which
+filename contains this?". Three filters are load-bearing and not cosmetic:
+the always-applied ``workspace`` pin, ``hide_from_ai`` (a file the owner hid
+from AI must not resurface through content search — and it is written as
+``$ne: True`` because legacy rows have no such key at all, so ``== False``
+would silently drop every one of them), and the same tri-state ``pocket_id``
+partition ``list_by_workspace`` uses, so pocket files never bleed into the
+workspace panel through the search door. Returns ``KbTrackedRecord`` triples
+rather than bare records because the caller has to rank by the SEARCH's order
+and disambiguate an article id that exists in two scopes.
+
 2026-08-28 (FC-1 "File comprehension"): ``summary`` is threaded exactly the way
 ``tags`` is — ``set_library_metadata`` grew a ``summary`` keyword, and both
 ``iter_by_workspace`` / ``iter_by_pocket`` dict rows now carry it so the
@@ -67,7 +81,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 from pocketpaw.uploads.file_store import FileRecord
 from pocketpaw_ee.cloud.uploads.models import FileUpload
@@ -90,6 +104,20 @@ class _Sentinel:
 
 LIST_WORKSPACE_ONLY = _Sentinel()
 """Sentinel: pass as ``pocket_id`` to filter rows where ``pocket_id IS None``."""
+
+
+class KbTrackedRecord(NamedTuple):
+    """One file row plus the kb-go article it was ingested into (FL-11b).
+
+    ``scope`` is the row's stored ``kb_scope`` and may be ``None`` on a row
+    written before the column existed. The caller keeps the pair together
+    because the same article id can legitimately exist in two scopes (kb-go
+    slugs an article off its title), so the id alone does not identify a hit.
+    """
+
+    article_id: str
+    scope: str | None
+    record: FileRecord
 
 
 class MongoFileStore:
@@ -460,6 +488,76 @@ class MongoFileStore:
             query["pocket_id"] = pocket_id
         docs = await FileUpload.find(query).sort([("createdAt", -1)]).limit(capped).to_list()
         return [r for r in (self._to_record(d) for d in docs) if r is not None]
+
+    async def list_by_kb_articles(
+        self,
+        workspace: str,
+        article_ids: list[str],
+        *,
+        pocket_id: str | None | _Sentinel = None,
+        limit: int = 200,
+    ) -> list[KbTrackedRecord]:
+        """Resolve kb-go article ids back to the file rows ingested into them.
+
+        The reverse of :meth:`set_kb_article`, and the join that turns a kb
+        content search into a FILES answer. Returns one triple per matching
+        live row; ordering is not meaningful here (the caller re-ranks by the
+        search's own order), so no sort is applied.
+
+        Filters, all deliberate:
+
+        * ``workspace`` — always applied, like every other read here. Without
+          it a shared article id would read another tenant's row.
+        * ``deleted_at IS NULL`` — a soft-deleted file is gone from the panel
+          and must be gone from search.
+        * ``hide_from_ai`` — written as ``$ne: True`` rather than ``== False``.
+          Rows created before FL-1 have NO ``hide_from_ai`` key in Mongo, and
+          ``{"hide_from_ai": False}`` does not match a missing key, so the
+          equality form would silently return nothing for every legacy row.
+          The ``$ne`` form matches missing-and-False and excludes only rows the
+          owner explicitly hid. This filter is defence in depth: hiding a file
+          also purges its article, but a purge that failed leaves the tracking
+          behind, and a hidden file resurfacing in search is exactly the leak
+          the toggle exists to prevent.
+        * ``pocket_id`` — the same tri-state as :meth:`list_by_workspace`
+          (``None`` = no filter, a string = that pocket, ``LIST_WORKSPACE_ONLY``
+          = workspace-scoped rows only), so search partitions pockets exactly
+          the way the listing does.
+
+        An empty ``article_ids`` short-circuits — an unbounded ``$in: []``
+        query is a pointless round trip.
+        """
+        ids = [a for a in article_ids if a]
+        if not ids:
+            return []
+        capped = max(1, min(limit, 500))
+        query: dict = {
+            "workspace": workspace,
+            "deleted_at": None,
+            "kb_article_id": {"$in": ids},
+            "hide_from_ai": {"$ne": True},
+        }
+        if pocket_id is LIST_WORKSPACE_ONLY:
+            query["pocket_id"] = None
+        elif isinstance(pocket_id, str):
+            query["pocket_id"] = pocket_id
+        docs = await FileUpload.find(query).limit(capped).to_list()
+        out: list[KbTrackedRecord] = []
+        for doc in docs:
+            rec = self._to_record(doc)
+            if rec is None:
+                continue
+            article_id = getattr(doc, "kb_article_id", None)
+            if not article_id:
+                continue
+            out.append(
+                KbTrackedRecord(
+                    article_id=article_id,
+                    scope=getattr(doc, "kb_scope", None),
+                    record=rec,
+                )
+            )
+        return out
 
     async def count_by_workspace(
         self,
