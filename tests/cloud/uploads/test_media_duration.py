@@ -263,6 +263,53 @@ class TestUnknownContainers:
         assert probe_duration_seconds(f) is None
 
 
+# --- the guards the outer except would otherwise hide ----------------------
+
+
+class TestTheGuardsAreRealGuards:
+    """``probe_duration_seconds`` catches everything and answers ``None``, so
+    from outside there is NO difference between a guard that fired and a bug
+    that raised into the catch-all.
+
+    A mutation run proved that exactly: deleting the zero-timescale check and
+    deleting the box-bounds check both ESCAPED — the public tests still passed
+    because an exception and a refusal look identical through that except.
+    These assert the guards at their own seam, where the difference exists.
+    """
+
+    def test_a_zero_timescale_is_refused_rather_than_divided_by(self):
+        from pocketpaw_ee.cloud.uploads.media_duration import _parse_mvhd
+
+        good = b"\x00\x00\x00\x00" + b"\x00" * 8 + struct.pack(">II", 1000, 95_000) + b"\x00" * 80
+        assert _parse_mvhd(good) == pytest.approx(95.0)
+
+        zero = b"\x00\x00\x00\x00" + b"\x00" * 8 + struct.pack(">II", 0, 95_000) + b"\x00" * 80
+        assert _parse_mvhd(zero) is None, "a zero timescale must be refused, not divided by"
+
+    def test_a_box_that_overruns_the_file_is_refused(self, tmp_path):
+        from pocketpaw_ee.cloud.uploads.media_duration import _read_box_header
+
+        f = tmp_path / "boxes.bin"
+        f.write_bytes(struct.pack(">I", 40) + b"moov" + b"\x00" * 32)
+
+        with f.open("rb") as fh:
+            assert _read_box_header(fh, 40) == (b"moov", 8, 32)
+        with f.open("rb") as fh:
+            # The same box, read against a file the header overruns.
+            assert _read_box_header(fh, 20) is None, (
+                "a box claiming more bytes than the file holds was accepted"
+            )
+
+    def test_a_size_smaller_than_its_own_header_is_refused(self, tmp_path):
+        """Otherwise the walk advances by a negative amount and never ends."""
+        from pocketpaw_ee.cloud.uploads.media_duration import _read_box_header
+
+        f = tmp_path / "tiny.bin"
+        f.write_bytes(struct.pack(">I", 2) + b"moov" + b"\x00" * 32)
+        with f.open("rb") as fh:
+            assert _read_box_header(fh, 40) is None
+
+
 # --- ground truth ----------------------------------------------------------
 
 

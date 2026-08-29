@@ -279,8 +279,21 @@ def probe_duration_seconds(path: Path) -> float | None:
         if magic[0:3] == b"ID3" or (magic[0] == 0xFF and (magic[1] & 0xE0) == 0xE0):
             return _mp3_duration(path, size)
     except Exception:
-        # A parser is not allowed to be the reason an upload fails. Unknown.
-        logger.debug("media-duration: could not probe %s", path, exc_info=True)
+        # A parser is not allowed to be the reason an upload fails, so this
+        # catches everything — but it is logged at WARNING, not DEBUG, and the
+        # distinction is deliberate. A container we do not support returns
+        # ``None`` WITHOUT coming through here; reaching this line means the
+        # parser raised on something it thought it understood, which is a bug
+        # in this file. Silencing it would let a permanently broken probe send
+        # every recording to the byte ceiling with nothing to notice it —
+        # the failure that reads as "the ceiling is fine" while it is blind.
+        logger.warning(
+            "media-duration: the parser RAISED on %s — this is a bug in "
+            "media_duration, not an unsupported container; the file falls back "
+            "to the size ceiling",
+            path,
+            exc_info=True,
+        )
         return None
 
     return None

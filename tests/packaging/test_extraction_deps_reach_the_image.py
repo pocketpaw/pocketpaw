@@ -69,3 +69,26 @@ def test_ee_extraction_extra_still_carries_the_document_deps():
         if dep == "trafilatura":
             continue  # lives in the main knowledge extra, asserted above
         assert dep in pkgs, f"ee[extraction] no longer carries {dep} — needed for {why}"
+
+
+def test_fal_client_is_a_BASE_dependency_of_ee_not_an_extra():
+    """T2 (2026-08-29): media transcription needs it, and it must not become
+    optional.
+
+    ``fal-client`` is lazy-imported by ``uploads/transcription.py`` and
+    ``studio/fal_edit.py``, so moving it into an extra would build green and
+    then fail at runtime — the same shape as the pypdf hole above, and with
+    the same symptom: audio and video uploads silently produce no transcript,
+    no summary and no search hit, and it reads as "transcription is off".
+
+    Asserted on the BASE ``dependencies`` list specifically. The Dockerfile
+    installs ``./ee[extraction]``, which carries the base deps too, so being
+    in an extra that nobody names is the only way to lose it.
+    """
+    data = tomllib.loads((ROOT / "ee" / "pyproject.toml").read_text())
+    base = " ".join(data["project"]["dependencies"])
+    assert "fal-client" in base, (
+        "fal-client left pocketpaw-ee's base dependencies. Media transcription "
+        "and the /studio edit ops both lazy-import it, so the image would build "
+        "green and every media upload would silently produce nothing."
+    )
