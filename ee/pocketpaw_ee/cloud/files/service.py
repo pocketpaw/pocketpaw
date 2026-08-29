@@ -14,6 +14,13 @@ that pocket only. When ``None`` (the default), the listing returns
 workspace-only rows — the workspace Files panel never sees pocket files,
 which is the privacy contract for pocket-scoped uploads.
 
+2026-08-29 (T3 "Files content search"): the record→row projection that was
+inlined in ``list_chat_uploads`` is now the module-level
+``unified_from_record``. ``files/content_search.py`` projects the rows a kb
+hit resolves to through the SAME function — a second hand-written copy is how
+summary/collections/tags/agent_id got dropped three separate times in this
+pipeline, and the fix was always "one projection, one place".
+
 2026-08-13 (Files pagination): ``list_unified`` now returns a
 ``UnifiedPage`` (files + warnings + total + has_more) and accepts an
 ``offset`` for offset-based paging. ``total`` comes from a cheap count
@@ -31,6 +38,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
+from pocketpaw.uploads.file_store import FileRecord
 from pocketpaw_ee.cloud.uploads.mongo_store import LIST_WORKSPACE_ONLY, MongoFileStore
 
 logger = logging.getLogger(__name__)
@@ -102,6 +110,33 @@ class UnifiedPage:
     has_more: bool
 
 
+def unified_from_record(rec: FileRecord) -> UnifiedFile:
+    """Project one uploads ``FileRecord`` into a flat-listing row.
+
+    THE record→row projection, extracted 2026-08-29 so there is exactly one.
+    It used to be inlined in ``list_chat_uploads``; content search
+    (``files/content_search.py``) needs the same projection for the rows a kb
+    hit resolves to, and a second hand-written copy is precisely how
+    summary/collections/tags/agent_id were dropped three times in this
+    pipeline already. A new field added to ``UnifiedFile`` now has one hop to
+    be threaded through, not two.
+    """
+    return UnifiedFile(
+        id=rec.id,
+        source="chat",
+        filename=rec.filename,
+        mime=rec.mime,
+        size=rec.size,
+        url=f"/api/v1/uploads/{rec.id}",
+        created=rec.created,
+        chat_id=rec.chat_id,
+        tags=list(rec.tags or []),
+        collections=list(rec.collections or []),
+        summary=rec.summary,
+        agent_id=rec.agent_id,
+    )
+
+
 def _dedupe(files: list[UnifiedFile]) -> list[UnifiedFile]:
     """Drop later duplicates keyed on ``(filename, size, mime)``.
 
@@ -145,23 +180,7 @@ class UnifiedFilesService:
             records = await self._uploads.list_by_workspace(
                 workspace_id, limit=limit, pocket_id=LIST_WORKSPACE_ONLY
             )
-        return [
-            UnifiedFile(
-                id=rec.id,
-                source="chat",
-                filename=rec.filename,
-                mime=rec.mime,
-                size=rec.size,
-                url=f"/api/v1/uploads/{rec.id}",
-                created=rec.created,
-                chat_id=rec.chat_id,
-                tags=list(rec.tags or []),
-                collections=list(rec.collections or []),
-                summary=rec.summary,
-                agent_id=rec.agent_id,
-            )
-            for rec in records
-        ]
+        return [unified_from_record(rec) for rec in records]
 
     async def list_drive(self, workspace_id: str, *, limit: int) -> list[UnifiedFile]:
         """Drive source — stubbed until Cluster C lands connector status.

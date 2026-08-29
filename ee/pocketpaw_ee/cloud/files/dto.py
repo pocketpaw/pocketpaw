@@ -152,3 +152,23 @@ class SearchQuery(BaseModel):
     mimes: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     limit: int = 50
+
+
+class ContentSearchRequest(BaseModel):
+    """Body of ``POST /files/search`` (T3 "Files content search").
+
+    POST, not GET, for the same reason ``/kb/search`` is: the query is the
+    member's own words about their own documents, and a GET would write it
+    into every access log and proxy trace along the way.
+
+    There is deliberately NO ``scope`` field. ``/kb/search`` accepts one and
+    binds it to the caller through an allowlist; this surface derives its
+    scopes from the caller instead (``content_search.resolve_kb_scopes``), so
+    there is nothing to validate and nothing to get wrong. ``pocket_id`` is
+    the only partition the client may ask for, and it is gated by the same
+    ``pockets_service.is_member`` check the listing uses.
+    """
+
+    query: str
+    limit: int = Field(20, ge=1, le=50)
+    pocket_id: str | None = None
