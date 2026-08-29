@@ -32,18 +32,29 @@ WORKDIR /build
 COPY pyproject.toml README.md LICENSE ./
 COPY src/ src/
 
-# Create venv and install all extras
+# Create venv and install all extras.
+# `knowledge` is NOT inside `[all]` — that extra is hand-maintained and the
+# document deps were never added to it. Without them pypdf is absent, so
+# ee/cloud/extraction/local.py raises ModuleNotFoundError on every PDF, the
+# listener's except swallows it, and file comprehension + the book agent
+# silently produce nothing for the most common upload type. It reads as
+# "the feature is off" rather than "the build is missing a dependency".
+# Named explicitly here rather than folded into `[all]`, so a reader of this
+# file can see what the image needs to actually read documents.
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-RUN pip install --no-cache-dir '.[all]'
+RUN pip install --no-cache-dir '.[all]' '.[knowledge]'
 
 # Enterprise edition: also install the FSL enterprise layer (pocketpaw-ee).
 # For an OSS build, ee/ lands only in this throwaway builder stage and is
 # never installed — the runtime image below copies just the venv, so it
 # stays genuinely EE-free.
 COPY ee/ ee/
+# `./ee[extraction]`, not bare `./ee`: the extraction adapters lazy-import
+# pypdf / python-docx / pymupdf, so a bare install builds green and then
+# fails at runtime on the first document. Same silent shape as above.
 RUN if [ "$POCKETPAW_EDITION" = "enterprise" ]; then \
-        pip install --no-cache-dir ./ee ; \
+        pip install --no-cache-dir './ee[extraction]' ; \
     fi
 
 # Install Playwright Chromium browser
