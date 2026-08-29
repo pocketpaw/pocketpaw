@@ -1,4 +1,26 @@
 # listeners.py — In-process subscribers for upload-related bus events.
+# Updated: 2026-08-29 — T2 "Audio/video transcription at ingest". ``audio/*``
+#   and ``video/*`` no longer go through the extraction chain at all; they go
+#   to ``uploads.transcription``, which returns the transcript as an ordinary
+#   ``ExtractionResult``. Three things follow, and only the first is the
+#   feature:
+#   (1) everything after this point is UNCHANGED — the same persist, the same
+#       auto-tag, the same comprehension, the same KB ingest — so a recording
+#       gets a summary, tags and content search with no new code in any of
+#       those paths. That payoff is the reason T0 (persist the extraction) had
+#       to land first;
+#   (2) it FIXES a live bug rather than adding beside it. ``LocalExtractor``
+#       advertises ``supports_mimes = {"*"}`` and ends in
+#       ``path.read_text(errors="replace")``, so an uploaded video was being
+#       read whole into a string of replacement characters and that string was
+#       persisted, summarised, tagged and indexed. The branch is exclusive, so
+#       the binary is never read as text again;
+#   (3) it is contained in both directions. A textless result carrying a
+#       recorded ``skipped`` reason (too long, no speech) is persisted like any
+#       empty extraction — comprehension and tagging no-op on it and the KB
+#       ingest is skipped by the existing empty-text check. ``None`` means
+#       transcription itself was unavailable, and the listener returns without
+#       persisting so the next ingest retries.
 # Updated: 2026-08-29 — T0 "Persist the extracted text". Immediately after
 #   ``chain.run`` and BEFORE anything consumes the result, the listener now
 #   persists the whole ``ExtractionResult`` via ``uploads.extracted_text`` so
@@ -115,6 +137,7 @@ from pocketpaw_ee.cloud._core.realtime.events import Event, FileReady
 from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
 from pocketpaw_ee.cloud.uploads.extracted_text import persist_extracted_text
 from pocketpaw_ee.cloud.uploads.resolver import materialize_to_local_path
+from pocketpaw_ee.cloud.uploads.transcription import is_transcribable, transcribe_media
 
 logger = logging.getLogger(__name__)
 
@@ -203,15 +226,45 @@ async def index_uploaded_file(event: Event) -> None:
             )
             return
 
-        try:
-            from pocketpaw.config import get_settings
-            from pocketpaw_ee.cloud.extraction import build_chain
+        # T2: a recording is transcribed, not extracted — and the branch is
+        # exclusive on purpose. ``LocalExtractor`` claims every mime
+        # (``supports_mimes = {"*"}``) and its last branch is
+        # ``path.read_text(errors="replace")``, so sending a video through the
+        # chain slurps the whole binary into a string of replacement
+        # characters, which then gets persisted, summarised, tagged and pushed
+        # into the knowledge base. Media goes to ``transcription`` instead, and
+        # comes back as an ordinary ``ExtractionResult`` — so everything below
+        # this point (persist, tags, comprehension, KB ingest) treats a podcast
+        # exactly like a PDF, with no new code in any of those paths.
+        if is_transcribable(mime):
+            result = await transcribe_media(
+                path=path,
+                mime=mime,
+                file_id=file_id,
+                workspace_id=str(workspace_id),
+                filename=filename,
+            )
+            if result is None:
+                # Nothing was learned about the FILE — only that transcription
+                # was unavailable (no key, today's budget spent, fal errored).
+                # Persist nothing, so the next ingest is a clean retry.
+                logger.info(
+                    "file_id=%s (%s): no transcript this pass; leaving the file "
+                    "un-indexed rather than recording a result we do not have",
+                    file_id,
+                    mime,
+                )
+                return
+        else:
+            try:
+                from pocketpaw.config import get_settings
+                from pocketpaw_ee.cloud.extraction import build_chain
 
-            chain = build_chain(get_settings())
-            result = await chain.run(path, mime)
-        except Exception:
-            logger.exception("extraction failed for file_id=%s", file_id)
-            return
+                chain = build_chain(get_settings())
+                result = await chain.run(path, mime)
+            except Exception:
+                logger.exception("extraction failed for file_id=%s", file_id)
+                return
 
         # T0: persist the extraction ONCE, here, before anything consumes it.
         # This is the only place in the system that runs the chain on upload,
