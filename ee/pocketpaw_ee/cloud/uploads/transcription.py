@@ -261,7 +261,7 @@ async def _call_fal(path: Path, model: str, key: str) -> Any:
     import fal_client  # noqa: PLC0415 — lazy: EE pattern for optional runtime deps
 
     client = fal_client.AsyncClient(key=key)
-    audio_url = await client.upload_file(str(path))
+    audio_url = await client.upload_file(path)
     # ``subscribe`` is the QUEUE path, not the synchronous ``run``. A
     # 30-minute file is ~90 s of inference; the sync endpoint is meant for
     # short calls and would put this feature's whole reason for existing —
