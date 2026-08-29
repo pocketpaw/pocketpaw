@@ -340,6 +340,7 @@ async def test_no_embedder_returned_skips_quietly(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_modality_mismatch_skips_vector(monkeypatch, tmp_path):
     """Audio file but text+image-only embedder → vector path skipped."""
+    from pocketpaw_ee.cloud.uploads import listeners
     from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     direct = tmp_path / "x.wav"
@@ -360,6 +361,16 @@ async def test_modality_mismatch_skips_vector(monkeypatch, tmp_path):
         settings=settings,
         subprocess_calls=subprocess_calls,
     )
+
+    # T2 (2026-08-29): audio/* no longer goes through the extraction chain —
+    # it goes to fal transcription. This test is about the VECTOR modality
+    # gate, and it still needs a wav to reach it, so stand in for the
+    # transcript rather than change the mime (which is the whole point of the
+    # case). The routing itself is covered in test_transcription.py.
+    async def _fake_transcribe(**_kwargs):
+        return ExtractionResult(text="audio transcript", backend="fal-transcription")
+
+    monkeypatch.setattr(listeners, "transcribe_media", _fake_transcribe)
 
     await index_uploaded_file(
         FileReady(

@@ -1,4 +1,18 @@
 # conftest.py — shared fixtures for the cloud/uploads test package.
+# 2026-08-29 (T2): added the autouse ``no_real_transcription`` fixture. It pins
+#   both halves of the fal seam, for two different reasons.
+#   ``transcription._api_key`` resolves through ``studio.fal_edit.fal_api_key``,
+#   which calls ``load_dotenv()`` — so on a developer box it returns the
+#   workspace's REAL fal key, exactly the way ``build_adapter`` returns a real
+#   S3 adapter (see the T0 note below; that one already wrote to a live bucket
+#   once). It is pinned to an obvious fake so the gates downstream of it still
+#   run.
+#   ``transcription._call_fal`` is pinned to a stub that RAISES, not to one that
+#   returns nothing. T0's fixture could safely answer ``None`` because that was
+#   the pre-T0 behaviour; transcription has no pre-existing behaviour, so a
+#   silent stub would let a test that accidentally reaches the network path
+#   pass while proving nothing. A raise is loud, and the tests that mean to
+#   exercise a transcription install their own fake over it.
 # 2026-08-29 (T0): added the autouse ``no_real_storage_adapter`` fixture. It
 #   pins ``uploads.extracted_text._resolve_adapter`` to ``None`` so a test that
 #   forgets to inject an adapter falls back to re-extraction instead of
@@ -48,6 +62,32 @@ def no_real_storage_adapter(monkeypatch):
     from pocketpaw_ee.cloud.uploads import extracted_text
 
     monkeypatch.setattr(extracted_text, "_resolve_adapter", lambda: None)
+
+
+#: What ``no_real_transcription`` hands to the key gate. Obviously not a key,
+#: so a log line or an assertion carrying it is self-explaining.
+FAKE_FAL_KEY = "test-fal-key-never-real"
+
+
+@pytest.fixture(autouse=True)
+def no_real_transcription(monkeypatch):
+    """No uploads test may reach fal, and none may read the real fal key.
+
+    See the module header. The key is faked rather than emptied so the ceiling
+    and budget gates BELOW it still execute — a fixture that returned no key
+    would short-circuit every test at gate 2 and quietly stop measuring the
+    thing each one is named after.
+    """
+    from pocketpaw_ee.cloud.uploads import transcription
+
+    async def _forbidden(*_a, **_kw):
+        raise AssertionError(
+            "a test reached the real fal transcription call. Install a fake "
+            "over transcription._call_fal in the test that means to."
+        )
+
+    monkeypatch.setattr(transcription, "_api_key", lambda: FAKE_FAL_KEY)
+    monkeypatch.setattr(transcription, "_call_fal", _forbidden)
 
 
 @pytest.fixture()
