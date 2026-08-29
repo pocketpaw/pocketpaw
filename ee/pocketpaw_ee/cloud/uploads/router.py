@@ -9,6 +9,18 @@ human to SET one, that rule would only ever protect a previous machine
 summary. An explicit ``""`` erases it (and thereby re-opens the file to a
 future comprehension pass); omitting the field leaves it untouched.
 
+2026-08-29 (BA-3 "Make an agent of this book"): added
+``POST /uploads/{file_id}/agent`` — press once, get a dedicated co-reader
+agent that has read this file. All the provisioning logic lives in
+``uploads.book_agent``; the route is the tenant boundary and nothing else.
+PATH NOTE: the feature is pressed from the /files library, but the endpoint
+lives under this router's ``/uploads`` prefix because that is where the
+native ``file_id``, the tenant deps and the write ACL already are — the
+/files surface addresses the same row as ``uploads:<file_id>``. Unlike its
+neighbours here (which predate the rule), this route raises ``CloudError``
+subclasses, never ``HTTPException``, per the ee/cloud error convention;
+``_core.http.cloud_error_handler`` renders them.
+
 2026-07-03 (FL-11b "hide-from-AI purge"): ``PATCH /uploads/{file_id}`` now
 retroactively purges a file's KB content when ``hide_from_ai`` flips false→true
 AND the row tracks a kb-go article (``kb_article_id`` + ``kb_scope`` recorded on
@@ -482,6 +494,56 @@ async def patch_upload(
         "collections": list(doc.collections or []),
         "hide_from_ai": bool(doc.hide_from_ai),
         "summary": doc.summary,
+    }
+
+
+@router.post(
+    "/{file_id}/agent",
+    dependencies=[Depends(require_action_any_workspace("uploads.write"))],
+)
+async def make_book_agent(
+    file_id: str,
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Make (or return) the dedicated co-reader agent for this file.
+
+    Idempotent — pressing twice returns the same agent with ``created:
+    false``. ``indexed`` reports whether the book's text is actually in the
+    agent's knowledge scope: ``false`` means the agent exists but the ingest
+    failed, and the caller should say so rather than presenting a co-reader
+    that has read nothing (pressing again retries the ingest against that
+    same agent).
+
+    Gated as a WRITE: it mutates the file row's ``agent_id`` bind, so it takes
+    the same ``uploads.write`` membership check as upload, plus the
+    owner-or-workspace-admin ACL the PATCH route uses. Everything below that
+    — tenancy, idempotency, failure policy — lives in ``book_agent``.
+    """
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud._core.errors import NotFound as CloudNotFound
+    from pocketpaw_ee.cloud.uploads.book_agent import ensure_book_agent
+
+    doc = await _META.get_doc_scoped(file_id, workspace=workspace)
+    if doc is None:
+        raise CloudNotFound("file", file_id)
+
+    # Write-side ACL — owner OR workspace admin, matching PATCH /uploads/{id}.
+    # Chat membership does NOT grant it: making an agent of someone's book is
+    # a write on their library row, not a read of a shared attachment.
+    if doc.owner != user_id:
+        try:
+            is_admin = await _is_workspace_admin(user_id, workspace)
+        except Exception:
+            is_admin = False
+        if not is_admin:
+            raise Forbidden("files.forbidden")
+
+    result = await ensure_book_agent(file_id, workspace, user_id)
+    return {
+        "agent_id": result.agent_id,
+        "created": result.created,
+        "indexed": result.indexed,
     }
 
 
