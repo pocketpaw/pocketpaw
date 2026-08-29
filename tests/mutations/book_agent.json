@@ -1,0 +1,128 @@
+[
+  {
+    "label": "the idempotency check is deleted — every press re-reads the whole book",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "    existing_id = getattr(doc, \"agent_id\", \"\") or \"\"\n    if existing_id:",
+    "replace": "    existing_id = getattr(doc, \"agent_id\", \"\") or \"\"\n    if False:",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_pressing_twice_returns_the_same_agent_and_does_no_work_twice"
+    ]
+  },
+  {
+    "label": "the tenant filter is dropped — another workspace's book becomes an agent",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "    async def get_doc_scoped(self, file_id: str, workspace: str) -> FileUpload | None:\n        return await FileUpload.find_one(\n            FileUpload.file_id == file_id,\n            FileUpload.workspace == workspace,",
+    "replace": "    async def get_doc_scoped(self, file_id: str, workspace: str) -> FileUpload | None:\n        return await FileUpload.find_one(\n            FileUpload.file_id == file_id,",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_another_workspaces_file_is_not_found"
+    ]
+  },
+  {
+    "label": "the book is ingested into the workspace scope — the agent never reads it",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "            scope=f\"agent:{agent_id}\",",
+    "replace": "            scope=f\"workspace:{agent_id}\",",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_the_book_lands_in_the_agents_own_scope"
+    ]
+  },
+  {
+    "label": "the file is bound even when the ingest failed — the retry never happens",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "    indexed = await _ingest_book(agent.id, text, filename)\n    if not indexed:\n        return BookAgentResult(agent_id=agent.id, created=created, indexed=False)",
+    "replace": "    indexed = await _ingest_book(agent.id, text, filename)",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_a_failed_ingest_keeps_the_agent_and_says_it_is_unread"
+    ]
+  },
+  {
+    "label": "the hide-from-AI gate is removed — a hidden file reaches a KB scope anyway",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "    if getattr(doc, \"hide_from_ai\", False):\n        raise Forbidden(",
+    "replace": "    if False:\n        raise Forbidden(",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_a_file_hidden_from_ai_is_refused"
+    ]
+  },
+  {
+    "label": "an unreadable file still mints an agent that has read nothing",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "    if not text:\n        # An image-only scan",
+    "replace": "    if False:\n        # An image-only scan",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_no_readable_text_makes_no_agent"
+    ]
+  },
+  {
+    "label": "the detected title is ignored — the agent is named after the file",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "    detected = (title or \"\").strip()\n    if detected:",
+    "replace": "    detected = (title or \"\").strip()\n    if False:",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_the_agent_is_named_after_the_book_when_extraction_finds_a_title"
+    ]
+  },
+  {
+    "label": "the filename is used raw — separators and all",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "    cleaned = _WHITESPACE.sub(\" \", _FILENAME_SEPARATORS.sub(\" \", stem)).strip()",
+    "replace": "    cleaned = stem",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_the_agent_falls_back_to_a_cleaned_up_filename"
+    ]
+  },
+  {
+    "label": "the slug stops being deterministic — a retry mints a second agent",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "    return f\"book-{file_id}\"",
+    "replace": "    import uuid\n\n    return f\"book-{file_id}-{uuid.uuid4().hex}\"",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_a_retry_after_a_failed_ingest_adopts_the_same_agent"
+    ]
+  },
+  {
+    "label": "the idempotent return claims the agent has not read the book",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "            return BookAgentResult(agent_id=existing_id, created=False, indexed=True)",
+    "replace": "            return BookAgentResult(agent_id=existing_id, created=False, indexed=False)",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_pressing_twice_returns_the_same_agent_and_does_no_work_twice"
+    ]
+  },
+  {
+    "label": "an adopted agent is reported as freshly created",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "    created = False\n    try:\n        agent = await agents_service.get_by_slug(file_workspace, slug)",
+    "replace": "    created = True\n    try:\n        agent = await agents_service.get_by_slug(file_workspace, slug)",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_a_retry_after_a_failed_ingest_adopts_the_same_agent"
+    ]
+  },
+  {
+    "label": "the agent is made in the CALLER's claimed workspace, not the file's",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "    file_workspace = doc.workspace",
+    "replace": "    file_workspace = workspace_id",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_the_agent_follows_the_file_even_if_the_read_stops_filtering"
+    ]
+  },
+  {
+    "label": "the persona reverts to a generic assistant — the co-reader framing is lost",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "        f'You are a co-reader of \"{subject}\". You have read it closely and you '",
+    "replace": "        f'You are a helpful assistant. A document called \"{subject}\" is attached. '",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_the_agent_is_a_co_reader_not_a_generic_assistant"
+    ]
+  },
+  {
+    "label": "the bind is never written — the file forgets its agent",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "    bound = await store.set_book_agent(file_id, file_workspace, agent_id=agent.id)",
+    "replace": "    bound = await store.set_book_agent(file_id, file_workspace, agent_id=None)",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_the_bind_is_persisted_on_the_file"
+    ]
+  }
+]
