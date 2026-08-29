@@ -5,6 +5,14 @@
 # Created 2026-08-29. Sibling of test_local.py, which pins the original
 # PDF/DOCX/image/VTT parity contract and is left untouched.
 #
+# Updated 2026-08-29, same day, twice after the first draft:
+#   - the two html-fallback fixtures were replaced. They asserted the right
+#     output while never executing the fallback, and the mutation sweep caught
+#     it — see test_trafilatura_really_declines_the_fallback_fixtures.
+#   - added the seam assertions at the bottom (the library APIs these branches
+#     call, plus the premise that Pillow still cannot decode HEIF alone), per
+#     the design doc's risk register.
+#
 # THREE THINGS THESE TESTS DO ON PURPOSE:
 #
 # 1. Real fixtures, built at test time. Every document here is written by the
