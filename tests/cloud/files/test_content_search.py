@@ -56,6 +56,33 @@ def _router_module():
 
 
 @pytest.fixture(autouse=True)
+def _no_real_storage(monkeypatch):
+    """Make the process-wide uploads adapter unusable for the whole module.
+
+    In a dev checkout ``uploads/router._ADAPTER`` is built at import time from
+    ``load_dotenv()`` + ``POCKETPAW_UPLOAD_ADAPTER=s3``, so it is a LIVE S3
+    client aimed at a real bucket — and mounting the /files surface pulls that
+    module in transitively. Content search never touches blob storage (the
+    join is metadata-only), and this fixture makes that a guarantee instead of
+    an observation: any future test here that reaches for the adapter gets a
+    loud AttributeError rather than a network write.
+    """
+    import importlib
+
+    uploads_router = importlib.import_module("pocketpaw_ee.cloud.uploads.router")
+
+    class _Detonate:
+        def __getattr__(self, name):  # pragma: no cover — tripwire
+            raise AssertionError(
+                f"a files-search test reached the real uploads adapter (.{name}). "
+                "Inject a fake adapter; never resolve the default."
+            )
+
+    monkeypatch.setattr(uploads_router, "_ADAPTER", _Detonate(), raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _clear_probe_cache():
     """The compiled_with probe is TTL-cached per scope at module level; a test
     must never inherit another test's corpus."""
@@ -658,3 +685,80 @@ def test_the_endpoint_accepts_no_scope_override(monkeypatch):
     assert "scope" not in seen[0]
     assert seen[0]["workspace_id"] == "w1"
     assert seen[0]["user_id"] == "u1"
+
+
+# ---------------------------------------------------------------------------
+# Seam assertions
+# ---------------------------------------------------------------------------
+#
+# The design doc's non-negotiable (a): every new integration ships a check that
+# the API it calls actually EXISTS with the shape it is called with. Content
+# search wraps three of its four seams in `except Exception`, which is correct
+# for a search box and lethal for a signature drift — a renamed helper would
+# not raise, it would render "couldn't search inside your files" forever, and
+# the feature would read as switched off rather than broken. These tests fail
+# at the rename instead.
+
+
+def test_the_kb_seam_exists_with_the_shape_content_search_calls():
+    """``_kb`` is called positionally as ``_kb("search", q, "--scope", s,
+    "--limit", n)`` and ``_kb("list", "--scope", s)``, through
+    ``asyncio.to_thread``. A signature change here surfaces as a permanent
+    ``kb_unavailable``."""
+    import inspect
+
+    from pocketpaw_ee.cloud.agents.knowledge import _kb
+
+    sig = inspect.signature(_kb)
+    params = list(sig.parameters.values())
+    assert params[0].kind is inspect.Parameter.VAR_POSITIONAL, (
+        "_kb no longer takes *args; content_search passes its kb argv positionally"
+    )
+    # Keyword-only extras content_search relies on being optional.
+    for name in ("input_text", "timeout"):
+        assert name in sig.parameters, f"_kb lost its {name!r} keyword"
+
+
+def test_the_scope_seam_exists_and_still_orders_user_pocket_workspace():
+    """``resolve_kb_scopes`` builds a ``ScopeContext`` by keyword and reads the
+    precedence out of ``_kb_scopes_for_context``. If that module renames a
+    field, the constructor raises — but if it silently reorders, tenancy
+    changes with no error at all. Pin the order, not just the import."""
+    assert cs.resolve_kb_scopes(workspace_id="w1", user_id="u1", pocket_id=None) == [
+        "user:u1",
+        "workspace:w1",
+    ]
+    assert cs.resolve_kb_scopes(workspace_id="w1", user_id="u1", pocket_id="p9") == [
+        "user:u1",
+        "pocket:p9",
+        "workspace:w1",
+    ]
+
+
+def test_the_pocket_membership_seam_takes_the_keywords_the_gate_passes():
+    """``_pocket_readable`` calls ``is_member(pocket_id=…, user_id=…)`` inside
+    an ``except Exception: return False``. A renamed keyword would therefore
+    deny EVERY pocket search silently — the switched-off shape exactly."""
+    import inspect
+
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    sig = inspect.signature(pockets_service.is_member)
+    assert {"pocket_id", "user_id"} <= set(sig.parameters), (
+        f"is_member no longer accepts pocket_id/user_id: {sig}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_store_seam_accepts_the_pocket_sentinel(beanie_files_db):
+    """``search_file_contents`` hands ``LIST_WORKSPACE_ONLY`` — a sentinel
+    OBJECT, not a string — to the store. A store that started treating an
+    unknown type as "no filter" would leak pocket rows into the workspace
+    panel without erroring."""
+    await _seed("w1", name="ws.pdf", article_id="a-ws")
+    await _seed("w1", name="p.pdf", article_id="a-p", pocket_id="P")
+
+    rows = await MongoFileStore().list_by_kb_articles(
+        "w1", ["a-ws", "a-p"], pocket_id=LIST_WORKSPACE_ONLY
+    )
+    assert [r.record.filename for r in rows] == ["ws.pdf"]
