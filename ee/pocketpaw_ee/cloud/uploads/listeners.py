@@ -1,4 +1,23 @@
 # listeners.py — In-process subscribers for upload-related bus events.
+# Updated: 2026-08-29 — T0 "Persist the extracted text". Immediately after
+#   ``chain.run`` and BEFORE anything consumes the result, the listener now
+#   persists the whole ``ExtractionResult`` via ``uploads.extracted_text`` so
+#   no later consumer re-runs the chain over the same bytes (the book agent
+#   did; transcription was about to). Three properties:
+#   (1) it runs before comprehension and before the KB ingest, so the text is
+#       already durable if either of those dies mid-flight;
+#   (2) it fails OPEN by contract — ``persist_extracted_text`` returns False
+#       instead of raising, so a storage failure costs a future re-extraction
+#       and cannot lose the ingest, the tags or the comprehension that follow.
+#       That is the same containment rule the FL-6 tag write and the FL-11b
+#       tracking write already follow;
+#   (3) ``content_version`` is read from the row BEFORE extraction starts, so a
+#       concurrent inline edit makes the stored text look STALE (the reader
+#       then re-extracts) rather than making edited bytes look described.
+#   ``_write_comprehension`` now takes the typed ``ExtractionResult`` rather
+#   than an untyped ``result`` — the same type ``load_extracted_text`` returns,
+#   so a future backfill can feed it a stored blob. It deliberately does not
+#   read that blob back here; see the function's own note.
 # Updated: 2026-08-28 — FC-3 "File comprehension". After the FL-6 auto-tag pass
 #   the listener now also asks a model what the file IS (``_write_comprehension``,
 #   beside ``_write_auto_tags``) and persists a ``summary`` plus merged
@@ -93,6 +112,8 @@ from pathlib import Path
 
 from pocketpaw_ee.cloud._core.realtime.bus import get_bus
 from pocketpaw_ee.cloud._core.realtime.events import Event, FileReady
+from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
+from pocketpaw_ee.cloud.uploads.extracted_text import persist_extracted_text
 from pocketpaw_ee.cloud.uploads.resolver import materialize_to_local_path
 
 logger = logging.getLogger(__name__)
@@ -156,6 +177,12 @@ async def index_uploaded_file(event: Event) -> None:
     # must not clobber if a person already wrote one.
     existing_collections = list(getattr(doc, "collections", []) or [])
     existing_summary = getattr(doc, "summary", None)
+    # T0: the version the extraction we are about to run describes. Read BEFORE
+    # the chain runs, on purpose — if an inline edit bumps it while extraction
+    # is in flight, we stamp the OLD version, the reader sees a mismatch and
+    # re-extracts. Reading it afterwards would label text from stale bytes as
+    # current, which is the one outcome worse than not persisting at all.
+    content_version = getattr(doc, "content_version", 0) or 0
 
     adapter = _resolve_adapter()
     if adapter is None or not storage_key:
@@ -186,6 +213,24 @@ async def index_uploaded_file(event: Event) -> None:
             logger.exception("extraction failed for file_id=%s", file_id)
             return
 
+        # T0: persist the extraction ONCE, here, before anything consumes it.
+        # This is the only place in the system that runs the chain on upload,
+        # so it is the only place that can hand the result to everyone else —
+        # the book agent and (next) transcription both re-ran the whole chain
+        # over the same bytes because this line did not exist.
+        #
+        # Contained and fail-OPEN by contract (``persist_extracted_text``
+        # returns False rather than raising), so a storage failure costs a
+        # future re-extraction and nothing else: comprehension, auto-tagging
+        # and the KB ingest below all proceed exactly as before.
+        await persist_extracted_text(
+            file_id=file_id,
+            workspace_id=str(workspace_id),
+            result=result,
+            content_version=content_version,
+            adapter=adapter,
+        )
+
         # FL-6: auto-tag from extraction output. Independent of KB ingest —
         # runs before it so a file still gets tags even if the KB write later
         # fails. Contained: a tag-write error must not abort indexing.
@@ -203,7 +248,7 @@ async def index_uploaded_file(event: Event) -> None:
         await _write_comprehension(
             file_id=file_id,
             workspace_id=str(workspace_id),
-            result=result,
+            extracted=result,
             mime=mime,
             existing_collections=existing_collections,
             existing_summary=existing_summary,
@@ -540,12 +585,21 @@ async def _write_comprehension(
     *,
     file_id: str,
     workspace_id: str,
-    result,
+    extracted: ExtractionResult,
     mime: str,
     existing_collections: list[str],
     existing_summary: str | None,
 ) -> None:
     """Ask a model what this file IS and persist the summary + collections.
+
+    T0 note — WHY THIS DOES NOT READ THE STORED TEXT BACK. ``extracted`` is now
+    the typed ``ExtractionResult``: the same shape ``extracted_text`` persists
+    and the same shape ``load_extracted_text`` returns, so a backfill that wants
+    to re-comprehend an old file can hand this function a loaded blob and
+    nothing else changes. What it deliberately does NOT do is fetch the blob the
+    caller wrote three lines earlier — that would be a storage round-trip for
+    text already in memory, on the hot path of every upload. "Consumers do not
+    re-extract" is the goal; re-READING what you are holding buys none of it.
 
     The three refusals, in the order they are cheapest to make:
 
@@ -594,11 +648,10 @@ async def _write_comprehension(
         from pocketpaw_ee.cloud.uploads.comprehension import comprehend
         from pocketpaw_ee.cloud.uploads.tagging import merge_tags
 
-        captions = list(getattr(result, "captions", None) or [])
         understood = await comprehend(
-            getattr(result, "title", None),
-            getattr(result, "text", None),
-            captions,
+            extracted.title,
+            extracted.text,
+            list(extracted.captions or []),
             mime=mime,
         )
         if understood is None:

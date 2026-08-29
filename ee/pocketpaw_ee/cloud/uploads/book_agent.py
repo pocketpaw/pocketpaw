@@ -40,10 +40,17 @@
 #     why ``indexed`` is on the result at all — the caller has to tell the user
 #     "your agent is here but it hasn't finished reading."
 #
-# KNOWN COST: the text is extracted AGAIN here. The upload listener already
-# extracted this exact file at upload time, but it only persisted the derived
-# kb-go article, never the raw text, so there is nothing to reuse — see the
-# module's ``_extract_text`` note.
+# Updated 2026-08-29 (T0, "Persist the extracted text"): the KNOWN COST that
+# used to sit here is GONE. This module previously re-ran the entire extraction
+# chain over bytes the upload listener had already extracted, because the
+# listener persisted only the compiled kb-go article and never the raw text —
+# tens of seconds and a second captioning bill for a large PDF, every press.
+# The listener now stores the whole ``ExtractionResult``, so ``_extract_text``
+# reads it back and only falls through to the chain when there is nothing
+# stored: a file uploaded before T0, a file edited since (the stored text is
+# then STALE and refused), or a persist that failed. The fallback is the old
+# code path unchanged, so nothing about this feature depends on the store
+# having worked.
 
 from __future__ import annotations
 
@@ -54,6 +61,7 @@ from pathlib import Path
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import Forbidden, Internal, NotFound, ValidationError
+from pocketpaw_ee.cloud.uploads.extracted_text import load_extracted_text
 from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 from pocketpaw_ee.cloud.uploads.resolver import materialize_to_local_path
 
@@ -160,16 +168,41 @@ def _resolve_adapter() -> Any | None:
 async def _extract_text(doc: Any) -> tuple[str, str | None]:
     """Return ``(text, title)`` for the file, or raise.
 
-    THE RE-EXTRACTION NOTE. This runs the same chain the FileReady listener ran
-    at upload time. The listener persists the compiled kb-go article and the
-    article id, never the raw extracted text, so there is genuinely nothing
-    cheaper to read back — reusing the workspace-scope article would hand the
-    agent kb's lossy summary instead of the book. Re-extraction is therefore
-    correct here, just not free: a large PDF pays the full chain again
-    (seconds to tens of seconds locally; a cloud extractor adds its round trip).
-    If this ever needs to be fast, the fix is upstream — persist the extracted
-    text at upload — not a shortcut here.
+    T0: the upload listener already extracted this file once and now PERSISTS
+    the result, so the first thing we do is read it back. On a hit the whole
+    chain — and, for a scanned PDF, a second captioning bill — is skipped.
+
+    ``load_extracted_text`` returns ``None`` for every doubt (no stored blob,
+    a legacy row, a file edited since extraction, a hidden file, a corrupt
+    blob), and ``None`` drops straight through to the chain below: the exact
+    code that ran before T0. So the stored copy is a pure accelerator — if the
+    store never worked at all, this function still behaves as it always did,
+    just slowly. That is deliberate; the alternative would make a co-reader
+    agent fail on a file the user can plainly read.
+
+    A stored hit still has to clear the SAME empty-text bar as a fresh
+    extraction, so an image-only scan is refused identically either way.
     """
+    stored = await load_extracted_text(doc)
+    if stored is not None:
+        text = (stored.text or "").strip()
+        if text:
+            logger.info(
+                "book agent: reusing the stored extraction for file_id=%s "
+                "(%d chars); skipping the chain",
+                getattr(doc, "file_id", "?"),
+                len(text),
+            )
+            return text, stored.title
+        # Stored, but empty. Re-running the chain would produce the same empty
+        # result at full cost, so refuse here on the same terms the fresh path
+        # refuses below — an agent that has read nothing is a broken feature,
+        # not a slow one.
+        raise ValidationError(
+            "file.no_text",
+            "No readable text was found in this file, so no agent was made from it.",
+        )
+
     adapter = _resolve_adapter()
     storage_key = getattr(doc, "storage_key", "") or ""
     if adapter is None or not storage_key:

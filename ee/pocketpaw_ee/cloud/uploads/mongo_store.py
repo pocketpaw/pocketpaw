@@ -1,5 +1,17 @@
 """Mongo-backed metadata store, workspace-scoped.
 
+2026-08-29 (T0 "Persist the extracted text"): added ``set_extracted_text`` —
+the workspace-scoped setter ``uploads.extracted_text`` uses to point a row at
+the derived blob holding its ``ExtractionResult``, shaped exactly like
+``set_kb_article`` (read through the workspace filter, write the pair, save).
+The key and the ``content_version`` it was extracted from are always written
+TOGETHER: a key without a version is a blob whose freshness nobody can judge.
+``extracted_text`` never touches Beanie itself; this store stays the only owner
+of ``FileUpload`` writes in the package. Deliberately NOT threaded into
+``_to_record`` or the ``iter_by_*`` dict rows — unlike ``tags``/``summary``,
+nothing in a listing renders it, and ``FileRecord`` is a ``src/`` type whose
+shape ripples well past this package.
+
 2026-08-28 (FC-1 "File comprehension"): ``summary`` is threaded exactly the way
 ``tags`` is — ``set_library_metadata`` grew a ``summary`` keyword, and both
 ``iter_by_workspace`` / ``iter_by_pocket`` dict rows now carry it so the
@@ -194,6 +206,36 @@ class MongoFileStore:
         if doc is None:
             return None
         doc.agent_id = agent_id
+        await doc.save()
+        return doc
+
+    async def set_extracted_text(
+        self,
+        file_id: str,
+        workspace: str,
+        *,
+        key: str | None,
+        content_version: int | None,
+    ) -> FileUpload | None:
+        """Point a row at its persisted extraction blob (T0).
+
+        Workspace-scoped like every other write here — the filter is applied on
+        the read, so a caller cannot re-point another tenant's row. Pass the
+        storage key plus the ``content_version`` the text was extracted FROM
+        after a successful blob write; pass ``None`` for both to clear the
+        pointer (the reader then falls back to a live extraction). Both fields
+        are always written to the given values, the way ``set_kb_article``
+        writes its pair — they only mean anything together, so a partial update
+        would leave a key whose freshness cannot be judged.
+
+        Returns the updated doc, or ``None`` if no live row matches
+        ``(file_id, workspace)``.
+        """
+        doc = await self.get_doc_scoped(file_id, workspace)
+        if doc is None:
+            return None
+        doc.extracted_text_key = key
+        doc.extracted_text_version = content_version
         await doc.save()
         return doc
 

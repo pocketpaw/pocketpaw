@@ -1,5 +1,53 @@
 """EE FileUpload document — Mongo metadata for blobs stored via StorageAdapter.
 
+2026-08-29 — T0 "Persist the extracted text". Added ``extracted_text_key``
+(``str | None``) and ``extracted_text_version`` (``int | None``), both default
+``None``. Together they point at ONE derived blob holding the serialized
+``ExtractionResult`` produced at upload time, so no later consumer has to run
+the extraction chain over the same bytes again (``uploads/extracted_text.py``
+owns the blob; see that module for the read/write contract).
+
+**Why a BLOB and not a Mongo field.** A 500-page book extracts to ~940K chars
+(measured). Three things break if that text lives on this document:
+
+1. ``mongo_store.iter_by_workspace`` / ``iter_by_pocket`` / ``list_by_workspace``
+   hydrate FULL Beanie documents with ``limit`` up to 500 and no projection.
+   500 rows x ~1 MB is a memory bomb on the plain ``/files`` listing, and the
+   only fix would be a projection on every read path — including every read
+   path anyone adds later, which is a rule that silently stops being followed.
+2. BSON caps a document at 16 MB. An extraction that crosses it does not
+   degrade, it makes ``doc.save()`` RAISE — which would take the ``summary``,
+   ``tags`` and ``kb_article_id`` writes on the same row down with it.
+3. Capping the field to fit is not a way out: the whole point of persisting the
+   text is that the BOOK AGENT can reuse it, and the book agent needs the whole
+   book. A cap makes the feature miss exactly the file it exists for.
+
+A blob has none of those limits, and this package already owns a
+``StorageAdapter`` keyed by string. The key is DETERMINISTIC on ``file_id``
+(not a random ``new_storage_key``) so a re-ingest overwrites in place instead
+of leaking a new object per pass, and so a blob written while the column write
+failed is simply overwritten next time rather than orphaned forever.
+
+``extracted_text_version`` is the staleness guard, and it is load-bearing:
+``cloud/file_versions/service.py`` rewrites a file's bytes and bumps
+``content_version`` WITHOUT emitting ``FileReady``, so an inline edit never
+re-runs extraction. It records the ``content_version`` the text was extracted
+from; the reader treats "version does not match the row's current
+``content_version``" as identical to "no stored text" and falls back to a live
+extraction. Without it, persisting text would REGRESS the book agent, which
+re-extracts fresh today.
+
+Neither field is indexed: both are read only after a row has already been
+resolved by ``file_id``, exactly like ``summary`` and ``kb_article_id``.
+Legacy rows read back ``None`` via the defaults (Beanie field-add, no
+migration) and every consumer falls back to extraction on ``None``.
+
+Known follow-up, deliberately NOT built here: flipping ``hide_from_ai`` on does
+not yet PURGE an already-persisted text blob the way it purges the kb article.
+The reader refuses to serve text for a hidden file, so nothing reads it — but
+the bytes stay at rest until the file is deleted. The purge belongs beside the
+existing kb purge in ``uploads/router.py``'s PATCH handler.
+
 2026-08-28 — FC-1 "File comprehension". Added ``summary`` (``str | None``,
 default ``None``): one or two sentences saying what the file IS, written by the
 comprehension pass on ingest (``uploads/comprehension.py``) and editable by a
@@ -113,6 +161,16 @@ class FileUpload(TimestampedDocument):
     # a later re-index re-populates these. Legacy rows read ``None``.
     kb_article_id: str | None = None
     kb_scope: str | None = None
+    # Persisted extraction (T0). ``extracted_text_key`` is the storage key of
+    # the derived blob holding the serialized ``ExtractionResult`` from ingest;
+    # ``extracted_text_version`` is the ``content_version`` those bytes were
+    # extracted FROM. A reader that sees a mismatch must treat the blob as
+    # absent and re-extract — see the module docstring for why the version is
+    # not optional. ``None`` on legacy rows, on files that were never
+    # extracted, and on files whose persist step failed (the ingest still
+    # succeeded; the only cost is that the next consumer re-extracts).
+    extracted_text_key: str | None = None
+    extracted_text_version: int | None = None
     # Book-agent bind (BA-1). The id of the dedicated co-reader agent made
     # from this file, or ``None`` when none has been made. This is the
     # idempotency key for "Make an agent of this book": a live bind short-

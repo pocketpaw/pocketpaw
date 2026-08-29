@@ -1,4 +1,11 @@
 # service.py — EEUploadService: workspace-scoped upload pipeline on top of OSS.
+# Updated: 2026-08-29 — T0 "Persist the extracted text". ``delete`` now also
+#   removes the file's DERIVED extraction blob (``uploads.extracted_text``),
+#   which T0 introduced beside the uploaded bytes. Without this, every deleted
+#   file would leave its extracted text at rest forever. It runs after the
+#   tombstone and the primary blob delete, is keyed on ``file_id`` alone (so it
+#   needs no row read and works post-tombstone), and swallows its own failures
+#   — a derived orphan is a cleanup-job problem, never a failed delete.
 # Updated: 2026-06-26 — ART-4 security follow-up. ``presigned_get`` now forwards
 #   a Content-Disposition to the storage adapter: ``attachment; filename="…"``
 #   for any mime NOT in ``INLINE_MIMES`` (mirroring the streaming download
@@ -52,6 +59,7 @@ from pocketpaw.uploads.service import (
 )
 from pocketpaw_ee.cloud.realtime.emit import emit
 from pocketpaw_ee.cloud.realtime.events import FileDeleted, FileReady
+from pocketpaw_ee.cloud.uploads.extracted_text import delete_extracted_text
 from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 
 
@@ -331,6 +339,13 @@ class EEUploadService:
         # future cleanup job) rather than silently surviving visibility.
         await self._meta.soft_delete_scoped(file_id, workspace=workspace)
         await self._adapter.delete(rec.storage_key)
+        # T0: the upload's DERIVED extraction blob goes with it. Keyed
+        # deterministically on file_id, so no row read is needed — which also
+        # means it works after the tombstone above. Best-effort by contract:
+        # ``delete_extracted_text`` swallows its own failures, because a
+        # leftover derived blob is a cleanup-job problem and never a reason to
+        # fail a delete the user asked for.
+        await delete_extracted_text(file_id, adapter=self._adapter)
         # Emit FileDeleted on every delete so subscribers can prune cached
         # state (KB index, search caches). Chat-scoped rows include group_id
         # for the timeline broadcast; workspace-only rows skip it.
