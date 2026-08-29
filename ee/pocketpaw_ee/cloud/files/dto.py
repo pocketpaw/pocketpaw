@@ -1,5 +1,11 @@
 """Public schemas for the files module.
 
+2026-08-29 (T3 "Files content search"): added ``ContentSearchRequest``, the body
+of ``POST /files/search``. It carries no ``scope`` field on purpose — unlike
+``/kb/search``, which takes a client scope and binds it to the caller through an
+allowlist, this surface derives its scopes from the caller, so there is nothing
+to validate and nothing to get wrong. See the class docstring.
+
 2026-08-28 (FC-1 "File comprehension"): ``FileEntry`` grew ``summary``
 (``str | None``, default ``None``) — one or two sentences saying what the file
 IS, written by the comprehension pass on ingest. Only the uploads provider

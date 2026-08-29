@@ -47,8 +47,8 @@
   {
     "label": "swallow a kb failure as an empty result instead of reporting it",
     "file": "ee/pocketpaw_ee/cloud/files/content_search.py",
-    "find": "            matches=[], scopes=scopes, degraded=DEGRADED_KB_UNAVAILABLE\n        )",
-    "replace": "            matches=[], scopes=scopes, degraded=None\n        )",
+    "find": "        return ContentSearchResult(matches=[], scopes=scopes, degraded=DEGRADED_KB_UNAVAILABLE)",
+    "replace": "        return ContentSearchResult(matches=[], scopes=scopes, degraded=None)",
     "tests": [
       "tests/cloud/files/test_content_search.py::test_an_unreachable_kb_says_so_instead_of_returning_no_matches"
     ]

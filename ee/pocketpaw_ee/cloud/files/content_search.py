@@ -200,9 +200,7 @@ async def _default_kb_list(scope: str) -> list[dict[str, Any]]:
     return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
 
 
-async def _compiled_with_for_scope(
-    scope: str, kb_list: KbListFn | None
-) -> dict[str, str]:
+async def _compiled_with_for_scope(scope: str, kb_list: KbListFn | None) -> dict[str, str]:
     """``{article_id: compiled_with}`` for one scope, TTL-cached.
 
     The cache is bypassed entirely when a probe is injected, so a test never
@@ -254,9 +252,7 @@ async def search_file_contents(
     defaults shell out to kb-go and read Mongo.
     """
     q = (query or "").strip()
-    scopes = resolve_kb_scopes(
-        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
-    )
+    scopes = resolve_kb_scopes(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
     if not q or not scopes:
         return ContentSearchResult(matches=[], scopes=scopes, degraded=None)
 
@@ -266,9 +262,7 @@ async def search_file_contents(
         hits = await searcher(q, scopes, min(capped * _OVERFETCH, _MAX_KB_LIMIT))
     except Exception as exc:
         logger.warning("files content search: kb unreachable (scopes=%s): %s", scopes, exc)
-        return ContentSearchResult(
-            matches=[], scopes=scopes, degraded=DEGRADED_KB_UNAVAILABLE
-        )
+        return ContentSearchResult(matches=[], scopes=scopes, degraded=DEGRADED_KB_UNAVAILABLE)
 
     # kb stamps ``scope`` on a hit only in multi-scope mode; with one scope the
     # answer is unambiguous, so fill it in rather than leaving the row blank.
