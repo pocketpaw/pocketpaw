@@ -1,5 +1,15 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-08-29 (T2 "Audio/video transcription at ingest") — added
+``FileTranscriptionUsage`` (one row per workspace per UTC day, the atomic
+counter behind the media-transcription daily cap) to the imports and
+``get_all_documents()`` so the ``file_transcription_usage`` collection is wired
+into ``init_beanie``. Kept out of ``__all__``: only
+``ee.cloud.uploads.transcription_budget`` imports the doc class directly.
+Registering it here is load-bearing — an unregistered document makes
+``get_pymongo_collection()`` raise inside that budget's fail-CLOSED except, so
+every transcription is refused and the feature reads as switched off.
+
 Updated: 2026-08-28 (FC-3 "File comprehension") — added
 ``FileComprehensionUsage`` (one row per workspace per UTC day, the atomic
 counter behind the comprehension daily cap) to the imports and
@@ -195,6 +205,7 @@ from pocketpaw_ee.cloud.models.fabric_ingest_state import (
 )
 from pocketpaw_ee.cloud.models.file import FileObj
 from pocketpaw_ee.cloud.models.file_comprehension_usage import FileComprehensionUsage
+from pocketpaw_ee.cloud.models.file_transcription_usage import FileTranscriptionUsage
 from pocketpaw_ee.cloud.models.file_version import FileVersionDoc
 from pocketpaw_ee.cloud.models.foresight_backtest import ForesightBacktest
 from pocketpaw_ee.cloud.models.foresight_prediction_record import (
@@ -471,6 +482,12 @@ def get_all_documents():
         # Per-workspace/day file-comprehension spend counter (FC-3). Only
         # ``ee.cloud.uploads.comprehension_budget`` reads/writes this.
         FileComprehensionUsage,
+        # Per-workspace/day media-transcription spend counter (T2). Only
+        # ``ee.cloud.uploads.transcription_budget`` reads/writes this. Separate
+        # from the comprehension counter on purpose: the two meter different
+        # bills, and one shared row would let a bulk photo import exhaust the
+        # ceiling that exists to stop a podcast library.
+        FileTranscriptionUsage,
         # file_versions edit history (ART-1). Only ``file_versions.service``
         # imports this class (import-linter "FileVersions" contract).
         FileVersionDoc,

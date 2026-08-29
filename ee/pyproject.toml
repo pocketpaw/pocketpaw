@@ -190,11 +190,18 @@ dependencies = [
     # uses it for the per-workspace keypair + subscribe/unsubscribe endpoints.
     "py-vapid>=1.9.0",
     "pywebpush>=2.3.0",
-    # --- fal.ai client — /studio canvas EDIT ops (cloud.studio.fal_edit) ---
+    # --- fal.ai client — /studio canvas EDIT ops + media transcription ---
     # LiteLLM serves the text-to-image generation models but has no route for
     # fal's image-EDIT endpoints (nano-banana-2/edit, birefnet/v2, esrgan, …),
     # so those run DIRECTLY against fal through the official fal-client SDK.
-    # Only imported by ee/pocketpaw_ee/cloud/studio/fal_edit.py.
+    # The gateway serves no speech-to-text model either (probed 2026-08-29:
+    # 80 models, zero), so ingest-time audio/video transcription calls fal
+    # direct for the same reason.
+    # Imported (lazily) by ee/pocketpaw_ee/cloud/studio/fal_edit.py and
+    # ee/pocketpaw_ee/cloud/uploads/transcription.py. It is a BASE dependency,
+    # not an extra, deliberately — both importers are lazy, so demoting it to
+    # an extra builds green and then produces nothing at runtime. Pinned there
+    # by tests/packaging/test_extraction_deps_reach_the_image.py.
     "fal-client>=0.3.0",
     "hcloud>=2.23.0",
 ]
