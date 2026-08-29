@@ -220,6 +220,28 @@ async def test_a_stale_bind_reprovisions(beanie_upload_db, store, wiring):
     assert doc.agent_id == result.agent_id
 
 
+async def test_a_stale_bind_is_cleared_even_if_the_reprovision_fails(
+    beanie_upload_db, store, wiring
+):
+    """A bind must never outlive the agent it names.
+
+    Stale bind + a re-provision that can't finish its ingest: the row must not
+    keep pointing at the deleted agent, or the library offers "open the agent"
+    on a dead id.
+    """
+    from pocketpaw_ee.cloud.uploads.book_agent import ensure_book_agent
+
+    wiring.ingest.fail = True
+    await store.save_scoped(_record(), "w1")
+    await store.set_book_agent("f1", "w1", agent_id="agent-that-was-deleted")
+
+    result = await ensure_book_agent("f1", "w1", "u1")
+
+    assert result.indexed is False
+    doc = await store.get_doc_scoped("f1", "w1")
+    assert doc.agent_id is None
+
+
 # --- tenancy ---------------------------------------------------------------
 
 

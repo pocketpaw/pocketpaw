@@ -274,12 +274,17 @@ async def ensure_book_agent(
             await agents_service.get(existing_id)
             return BookAgentResult(agent_id=existing_id, created=False, indexed=True)
         except NotFound:
-            # Stale bind (agent deleted) — fall through and re-provision.
+            # Stale bind (agent deleted) — fall through and re-provision. Clear
+            # it FIRST: if the re-provision then fails (unreadable file, ingest
+            # error), the row would otherwise keep pointing at a deleted agent
+            # and the library would offer "open" on a dead id. The invariant is
+            # that a bind always names a live agent that has read the book.
             logger.info(
                 "book agent: file %s bound to missing agent %s; re-provisioning",
                 file_id,
                 existing_id,
             )
+            await store.set_book_agent(file_id, file_workspace, agent_id=None)
 
     # (4) Extract first — the name comes from the title, and a file we cannot
     # read must not leave an agent behind.
@@ -326,6 +331,10 @@ async def ensure_book_agent(
         return BookAgentResult(agent_id=agent.id, created=created, indexed=False)
 
     # (7) Bind the file to the agent — the idempotency key for the next press.
+    # no-event: the visible artifact is the agent, and ``agents.service.create``
+    # already emitted ``AgentCreated`` for it. This write is uploads-internal
+    # bookkeeping on a row nothing subscribes to; an event here would announce
+    # the same thing twice, and on the adopt path announce nothing new at all.
     bound = await store.set_book_agent(file_id, file_workspace, agent_id=agent.id)
     if bound is None:
         # The row vanished under us (deleted mid-provision). The agent read the

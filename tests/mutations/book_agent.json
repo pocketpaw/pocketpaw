@@ -117,6 +117,15 @@
     ]
   },
   {
+    "label": "a stale bind survives a failed re-provision — the library offers a dead agent",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "            await store.set_book_agent(file_id, file_workspace, agent_id=None)",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/uploads/test_book_agent.py::test_a_stale_bind_is_cleared_even_if_the_reprovision_fails"
+    ]
+  },
+  {
     "label": "the bind is never written — the file forgets its agent",
     "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
     "find": "    bound = await store.set_book_agent(file_id, file_workspace, agent_id=agent.id)",
