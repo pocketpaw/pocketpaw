@@ -477,6 +477,62 @@ def test_the_global_budget_leaves_short_text_alone() -> None:
     assert local_mod._budgeted(["a", "b"], limit=100) == "a\nb"
 
 
+def test_the_library_apis_this_module_calls_actually_exist() -> None:
+    """Seam assertion: pin every third-party attribute the branches reach for.
+
+    The real-fixture tests above exercise these implicitly, but implicitly is
+    how a seam breaks quietly — a renamed attribute inside a `getattr(...,
+    False)` or a broad except degrades to "extracted nothing" rather than to an
+    error. Naming them here means a library upgrade that moves one fails with
+    the attribute's name in the message.
+
+    Deliberately checks the API SURFACE, not behaviour; behaviour is covered by
+    the fixtures. Cheap enough to be worth the redundancy.
+    """
+    import openpyxl
+    import pillow_heif
+    import pptx
+    import trafilatura
+    from PIL import Image
+
+    assert callable(pptx.Presentation)
+    assert callable(openpyxl.load_workbook)
+    assert callable(trafilatura.extract)
+    assert callable(pillow_heif.register_heif_opener)
+    assert callable(Image.open)
+
+    # The shape attributes the pptx branch reads off real objects.
+    prs = pptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[5])
+    assert hasattr(slide, "has_notes_slide")
+    assert hasattr(slide.notes_slide, "notes_text_frame")
+    assert hasattr(slide.shapes[0], "has_text_frame")
+    assert hasattr(slide.shapes[0], "text_frame")
+
+    # read_only + data_only + values_only are the xlsx branch's whole contract.
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["cell"])
+    assert list(workbook.active.iter_rows(values_only=True)) == [("cell",)]
+    assert hasattr(workbook, "sheetnames") and hasattr(workbook, "close")
+
+
+def test_pillow_still_cannot_decode_heif_without_pillow_heif() -> None:
+    """The premise of the heif branch, asserted rather than assumed.
+
+    If a future Pillow ships native HEIF, `register_heif_opener` becomes dead
+    weight and pillow-heif could be dropped. Nothing else would tell us.
+    """
+    import warnings
+
+    from PIL import features
+
+    with warnings.catch_warnings():
+        # Pillow warns "Unknown feature 'heif'" rather than returning False for
+        # a name it does not know — which is itself the answer we want here.
+        warnings.simplefilter("ignore", UserWarning)
+        assert features.check("heif") is not True
+
+
 @pytest.mark.parametrize("suffix", [".psd", ".cr2", ".nef", ".arw", ".ppt", ".xls"])
 async def test_explicit_non_goals_keep_the_raw_read(tmp_path: Path, suffix: str) -> None:
     """psd and camera raw are out of scope by decision; .ppt/.xls are binary
