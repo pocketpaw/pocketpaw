@@ -1,4 +1,15 @@
 # conftest.py — shared fixtures for the cloud/uploads test package.
+# 2026-08-29 (T0): added the autouse ``no_real_storage_adapter`` fixture. It
+#   pins ``uploads.extracted_text._resolve_adapter`` to ``None`` so a test that
+#   forgets to inject an adapter falls back to re-extraction instead of
+#   reaching the process-wide upload singleton. That singleton is NOT a
+#   harmless local-disk stub on a developer box: ``build_adapter`` calls
+#   ``load_dotenv()``, so a workspace ``.env`` carrying
+#   ``POCKETPAW_UPLOAD_ADAPTER=s3`` makes it a LIVE S3 adapter pointed at a
+#   real bucket — and a persist test then writes a real object over the
+#   network. Observed for real while writing the T0 tests. Returning ``None``
+#   is the same answer every pre-T0 test already got, so this changes nothing
+#   about existing behaviour.
 # 2026-07-03 (FL-6): the ``beanie_upload_db`` fixture now resets the Beanie
 #   binding on ``FileUpload`` / ``FileFolder`` / ``ShareLink`` after each test.
 #   Before FL-6 no test read Beanie state from inside the listener, so a leaked
@@ -15,6 +26,21 @@ import uuid
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def no_real_storage_adapter(monkeypatch):
+    """Never let an uploads test reach the process-wide storage singleton.
+
+    See the module header: on a developer box that singleton can be a live S3
+    adapter. Tests that mean to exercise the blob path inject their own
+    adapter explicitly (``persist_extracted_text(..., adapter=...)``); every
+    other test gets ``None``, which the reader treats as "re-extract" — the
+    behaviour those tests already had before T0.
+    """
+    from pocketpaw_ee.cloud.uploads import extracted_text
+
+    monkeypatch.setattr(extracted_text, "_resolve_adapter", lambda: None)
 
 
 @pytest.fixture()
