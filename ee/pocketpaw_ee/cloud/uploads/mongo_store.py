@@ -322,6 +322,14 @@ class MongoFileStore:
             owner_id=doc.owner,
             chat_id=doc.chat_id,
             created=doc.createdAt or datetime.now(UTC),
+            # Library metadata, read defensively: legacy rows predate every
+            # one of these fields. This is the path the flat ``GET /files``
+            # listing is built from, so a field missing HERE is a field the
+            # Files panel can never render no matter what the DB holds.
+            tags=list(getattr(doc, "tags", None) or []),
+            collections=list(getattr(doc, "collections", None) or []),
+            summary=getattr(doc, "summary", None),
+            agent_id=getattr(doc, "agent_id", None),
         )
 
     async def iter_by_workspace(
