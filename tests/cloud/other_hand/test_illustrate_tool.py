@@ -134,10 +134,22 @@ class TestTheBudgetItself:
     async def test_an_unreachable_database_fails_CLOSED(self, monkeypatch):
         from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
 
+        from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
+
         monkeypatch.setenv("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", "5")
-        # No monkeypatching needed: Beanie is not initialised in this suite, so
-        # the collection accessor does not exist and the counter genuinely
-        # cannot be read. That IS the degraded-database case, reached honestly.
+        # Establish the degraded database EXPLICITLY. This used to rely on
+        # "Beanie is not initialised in this suite", which was true only while
+        # the other-hand tests ran alone: once the uploads suites (which do
+        # initialise Beanie) share the session, the counter became readable,
+        # the claim succeeded and this gate silently inverted. A test must
+        # create the condition it is named after, not inherit it from whatever
+        # else happens to be in the run.
+        def _unreachable():
+            raise RuntimeError("database unreachable")
+
+        monkeypatch.setattr(
+            IllustrationUsage, "get_pymongo_collection", staticmethod(_unreachable)
+        )
         # A degraded database must never become an open tab at the illustrator,
         # so the answer is no — the cost of being wrong this way is a turn that
         # explains in words, and the other way is money.
