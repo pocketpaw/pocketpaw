@@ -1,4 +1,20 @@
 # listeners.py — In-process subscribers for upload-related bus events.
+# Updated: 2026-08-28 — FC-3 "File comprehension". After the FL-6 auto-tag pass
+#   the listener now also asks a model what the file IS (``_write_comprehension``,
+#   beside ``_write_auto_tags``) and persists a ``summary`` plus merged
+#   ``collections`` through ``MongoFileStore.set_library_metadata``. Four
+#   properties, three of which the auto-tag path already modelled:
+#   (1) the ``hide_from_ai`` gate above still runs FIRST and returns before any
+#       of this, so a hidden file is never sent to a model — same fail-CLOSED
+#       privacy gate, no second copy of it;
+#   (2) fail-OPEN on everything else: a failed, empty or capped comprehension
+#       leaves the file indexed, tagged and usable. The user asked to store a
+#       file, not to have it understood;
+#   (3) a non-empty ``summary`` is never overwritten, so a human's correction
+#       survives every re-ingest;
+#   (4) a per-workspace daily cap (``uploads.comprehension_budget``) is claimed
+#       BEFORE the call, and that one gate fails CLOSED — the cost of skipping a
+#       summary is a missing summary, the cost of an unbounded ingest is money.
 # Updated: 2026-08-04 (living-wiki review follow-up) — _extract_article_id now
 #   delegates to knowledge.extract_ingest_article_id: kb-go's real ingest
 #   receipt keys the id as "article" (finishIngest), which the inline
@@ -135,6 +151,11 @@ async def index_uploaded_file(event: Event) -> None:
         )
         return
     existing_tags = list(getattr(doc, "tags", []) or [])
+    # FC-3: read the library state the comprehension pass has to respect while
+    # we still hold the row — the shelves it merges into, and the summary it
+    # must not clobber if a person already wrote one.
+    existing_collections = list(getattr(doc, "collections", []) or [])
+    existing_summary = getattr(doc, "summary", None)
 
     adapter = _resolve_adapter()
     if adapter is None or not storage_key:
@@ -173,6 +194,19 @@ async def index_uploaded_file(event: Event) -> None:
             workspace_id=str(workspace_id),
             result=result,
             existing_tags=existing_tags,
+        )
+
+        # FC-3: comprehension, beside auto-tagging and independent of it. Runs
+        # before the KB ingest for the same reason FL-6 does — a file should
+        # still be understood when the KB write later fails — and is contained
+        # the same way, so nothing here can abort the ingest.
+        await _write_comprehension(
+            file_id=file_id,
+            workspace_id=str(workspace_id),
+            result=result,
+            mime=mime,
+            existing_collections=existing_collections,
+            existing_summary=existing_summary,
         )
 
         text = (result.text or "").strip()
@@ -500,6 +534,102 @@ async def _write_auto_tags(
             logger.info("auto-tagged file_id=%s with %d tag(s)", file_id, len(merged))
     except Exception:
         logger.exception("auto-tagging failed for file_id=%s; KB ingest unaffected", file_id)
+
+
+async def _write_comprehension(
+    *,
+    file_id: str,
+    workspace_id: str,
+    result,
+    mime: str,
+    existing_collections: list[str],
+    existing_summary: str | None,
+) -> None:
+    """Ask a model what this file IS and persist the summary + collections.
+
+    The three refusals, in the order they are cheapest to make:
+
+    1. **A summary already written by a person stays.** The comprehension pass
+       is a guess made from the first few thousand characters; a human who has
+       read the file and typed a correction outranks it, every time, forever.
+       We do not track provenance — any non-empty summary is treated as
+       somebody's, and the cost of that simplification is that a stale machine
+       summary also survives. A person can clear it (``PATCH`` with ``""``) and
+       the next ingest re-writes it. ``collections`` still merges, because
+       merging cannot destroy anything.
+    2. **The daily cap is claimed before the call, and refuses fail-CLOSED.**
+       This is the one gate in the whole path that fails closed; see
+       ``comprehension_budget``'s module note for why the asymmetry is
+       deliberate.
+    3. **Everything after that fails OPEN.** A dead proxy, a 404 model id, a
+       model that answers in prose — ``comprehend`` returns None and this
+       function returns quietly. A file the user asked us to STORE must not
+       fail to store because we could not describe it.
+
+    Note what is NOT here: a ``hide_from_ai`` check. That gate lives at the top
+    of ``index_uploaded_file`` and has already returned before this runs.
+    Re-checking it here would create a second copy of a privacy rule, and two
+    copies of a rule is one copy that can drift.
+    """
+    try:
+        if (existing_summary or "").strip():
+            logger.debug("file_id=%s already has a summary; leaving it alone", file_id)
+            return
+
+        from pocketpaw_ee.cloud.uploads import comprehension_budget
+
+        allowed, spent, cap = await comprehension_budget.try_spend(workspace_id)
+        if not allowed:
+            logger.info(
+                "file comprehension skipped for file_id=%s: workspace %s is at "
+                "%d/%d for today (or the counter was unreadable). The file is "
+                "still indexed and tagged.",
+                file_id,
+                workspace_id,
+                spent,
+                cap,
+            )
+            return
+
+        from pocketpaw_ee.cloud.uploads.comprehension import comprehend
+        from pocketpaw_ee.cloud.uploads.tagging import merge_tags
+
+        captions = list(getattr(result, "captions", None) or [])
+        understood = await comprehend(
+            getattr(result, "title", None),
+            getattr(result, "text", None),
+            captions,
+            mime=mime,
+        )
+        if understood is None:
+            return
+
+        # ``collections`` merges on the same terms tags do: existing values
+        # first, order preserved, no clobber. A shelf a person put this file on
+        # is not the model's to remove.
+        merged = merge_tags(existing_collections, understood.categories)
+
+        from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+
+        updated = await MongoFileStore().set_library_metadata(
+            file_id,
+            workspace_id,
+            summary=understood.summary,
+            collections=merged,
+        )
+        if updated is None:
+            logger.debug(
+                "comprehension write found no row for file_id=%s workspace=%s",
+                file_id,
+                workspace_id,
+            )
+        else:
+            logger.info("comprehended file_id=%s into %d collection(s)", file_id, len(merged))
+    except Exception:
+        logger.exception(
+            "file comprehension failed for file_id=%s; the file stays indexed, tagged and usable",
+            file_id,
+        )
 
 
 def _resolve_adapter():

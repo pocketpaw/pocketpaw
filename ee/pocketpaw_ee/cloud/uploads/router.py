@@ -1,5 +1,14 @@
 """EE /uploads router — workspace-scoped upload endpoints.
 
+2026-08-28 (FC-1 "File comprehension"): ``PATCH /uploads/{file_id}`` accepts
+``summary`` (str) so a person can correct or write what a file IS, and the
+response echoes it. This is the half of FC-1 that makes "never overwrite a
+human's edit" mean something — the ingest-time comprehension pass refuses to
+touch a row whose ``summary`` is already non-empty, so without a way for a
+human to SET one, that rule would only ever protect a previous machine
+summary. An explicit ``""`` erases it (and thereby re-opens the file to a
+future comprehension pass); omitting the field leaves it untouched.
+
 2026-07-03 (FL-11b "hide-from-AI purge"): ``PATCH /uploads/{file_id}`` now
 retroactively purges a file's KB content when ``hide_from_ai`` flips false→true
 AND the row tracks a kb-go article (``kb_article_id`` + ``kb_scope`` recorded on
@@ -89,6 +98,11 @@ _CFG = UploadSettings(local_root=_ROOT)
 _ADAPTER = build_adapter(_ROOT)
 _META = MongoFileStore()
 _FOLDERS = FolderStore()
+
+# FC-1: the longest summary PATCH will accept. A library subtitle, not a
+# document — the machine-written ones land well under this, and the ceiling
+# exists so a hand-crafted request cannot put a novel into every listing row.
+_MAX_SUMMARY_CHARS = 1000
 
 
 async def _is_chat_member(chat_id: str, user_id: str, _workspace: str) -> bool:
@@ -365,6 +379,7 @@ async def patch_upload(
     new_tags = body.get("tags")
     new_collections = body.get("collections")
     new_hide = body.get("hide_from_ai")
+    new_summary = body.get("summary")
 
     if new_filename is not None:
         if not isinstance(new_filename, str) or not new_filename.strip():
@@ -395,6 +410,20 @@ async def patch_upload(
         ):
             raise HTTPException(status_code=400, detail="collections must be a list of strings")
         doc.collections = new_collections
+
+    # FC-1: a human writing (or correcting, or erasing) what the file IS.
+    # Capped at _MAX_SUMMARY_CHARS — this is a library subtitle, not a place
+    # to paste a document, and an unbounded string here would be echoed into
+    # every /files listing row.
+    if new_summary is not None:
+        if not isinstance(new_summary, str):
+            raise HTTPException(status_code=400, detail="summary must be a string")
+        if len(new_summary) > _MAX_SUMMARY_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"summary must be at most {_MAX_SUMMARY_CHARS} characters",
+            )
+        doc.summary = new_summary
 
     # FL-11b: detect a false→true hide transition so we can retroactively
     # purge the file's KB article after the row is saved. Capture the pre-edit
@@ -452,6 +481,7 @@ async def patch_upload(
         "tags": list(doc.tags or []),
         "collections": list(doc.collections or []),
         "hide_from_ai": bool(doc.hide_from_ai),
+        "summary": doc.summary,
     }
 
 
