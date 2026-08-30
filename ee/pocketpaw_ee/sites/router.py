@@ -3,6 +3,20 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# Updated 2026-08-31 (feat/sites-public-asset-uploads): three endpoints for the
+# site's PUBLIC asset rail — POST/GET/DELETE ``/sites/by-pocket/{pocket_id}/assets``.
+# A site could not display an image the owner supplied: the source map the generator
+# takes is text-only, its base64 ``assets`` sideband is refused for every engine but
+# html, and both URLs this codebase already mints are unusable by an anonymous
+# visitor (a presign expires; ``/api/v1/uploads/{id}`` is auth-gated). These store
+# the bytes on a world-readable bucket and hand back a durable absolute URL.
+#
+# IMAGES ONLY, AND THAT IS THE FEATURE'S EDGE. A document — the PRD case — is agent
+# INPUT, not site content, and putting a customer's requirements doc on an
+# unauthenticated URL is a data leak. Documents keep going through the private
+# upload rail; only raster images land here, proven by magic bytes rather than by
+# the Content-Type the client claims.
+#
 # Updated 2026-08-24 (SP-2 — draft preview joins the ephemeral build lane): GET
 # ``/sites/by-pocket/{pocket_id}/native-artifact`` now has TWO response shapes and
 # ``build_status`` says which. A cache hit is unchanged (the render, ``build_status``
@@ -234,6 +248,9 @@ from pocketpaw_ee.sites.dto import (
     NativeArtifactResponse,
     PublishRequest,
     RequestPublishResponse,
+    SiteAssetDeleteRequest,
+    SiteAssetListResponse,
+    SiteAssetResponse,
     SiteClientResponse,
     SiteClientUpdate,
     SiteDataRowsResponse,
@@ -880,3 +897,117 @@ async def record_site_invoice(
     return await sites_service.record_site_invoice(
         workspace_id=ctx.workspace_id, site_id=site_id, body=body
     )
+
+
+# ── The public asset rail ───────────────────────────────────────────────
+#
+# Gated exactly like the other pocket-scoped writes here: fabric.write to add or
+# remove, fabric.read to list. Tenancy is not left to the gate alone — every key
+# is built from ``ctx.workspace_id``, so a caller cannot name another workspace's
+# object even with a valid token for their own.
+
+
+def _asset_store_or_503():
+    """Return the configured store, or 503 with a message an operator can act on."""
+    from pocketpaw_ee.sites.public_assets import public_asset_store
+
+    store = public_asset_store()
+    if store is None:
+        # Deliberately NOT a fallback to the private adapter. A link that 403s for
+        # every visitor is worse than a clear refusal, because it fails later and
+        # looks like a broken site rather than a missing setting.
+        raise HTTPException(
+            503,
+            "Public asset storage is not configured for this deployment "
+            "(set POCKETPAW_UPLOAD_ADAPTER=s3 and S3_PUBLIC_BUCKET).",
+        )
+    return store
+
+
+@router.post("/sites/by-pocket/{pocket_id}/assets", response_model=SiteAssetResponse)
+async def upload_site_asset(
+    pocket_id: str,
+    file: UploadFile = File(...),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteAssetResponse:
+    """Store one image on the public bucket and return its durable URL.
+
+    Only PNG/JPEG/GIF/WebP are accepted, and acceptance is decided by MAGIC BYTES,
+    never by the part's Content-Type — on a public origin a caller who can label
+    arbitrary bytes ``image/png`` can host arbitrary content under our name. SVG is
+    refused for the same reason even though it is an image: it executes script.
+
+    Like ``import_site`` above, the cap here gates PROCESSING, not ingress —
+    Starlette spools the whole body before this runs, so bounding the raw request
+    is the fronting proxy's job. Oversized → 413; anything the rail refuses → 400
+    with a message written to be shown to the user verbatim.
+    """
+    from pocketpaw_ee.sites.public_assets import MAX_ASSET_BYTES, PublicAssetError
+
+    store = _asset_store_or_503()
+
+    data = await file.read(MAX_ASSET_BYTES + 1)
+    if len(data) > MAX_ASSET_BYTES:
+        raise HTTPException(
+            413,
+            f"That image exceeds the {MAX_ASSET_BYTES // (1024 * 1024)}MB upload cap.",
+        )
+
+    try:
+        asset = await store.put(
+            data,
+            filename=file.filename or "asset",
+            workspace_id=ctx.workspace_id,
+            pocket_id=pocket_id,
+        )
+    except PublicAssetError as exc:
+        # The message is authored for a human and carries no internal detail.
+        raise HTTPException(400, str(exc)) from exc
+
+    return SiteAssetResponse(
+        key=asset.key,
+        url=asset.url,
+        mime=asset.mime,
+        size=asset.size,
+        filename=asset.filename,
+    )
+
+
+@router.get("/sites/by-pocket/{pocket_id}/assets", response_model=SiteAssetListResponse)
+async def list_site_assets(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteAssetListResponse:
+    """List every image uploaded for this site, newest naming first by filename."""
+    store = _asset_store_or_503()
+    assets = await store.list(workspace_id=ctx.workspace_id, pocket_id=pocket_id)
+    return SiteAssetListResponse(
+        assets=[
+            SiteAssetResponse(key=a.key, url=a.url, mime=a.mime, size=a.size, filename=a.filename)
+            for a in assets
+        ]
+    )
+
+
+@router.delete("/sites/by-pocket/{pocket_id}/assets", status_code=204)
+async def delete_site_asset(
+    pocket_id: str,
+    body: SiteAssetDeleteRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> None:
+    """Delete one asset, refusing any key outside this site's own prefix.
+
+    The key arrives from the client, so the prefix check in the store is what
+    stands between this and an arbitrary cross-tenant object delete. It is
+    enforced there rather than here so a non-HTTP caller inherits it too.
+    """
+    from pocketpaw_ee.sites.public_assets import PublicAssetError
+
+    store = _asset_store_or_503()
+    try:
+        await store.delete(workspace_id=ctx.workspace_id, pocket_id=pocket_id, key=body.key)
+    except PublicAssetError as exc:
+        raise HTTPException(403, str(exc)) from exc

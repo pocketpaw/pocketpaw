@@ -800,3 +800,35 @@ class NativeArtifactResponse(BaseModel):
     build_status: str = "none"
     build_reason: str | None = None
     build_job_id: str | None = None
+
+
+class SiteAssetResponse(BaseModel):
+    """One image published to the site's public asset rail.
+
+    ``url`` is the whole point: a durable, credential-free address. It carries no
+    signature and no expiry, so it can be pasted into page source that outlives
+    this process — unlike a presign (7-day cap) or ``/api/v1/uploads/{id}``
+    (auth-gated, and therefore a 401 for the anonymous visitor the site serves).
+
+    ``key`` is the storage key, and the handle DELETE takes. It is scoped to the
+    owning workspace and pocket, so it is safe to hand to the client: the delete
+    endpoint re-checks the prefix and refuses anything outside this site.
+    """
+
+    key: str
+    url: str
+    mime: str
+    size: int
+    filename: str
+
+
+class SiteAssetListResponse(BaseModel):
+    """Every asset this site has uploaded."""
+
+    assets: list[SiteAssetResponse]
+
+
+class SiteAssetDeleteRequest(BaseModel):
+    """The storage key to remove. Validated against the site's own prefix."""
+
+    key: str

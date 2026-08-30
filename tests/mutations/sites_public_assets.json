@@ -1,0 +1,119 @@
+[
+  {
+    "label": "the public rail trusts the caller's Content-Type again (the private rail's sniffer semantics), so HTML labelled image/png is stored and served from a bucket origin we own",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "        mime = sniff_image_mime(data[:512])\n        if mime is None or mime not in PUBLIC_IMAGE_MIMES:",
+    "replace": "        mime = sniff_image_mime(data[:512]) or \"image/png\"\n        if mime not in PUBLIC_IMAGE_MIMES:",
+    "tests": [
+      "tests/ee/sites/test_public_assets.py"
+    ]
+  },
+  {
+    "label": "SVG joins the public allowlist, turning an image upload into stored XSS on an origin we serve",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "        \"image/webp\",\n    }\n)",
+    "replace": "        \"image/webp\",\n        \"image/svg+xml\",\n    }\n)",
+    "tests": [
+      "tests/ee/sites/test_public_assets.py"
+    ]
+  },
+  {
+    "label": "the delete prefix check goes away, making the endpoint an arbitrary cross-tenant object delete against the whole public bucket",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "        if not key.startswith(prefix) or \"/\" in key[len(prefix) :]:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_public_assets.py"
+    ]
+  },
+  {
+    "label": "delete stops rejecting a nested path, so a key that walks out of the pocket prefix is honoured",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "        if not key.startswith(prefix) or \"/\" in key[len(prefix) :]:",
+    "replace": "        if not key.startswith(prefix):",
+    "tests": [
+      "tests/ee/sites/test_public_assets.py"
+    ]
+  },
+  {
+    "label": "the key drops its workspace segment, so two tenants uploading the same bytes to the same pocket id collide on one object",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "    return f\"{_KEY_PREFIX}/{workspace_id}/{pocket_id}/\"",
+    "replace": "    return f\"{_KEY_PREFIX}/{pocket_id}/\"",
+    "tests": [
+      "tests/ee/sites/test_public_assets.py"
+    ]
+  },
+  {
+    "label": "the filename stops being sanitised, so a hostile name walks the key out of the site's own prefix",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "    stem = _STEM_RE.sub(\"-\", stem).strip(\"-.\")[:_MAX_STEM_LEN]\n    return stem or \"asset\"",
+    "replace": "    return stem or \"asset\"",
+    "tests": [
+      "tests/ee/sites/test_public_assets.py"
+    ]
+  },
+  {
+    "label": "bytes are stored even when the adapter mints no public address, leaving an object nobody can ever reference",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "        url = self._adapter.public_url(key)\n        if not url:",
+    "replace": "        url = self._adapter.public_url(key) or \"\"\n        if False:",
+    "tests": [
+      "tests/ee/sites/test_public_assets.py"
+    ]
+  },
+  {
+    "label": "the size cap stops rejecting, so an oversized upload is buffered and stored",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "        if len(data) > MAX_ASSET_BYTES:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_public_assets.py"
+    ]
+  },
+  {
+    "label": "the private S3 adapter starts minting public URLs, so the private bucket hands out links for objects the world cannot read",
+    "file": "src/pocketpaw/uploads/s3.py",
+    "find": "        if not self._public_base_url:\n            return None",
+    "replace": "        if not self._public_base_url:\n            return f\"/{key}\"",
+    "tests": [
+      "tests/ee/sites/test_public_assets.py"
+    ]
+  },
+  {
+    "label": "the public bucket falls back to the private one when S3_PUBLIC_BUCKET is unset, publishing tenant files to a rail meant for site imagery",
+    "file": "src/pocketpaw/uploads/factory.py",
+    "find": "    bucket = (os.environ.get(\"S3_PUBLIC_BUCKET\") or \"\").strip()\n    if not bucket:\n        return None",
+    "replace": "    bucket = (os.environ.get(\"S3_PUBLIC_BUCKET\") or os.environ.get(\"S3_PRIVATE_BUCKET\") or \"\").strip()\n    if not bucket:\n        return None",
+    "tests": [
+      "tests/ee/sites/test_public_assets.py"
+    ]
+  },
+  {
+    "label": "public objects go up without ACL=public-read, so every embedded image 403s for visitors while the URL still looks right",
+    "file": "src/pocketpaw/uploads/s3.py",
+    "find": "            extra[\"ACL\"] = \"public-read\"",
+    "replace": "            extra[\"CacheControl\"] = \"public, max-age=31536000, immutable\"",
+    "tests": [
+      "tests/uploads/test_s3_public_mode.py"
+    ]
+  },
+  {
+    "label": "the agent tool reads the workspace from its own args, so a prompt-injected workspace_id lists another tenant's assets",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "    workspace_id, _user_id = _identity()\n    if not workspace_id:\n        return _error_response(\"No active workspace — cannot read this site's assets.\")",
+    "replace": "    workspace_id = str(args.get(\"workspace_id\") or \"\") or _identity()[0]\n    if not workspace_id:\n        return _error_response(\"No active workspace — cannot read this site's assets.\")",
+    "tests": [
+      "tests/ee/sites/test_list_site_assets_tool.py"
+    ]
+  },
+  {
+    "label": "the asset tool id stops riding SITES_TOOL_IDS, so the hard /sites allow-list filters it out and the agent silently never sees it",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "    PUBLISH_TOOL_ID,\n    LIST_SITE_ASSETS_TOOL_ID,",
+    "replace": "    PUBLISH_TOOL_ID,",
+    "tests": [
+      "tests/ee/sites/test_list_site_assets_tool.py"
+    ]
+  }
+]

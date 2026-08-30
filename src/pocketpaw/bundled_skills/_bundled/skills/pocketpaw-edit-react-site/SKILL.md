@@ -282,7 +282,11 @@ Every edit is held to the bar the page was built to. Briefly:
 - **Real copy, always.** Never "TBD", never "Lorem ipsum", and never a
   fabricated testimonial, statistic, price, address or phone number. If the
   edit needs a fact you do not have, ask for it rather than inventing it.
-- **Photography comes from `mcp__pocketpaw_stock__search_stock_images`** with a
+- **Check `mcp__pocketpaw_sites_manager__list_site_assets` before any stock
+  search.** Those are the owner's OWN uploads for this site; when the user says
+  "use my logo" or "the image I uploaded", that is the only place it exists.
+  Embed the returned `url` verbatim — it is absolute, public and permanent.
+- **Other photography comes from `mcp__pocketpaw_stock__search_stock_images`** with a
   generic descriptive query. Embed the returned `url` directly, set `alt` from
   the returned `alt`, and render the returned `credit` — the providers' terms
   require it. On an empty result, use a gradient or solid treatment. **Never
@@ -407,6 +411,7 @@ Never fall back to another engine's tool, and never fall back to
   `get_pocket`, which is NOT on this surface's allow-list
 - `mcp__pocketpaw_sites_manager__publish` — deploy, on explicit request (STEP 4)
 - `mcp__pocketpaw_sites_manager__edit_svelte_component` — the svelte-track sibling
+- `mcp__pocketpaw_sites_manager__list_site_assets` — the owner's own uploaded images
 - `mcp__pocketpaw_stock__search_stock_images` — real photography for a new section
 - `mcp__pocketpaw_icons__search_icons` — feature icons
 - `mcp__pocketpaw_palette__scale_from_color` / `extract_palette` — brand colour

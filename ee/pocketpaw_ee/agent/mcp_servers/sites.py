@@ -209,8 +209,17 @@ GET_SITE_BUILD_STATUS_TOOL_ID = f"mcp__{SERVER_NAME}__get_site_build_status"
 # like the rest: an absent id is filtered out with no error at all.
 READ_SITE_SOURCE_TOOL_ID = f"mcp__{SERVER_NAME}__read_site_source"
 
+# The OWNER'S OWN IMAGES (feat/sites-public-asset-uploads). Without this the agent
+# cannot use a logo or photo the user uploaded: nothing in the authoring context
+# mentions them, so it either invents a path that 404s or falls back to a stock
+# photo of somebody else's product. Read-only, and its id rides ``SITES_TOOL_IDS``
+# so the hard /sites allow-list picks it up — an id absent there is filtered out
+# and the tool is silently unreachable.
+LIST_SITE_ASSETS_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_assets"
+
 SITES_TOOL_IDS = (
     PUBLISH_TOOL_ID,
+    LIST_SITE_ASSETS_TOOL_ID,
     CREATE_LANDING_SITE_TOOL_ID,
     CREATE_SVELTE_SITE_TOOL_ID,
     EDIT_SVELTE_COMPONENT_TOOL_ID,
@@ -444,6 +453,68 @@ async def _get_site_build_status_handler(args: dict) -> dict:
     return _success_response({"ok": True, "message": message, **state})
 
 
+async def _list_site_assets_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__list_site_assets``.
+
+    Returns the images the site's owner uploaded, each with a durable public URL
+    the agent can put straight into markup. Workspace comes from the per-stream
+    ContextVars, never from the args — otherwise a prompt-injected pocket id
+    could read another tenant's assets.
+    """
+    from pocketpaw_ee.sites.public_assets import public_asset_store
+
+    pocket_id = str(args.get("pocket_id") or "").strip()
+    if not pocket_id:
+        return _error_response("pocket_id is required.")
+
+    workspace_id, _user_id = _identity()
+    if not workspace_id:
+        return _error_response("No active workspace — cannot read this site's assets.")
+
+    store = public_asset_store()
+    if store is None:
+        # A deployment fact, not a failure of this call. Say so plainly so the
+        # agent stops looking for uploads instead of inventing a URL.
+        return _success_response(
+            {
+                "ok": True,
+                "count": 0,
+                "assets": [],
+                "message": (
+                    "Public asset storage is not configured on this deployment, so this "
+                    "site has no uploaded images. Use stock photography instead."
+                ),
+            }
+        )
+
+    try:
+        assets = await store.list(workspace_id=workspace_id, pocket_id=pocket_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sites.list_site_assets failed for pocket %s", pocket_id, exc_info=True)
+        return _error_response(f"Could not read this site's assets: {exc}")
+
+    return _success_response(
+        {
+            "ok": True,
+            "count": len(assets),
+            "assets": [
+                {
+                    "url": a.url,
+                    "filename": a.filename,
+                    "mime": a.mime,
+                    "size": a.size,
+                }
+                for a in assets
+            ],
+            "message": (
+                f"{len(assets)} image(s) uploaded by the site owner."
+                if assets
+                else "The owner has not uploaded any images for this site yet."
+            ),
+        }
+    )
+
+
 def build_sites_manager_server() -> tuple[str, Any] | None:
     """Build the in-process SDK MCP server for Sites, or return ``None`` if the
     Claude Agent SDK isn't installed.
@@ -543,6 +614,39 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     async def get_site_build_status(args):  # type: ignore[no-untyped-def]
         return await _get_site_build_status_handler(args)
 
+    @tool(
+        "list_site_assets",
+        (
+            "List the images the SITE OWNER uploaded for this site, with durable "
+            "public URLs you can embed directly. READ-ONLY. Call this BEFORE "
+            "choosing imagery for a site you are building or editing — the owner's "
+            "own logo, product shots and team photos live here, and they beat stock "
+            "photography every time. Also call it when the user says 'use my logo', "
+            "'the image I uploaded', 'the photo I added', or names a file.\n"
+            "Args: `pocket_id` (required — the site pocket). Returns {ok, count, "
+            "assets:[{url, filename, mime, size}], message}.\n"
+            "HOW TO READ IT: `url` is absolute, permanent and public — put it in "
+            "`src` verbatim, do NOT rewrite it, do NOT copy the file into the "
+            "source map, and do NOT prefix it with a path. An empty `assets` means "
+            "the owner uploaded nothing; fall back to `search_stock_images` and "
+            "NEVER invent an asset URL or guess a filename."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Id of the site pocket whose uploaded images you want.",
+                },
+            },
+            "required": ["pocket_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def list_site_assets(args):  # type: ignore[no-untyped-def]
+        return await _list_site_assets_handler(args)
+
     # Register the deterministic landing-site create tool on this SAME server.
     # The SKILL flow is: produce the `content` copy → create_landing_site →
     # publish, so the two hops sit on one allowlisted server. Built here (not as a
@@ -602,6 +706,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
         tools=[
             publish,
             get_site_build_status,
+            list_site_assets,
             create_landing_site,
             create_svelte_site,
             edit_svelte_component,
@@ -618,6 +723,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
 
 __all__ = [
     "CREATE_DYNAMIC_SITE_TOOL_ID",
+    "LIST_SITE_ASSETS_TOOL_ID",
     "CREATE_HTML_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",
     "CREATE_REACT_SITE_TOOL_ID",
