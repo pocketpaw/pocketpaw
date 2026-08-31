@@ -187,5 +187,14 @@
     "tests": [
       "tests/cloud/chat/test_attachment_media_publishing.py"
     ]
+  },
+  {
+    "label": "the publish moves back BELOW the extraction call, so any box without tesseract silently drops every attached image (the 2026-09-01 live failure)",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "                published = await _publish_media_attachment(ctx, rec, path, surface=surface)\n                if published:\n                    entries.append(published)\n                    processed += 1\n                    continue\n\n                if chain is None:",
+    "replace": "                if chain is None:",
+    "tests": [
+      "tests/cloud/chat/test_attachment_media_publishing.py"
+    ]
   }
 ]

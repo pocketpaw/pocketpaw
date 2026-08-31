@@ -2748,6 +2748,27 @@ async def _build_attachments_block(
                 if resolved is None:
                     continue
                 rec, path = resolved
+
+                # PUBLISHABLE MEDIA TAKES A DIFFERENT ROAD, AND TAKES IT FIRST.
+                # Extraction has nothing to say about an image or a video, and
+                # making this depend on it is not merely wasteful — it is a hard
+                # coupling that BREAKS the feature. Measured 2026-09-01 on a real
+                # 200 KB jpeg: the local adapter reaches for OCR and raises
+                # TesseractNotFoundError on any box without tesseract installed,
+                # the `except` below does `continue`, and a publish placed after
+                # it never runs. The user attached a logo and the agent was told
+                # nothing at all.
+                #
+                # So decide media BEFORE the chain is even built. On a sites
+                # surface this republishes to the public bucket and hands back an
+                # address the published page can load; everywhere else it returns
+                # None and the ordinary extraction path below still runs.
+                published = await _publish_media_attachment(ctx, rec, path, surface=surface)
+                if published:
+                    entries.append(published)
+                    processed += 1
+                    continue
+
                 if chain is None:
                     try:
                         chain = build_chain(get_settings())
@@ -2767,21 +2788,6 @@ async def _build_attachments_block(
 
                 text = (result.text or "").strip()
                 header = f"### {rec.filename} ({rec.mime}, {rec.size} bytes)"
-
-                # PUBLISHABLE MEDIA takes a different road entirely. Extraction
-                # gives an image or a video nothing — the entry below would read
-                # "(no text extracted)", which tells the agent a file exists and
-                # leaves it no way to USE it. On a sites surface that is exactly
-                # the file the user attached so their page could show it, so
-                # republish it to the public bucket and hand back an address the
-                # published page can actually load. Gated on the surface: the
-                # private upload rail is where a chat attachment belongs
-                # everywhere else, and a world-readable copy is not a default.
-                published = await _publish_media_attachment(ctx, rec, path, surface=surface)
-                if published:
-                    entries.append(published)
-                    processed += 1
-                    continue
 
                 if not text:
                     entries.append(f"{header}\n(no text extracted)")

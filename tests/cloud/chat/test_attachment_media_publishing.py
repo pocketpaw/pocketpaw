@@ -164,6 +164,54 @@ async def test_an_unconfigured_deployment_says_so_rather_than_going_quiet(monkey
 
 
 @pytest.mark.asyncio
+async def test_publishing_does_not_depend_on_text_extraction(monkeypatch, png) -> None:
+    """ORDERING GUARD — publishing must happen BEFORE the extraction chain runs.
+
+    Measured 2026-09-01 against a real 200 KB jpeg: the local extraction adapter
+    reaches for OCR and raises TesseractNotFoundError on any box without
+    tesseract. The attachment loop catches that and `continue`s, so a publish
+    placed after it never executes — the user attached a logo and the agent was
+    told nothing at all.
+
+    This drives the whole block with a chain that always raises, and asserts the
+    image still comes back with its public URL. Move the publish call back below
+    the extraction call and this fails.
+    """
+    store = FakeStore()
+    _install(monkeypatch, store)
+
+    rec = FakeRec("logo.png", "image/png", 40)
+
+    class Resolved:
+        async def __aenter__(self):
+            return (rec, png)
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class Resolver:
+        def open_local_for_url(self, *_a, **_kw):
+            return Resolved()
+
+    class ExplodingChain:
+        async def run(self, *_a, **_kw):
+            raise RuntimeError("tesseract is not installed or it's not in your PATH")
+
+    # Both are imported INSIDE the function, so patch them at their source.
+    monkeypatch.setattr("pocketpaw_ee.cloud.uploads.resolver.default_resolver", lambda: Resolver())
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.extraction.build_chain", lambda *_a, **_kw: ExplodingChain()
+    )
+
+    block = await agent_service._build_attachments_block(
+        FakeCtx(), [{"url": "/api/v1/uploads/abc"}], surface="sites"
+    )
+
+    assert "PUBLIC URL:" in block, "an image must publish even when extraction cannot run"
+    assert store.calls, "the bytes must reach the public bucket"
+
+
+@pytest.mark.asyncio
 async def test_a_storage_failure_degrades_and_never_breaks_the_turn(monkeypatch, png) -> None:
     class Boom:
         async def put(self, *_a, **_kw):
