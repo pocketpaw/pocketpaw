@@ -196,5 +196,23 @@
     "tests": [
       "tests/cloud/chat/test_attachment_media_publishing.py"
     ]
+  },
+  {
+    "label": "the enterprise image goes back to a bare wheel install, so every PDF and .docx attached in chat is silently dropped in production",
+    "file": "Dockerfile.enterprise",
+    "find": "&& pip install --no-cache-dir \"$(ls ee/dist/pocketpaw_ee-*.whl)[extraction]\"",
+    "replace": "&& pip install --no-cache-dir ee/dist/pocketpaw_ee-*.whl",
+    "tests": [
+      "tests/ee/test_extraction_closure_is_shipped.py"
+    ]
+  },
+  {
+    "label": "the OSS/dual image drops the extraction extra, reintroducing the same silent document drop",
+    "file": "Dockerfile",
+    "find": "pip install --no-cache-dir './ee[extraction]' ; \\",
+    "replace": "pip install --no-cache-dir ./ee ; \\",
+    "tests": [
+      "tests/ee/test_extraction_closure_is_shipped.py"
+    ]
   }
 ]

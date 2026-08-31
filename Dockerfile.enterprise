@@ -252,9 +252,20 @@ COPY ee/ ee/
 # front-end) + wheel (RECORD-safe repack) for the release script. `rm -rf ee/dist`
 # drops any wheel that rode in from the build context so the glob matches one.
 RUN pip install --no-cache-dir uv wheel
+# `[extraction]` is NOT optional in practice, despite the name. It carries the
+# libraries ee/pocketpaw_ee/cloud/extraction lazy-imports — pypdf, python-docx,
+# trafilatura, pymupdf — and without them a PDF or .docx a user attaches in chat
+# raises inside the adapter, the attachment loop swallows it, and the agent is
+# handed NO entry for that file. The user sees a reply saying no document was
+# attached. Measured 2026-09-01: `.[all]` above does not cover this (it is a
+# curated list that never references `[knowledge]`, where root keeps pypdf), and
+# a bare wheel install takes no extras, so the image had none of them.
+#
+# The extras ride the wheel path, which pip accepts. `rm -rf ee/dist` above
+# guarantees the glob matches exactly one file, so the substitution is safe.
 RUN rm -rf ee/dist \
     && bash ee/scripts/build_compiled_wheel.sh \
-    && pip install --no-cache-dir ee/dist/pocketpaw_ee-*.whl
+    && pip install --no-cache-dir "$(ls ee/dist/pocketpaw_ee-*.whl)[extraction]"
 
 # Install Playwright Chromium browser
 RUN playwright install chromium
