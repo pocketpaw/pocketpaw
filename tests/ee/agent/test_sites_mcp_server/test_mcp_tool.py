@@ -45,6 +45,7 @@ class TestSitesMcpServerRegistration:
             EDIT_REACT_COMPONENT_TOOL_ID,
             EDIT_SVELTE_COMPONENT_TOOL_ID,
             GET_SITE_BUILD_STATUS_TOOL_ID,
+            LIST_SITE_ASSETS_TOOL_ID,
             PUBLISH_TOOL_ID,
             READ_SITE_SOURCE_TOOL_ID,
             SERVER_NAME,
@@ -104,10 +105,19 @@ class TestSitesMcpServerRegistration:
         # a capture form's hidden paw_* inputs.
         assert READ_SITE_SOURCE_TOOL_ID == "mcp__pocketpaw_sites_manager__read_site_source"
         assert READ_SITE_SOURCE_TOOL_ID in SITES_TOOL_IDS
+        # The READ-ONLY asset tool — the owner's OWN uploaded images, with durable
+        # public URLs. It is the only way the agent can learn that a logo or a
+        # product shot exists: nothing in the source map or the preamble names
+        # them, so without it the agent's best available move is a stock photo of
+        # somebody else's product, or an invented src that 404s on a live page.
+        # Read-only and pocket-scoped; the workspace comes from the per-stream
+        # identity, never from the tool args.
+        assert LIST_SITE_ASSETS_TOOL_ID == "mcp__pocketpaw_sites_manager__list_site_assets"
+        assert LIST_SITE_ASSETS_TOOL_ID in SITES_TOOL_IDS
         # The count is deliberate: adding a tool here widens the /sites surface
         # allow-list (SITES_TOOL_IDS feeds it), so a new id must be a decision,
         # not a side effect. Bump it WITH an id assertion above — never alone.
-        assert len(SITES_TOOL_IDS) == 11
+        assert len(SITES_TOOL_IDS) == 12
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk
