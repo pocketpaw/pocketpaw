@@ -4998,6 +4998,12 @@ async def publish_pocket(
     # The buyer's app origin (the router reads it off the Origin / Referer header),
     # used to build the checkout's return_url so a paid publish can send them back.
     origin: str | None = None,
+    # May THIS caller commit the workspace to a recurring charge? Defaults to
+    # False so every path fails closed: the in-process MCP publish tool passes no
+    # tier today, and a future caller that starts passing one cannot buy by
+    # accident. Only the REST router sets it, and only after checking
+    # ``sites.buy_plan`` against the caller's role.
+    purchase_authorized: bool = False,
     preview: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
@@ -5188,6 +5194,44 @@ async def publish_pocket(
     existing_doc = await _SiteDoc.find_one(
         {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
     )
+    # WHO IS ALLOWED TO SPEND. Publishing is a MEMBER action and stays one; buying
+    # a paid tier is not. Since site plans became add-on lines on the workspace's
+    # own subscription, a paid publish charges the company card inside this
+    # request — so without this a MEMBER could commit the workspace to a recurring
+    # charge they are too junior to even SEE on the billing page
+    # (``billing.view`` is ADMIN).
+    #
+    # Only an actual PURCHASE is refused: an explicit paid tier that differs from
+    # what the site already holds. A republish of a site already on a paid tier is
+    # a content edit and must keep working for the member who builds it —
+    # refusing that would make every employee's ordinary edit need an admin.
+    #
+    # PLACED BEFORE ANYTHING THAT CHARGES OR MUTATES, and that position is the
+    # whole gate. Sitting one branch lower it ran AFTER the tier-change path had
+    # already re-synced the cart and rewritten ``plan_tier`` — so the upgrade was
+    # billed, and the check then compared the new tier against itself, saw a
+    # no-op republish, and allowed what it had just paid for. Caught by
+    # test_an_unauthorized_upgrade_is_refused.
+    _requested_tier_key = (
+        site_plans.canonical_site_tier_key(site_plan_key) if site_plan_key else None
+    )
+    _held_tier_key = (
+        site_plans.canonical_site_tier_key(getattr(existing_doc, "plan_tier", None))
+        if existing_doc is not None
+        else None
+    )
+    if (
+        is_paid
+        and site_plan_key is not None
+        and _requested_tier_key != _held_tier_key
+        and not purchase_authorized
+    ):
+        raise Forbidden(
+            "sites.plan_purchase_forbidden",
+            "Buying a paid site plan needs a workspace admin. Publish on the free "
+            "plan, or ask an admin to upgrade this site.",
+        )
+
     # TWO RAILS PAY, AND ONLY ONE OF THEM LEAVES A ``subscription_id``.
     #
     # "has an active per-site subscription id" was the whole test until add-ons

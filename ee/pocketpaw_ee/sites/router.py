@@ -272,12 +272,47 @@ router = APIRouter(
 )
 
 
+def _may_buy_site_plan(user: object, workspace_id: str) -> bool:
+    """May this caller commit the workspace to a recurring site charge?
+
+    Asked as a QUESTION rather than enforced as a dependency, because the answer
+    only matters when the request actually names a paid tier — and a free publish
+    by an ordinary member is the common case that must not 403. The service makes
+    the decision; this only reports the role.
+
+    Non-raising by design: ``check_workspace_action`` raises on deny and audits
+    it, which is right for a gate and wrong for a predicate. The denial that
+    reaches the user comes from the service, with copy that tells them what to do
+    about it, rather than a bare role error on a publish they were allowed to make.
+    """
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.guards.deps import check_workspace_action
+
+    try:
+        check_workspace_action(user, workspace_id, "sites.buy_plan")
+    except CloudError:
+        return False
+    except Exception:  # noqa: BLE001 — a broken role read must not sell a plan
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "sites.publish: could not resolve the caller's role for sites.buy_plan "
+            "— treating as NOT authorized to buy",
+            exc_info=True,
+        )
+        return False
+    return True
+
+
 @router.post("/sites/publish", response_model=SiteResponse)
 async def publish_site(
     body: PublishRequest,
     request: Request,
     ctx: RequestContext = Depends(request_context),
-    _: object = Depends(require_action_any_workspace("fabric.write")),
+    # The USER, not a throwaway: publishing stays a MEMBER action, but whether
+    # this caller may BUY a paid tier is a second, higher question and needs the
+    # principal to ask it of.
+    user: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> SiteResponse:
     """Compile the pocket's rippleSpec, smoke-gate, deploy, and persist."""
     # The pocket-read + theme-derive + publish is shared with the in-process MCP
@@ -297,6 +332,7 @@ async def publish_site(
         user_id=ctx.user_id,
         pocket_id=body.pocket_id,
         site_plan_key=body.site_plan_key,
+        purchase_authorized=_may_buy_site_plan(user, ctx.workspace_id),
         prewarm_origin=request.headers.get("origin") or None,
         # Also the checkout's return base for a PAID publish. The frontend sends the
         # whole page to ``checkout_url``, so with no return_url the buyer pays and

@@ -359,6 +359,7 @@ async def test_paid_publish_captures_the_flag_in_the_deploy_snapshot(mongo_db, m
         user_id="u1",
         pocket_id=pocket_id,
         site_plan_key="site",
+        purchase_authorized=True,
         _generator=gen,
         _cloudflare=_RecordingCF(),
         _bundle_reader=lambda d: b"x",
@@ -402,6 +403,7 @@ async def test_deferred_paid_publish_preserves_the_flag(mongo_db, recording_bus,
         user_id="u1",
         pocket_id=pocket_id,
         site_plan_key="site",
+        purchase_authorized=True,
         _generator=_RecordingGenerator(),  # publish-path generator: must NOT run
         _billing_provider=_RecordingBillingProvider(),
     )
@@ -447,6 +449,7 @@ async def test_activation_of_a_pre_mt1_pending_site_defaults_to_false(mongo_db, 
         user_id="u1",
         pocket_id=pocket_id,
         site_plan_key="site",
+        purchase_authorized=True,
         _generator=_RecordingGenerator(),
         _billing_provider=_RecordingBillingProvider(),
     )
