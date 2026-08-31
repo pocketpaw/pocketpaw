@@ -17,6 +17,26 @@ from pydantic import BaseModel, Field
 # ── Model / style catalog ───────────────────────────────────────────────────
 
 
+class StudioModelParam(BaseModel):
+    """One declarative per-model parameter knob (the edit composer renders a
+    control for each). Mirrors paw-enterprise ``core/studio/types.ts``
+    ``StudioModelParam`` — ``key``/``label``/``type``/``default`` plus the
+    optional ``min``/``max``/``step``/``options``/``hint``/``advanced`` fields.
+    ``type`` is one of ``stepper`` | ``text`` | ``select`` | ``slider`` |
+    ``toggle``; ``default`` is the value the knob resets to."""
+
+    key: str
+    label: str
+    type: str
+    default: Any = None
+    hint: str | None = None
+    min: int | float | None = None
+    max: int | float | None = None
+    step: int | float | None = None
+    options: list[str] | None = None
+    advanced: bool = False
+
+
 class StudioModel(BaseModel):
     """One selectable generation model in the composer picker."""
 
@@ -33,6 +53,9 @@ class StudioModel(BaseModel):
     credits: int | None = None
     tags: list[str] = Field(default_factory=list)
     default: bool | None = None
+    # Per-model declarative knobs the edit composer surfaces (empty for models
+    # that expose no extra edit controls).
+    params: list[StudioModelParam] = Field(default_factory=list)
 
 
 class StudioStyleLook(BaseModel):
@@ -181,6 +204,10 @@ class EditRequest(BaseModel):
     direction: str | None = None
     factor: float | None = None
     model: str | None = None
+    # The rail edit composer's per-model parameter values (keyed by the model's
+    # ``params`` keys — e.g. ``num_images`` / ``seed``). Only the ``edit`` op
+    # reads them today.
+    params: dict[str, Any] | None = None
 
 
 class VideoElementsRequest(BaseModel):
@@ -317,6 +344,7 @@ class MediaListResponse(BaseModel):
 
 __all__ = [
     "StudioModel",
+    "StudioModelParam",
     "StudioStyle",
     "StudioStyleLook",
     "StudioStyleMotion",
