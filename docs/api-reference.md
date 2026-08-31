@@ -2621,7 +2621,26 @@ Errors use the standard envelope `{"error": {"code", "message"}}`.
 ### `GET /knowledge/articles`
 
 Query params: `workspace_id` (optional, must match the active workspace),
-`agent_id` (optional filter; `"workspace"` = workspace-only).
+`agent_id` (optional filter; `"workspace"` = workspace-only), `limit` /
+`offset` (optional offset pagination; omit `limit` for the legacy one-shot
+full listing), and `exclude_upload_derived`.
+
+`exclude_upload_derived` (default `false`) is de-duplication for the Files
+panel, which merges these rows with `GET /files` on the client. An upload
+records the article it was ingested into (the FL-11b `kb_article_id` /
+`kb_scope` columns), so when this is set those articles are dropped and an
+uploaded PDF stops appearing beside the article compiled out of it as two
+separate documents. Standalone knowledge — an article ingested from chat or a
+URL, with no file behind it — is never touched; nor is an article whose upload
+is hidden from AI, soft-deleted, or pocket-scoped, because then the article is
+the only surviving copy in the panel.
+
+**Leave it off for knowledge browsers.** `/knowledge`, `/knowledge-lab` and the
+command palette read this same route, and there the compiled article *is* the
+thing being read and repaired — suppressing for them would make upload-derived
+knowledge silently vanish from the wiki. The extra query only runs when the
+flag is set, so the default path costs nothing. Suppression happens before the
+`offset` slice, so `total` and `has_more` describe the filtered set.
 
 Response:
 
