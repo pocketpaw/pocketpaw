@@ -396,6 +396,7 @@ class MongoFileStore:
             # one of these fields. This is the path the flat ``GET /files``
             # listing is built from, so a field missing HERE is a field the
             # Files panel can never render no matter what the DB holds.
+            folder_path=getattr(doc, "folder_path", None) or "/",
             tags=list(getattr(doc, "tags", None) or []),
             collections=list(getattr(doc, "collections", None) or []),
             summary=getattr(doc, "summary", None),

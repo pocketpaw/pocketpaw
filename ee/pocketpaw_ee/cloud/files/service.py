@@ -70,6 +70,12 @@ class UnifiedFile:
     collections: list[str] = field(default_factory=list)
     summary: str | None = None
     agent_id: str | None = None
+    # Where the row LIVES. Absent until 2026-08-29, so the flat listing never
+    # told a client which folder a file was in — and a Move UI that guards on
+    # `folder_path ?? "/"` therefore decided every file was already at the
+    # root and quietly did nothing. Non-upload sources have no folders and
+    # keep the "/" default.
+    folder_path: str = "/"
 
     def to_json(self) -> dict:
         """The wire shape of one flat-listing row.
@@ -93,6 +99,7 @@ class UnifiedFile:
             "collections": self.collections,
             "summary": self.summary,
             "agent_id": self.agent_id,
+            "folder_path": self.folder_path,
         }
 
 
@@ -130,6 +137,7 @@ def unified_from_record(rec: FileRecord) -> UnifiedFile:
         url=f"/api/v1/uploads/{rec.id}",
         created=rec.created,
         chat_id=rec.chat_id,
+        folder_path=getattr(rec, "folder_path", None) or "/",
         tags=list(rec.tags or []),
         collections=list(rec.collections or []),
         summary=rec.summary,

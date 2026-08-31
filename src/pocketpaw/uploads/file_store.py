@@ -33,6 +33,12 @@ class FileRecord:
     collections: list[str] = field(default_factory=list)
     summary: str | None = None
     agent_id: str | None = None
+    # Where the file LIVES. Absent until now, so the flat listing could not
+    # tell a client which folder a row was in — and a "move" UI that guards
+    # on `folder_path ?? "/"` therefore concluded every file was already at
+    # the root and quietly did nothing. Defaults to "/" so a legacy row reads
+    # as root rather than unknown.
+    folder_path: str = "/"
 
 
 class JSONLFileStore:

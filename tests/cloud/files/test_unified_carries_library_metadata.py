@@ -24,7 +24,7 @@ from pocketpaw.uploads.file_store import FileRecord
 from pocketpaw_ee.cloud.files.service import UnifiedFile, UnifiedFilesService
 
 # Every field the library writes onto an upload row and the panel renders.
-LIBRARY_METADATA = ("tags", "collections", "summary", "agent_id")
+LIBRARY_METADATA = ("tags", "collections", "summary", "agent_id", "folder_path")
 
 
 def _record(**over) -> FileRecord:
@@ -123,6 +123,7 @@ def test_the_wire_row_carries_every_library_metadata_field():
         collections=["media"],
         summary="What the file is.",
         agent_id="agent-42",
+        folder_path="/Books",
     )
     wire = row.to_json()
     for name in LIBRARY_METADATA:
@@ -130,6 +131,9 @@ def test_the_wire_row_carries_every_library_metadata_field():
     assert wire["summary"] == "What the file is."
     assert wire["collections"] == ["media"]
     assert wire["agent_id"] == "agent-42"
+    # folder_path is what a Move UI reads to know whether a file is already
+    # where you are sending it. Dropped here, every move looks like a no-op.
+    assert wire["folder_path"] == "/Books"
 
 
 def test_the_router_serializes_rows_through_to_json():
