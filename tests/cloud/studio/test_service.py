@@ -406,7 +406,7 @@ async def test_generate_video_happy_path(monkeypatch, studio_env) -> None:
     poster = b"\x89PNG\r\n\x1a\nfake-poster"
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
+    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None, resolution=None, generate_audio=None):
         seen.update(
             prompt=prompt,
             duration_sec=duration_sec,
@@ -448,7 +448,7 @@ async def test_generate_video_alias_resolves_endpoint(monkeypatch, studio_env) -
     by fal_video before dispatch."""
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
+    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None, resolution=None, generate_audio=None):
         seen["model"] = model
         return b"mp4", "video/mp4", None, None
 
@@ -466,7 +466,7 @@ async def test_generate_video_alias_resolves_endpoint(monkeypatch, studio_env) -
 async def test_generate_video_fal_failure_is_upstream_error(monkeypatch, studio_env) -> None:
     """A fal video upstream failure surfaces as StudioUpstreamError (→ 502)."""
 
-    async def _boom(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
+    async def _boom(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None, resolution=None, generate_audio=None):
         raise fal_video.FalVideoError("fal video 'x' failed: bad key")
 
     monkeypatch.setattr(fal_video, "run_fal_video", _boom)
@@ -484,7 +484,7 @@ async def test_generate_video_image_to_video_passes_all_images(monkeypatch, stud
     generated, history = studio_env
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
+    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None, resolution=None, generate_audio=None):
         seen.update(
             prompt=prompt,
             duration_sec=duration_sec,
@@ -521,7 +521,7 @@ async def test_generate_video_image_to_video_forwards_typed_prompt(monkeypatch, 
     generated, history = studio_env
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
+    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None, resolution=None, generate_audio=None):
         seen.update(prompt=prompt, image_urls=image_urls, duration_sec=duration_sec)
         return b"mp4", "video/mp4", None, None
 
@@ -553,6 +553,46 @@ async def test_generate_video_without_images_requires_prompt(monkeypatch, studio
     req = schemas.GenerateRequest(prompt="", kind="video", model="m", aspectRatio="16:9")
     with pytest.raises(ValueError, match="prompt is required for text-to-video"):
         await service.generate(req, workspace_id="ws-1")
+
+
+async def test_generate_video_seedance_i2v_forwards_schema(monkeypatch, studio_env) -> None:
+    """A Seedance i2v video request forwards the Seedance-specific extras
+    (``resolution`` / ``generateAudio``) plus the resolved images to fal_video."""
+    generated, history = studio_env
+    seen: dict = {}
+
+    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None, resolution=None, generate_audio=None):
+        seen.update(
+            model=model,
+            image_urls=image_urls,
+            resolution=resolution,
+            generate_audio=generate_audio,
+            duration_sec=duration_sec,
+            aspect_ratio=aspect_ratio,
+        )
+        return b"mp4", "video/mp4", None, None
+
+    monkeypatch.setattr(fal_video, "run_fal_video", _fake_video)
+
+    req = schemas.GenerateRequest(
+        prompt="a character walks across the frame",
+        kind="video",
+        model="bytedance/seedance-2.5/image-to-video",
+        aspectRatio="16:9",
+        durationSec=30,
+        inputImageUrls=["data:image/png;base64,AAAA"],
+        resolution="720p",
+        generateAudio=True,
+    )
+    gen = await service.generate(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert seen["model"] == "bytedance/seedance-2.5/image-to-video"
+    assert seen["image_urls"] == ["data:image/png;base64,AAAA"]
+    assert seen["resolution"] == "720p"
+    assert seen["generate_audio"] is True
+    assert seen["duration_sec"] == 30
+    assert seen["aspect_ratio"] == "16:9"
 
 
 # ── curated image + music (direct fal.ai dispatch, movie-maker) ──────────────

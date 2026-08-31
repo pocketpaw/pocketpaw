@@ -1112,6 +1112,8 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
             aspect_ratio=req.aspectRatio,
             model=model,
             image_urls=input_data_urls,
+            resolution=req.resolution,
+            generate_audio=req.generateAudio,
         )
     except fal_video.FalVideoError as exc:
         raise StudioUpstreamError(str(exc)) from exc

@@ -60,6 +60,19 @@ IMAGE_TO_VIDEO_PAIR_MODEL = "fal-ai/kling-video/v1.6/standard/image-to-video"
 # Kling call animates (fal image-to-video needs SOMETHING describing the move).
 DEFAULT_I2V_PROMPT = "animate this scene with smooth, natural motion"
 
+# ByteDance Seedance 2.5 image-to-video — the movie-maker's single-still path.
+# Unlike Kling's 2-frame contract (image_url + optional end_image_url per call,
+# 3+ images chained as pairs), Seedance animates ONE still into a native
+# 30-second clip at up to 720p with NO stitching, so its contract is its own:
+# ``image_url`` (start, required) + optional ``end_image_url`` + ``resolution``
+# ("480p"/"720p") + ``duration`` (a STRING enum "auto"/"4".."30") + a string
+# ``aspect_ratio`` enum (incl. "auto") + ``generate_audio`` (sync audio).
+SEEDANCE_I2V_MODEL = "bytedance/seedance-2.5/image-to-video"
+SEEDANCE_RESOLUTIONS: tuple[str, ...] = ("480p", "720p")
+# The durations the composer offers for this endpoint (Seedance accepts "4".."30",
+# so 5s / 10s / 30s all map to valid string enums).
+SEEDANCE_DURATIONS: tuple[int, ...] = (5, 10, 30)
+
 # Catalog video model ids → the image-to-video endpoint to dispatch when the flow
 # conditions a video node on input images (mirrors VIDEO_MODEL_ALIASES). A
 # ``fal-ai/...`` id passes straight through for a single image; multi-image runs
@@ -134,13 +147,13 @@ CURATED_VIDEO_MODELS: dict[str, dict[str, Any]] = {
         "duration_as_string": True,
     },
     "seedance_2_5_i2v": {
-        "id": "bytedance/seedance-2.5/enterprise/image-to-video",
+        "id": SEEDANCE_I2V_MODEL,  # bytedance/seedance-2.5/image-to-video
         "name": "Seedance 2.5 (image)",
         "vendor": "ByteDance",
         "kind": "image-to-video",
-        "aspect_ratios": ("16:9", "9:16", "1:1"),
-        "durations": (5, 10),
-        "duration_as_string": False,
+        "aspect_ratios": ("16:9", "9:16", "1:1", "4:3", "3:4"),
+        "durations": SEEDANCE_DURATIONS,
+        "duration_as_string": True,
     },
     "kling_i2v": {
         "id": IMAGE_TO_VIDEO_PAIR_MODEL,  # fal-ai/kling-video/v1.6/standard/image-to-video
@@ -275,6 +288,61 @@ def build_image_to_video_arguments(
         )
     if aspect_ratio:
         args["aspect_ratio"] = aspect_ratio
+    return args
+
+
+# ── Seedance 2.5 image-to-video (single still → 30s clip, no stitching) ──────
+
+
+def is_seedance_i2v_endpoint(endpoint: str | None) -> bool:
+    """True when ``endpoint`` is the Seedance 2.5 image-to-video model.
+
+    Seedance's i2v contract is nothing like Kling's (one still, string enums for
+    duration/aspect, resolution, sync audio), so the dispatcher must short-circuit
+    the Kling pair-chaining path the moment it sees this model."""
+    e = (endpoint or "").strip()
+    return "seedance-2.5" in e and "image-to-video" in e
+
+
+def build_seedance_i2v_arguments(
+    *,
+    image_url: str,
+    prompt: str | None = None,
+    end_image_url: str | None = None,
+    resolution: str | None = None,
+    duration_sec: int | None = None,
+    aspect_ratio: str | None = None,
+    generate_audio: bool | None = None,
+) -> dict[str, Any]:
+    """Build the fal ``arguments`` dict for ONE Seedance 2.5 i2v call.
+
+    Pure + side-effect free so it unit-tests in isolation. Mirrors the fal schema
+    for ``bytedance/seedance-2.5/image-to-video``:
+      * ``image_url``    — required start frame.
+      * ``end_image_url``— optional end frame.
+      * ``resolution``   — "480p" | "720p".
+      * ``duration``     — a STRING enum ("auto"/"4".."30"); we send str(seconds)
+        for the composer's 5s/10s/30s choices.
+      * ``aspect_ratio`` — a string enum (incl. "auto"); the composer sends a
+        concrete ratio like "16:9".
+      * ``generate_audio`` — boolean (sync audio alongside the video).
+
+    Blank/None values are omitted so fal fills its own defaults ("auto" duration,
+    "auto" aspect, "720p" resolution, audio on).
+    """
+    args: dict[str, Any] = {"image_url": image_url}
+    if prompt and prompt.strip():
+        args["prompt"] = prompt.strip()
+    if end_image_url and end_image_url.strip():
+        args["end_image_url"] = end_image_url.strip()
+    if resolution:
+        args["resolution"] = resolution
+    if duration_sec and duration_sec > 0:
+        args["duration"] = str(int(duration_sec))
+    if aspect_ratio:
+        args["aspect_ratio"] = aspect_ratio
+    if generate_audio is not None:
+        args["generate_audio"] = bool(generate_audio)
     return args
 
 
@@ -496,6 +564,52 @@ async def _run_image_to_video(
     return video_bytes, video_mime, poster_bytes, poster_mime
 
 
+async def _run_seedance_i2v(
+    *,
+    image_url: str,
+    prompt: str,
+    end_image_url: str | None = None,
+    resolution: str | None = None,
+    duration_sec: int | None = None,
+    aspect_ratio: str | None = None,
+    generate_audio: bool | None = None,
+    key: str,
+) -> tuple[bytes, str, bytes | None, str | None]:
+    """Run ONE Seedance 2.5 image-to-video call and return the result bytes.
+
+    The Seedance i2v contract is a single still (no Kling pair chaining), so this
+    is a plain one-call dispatch: build the Seedance-shaped arguments, run the
+    endpoint via ``_run_fal``, download the output video (+ optional poster).
+    """
+    arguments = build_seedance_i2v_arguments(
+        image_url=image_url,
+        prompt=prompt,
+        end_image_url=end_image_url,
+        resolution=resolution,
+        duration_sec=duration_sec,
+        aspect_ratio=aspect_ratio,
+        generate_audio=generate_audio,
+    )
+    result = await _run_fal(SEEDANCE_I2V_MODEL, arguments, key=key)
+    video_url = _extract_video_url(result)
+    if not video_url:
+        raise FalVideoError(f"fal Seedance i2v '{SEEDANCE_I2V_MODEL}' returned no video data")
+    video_bytes, video_mime = await _download(video_url)
+
+    poster_bytes: bytes | None = None
+    poster_mime: str | None = None
+    poster_url = _extract_poster_url(result)
+    if poster_url:
+        try:
+            poster_bytes, poster_mime = await _download(poster_url)
+        except Exception:  # noqa: BLE001 — a poster is cosmetic; never fail the video
+            logger.warning(
+                "studio: fal Seedance i2v poster download failed (non-fatal)", exc_info=True
+            )
+            poster_bytes, poster_mime = None, None
+    return video_bytes, video_mime, poster_bytes, poster_mime
+
+
 # ── The fal SDK seam (tests inject _run_fal) ────────────────────────────────
 
 
@@ -542,6 +656,8 @@ async def run_fal_video(
     model: str | None = None,
     key: str | None = None,
     image_urls: list[str] | None = None,
+    resolution: str | None = None,
+    generate_audio: bool | None = None,
 ) -> tuple[bytes, str, bytes | None, str | None]:
     """Run a fal video generation and return the result.
 
@@ -571,6 +687,20 @@ async def run_fal_video(
         raise FalVideoError("fal.ai API key is not configured (set FAL_AI_API_KEY)")
 
     if images:
+        # Seedance 2.5 i2v is its own single-still contract (no Kling pair
+        # chaining) — short-circuit before the Kling path so its string-enum
+        # duration/aspect + resolution + sync-audio arguments are built correctly.
+        if is_seedance_i2v_endpoint(model):
+            return await _run_seedance_i2v(
+                image_url=images[0],
+                prompt=text or DEFAULT_I2V_PROMPT,
+                end_image_url=images[1] if len(images) > 1 else None,
+                resolution=resolution,
+                duration_sec=duration_sec,
+                aspect_ratio=aspect_ratio,
+                generate_audio=generate_audio,
+                key=api_key,
+            )
         return await _run_image_to_video(
             prompt=text,
             image_urls=images,
@@ -612,6 +742,9 @@ __all__ = [
     "DEFAULT_IMAGE_TO_VIDEO_MODEL",
     "IMAGE_TO_VIDEO_PAIR_MODEL",
     "DEFAULT_I2V_PROMPT",
+    "SEEDANCE_I2V_MODEL",
+    "SEEDANCE_RESOLUTIONS",
+    "SEEDANCE_DURATIONS",
     "VIDEO_MODEL_ALIASES",
     "IMAGE_TO_VIDEO_MODEL_ALIASES",
     "SUPPORTED_DURATIONS",
@@ -621,5 +754,7 @@ __all__ = [
     "resolve_image_to_video_endpoint",
     "build_arguments",
     "build_image_to_video_arguments",
+    "build_seedance_i2v_arguments",
+    "is_seedance_i2v_endpoint",
     "run_fal_video",
 ]

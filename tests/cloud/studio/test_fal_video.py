@@ -596,3 +596,97 @@ async def test_run_fal_video_image_to_video_no_output_is_fal_error(monkeypatch) 
 
     with pytest.raises(fal_video.FalVideoError, match="no video data"):
         await fal_video.run_fal_video(prompt="x", image_urls=["data:a"], key="k")
+
+
+# ── Seedance 2.5 image-to-video (single still → 30s clip, no stitching) ──────
+
+
+def test_is_seedance_i2v_endpoint() -> None:
+    assert fal_video.is_seedance_i2v_endpoint("bytedance/seedance-2.5/image-to-video") is True
+    assert (
+        fal_video.is_seedance_i2v_endpoint("bytedance/seedance-2.5/enterprise/image-to-video")
+        is True
+    )
+    assert fal_video.is_seedance_i2v_endpoint("fal-ai/kling-video/v1/standard/image-to-video") is False
+    assert fal_video.is_seedance_i2v_endpoint(None) is False
+    assert fal_video.is_seedance_i2v_endpoint("") is False
+
+
+def test_build_seedance_i2v_arguments_minimal() -> None:
+    assert fal_video.build_seedance_i2v_arguments(image_url="data:img") == {
+        "image_url": "data:img"
+    }
+
+
+def test_build_seedance_i2v_arguments_full() -> None:
+    args = fal_video.build_seedance_i2v_arguments(
+        image_url="data:start",
+        prompt="zoom in",
+        end_image_url="data:end",
+        resolution="720p",
+        duration_sec=10,
+        aspect_ratio="16:9",
+        generate_audio=True,
+    )
+    assert args == {
+        "image_url": "data:start",
+        "prompt": "zoom in",
+        "end_image_url": "data:end",
+        "resolution": "720p",
+        "duration": "10",
+        "aspect_ratio": "16:9",
+        "generate_audio": True,
+    }
+
+
+def test_build_seedance_i2v_arguments_omits_blanks() -> None:
+    args = fal_video.build_seedance_i2v_arguments(
+        image_url="data:start",
+        prompt="  ",
+        end_image_url="",
+        resolution=None,
+        duration_sec=0,
+        aspect_ratio=None,
+        generate_audio=None,
+    )
+    assert args == {"image_url": "data:start"}
+
+
+async def test_run_fal_video_seedance_i2v_dispatches_single_call(monkeypatch) -> None:
+    """Seedance i2v short-circuits the Kling pair-chaining path: a single fal call
+    with the Seedance schema (string duration/aspect, resolution, sync audio)."""
+    seen: dict = {}
+
+    async def _fake_run(endpoint, arguments, *, key, client_timeout=..., start_timeout=...):
+        seen.update(endpoint=endpoint, arguments=arguments, key=key)
+        return {"video": {"url": "https://fal.test/out.mp4"}}
+
+    async def _fake_download(url):
+        return b"MP4DATA", "video/mp4"
+
+    monkeypatch.setattr(fal_video, "_run_fal", _fake_run)
+    monkeypatch.setattr(fal_video, "_download", _fake_download)
+
+    out = await fal_video.run_fal_video(
+        prompt="slow zoom",
+        image_urls=["data:start", "data:end"],
+        duration_sec=30,
+        aspect_ratio="16:9",
+        model="bytedance/seedance-2.5/image-to-video",
+        resolution="720p",
+        generate_audio=True,
+        key="k",
+    )
+
+    assert out == (b"MP4DATA", "video/mp4", None, None)
+    assert seen["endpoint"] == fal_video.SEEDANCE_I2V_MODEL
+    assert seen["arguments"] == {
+        "image_url": "data:start",
+        "prompt": "slow zoom",
+        "end_image_url": "data:end",
+        "resolution": "720p",
+        "duration": "30",
+        "aspect_ratio": "16:9",
+        "generate_audio": True,
+    }
+    assert seen["key"] == "k"

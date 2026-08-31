@@ -174,6 +174,11 @@ class GenerateRequest(BaseModel):
     # location / element consistency) — the backend resolves these to ``data:``
     # URLs and dispatches the model's EDIT endpoint via fal.
     referenceImageUrls: list[str] | None = None
+    # Seedance 2.5 image-to-video extras (the rail's video composer). ``resolution``
+    # is "480p" | "720p"; ``generateAudio`` toggles the endpoint's synchronized
+    # audio. Only read when the video model resolves to Seedance i2v.
+    resolution: str | None = None
+    generateAudio: bool | None = None
 
 
 class MusicRequest(BaseModel):
