@@ -1,4 +1,14 @@
-"""StorageAdapter protocol — the swap point for local, S3, etc."""
+"""StorageAdapter protocol — the swap point for local, S3, etc.
+
+Updated 2026-08-31 (feat/sites-public-asset-uploads): added ``public_url``. Every
+other read path here is *time-limited* (``presigned_get``) or *auth-gated* (the
+caller streams via ``open`` behind its own permission check). Neither can back an
+``<img src>`` on a site we publish to the open internet: a presign expires while
+the site is still live, and an auth-gated URL 401s for the anonymous visitor the
+site exists to serve. ``public_url`` is the third kind — a durable, credential-free
+address — and it is ``None`` on every adapter that cannot honestly mint one, so a
+caller must handle absence rather than receive a URL that later dies.
+"""
 
 from __future__ import annotations
 
@@ -77,6 +87,22 @@ class StorageAdapter(Protocol):
         local adapter ignores it (it never presigns); ``None`` preserves the
         adapter/object default disposition.
         """
+
+    def public_url(self, key: str) -> str | None:
+        """Return a durable, credential-free URL for ``key``, or ``None``.
+
+        Distinct from :meth:`presigned_get` in the two ways that matter for
+        published content: it never expires, and it carries no signature, so it
+        can be baked into HTML that outlives this process. Only an adapter
+        pointed at a bucket whose objects are actually world-readable may return
+        a URL here — returning one for a private bucket produces a link that
+        renders as a broken image for every visitor.
+
+        The default is ``None`` (local disk, and the private S3 adapter). Callers
+        must treat ``None`` as "this deployment cannot host public assets" and
+        fail loudly rather than substituting an auth-gated link.
+        """
+        return None
 
     async def list_prefix(self, prefix: str) -> list[str]:
         """List every key that starts with ``prefix`` (non-recursive, one level).

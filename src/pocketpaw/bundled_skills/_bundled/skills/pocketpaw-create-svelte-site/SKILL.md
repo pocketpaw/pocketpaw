@@ -234,7 +234,17 @@ A marketing page needs real photography — a hero photo, section imagery. Do
 photo-free wireframe when the page calls for imagery. Instead pull real,
 free stock photos:
 
+0. Call **`list_site_assets`** (MCP tool
+   `mcp__pocketpaw_sites_manager__list_site_assets`) with the `pocket_id`
+   FIRST. These are the images the OWNER uploaded for this site — their logo,
+   their product shots, their team. They beat stock every time, and shipping a
+   stock face when the owner supplied their own is the most obvious way a
+   generated site reads as generic. Each `url` is absolute, public and
+   permanent: embed it verbatim as `src`, never copy the file into the source
+   map. If the user says "my logo" or "the photo I uploaded", it is here. An
+   empty list simply means they uploaded none — carry on to stock.
 1. Call **`search_stock_images`** (MCP tool `mcp__pocketpaw_stock__search_stock_images`)
+   for whatever the owner's own assets did not cover,
    with a **generic, descriptive** query — `"modern dental office"`,
    `"artisan bakery bread"` — not a hyper-specific one (`"dentist in Akron"`
    returns weak matches). Pass `orientation` (`landscape` for heroes/banners,

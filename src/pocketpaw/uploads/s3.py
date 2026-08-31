@@ -10,6 +10,13 @@ env var names (``S3_ENDPOINT``, ``S3_REGION``, ``S3_ACCESS_KEY_ID``,
 ``S3_SECRET_ACCESS_KEY``, ``S3_PRIVATE_BUCKET``) so one deployment can point
 both services at the same bucket.
 
+2026-08-31 (feat/sites-public-asset-uploads): the adapter can now be pointed at a
+world-readable bucket. ``public_base_url`` turns on :meth:`public_url` (a durable,
+unsigned address a published site can reference); ``public_read`` makes ``put``
+send ``ACL=public-read`` plus an immutable ``Cache-Control``. Both default to off,
+so an adapter built the old way emits byte-identical S3 calls — the private bucket
+must not start handing out public links because a new keyword exists.
+
 2026-07-15 (CORS-1): added ``ensure_cors``/``get_cors`` so the bucket's CORS
 policy can be applied from code (the creds already live in the deploy env)
 instead of an out-of-band ``aws s3api put-bucket-cors``. Browsers fetching
@@ -23,6 +30,7 @@ import asyncio
 import io
 import logging
 from collections.abc import AsyncIterator
+from functools import partial
 from pathlib import Path
 
 from pocketpaw.uploads.adapter import StorageAdapter, StorageItem, StoredObject
@@ -53,6 +61,8 @@ class S3StorageAdapter(StorageAdapter):
         endpoint_url: str | None = None,
         access_key_id: str | None = None,
         secret_access_key: str | None = None,
+        public_base_url: str | None = None,
+        public_read: bool = False,
     ) -> None:
         try:
             import boto3
@@ -66,6 +76,10 @@ class S3StorageAdapter(StorageAdapter):
             raise ValueError("S3StorageAdapter requires a bucket name")
 
         self._bucket = bucket
+        # Trailing slash stripped once here so public_url can join with a single
+        # "/" and never emit a "//" that some CDNs treat as a distinct path.
+        self._public_base_url = (public_base_url or "").rstrip("/") or None
+        self._public_read = public_read
         self._client = boto3.client(
             "s3",
             region_name=region,
@@ -92,17 +106,39 @@ class S3StorageAdapter(StorageAdapter):
             )
         buf.seek(0)
 
+        extra: dict[str, str] = {}
+        if self._public_read:
+            # Keys on the public rail are content-hashed, so a given key's bytes
+            # can never change — the only safe case for a year-long immutable
+            # cache, and the reason a re-upload of the same image costs nothing.
+            extra["ACL"] = "public-read"
+            extra["CacheControl"] = "public, max-age=31536000, immutable"
+
         try:
             await asyncio.to_thread(
-                self._client.put_object,
-                Bucket=self._bucket,
-                Key=key,
-                Body=buf,
-                ContentType=mime,
+                partial(
+                    self._client.put_object,
+                    Bucket=self._bucket,
+                    Key=key,
+                    Body=buf,
+                    ContentType=mime,
+                    **extra,
+                )
             )
         except Exception as exc:
             raise StorageFailure(str(exc)) from exc
         return StoredObject(key=key, size=size, mime=mime)
+
+    def public_url(self, key: str) -> str | None:
+        """Return the durable public address of ``key``, or ``None``.
+
+        ``None`` unless this adapter was built with ``public_base_url`` — the
+        private bucket answers "no public address exists", which is the honest
+        answer and stops a caller pasting a link that 403s for every visitor.
+        """
+        if not self._public_base_url:
+            return None
+        return f"{self._public_base_url}/{key.lstrip('/')}"
 
     async def open(self, key: str) -> AsyncIterator[bytes]:
         try:

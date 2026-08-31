@@ -25,6 +25,14 @@ def _make_adapter(client: MagicMock) -> S3StorageAdapter:
     adapter = S3StorageAdapter.__new__(S3StorageAdapter)
     adapter._bucket = "test-bucket"  # type: ignore[attr-defined]
     adapter._client = client  # type: ignore[attr-defined]
+    # ``__new__`` skips ``__init__``, so every field ``put`` reads has to be set
+    # here by hand. These two are the private-bucket defaults (2026-08-31,
+    # feat/sites-public-asset-uploads); the public rail is covered separately in
+    # test_s3_public_mode.py. Production never constructs via ``__new__`` — the
+    # factory is the only caller — so keeping them in sync here is a test-fixture
+    # duty, not a reason to make the adapter tolerate a half-built instance.
+    adapter._public_base_url = None  # type: ignore[attr-defined]
+    adapter._public_read = False  # type: ignore[attr-defined]
     return adapter
 
 
