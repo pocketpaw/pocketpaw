@@ -2,8 +2,8 @@
   {
     "label": "the public rail trusts the caller's Content-Type again (the private rail's sniffer semantics), so HTML labelled image/png is stored and served from a bucket origin we own",
     "file": "ee/pocketpaw_ee/sites/public_assets.py",
-    "find": "        mime = sniff_image_mime(data[:512])\n        if mime is None or mime not in PUBLIC_IMAGE_MIMES:",
-    "replace": "        mime = sniff_image_mime(data[:512]) or \"image/png\"\n        if mime not in PUBLIC_IMAGE_MIMES:",
+    "find": "        mime = sniff_media_mime(data[:512])\n        if mime is None or mime not in PUBLIC_MEDIA_MIMES:",
+    "replace": "        mime = sniff_media_mime(data[:512]) or \"image/png\"\n        if mime not in PUBLIC_MEDIA_MIMES:",
     "tests": [
       "tests/ee/sites/test_public_assets.py"
     ]
@@ -65,8 +65,8 @@
   {
     "label": "the size cap stops rejecting, so an oversized upload is buffered and stored",
     "file": "ee/pocketpaw_ee/sites/public_assets.py",
-    "find": "        if len(data) > MAX_ASSET_BYTES:",
-    "replace": "        if False:",
+    "find": "        cap = max_bytes_for_mime(mime)\n        if len(data) > cap:",
+    "replace": "        cap = max_bytes_for_mime(mime)\n        if False:",
     "tests": [
       "tests/ee/sites/test_public_assets.py"
     ]
@@ -101,8 +101,8 @@
   {
     "label": "the agent tool reads the workspace from its own args, so a prompt-injected workspace_id lists another tenant's assets",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
-    "find": "    workspace_id, _user_id = _identity()\n    if not workspace_id:\n        return _error_response(\"No active workspace — cannot read this site's assets.\")",
-    "replace": "    workspace_id = str(args.get(\"workspace_id\") or \"\") or _identity()[0]\n    if not workspace_id:\n        return _error_response(\"No active workspace — cannot read this site's assets.\")",
+    "find": "    workspace_id, _user_id = _identity()\n    if not workspace_id:\n        return _error_response(\"No active workspace \u2014 cannot read this site's assets.\")",
+    "replace": "    workspace_id = str(args.get(\"workspace_id\") or \"\") or _identity()[0]\n    if not workspace_id:\n        return _error_response(\"No active workspace \u2014 cannot read this site's assets.\")",
     "tests": [
       "tests/ee/sites/test_list_site_assets_tool.py"
     ]
@@ -114,6 +114,78 @@
     "replace": "    PUBLISH_TOOL_ID,",
     "tests": [
       "tests/ee/sites/test_list_site_assets_tool.py"
+    ]
+  },
+  {
+    "label": "QuickTime rejoins the MP4 brands, so a .mov publishes as video/mp4 and plays as a blank box for some visitors",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "    if head[4:8] == b\"ftyp\" and head[8:12] in _MP4_BRANDS:",
+    "replace": "    if head[4:8] == b\"ftyp\":",
+    "tests": [
+      "tests/ee/sites/test_public_assets.py"
+    ]
+  },
+  {
+    "label": "video is judged against the image cap, so a legitimate 12MB background video is refused as oversized",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "    return MAX_VIDEO_BYTES if mime in PUBLIC_VIDEO_MIMES else MAX_IMAGE_BYTES",
+    "replace": "    return MAX_IMAGE_BYTES",
+    "tests": [
+      "tests/ee/sites/test_public_assets.py"
+    ]
+  },
+  {
+    "label": "every asset reports kind=image, so the agent emits <img> for a video and the hero renders as a broken picture",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "    return \"video\" if mime in PUBLIC_VIDEO_MIMES else \"image\"",
+    "replace": "    return \"image\"",
+    "tests": [
+      "tests/ee/sites/test_public_assets.py"
+    ]
+  },
+  {
+    "label": "the video cap is raised past the S3 adapter's in-memory buffer ceiling, trading a clean refusal for an OOM mid-upload",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "MAX_VIDEO_BYTES = 50 * 1024 * 1024",
+    "replace": "MAX_VIDEO_BYTES = 512 * 1024 * 1024",
+    "tests": [
+      "tests/ee/sites/test_public_assets.py"
+    ]
+  },
+  {
+    "label": "the surface gate opens to every surface, so a chat attachment on /files or /studio is copied to a world-readable bucket",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "    if (surface or \"\") not in _MEDIA_PUBLISHING_SURFACES:\n        return None",
+    "replace": "    if False:\n        return None",
+    "tests": [
+      "tests/cloud/chat/test_attachment_media_publishing.py"
+    ]
+  },
+  {
+    "label": "a missing surface is treated as sites, so any caller that forgets to thread it starts publishing users' uploads",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "    if (surface or \"\") not in _MEDIA_PUBLISHING_SURFACES:\n        return None",
+    "replace": "    if surface is not None and surface not in _MEDIA_PUBLISHING_SURFACES:\n        return None",
+    "tests": [
+      "tests/cloud/chat/test_attachment_media_publishing.py"
+    ]
+  },
+  {
+    "label": "the media allowlist stops gating, so a PRD attached while describing a site is published to an unauthenticated URL",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "    if mime not in PUBLIC_MEDIA_MIMES:\n        return None",
+    "replace": "    if False:\n        return None",
+    "tests": [
+      "tests/cloud/chat/test_attachment_media_publishing.py"
+    ]
+  },
+  {
+    "label": "a pre-create attachment loses its tenant scope, so every workspace's pre-create uploads share one prefix",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "            pocket_id=ctx.pocket_id or f\"_user-{ctx.user_id}\",",
+    "replace": "            pocket_id=ctx.pocket_id or \"_user\",",
+    "tests": [
+      "tests/cloud/chat/test_attachment_media_publishing.py"
     ]
   }
 ]

@@ -1233,6 +1233,7 @@ async def _drive_agent_loop(
     is_cancelled: Any,
     emit_stream_start: bool,
     flow_context: dict[str, Any] | None = None,
+    surface: str | None = None,
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     """Drive ``AgentPool.run`` and yield ``(event_name, event_data)`` tuples."""
     pool = get_agent_pool()
@@ -1269,6 +1270,7 @@ async def _drive_agent_loop(
         user_message=user_content,
         attachments=attachments_in,
         mentions=mentions_in,
+        surface=surface,
     )
     # Bail early if /agent/stop was called while knowledge context was
     # being built (another blocking point before the cancel-check loop).
@@ -1867,6 +1869,12 @@ async def _iter_agent_events(
         history=list(spec.history),
         is_cancelled=_is_cancelled,
         emit_stream_start=True,
+        # The surface decides whether an attached image/video may be republished
+        # to the PUBLIC asset bucket (sites only — see _build_attachments_block).
+        # Threaded explicitly rather than sniffed off ctx: publishing a user's
+        # chat attachment to a world-readable URL is not a default anyone should
+        # inherit by accident.
+        surface=spec.surface,
         # Studio Flow build context (flow_id / project_name) so the agent's
         # prompt carries the ACTIVE FLOW ID and build_studio_flow persists into
         # the flow project the user is on. None on every non-studio run.

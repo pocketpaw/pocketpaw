@@ -32,13 +32,14 @@ from pathlib import Path
 
 import pytest
 from pocketpaw_ee.sites.public_assets import (
-    MAX_ASSET_BYTES,
+    MAX_IMAGE_BYTES,
+    MAX_VIDEO_BYTES,
     PublicAssetError,
     PublicAssetStore,
     build_key,
     prefix_for,
     public_asset_store,
-    sniff_image_mime,
+    sniff_media_mime,
 )
 
 from pocketpaw.uploads.adapter import StorageItem
@@ -47,6 +48,12 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 GIF = b"GIF89a" + b"\x00" * 64
 WEBP = b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"\x00" * 64
+MP4 = b"\x00\x00\x00\x20" + b"ftyp" + b"isom" + b"\x00" * 64
+WEBM = b"\x1a\x45\xdf\xa3" + b"\x00" * 64
+# A QuickTime .mov: the same ftyp box, with a brand browsers will not reliably
+# play. Accepting it would publish a hero that is blank for some visitors, which
+# is worse than refusing it — because nobody finds out.
+MOV = b"\x00\x00\x00\x14" + b"ftyp" + b"qt  " + b"\x00" * 64
 SVG = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
 HTML = b"<!DOCTYPE html><html><script>alert(1)</script></html>"
 
@@ -97,12 +104,12 @@ def store() -> tuple[PublicAssetStore, FakePublicAdapter]:
     [(PNG, "image/png"), (JPEG, "image/jpeg"), (GIF, "image/gif"), (WEBP, "image/webp")],
 )
 def test_sniff_accepts_real_images(data: bytes, expected: str) -> None:
-    assert sniff_image_mime(data) == expected
+    assert sniff_media_mime(data) == expected
 
 
 @pytest.mark.parametrize("data", [SVG, HTML, b"plain text", b"", b"PK\x03\x04zipbytes"])
 def test_sniff_rejects_everything_that_is_not_a_raster_image(data: bytes) -> None:
-    assert sniff_image_mime(data) is None
+    assert sniff_media_mime(data) is None
 
 
 # ── put(): the security gate ────────────────────────────────────────────
@@ -146,7 +153,7 @@ async def test_empty_and_oversize_are_refused(store) -> None:
     with pytest.raises(PublicAssetError, match="empty"):
         await svc.put(b"", filename="a.png", workspace_id="ws1", pocket_id="pk1")
 
-    huge = PNG + b"\x00" * MAX_ASSET_BYTES
+    huge = PNG + b"\x00" * MAX_IMAGE_BYTES
     with pytest.raises(PublicAssetError, match="capped at"):
         await svc.put(huge, filename="a.png", workspace_id="ws1", pocket_id="pk1")
 
@@ -317,7 +324,7 @@ def test_the_public_allowlist_contains_nothing_that_executes(
     for mime in ("image/svg+xml", "text/html", "application/xhtml+xml", "text/xml"):
         assert mime not in PUBLIC_IMAGE_MIMES, f"{mime} can execute script — never public"
     # And the sniffer must not learn it either.
-    assert sniff_image_mime(SVG) is None
+    assert sniff_media_mime(SVG) is None
 
 
 def test_s3_public_bucket_without_an_endpoint_has_no_public_rail(
@@ -381,3 +388,69 @@ def test_the_private_adapter_mints_no_public_url(
 
     adapter = build_adapter(local_root=tmp_path)
     assert adapter.public_url("anything") is None
+
+
+# ── Video: scroll-driven background video is a mainstream site form ─────
+
+
+@pytest.mark.parametrize(("data", "expected"), [(MP4, "video/mp4"), (WEBM, "video/webm")])
+def test_sniff_accepts_web_playable_video(data: bytes, expected: str) -> None:
+    assert sniff_media_mime(data) == expected
+
+
+def test_quicktime_is_refused_even_though_it_is_video() -> None:
+    """A .mov is real video that does not play everywhere.
+
+    Publishing one produces a hero that is silently blank for some visitors —
+    strictly worse than refusing the upload, because nobody finds out.
+    """
+    assert sniff_media_mime(MOV) is None
+
+
+@pytest.mark.asyncio
+async def test_a_video_stores_and_is_marked_as_video(store) -> None:
+    svc, adapter = store
+    asset = await svc.put(MP4, filename="hero loop.mp4", workspace_id="ws1", pocket_id="pk1")
+
+    assert asset.mime == "video/mp4"
+    assert asset.kind == "video", "the agent needs this to emit <video>, not <img>"
+    # extension_for() is the private rail's map and has no video mimes; without
+    # the local fallback this key would end ".bin".
+    assert asset.key.endswith(".mp4")
+    assert asset.key in adapter.objects
+
+
+@pytest.mark.asyncio
+async def test_an_image_is_marked_as_image(store) -> None:
+    svc, _ = store
+    asset = await svc.put(PNG, filename="logo.png", workspace_id="ws1", pocket_id="pk1")
+    assert asset.kind == "image"
+
+
+@pytest.mark.asyncio
+async def test_video_gets_the_larger_cap_not_the_image_one(store) -> None:
+    """A 12 MB video must not be judged against the 10 MB image ceiling."""
+    svc, _ = store
+    twelve_mb = MP4 + b"\x00" * (12 * 1024 * 1024)
+    asset = await svc.put(twelve_mb, filename="loop.mp4", workspace_id="ws1", pocket_id="pk1")
+    assert asset.kind == "video"
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_video_is_refused_and_names_video(store) -> None:
+    svc, _ = store
+    huge = MP4 + b"\x00" * MAX_VIDEO_BYTES
+    with pytest.raises(PublicAssetError, match="Video for a site are capped"):
+        await svc.put(huge, filename="loop.mp4", workspace_id="ws1", pocket_id="pk1")
+
+
+def test_the_video_cap_stays_under_the_adapters_in_memory_ceiling() -> None:
+    """The S3 adapter buffers a whole body in memory before it PUTs.
+
+    Raising MAX_VIDEO_BYTES past that ceiling does not need a bigger number, it
+    needs multipart upload. This pins the dependency so whoever bumps it has to
+    confront the comment rather than discover it as an OOM.
+    """
+    from pocketpaw.uploads.s3 import _MEM_BUFFER_WARN_BYTES
+
+    assert MAX_VIDEO_BYTES < _MEM_BUFFER_WARN_BYTES

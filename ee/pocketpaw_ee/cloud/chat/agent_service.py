@@ -255,6 +255,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -2486,6 +2487,7 @@ async def build_knowledge_context(
     user_message: str,
     attachments: list[dict[str, Any]] | None = None,
     mentions: list[dict[str, Any]] | None = None,
+    surface: str | None = None,
 ) -> str:
     """Build the per-turn knowledge context — dynamic scope/participants
     tags + KB hits + inlined attachment text. Static behavioral rules are
@@ -2517,7 +2519,7 @@ async def build_knowledge_context(
     if briefing:
         sections.append(briefing)
 
-    attachments_block = await _build_attachments_block(ctx, attachments)
+    attachments_block = await _build_attachments_block(ctx, attachments, surface=surface)
     if attachments_block:
         sections.append(attachments_block)
 
@@ -2608,9 +2610,95 @@ _ATTACHMENT_PER_FILE_CHARS = 8000
 _ATTACHMENT_TOTAL_CHARS = 30000
 
 
+# Surfaces whose attachments may be republished to the WORLD-READABLE bucket.
+# A site's whole job is to be loaded by strangers, so an image attached while
+# describing or refining one is content the user is explicitly asking us to
+# publish. Nowhere else is: a chat attachment on /files or /studio stays on the
+# private, auth-gated rail. Adding a surface here makes its users' uploads
+# publicly addressable — treat it as a privacy boundary, not a feature flag.
+_MEDIA_PUBLISHING_SURFACES: frozenset[str] = frozenset({"sites"})
+
+
+async def _publish_media_attachment(
+    ctx: ScopeContext,
+    rec: Any,
+    path: Any,
+    *,
+    surface: str | None,
+) -> str | None:
+    """Republish an attached image/video publicly; return its ``<uploaded-files>`` entry.
+
+    ``None`` when this is not a publishable case — wrong surface, not media, or
+    the deployment has no public bucket — and the caller then falls back to the
+    ordinary extracted-text entry. Never raises: a failed republish must degrade
+    to "the agent does not get to embed this file", never to a failed chat turn.
+    """
+    if (surface or "") not in _MEDIA_PUBLISHING_SURFACES:
+        return None
+
+    try:
+        from pocketpaw_ee.sites.public_assets import (
+            PUBLIC_MEDIA_MIMES,
+            public_asset_store,
+        )
+    except Exception:  # noqa: BLE001 — EE sites layer unavailable; degrade quietly
+        return None
+
+    mime = getattr(rec, "mime", "") or ""
+    if mime not in PUBLIC_MEDIA_MIMES:
+        return None
+
+    store = public_asset_store()
+    if store is None:
+        # No public bucket on this deployment. Say so in the block rather than
+        # staying silent: otherwise the agent sees a file it cannot use and no
+        # reason why, and its most likely move is to invent a URL.
+        return (
+            f"### {rec.filename} ({mime}, {rec.size} bytes)\n"
+            "(an image/video was attached, but this deployment has no public asset "
+            "storage configured, so it cannot be published to a site — say so rather "
+            "than inventing a URL)"
+        )
+
+    try:
+        data = Path(path).read_bytes()
+        asset = await store.put(
+            data,
+            filename=getattr(rec, "filename", None) or "attachment",
+            workspace_id=ctx.workspace_id,
+            # Pre-create sends have no pocket yet. Key those under the USER so
+            # they are still tenant-scoped and never collide across people; the
+            # agent gets a working URL either way, which is the point.
+            pocket_id=ctx.pocket_id or f"_user-{ctx.user_id}",
+        )
+    except Exception:  # noqa: BLE001 — never fail a chat turn over an upload
+        logger.warning(
+            "attachment %s could not be published to the public rail",
+            getattr(rec, "filename", "?"),
+            exc_info=True,
+        )
+        return None
+
+    element = (
+        f'<video src="{asset.url}" autoplay muted loop playsinline>'
+        if asset.kind == "video"
+        else f'<img src="{asset.url}" alt="…">'
+    )
+    return (
+        f"### {rec.filename} ({asset.mime}, {asset.size} bytes)\n"
+        f"PUBLIC URL: {asset.url}\n"
+        f"The user attached this so the site can show it. The URL above is "
+        f"permanent and world-readable — use it VERBATIM as {element}. "
+        f"Do not copy the file into the source map, do not rewrite the URL, and "
+        f"do not substitute a stock asset for it."
+    )
+
+
 async def _build_attachments_block(
     ctx: ScopeContext,
     attachments: list[dict[str, Any]] | None,
+    *,
+    surface: str | None = None,
 ) -> str:
     """Inline extracted text from each upload URL in ``attachments``.
 
@@ -2679,6 +2767,22 @@ async def _build_attachments_block(
 
                 text = (result.text or "").strip()
                 header = f"### {rec.filename} ({rec.mime}, {rec.size} bytes)"
+
+                # PUBLISHABLE MEDIA takes a different road entirely. Extraction
+                # gives an image or a video nothing — the entry below would read
+                # "(no text extracted)", which tells the agent a file exists and
+                # leaves it no way to USE it. On a sites surface that is exactly
+                # the file the user attached so their page could show it, so
+                # republish it to the public bucket and hand back an address the
+                # published page can actually load. Gated on the surface: the
+                # private upload rail is where a chat attachment belongs
+                # everywhere else, and a world-readable copy is not a default.
+                published = await _publish_media_attachment(ctx, rec, path, surface=surface)
+                if published:
+                    entries.append(published)
+                    processed += 1
+                    continue
+
                 if not text:
                     entries.append(f"{header}\n(no text extracted)")
                     processed += 1

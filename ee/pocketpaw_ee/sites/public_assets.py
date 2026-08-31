@@ -21,8 +21,18 @@
 # WHAT IT DELIBERATELY DOES NOT DO. It does not store documents. A PRD is agent
 # INPUT, not site content; publishing a customer's requirements doc to an
 # unauthenticated bucket is a data leak, so documents stay on the private rail
-# (``EEUploadService``) and reach the model as text. See ``router.py`` — the
-# endpoint routes by kind and only images land here.
+# (``EEUploadService``), where ``chat/agent_service._build_attachments_block``
+# already extracts their text into the model's context. Only PUBLISHABLE MEDIA —
+# the stills and video a page actually renders — lands here.
+#
+# Updated 2026-08-31 (video): the rail carries VIDEO as well as stills. A
+# scroll-driven background video is a mainstream landing-page form now, and it has
+# the same address problem a hero image does — worse, since a video element refetches
+# by range and a signed URL dying mid-scroll is a visibly broken page. Video gets its
+# own 50 MiB cap: the S3 adapter buffers a whole body in memory before it PUTs
+# (``_MEM_BUFFER_WARN_BYTES`` is 64 MiB), so a larger ceiling here would trip that
+# warning and eventually OOM a web worker. Raising it past 50 MiB means teaching the
+# adapter multipart upload first — that is the honest prerequisite, not a config bump.
 #
 # KEY LAYOUT: ``sites-assets/{workspace_id}/{pocket_id}/{sha256[:16]}-{stem}{ext}``
 # Tenant-scoped so one workspace can never enumerate or overwrite another's, and
@@ -57,6 +67,18 @@ PUBLIC_IMAGE_MIMES: frozenset[str] = frozenset(
     }
 )
 
+# Web-playable containers only. A .mov/quicktime upload is common off a phone but
+# does not play in every browser, so accepting it would publish a video that is
+# silently blank for some visitors — worse than refusing it at the door.
+PUBLIC_VIDEO_MIMES: frozenset[str] = frozenset(
+    {
+        "video/mp4",
+        "video/webm",
+    }
+)
+
+PUBLIC_MEDIA_MIMES: frozenset[str] = PUBLIC_IMAGE_MIMES | PUBLIC_VIDEO_MIMES
+
 # Magic-byte signatures for the allowlist above. The public rail must NOT reuse
 # ``uploads.service._sniff_mime``: that helper FALLS BACK to the client's own
 # Content-Type header when nothing matches, so a caller can label arbitrary bytes
@@ -68,9 +90,23 @@ _SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\xff\xd8\xff", "image/jpeg"),
     (b"GIF87a", "image/gif"),
     (b"GIF89a", "image/gif"),
+    # Matroska/WebM: the EBML header is a plain prefix.
+    (b"\x1a\x45\xdf\xa3", "video/webm"),
 )
 
-MAX_ASSET_BYTES = 10 * 1024 * 1024  # 10 MiB — a hero image, not a video.
+# ISO-BMFF brands that are actually web-playable MP4. `qt  ` (QuickTime) is
+# deliberately absent — see PUBLIC_VIDEO_MIMES.
+_MP4_BRANDS: frozenset[bytes] = frozenset(
+    {b"isom", b"iso2", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"dash", b"M4V "}
+)
+
+MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MiB — a hero image.
+# 50 MiB, NOT an arbitrary round number: the S3 adapter buffers the whole body in
+# memory and warns past 64 MiB. Staying under that is the difference between a
+# refusal the user can act on and a worker that dies mid-upload.
+MAX_VIDEO_BYTES = 50 * 1024 * 1024
+# Back-compat alias — the endpoint's read cap must admit the largest kind.
+MAX_ASSET_BYTES = MAX_VIDEO_BYTES
 
 _KEY_PREFIX = "sites-assets"
 _HASH_LEN = 16
@@ -95,22 +131,41 @@ class PublicAsset:
     size: int
     filename: str
     sha256: str
+    # "image" | "video" — the agent needs this to emit <img> vs <video>, and it
+    # cannot reliably infer it from the extension alone in a listing.
+    kind: str = "image"
 
 
-def sniff_image_mime(head: bytes) -> str | None:
-    """Return the image mime ``head`` actually proves, or ``None``.
+def sniff_media_mime(head: bytes) -> str | None:
+    """Return the media mime ``head`` actually proves, or ``None``.
 
     Unlike the private rail's sniffer there is no fallback to a caller-supplied
-    Content-Type — unrecognised bytes are simply not an image.
+    Content-Type — unrecognised bytes are simply not publishable media.
     """
     for magic, mime in _SIGNATURES:
         if head.startswith(magic):
             return mime
-    # WebP is the one format whose marker is not a plain prefix: "RIFF", then a
-    # 4-byte little-endian length, then "WEBP" at offset 8.
+    # WebP is the one image format whose marker is not a plain prefix: "RIFF",
+    # then a 4-byte little-endian length, then "WEBP" at offset 8.
     if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
         return "image/webp"
+    # MP4/ISO-BMFF: a 4-byte box length, then "ftyp", then the brand. Only the
+    # brands a browser actually plays are accepted — an unrecognised brand (HEIF
+    # off a phone, say) falls through to None rather than being published as
+    # video/mp4 and rendering as a blank player on the live page.
+    if head[4:8] == b"ftyp" and head[8:12] in _MP4_BRANDS:
+        return "video/mp4"
     return None
+
+
+def kind_for_mime(mime: str) -> str:
+    """Return ``"image"`` or ``"video"`` — what the agent must emit for this asset."""
+    return "video" if mime in PUBLIC_VIDEO_MIMES else "image"
+
+
+def max_bytes_for_mime(mime: str) -> int:
+    """The size ceiling that applies to this media kind."""
+    return MAX_VIDEO_BYTES if mime in PUBLIC_VIDEO_MIMES else MAX_IMAGE_BYTES
 
 
 def _safe_stem(filename: str) -> str:
@@ -126,7 +181,10 @@ def _safe_stem(filename: str) -> str:
 def build_key(workspace_id: str, pocket_id: str, digest: str, filename: str, mime: str) -> str:
     """Return the tenant-scoped, content-addressed storage key for one asset."""
     stem = _safe_stem(filename)
-    ext = extension_for(mime) or ".bin"
+    # ``extension_for`` is the shared private-rail map and carries no video
+    # mimes, so fall back to the local one rather than emit ".bin" for an mp4 —
+    # some CDNs and players still sniff the extension.
+    ext = extension_for(mime) or _MEDIA_EXT.get(mime) or ".bin"
     return f"{_KEY_PREFIX}/{workspace_id}/{pocket_id}/{digest[:_HASH_LEN]}-{stem}{ext}"
 
 
@@ -157,18 +215,25 @@ class PublicAssetStore:
         """Validate, store, and return the asset. Raises :class:`PublicAssetError`."""
         if not data:
             raise PublicAssetError("That file is empty.")
-        if len(data) > MAX_ASSET_BYTES:
+
+        # Sniff BEFORE the size check: the ceiling depends on the kind, and a
+        # 30 MB video rejected against the 10 MB image cap would be a confusing
+        # lie about why it failed.
+        mime = sniff_media_mime(data[:512])
+        if mime is None or mime not in PUBLIC_MEDIA_MIMES:
             raise PublicAssetError(
-                f"That file is {len(data) // (1024 * 1024)} MB. "
-                f"Site images are capped at {MAX_ASSET_BYTES // (1024 * 1024)} MB."
+                "A site can publish PNG, JPEG, GIF and WebP images, or MP4 and WebM "
+                "video. (SVG is not accepted — it can carry script. QuickTime .mov is "
+                "not accepted — it does not play in every browser.) "
+                "Documents like a PRD are read as context instead, not published."
             )
 
-        mime = sniff_image_mime(data[:512])
-        if mime is None or mime not in PUBLIC_IMAGE_MIMES:
+        cap = max_bytes_for_mime(mime)
+        if len(data) > cap:
+            noun = "Video" if kind_for_mime(mime) == "video" else "Images"
             raise PublicAssetError(
-                "Only PNG, JPEG, GIF and WebP images can be published to a site. "
-                "(SVG is not accepted — it can carry script.) "
-                "Documents like a PRD go through the chat attachment instead."
+                f"That file is {len(data) // (1024 * 1024)} MB. "
+                f"{noun} for a site are capped at {cap // (1024 * 1024)} MB."
             )
 
         digest = hashlib.sha256(data).hexdigest()
@@ -199,6 +264,7 @@ class PublicAssetStore:
             size=len(data),
             filename=filename,
             sha256=digest,
+            kind=kind_for_mime(mime),
         )
 
     async def list(self, *, workspace_id: str, pocket_id: str) -> list[PublicAsset]:
@@ -223,6 +289,7 @@ class PublicAssetStore:
                     size=item.size,
                     filename=display,
                     sha256=digest,
+                    kind=kind_for_mime(_mime_for_name(item.name)),
                 )
             )
         return sorted(out, key=lambda a: a.filename)
@@ -237,7 +304,14 @@ class PublicAssetStore:
         await self._adapter.delete(key)
 
 
+_MEDIA_EXT: dict[str, str] = {
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+}
+
 _NAME_MIMES: tuple[tuple[str, str], ...] = (
+    (".mp4", "video/mp4"),
+    (".webm", "video/webm"),
     (".png", "image/png"),
     (".jpg", "image/jpeg"),
     (".jpeg", "image/jpeg"),
@@ -279,12 +353,18 @@ def public_asset_store() -> PublicAssetStore | None:
 
 __all__ = [
     "MAX_ASSET_BYTES",
+    "MAX_IMAGE_BYTES",
+    "MAX_VIDEO_BYTES",
     "PUBLIC_IMAGE_MIMES",
+    "PUBLIC_MEDIA_MIMES",
+    "PUBLIC_VIDEO_MIMES",
     "PublicAsset",
     "PublicAssetError",
     "PublicAssetStore",
     "build_key",
     "prefix_for",
+    "kind_for_mime",
+    "max_bytes_for_mime",
     "public_asset_store",
-    "sniff_image_mime",
+    "sniff_media_mime",
 ]
