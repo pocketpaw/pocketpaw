@@ -89,6 +89,7 @@ EDIT_ENDPOINTS: dict[str, str] = {
     "nano_banana": "fal-ai/nano-banana-2/edit",
     "gpt_image_2": "openai/gpt-image-2/edit",
     "seedream_2k": "bytedance/seedream/v5/pro/edit",
+    "grok_imagine": "xai/grok-imagine-image/v2.0/edit",
 }
 
 # Per-model ceiling on ``image_urls`` for the reference-based edit endpoints.
@@ -96,6 +97,181 @@ EDIT_ENDPOINTS: dict[str, str] = {
 # truncate). Absent = no known cap.
 EDIT_REFERENCE_LIMITS: dict[str, int] = {
     "grok_imagine": 3,
+}
+
+# ── Per-model edit parameters ────────────────────────────────────────────────
+# The declarative knobs the edit composer surfaces PER MODEL, keyed by the
+# curated registry key. Each entry mirrors that model's actual fal.ai edit
+# schema (what the endpoint exposes — quality, size, background, number of
+# images, resolution, output format, safety tolerance, seed), so the rail
+# composer shows exactly what the model provides. Values the backend forwards on
+# the edit path (``build_edit_arguments`` below) are the same keys.
+#
+# ``recraft_v3`` has no edit variant, so it carries no params. Serialized into
+# ``StudioModel.params`` by ``service._curated_image_models()``.
+
+MODEL_PARAMS: dict[str, list[dict[str, Any]]] = {
+    "nano_banana": [
+        {
+            "key": "num_images",
+            "label": "Number of images",
+            "type": "stepper",
+            "default": 1,
+            "min": 1,
+            "max": 4,
+        },
+        {
+            "key": "seed",
+            "label": "Seed",
+            "type": "text",
+            "default": "",
+            "hint": "Optional — fixed seed for reproducible edits",
+            "advanced": True,
+        },
+        {
+            "key": "output_format",
+            "label": "Output format",
+            "type": "select",
+            "default": "png",
+            "options": ["png", "jpeg", "webp"],
+            "advanced": True,
+        },
+        {
+            "key": "safety_tolerance",
+            "label": "Safety tolerance",
+            "type": "slider",
+            "default": 4,
+            "min": 1,
+            "max": 6,
+            "step": 1,
+            "hint": "API only",
+            "advanced": True,
+        },
+    ],
+    "gpt_image_2": [
+        {
+            "key": "quality",
+            "label": "Quality",
+            "type": "select",
+            "default": "medium",
+            "options": ["low", "medium", "high"],
+        },
+        {
+            "key": "num_images",
+            "label": "Number of images",
+            "type": "stepper",
+            "default": 1,
+            "min": 1,
+            "max": 4,
+        },
+        {
+            "key": "size",
+            "label": "Image size",
+            "type": "select",
+            "default": "auto",
+            "options": ["auto", "1024x1024", "1536x1024", "1024x1536"],
+            "advanced": True,
+        },
+        {
+            "key": "background",
+            "label": "Background",
+            "type": "select",
+            "default": "auto",
+            "options": ["auto", "transparent", "opaque"],
+            "advanced": True,
+        },
+        {
+            "key": "output_format",
+            "label": "Output format",
+            "type": "select",
+            "default": "jpeg",
+            "options": ["jpeg", "png", "webp"],
+            "advanced": True,
+        },
+        {
+            "key": "seed",
+            "label": "Seed",
+            "type": "text",
+            "default": "",
+            "hint": "Optional — fixed seed for reproducible edits",
+            "advanced": True,
+        },
+    ],
+    "seedream_2k": [
+        {
+            "key": "num_images",
+            "label": "Number of images",
+            "type": "stepper",
+            "default": 1,
+            "min": 1,
+            "max": 4,
+        },
+        {
+            "key": "resolution",
+            "label": "Image size",
+            "type": "select",
+            "default": "auto",
+            "options": ["auto", "1K", "2K", "4K"],
+            "hint": "Determined automatically from the input when 'auto'",
+            "advanced": True,
+        },
+        {
+            "key": "output_format",
+            "label": "Output format",
+            "type": "select",
+            "default": "jpeg",
+            "options": ["jpeg", "png"],
+            "advanced": True,
+        },
+        {
+            "key": "seed",
+            "label": "Seed",
+            "type": "text",
+            "default": "",
+            "hint": "Optional — fixed seed for reproducible edits",
+            "advanced": True,
+        },
+    ],
+    "grok_imagine": [
+        {
+            "key": "resolution",
+            "label": "Resolution",
+            "type": "select",
+            "default": "2k",
+            "options": ["1k", "2k"],
+        },
+        {
+            "key": "quality",
+            "label": "Quality",
+            "type": "select",
+            "default": "medium",
+            "options": ["low", "medium", "high"],
+        },
+        {
+            "key": "num_images",
+            "label": "Number of images",
+            "type": "stepper",
+            "default": 1,
+            "min": 1,
+            "max": 4,
+        },
+        {
+            "key": "output_format",
+            "label": "Output format",
+            "type": "select",
+            "default": "jpeg",
+            "options": ["jpeg", "png"],
+            "advanced": True,
+        },
+        {
+            "key": "seed",
+            "label": "Seed",
+            "type": "text",
+            "default": "",
+            "hint": "Optional — fixed seed for reproducible edits",
+            "advanced": True,
+        },
+    ],
 }
 
 # ── Aspect ratio → image_size ────────────────────────────────────────────────
@@ -199,36 +375,91 @@ def build_edit_arguments(
     aspect_ratio: str | None = None,
     count: int = 1,
     seed: int | None = None,
+    quality: str | None = None,
+    size: str | None = None,
+    background: str | None = None,
+    output_format: str | None = None,
+    resolution: str | None = None,
+    safety_tolerance: int | None = None,
 ) -> dict[str, Any]:
     """Build the fal ``arguments`` dict for a reference-based edit call.
 
-    nano-banana / gpt-image-2 take the references as ``image_urls`` (capped per
-    model) + prompt; seedream's edit endpoint is a SINGLE-image op, so a single
-    reference is sent as ``image_url`` (same shape as fal_edit's sketch-to-image
-    op). Pure + side-effect free; raises ValueError when no references were
-    supplied.
+    nano-banana / gpt-image-2 / grok take the references as ``image_urls``
+    (capped per model) + prompt; seedream's edit endpoint is a SINGLE-image op,
+    so a single reference is sent as ``image_url`` (same shape as fal_edit's
+    sketch-to-image op). Each model's own knobs (quality / size / background /
+    resolution / output_format / safety_tolerance / seed / num_images) are
+    forwarded only when provided — the shapes mirror each endpoint's fal schema.
+    Pure + side-effect free; raises ValueError when no references were supplied.
     """
     refs = [u for u in (image_urls or []) if u and u.strip()]
     if not refs:
         raise ValueError("at least one reference image is required for image edit")
     refs = cap_reference_images(model_key, refs)
+    num_images = max(1, min(int(count), 4))
 
     if model_key == "seedream_2k":
-        args = {
+        args: dict[str, Any] = {
             "prompt": prompt,
             "image_url": refs[0],
+            "num_images": num_images,
         }
+        if resolution:
+            args["resolution"] = resolution
+        if output_format:
+            args["output_format"] = output_format
+        if seed is not None:
+            args["seed"] = int(seed)
         return args
 
+    if model_key == "gpt_image_2":
+        args = {
+            "prompt": prompt,
+            "image_urls": refs,
+            "num_images": num_images,
+        }
+        if quality:
+            args["quality"] = quality
+        if size:
+            args["size"] = size
+        if background:
+            args["background"] = background
+        if output_format:
+            args["output_format"] = output_format
+        if seed is not None:
+            args["seed"] = int(seed)
+        return args
+
+    if model_key == "grok_imagine":
+        args = {
+            "prompt": prompt,
+            "image_urls": refs,
+            "num_images": num_images,
+        }
+        if resolution:
+            args["resolution"] = resolution
+        if quality:
+            args["quality"] = quality
+        if output_format:
+            args["output_format"] = output_format
+        if seed is not None:
+            args["seed"] = int(seed)
+        return args
+
+    # nano_banana (and any other reference-based edit endpoint): the generic
+    # fal image-edit shape. Keeps the legacy ``output_format``/``sync_mode``
+    # defaults unless the composer overrides them.
     args = {
         "prompt": prompt,
         "image_urls": refs,
-        "num_images": max(1, min(int(count), 4)),
-        "output_format": "jpeg",
+        "num_images": num_images,
+        "output_format": output_format or "jpeg",
         "sync_mode": False,
     }
     if seed is not None:
         args["seed"] = int(seed)
+    if safety_tolerance is not None:
+        args["safety_tolerance"] = int(safety_tolerance)
     return args
 
 
@@ -347,6 +578,12 @@ async def run_fal_image_edit(
     aspect_ratio: str | None = None,
     count: int = 1,
     seed: int | None = None,
+    quality: str | None = None,
+    size: str | None = None,
+    background: str | None = None,
+    output_format: str | None = None,
+    resolution: str | None = None,
+    safety_tolerance: int | None = None,
     key: str | None = None,
 ) -> list[tuple[bytes, str]]:
     """Run a reference-based image edit and return ``[(bytes, mime), …]``.
@@ -354,8 +591,10 @@ async def run_fal_image_edit(
     ``image_urls`` are the reference images (character/location/element) the edit
     endpoint conditions on; the model is resolved to its edit variant via
     ``EDIT_ENDPOINTS`` (seedream resolves to its single-image edit endpoint).
-    Raises ValueError (no references / no edit endpoint for the model) and
-    FalImageError (upstream / no output).
+    The optional per-model knobs (``quality``/``size``/``background``/
+    ``resolution``/``output_format``/``safety_tolerance``/``seed``/``count``) are
+    forwarded onto the endpoint's own schema. Raises ValueError (no references /
+    no edit endpoint for the model) and FalImageError (upstream / no output).
     """
     text = (prompt or "").strip()
     if not text:
@@ -376,6 +615,12 @@ async def run_fal_image_edit(
         aspect_ratio=aspect_ratio,
         count=count,
         seed=seed,
+        quality=quality,
+        size=size,
+        background=background,
+        output_format=output_format,
+        resolution=resolution,
+        safety_tolerance=safety_tolerance,
     )
 
     api_key = key if key is not None else fal_edit.fal_api_key()
@@ -396,6 +641,7 @@ __all__ = [
     "IMAGE_MODEL_LABELS",
     "EDIT_ENDPOINTS",
     "EDIT_REFERENCE_LIMITS",
+    "MODEL_PARAMS",
     "IMAGE_SIZE_MAP",
     "GPT_IMAGE_SIZE_MAP",
     "FalImageError",

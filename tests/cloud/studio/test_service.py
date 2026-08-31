@@ -243,6 +243,59 @@ async def test_list_models_upstream_failure_propagates(monkeypatch) -> None:
         await service.list_models()
 
 
+async def test_curated_image_models_expose_edit_params(monkeypatch) -> None:
+    """Curated image models surface their per-model edit knobs from
+    ``fal_image.MODEL_PARAMS`` — only the edit-capable models carry any."""
+
+    async def _list(**kw):
+        return []
+
+    monkeypatch.setattr(catalog_service, "list_models", _list)
+
+    models = await service.list_models()
+    by_id = {m.id: m for m in models}
+
+    nana = by_id["fal-ai/nano-banana-2"]
+    assert {p.key for p in nana.params} == {
+        "num_images",
+        "seed",
+        "output_format",
+        "safety_tolerance",
+    }
+    num = next(p for p in nana.params if p.key == "num_images")
+    assert num.type == "stepper" and num.min == 1 and num.max == 4
+
+    gpt = by_id["openai/gpt-image-2"]
+    assert {p.key for p in gpt.params} == {
+        "quality",
+        "num_images",
+        "size",
+        "background",
+        "output_format",
+        "seed",
+    }
+
+    seedream = by_id["bytedance/seedream/v5/pro/text-to-image"]
+    assert {p.key for p in seedream.params} == {
+        "num_images",
+        "resolution",
+        "output_format",
+        "seed",
+    }
+
+    grok = by_id["xai/grok-imagine-image/v2.0/text-to-image"]
+    assert {p.key for p in grok.params} == {
+        "resolution",
+        "quality",
+        "num_images",
+        "output_format",
+        "seed",
+    }
+
+    # Non-edit curated image models expose no params.
+    assert by_id["fal-ai/recraft/v3/text-to-image"].params == []
+
+
 # ── generate (image) ─────────────────────────────────────────────────────────
 
 
@@ -651,6 +704,94 @@ async def test_edit_happy_path(monkeypatch, studio_env) -> None:
     assert len(records) == 1
     assert records[0]["_workspace"] == "ws-1"
     assert name in service.tracked_generation_filenames()
+
+
+async def test_edit_op_routes_curated_model_through_fal_image(monkeypatch, studio_env) -> None:
+    """``op='edit'`` with a curated image model id + per-model params dispatches
+    through the model's own /edit variant (fal_image), forwarding ``num_images``
+    and ``seed`` instead of the generic canvas op."""
+    png = b"\x89PNG\r\n\x1a\nedited"
+    seen: dict = {}
+
+    async def _fake_fal_image_edit(**kwargs):
+        seen.update(kwargs)
+        return [(png, "image/png")]
+
+    monkeypatch.setattr(fal_image, "run_fal_image_edit", _fake_fal_image_edit)
+
+    req = schemas.EditRequest(
+        op="edit",
+        sourceUrl=_DATA_URL,
+        prompt="turn the sky purple",
+        model="fal-ai/nano-banana-2",
+        params={"num_images": 3, "seed": "42"},
+    )
+    gen = await service.edit(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert seen["model"] == "fal-ai/nano-banana-2"
+    assert seen["count"] == 3
+    assert seen["seed"] == 42
+    assert seen["image_urls"] == [_DATA_URL]
+    assert gen.assets[0].url.startswith("/api/v1/media/")
+
+
+async def test_edit_op_forwards_gpt_image_2_knobs(monkeypatch, studio_env) -> None:
+    """gpt-image-2 edit forwards its own knobs (quality / size / background /
+    output_format) onto the fal arguments."""
+    png = b"\x89PNG\r\n\x1a\nedited"
+    seen: dict = {}
+
+    async def _fake_fal_image_edit(**kwargs):
+        seen.update(kwargs)
+        return [(png, "image/png")]
+
+    monkeypatch.setattr(fal_image, "run_fal_image_edit", _fake_fal_image_edit)
+
+    req = schemas.EditRequest(
+        op="edit",
+        sourceUrl=_DATA_URL,
+        prompt="livery",
+        model="openai/gpt-image-2",
+        params={
+            "quality": "high",
+            "size": "1536x1024",
+            "background": "transparent",
+            "output_format": "png",
+            "num_images": 2,
+        },
+    )
+    gen = await service.edit(req, workspace_id="ws-1")
+    assert gen.status == "succeeded"
+    assert seen["quality"] == "high"
+    assert seen["size"] == "1536x1024"
+    assert seen["background"] == "transparent"
+    assert seen["output_format"] == "png"
+    assert seen["count"] == 2
+
+
+async def test_edit_op_curated_params_blank_seed_is_none(monkeypatch, studio_env) -> None:
+    """A blank ``seed`` from the composer's untouched text knob coerces to None
+    (never ``int('')`` → 400/500)."""
+    png = b"\x89PNG\r\n\x1a\nedited"
+    seen: dict = {}
+
+    async def _fake_fal_image_edit(**kwargs):
+        seen.update(kwargs)
+        return [(png, "image/png")]
+
+    monkeypatch.setattr(fal_image, "run_fal_image_edit", _fake_fal_image_edit)
+
+    req = schemas.EditRequest(
+        op="edit",
+        sourceUrl=_DATA_URL,
+        prompt="recolor",
+        model="bytedance/seedream/v5/pro/text-to-image",
+        params={"seed": ""},
+    )
+    gen = await service.edit(req, workspace_id="ws-1")
+    assert gen.status == "succeeded"
+    assert seen["seed"] is None
 
 
 async def test_edit_resolves_stored_media_source(monkeypatch, studio_env) -> None:

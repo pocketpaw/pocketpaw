@@ -267,6 +267,12 @@ def _curated_image_models() -> list[schemas.StudioModel]:
                 credits=1,
                 tags=[cfg.get("vendor", "fal").lower(), "image", "curated"],
                 default=(key == fal_image.DEFAULT_IMAGE_MODEL),
+                # Per-model edit knobs (what each fal model's edit endpoint
+                # actually accepts) — declared in fal_image.MODEL_PARAMS.
+                params=[
+                    schemas.StudioModelParam.model_validate(p)
+                    for p in fal_image.MODEL_PARAMS.get(key, [])
+                ],
             )
         )
     return models
@@ -1246,6 +1252,44 @@ def _fit_character_image(data_url: str, mime: str) -> tuple[str, str]:
     )
 
 
+def _coerce_param_int(value: Any, *, default: int, lo: int, hi: int) -> int:
+    """Coerce a rail-composer param value to an int clamped to ``[lo, hi]``.
+
+    The composer may send numbers, numeric strings, or ``None`` (an untouched
+    knob). Anything unparsable falls back to ``default`` so a malformed value
+    never 500s the request."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(n, hi))
+
+
+def _coerce_param_seed(value: Any) -> int | None:
+    """Coerce a rail-composer seed param to an int, or None when unset/blank.
+
+    The composer's seed knob defaults to an empty string (meaning "unset");
+    ``False`` (a cleared toggle-like value) is treated the same. A literal 0 is a
+    valid seed and passes through."""
+    if value is None or value == "" or value is False:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_param_str(value: Any) -> str | None:
+    """Coerce a rail-composer select/text param to a non-empty string, or None.
+
+    Select knobs default to a chosen option (always a non-empty string); a
+    cleared/absent value becomes None so it is omitted from the fal arguments."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
 async def edit(req: schemas.EditRequest, *, workspace_id: str) -> schemas.Generation:
     """Run a canvas edit op (inpaint/expand/upscale/variations/remove-bg/edit/
     sketch-to-image) DIRECTLY against fal.ai — the LiteLLM gateway serves
@@ -1268,19 +1312,64 @@ async def edit(req: schemas.EditRequest, *, workspace_id: str) -> schemas.Genera
         raise ValueError("sourceUrl is required for an edit")
 
     source_data_url, _ = await _resolve_source_data_url(req.sourceUrl)
+    model_id = (req.model or "").strip()
 
-    try:
-        results = await fal_edit.run_fal_edit(
-            op=op,
-            image_data_url=source_data_url,
-            mask_data_url=req.maskDataUrl,
-            prompt=req.prompt,
-            direction=req.direction,
-            factor=req.factor,
-            model=req.model,
+    # The rail edit composer sends ``op='edit'`` with a CURATED image model id
+    # (e.g. ``fal-ai/nano-banana-2`` — the text-to-image id, not its /edit
+    # endpoint) plus the model's per-model params. Route those through the
+    # model's own edit variant (fal_image), forwarding ``num_images`` / ``seed``.
+    # Canvas ops and non-curated models keep the generic fal_edit path.
+    is_curated_edit = (
+        op == "edit"
+        and model_id
+        and fal_image.model_key_for_id(model_id) in fal_image.EDIT_ENDPOINTS
+    )
+    if is_curated_edit:
+        composer_params = req.params or {}
+        count = _coerce_param_int(
+            composer_params.get("num_images"), default=1, lo=1, hi=_MAX_GENERATED_ASSETS
         )
-    except fal_edit.FalEditError as exc:
-        raise StudioUpstreamError(str(exc)) from exc
+        seed = _coerce_param_seed(composer_params.get("seed"))
+        quality = _coerce_param_str(composer_params.get("quality"))
+        size = _coerce_param_str(composer_params.get("size"))
+        background = _coerce_param_str(composer_params.get("background"))
+        output_format = _coerce_param_str(composer_params.get("output_format"))
+        resolution = _coerce_param_str(composer_params.get("resolution"))
+        raw_tolerance = composer_params.get("safety_tolerance")
+        safety_tolerance = (
+            _coerce_param_int(raw_tolerance, default=4, lo=1, hi=6)
+            if raw_tolerance is not None
+            else None
+        )
+        try:
+            results = await fal_image.run_fal_image_edit(
+                prompt=req.prompt,
+                image_urls=[source_data_url],
+                model=model_id,
+                count=count,
+                seed=seed,
+                quality=quality,
+                size=size,
+                background=background,
+                output_format=output_format,
+                resolution=resolution,
+                safety_tolerance=safety_tolerance,
+            )
+        except fal_image.FalImageError as exc:
+            raise StudioUpstreamError(str(exc)) from exc
+    else:
+        try:
+            results = await fal_edit.run_fal_edit(
+                op=op,
+                image_data_url=source_data_url,
+                mask_data_url=req.maskDataUrl,
+                prompt=req.prompt,
+                direction=req.direction,
+                factor=req.factor,
+                model=model_id,
+            )
+        except fal_edit.FalEditError as exc:
+            raise StudioUpstreamError(str(exc)) from exc
 
     if not results:
         raise StudioUpstreamError("fal edit produced no output images")
@@ -1290,7 +1379,7 @@ async def edit(req: schemas.EditRequest, *, workspace_id: str) -> schemas.Genera
         url = await _save_image_bytes(data, mime=mime, ext=fal_edit.mime_to_ext(mime))
         assets.append({"id": _seq_id("asset"), "url": url, "mime": mime})
 
-    model = (req.model or "").strip() or fal_edit.DEFAULT_EDIT_MODELS[op]
+    model = model_id or fal_edit.DEFAULT_EDIT_MODELS[op]
     params: dict[str, Any] = {
         "kind": "image",
         "model": model,
