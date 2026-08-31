@@ -1,6 +1,19 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-01 (fix/sites-react-orphan-create): ``edit_react_component`` now
+# returns ``unreferenced`` alongside ``created``. Adding a section to a react site is
+# TWO calls — write ``src/components/<Name>.tsx``, then edit ``src/App.tsx`` to import
+# and render it — and the first call returned a flat success whether or not the second
+# ever came. A component nothing imports is not in the bundle, so the page is byte-for-
+# byte unchanged; the caller could not tell that from a real edit, and reported the work
+# as done over a site that never moved. Reported live: an image attached to a published
+# site, "added to a component", and nowhere to be found. The verdict is ADVISORY (the
+# file is written, ``ok`` stays true) because call 1 is unreferenced by definition at the
+# instant it lands — a refusal would close the only lane that can add a section at all.
+# It is scoped to ``create`` for the same reason the signal exists: a warning on every
+# edit is noise, and noise is how the one that matters gets skimmed.
+#
 # Updated 2026-08-24 (SP-2 — draft preview joins the ephemeral build lane): a cold
 # ``get_native_artifact`` no longer builds in this process. ``_build_native_artifact``
 # used to call ``generator.build``, which shells out to ``bun``; the deployed API
@@ -980,7 +993,11 @@ from pocketpaw_ee.sites.html_paths import (
     is_reserved_html_path,
     normalize_html_path,
 )
-from pocketpaw_ee.sites.react_paths import is_reserved_react_path, react_path_rejection
+from pocketpaw_ee.sites.react_paths import (
+    is_reserved_react_path,
+    react_path_is_referenced,
+    react_path_rejection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -6845,7 +6862,13 @@ async def edit_react_component(
     ``edit_svelte_component`` only needs the workspace to look up the Site doc whose
     builder origin its republish must re-apply — a republish this lane does not do.
 
-    Returns ``{pocket_id, component_path, created}``.
+    Returns ``{pocket_id, component_path, created, unreferenced}``. ``unreferenced``
+    is the advisory half of the two-call contract: True when this call CREATED a
+    file that no other file in the map imports (or, under ``public/``, that no file
+    references by URL), which means the page renders nothing new until the caller's
+    next edit wires it in. It is never True for a plain edit, and it never blocks —
+    call 1 of two is unreferenced by definition, so refusing it would close the only
+    lane that can add a section at all.
     """
     if _pockets is not None:
         pockets_service = _pockets
@@ -6911,10 +6934,32 @@ async def edit_react_component(
         create=create,
     )
 
+    # Does anything reach the file we just wrote? A create is HALF of adding a
+    # section — the other half is the ``src/App.tsx`` edit that imports and renders
+    # it — and until 2026-09-01 nothing connected the two. A create that landed call
+    # 1 and never got call 2 returned a flat success for a file the bundle does not
+    # contain, so the caller had no way to tell "added" from "added and reachable"
+    # and reported the work as done over a page that never changed.
+    #
+    # Scoped to ``create`` deliberately. An ordinary edit touches a file that is
+    # already part of the site, and re-litigating its wiring on every headline change
+    # is noise on the common path — which is how the signal on the rare path gets
+    # skimmed. The map scanned is the POST-write one: the write sets exactly this one
+    # key, so re-reading the pocket to learn what we just sent it would be a round
+    # trip for an answer we already hold.
+    unreferenced = create and not react_path_is_referenced(
+        {**source_map, component_path: new_source}, component_path
+    )
+
     # NO publish, NO enqueue, NO native pre-warm. The pre-warm serves the svelte
     # native editor's shadow-render, which reads a SvelteKit build; react has no
     # such artifact, so warming one here would build a site nothing reads.
-    return {"pocket_id": pocket_id, "component_path": component_path, "created": create}
+    return {
+        "pocket_id": pocket_id,
+        "component_path": component_path,
+        "created": create,
+        "unreferenced": unreferenced,
+    }
 
 
 async def edit_html_file(

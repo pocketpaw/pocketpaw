@@ -1913,9 +1913,21 @@ Write ONE file of a react site's `source` map as a reviewable draft.
 | `create` | boolean | Default `false`. Create a NEW file at `component_path`; the path must **not** already exist. |
 
 Returns `{ok: true, status: "draft", is_live: false, pocket_id, component_path,
-created, message}`. To **add a section**, call it twice: once with `create: true`
-for `src/components/<Name>.tsx`, then again with `edits` on `src/App.tsx` to
-import and render it.
+created, unreferenced, message}`. To **add a section**, call it twice: once with
+`create: true` for `src/components/<Name>.tsx`, then again with `edits` on
+`src/App.tsx` to import and render it.
+
+**`unreferenced` is the second call's reminder.** It is `true` when this call
+*created* a file that nothing else in the source map reaches — no import specifier
+resolves to it, or, under `public/`, no file mentions its URL. Such a file is not
+in the bundle: the page renders exactly as it did before. The `message` then leads
+with the outstanding step and an explicit instruction not to report the section as
+added yet, because a create that stops after call 1 otherwise returns an
+unqualified success and the agent tells the user about a component they cannot
+find. It is advisory and never blocking — call 1 of two is unreferenced at the
+instant it lands, every time, so refusing it would make adding a section
+impossible. `unreferenced` is always `false` for an ordinary edit; the scan is
+scoped to `create` so the common path stays quiet.
 
 **It does not publish and does not enqueue a build**, and that is a deliberate
 divergence from the svelte tool rather than an omission. `build_runs_async("react")`

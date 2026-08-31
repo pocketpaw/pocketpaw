@@ -173,6 +173,14 @@ always **two calls**, and stopping after the first is the failure mode:
    adding the `import`, one block placing `<Testimonials />` at the right point
    in the funnel.
 
+**The tool tells you when call 2 is still outstanding.** After a `create`, the
+response carries `unreferenced: true` if nothing in the source map reaches the
+file you just wrote, and the `message` leads with the step you still owe. Treat
+that as "half done", not as a warning to note and move past: the file exists, the
+page is unchanged, and reporting the section as added there is exactly how a user
+ends up hunting for a component that renders nowhere. It is not an error — `ok`
+is still true and the write really happened, so do not retry the create.
+
 Removing a section is the mirror image: edit `src/App.tsx` to drop the import
 and the element. Leaving the now-unused component file behind is harmless (the
 build tree-shakes it), so prefer that over a delete you cannot undo.
@@ -398,7 +406,8 @@ Never fall back to another engine's tool, and never fall back to
 - Exactly one site pocket exists, and it is the one the user was looking at.
 - The change went in as a **diff** unless it was a genuine rewrite.
 - With **all JavaScript disabled**, the edited section still looks finished.
-- A new section was **both** written and rendered from `src/App.tsx`.
+- A new section was **both** written and rendered from `src/App.tsx` — and the
+  last `create` did not come back `unreferenced: true`.
 - No claim was made about a package being added, or about the change being live.
 - The user was told it is a draft, and was not invited to go and look at a
   rendered page that does not exist until a build runs.

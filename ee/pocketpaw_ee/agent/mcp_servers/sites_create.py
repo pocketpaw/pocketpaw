@@ -1,6 +1,15 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated: 2026-09-01 (fix/sites-react-orphan-create — a create that renders nothing
+# stopped narrating as a finished change). ``edit_react_component``'s success body now
+# carries ``unreferenced`` and, when it is true, a ``message`` that LEADS with the
+# outstanding second call and forbids reporting the section as added. The skill already
+# taught the two-call contract in prose; what was missing was feedback inside the loop,
+# so an agent that made call 1 and stopped read an unqualified "Saved to the site's
+# draft" and had no reason to make call 2. Advice, not an error: ``ok`` stays true and
+# the file really was written, so the agent must not retry the create.
+#
 # Updated: 2026-08-19 (fix/sites-read-source-tool — the edit lane could write but not
 # read) — added ``read_site_source`` + ``_read_site_source_handler``, the READ half the
 # three edit tools in this file were written against and never had. Each of them prefers
@@ -2072,6 +2081,35 @@ async def _edit_react_component_handler(args: dict) -> dict:
 
     # The edit is a DRAFT. The chat agent narrates this payload, so — exactly like
     # the svelte edit tool — it must not contain a completed-state publish claim.
+    #
+    # ``unreferenced`` (2026-09-01) makes the SECOND half of the two-call contract
+    # visible on the call that creates the first half. A created component that
+    # nothing imports is not in the bundle: the page renders exactly as it did
+    # before. The old payload said "Saved to the site's draft" for that case too,
+    # which is true and is the whole problem — an agent reading an unqualified
+    # success has no reason to make call 2, and reports a section the user cannot
+    # find. So the message carries the outstanding step and, explicitly, the
+    # instruction NOT to report the work as done yet.
+    #
+    # It is advice, not an error: ``ok`` stays True and the file really was written.
+    # A refusal here would make "add a testimonials section" impossible, since call
+    # 1 is unreferenced at the instant it lands, every time.
+    unreferenced = bool(result.get("unreferenced"))
+    message = (
+        "Saved to the site's draft — it is NOT online yet, and no build was "
+        "started. Tell the user the change is in the draft they can preview "
+        "under /sites, and offer to publish it; only call the publish tool "
+        "when they ask."
+    )
+    if unreferenced:
+        message = (
+            f"HALF DONE — `{result['component_path']}` was created, but NOTHING "
+            "IMPORTS IT, so the page renders exactly as it did before and the user "
+            "will see no change. Make your NEXT call an `edits` call on "
+            "`src/App.tsx` (or whichever component should contain it) that imports "
+            "and renders it. Do NOT tell the user the section/image is added until "
+            "that second call succeeds — the file exists, but nothing shows it.\n"
+        ) + message
     return _success_response(
         {
             "ok": True,
@@ -2080,12 +2118,8 @@ async def _edit_react_component_handler(args: dict) -> dict:
             "pocket_id": result["pocket_id"],
             "component_path": result["component_path"],
             "created": result["created"],
-            "message": (
-                "Saved to the site's draft — it is NOT online yet, and no build was "
-                "started. Tell the user the change is in the draft they can preview "
-                "under /sites, and offer to publish it; only call the publish tool "
-                "when they ask."
-            ),
+            "unreferenced": unreferenced,
+            "message": message,
         }
     )
 
@@ -2140,7 +2174,11 @@ def make_edit_react_component_tool(tool: Any) -> Any:
             "Args: `pocket_id` (the react site pocket), `component_path`, and one "
             "of `edits` / `new_source`, plus optional `create`. Returns {ok, "
             "status:'draft', is_live:false, pocket_id, component_path, created, "
-            "message}. Relay the `message`: the change is in the DRAFT the user can "
+            "unreferenced, message}. `unreferenced:true` means the file you just "
+            "created is imported by NOTHING — it is not in the bundle and the page "
+            "is unchanged, so the second call is still outstanding and you must not "
+            "report the section as added yet. Relay the `message`: the change is in "
+            "the DRAFT the user can "
             "preview under /sites, and publishing is their call — do NOT tell them "
             "it is live. ok=false with an error means NOTHING was saved: an "
             "old_string that matched 0 or >1 times means make it more specific and "
