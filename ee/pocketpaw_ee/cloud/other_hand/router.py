@@ -123,9 +123,7 @@ async def put_page_snapshot(
     history in v1. Any workspace member may snapshot their own page.
     """
     try:
-        path = other_hand_service.write_snapshot(
-            workspace_id, page_id, body.png_base64, body.kind
-        )
+        path = other_hand_service.write_snapshot(workspace_id, page_id, body.png_base64, body.kind)
     except other_hand_service.SnapshotError as exc:
         raise _to_cloud_error(exc) from exc
     return {"path": path, "free_y": body.free_y}

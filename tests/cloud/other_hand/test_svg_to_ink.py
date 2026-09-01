@@ -31,16 +31,18 @@ class TestFittingIntoTheBox:
     def test_a_square_drawing_is_not_stretched_into_a_wide_box(self):
         # The tell that something machine-processed a drawing. A 100x100 canvas
         # in a 800x200 box must scale by 2 (the height fit), not 8 by 2.
-        ops = svg_to_ops(wrap('<rect x="0" y="0" width="100" height="100"/>'),
-                         Box(x=100, y=100, w=800, h=200))
+        ops = svg_to_ops(
+            wrap('<rect x="0" y="0" width="100" height="100"/>'), Box(x=100, y=100, w=800, h=200)
+        )
         xs = [p[0] for p in all_points(ops)]
         ys = [p[1] for p in all_points(ops)]
         assert math.isclose(max(xs) - min(xs), 200, abs_tol=1.5)
         assert math.isclose(max(ys) - min(ys), 200, abs_tol=1.5)
 
     def test_the_fitted_drawing_is_centred_in_its_box(self):
-        ops = svg_to_ops(wrap('<rect x="0" y="0" width="100" height="100"/>'),
-                         Box(x=100, y=100, w=800, h=200))
+        ops = svg_to_ops(
+            wrap('<rect x="0" y="0" width="100" height="100"/>'), Box(x=100, y=100, w=800, h=200)
+        )
         xs = [p[0] for p in all_points(ops)]
         # Box spans 100..900; a 200-wide drawing centred sits at 400..600.
         assert math.isclose((max(xs) + min(xs)) / 2, 500, abs_tol=2)
@@ -120,9 +122,7 @@ class TestShapeElements:
 
     def test_elements_a_pen_cannot_draw_are_skipped_silently(self):
         body = (
-            '<text x="10" y="10">hi</text>'
-            '<image href="x.png"/>'
-            '<line x1="0" y1="0" x2="9" y2="9"/>'
+            '<text x="10" y="10">hi</text><image href="x.png"/><line x1="0" y1="0" x2="9" y2="9"/>'
         )
         ops = svg_to_ops(wrap(body), Box(x=0, y=0, w=100, h=100))
         assert len(ops) == 1, "only the line is drawable"
@@ -140,8 +140,10 @@ class TestTheOutputIsSafeToRender:
     def test_no_coordinate_escapes_the_page_width(self):
         # The frontend validator drops a whole op if any point is out of range,
         # so an overflowing drawing would vanish rather than clip.
-        ops = svg_to_ops(wrap('<rect x="-500" y="-500" width="2000" height="2000"/>'),
-                         Box(x=0, y=0, w=PAGE_W, h=800))
+        ops = svg_to_ops(
+            wrap('<rect x="-500" y="-500" width="2000" height="2000"/>'),
+            Box(x=0, y=0, w=PAGE_W, h=800),
+        )
         for x, _y in all_points(ops):
             assert 0 <= x <= PAGE_W
 
@@ -235,10 +237,7 @@ class TestTheBugsARealGenerationFound:
 
         def one(i: int) -> str:
             x = i % 90
-            return (
-                f'<path fill="rgb(0,0,0)" '
-                f'd="M{x} 5 C {x + 3} 40, {x + 6} 40, {x + 9} 5"/>'
-            )
+            return f'<path fill="rgb(0,0,0)" d="M{x} 5 C {x + 3} 40, {x + 6} 40, {x + 9} 5"/>'
 
         # 2500 curves is comfortably OVER the budget — checked, because an
         # under-budget fixture would skip the thinning loop entirely and the

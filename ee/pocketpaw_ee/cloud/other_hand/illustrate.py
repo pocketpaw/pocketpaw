@@ -52,6 +52,8 @@ PRO_MODEL = "fal-ai/recraft/v4/pro/text-to-vector"
 def configured_model() -> str:
     """The endpoint this deployment generates with."""
     return (os.environ.get(_ENV_MODEL) or "").strip() or DEFAULT_MODEL
+
+
 # Line art, because a pen has no fills: a filled illustration converts to its
 # outlines and loses whatever the fills were carrying. Asking for the style we
 # can actually draw beats converting one we cannot.

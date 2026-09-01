@@ -104,9 +104,7 @@ class TestItRefusesRatherThanSpends:
         assert not captured
 
     @pytest.mark.asyncio
-    async def test_no_key_is_a_clear_refusal_with_no_retry_advice(
-        self, captured, monkeypatch
-    ):
+    async def test_no_key_is_a_clear_refusal_with_no_retry_advice(self, captured, monkeypatch):
         from pocketpaw_ee.cloud.studio import fal_edit
 
         monkeypatch.setattr(fal_edit, "fal_api_key", lambda: None)
@@ -157,6 +155,7 @@ class TestTheBudgetItself:
         from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
 
         monkeypatch.setenv("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", "5")
+
         # Establish the degraded database EXPLICITLY. This used to rely on
         # "Beanie is not initialised in this suite", which was true only while
         # the other-hand tests ran alone: once the uploads suites (which do
@@ -167,9 +166,7 @@ class TestTheBudgetItself:
         def _unreachable():
             raise RuntimeError("database unreachable")
 
-        monkeypatch.setattr(
-            IllustrationUsage, "get_pymongo_collection", staticmethod(_unreachable)
-        )
+        monkeypatch.setattr(IllustrationUsage, "get_pymongo_collection", staticmethod(_unreachable))
         # A degraded database must never become an open tab at the illustrator,
         # so the answer is no — the cost of being wrong this way is a turn that
         # explains in words, and the other way is money.

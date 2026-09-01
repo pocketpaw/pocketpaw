@@ -119,8 +119,7 @@ async def validate_key(api_key: str) -> None:
     if resp.status_code == 429:
         raise ValidationError(
             "byok.key_rate_limited",
-            "That key is rate-limited right now, so we could not verify it. "
-            "Try again in a minute.",
+            "That key is rate-limited right now, so we could not verify it. Try again in a minute.",
         )
     if resp.status_code >= 500:
         raise ValidationError(

@@ -49,9 +49,7 @@ class _CapturePool:
         self.run_called = False
 
     async def get(self, _agent_id):
-        return SimpleNamespace(
-            config={"backend": "claude_agent_sdk", "model": ""}, agent_name="A"
-        )
+        return SimpleNamespace(config={"backend": "claude_agent_sdk", "model": ""}, agent_name="A")
 
     def run(self, agent_id, content, session_key, **kwargs):
         self.run_called = True
@@ -131,9 +129,7 @@ async def _drive(
     async def _resolve(workspace_id):
         return creds
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _resolve
-    )
+    monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _resolve)
     monkeypatch.setattr("pocketpaw_ee.cloud.auth.guest_budget.load_guest", guest_loader)
 
     async def _never_cancelled():

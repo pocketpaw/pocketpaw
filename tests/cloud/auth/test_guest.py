@@ -193,9 +193,7 @@ def _resolver_stub(monkeypatch):
     tests do."""
     from unittest.mock import MagicMock
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.workspace.service.get_resolver", lambda: MagicMock()
-    )
+    monkeypatch.setattr("pocketpaw_ee.cloud.workspace.service.get_resolver", lambda: MagicMock())
 
 
 class TestMintGuest:

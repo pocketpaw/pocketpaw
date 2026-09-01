@@ -35,8 +35,9 @@ def fake_generator(monkeypatch):
         async def run(self, endpoint, arguments=None, **k):
             _Client.last_endpoint = endpoint
             _Client.last_arguments = arguments or {}
-            return {"images": [{"url": "https://example.test/x.svg",
-                                "content_type": "image/svg+xml"}]}
+            return {
+                "images": [{"url": "https://example.test/x.svg", "content_type": "image/svg+xml"}]
+            }
 
     mod = types.ModuleType("fal_client")
     mod.AsyncClient = _Client
@@ -74,9 +75,7 @@ class TestTheRoundTrip:
         assert max(len(op["pts"]) for op in ops) > 6
 
     @pytest.mark.asyncio
-    async def test_the_generator_is_asked_for_line_art_not_just_the_prompt(
-        self, fake_generator
-    ):
+    async def test_the_generator_is_asked_for_line_art_not_just_the_prompt(self, fake_generator):
         await ill.illustrate_as_ops(
             "a honeybee", Box(x=0, y=0, w=400, h=400), api_key="k", allowed=True
         )

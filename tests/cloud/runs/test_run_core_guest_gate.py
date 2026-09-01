@@ -132,9 +132,7 @@ async def _events(transport) -> list[Any]:
 # ---------------------------------------------------------------------------
 
 
-async def test_a_guest_over_the_cap_is_rejected_and_the_model_never_runs(
-    monkeypatch, mongo_db
-):
+async def test_a_guest_over_the_cap_is_rejected_and_the_model_never_runs(monkeypatch, mongo_db):
     guest = await _mk_guest(turns=2)
     await _store_key()
     uid = str(guest.id)

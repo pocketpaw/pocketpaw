@@ -185,9 +185,7 @@ def _kind_suffix(kind: str) -> str:
     return "" if kind == "page" else f".{kind}"
 
 
-def write_snapshot(
-    workspace_id: str, page_id: str, png_base64: str, kind: str = "page"
-) -> str:
+def write_snapshot(workspace_id: str, page_id: str, png_base64: str, kind: str = "page") -> str:
     """Write a snapshot and return the absolute path the agent can ``Read``.
 
     Overwrites any previous snapshot for this ``page_id`` and ``kind`` — v1

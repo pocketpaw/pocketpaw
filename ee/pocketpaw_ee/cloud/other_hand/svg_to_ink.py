@@ -88,9 +88,7 @@ def _flatten_cubic(
     fixed number: the same constant then serves a 20px flourish and a 900px arc
     without over-sampling the first or faceting the second.
     """
-    net = (
-        math.dist(p0, p1) + math.dist(p1, p2) + math.dist(p2, p3)
-    ) * scale
+    net = (math.dist(p0, p1) + math.dist(p1, p2) + math.dist(p2, p3)) * scale
     # int() around the WHOLE expression: ``x ** 0.5`` is a float, and a float
     # reaching range() raises TypeError. That bug shipped, and the broad except
     # in _shapes swallowed it for 650 of a real illustration's 653 paths — the

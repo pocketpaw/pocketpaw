@@ -160,9 +160,7 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
                         "capture.\n"
                     )
                 if not mark_text and not mark_image_path:
-                    parts.append(
-                        "Read the text inside that region on the book page.\n"
-                    )
+                    parts.append("Read the text inside that region on the book page.\n")
                 mark_block = "".join(parts)
             book_block = (
                 # "source" not "book": it may be a PDF page OR an image the
