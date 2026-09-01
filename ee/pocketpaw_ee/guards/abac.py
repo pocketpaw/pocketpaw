@@ -25,6 +25,31 @@
 #   Other display-only flags (studio, code, deep_work, chain_flow, fleet, belt,
 #   foresight) are surfaced to the UI but not yet enforced. ``automations`` stays
 #   on pro+; ``audit``/``sso``/``instinct``/``custom_roles`` stay enterprise-only.
+# Updated 2026-09-01 (fix/instinct-is-a-gate-not-a-tier) — ``instinct`` moved OUT
+#   of the enterprise-only set and onto EVERY tier, free included. It is not a
+#   capability you buy; it is the APPROVAL GATE agents propose through, and the
+#   gate it was priced above was HALF-OPEN. Roughly twenty modules WRITE Instinct
+#   actions (belt, external actions, growth, fabric conflicts/proposals, admin
+#   proposals, the site-publish merge gate, the chat agent service) and almost
+#   none of them check this flag. Exactly ONE place reads and approves them —
+#   ``instinct/router.py``'s ``require_plan_feature("instinct")`` — so on
+#   free/go/pro/pro_max those proposals were created and could never be read,
+#   approved, or rejected. Not "unavailable": a queue with no door. The reported
+#   symptom was a workspace OWNER unable to publish a site, because the builder's
+#   Publish button self-approves through ``instinct/actions/pending`` +
+#   ``/approve`` and both 403'd with ``plan.feature_denied``.
+#   The floor gets it for the same reason the rest do: ``free`` carries
+#   ``sessions``, so agents ACT there, and oversight of agent actions cannot be
+#   the thing a cheaper tier does without. It costs no paid upstream either —
+#   the store is a local per-workspace SQLite file — which is the stated bar for
+#   the free floor.
+#   THIS LOOSENS NO PERMISSION. ``instinct.approve`` is still ADMIN in
+#   ``guards/actions.py``, the artifact-change workspace tenancy asserts still
+#   run, and ``require_license`` still gates the router. What is removed is a
+#   BILLING gate that sat redundantly on top of a working PERMISSION gate.
+#   What stays enterprise is the intelligence built ON Instinct — ``audit``
+#   (the ledger + its export) and ``custom_roles`` — which are keyed separately
+#   and untouched here.
 
 from __future__ import annotations
 
@@ -56,7 +81,9 @@ PLAN_FEATURES: dict[str, set[str]] = {
     # The base/free floor — a workspace with no paid plan (or an unknown plan)
     # resolves here. Deliberately minimal: the core canvas (pockets) and the
     # ability to run sessions, nothing that costs the platform a paid upstream.
-    "free": {"pockets", "sessions"},
+    # ``instinct`` is here because the floor RUNS AGENTS (``sessions``), and the
+    # approval gate has to exist wherever agents act — see the note above.
+    "free": {"pockets", "sessions", "instinct"},
     # Paw Go — everyday: chat, pockets, agents, memory + Studio + Sites. ``sites``
     # is ENFORCED here (go gets a site); ``fabric`` (the ontology) is NOT.
     "go": {
@@ -66,6 +93,7 @@ PLAN_FEATURES: dict[str, set[str]] = {
         "memory",
         "studio",
         "sites",
+        "instinct",
     },
     # Paw Pro — daily drivers. Adds automations + knowledge_base + display flags
     # for the power surfaces (code, deep_work, chain_flow, fleet, belt,
@@ -86,6 +114,7 @@ PLAN_FEATURES: dict[str, set[str]] = {
         "fleet",
         "belt",
         "foresight",
+        "instinct",
     },
     # Paw Pro Max — uncapped power users. Everything in pro (incl. belt +
     # foresight) + nothing extra at the feature-set level — the differentiator
@@ -105,6 +134,7 @@ PLAN_FEATURES: dict[str, set[str]] = {
         "fleet",
         "belt",
         "foresight",
+        "instinct",
     },
     # Enterprise — the full set: every consumer flag PLUS the enterprise-only
     # gates (the ``fabric`` ONTOLOGY, instinct, audit, sso, custom_roles).

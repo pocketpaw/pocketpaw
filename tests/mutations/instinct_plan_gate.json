@@ -1,0 +1,16 @@
+[
+  {
+    "label": "the free floor loses the approval gate while still running agent sessions",
+    "file": "ee/pocketpaw_ee/guards/abac.py",
+    "find": "    \"free\": {\"pockets\", \"sessions\", \"instinct\"},",
+    "replace": "    \"free\": {\"pockets\", \"sessions\"},",
+    "tests": ["tests/cloud/test_plan_feature_gate.py"]
+  },
+  {
+    "label": "go loses the approval gate, stranding every proposal it can still create",
+    "file": "ee/pocketpaw_ee/guards/abac.py",
+    "find": "        \"studio\",\n        \"sites\",\n        \"instinct\",\n    },",
+    "replace": "        \"studio\",\n        \"sites\",\n    },",
+    "tests": ["tests/cloud/test_plan_feature_gate.py"]
+  }
+]
