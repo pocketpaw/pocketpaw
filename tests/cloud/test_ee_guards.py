@@ -44,11 +44,30 @@ class TestWorkspaceRole:
     def test_member_level_is_1(self):
         assert WorkspaceRole.MEMBER.level == 1
 
-    def test_admin_level_is_2(self):
-        assert WorkspaceRole.ADMIN.level == 2
+    def test_editor_level_is_2(self):
+        # The tier whose insertion stranded the two assertions below. Pinned so
+        # the next person to widen the ladder sees the whole shape fail at once
+        # rather than the top two silently.
+        assert WorkspaceRole.EDITOR.level == 2
 
-    def test_owner_level_is_3(self):
-        assert WorkspaceRole.OWNER.level == 3
+    def test_admin_level_is_3(self):
+        assert WorkspaceRole.ADMIN.level == 3
+
+    def test_owner_level_is_4(self):
+        assert WorkspaceRole.OWNER.level == 4
+
+    def test_the_ladder_is_strictly_ascending(self):
+        # The property the three literals above are only a sample of. Had this
+        # existed, inserting EDITOR would still have passed here and failed
+        # loudly there — which is the right split: the literals pin the contract,
+        # this pins that the contract stays ordered.
+        levels = [
+            WorkspaceRole.MEMBER.level,
+            WorkspaceRole.EDITOR.level,
+            WorkspaceRole.ADMIN.level,
+            WorkspaceRole.OWNER.level,
+        ]
+        assert levels == sorted(set(levels))
 
     @pytest.mark.parametrize(
         "value,expected",
