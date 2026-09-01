@@ -44,12 +44,18 @@ def _default_sites_plan():
         yield
 
 
-def _ok_result(*, created: bool = False) -> dict:
-    """What the service returns on a successful edit."""
+def _ok_result(*, created: bool = False, unreferenced: bool = False) -> dict:
+    """What the service returns on a successful edit.
+
+    ``unreferenced`` mirrors the service's own key (see
+    ``sites/service.py::edit_react_component``): True when a CREATE landed a file
+    that nothing imports. The stub carries it so this file pins the real shape —
+    a stub that lags the service tests a payload the handler never receives."""
     return {
         "pocket_id": "pk1",
         "component_path": "src/components/Hero.tsx",
         "created": created,
+        "unreferenced": unreferenced,
     }
 
 
@@ -512,3 +518,122 @@ class TestEditHandler:
             )
         assert out.get("is_error") is True
         assert "edit failed" in out["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# The unreferenced-create warning — the payload the agent narrates
+# ---------------------------------------------------------------------------
+#
+# THE INCIDENT (2026-09-01): a user attached an image to an already-published react
+# site and asked for it in the hero. The agent created a component, this payload
+# came back a clean success, and the agent reported the image as added. Nothing
+# imported the new file, so the page never changed and the user could not find the
+# component anywhere. The service now answers "does anything reach this file"; these
+# pin that the answer reaches the agent as an OUTSTANDING STEP rather than a footnote.
+
+
+class TestUnreferencedCreateWarning:
+    @pytest.mark.asyncio
+    async def test_orphan_create_tells_the_agent_the_page_is_unchanged(self) -> None:
+        """The message must name the next call AND forbid the premature report. A
+        payload that only said "saved to the draft" is what produced the incident.
+
+        THE MUTATION THAT BREAKS THIS: drop the `if unreferenced:` branch. Run: the
+        orphan create narrated as an ordinary success again."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch(
+                "pocketpaw_ee.sites.service.edit_react_component",
+                new=AsyncMock(return_value=_ok_result(created=True, unreferenced=True)),
+            ),
+        ):
+            out = await mcp._edit_react_component_handler(
+                {
+                    "pocket_id": "pk1",
+                    "component_path": "src/components/Hero.tsx",
+                    "new_source": "export default function Hero() { return <section/>; }",
+                    "create": True,
+                }
+            )
+
+        # Advice, not a rejection: the file WAS written, so ok stays true and the
+        # agent must not retry the create.
+        assert not out.get("is_error"), out
+        body = json.loads(out["content"][0]["text"])
+        assert body["ok"] is True
+        assert body["created"] is True
+        assert body["unreferenced"] is True
+
+        message = body["message"]
+        assert "src/App.tsx" in message, "the outstanding call must name where to wire it"
+        assert "NOTHING IMPORTS IT" in message
+        # The half that stops the false report the user actually hit.
+        assert "Do NOT tell the user" in message
+        # The draft/not-live contract is still carried — this is additive.
+        assert "NOT online yet" in message
+
+    @pytest.mark.asyncio
+    async def test_a_wired_create_carries_no_warning(self) -> None:
+        """A warning on every create teaches the agent to skim the field. Only an
+        actually-unreachable file gets one.
+
+        THE MUTATION THAT BREAKS THIS: warn unconditionally on `created`. Run: a
+        create the agent had already wired up still nagged."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch(
+                "pocketpaw_ee.sites.service.edit_react_component",
+                new=AsyncMock(return_value=_ok_result(created=True, unreferenced=False)),
+            ),
+        ):
+            out = await mcp._edit_react_component_handler(
+                {
+                    "pocket_id": "pk1",
+                    "component_path": "src/components/Hero.tsx",
+                    "new_source": "x",
+                    "create": True,
+                }
+            )
+
+        body = json.loads(out["content"][0]["text"])
+        assert body["unreferenced"] is False
+        assert "HALF DONE" not in body["message"]
+        assert "NOT online yet" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_a_service_without_the_key_degrades_to_no_warning(self) -> None:
+        """Forward/backward compatibility: an older service dict (no
+        ``unreferenced``) must not KeyError the handler mid-turn. Absent reads as
+        "nothing to warn about" — the pre-change behaviour — never as a crash that
+        loses an edit the service already persisted."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        legacy = {
+            "pocket_id": "pk1",
+            "component_path": "src/components/Hero.tsx",
+            "created": True,
+        }
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch(
+                "pocketpaw_ee.sites.service.edit_react_component",
+                new=AsyncMock(return_value=legacy),
+            ),
+        ):
+            out = await mcp._edit_react_component_handler(
+                {
+                    "pocket_id": "pk1",
+                    "component_path": "src/components/Hero.tsx",
+                    "new_source": "x",
+                    "create": True,
+                }
+            )
+
+        assert not out.get("is_error"), out
+        body = json.loads(out["content"][0]["text"])
+        assert body["unreferenced"] is False
+        assert "HALF DONE" not in body["message"]
