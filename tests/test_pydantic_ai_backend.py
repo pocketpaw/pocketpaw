@@ -1591,6 +1591,116 @@ def test_a_missing_response_does_not_lose_the_token_counts():
 
 
 # --------------------------------------------------------------------------
+# usage on the runs that never reach AgentRunResultEvent
+#
+# ``AgentRunResultEvent`` is the last event of a COMPLETED run, so while it was
+# the only producer of ``token_usage`` here, every cancel / stop() / crash
+# reported no usage at all and the meter faithfully billed it zero.
+# --------------------------------------------------------------------------
+
+
+async def test_usage_reaches_a_consumer_that_walks_away_mid_run():
+    """The cloud run loop does not ask this backend to stop on a cancel — it
+    stops READING. ``_drive_agent_loop`` breaks on the cancel flag and its
+    ``finally`` cancels the pending ``__anext__``, so nothing produced after
+    that moment is delivered.
+
+    That is why usage is emitted AS the run consumes it rather than on the way
+    out: a payload built only at the end cannot bill a cancelled run no matter
+    where it is built. Yielding from a ``finally`` is not an escape either — the
+    OSS loop closes this generator (``agents/loop.py`` ``run_iter.aclose()``)
+    and yielding under GeneratorExit raises ``RuntimeError``.
+    """
+    seen = []
+    async for ev in _search_backend("c1").run("search for pocketpaw"):
+        seen.append(ev)
+        if ev.type == "tool_result":
+            break  # the consumer walks away, exactly like the cancel path
+
+    usage = [e for e in seen if e.type == "token_usage"]
+    assert usage, f"nothing was delivered before the consumer stopped: {[e.type for e in seen]}"
+    assert usage[-1].metadata["input_tokens"] > 0
+    assert usage[-1].metadata["backend"] == "pydantic_ai"
+
+
+async def test_a_stopped_run_still_reports_the_tokens_it_burned():
+    """``stop()`` was a free-usage path: the loop broke out and the run ended on
+    a bare ``done``."""
+    backend = _search_backend("c1")
+    seen = []
+    async for ev in backend.run("search for pocketpaw"):
+        seen.append(ev)
+        if ev.type == "tool_result":
+            await backend.stop()
+
+    kinds = [e.type for e in seen]
+    assert kinds[-1] == "done"
+    usage = [e for e in seen if e.type == "token_usage"]
+    assert usage, f"a stopped run reported no usage at all: {kinds}"
+    assert usage[-1].metadata["input_tokens"] > 0
+
+
+async def test_a_run_that_dies_mid_response_still_bills_that_response():
+    """A provider dying part-way through a response is the ordinary crash, and it
+    is not free: pydantic-ai folds a cut-short response's tokens into the run's
+    usage before the exception propagates.
+
+    No completed response means no mid-run snapshot fired, so the payload here
+    comes from the crash path itself — and it has to arrive BEFORE the ``error``
+    frame, because the cloud run loop treats ``error`` as terminal and stops
+    reading the stream at it. A payload emitted after it is thrown away.
+    """
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        yield "partial answer "
+        raise RuntimeError("proxy died mid-response")
+
+    events = await _collect(_backend_with_model(FunctionModel(stream_function=stream_fn)), "go")
+    kinds = [e.type for e in events]
+
+    assert "error" in kinds
+    usage_at = [i for i, k in enumerate(kinds) if k == "token_usage"]
+    assert usage_at, f"a run that died mid-response reported no usage at all: {kinds}"
+    assert usage_at[-1] < kinds.index("error"), f"usage must precede the error frame: {kinds}"
+
+    usage = events[usage_at[-1]]
+    assert usage.metadata["input_tokens"] > 0, "the prompt it already paid for must be billed"
+
+
+async def test_usage_payloads_are_run_cumulative_and_never_shrink():
+    """Consumers keep the LATEST payload (the cloud run loop) or fold in its
+    DIFFERENCE (``agents/loop.py``, ``status.py``, ``trace_collector.py``). Both
+    read a payload as the run's running total, so the sequence has to grow."""
+    events = await _collect(_search_backend("c1"), "search for pocketpaw")
+    totals = [
+        e.metadata["input_tokens"] + e.metadata["output_tokens"]
+        for e in events
+        if e.type == "token_usage"
+    ]
+    assert len(totals) >= 2, f"expected a mid-run snapshot and a final total, got {totals}"
+    assert totals == sorted(totals), f"payloads must never shrink: {totals}"
+
+
+def test_the_abnormal_path_names_the_model_the_run_resolved():
+    """No mid-stream event carries a model name — the event union is parts,
+    tools and enqueued messages only — so an abnormal-path payload falls back to
+    the RESOLVED model. The completed path still reads it off the response,
+    which stays the truthful source there."""
+    from pydantic_ai.usage import RunUsage
+
+    event = PydanticAIBackend(_settings())._usage_event_from(
+        RunUsage(input_tokens=500, output_tokens=120),
+        model_name="claude-haiku-4-5-20251001",
+    )
+
+    assert event.type == "token_usage"
+    assert event.metadata["model"] == "claude-haiku-4-5-20251001"
+    assert event.metadata["input_tokens"] == 500
+    assert event.metadata["output_tokens"] == 120
+    assert event.metadata["total_cost_usd"] > 0
+
+
+# --------------------------------------------------------------------------
 # tool bridge
 # --------------------------------------------------------------------------
 

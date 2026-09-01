@@ -1,3 +1,12 @@
+"""Per-session agent status tracked off the message bus.
+
+Updated 2026-09-02 (fix/metering-partial-usage-capture) — ``token_usage``
+payloads are RUN-CUMULATIVE, so the per-session token counters fold in the
+DIFFERENCE between payloads rather than adding each one whole. Adding them whole
+was right only while every backend reported exactly once per run, and it does
+not survive a backend that reports as the run progresses.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -25,6 +34,13 @@ class _SessionState:
     state_changed_at: float = field(default_factory=time.monotonic)
     token_input: int = 0
     token_output: int = 0
+    # The last RUN-CUMULATIVE token_usage payload folded in. Backends report a
+    # running total rather than one turn's delta, so the counters above add the
+    # difference instead of the payload — otherwise a run that reports twice
+    # counts its first turn again in every later payload. Reset with the rest of
+    # the state on ``agent_start``, which builds a fresh instance per run.
+    _last_cum_input: int = 0
+    _last_cum_output: int = 0
 
 
 class StatusTracker:
@@ -125,8 +141,15 @@ class StatusTracker:
         elif etype == "token_usage":
             s = self._sessions.get(session_key)
             if s:
-                s.token_input += data.get("input", 0)
-                s.token_output += data.get("output", 0)
+                # Fold in the DELTA of a cumulative payload — see
+                # ``_last_cum_input``. max(0, ...) because a payload that went
+                # backwards is a backend regression, never a refund.
+                cum_input = data.get("input", 0) or 0
+                cum_output = data.get("output", 0) or 0
+                s.token_input += max(0, cum_input - s._last_cum_input)
+                s.token_output += max(0, cum_output - s._last_cum_output)
+                s._last_cum_input = max(s._last_cum_input, cum_input)
+                s._last_cum_output = max(s._last_cum_output, cum_output)
 
         elif etype == "error":
             s = self._sessions.get(session_key)

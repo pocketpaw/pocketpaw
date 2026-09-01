@@ -1,0 +1,113 @@
+[
+  {
+    "label": "the run's usage ledger is never handed to the SDK, so an abnormal run has nothing to report and a cancel is free again",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            kwargs[\"usage\"] = run_usage",
+    "replace": "            pass",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_usage_reaches_a_consumer_that_walks_away_mid_run",
+      "tests/test_pydantic_ai_backend.py::test_a_stopped_run_still_reports_the_tokens_it_burned"
+    ]
+  },
+  {
+    "label": "usage is reported only when the run reaches its terminal event — the pre-fix behaviour, where every cancel and stop() billed zero",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            if total <= emitted_total:\n                return None",
+    "replace": "            if True:\n                return None",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_usage_reaches_a_consumer_that_walks_away_mid_run",
+      "tests/test_pydantic_ai_backend.py::test_a_stopped_run_still_reports_the_tokens_it_burned",
+      "tests/test_pydantic_ai_backend.py::test_a_run_that_dies_mid_response_still_bills_that_response"
+    ]
+  },
+  {
+    "label": "the crashed run emits its usage AFTER the error frame — the run loop stops reading at the error, so the payload is discarded and the bill is zero",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            snapshot = _usage_snapshot()\n            if snapshot is not None:\n                yield snapshot\n            yield AgentEvent(type=\"error\", content=self._explain_error(exc))",
+    "replace": "            yield AgentEvent(type=\"error\", content=self._explain_error(exc))\n            snapshot = _usage_snapshot()\n            if snapshot is not None:\n                yield snapshot",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_a_run_that_dies_mid_response_still_bills_that_response"
+    ]
+  },
+  {
+    "label": "a failed run stops recording usage — the crashed-run half of the three terminal states that could never carry it",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "                status=\"failed\",\n                partial_text=full_text,\n                error=err_msg,\n                usage=usage or None,",
+    "replace": "                status=\"failed\",\n                partial_text=full_text,\n                error=err_msg,",
+    "tests": [
+      "tests/cloud/runs/test_run_core_token_usage.py::test_a_failed_run_carries_the_tokens_it_burned"
+    ]
+  },
+  {
+    "label": "an interrupted run stops recording usage — a host cancel (worker shutdown) writes a terminal doc with no counts and the sweeper bills it zero",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            status=\"interrupted\",\n            partial_text=full_text,\n            usage=usage or None,",
+    "replace": "            status=\"interrupted\",\n            partial_text=full_text,",
+    "tests": [
+      "tests/cloud/runs/test_run_core_token_usage.py::test_an_interrupted_run_carries_the_tokens_it_burned"
+    ]
+  },
+  {
+    "label": "latest-wins loses its floor, so a payload that shrank (a backend regressed to per-turn reporting) silently overwrites a larger bill downward",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "                        if _usage_total(event_data) >= _usage_total(usage):",
+    "replace": "                        if True:",
+    "tests": [
+      "tests/cloud/runs/test_run_core_token_usage.py::test_a_shrinking_payload_cannot_halve_the_bill"
+    ]
+  },
+  {
+    "label": "the run-loop total stops counting cached tokens, so it ranks payloads differently from the meter that bills them",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        + _usage_int(usage.get(\"output_tokens\"))\n        + _usage_int(usage.get(\"cached_input_tokens\"))",
+    "replace": "        + _usage_int(usage.get(\"output_tokens\"))",
+    "tests": [
+      "tests/cloud/runs/test_run_core_token_usage.py::test_the_run_loops_total_agrees_with_the_meters"
+    ]
+  },
+  {
+    "label": "codex reports its per-turn counts again instead of the run total — the run loop keeps the LATEST payload, so a multi-turn run bills for its final turn alone",
+    "file": "src/pocketpaw/agents/codex_cli.py",
+    "find": "                            \"input_tokens\": run_input,\n                            \"output_tokens\": run_output,\n                            \"cached_input_tokens\": run_cached,",
+    "replace": "                            \"input_tokens\": int(getattr(usage, \"input_tokens\", 0) or 0),\n                            \"output_tokens\": int(getattr(usage, \"output_tokens\", 0) or 0),\n                            \"cached_input_tokens\": int(getattr(usage, \"cached_input_tokens\", 0) or 0),",
+    "tests": [
+      "tests/test_codex_cli_backend.py::TestCodexCLIEventMapping::test_multi_turn_usage_is_run_cumulative"
+    ]
+  },
+  {
+    "label": "copilot reports one API call's tokens instead of the run total — assistant.usage is per call, so a multi-call turn bills for one call",
+    "file": "src/pocketpaw/agents/copilot_sdk.py",
+    "find": "                                    \"input_tokens\": _run_input,\n                                    \"output_tokens\": _run_output,",
+    "replace": "                                    \"input_tokens\": int(input_t),\n                                    \"output_tokens\": int(output_t),",
+    "tests": [
+      "tests/test_copilot_sdk_backend.py::TestCopilotUsageCardinality::test_usage_is_run_cumulative_across_api_calls"
+    ]
+  },
+  {
+    "label": "the OSS loop records each cumulative payload whole into an ADDITIVE tracker, so a run that reports twice counts its first turn again in the second",
+    "file": "src/pocketpaw/agents/loop.py",
+    "find": "                            d_input = max(0, input_tokens - recorded_input)\n                            d_output = max(0, output_tokens - recorded_output)",
+    "replace": "                            d_input = input_tokens\n                            d_output = output_tokens",
+    "tests": [
+      "tests/test_agent_loop.py::test_cumulative_token_usage_is_recorded_as_a_delta"
+    ]
+  },
+  {
+    "label": "the status tracker adds each cumulative payload whole again, so the per-session token counters double-count every turn after the first",
+    "file": "src/pocketpaw/status.py",
+    "find": "                s.token_input += max(0, cum_input - s._last_cum_input)\n                s.token_output += max(0, cum_output - s._last_cum_output)",
+    "replace": "                s.token_input += cum_input\n                s.token_output += cum_output",
+    "tests": [
+      "tests/test_status_tracker.py::TestStatusTracker::test_token_usage_folds_in_a_run_total_without_double_counting"
+    ]
+  },
+  {
+    "label": "the trace collector stores the running total in every llm_calls row, so the total_cost roll-up (a plain sum over those rows) charges the whole run once per payload",
+    "file": "src/pocketpaw/trace_collector.py",
+    "find": "                input_tokens = max(0, input_tokens - prev_input)\n                output_tokens = max(0, output_tokens - prev_output)",
+    "replace": "                input_tokens = input_tokens\n                output_tokens = output_tokens",
+    "tests": [
+      "tests/test_trace_collector.py::test_cumulative_token_usage_becomes_one_entry_per_call"
+    ]
+  }
+]

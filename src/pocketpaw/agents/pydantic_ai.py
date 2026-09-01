@@ -290,6 +290,36 @@ follow, and the middle one contradicts what this file used to say:
   instant the run finishes, so now IS the run's moment. The meter cannot say the
   same, because it bills off a sweeper draining a backlog, which is why
   ``resolve_cost`` takes the run's own timestamp instead of assuming one.
+
+Updated 2026-09-02 (fix/metering-partial-usage-capture) — a run that does not
+finish now reports the tokens it burned. ``_usage_event`` was reachable only
+from ``AgentRunResultEvent``, which is the last event of a COMPLETED run, so
+every cancel, ``stop()`` and crash emitted no ``token_usage`` at all and the
+meter faithfully billed them zero. Three things carry the fix:
+
+* **The run owns a ``RunUsage`` ledger**, built here and passed to
+  ``run_stream_events``. pydantic-ai does not copy it — ``Agent.iter`` hands the
+  same instance to ``GraphAgentState`` — and accumulates into it in place after
+  every completed model response AND for a response whose stream was cut
+  mid-flight. So the counts stay readable from this frame however the run ends.
+* **Usage is emitted AS the run consumes it**, not on the way out. This is not a
+  style choice: the cloud run loop does not ask this backend to stop on a
+  cancel, it stops READING (``_drive_agent_loop`` breaks on the cancel flag and
+  its ``finally`` cancels the pending ``__anext__``), so a payload produced at
+  the end of an abandoned run is never delivered. A ``finally:`` yield does not
+  rescue it either — the OSS loop closes this generator
+  (``agents/loop.py`` ``run_iter.aclose()``) and yielding under GeneratorExit
+  raises ``RuntimeError: async generator ignored GeneratorExit``.
+* **Payloads are RUN-CUMULATIVE and monotonic**, which is the contract every
+  consumer now reads them under: the cloud run loop keeps the largest, and
+  ``agents/loop.py``, ``status.py`` and ``trace_collector.py`` fold in the
+  difference. The crash path emits BEFORE its ``error`` frame because the run
+  loop treats ``error`` as terminal and stops reading there.
+
+``_usage_event`` split into ``_usage_event_from`` for this: the counts are the
+same object either way, but only a completed run has a response to read the
+model name off, so the caller supplies it. The abnormal path falls back to the
+resolved model — no mid-stream event carries one.
 """
 
 from __future__ import annotations
@@ -2032,6 +2062,55 @@ class PydanticAIBackend:
         # ``_announce_tool`` for why the id alone was the wrong key.
         announced: set[str] = set()
 
+        # THE RUN'S USAGE LEDGER (C2). pydantic-ai does NOT copy this object —
+        # ``Agent.iter`` does ``usage = usage or RunUsage()`` and hands that same
+        # instance to ``GraphAgentState``, which accumulates into it in place
+        # after every completed model response AND for a response whose stream
+        # was cut mid-flight. So this reference stays readable from here no
+        # matter how the run ends.
+        #
+        # That matters because ``AgentRunResultEvent`` — until now the only
+        # producer of ``token_usage`` on this backend — is the last event of a
+        # COMPLETED run. A cancel, a ``stop()`` or a raise never produces one,
+        # so those runs reported no usage at all and the meter faithfully billed
+        # them zero. Hoisted ABOVE the try so every exit path can read it,
+        # including a failure inside ``_build_model``.
+        from pydantic_ai.usage import RunUsage
+
+        run_usage = RunUsage()
+        model: Any = None
+        emitted_total = 0
+
+        def _usage_snapshot() -> AgentEvent | None:
+            """A cumulative ``token_usage`` for what the run has consumed SO FAR.
+
+            Emitted DURING the run and not merely at the end, because the end is
+            exactly what an abandoned run never reaches. The cloud run loop does
+            not ask this backend to stop on a cancel — it stops READING
+            (``_drive_agent_loop`` breaks on the cancel flag and its ``finally``
+            cancels the pending ``__anext__``), so anything produced after that
+            moment is discarded no matter where it is produced. A payload built
+            only on the way out therefore cannot bill a cancelled run.
+
+            Yielding from a ``finally`` is not the answer either: the OSS loop
+            closes this generator (``agents/loop.py`` ``run_iter.aclose()``), and
+            a generator that yields while GeneratorExit is propagating raises
+            ``RuntimeError: async generator ignored GeneratorExit``.
+
+            Returns None when nothing new has been consumed, so a run that burns
+            no tokens stays silent instead of emitting an empty payload.
+            """
+            nonlocal emitted_total
+            total = int(getattr(run_usage, "total_tokens", 0) or 0)
+            if total <= emitted_total:
+                return None
+            emitted_total = total
+            # The model name off the RESOLVED model, not off a response: no
+            # mid-stream event carries one (the event union is parts, tools and
+            # enqueued messages only). The completed path still takes it from
+            # the response, which is the truthful source there.
+            return self._usage_event_from(run_usage, model_name=getattr(model, "model_name", None))
+
         try:
             model = self._build_model()
 
@@ -2087,6 +2166,11 @@ class PydanticAIBackend:
 
                 kwargs["model_settings"] = ModelSettings(max_tokens=max_output)
 
+            # Hand the SDK the ledger built above. Per-RUN like ``usage_limits``
+            # and ``model_settings``: the cached agent is shared across runs, so
+            # a run's accounting cannot live on it.
+            kwargs["usage"] = run_usage
+
             async with agent.run_stream_events(message, **kwargs) as stream:
                 async for event in stream:
                     if handle.stopped:
@@ -2096,20 +2180,42 @@ class PydanticAIBackend:
                     # ``_map_event`` returns nothing for a usage-less result.
                     self._retain_run_transcript(session_key, event)
                     for agent_event in self._map_event(event, announced):
+                        if agent_event.type == "token_usage":
+                            # The terminal result event just reported the run
+                            # total (``result.usage`` IS ``run_usage``), so the
+                            # snapshot below has nothing left to add.
+                            emitted_total = int(getattr(run_usage, "total_tokens", 0) or 0)
                         yield agent_event
+                    snapshot = _usage_snapshot()
+                    if snapshot is not None:
+                        yield snapshot
 
         except asyncio.CancelledError:
             # Caller cancelled this run specifically — the correct per-run
             # cancellation path. Propagate; do not degrade it into "done".
+            # Nothing is emitted here on purpose: the consumer has already
+            # stopped reading, and the usage this run burned was delivered by
+            # the in-run snapshots above.
             raise
         except Exception as exc:
             logger.error("Pydantic AI streaming error: %s", exc, exc_info=True)
+            # Usage BEFORE the error frame, and the order is load-bearing: the
+            # cloud run loop treats ``error`` as terminal and stops reading the
+            # stream at it, so a payload emitted after it is thrown away.
+            snapshot = _usage_snapshot()
+            if snapshot is not None:
+                yield snapshot
             yield AgentEvent(type="error", content=self._explain_error(exc))
             yield AgentEvent(type="done", content="")
             return
         finally:
             self._active.discard(handle)
 
+        # Reached on a clean finish AND on the ``stop()`` break, which is the
+        # other path that never sees ``AgentRunResultEvent``.
+        snapshot = _usage_snapshot()
+        if snapshot is not None:
+            yield snapshot
         yield AgentEvent(type="done", content="")
 
     def _explain_error(self, exc: Exception) -> str:
@@ -2342,6 +2448,24 @@ class PydanticAIBackend:
         usage = getattr(getattr(event, "result", None), "usage", None)
         if usage is None:
             return None
+        response = getattr(getattr(event, "result", None), "response", None)
+        model_name = getattr(response, "model_name", None)
+        model_name = model_name if isinstance(model_name, str) and model_name else None
+        return self._usage_event_from(usage, model_name=model_name)
+
+    def _usage_event_from(self, usage: Any, *, model_name: str | None) -> AgentEvent:
+        """Build the ``token_usage`` payload from a ``RunUsage``, whatever produced it.
+
+        Split out of ``_usage_event`` on 2026-09-02 so the ABNORMAL paths can
+        reach it. The counts are the same object either way — pydantic-ai
+        accumulates into the ledger the run was handed, and a completed run's
+        ``result.usage`` IS that ledger — but the model name is not: only a
+        completed run has a response to read it off, so the caller supplies it.
+
+        ``model_name=None`` is a real state and not an error. It bills zero and
+        says so in the log rather than raising, because one unpriceable turn must
+        not stall a sweep over everyone else's.
+        """
         total = int(getattr(usage, "input_tokens", 0) or 0)
         read = int(getattr(usage, "cache_read_tokens", 0) or 0)
         write = int(getattr(usage, "cache_write_tokens", 0) or 0)
@@ -2365,10 +2489,6 @@ class PydanticAIBackend:
                 savings.hit_rate * 100,
                 savings.est_tokens_saved,
             )
-
-        response = getattr(getattr(event, "result", None), "response", None)
-        model_name = getattr(response, "model_name", None)
-        model_name = model_name if isinstance(model_name, str) and model_name else None
 
         cost = 0.0
         if model_name is not None:
