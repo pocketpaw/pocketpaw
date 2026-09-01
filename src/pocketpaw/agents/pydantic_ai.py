@@ -271,6 +271,25 @@ One call now emits TWO ``tool_use`` events — provisional then resolved — und
 the ``input_pending`` contract documented on ``AgentEvent`` in ``protocol.py``
 and shared with ``claude_sdk``. A consumer that APPENDS per event must skip
 ``input_pending is True``.
+
+Updated 2026-09-02 (fix/metering-dated-pricing) — ``_usage_event`` prices through
+``usage_tracker.price_run`` instead of the flat ``_PRICING`` table. Three things
+follow, and the middle one contradicts what this file used to say:
+
+* The cache WRITE is priced at Anthropic's 1.25x premium. The old docstring named
+  the undercount and left it, because the flat table had no column for a write.
+  It has one now, and the write is passed through separately rather than folded
+  into ordinary input.
+* ``resolve_cost`` is no longer the wrong place to price a run. The note below
+  still prefers pricing HERE, but the reason narrowed: the meter used to read
+  this payload's uncached remainder as if it were the inclusive total, and since
+  2026-09-02 it reconstitutes the total from the cache lines. Pricing here is now
+  a preference (we hold the real counts; the meter holds a dict), not a
+  correctness requirement.
+* ``at=datetime.now(tz=UTC)`` is correct HERE and is not laziness. This runs the
+  instant the run finishes, so now IS the run's moment. The meter cannot say the
+  same, because it bills off a sweeper draining a backlog, which is why
+  ``resolve_cost`` takes the run's own timestamp instead of assuming one.
 """
 
 from __future__ import annotations
@@ -2307,16 +2326,18 @@ class PydanticAIBackend:
           the response says which model actually priced these tokens. Same
           reason ``claude_sdk`` takes it from the CLI's own report.
         * **The cost is computed here** rather than left to the meter's
-          estimator. ``resolve_cost``'s fallback expects an INCLUSIVE
-          ``input_tokens`` while every Anthropic-shaped payload in this codebase
-          reports the uncached remainder, so letting it estimate would subtract
-          the cached tokens a second time and undercount. Pricing where the
-          inclusive total is still in scope avoids the ambiguity; the table is
-          the same one the meter would have used.
+          estimator. ``price_run`` wants an INCLUSIVE ``input_tokens`` while the
+          payload this method emits carries the uncached remainder, so pricing
+          where the inclusive total is still in scope removes the ambiguity
+          entirely. ``resolve_cost`` reconstitutes the total from the cache
+          lines rather than guessing (2026-09-02), so it is no longer wrong to
+          let it price — but it is still better to price here, because here we
+          have the real numbers and there they have been through a dict.
 
-        Cache WRITE tokens are priced as ordinary input, which slightly
-        undercounts — Anthropic bills them at a premium. Named rather than
-        silently absorbed; the estimator has no concept of a write.
+        Cache WRITE tokens are priced correctly as of 2026-09-02: ``price_run``
+        passes reads and writes to ``genai-prices`` separately and a write bills
+        at Anthropic's 1.25x premium. They used to be folded into ordinary input
+        because the old flat table had no column for a write.
         """
         usage = getattr(getattr(event, "result", None), "usage", None)
         if usage is None:
@@ -2351,14 +2372,39 @@ class PydanticAIBackend:
 
         cost = 0.0
         if model_name is not None:
-            from pocketpaw.usage_tracker import _estimate_cost
+            from datetime import UTC, datetime
 
-            # ``total`` and not the remainder: the estimator subtracts the cached
-            # portion itself, so handing it the already-reduced number would
-            # remove those tokens twice.
-            estimated = _estimate_cost(model_name, total, output, read)
-            if estimated:
-                cost = float(estimated)
+            from pocketpaw.usage_tracker import price_run
+
+            # ``total`` and not the remainder: both pricing rungs subtract the
+            # cached portion themselves, so handing them the already-reduced
+            # number would remove those tokens twice.
+            #
+            # ``at`` is now, and here that is correct rather than lazy: this runs
+            # the instant the run finished, so now IS the run's moment. The meter
+            # cannot say that — it bills off a sweeper draining a backlog — which
+            # is why ``resolve_cost`` takes the run's timestamp instead.
+            priced = price_run(
+                model_name,
+                input_tokens=total,
+                output_tokens=output,
+                cache_read_tokens=read,
+                cache_write_tokens=write,
+                at=datetime.now(tz=UTC),
+            )
+            if priced is not None:
+                cost = float(priced)
+            else:
+                logger.warning(
+                    "[pydantic_ai] no price for model %r — this turn bills $0 "
+                    "(in=%d out=%d cache_read=%d cache_write=%d). Add a row to "
+                    "usage_tracker._PRICING if genai-prices lacks the id.",
+                    model_name,
+                    total,
+                    output,
+                    read,
+                    write,
+                )
 
         return AgentEvent(
             type="token_usage",

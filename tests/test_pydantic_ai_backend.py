@@ -26,6 +26,14 @@ unconditionally ``{}`` — counting events proved the dedupe worked and said
 nothing about whether the arguments survived it. Its replacement counts one
 event PER PHASE, and ``test_streamed_tool_call_delivers_its_real_arguments``
 pins the payload the count test could never see.
+
+Updated 2026-09-02 (fix/metering-dated-pricing) — the backend prices through
+``usage_tracker.price_run`` instead of the flat table, so one pinned figure
+moved. ``test_the_usage_event_carries_what_the_meter_actually_reads`` now expects
+0.001645 rather than 0.00162: the 100 cache-WRITE tokens in its fixture used to
+be billed as ordinary input and are now billed at Anthropic's 1.25x write
+premium. The difference is a rounding error on that fixture and is not one on a
+write-heavy turn, which is the whole reason the write got its own line.
 """
 
 from __future__ import annotations
@@ -1476,15 +1484,22 @@ def test_the_usage_event_carries_what_the_meter_actually_reads():
 
     # The exact number, not just "> 0", and asserted HERE rather than only in the
     # end-to-end test below, because this test carries no pocketpaw_ee import and
-    # so runs in the OSS-only CI job too. Haiku 4.5 is $1/$5/$0.10 per MTok:
-    # 300 uncached input + 250 output + 700 cache reads.
+    # so runs in the OSS-only CI job too. Haiku 4.5 is $1.00 input / $5.00 output
+    # / $0.10 cache read / $1.25 cache WRITE per MTok:
+    #   200 uncached input + 250 output + 700 cache reads + 100 cache writes
+    #   = 0.0002 + 0.00125 + 0.00007 + 0.000125 = 0.001645
     #
-    # ">0" would pass on the double-subtraction bug this guards. ``input_tokens``
-    # here is the INCLUSIVE 1000 and the estimator removes the cached portion
-    # itself; handing it the uncached remainder instead removes those tokens a
-    # second time, giving 0.00132 - still positive, still wrong, invisible to a
+    # This was 0.00162 until 2026-09-02, when the write stopped being billed as
+    # ordinary input. The old number folded the 100 write tokens into the fresh
+    # input at $1.00 and never charged the 1.25x premium; the difference is small
+    # here and is not small on a write-heavy turn.
+    #
+    # ">0" would pass on the double-subtraction bug this also guards.
+    # ``input_tokens`` here is the INCLUSIVE 1000 and ``price_run`` removes the
+    # cached portion itself; handing it the uncached remainder instead removes
+    # those tokens a second time - still positive, still wrong, invisible to a
     # truthiness check.
-    assert meta["total_cost_usd"] == pytest.approx(0.00162)
+    assert meta["total_cost_usd"] == pytest.approx(0.001645)
 
 
 def test_the_meter_prices_a_pydantic_ai_run_end_to_end():
@@ -1497,6 +1512,8 @@ def test_the_meter_prices_a_pydantic_ai_run_end_to_end():
     """
     pytest.importorskip("pocketpaw_ee", reason="pocketpaw-ee not installed")
 
+    from datetime import UTC, datetime
+
     from pocketpaw_ee.cloud.metering.service import resolve_cost
 
     class _Usage:
@@ -1506,15 +1523,16 @@ def test_the_meter_prices_a_pydantic_ai_run_end_to_end():
         cache_write_tokens = 0
 
     meta = PydanticAIBackend(_settings())._usage_event(_event_for(_Usage())).metadata
-    cost = resolve_cost(meta)
+    cost = resolve_cost(meta, at=datetime(2026, 9, 1, tzinfo=UTC))
 
     assert cost.source != "none", "the meter could not price this run"
-    # "reported" and not "estimated": the payload now prices itself, so the meter
-    # takes the reported branch and never reaches its estimator. That is the
-    # point - the estimator expects an inclusive input_tokens while this payload
-    # carries the uncached remainder, and only pricing upstream avoids the
-    # mismatch. If this ever flips to "estimated", the cost is being computed
-    # from the wrong number.
+    # "reported" and not "estimated": the payload prices itself, so the meter
+    # takes the reported branch and never reaches its own lookup. Both roads now
+    # lead to the same number - since 2026-09-02 the meter reconstitutes the
+    # inclusive prompt from the cache lines instead of mistaking the remainder
+    # for the total - but pricing upstream is still preferred, because upstream
+    # has the real counts and the meter only has a dict. If this flips to
+    # "estimated", the payload stopped carrying its own cost.
     assert cost.source == "reported"
     assert cost.model == "claude-haiku-4-5-20251001"
     # The exact number, not just "> 0". Haiku 4.5 is $1/$5/$0.10 per MTok, so
