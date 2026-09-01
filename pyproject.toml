@@ -49,6 +49,12 @@ dependencies = [
     # LLM Clients
     "openai>=1.60.0",
     "anthropic>=0.45.0",
+    # LLM pricing — effective-dated rates compiled into the package as Python
+    # source, so a lookup touches no network. It is already an unconditional
+    # requirement of pydantic-ai-slim, which ee depends on hard, so it is present
+    # everywhere metering runs; declared explicitly so a change in pydantic-ai's
+    # own dependency list cannot silently unprice our billing.
+    "genai-prices>=0.0.73",
     # Agent Backend (recommended default)
     "claude-agent-sdk>=0.1.72",
     # Dashboard (default mode — must be in core so `pip install pocketpaw` just works)

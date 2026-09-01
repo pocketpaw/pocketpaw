@@ -1,4 +1,12 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-09-02 (fix/metering-dated-pricing) — the concierge stats panel
+#   prices each run at the moment it RAN, not at the moment somebody opened the
+#   page. ``resolve_cost`` now requires that timestamp because LLM prices are
+#   effective-dated (``claude-sonnet-5`` went from $2.00 to $3.00 per MTok on
+#   2026-09-01), and this endpoint reads a WINDOW OF HISTORY. Pricing at request
+#   time meant the same past week restated itself at the current rates on every
+#   refresh, so the panel and the wallet could quote different numbers for the
+#   same runs. One-line change; the tokens and the run counting are untouched.
 # Updated: 2026-08-26 (the row an owner can see must open, and say what it cost)
 #   (1) THE DRILL-IN AGREED WITH THE LIST AGAIN. ``_load_transcript`` narrowed to
 #   one conversation by REBUILDING an exact ``session_key`` from the conversation
@@ -2648,7 +2656,11 @@ async def _concierge_stats(
     stats = ConciergeStatsResponse(window=window, since=since or "")
 
     try:
-        from pocketpaw_ee.cloud.metering.service import _total_tokens, resolve_cost
+        from pocketpaw_ee.cloud.metering.service import (
+            _total_tokens,
+            resolve_cost,
+            run_moment,
+        )
         from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 
         predicates: list[Any] = [
@@ -2689,7 +2701,11 @@ async def _concierge_stats(
             stats.tokens.output += _int_or_zero(usage.get("output_tokens"))
             stats.tokens.cached_input += _int_or_zero(usage.get("cached_input_tokens"))
             stats.tokens.total += _total_tokens(usage)
-            cost += resolve_cost(usage).cost_usd
+            # The run's own moment, not now: this panel reads a window of
+            # history, and prices are effective-dated, so pricing at request
+            # time would restate last week's spend at this week's rates every
+            # time somebody opened the page.
+            cost += resolve_cost(usage, at=run_moment(run)).cost_usd
 
         stats.runs = len(runs)
         stats.visitors = len(visitors)

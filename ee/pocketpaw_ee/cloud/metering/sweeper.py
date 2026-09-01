@@ -48,6 +48,13 @@
 #   federated by joining on the run id. The emit is fail-soft and post-bill, so a
 #   broken ledger can never cost a workspace its billing (the drift that silence
 #   buys is what AL-4's reconcile endpoint exists to surface).
+# Updated 2026-09-02 (fix/metering-dated-pricing): the loop now reads each
+#   ``BillResult`` back and tallies the runs whose cost came out ``unpriced``,
+#   emitting ONE warning per tick naming the distinct model ids. An unpriced run
+#   bills 0 credits, which writes no ledger row, so the tick is the last place
+#   the fact still exists — after this loop it is gone. Same argument as the
+#   ``ts`` note above: the sweep is where a run's truth is available, so it is
+#   where the sweep has to record it.
 
 from __future__ import annotations
 
@@ -226,9 +233,10 @@ async def sweep_unbilled_runs(
     card = rate_card if rate_card is not None else metering_service.load_rate_card()
 
     billed = 0
+    unpriced: list[str] = []
     for doc in unbilled:
         try:
-            await metering_service.bill_run(doc, rate_card=card)
+            result = await metering_service.bill_run(doc, rate_card=card)
         except Exception:
             # Leave ``billed`` False so the next tick retries this run; the
             # run:{run_id} key keeps any partial debit from double-applying.
@@ -249,7 +257,23 @@ async def sweep_unbilled_runs(
             # ``_emit_run_completed``), so this line cannot raise; the ``else``
             # is the structural belt to that braces.
             await _emit_run_completed(doc)
+            # C4 — an unpriced run bills 0 and marks itself billed, so it leaves
+            # no ledger row and nothing downstream can count it. The tick's own
+            # tally is the only place it can be counted, which is why it is
+            # counted here rather than in a metrics system this codebase does not
+            # have. One line per tick, not per run: a backlog on one bad model id
+            # should read as one problem, not two hundred.
+            if result.cost_source == "unpriced" and result.model:
+                unpriced.append(result.model)
 
+    if unpriced:
+        logger.warning(
+            "sweep_unbilled_runs: %d of %d runs billed $0 because nothing could "
+            "price them — models: %s",
+            len(unpriced),
+            billed,
+            ", ".join(sorted(set(unpriced))),
+        )
     if billed:
         logger.info("sweep_unbilled_runs: billed %d terminal runs", billed)
     return billed
