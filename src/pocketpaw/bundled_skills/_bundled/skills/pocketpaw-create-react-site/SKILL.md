@@ -189,8 +189,17 @@ Conversion essentials the page should carry:
 Same rule as every track: do **not** invent image `src` paths and do **not**
 ship a photo-free wireframe when the page calls for imagery.
 
-1. Call **`mcp__pocketpaw_stock__search_stock_images`** with a **generic,
-   descriptive** query — `"modern dental office"`, not `"dentist in Akron"`.
+0. Call **`mcp__pocketpaw_sites_manager__list_site_assets`** with the
+   `pocket_id` FIRST. These are the images the owner uploaded for this site —
+   their logo, their product, their team. A real logo beats any stock photo,
+   and shipping a stock face when the owner supplied their own is the single
+   most obvious way a generated site reads as generic. Its `url` is absolute,
+   public and permanent: put it in `src` verbatim, never copy the file into the
+   source map. If the user mentions "my logo" or "the image I uploaded", this
+   is where it is. An empty list just means they uploaded nothing — carry on.
+1. Call **`mcp__pocketpaw_stock__search_stock_images`** for whatever the owner's
+   own assets did not cover, with a **generic, descriptive** query — `"modern
+   dental office"`, not `"dentist in Akron"`.
    Pass `orientation` (`landscape` for heroes) and a small `count`.
 2. It returns `{url, alt, credit, credit_url, provider}` per photo. **Embed the
    `url` directly** as the `src` of a plain `<img>` (or a CSS
@@ -453,7 +462,7 @@ surface loads only the skill you are reading.
   existing react site (STEP 4). The tool for every follow-up edit; never
   re-create.
 - `mcp__pocketpaw_sites_manager__publish` — deploy, on explicit request (STEP 4)
-- `mcp__pocketpaw_design_systems__list_design_systems` / `get_design_system` — the token starting point
 - `mcp__pocketpaw_palette__scale_from_color` / `extract_palette` — brand colour
+- `mcp__pocketpaw_sites_manager__list_site_assets` — the owner's own uploaded images
 - `mcp__pocketpaw_stock__search_stock_images` — real photography
 - `mcp__pocketpaw_icons__search_icons` — feature icons

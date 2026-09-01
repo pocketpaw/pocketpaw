@@ -173,6 +173,14 @@ always **two calls**, and stopping after the first is the failure mode:
    adding the `import`, one block placing `<Testimonials />` at the right point
    in the funnel.
 
+**The tool tells you when call 2 is still outstanding.** After a `create`, the
+response carries `unreferenced: true` if nothing in the source map reaches the
+file you just wrote, and the `message` leads with the step you still owe. Treat
+that as "half done", not as a warning to note and move past: the file exists, the
+page is unchanged, and reporting the section as added there is exactly how a user
+ends up hunting for a component that renders nowhere. It is not an error — `ok`
+is still true and the write really happened, so do not retry the create.
+
 Removing a section is the mirror image: edit `src/App.tsx` to drop the import
 and the element. Leaving the now-unused component file behind is harmless (the
 build tree-shakes it), so prefer that over a delete you cannot undo.
@@ -282,7 +290,11 @@ Every edit is held to the bar the page was built to. Briefly:
 - **Real copy, always.** Never "TBD", never "Lorem ipsum", and never a
   fabricated testimonial, statistic, price, address or phone number. If the
   edit needs a fact you do not have, ask for it rather than inventing it.
-- **Photography comes from `mcp__pocketpaw_stock__search_stock_images`** with a
+- **Check `mcp__pocketpaw_sites_manager__list_site_assets` before any stock
+  search.** Those are the owner's OWN uploads for this site; when the user says
+  "use my logo" or "the image I uploaded", that is the only place it exists.
+  Embed the returned `url` verbatim — it is absolute, public and permanent.
+- **Other photography comes from `mcp__pocketpaw_stock__search_stock_images`** with a
   generic descriptive query. Embed the returned `url` directly, set `alt` from
   the returned `alt`, and render the returned `credit` — the providers' terms
   require it. On an empty result, use a gradient or solid treatment. **Never
@@ -394,7 +406,8 @@ Never fall back to another engine's tool, and never fall back to
 - Exactly one site pocket exists, and it is the one the user was looking at.
 - The change went in as a **diff** unless it was a genuine rewrite.
 - With **all JavaScript disabled**, the edited section still looks finished.
-- A new section was **both** written and rendered from `src/App.tsx`.
+- A new section was **both** written and rendered from `src/App.tsx` — and the
+  last `create` did not come back `unreferenced: true`.
 - No claim was made about a package being added, or about the change being live.
 - The user was told it is a draft, and was not invited to go and look at a
   rendered page that does not exist until a build runs.
@@ -407,7 +420,7 @@ Never fall back to another engine's tool, and never fall back to
   `get_pocket`, which is NOT on this surface's allow-list
 - `mcp__pocketpaw_sites_manager__publish` — deploy, on explicit request (STEP 4)
 - `mcp__pocketpaw_sites_manager__edit_svelte_component` — the svelte-track sibling
+- `mcp__pocketpaw_sites_manager__list_site_assets` — the owner's own uploaded images
 - `mcp__pocketpaw_stock__search_stock_images` — real photography for a new section
 - `mcp__pocketpaw_icons__search_icons` — feature icons
 - `mcp__pocketpaw_palette__scale_from_color` / `extract_palette` — brand colour
-- `mcp__pocketpaw_design_systems__get_design_system` — the page's token vocabulary

@@ -192,6 +192,29 @@ class PublishRequest(BaseModel):
     site_plan_key: str | None = None
 
 
+class SitePlanRequestBody(BaseModel):
+    """Body for POST /sites/plan-requests — ask an admin to put a site on a paid
+    plan. Same two fields a publish takes, because it describes the same
+    purchase; the difference is who is allowed to make it happen."""
+
+    pocket_id: str
+    site_plan_key: str
+
+
+class SitePlanRequestResponse(BaseModel):
+    """Ack for a filed site-plan request.
+
+    ``action_id`` is the pending Instinct Action an admin approves in The Tray —
+    returned so a client can link straight to it rather than telling the employee
+    to go looking. Deliberately carries NO site fields: nothing was published and
+    nothing was charged, and a SiteResponse here would read like it had been."""
+
+    action_id: str
+    status: str
+    site_plan_key: str
+    monthly_price_usd: int
+
+
 class MakeEditableRequest(BaseModel):
     """Body for POST /sites/by-pocket/{pocket_id}/editable (SE-2b). The builder
     origin is optional — the service falls back to the configured dashboard
@@ -800,3 +823,35 @@ class NativeArtifactResponse(BaseModel):
     build_status: str = "none"
     build_reason: str | None = None
     build_job_id: str | None = None
+
+
+class SiteAssetResponse(BaseModel):
+    """One image published to the site's public asset rail.
+
+    ``url`` is the whole point: a durable, credential-free address. It carries no
+    signature and no expiry, so it can be pasted into page source that outlives
+    this process — unlike a presign (7-day cap) or ``/api/v1/uploads/{id}``
+    (auth-gated, and therefore a 401 for the anonymous visitor the site serves).
+
+    ``key`` is the storage key, and the handle DELETE takes. It is scoped to the
+    owning workspace and pocket, so it is safe to hand to the client: the delete
+    endpoint re-checks the prefix and refuses anything outside this site.
+    """
+
+    key: str
+    url: str
+    mime: str
+    size: int
+    filename: str
+
+
+class SiteAssetListResponse(BaseModel):
+    """Every asset this site has uploaded."""
+
+    assets: list[SiteAssetResponse]
+
+
+class SiteAssetDeleteRequest(BaseModel):
+    """The storage key to remove. Validated against the site's own prefix."""
+
+    key: str

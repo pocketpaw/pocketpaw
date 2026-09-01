@@ -1,6 +1,14 @@
 # tests/cloud/surface/test_sites_handler.py — Sites surface handler.
 #
 # Created: 2026-06-03 — Guards the /sites surface preamble.
+# Updated: 2026-09-01 (fix/sites-drop-bundled-design-systems) — the bundled
+# DESIGN.md library and its ``pocketpaw_design_systems`` MCP server are gone, so
+# ``test_create_names_design_and_asset_tools`` split in two: the asset half kept
+# its stock/palette assertions under a truthful name, and the design half became
+# an INVERSE guard — no create preamble on any engine may name a design-system
+# tool id. A third test pins the replacement instruction, because deleting the
+# retriever without saying where tokens come from would leave the model on its
+# own defaults, which is the repetition the removal is meant to end.
 # Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — four tests at the BOTTOM
 # of this file pin the two preambles that route to the new react edit tool: the
 # react create step now says a follow-up change is
@@ -654,18 +662,65 @@ async def test_create_always_two_phase() -> None:
     assert "build" in lower
 
 
-async def test_create_names_design_and_asset_tools() -> None:
-    """The create preamble names the design-system, stock, and custom-color tool
-    ids so the agent themes the site and wires real assets."""
+async def test_create_names_asset_tools() -> None:
+    """The create preamble names the stock and custom-color tool ids so the agent
+    wires real assets and honours a brand hex."""
     out = (
         await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
     ).text
 
-    assert "mcp__pocketpaw_design_systems__list_design_systems" in out
-    assert "mcp__pocketpaw_design_systems__get_design_system" in out
     assert "mcp__pocketpaw_stock__search_stock_images" in out
     # Custom-color path: brand hex → full scale.
     assert "mcp__pocketpaw_palette__scale_from_color" in out
+
+
+async def test_create_never_names_a_bundled_design_system_tool() -> None:
+    """The preamble must not send the agent shopping for a canned look.
+
+    The bundled DESIGN.md library and its ``pocketpaw_design_systems`` MCP server
+    are DELETED (fix/sites-drop-bundled-design-systems). Five fixed identities
+    capped how many different sites this surface could produce, and the taxonomy
+    made the pick near-deterministic — ``warm-local-service`` claimed cafe /
+    salon / dentist / bakery, so every local business got the same honey-amber
+    palette, the one the embedded design system bans as a default reach.
+
+    This is the INVERSE guard, and it is the one that matters: an id named here
+    is an id the agent tries to call. Re-adding the library would have to re-add
+    this name, and that is what should fail.
+
+    MUTATION: put ``mcp__pocketpaw_design_systems__list_design_systems`` back into
+    the create preamble's Phase 2 and this test fails.
+    """
+    for engine in (None, "html", "ripple", "svelte", "react"):
+        out = (
+            await sites_handler.build_preamble(
+                WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
+            )
+        ).text
+        assert "pocketpaw_design_systems" not in out, f"engine={engine}"
+        assert "list_design_systems" not in out, f"engine={engine}"
+        assert "get_design_system" not in out, f"engine={engine}"
+
+
+async def test_create_tells_the_agent_to_author_its_own_tokens() -> None:
+    """With no library to retrieve, Phase 2 must say where the tokens come from.
+
+    Deleting the retriever without replacing the instruction would leave step 1
+    saying nothing about color, type, or ground — and an absence of instruction
+    is how the model falls back to its own defaults, which is the repetition this
+    change exists to remove. So the step names the custom properties to write and
+    points at the embedded design system's own modules for the values.
+    """
+    out = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
+
+    assert "--accent" in out
+    assert "--bg" in out
+    assert "custom properties" in out.lower()
+    # The anti-repetition rule is now load-bearing rather than a footnote.
+    assert "rotate" in out.lower()
+    assert "reseed the accent" in out
 
 
 async def test_create_clarify_renders_ripple_widget_when_ripple_on() -> None:

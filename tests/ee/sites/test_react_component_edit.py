@@ -110,10 +110,14 @@ async def test_targeted_edits_are_applied_and_persisted(beanie_test_db):
         edits=[{"old_string": "Bright Smile Dental", "new_string": "Bright Smile"}],
     )
 
+    # Whole-dict equality on purpose: the agent narrates this payload, so a key
+    # arriving without a decision is a key it will narrate un-briefed. ``unreferenced``
+    # is False here because this is an edit, not a create — see section (d).
     assert out == {
         "pocket_id": pocket_id,
         "component_path": "src/components/Hero.tsx",
         "created": False,
+        "unreferenced": False,
     }
     source = await _source_of(pocket_id)
     assert "<h1>Bright Smile</h1>" in source["src/components/Hero.tsx"]
@@ -627,3 +631,176 @@ async def test_pockets_service_emits_pocket_updated(beanie_test_db, _recording_b
 
     kinds = [type(e).__name__ for e in _recording_bus_for_sites.events]
     assert "PocketUpdated" in kinds, kinds
+
+
+# ---------------------------------------------------------------------------
+# (d) The UNREFERENCED-CREATE signal — the second half of the two-call contract
+# ---------------------------------------------------------------------------
+#
+# THE INCIDENT (2026-09-01). A user uploaded an image to an already-published react
+# site and asked for it in the hero. The agent created a new component, reported
+# "I added it to a component", and nothing appeared — not on the page, not anywhere
+# the user could find it. Only "just add an img tag with the link" worked, because
+# that edited a component the page ALREADY renders.
+#
+# Adding a section is a TWO-CALL contract: `create=true` writes the file, then a
+# second `edits` call wires it into `src/App.tsx`. Nothing enforced or even
+# mentioned the second call after the first one landed. `create` returned a flat
+# success for a file that nothing imports — dead code in the source map — and the
+# agent, reading a clean success, reported the work as done. The file really was
+# written, so "I added it to a component" was true and useless.
+#
+# The signal is ADVISORY, never blocking: call 1 is unreferenced BY DEFINITION at
+# the moment it happens. It has to read as the next step on a checklist, or agents
+# learn to avoid `create` entirely and the section-adding lane closes again. This
+# mirrors merge_spec's orphan-state warning ("Added state key(s) with no ui widget
+# reading them — renders nothing"), which is the same defect one engine over.
+
+
+@pytest.mark.asyncio
+async def test_create_reports_the_new_file_is_referenced_by_nothing(beanie_test_db):
+    """The bug, in one assertion. A created component that no file imports renders
+    NOTHING, and the caller must be told so on the call that creates it.
+
+    THE MUTATION THAT BREAKS THIS: hardcode ``unreferenced`` to False. Run: the
+    orphan create reported a clean success and the agent had no reason to make the
+    second call."""
+    pocket_id = await _make_react_pocket("ws1", "u1")
+
+    out = await sites_service.edit_react_component(
+        user_id="u1",
+        pocket_id=pocket_id,
+        component_path="src/components/Testimonials.tsx",
+        new_source="export default function Testimonials() { return <section/>; }\n",
+        create=True,
+    )
+
+    assert out["created"] is True
+    assert out["unreferenced"] is True, (
+        "src/App.tsx does not import the new component, so the page renders nothing "
+        "new — the response must say so"
+    )
+    # The file still landed: this is advice about the NEXT call, not a rejection.
+    source = await _source_of(pocket_id)
+    assert "src/components/Testimonials.tsx" in source
+
+
+@pytest.mark.asyncio
+async def test_create_is_silent_once_a_file_imports_the_new_path(beanie_test_db):
+    """The other half — the warning must not cry wolf. An agent that wires the
+    import FIRST (or re-creates a path something already references) has nothing
+    outstanding, and a warning there teaches it to ignore the field.
+
+    THE MUTATION THAT BREAKS THIS: always report ``unreferenced=True``. Run: a
+    correctly-wired create still nagged, which is how a signal gets ignored."""
+    pocket_id = await _make_react_pocket("ws1", "u1")
+    # Wire the import BEFORE the component file exists — the order the generator's
+    # own scaffold uses, and legal because App.tsx already exists.
+    await sites_service.edit_react_component(
+        user_id="u1",
+        pocket_id=pocket_id,
+        component_path="src/App.tsx",
+        edits=[
+            {
+                "old_string": "import Hero from './components/Hero';\n",
+                "new_string": (
+                    "import Hero from './components/Hero';\n"
+                    "import Testimonials from './components/Testimonials';\n"
+                ),
+            }
+        ],
+    )
+
+    out = await sites_service.edit_react_component(
+        user_id="u1",
+        pocket_id=pocket_id,
+        component_path="src/components/Testimonials.tsx",
+        new_source="export default function Testimonials() { return <section/>; }\n",
+        create=True,
+    )
+
+    assert out["created"] is True
+    assert out["unreferenced"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_edit_never_reports_unreferenced(beanie_test_db):
+    """Scoped to ``create``. An ordinary edit touches a file that was already part
+    of the site; re-litigating its wiring on every headline change is noise, and
+    noise on the common path is what makes the signal on the rare path get skimmed.
+
+    The file edited here is ``src/index.css``, which NOTHING in the fixture imports —
+    chosen deliberately. Editing ``Hero.tsx`` would prove nothing: it is imported by
+    App.tsx, so it reports False whether the ``create and`` scoping is there or not,
+    and the mutation below would sail past a green test.
+
+    THE MUTATION THAT BREAKS THIS: drop the ``create and`` so the scan runs on every
+    edit. Run: a headline change to any unwired file nagged about wiring the caller
+    never asked to change."""
+    pocket_id = await _make_react_pocket("ws1", "u1")
+
+    out = await sites_service.edit_react_component(
+        user_id="u1",
+        pocket_id=pocket_id,
+        component_path="src/index.css",
+        edits=[{"old_string": "#0A84FF", "new_string": "#111111"}],
+    )
+
+    assert out["created"] is False
+    assert out["unreferenced"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_file_that_only_imports_itself_is_still_unreferenced(beanie_test_db):
+    """A module reaching itself reaches nothing: the page still never renders it.
+    Skipping the created file is what makes that true, and a scan that counted its
+    own contents would report every self-referential component as wired.
+
+    THE MUTATION THAT BREAKS THIS: drop the ``continue`` that skips the file itself.
+    Run: a component importing a sibling constant from its own path reported as
+    referenced, and the outstanding App.tsx call was never suggested."""
+    pocket_id = await _make_react_pocket("ws1", "u1")
+
+    out = await sites_service.edit_react_component(
+        user_id="u1",
+        pocket_id=pocket_id,
+        component_path="src/components/Gallery.tsx",
+        new_source=(
+            "import { SHOTS } from './Gallery';\n"
+            "export default function Gallery() { return <section>{SHOTS.length}</section>; }\n"
+        ),
+        create=True,
+    )
+
+    assert out["created"] is True
+    assert out["unreferenced"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_public_asset_is_referenced_by_its_url_not_an_import(beanie_test_db):
+    """``public/`` is the other authorable prefix and it is NOT a module tree: a
+    file there is reached by URL (``/logo.png``), never by an import specifier. An
+    import-only scan would report every correctly-used asset as an orphan."""
+    pocket_id = await _make_react_pocket("ws1", "u1")
+    await sites_service.edit_react_component(
+        user_id="u1",
+        pocket_id=pocket_id,
+        component_path="src/components/Hero.tsx",
+        edits=[
+            {
+                "old_string": "<h1>Bright Smile Dental</h1>",
+                "new_string": '<h1>Bright Smile Dental</h1>\n      <img src="/logo.png" alt=""/>',
+            }
+        ],
+    )
+
+    out = await sites_service.edit_react_component(
+        user_id="u1",
+        pocket_id=pocket_id,
+        component_path="public/logo.png",
+        new_source="(binary-ish placeholder)",
+        create=True,
+    )
+
+    assert out["created"] is True
+    assert out["unreferenced"] is False

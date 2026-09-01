@@ -14,6 +14,18 @@ deployment can point both services at the same bucket:
     S3_ACCESS_KEY_ID
     S3_SECRET_ACCESS_KEY
     S3_PRIVATE_BUCKET       (required in s3 mode)
+
+Updated 2026-08-31 (feat/sites-public-asset-uploads): added
+``build_public_adapter``, a SECOND adapter over the world-readable bucket:
+
+    S3_PUBLIC_BUCKET        (enables the public rail; absent = feature off)
+    S3_PUBLIC_BASE_URL      (optional — a CDN / custom domain in front of it;
+                             defaults to path-style ``S3_ENDPOINT/bucket``)
+
+It is deliberately a separate function rather than a flag on ``build_adapter``.
+The two buckets have opposite security postures, and the private one is what
+every existing caller gets; a shared code path is how a chat attachment
+eventually lands in a bucket the whole internet can read.
 """
 
 from __future__ import annotations
@@ -56,4 +68,53 @@ def _build_s3() -> StorageAdapter:
         endpoint_url=os.environ.get("S3_ENDPOINT") or None,
         access_key_id=os.environ.get("S3_ACCESS_KEY_ID") or None,
         secret_access_key=os.environ.get("S3_SECRET_ACCESS_KEY") or None,
+    )
+
+
+def build_public_adapter() -> StorageAdapter | None:
+    """Return an adapter over the PUBLIC bucket, or ``None`` when unconfigured.
+
+    ``None`` means this deployment has no world-readable bucket, and callers
+    must surface that as "public asset hosting is not configured" — never fall
+    back to :func:`build_adapter`, whose bucket is private and would hand out
+    links that 403 for every visitor.
+
+    Requires ``POCKETPAW_UPLOAD_ADAPTER=s3`` *and* ``S3_PUBLIC_BUCKET``. There is
+    no local-disk equivalent on purpose: serving public assets locally would mean
+    an unauthenticated route on the dashboard's own origin, which is a strictly
+    worse place for visitor-supplied bytes than a separate bucket origin.
+    """
+    try:  # pragma: no cover — trivial guard, mirrors build_adapter
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except ImportError:
+        pass
+
+    if os.environ.get("POCKETPAW_UPLOAD_ADAPTER", "local").strip().lower() != "s3":
+        return None
+
+    bucket = (os.environ.get("S3_PUBLIC_BUCKET") or "").strip()
+    if not bucket:
+        return None
+
+    from pocketpaw.uploads.s3 import S3StorageAdapter
+
+    endpoint = (os.environ.get("S3_ENDPOINT") or "").strip().rstrip("/")
+    base = (os.environ.get("S3_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    if not base:
+        if not endpoint:
+            # AWS-style virtual host. Without a region-qualified endpoint we
+            # cannot build a correct address, and a guessed one silently 404s.
+            return None
+        base = f"{endpoint}/{bucket}"
+
+    return S3StorageAdapter(
+        bucket=bucket,
+        region=os.environ.get("S3_REGION") or None,
+        endpoint_url=endpoint or None,
+        access_key_id=os.environ.get("S3_ACCESS_KEY_ID") or None,
+        secret_access_key=os.environ.get("S3_SECRET_ACCESS_KEY") or None,
+        public_base_url=base,
+        public_read=True,
     )

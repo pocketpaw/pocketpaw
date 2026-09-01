@@ -269,6 +269,34 @@
 # it; `_design_system_block` reads that SKILL.md at request time, so the two
 # have to agree or the embedded copy re-teaches the images-only habit.
 
+# Updated: 2026-09-01 (fix/sites-drop-bundled-design-systems) - the create
+# preamble stopped shopping for a look and went back to authoring one. Phase 2
+# step 1 used to call `mcp__pocketpaw_design_systems__list_design_systems` and
+# theme the page from whichever of FIVE bundled DESIGN.md systems the agent
+# picked. Five fixed identities is a ceiling on how many different sites this
+# surface can produce, and the taxonomy made the pick close to deterministic:
+# `warm-local-service` lists cafe / salon / dentist / bakery in its `industries`,
+# so every local business landed on the same honey-amber-on-stone palette. That
+# palette is the exact one the embedded design system BANS as a default reach
+# (2.G, premium-consumer palette ban), which is the tell that there were two
+# sources of design truth here and the weaker one was winning: the retriever
+# answered with tokens, and tokens beat prose at the moment of writing CSS.
+#
+# The library, its MCP server and its provider are deleted, not merely unnamed
+# here - a tool the preamble stops naming is still reachable and still gets
+# called. Step 1 now says LOCK THE TOKENS: derive `--bg` / `--ink` / `--accent` /
+# `--radius` / `--shadow` and the two font faces from the identity Phase 1
+# already committed to, using the direction families (2.E), typographic pairings
+# (2.D), background architectures (2.B) and color calibration (2.G) of the
+# design-taste system embedded at the end of this message, and write them before
+# any markup. The rotation rule survives the removal and is now the whole
+# anti-repetition mechanism, so it says what it is guarding against. Step 2's
+# brand-hex override now overrides `the accent you chose` (there is no library
+# primary to override), and the robustness bullet no longer lists a design-system
+# tool among the ones that can error. `_design_taste_system` is untouched: the
+# skill that GOVERNS the build was never the problem, and it is now the only
+# design authority on this surface.
+
 from __future__ import annotations
 
 import functools
@@ -814,21 +842,28 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "and palette so two similar briefs never look identical.\n"
         "\n"
         "PHASE 2 — DESIGN + BUILD (apply the embedded DESIGN SYSTEM throughout).\n"
-        "1. PICK A LOOK. Call "
-        "`mcp__pocketpaw_design_systems__list_design_systems` to see the "
-        "library, choose the one that fits your Design Read, then "
-        "`mcp__pocketpaw_design_systems__get_design_system` with its slug to load "
-        "the DESIGN.md + tokens.css as a starting palette. THEME the site with "
-        "those tokens while the pocketpaw-design-taste rules GOVERN the build: a "
-        "mandatory background architecture (never a plain #fff/#000 page), the "
-        "chosen visual identity, diverse section compositions (the default AI "
-        "sequence and two consecutive same-layout sections are banned), a bold "
-        "typographic pairing, Tier-0 CSS-only motion, and ZERO em-dashes. Do NOT "
-        "default to the warm / earthy system just because the business is a cafe, "
-        "salon, or shop — rotate to the less-obvious fit and reseed the accent.\n"
+        "1. LOCK THE TOKENS. There is NO design-system library to pick from: "
+        "you AUTHOR the token set for THIS business out of the identity you "
+        "just committed to. Take the aesthetic direction family (2.E), the "
+        "typographic pairing (2.D), the background architecture (2.B) and the "
+        "color calibration rules (2.G) from the embedded DESIGN SYSTEM and "
+        "write them out as concrete CSS custom properties (--bg, --ink, "
+        "--accent, --radius, --shadow, the display + body faces) BEFORE you "
+        "write any markup, then build every section from those variables "
+        "instead of sprinkling ad-hoc hex per section. The same rules GOVERN "
+        "the build: a mandatory background architecture (never a plain "
+        "#fff/#000 page), the ONE chosen visual identity, diverse section "
+        "compositions (the default AI sequence and two consecutive "
+        "same-layout sections are banned), a bold typographic pairing, Tier-0 "
+        "CSS-only motion, and ZERO em-dashes. ROTATE, because a look you "
+        "reach for by reflex is the look every site in that industry already "
+        "has: do NOT default to the warm / earthy family just because the "
+        "business is a cafe, salon, or shop, pick the less-obvious fit, and "
+        "reseed the accent so two similar briefs never resolve to the same "
+        "palette.\n"
         "2. CUSTOM COLORS. If the user gave a brand color, call "
         "`mcp__pocketpaw_palette__scale_from_color` with the hex to get a full "
-        "scale and OVERRIDE the design system's primary with it. If they gave "
+        "scale and OVERRIDE the accent you chose with it. If they gave "
         "a logo or reference-image URL, call "
         "`mcp__pocketpaw_palette__extract_palette` on it and key the palette "
         "off that.\n"
@@ -841,7 +876,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "native element. The only asset rule is that a URL has to be one you "
         "were actually given rather than one you made up.\n"
         "4. BRIEF. State a one-line brief back so the user sees the plan — e.g. "
-        "'Building a [design-system vibe] site for [business] with sections "
+        "'Building a [direction family + identity] site for [business] with "
+        "sections "
         "[…], palette [primary].' Then build.\n"
         f"5. {build_step}\n"
         "6. DRAFT-FIRST — STOP at the draft; do NOT publish by default. The create "
@@ -859,10 +895,10 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "'create'/'build'/'make' request.\n"
         "\n"
         "ROBUSTNESS (this flow must never stall or disappoint in real use):\n"
-        "- If ANY tool errors (design-system, stock, palette, or icons), do "
-        "NOT retry blindly or stall. Proceed with sensible defaults — a "
-        "reasonable built-in look, generic-but-tasteful section imagery — and "
-        "briefly note what you fell back on. A tool failure must NEVER block "
+        "- If ANY tool errors (stock, palette, or icons), do NOT retry blindly "
+        "or stall. Proceed with sensible defaults — the identity you already "
+        "committed to, generic-but-tasteful section imagery — and briefly "
+        "note what you fell back on. A tool failure must NEVER block "
         "the build.\n"
         "- ONE round of questions maximum. If the user already gave detail or "
         "says 'just build it', skip straight to Phase 2 with sensible "
@@ -1261,7 +1297,11 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
             "large rewrite). Read the file before you diff it. To ADD a page, call "
             "it twice: once with `create=true` and `new_source` for the new file "
             "(e.g. 'about.html'), then once with `edits` on `index.html` to link to "
-            "it. NEVER call `create_html_site` again to apply a change — it takes "
+            "it. The create tells you when the second call is still outstanding: "
+            "`unreferenced:true` means nothing in the site links to the file you "
+            "just wrote, so no visitor can reach it and the pages they can reach "
+            "are unchanged — add the link before you report the page as added. "
+            "NEVER call `create_html_site` again to apply a change — it takes "
             "no pocket id, so it mints a SECOND site pocket at a SECOND url and "
             "leaves the one the user is looking at untouched.\n"
             "PATHS ARE ROOT-RELATIVE: `index.html` is the page the edge serves, "

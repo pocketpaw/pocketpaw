@@ -3,6 +3,20 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# Updated 2026-08-31 (feat/sites-public-asset-uploads): three endpoints for the
+# site's PUBLIC asset rail — POST/GET/DELETE ``/sites/by-pocket/{pocket_id}/assets``.
+# A site could not display an image the owner supplied: the source map the generator
+# takes is text-only, its base64 ``assets`` sideband is refused for every engine but
+# html, and both URLs this codebase already mints are unusable by an anonymous
+# visitor (a presign expires; ``/api/v1/uploads/{id}`` is auth-gated). These store
+# the bytes on a world-readable bucket and hand back a durable absolute URL.
+#
+# IMAGES ONLY, AND THAT IS THE FEATURE'S EDGE. A document — the PRD case — is agent
+# INPUT, not site content, and putting a customer's requirements doc on an
+# unauthenticated URL is a data leak. Documents keep going through the private
+# upload rail; only raster images land here, proven by magic bytes rather than by
+# the Content-Type the client claims.
+#
 # Updated 2026-08-24 (SP-2 — draft preview joins the ephemeral build lane): GET
 # ``/sites/by-pocket/{pocket_id}/native-artifact`` now has TWO response shapes and
 # ``build_status`` says which. A cache hit is unchanged (the render, ``build_status``
@@ -234,12 +248,17 @@ from pocketpaw_ee.sites.dto import (
     NativeArtifactResponse,
     PublishRequest,
     RequestPublishResponse,
+    SiteAssetDeleteRequest,
+    SiteAssetListResponse,
+    SiteAssetResponse,
     SiteClientResponse,
     SiteClientUpdate,
     SiteDataRowsResponse,
     SiteDataTablesResponse,
     SiteEntitlementsResponse,
     SiteInvoiceCreate,
+    SitePlanRequestBody,
+    SitePlanRequestResponse,
     SitePreviewRefreshResponse,
     SitePreviewResponse,
     SiteResponse,
@@ -255,12 +274,47 @@ router = APIRouter(
 )
 
 
+def _may_buy_site_plan(user: object, workspace_id: str) -> bool:
+    """May this caller commit the workspace to a recurring site charge?
+
+    Asked as a QUESTION rather than enforced as a dependency, because the answer
+    only matters when the request actually names a paid tier — and a free publish
+    by an ordinary member is the common case that must not 403. The service makes
+    the decision; this only reports the role.
+
+    Non-raising by design: ``check_workspace_action`` raises on deny and audits
+    it, which is right for a gate and wrong for a predicate. The denial that
+    reaches the user comes from the service, with copy that tells them what to do
+    about it, rather than a bare role error on a publish they were allowed to make.
+    """
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.guards.deps import check_workspace_action
+
+    try:
+        check_workspace_action(user, workspace_id, "sites.buy_plan")
+    except CloudError:
+        return False
+    except Exception:  # noqa: BLE001 — a broken role read must not sell a plan
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "sites.publish: could not resolve the caller's role for sites.buy_plan "
+            "— treating as NOT authorized to buy",
+            exc_info=True,
+        )
+        return False
+    return True
+
+
 @router.post("/sites/publish", response_model=SiteResponse)
 async def publish_site(
     body: PublishRequest,
     request: Request,
     ctx: RequestContext = Depends(request_context),
-    _: object = Depends(require_action_any_workspace("fabric.write")),
+    # The USER, not a throwaway: publishing stays a MEMBER action, but whether
+    # this caller may BUY a paid tier is a second, higher question and needs the
+    # principal to ask it of.
+    user: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> SiteResponse:
     """Compile the pocket's rippleSpec, smoke-gate, deploy, and persist."""
     # The pocket-read + theme-derive + publish is shared with the in-process MCP
@@ -280,6 +334,7 @@ async def publish_site(
         user_id=ctx.user_id,
         pocket_id=body.pocket_id,
         site_plan_key=body.site_plan_key,
+        purchase_authorized=_may_buy_site_plan(user, ctx.workspace_id),
         prewarm_origin=request.headers.get("origin") or None,
         # Also the checkout's return base for a PAID publish. The frontend sends the
         # whole page to ``checkout_url``, so with no return_url the buyer pays and
@@ -288,6 +343,78 @@ async def publish_site(
         origin=request.headers.get("origin") or None,
     )
     return sites_service._to_response(doc)
+
+
+@router.post("/sites/plan-requests", response_model=SitePlanRequestResponse)
+async def request_site_plan(
+    body: SitePlanRequestBody,
+    ctx: RequestContext = Depends(request_context),
+    user: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SitePlanRequestResponse:
+    """Ask a workspace admin to put this site on a paid plan.
+
+    The other side of ``sites.plan_purchase_forbidden``. A member who publishes
+    and picks a paid tier is refused, correctly — a paid site is an add-on line
+    on the workspace's own subscription, so choosing one spends company money.
+    Before this endpoint the refusal was also a dead end: the employee who built
+    the site had no route forward except finding an admin out-of-band and
+    describing what they wanted.
+
+    This files an Instinct Action instead. An admin approves it in The Tray and
+    the executor performs the publish that was refused — re-checking the
+    APPROVER's ``sites.buy_plan`` at that moment, so approving is what authorizes
+    the spend and nothing here does.
+
+    Gated on ``fabric.write`` (MEMBER), the same action publishing needs: asking
+    is not spending, and a gate above MEMBER would refuse exactly the people this
+    exists for. An ADMIN may also call it — a request they can approve themselves
+    is a slower path to the same place, not a wrong one, and refusing it would
+    make the client's job harder for no benefit.
+
+    Returns the pending Action so the caller can link to it. NOTHING is published
+    and NOTHING is charged on this path.
+    """
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+    from pocketpaw_ee.cloud.billing import site_plans
+    from pocketpaw_ee.cloud.site_plan_requests import propose_site_plan_request
+
+    # Resolve the tier here as well as inside the propose helper — the response
+    # quotes a price, and a client showing "$0/month" for a tier we could not
+    # resolve would be worse than the refusal it replaced.
+    tier = site_plans.site_scoped_tier(site_plans.canonical_site_tier_key(body.site_plan_key))
+    if tier is None:
+        raise ValidationError(
+            "sites.unknown_plan_tier",
+            f"'{body.site_plan_key}' is not a plan a single site can be put on",
+        )
+
+    # The site's name for the Tray card, best-effort: an admin reading "Put
+    # Acme Dental on the Staff plan" can decide; one reading a pocket id cannot.
+    # A failure to resolve it must not block the request.
+    # Imported locally, like every other cross-entity read in this module: the
+    # sites service owns Site reads and reaches into pockets the same way.
+    site_name = ""
+    try:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+        pocket = await pockets_service.get(body.pocket_id, ctx.user_id)
+        site_name = str((pocket or {}).get("name") or "")
+    except Exception:  # noqa: BLE001 — a nicer card is not worth failing the ask
+        pass
+
+    action_id = await propose_site_plan_request(
+        workspace_id=ctx.workspace_id,
+        pocket_id=body.pocket_id,
+        site_plan_key=body.site_plan_key,
+        requested_by=ctx.user_id,
+        site_name=site_name,
+    )
+    return SitePlanRequestResponse(
+        action_id=action_id,
+        status="pending",
+        site_plan_key=tier.key,
+        monthly_price_usd=int(tier.monthly_price_usd or 0),
+    )
 
 
 @router.post("/sites/reserve", response_model=list[SiteResponse])
@@ -880,3 +1007,117 @@ async def record_site_invoice(
     return await sites_service.record_site_invoice(
         workspace_id=ctx.workspace_id, site_id=site_id, body=body
     )
+
+
+# ── The public asset rail ───────────────────────────────────────────────
+#
+# Gated exactly like the other pocket-scoped writes here: fabric.write to add or
+# remove, fabric.read to list. Tenancy is not left to the gate alone — every key
+# is built from ``ctx.workspace_id``, so a caller cannot name another workspace's
+# object even with a valid token for their own.
+
+
+def _asset_store_or_503():
+    """Return the configured store, or 503 with a message an operator can act on."""
+    from pocketpaw_ee.sites.public_assets import public_asset_store
+
+    store = public_asset_store()
+    if store is None:
+        # Deliberately NOT a fallback to the private adapter. A link that 403s for
+        # every visitor is worse than a clear refusal, because it fails later and
+        # looks like a broken site rather than a missing setting.
+        raise HTTPException(
+            503,
+            "Public asset storage is not configured for this deployment "
+            "(set POCKETPAW_UPLOAD_ADAPTER=s3 and S3_PUBLIC_BUCKET).",
+        )
+    return store
+
+
+@router.post("/sites/by-pocket/{pocket_id}/assets", response_model=SiteAssetResponse)
+async def upload_site_asset(
+    pocket_id: str,
+    file: UploadFile = File(...),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteAssetResponse:
+    """Store one image on the public bucket and return its durable URL.
+
+    Only PNG/JPEG/GIF/WebP are accepted, and acceptance is decided by MAGIC BYTES,
+    never by the part's Content-Type — on a public origin a caller who can label
+    arbitrary bytes ``image/png`` can host arbitrary content under our name. SVG is
+    refused for the same reason even though it is an image: it executes script.
+
+    Like ``import_site`` above, the cap here gates PROCESSING, not ingress —
+    Starlette spools the whole body before this runs, so bounding the raw request
+    is the fronting proxy's job. Oversized → 413; anything the rail refuses → 400
+    with a message written to be shown to the user verbatim.
+    """
+    from pocketpaw_ee.sites.public_assets import MAX_ASSET_BYTES, PublicAssetError
+
+    store = _asset_store_or_503()
+
+    data = await file.read(MAX_ASSET_BYTES + 1)
+    if len(data) > MAX_ASSET_BYTES:
+        raise HTTPException(
+            413,
+            f"That image exceeds the {MAX_ASSET_BYTES // (1024 * 1024)}MB upload cap.",
+        )
+
+    try:
+        asset = await store.put(
+            data,
+            filename=file.filename or "asset",
+            workspace_id=ctx.workspace_id,
+            pocket_id=pocket_id,
+        )
+    except PublicAssetError as exc:
+        # The message is authored for a human and carries no internal detail.
+        raise HTTPException(400, str(exc)) from exc
+
+    return SiteAssetResponse(
+        key=asset.key,
+        url=asset.url,
+        mime=asset.mime,
+        size=asset.size,
+        filename=asset.filename,
+    )
+
+
+@router.get("/sites/by-pocket/{pocket_id}/assets", response_model=SiteAssetListResponse)
+async def list_site_assets(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteAssetListResponse:
+    """List every image uploaded for this site, newest naming first by filename."""
+    store = _asset_store_or_503()
+    assets = await store.list(workspace_id=ctx.workspace_id, pocket_id=pocket_id)
+    return SiteAssetListResponse(
+        assets=[
+            SiteAssetResponse(key=a.key, url=a.url, mime=a.mime, size=a.size, filename=a.filename)
+            for a in assets
+        ]
+    )
+
+
+@router.delete("/sites/by-pocket/{pocket_id}/assets", status_code=204)
+async def delete_site_asset(
+    pocket_id: str,
+    body: SiteAssetDeleteRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> None:
+    """Delete one asset, refusing any key outside this site's own prefix.
+
+    The key arrives from the client, so the prefix check in the store is what
+    stands between this and an arbitrary cross-tenant object delete. It is
+    enforced there rather than here so a non-HTTP caller inherits it too.
+    """
+    from pocketpaw_ee.sites.public_assets import PublicAssetError
+
+    store = _asset_store_or_503()
+    try:
+        await store.delete(workspace_id=ctx.workspace_id, pocket_id=pocket_id, key=body.key)
+    except PublicAssetError as exc:
+        raise HTTPException(403, str(exc)) from exc

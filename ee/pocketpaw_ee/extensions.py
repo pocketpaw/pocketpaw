@@ -932,48 +932,13 @@ class CloudPaletteMcpProvider:
         return list(PALETTE_TOOL_IDS)
 
 
-class CloudDesignSystemsMcpProvider:
-    """`pocketpaw.mcp_servers` — the design-system library retriever in-process
-    server (``pocketpaw_design_systems``). Hosts ``list_design_systems`` +
-    ``get_design_system``.
-
-    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled
-    ``pocketpaw-create-svelte-site`` skill can pick and adapt a coherent,
-    professional visual identity from the bundled DESIGN.md library for a
-    generated marketing site without an explicit opt-in — the same regime the
-    palette + icons + stock-images + sites manager + media servers use. The
-    cloud chat agent runs on the claude_agent_sdk backend, which only sees
-    in-process MCP servers (a plain BaseTool is invisible to it), so the
-    design-system retriever MUST be surfaced here. It reads the bundled files
-    directly from OSS core (``pocketpaw.bundled_design_systems``) — no kb-go, no
-    network.
-    """
-
-    def build_server(self) -> tuple[str, Any] | None:
-        try:
-            from pocketpaw_ee.agent.mcp_servers.design_systems import (
-                build_design_systems_server,
-            )
-
-            return build_design_systems_server()
-        except ImportError:
-            # claude_agent_sdk not installed — the design-systems server is
-            # unavailable, same as the other in-process servers.
-            return None
-
-    def tool_ids(self) -> list[str]:
-        from pocketpaw_ee.agent.mcp_servers.design_systems import DESIGN_SYSTEM_TOOL_IDS
-
-        return list(DESIGN_SYSTEM_TOOL_IDS)
-
-
 class CloudAskMcpProvider:
     """`pocketpaw.mcp_servers` — the interactive ``ask_user`` in-process server
     (``pocketpaw_ask``). Hosts ``ask_user`` only.
 
     Ambient (NOT in ``OPT_IN_MCP_SERVERS``), same regime as the icons + palette
-    + stock-images + design-systems site-authoring servers. The cloud chat agent
-    runs on the claude_agent_sdk backend, which only sees in-process MCP servers
+    + stock-images site-authoring servers. The cloud chat agent runs on the
+    claude_agent_sdk backend, which only sees in-process MCP servers
     (the harness ``AskUserQuestion`` tool is NOT exposed to it), so an
     interactive question tool MUST be surfaced here. It matters most on surfaces
     where inline Ripple is OFF (e.g. /sites svelte-create): without it the agent

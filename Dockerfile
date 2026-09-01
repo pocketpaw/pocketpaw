@@ -32,15 +32,12 @@ WORKDIR /build
 COPY pyproject.toml README.md LICENSE ./
 COPY src/ src/
 
-# Create venv and install all extras.
-# `knowledge` is NOT inside `[all]` — that extra is hand-maintained and the
-# document deps were never added to it. Without them pypdf is absent, so
-# ee/cloud/extraction/local.py raises ModuleNotFoundError on every PDF, the
-# listener's except swallows it, and file comprehension + the book agent
-# silently produce nothing for the most common upload type. It reads as
-# "the feature is off" rather than "the build is missing a dependency".
-# Named explicitly here rather than folded into `[all]`, so a reader of this
-# file can see what the image needs to actually read documents.
+# Create venv and install the OSS core.
+# `[all]` is a CURATED list, not every extra — it does not reference
+# `[knowledge]` (trafilatura / bm25s / pypdf) or `[extraction]`. The comment here
+# used to say "install all extras", which is how the missing document-extraction
+# libraries went unnoticed until a PDF attached in chat reached the agent as
+# nothing at all. Adding an extra to pyproject does NOT put it in this image.
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir '.[all]' '.[knowledge]'
@@ -50,9 +47,14 @@ RUN pip install --no-cache-dir '.[all]' '.[knowledge]'
 # never installed — the runtime image below copies just the venv, so it
 # stays genuinely EE-free.
 COPY ee/ ee/
-# `./ee[extraction]`, not bare `./ee`: the extraction adapters lazy-import
-# pypdf / python-docx / pymupdf, so a bare install builds green and then
-# fails at runtime on the first document. Same silent shape as above.
+# `[extraction]` is NOT optional in practice, despite the name. It carries the
+# libraries ee/pocketpaw_ee/cloud/extraction lazy-imports — pypdf, python-docx,
+# trafilatura, pymupdf — and without them a PDF or .docx a user attaches in chat
+# raises inside the adapter, the attachment loop swallows it, and the agent is
+# handed NO entry for that file. The user sees a reply saying no document was
+# attached. Measured 2026-09-01: `.[all]` above does not cover this (it is a
+# curated list that never references `[knowledge]`, where root keeps pypdf), and
+# a bare `pip install ./ee` takes no extras, so the image had none of them.
 RUN if [ "$POCKETPAW_EDITION" = "enterprise" ]; then \
         pip install --no-cache-dir './ee[extraction]' ; \
     fi

@@ -1,0 +1,147 @@
+[
+  {
+    "label": "the executor checks the REQUESTER instead of the approver — every legitimate request now fails, and a member's own id decides",
+    "file": "ee/pocketpaw_ee/cloud/site_plan_requests/executor.py",
+    "find": "        await _recheck_approver_may_buy(workspace_id, approver_user_id)",
+    "replace": "        await _recheck_approver_may_buy(workspace_id, requested_by)",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_approving_checks_the_APPROVER_not_the_requester"
+    ]
+  },
+  {
+    "label": "the RBAC re-check is skipped entirely — any approval buys, whatever the approver's role",
+    "file": "ee/pocketpaw_ee/cloud/site_plan_requests/executor.py",
+    "find": "    try:\n        await _recheck_approver_may_buy(workspace_id, approver_user_id)\n    except Exception as exc:",
+    "replace": "    try:\n        pass\n    except Exception as exc:",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_an_approver_without_buy_rights_does_not_charge"
+    ]
+  },
+  {
+    "label": "a missing approver falls back to the requester — the member approves their own purchase",
+    "file": "ee/pocketpaw_ee/cloud/site_plan_requests/executor.py",
+    "find": "    if not approver_user_id:\n        await _fail(",
+    "replace": "    if False:\n        await _fail(",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_an_action_with_no_approver_never_buys"
+    ]
+  },
+  {
+    "label": "the approver id is read from a client-controlled field instead of the authenticated one",
+    "file": "ee/pocketpaw_ee/cloud/site_plan_requests/executor.py",
+    "find": "    return str(getattr(action, \"approved_by\", \"\") or \"\")",
+    "replace": "    return str(getattr(action, \"approver\", \"\") or getattr(action, \"approved_by\", \"\") or \"\")",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_the_approver_id_is_read_from_the_authenticated_field"
+    ]
+  },
+  {
+    "label": "the identity hash stops being checked — an approve-time edit buys a different tier",
+    "file": "ee/pocketpaw_ee/cloud/site_plan_requests/executor.py",
+    "find": "    if stored_hash and stored_hash != recomputed:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_a_moved_tier_after_approval_does_not_buy"
+    ]
+  },
+  {
+    "label": "the schema guard is dropped — a stale blob from an old build buys a misread tier",
+    "file": "ee/pocketpaw_ee/cloud/site_plan_requests/executor.py",
+    "find": "    if blob.get(\"schema\") != SITE_PLAN_REQUEST_SCHEMA:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_a_stale_schema_fails_loud"
+    ]
+  },
+  {
+    "label": "the idempotency guard is dropped — a bulk re-approve charges twice",
+    "file": "ee/pocketpaw_ee/cloud/site_plan_requests/executor.py",
+    "find": "    if _already_executed(guard_action, guard_blob):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_a_second_approval_does_not_buy_twice",
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_a_terminal_action_does_not_re_buy"
+    ]
+  },
+  {
+    "label": "price drift stops being reported — the admin never learns they were charged more than they approved",
+    "file": "ee/pocketpaw_ee/cloud/site_plan_requests/executor.py",
+    "find": "        else f\" (price changed since the request: ${quoted_price} → ${live_price}/month)\"",
+    "replace": "        else \"\"",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_a_price_that_moved_is_charged_live_and_reported"
+    ]
+  },
+  {
+    "label": "the executor prices from the STALE blob instead of the live catalog",
+    "file": "ee/pocketpaw_ee/cloud/site_plan_requests/executor.py",
+    "find": "    live_price = int(tier.monthly_price_usd or 0)",
+    "replace": "    live_price = int(blob.get(\"monthly_price_usd\") or 0)",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_a_price_that_moved_is_charged_live_and_reported"
+    ]
+  },
+  {
+    "label": "a dropped tier still publishes — the site is stamped with a plan nothing can price",
+    "file": "ee/pocketpaw_ee/cloud/site_plan_requests/executor.py",
+    "find": "    if tier is None:\n        await _fail(\n            f\"'{site_plan_key}' is no longer a plan a single site can be put on — \"",
+    "replace": "    if False:\n        await _fail(\n            f\"'{site_plan_key}' is no longer a plan a single site can be put on — \"",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_a_tier_the_catalog_dropped_does_not_buy"
+    ]
+  },
+  {
+    "label": "an org-scoped flat can be requested for one site — the card can only fail on approval",
+    "file": "ee/pocketpaw_ee/cloud/site_plan_requests/propose.py",
+    "find": "    tier = site_plans.site_scoped_tier(canonical_key)",
+    "replace": "    tier = site_plans.get_site_plan(canonical_key)",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_an_org_scoped_flat_cannot_be_requested_for_one_site"
+    ]
+  },
+  {
+    "label": "the identity hash stops covering the tier — two different tiers hash alike",
+    "file": "ee/pocketpaw_ee/cloud/site_plan_requests/propose.py",
+    "find": "            \"site_plan_key\": site_plan_key,\n        },\n        sort_keys=True,",
+    "replace": "        },\n        sort_keys=True,",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_the_request_hash_covers_identity_and_not_price"
+    ]
+  },
+  {
+    "label": "the router's tenancy guard waves through an empty workspace claim",
+    "file": "ee/pocketpaw_ee/instinct/router.py",
+    "find": "    blob_workspace = str(blob.get(\"workspace_id\") or \"\")\n    if not blob_workspace:\n        raise Forbidden(\n            \"instinct.missing_workspace_in_blob\",\n            \"This site plan request has no workspace claim — cannot verify tenancy\",\n        )",
+    "replace": "    blob_workspace = str(blob.get(\"workspace_id\") or \"\")\n    if not blob_workspace:\n        return",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_a_workspace_less_request_is_refused_rather_than_waved_through"
+    ]
+  },
+  {
+    "label": "a cross-workspace request can be approved — an attacker's card buys on a victim's subscription",
+    "file": "ee/pocketpaw_ee/instinct/router.py",
+    "find": "    if blob_workspace != current_workspace:\n        raise Forbidden(\n            \"instinct.cross_workspace_action\",\n            \"This site plan request belongs to another workspace\",\n        )",
+    "replace": "    if False:\n        raise Forbidden(\n            \"instinct.cross_workspace_action\",\n            \"This site plan request belongs to another workspace\",\n        )",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_a_request_from_another_workspace_cannot_be_approved"
+    ]
+  },
+  {
+    "label": "the kind leaves the reserved set — an approve-time edit can ADD this blob to an innocuous card",
+    "file": "ee/pocketpaw_ee/instinct/router.py",
+    "find": "        \"_customer_reply\",\n        \"_site_plan_request\",",
+    "replace": "        \"_customer_reply\",",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_the_kind_is_registered_so_edits_cannot_mint_or_move_it"
+    ]
+  },
+  {
+    "label": "the guard leaves the shared chokepoint — reject and bulk paths lose their tenancy binding",
+    "file": "ee/pocketpaw_ee/instinct/router.py",
+    "find": "    _assert_site_plan_request_workspace(action, current_workspace)",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_every_gated_kind_guard_runs_on_the_shared_chokepoint"
+    ]
+  }
+]

@@ -228,6 +228,24 @@ ACTIONS: dict[str, ActionRule] = {
     "fabric.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "fabric.write": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "fabric.admin": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Sites — buying a PAID per-site plan commits the workspace to a recurring
+    # charge, so it is not the same question as publishing.
+    #
+    # Publishing needs ``fabric.write`` (MEMBER) and stays there: an employee
+    # building and shipping a site on the free tier is the ordinary workflow and
+    # must not need an approval. But a paid tier bills the workspace's OWN
+    # subscription now (site plans are add-on lines on it), so a MEMBER selecting
+    # one was spending company money — while being too junior to so much as VIEW
+    # the billing page (``billing.view`` is ADMIN). That is the hole this closes.
+    #
+    # ADMIN rather than OWNER, and the line is deliberately easy to change. OWNER
+    # is the tier that governs money (``billing.manage``), and committing $7-19 a
+    # month is a smaller act than changing the workspace plan; requiring the owner
+    # personally for every site a company publishes makes the feature unusable at
+    # any real size. ADMIN is also exactly the tier that can already SEE the bill
+    # it is adding to. If that trade is wrong for a given deployment, this is one
+    # word.
+    "sites.buy_plan": ActionRule(WorkspaceRole.ADMIN, "sites.plan_purchase_forbidden"),
     # /ship — managed deploys onto real infrastructure.
     # Reading boxes / apps / logs is MEMBER. ``ship.manage`` (ADMIN) gates the
     # DESTRUCTIVE verbs — destroy, rollback, prod deploy — which never execute

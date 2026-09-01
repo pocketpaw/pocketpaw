@@ -191,24 +191,18 @@ def test_sites_all_modes_drop_file_and_shell_builtins():
 # ---------------------------------------------------------------------------
 # Sites authoring TOOLBELT allow-list (feat/sites-crew-toolbelt-allow) — the
 # crew (and the create-svelte-site skill) must be able to CALL stock / icons /
-# palette / design-system tools on /sites. The per-surface allow-list is a hard
+# palette tools on /sites. The per-surface allow-list is a hard
 # whitelist enforced by claude_sdk, so an id absent from sites_allow is silently
 # filtered out. These tests pin that the toolbelt ids ARE permitted AND survive
 # the real SDK filter predicate.
 # ---------------------------------------------------------------------------
 
-from pocketpaw_ee.agent.mcp_servers.design_systems import DESIGN_SYSTEM_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.palette import PALETTE_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.stock_images import STOCK_TOOL_IDS  # noqa: E402
 
-_TOOLBELT_IDS = (
-    frozenset(STOCK_TOOL_IDS)
-    | frozenset(ICON_TOOL_IDS)
-    | frozenset(PALETTE_TOOL_IDS)
-    | frozenset(DESIGN_SYSTEM_TOOL_IDS)
-)
+_TOOLBELT_IDS = frozenset(STOCK_TOOL_IDS) | frozenset(ICON_TOOL_IDS) | frozenset(PALETTE_TOOL_IDS)
 
 
 def _sites_create_metas():
@@ -218,7 +212,7 @@ def _sites_create_metas():
 
 def test_sites_allowlist_includes_authoring_toolbelt():
     """Every /sites create+refine mode permits the sites-manager tools AND the
-    full authoring toolbelt (stock / icons / palette / design-systems)."""
+    full authoring toolbelt (stock / icons / palette)."""
     metas = (*_sites_create_metas(), SurfaceMeta(pocket_id="pkt_1"))
     for meta in metas:
         profile = resolve_profile(SurfaceKind.SITES, meta)

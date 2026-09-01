@@ -1547,6 +1547,63 @@ that is then destroyed, so such a pocket rebuilds on every view instead of cachi
 eviction runs here (the on-disk store's `PAW_SITES_ARTIFACT_KEEP` does not apply); put a
 bucket lifecycle rule on the `site-artifacts/` prefix.
 
+### Site images — `/sites/by-pocket/{pocket_id}/assets`
+
+Three endpoints for the images a site DISPLAYS. Added 2026-08-31
+(feat/sites-public-asset-uploads).
+
+**Why a separate rail exists.** A published site is read by anonymous visitors, so
+an image it shows needs an address with no credential and no expiry. Neither URL
+the rest of this API mints qualifies: `StorageAdapter.presigned_get` expires (S3
+caps a presign at 7 days, and the site outlives it), and `/api/v1/uploads/{id}` —
+what the screenshot capture and the `deliver_artifact` tool hand back — is
+auth-gated, so it 401s for exactly the visitor the site exists to serve. The bytes
+cannot ride the build either: the generator takes a **text-only** `source` map, and
+its base64 `assets` sideband is rejected for every engine except `html`.
+
+| Method | Path | Gate |
+|---|---|---|
+| `POST` | `/sites/by-pocket/{pocket_id}/assets` | `fabric.write` |
+| `GET` | `/sites/by-pocket/{pocket_id}/assets` | `fabric.read` |
+| `DELETE` | `/sites/by-pocket/{pocket_id}/assets` | `fabric.write` |
+
+`POST` takes `multipart/form-data` with a single `file` part and returns
+`{key, url, mime, size, filename}`. `url` is absolute, unsigned and permanent —
+embed it verbatim. `GET` returns `{assets: [...]}`. `DELETE` takes `{"key": "..."}`
+and answers 204.
+
+**Images only, and that is the security boundary.** PNG, JPEG, GIF and WebP are
+accepted; the type is decided by **magic bytes**, never by the part's
+`Content-Type`, because on a public origin a caller who can label arbitrary bytes
+`image/png` can host arbitrary content under our name. SVG is refused even though
+it is an image: it is an XML document that executes script. Cap is 10 MB, and — as
+with `/sites/import` — that gates PROCESSING, not ingress; Starlette spools the
+whole body first, so bounding the raw request is the fronting proxy's job.
+
+**Documents are NOT this rail.** A PRD or spec is agent *input*, not site content,
+and publishing a customer's requirements doc to an unauthenticated bucket is a data
+leak. Documents keep going through the private upload rail (`/api/v1/uploads`).
+
+**Keys are `sites-assets/{workspace_id}/{pocket_id}/{sha256[:16]}-{stem}{ext}`** —
+tenant-scoped, so no workspace can name another's object, and content-addressed, so
+re-uploading the same file is free and the year-long immutable `Cache-Control` on
+the object is safe. `DELETE` re-checks that prefix and refuses anything outside it.
+
+**Configuration — `S3_PUBLIC_BUCKET`.** The rail needs
+`POCKETPAW_UPLOAD_ADAPTER=s3` **and** `S3_PUBLIC_BUCKET` (a bucket whose objects
+are world-readable; uploads carry `ACL=public-read`). `S3_PUBLIC_BASE_URL`
+optionally puts a CDN or custom domain in front; unset, the URL is path-style over
+`S3_ENDPOINT`. With no public bucket configured every endpoint answers **503** and
+says so — there is deliberately no fallback to the private bucket, because a link
+that 403s for every visitor fails later and looks like a broken site rather than a
+missing setting. There is no local-disk equivalent: serving public assets from the
+dashboard's own origin is a strictly worse place for visitor-facing bytes than a
+separate bucket origin.
+
+**The agent reads them via `list_site_assets`** (MCP, on the sites-manager server),
+so a generated page uses the owner's real logo instead of a stock photo. Workspace
+comes from the per-stream identity, never from the tool arguments.
+
 **A cold miss builds in an ephemeral Daytona sandbox, not in this process (SP-2).**
 It used to shell out to `bun` here, which works on a laptop and cannot work in the
 deployed API container — there is no toolchain, so every cold preview raised and
@@ -1928,9 +1985,21 @@ Write ONE file of a react site's `source` map as a reviewable draft.
 | `create` | boolean | Default `false`. Create a NEW file at `component_path`; the path must **not** already exist. |
 
 Returns `{ok: true, status: "draft", is_live: false, pocket_id, component_path,
-created, message}`. To **add a section**, call it twice: once with `create: true`
-for `src/components/<Name>.tsx`, then again with `edits` on `src/App.tsx` to
-import and render it.
+created, unreferenced, message}`. To **add a section**, call it twice: once with
+`create: true` for `src/components/<Name>.tsx`, then again with `edits` on
+`src/App.tsx` to import and render it.
+
+**`unreferenced` is the second call's reminder.** It is `true` when this call
+*created* a file that nothing else in the source map reaches — no import specifier
+resolves to it, or, under `public/`, no file mentions its URL. Such a file is not
+in the bundle: the page renders exactly as it did before. The `message` then leads
+with the outstanding step and an explicit instruction not to report the section as
+added yet, because a create that stops after call 1 otherwise returns an
+unqualified success and the agent tells the user about a component they cannot
+find. It is advisory and never blocking — call 1 of two is unreferenced at the
+instant it lands, every time, so refusing it would make adding a section
+impossible. `unreferenced` is always `false` for an ordinary edit; the scan is
+scoped to `create` so the common path stays quiet.
 
 **It does not publish and does not enqueue a build**, and that is a deliberate
 divergence from the svelte tool rather than an omission. `build_runs_async("react")`
@@ -1981,8 +2050,26 @@ Write ONE file of an html site's `source` map as a reviewable draft.
 | `create` | boolean | Default `false`. Create a NEW file at `file_path`; the path must **not** already exist. |
 
 Returns `{ok: true, status: "draft", is_live: false, pocket_id, file_path,
-created, message}`. To **add a page**, call it twice: once with `create: true` for
-e.g. `about.html`, then again with `edits` on `index.html` to link to it.
+created, unreferenced, message}`. To **add a page**, call it twice: once with
+`create: true` for e.g. `about.html`, then again with `edits` on `index.html` to
+link to it.
+
+**`unreferenced` is the second call's reminder**, the same signal
+`edit_react_component` carries, resolved html's way. It is `true` when this call
+*created* a file that no other file in the map points at — no `href`, `src`,
+`srcset`, `poster`, CSS `url()` or `@import` resolves to it. The reference is
+resolved against the referring file's own directory, a link to a directory
+matches that directory's `index.html` (`/about` reaches `about/index.html`, which
+is what the preview resolver serves), and off-site schemes are excluded, so a
+stale `https://example.com/about/` in the markup is not mistaken for a local link.
+The file the call just wrote is skipped, because a page whose only link to itself
+comes from its own copied nav is still unreachable.
+
+It matters more here than on the react track rather than less: an unimported react
+component is invisible, while an unlinked html page is written and deployed and
+simply cannot be navigated to — a state that is easy to describe as finished. The
+`message` then leads with the outstanding link and says not to report the page as
+added yet. Advisory and never blocking, and always `false` for an ordinary edit.
 
 **The argument is `file_path`, not `component_path`, and the difference is not
 cosmetic.** svelte and react have a component model; html does not — the scaffold

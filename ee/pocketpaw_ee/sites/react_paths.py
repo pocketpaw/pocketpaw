@@ -1,5 +1,15 @@
 # react_paths.py — the ONE place the react-track source-map path policy lives.
 #
+# Updated: 2026-09-01 (fix/sites-react-orphan-create) — added
+# ``react_path_is_referenced``, which answers "does anything in this source map
+# reach that path". The module was pure POLICY (may this path be written); this is
+# the first question about REACHABILITY, and it lives here because the answer
+# depends on the same two-prefix layout the policy above encodes: ``src/`` is a
+# module tree reached by import specifiers, ``public/`` is copied to the web root
+# and reached by URL. Written for the edit lane's ``create``, which could land a
+# component nothing imports and report a clean success — see the section comment
+# above the function for the incident that produced it.
+#
 # Created: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — extracted from
 # ``agent/mcp_servers/sites_create.py``, which owned ``REACT_RESERVED_FILES`` /
 # ``REACT_RESERVED_PREFIX`` / ``_reserved_react_keys`` because create was the only
@@ -49,6 +59,8 @@ trivial path spelling defeats is not a guard, and ``./package.json`` /
 from __future__ import annotations
 
 import posixpath
+import re
+from collections.abc import Mapping
 from typing import Any
 
 # Paths the generator owns and no source map may write. Mirrors ``RESERVED_FILES``
@@ -139,6 +151,105 @@ def react_path_rejection(path: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Is this path reached by anything? (the two-call contract's missing half)
+# ---------------------------------------------------------------------------
+#
+# Added 2026-09-01 (fix/sites-react-orphan-create). Adding a section to a react site
+# is TWO calls — ``create=true`` writes ``src/components/<Name>.tsx``, then a second
+# ``edits`` call imports and renders it in ``src/App.tsx`` — and nothing connected
+# the two. A create that landed call 1 and never got call 2 returned a flat success
+# for a file the bundle does not contain: no import, no render, no trace on the page.
+# The agent read the clean success and told the user the work was done, which is how
+# a real incident produced "I added it to a component" over a site that never changed.
+#
+# So a create now ANSWERS the question its own success hides: does anything reach
+# this file yet? The verdict is advisory — call 1 is unreferenced by definition at
+# the instant it happens, and a create that refused or errored on it would close the
+# only lane that can add a section at all.
+#
+# The two prefixes are reached two different ways and a single rule gets one of them
+# wrong. ``src/`` is a MODULE tree: reached by an import specifier, which is resolved
+# here rather than pattern-matched, so `./components/Hero` from `src/App.tsx` and
+# `../components/Hero` from `src/sections/X.tsx` both resolve to the one file they
+# mean. ``public/`` is NOT a module tree: it is copied to the web root and reached by
+# URL (`<img src="/logo.png">`), so an import-only scan would call every correctly
+# used asset an orphan.
+
+# Extensions a specifier may omit. A resolved specifier and a source-map key are
+# compared with these stripped, because `./components/Hero` and
+# `src/components/Hero.tsx` are the same file written two ways.
+_REACT_MODULE_EXTS: tuple[str, ...] = (".tsx", ".ts", ".jsx", ".js", ".mjs", ".css")
+
+# Quoted module specifiers: `from '...'`, a side-effect or dynamic `import '...'` /
+# `import('...')`, and `require('...')`. Deliberately NOT a general string scan —
+# matching any quoted text would let a testimonial mentioning "Testimonials" pass
+# for an import, and a false "it is referenced" is the silence this exists to break.
+_REACT_SPECIFIER_RE = re.compile(
+    r"""(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)['"]([^'"\n]+)['"]"""
+)
+
+
+def _strip_module_ext(path: str) -> str:
+    """Drop a module extension so a specifier and a map key compare equal."""
+    for ext in _REACT_MODULE_EXTS:
+        if path.endswith(ext):
+            return path[: -len(ext)]
+    return path
+
+
+def _resolve_specifier(importer: str, specifier: str) -> str | None:
+    """Resolve one import specifier to a project-relative path, or ``None``.
+
+    ``None`` means "not a local file" — a bare package specifier (``react``,
+    ``react-dom/client``) resolves into node_modules and can never name a source-map
+    key. Relative specifiers resolve against the IMPORTER's directory, which is the
+    whole reason this is a resolver and not a substring search: `./Hero` means a
+    different file depending on who wrote it.
+    """
+    if specifier.startswith("."):
+        return posixpath.normpath(posixpath.join(posixpath.dirname(importer), specifier))
+    if specifier.startswith("/"):
+        return posixpath.normpath(specifier.lstrip("/"))
+    # Vite's conventional root aliases. Neither is configured in the generator's
+    # shell today; resolving them anyway costs nothing and means the day one is,
+    # this reports "referenced" instead of nagging about a wired component.
+    if specifier.startswith(("@/", "~/")):
+        return posixpath.normpath("src/" + specifier[2:])
+    return None
+
+
+def react_path_is_referenced(source: Mapping[str, Any], path: str) -> bool:
+    """Does any OTHER file in ``source`` reach ``path``?
+
+    ``source`` is the source map AFTER the write, so the created file is present and
+    is skipped — a module that imports itself is still unreachable from the page.
+
+    A ``public/`` path is matched on its URL (``public/img/logo.png`` →
+    ``/img/logo.png``) as a substring, because an asset reference is an attribute
+    value in arbitrary markup and there is no grammar to resolve. A ``src/`` path is
+    matched by resolving every import specifier in every other file and comparing
+    extension-stripped paths, so the answer does not depend on how the import was
+    spelled.
+    """
+    norm = normalize_react_path(path)
+
+    if norm.startswith("public/"):
+        url = "/" + norm[len("public/") :]
+        return any(url in str(text) for key, text in source.items() if key != norm)
+
+    target = _strip_module_ext(norm)
+    for key, text in source.items():
+        if normalize_react_path(key) == norm:
+            continue  # the file itself — a self-import reaches nothing
+        importer = normalize_react_path(key)
+        for specifier in _REACT_SPECIFIER_RE.findall(str(text)):
+            resolved = _resolve_specifier(importer, specifier)
+            if resolved is not None and _strip_module_ext(resolved) == target:
+                return True
+    return False
+
+
 __all__ = [
     "REACT_AUTHORABLE_PREFIXES",
     "REACT_RESERVED_FILES",
@@ -146,6 +257,7 @@ __all__ = [
     "is_authorable_react_path",
     "is_reserved_react_path",
     "normalize_react_path",
+    "react_path_is_referenced",
     "react_path_rejection",
     "reserved_react_keys",
 ]

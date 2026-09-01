@@ -49,9 +49,21 @@ def _default_sites_plan():
         yield
 
 
-def _ok_result(*, created: bool = False, file_path: str = "index.html") -> dict:
-    """What the service returns on a successful edit."""
-    return {"pocket_id": "pk1", "file_path": file_path, "created": created}
+def _ok_result(
+    *, created: bool = False, file_path: str = "index.html", unreferenced: bool = False
+) -> dict:
+    """What the service returns on a successful edit.
+
+    ``unreferenced`` mirrors the service's own key (see
+    ``sites/service.py::edit_html_file``): True when a CREATE landed a file nothing
+    in the site links to. The stub carries it so this file pins the real shape — a
+    stub that lags the service tests a payload the handler never receives."""
+    return {
+        "pocket_id": "pk1",
+        "file_path": file_path,
+        "created": created,
+        "unreferenced": unreferenced,
+    }
 
 
 def _listed_tool(name: str = "edit_html_file"):
@@ -363,3 +375,124 @@ class TestEditHandler:
         assert not out.get("is_error"), out
         assert fake.await_args.kwargs["create"] is True
         assert json.loads(out["content"][0]["text"])["created"] is True
+
+
+# ---------------------------------------------------------------------------
+# The unreferenced-create warning — the payload the agent narrates
+# ---------------------------------------------------------------------------
+#
+# The react tool's signal on this track. It matters MORE here, not less: an unwired
+# react component is invisible, while an unlinked html page is written and deployed
+# and simply cannot be navigated to — a state an agent can very plausibly describe
+# as finished. See tests/ee/sites/test_html_file_edit.py for the scan itself.
+
+
+class TestUnreferencedCreateWarning:
+    @pytest.mark.asyncio
+    async def test_orphan_create_tells_the_agent_nothing_links_to_the_page(self) -> None:
+        """The message must name the next call AND forbid the premature report.
+
+        THE MUTATION THAT BREAKS THIS: drop the `if unreferenced:` branch. Run: the
+        unreachable page narrated as an ordinary success."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch(
+                "pocketpaw_ee.sites.service.edit_html_file",
+                new=AsyncMock(
+                    return_value=_ok_result(
+                        created=True, file_path="about/index.html", unreferenced=True
+                    )
+                ),
+            ),
+        ):
+            out = await mcp._edit_html_file_handler(
+                {
+                    "pocket_id": "pk1",
+                    "file_path": "about/index.html",
+                    "new_source": "<!doctype html><html><body><h1>About</h1></body></html>",
+                    "create": True,
+                }
+            )
+
+        # Advice, not a rejection: the file WAS written, so ok stays true and the
+        # agent must not retry the create.
+        assert not out.get("is_error"), out
+        body = json.loads(out["content"][0]["text"])
+        assert body["ok"] is True
+        assert body["created"] is True
+        assert body["unreferenced"] is True
+
+        message = body["message"]
+        assert "about/index.html" in message
+        assert "NOTHING IN THE SITE LINKS TO IT" in message
+        # The wiring step is a LINK here, not react's import.
+        assert "link" in message.lower()
+        assert "index.html" in message
+        # The half that stops the false report.
+        assert "Do NOT tell the user" in message
+        # The draft/not-live contract is still carried — this is additive.
+        assert "NOT online yet" in message
+
+    @pytest.mark.asyncio
+    async def test_a_linked_create_carries_no_warning(self) -> None:
+        """A warning on every create teaches the agent to skim the field.
+
+        THE MUTATION THAT BREAKS THIS: warn unconditionally on `created`. Run: a
+        page the agent had already linked still nagged."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch(
+                "pocketpaw_ee.sites.service.edit_html_file",
+                new=AsyncMock(
+                    return_value=_ok_result(
+                        created=True, file_path="about/index.html", unreferenced=False
+                    )
+                ),
+            ),
+        ):
+            out = await mcp._edit_html_file_handler(
+                {
+                    "pocket_id": "pk1",
+                    "file_path": "about/index.html",
+                    "new_source": "<h1>About</h1>",
+                    "create": True,
+                }
+            )
+
+        body = json.loads(out["content"][0]["text"])
+        assert body["unreferenced"] is False
+        assert "HALF DONE" not in body["message"]
+        assert "NOT online yet" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_a_service_without_the_key_degrades_to_no_warning(self) -> None:
+        """An older service dict (no ``unreferenced``) must not KeyError the handler
+        mid-turn. Absent reads as "nothing to warn about" — the pre-change
+        behaviour — never as a crash that loses an edit already persisted."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        legacy = {"pocket_id": "pk1", "file_path": "about/index.html", "created": True}
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch(
+                "pocketpaw_ee.sites.service.edit_html_file",
+                new=AsyncMock(return_value=legacy),
+            ),
+        ):
+            out = await mcp._edit_html_file_handler(
+                {
+                    "pocket_id": "pk1",
+                    "file_path": "about/index.html",
+                    "new_source": "<h1>About</h1>",
+                    "create": True,
+                }
+            )
+
+        assert not out.get("is_error"), out
+        body = json.loads(out["content"][0]["text"])
+        assert body["unreferenced"] is False
+        assert "HALF DONE" not in body["message"]

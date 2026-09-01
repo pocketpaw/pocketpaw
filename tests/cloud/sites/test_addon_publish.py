@@ -179,6 +179,7 @@ async def test_a_paid_publish_deploys_in_the_same_request(mongo_db, monkeypatch)
         user_id="u1",
         pocket_id=pocket_id,
         site_plan_key="site",
+        purchase_authorized=True,
         _bundle_reader=lambda d: b"x",
         _billing_provider=provider,
     )
@@ -238,6 +239,7 @@ async def test_upgrading_a_live_free_site_ships_the_new_content(mongo_db, monkey
         user_id="u1",
         pocket_id=pocket_id,
         site_plan_key="site",
+        purchase_authorized=True,
         _bundle_reader=lambda d: b"x",
         _billing_provider=provider,
     )
@@ -270,6 +272,7 @@ async def test_a_declined_charge_leaves_nothing_paid_for(mongo_db, monkeypatch):
             user_id="u1",
             pocket_id=pocket_id,
             site_plan_key="site",
+            purchase_authorized=True,
             _bundle_reader=lambda d: b"x",
             _billing_provider=provider,
         )
@@ -299,6 +302,7 @@ async def test_a_workspace_with_no_subscription_cannot_buy_a_site(mongo_db, monk
             user_id="u1",
             pocket_id=pocket_id,
             site_plan_key="site",
+            purchase_authorized=True,
             _bundle_reader=lambda d: b"x",
             _billing_provider=provider,
         )
@@ -330,6 +334,7 @@ async def test_the_legacy_per_site_rail_still_runs_when_no_addon_is_configured(
         user_id="u1",
         pocket_id=pocket_id,
         site_plan_key="site",
+        purchase_authorized=True,
         _bundle_reader=lambda d: b"x",
         _billing_provider=provider,
     )
@@ -359,6 +364,7 @@ async def test_republishing_a_paid_addon_site_does_not_charge_again(mongo_db, mo
         user_id="u1",
         pocket_id=pocket_id,
         site_plan_key="site",
+        purchase_authorized=True,
         _bundle_reader=lambda d: b"x",
         _billing_provider=provider,
     )
@@ -371,6 +377,7 @@ async def test_republishing_a_paid_addon_site_does_not_charge_again(mongo_db, mo
         user_id="u1",
         pocket_id=pocket_id,
         site_plan_key="site",
+        purchase_authorized=True,
         _bundle_reader=lambda d: b"x",
         _billing_provider=provider,
     )
@@ -400,6 +407,7 @@ async def test_a_tier_change_on_the_addon_rail_resyncs_the_cart(mongo_db, monkey
         user_id="u1",
         pocket_id=pocket_id,
         site_plan_key="site",
+        purchase_authorized=True,
         _bundle_reader=lambda d: b"x",
         _billing_provider=provider,
     )
@@ -408,6 +416,7 @@ async def test_a_tier_change_on_the_addon_rail_resyncs_the_cart(mongo_db, monkey
         user_id="u1",
         pocket_id=pocket_id,
         site_plan_key="staff",
+        purchase_authorized=True,
         _bundle_reader=lambda d: b"x",
         _billing_provider=provider,
     )
@@ -444,6 +453,7 @@ async def test_both_rails_configured_still_never_opens_a_per_site_subscription(
         user_id="u1",
         pocket_id=pocket_id,
         site_plan_key="site",
+        purchase_authorized=True,
         _bundle_reader=lambda d: b"x",
         _billing_provider=provider,
     )

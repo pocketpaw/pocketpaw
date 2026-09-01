@@ -178,8 +178,8 @@
   {
     "label": "the success body claims the change is published, so the agent tells the user a draft edit went live",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
-    "find": "                \"Saved to the site's draft — it is NOT online yet, and no build was \"",
-    "replace": "                \"Published — the change is live at the site's url. Also a draft. \"",
+    "find": "        \"Saved to the site's draft — it is NOT online yet, and no build was \"",
+    "replace": "        \"Published — the change is live at the site's url. Also a draft. \"",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_edit_react_component.py::TestEditHandler::test_success_payload_says_draft_and_never_claims_it_is_live"
     ]
@@ -284,6 +284,62 @@
     "replace": "            \"`create_react_site` again with the SAME \"",
     "tests": [
       "tests/cloud/surface/test_sites_handler.py::test_react_create_step_routes_follow_up_changes_to_the_edit_tool"
+    ]
+  },
+  {
+    "label": "the orphan-create signal is hardcoded off: a component nothing imports reports a clean success, which is the 2026-09-01 incident exactly",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    unreferenced = create and not react_path_is_referenced(",
+    "replace": "    unreferenced = False and not react_path_is_referenced(",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_create_reports_the_new_file_is_referenced_by_nothing",
+      "tests/ee/sites/test_react_component_edit.py::test_a_file_that_only_imports_itself_is_still_unreferenced"
+    ]
+  },
+  {
+    "label": "the signal is hardcoded on: every create nags, including one already wired, which is how a warning gets ignored",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    unreferenced = create and not react_path_is_referenced(",
+    "replace": "    unreferenced = create or not react_path_is_referenced(",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_create_is_silent_once_a_file_imports_the_new_path",
+      "tests/ee/sites/test_react_component_edit.py::test_a_public_asset_is_referenced_by_its_url_not_an_import"
+    ]
+  },
+  {
+    "label": "the create scoping is gone: the scan runs on every edit, so an ordinary change to an unwired file nags about wiring nobody asked to change",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    unreferenced = create and not react_path_is_referenced(",
+    "replace": "    unreferenced = not react_path_is_referenced(",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_an_ordinary_edit_never_reports_unreferenced"
+    ]
+  },
+  {
+    "label": "public/ is scanned as a module tree: an asset reached by URL reports as an orphan, so every correctly-used image nags",
+    "file": "ee/pocketpaw_ee/sites/react_paths.py",
+    "find": "    if norm.startswith(\"public/\"):",
+    "replace": "    if False and norm.startswith(\"public/\"):",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_a_public_asset_is_referenced_by_its_url_not_an_import"
+    ]
+  },
+  {
+    "label": "the file no longer skips itself, so a self-import counts as a reference and an unreachable component reports as wired",
+    "file": "ee/pocketpaw_ee/sites/react_paths.py",
+    "find": "            continue  # the file itself — a self-import reaches nothing",
+    "replace": "            pass  # the file itself — a self-import reaches nothing",
+    "tests": [
+      "tests/ee/sites/test_react_component_edit.py::test_a_file_that_only_imports_itself_is_still_unreferenced"
+    ]
+  },
+  {
+    "label": "the handler drops the outstanding-step warning, so the agent narrates an orphan create as an ordinary success",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "    if unreferenced:\n        message = (\n            f\"HALF DONE — `{result['component_path']}` was created",
+    "replace": "    if False and unreferenced:\n        message = (\n            f\"HALF DONE — `{result['component_path']}` was created",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_edit_react_component.py::TestUnreferencedCreateWarning::test_orphan_create_tells_the_agent_the_page_is_unchanged"
     ]
   }
 ]
