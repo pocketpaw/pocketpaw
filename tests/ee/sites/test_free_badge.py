@@ -337,7 +337,19 @@ def test_the_text_is_locked_too(prop):
 
 
 @pytest.mark.parametrize(
-    "prop", ["display", "visibility", "opacity", "width", "height", "max-width"]
+    "prop",
+    [
+        "display",
+        "visibility",
+        "opacity",
+        "width",
+        "height",
+        "max-width",
+        # The glyph is a STROKE, so its colours ARE the mark rather than styling
+        # applied to it — see the three tests below.
+        "stroke",
+        "fill",
+    ],
 )
 def test_the_mark_is_locked_too(prop):
     """``max-width`` earns its place: a locked ``width:17px`` is still beaten by
@@ -642,3 +654,75 @@ async def test_an_unbadgeable_page_aborts_the_publish(tmp_path, monkeypatch):
             project_dir=str(tmp_path),
             engine="html",
         )
+
+
+def test_the_marks_colour_is_locked_not_a_presentation_attribute():
+    """The cheapest bypass this module ever had, and it was open for as long as the
+    mark carried its colour in ``fill``/``stroke`` ATTRIBUTES.
+
+    Any author rule beats a presentation attribute on specificity alone — it does
+    not even need ``!important``:
+
+        a[data-paw-badge] svg { stroke: transparent }
+
+    One unremarkable line erased the brand while every locked property still
+    reported the badge as visible: an anchor, fixed, opaque, at max z-index, 17px
+    square, and empty. So the colours live in the inline lock, where an author
+    stylesheet cannot reach them.
+    """
+    svg_tag = badge.build_badge_anchor().split("<svg")[1].split(">")[0]
+
+    assert "stroke=" not in svg_tag, "colour in an attribute is beaten by any author rule"
+    assert "fill=" not in svg_tag
+    assert "stroke:#0A84FF!important" in svg_tag
+    # Locked in reverse as well: FILLING the pad path turns the paw into a blob.
+    assert "fill:none!important" in svg_tag
+
+
+def test_the_marks_shapes_carry_no_colour_of_their_own():
+    """The lock is on the <svg>, and stroke/fill inherit down to the shapes — but
+    only while nothing overrides them there. A shape carrying its own presentation
+    attribute would be styleable again, one level below where anyone is looking."""
+    shapes = badge.build_badge_anchor().split("<svg")[1]
+
+    for attr in ("stroke=", "fill="):
+        assert attr not in shapes, f"a shape re-introduced {attr} below the lock"
+
+
+def test_the_mark_is_the_lucide_paw_print_glyph():
+    """The mark is Lucide's ``paw-print``, copied from the package rather than
+    approximated by hand — three toe circles and a pad path on the 24x24 grid.
+
+    Pinned because the thing it replaced was a hand-traced paw that read as a
+    different animal at 17px than the one the product draws everywhere else, and
+    a redraw from memory is exactly how that comes back. The Paw Bar's own mascot
+    inlines this same node, so the badge on a published site and the bar bolted to
+    it agree.
+
+    Source: @lucide/svelte v1.16.0, dist/icons/paw-print.svelte (ISC).
+    """
+    svg = badge.build_badge_anchor().split("<svg")[1].split("</svg>")[0]
+
+    assert 'viewBox="0 0 24 24"' in svg, "Lucide's grid, not the old 32x32 favicon one"
+    for toe in (
+        '<circle cx="11" cy="4" r="2"/>',
+        '<circle cx="18" cy="8" r="2"/>',
+        '<circle cx="20" cy="16" r="2"/>',
+    ):
+        assert toe in svg
+    # The pad. Upstream's path verbatim, including the Q — do not "tidy" it.
+    assert "M9 10a5 5 0 0 1 5 5v3.5a3.5 3.5 0 0 1-6.84 1.045Q6.52 17.48 4.46 " in svg
+    assert "16.84A3.5 3.5 0 0 1 5.5 10Z" in svg
+    # The old hand-drawn mark had five toes around a filled disc. If any of those
+    # come back, the two marks have diverged again.
+    assert '<circle cx="16" cy="16" r="15"' not in svg
+
+
+def test_the_marks_geometry_survives_a_hostile_stylesheet():
+    """A stroked glyph has two more ways to be erased than a filled one:
+    ``stroke-width:0`` leaves the shapes with no line to draw, and the caps/joins
+    are what keep it looking like Lucide's paw rather than a spiky approximation."""
+    svg_tag = badge.build_badge_anchor().split("<svg")[1].split(">")[0]
+
+    for decl in ("stroke-width:2", "stroke-linecap:round", "stroke-linejoin:round"):
+        assert f"{decl}!important" in svg_tag

@@ -71,6 +71,19 @@
 #   element to lock. Also replaced the raise on an undecodable page with a
 #   byte-preserving latin-1 round-trip: refusing it made an imported non-UTF-8
 #   site permanently unpublishable, which is worse than what it prevented.
+# Updated 2026-09-01 (feat/pawbar-morph-and-paw-badge-mark): the mark is now the
+#   LUCIDE ``paw-print`` glyph, copied from @lucide/svelte v1.16.0 rather than
+#   traced by hand. What it replaced was an approximation off the favicon (five
+#   toes around a filled disc) that read as a different animal at 17px than the
+#   paw the product draws everywhere else; the Paw Bar's own mascot already
+#   inlines this exact node, so a published site's badge and the bar bolted to it
+#   now agree. Closed a bypass in the same change: the old mark carried its
+#   colour in ``fill``/``stroke`` presentation ATTRIBUTES, which ANY author rule
+#   beats on specificity alone without needing ``!important``, so
+#   ``a[data-paw-badge] svg{stroke:transparent}`` erased the brand while every
+#   locked property still reported it visible. The colours (and stroke-width /
+#   caps / joins, which a stroked glyph needs and a filled one does not) moved
+#   into ``_MARK_LOCK``.
 
 from __future__ import annotations
 
@@ -220,6 +233,17 @@ _MARK_LOCK = _CHILD_LOCK + (
     "min-width:17px!important;"
     "min-height:17px!important;"
     "flex:none!important;"
+    # The glyph is a STROKE, so these three ARE the mark — not styling on top of
+    # it. Left as presentation attributes they were the cheapest bypass in the
+    # module: any author rule beats a presentation attribute on specificity
+    # alone, so one unremarkable line erased the brand while the anchor stayed
+    # locked, opaque and 17px square. ``fill:none`` is locked for the same
+    # reason in reverse — filling the pad path turns the paw into a blob.
+    "stroke:#0A84FF!important;"
+    "fill:none!important;"
+    "stroke-width:2!important;"
+    "stroke-linecap:round!important;"
+    "stroke-linejoin:round!important;"
 )
 
 # THE LOOK. Everything below is presentation and degrades safely: a customer who
@@ -279,21 +303,39 @@ _GUARD_CSS = (
     "{content:none!important;display:none!important;}"
 )
 
-# The paw mark, inlined from docs/public/favicon.svg. Inline because the page is
-# served from the edge with no asset pipeline of ours behind it — an <img src>
+# The paw mark: the LUCIDE ``paw-print`` glyph, inlined. Inline because the page
+# is served from the edge with no asset pipeline of ours behind it — an <img src>
 # would be a second request to a host this site does not own, and a CSP or an
 # offline viewer would leave a broken box where the brand goes.
+#
+# LUCIDE, and copied from the package rather than drawn from memory. What stood
+# here before was a hand-approximated paw (five toes around a disc, traced off
+# docs/public/favicon.svg) that read as a different animal at 17px than the one
+# the product uses everywhere else. The Paw Bar's own mascot already inlines this
+# exact node — ``app/src/components/GlassShell.svelte`` in qbtrix/paw-bar — so
+# the badge on a published site and the bar bolted to it now draw the same paw.
+#
+# Source: @lucide/svelte v1.16.0, dist/icons/paw-print.svelte, ISC. Verbatim: the
+# three toe circles and the pad path, on Lucide's 24x24 grid with its 2px round
+# stroke. Do not "tidy" the path — it is upstream's, and matching it is the point.
+# Note the glyph's name is a third-party icon name and means nothing about our
+# Pawprints feed; this is the brand mark, not a reference to that surface.
+#
+# STROKED, NOT FILLED, which changes what has to be locked. The old mark carried
+# its colour in ``fill``/``stroke`` presentation ATTRIBUTES, and an author
+# stylesheet beats a presentation attribute without needing ``!important`` at all
+# — ``a[data-paw-badge] svg *{stroke:transparent}`` erased it in one line, with
+# every locked property still cheerfully reporting "visible". So the colours move
+# into the inline lock below, where an author rule cannot reach them.
 _MARK_SVG = (
-    '<svg width="17" height="17" viewBox="0 0 32 32" aria-hidden="true" '
+    '<svg width="17" height="17" viewBox="0 0 24 24" aria-hidden="true" '
     f'focusable="false" style="{_MARK_LOCK}">'
-    '<circle cx="16" cy="16" r="15" fill="#0A84FF"/>'
-    '<g transform="translate(4,4)" fill="none" stroke="#fff" stroke-width="2" '
-    'stroke-linecap="round" stroke-linejoin="round">'
-    '<circle cx="11" cy="4" r="2"/><circle cx="3" cy="7" r="2"/>'
-    '<circle cx="19" cy="7" r="2"/><circle cx="7" cy="19" r="2"/>'
-    '<circle cx="15" cy="19" r="2"/>'
-    '<path d="M8 14v.5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2V14a4 4 0 0 0-6 0z"/>'
-    "</g></svg>"
+    '<circle cx="11" cy="4" r="2"/>'
+    '<circle cx="18" cy="8" r="2"/>'
+    '<circle cx="20" cy="16" r="2"/>'
+    '<path d="M9 10a5 5 0 0 1 5 5v3.5a3.5 3.5 0 0 1-6.84 1.045Q6.52 17.48 4.46 '
+    '16.84A3.5 3.5 0 0 1 5.5 10Z"/>'
+    "</svg>"
 )
 
 

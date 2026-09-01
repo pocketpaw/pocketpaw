@@ -152,8 +152,13 @@ def test_the_vendored_loader_docks_a_column_rather_than_covering_the_page():
 
     # The open panel is a sized column. A full-viewport iframe swallows every
     # click on the host page whether or not the app paints a backdrop.
-    assert "PANEL_W = 400" in code
-    assert "PANEL_MAX_H = 720" in code
+    #
+    # The exact numbers are pinned deliberately, and the friction is the feature:
+    # a panel resize in paw-bar that never gets vendored here fails THIS test
+    # rather than shipping a site whose widget is a different size from the one
+    # its author was looking at. Update them when you re-vendor, not before.
+    assert "PANEL_W = 520" in code
+    assert "PANEL_MAX_H = 840" in code
 
     # Both doors into the widget — the app's message and the host's own button —
     # must dock. goFullscreen() survives ONLY in the drag protocol.
@@ -162,6 +167,14 @@ def test_the_vendored_loader_docks_a_column_rather_than_covering_the_page():
     # The opt-in big reading surface, and the box animation, both reached here.
     assert "pawbar:expand" in code
     assert "BOX_MS" in code
+
+    # The blurred host-page scrim (2026-09-01) is a HOST-DOCUMENT div, and this
+    # is the assertion that keeps it one. The obvious way to paint a backdrop is
+    # to grow the frame and draw it inside — which is the exact modal the two
+    # assertions above exist to prevent, arriving through a different door. A
+    # scrim element sits one below the frame's own z-index; nothing else in this
+    # file uses that number.
+    assert "2147483646" in code, "the scrim must sit under the frame, not inside it"
 
 
 def test_the_vendored_loader_speaks_the_frame_protocol_the_app_expects():
@@ -203,6 +216,28 @@ def test_the_vendored_loader_speaks_the_frame_protocol_the_app_expects():
     # The overlay handshake, both directions.
     assert "pawbar:overlay" in code, "app announces menus; loader must have a case"
     assert "pawbar:host-pointerdown" in code, "loader must report host clicks back"
+
+    # The docked bar's resting width, and the THIRD time this drift has bitten.
+    #
+    # The app rests the bar as a narrow pill and widens it when the visitor hovers
+    # — it hides the grip, the minimize control and the send button, then posts
+    # {pawbar:bar, compact, expanded} and expects the loader to ease the FRAME
+    # between BAR_W_REST and BAR_W. The loader owns both widths on purpose: an
+    # app that animates its own width feeds a ResizeObserver that the loader
+    # chases, and the frame ends up permanently behind the content it is clipping.
+    #
+    # A vendored copy with no case for this does not fail loudly. It shows up as
+    # the captain's 2026-09-01 report — "the width is the same and the icon and
+    # texts just appear and disappear, which looks extremely bad" — because the
+    # app half had shipped and this half had not. Cosmetic-looking, entirely
+    # silent, and invisible to every other test in this repo.
+    assert "pawbar:bar" in code, "app declares a resting width; loader must ease to it"
+    assert "BAR_W_REST" in code, "the compact width is loader policy, never a report"
+
+    # The host-close reply. The scrim takes the dismissing press on the host page,
+    # so the frame has to be TOLD — it owns the panel's own state and would
+    # otherwise still believe it is open.
+    assert "pawbar:host-close" in code
 
 
 def test_the_vendored_loader_is_generated_not_hand_edited():
