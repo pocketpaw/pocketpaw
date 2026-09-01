@@ -191,9 +191,8 @@ class TestUploadsBlocked:
     async def test_a_non_guest_upload_is_not_blocked_by_this_gate(self, mongo_db):
         """files=[] sails past the guest gate and returns an empty result —
         proving the gate keys on is_guest, not on everyone."""
-        from pocketpaw_ee.cloud.uploads.router import upload
-
         from fastapi import HTTPException
+        from pocketpaw_ee.cloud.uploads.router import upload
 
         doc = User(email="real4@x.co", hashed_password="x", is_active=True)
         await doc.insert()

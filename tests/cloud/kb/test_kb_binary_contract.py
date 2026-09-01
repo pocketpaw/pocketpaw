@@ -23,7 +23,6 @@ import shutil
 import subprocess
 
 import pytest
-
 from pocketpaw_ee.cloud.agents.knowledge import KB_BIN, extract_ingest_article_id
 
 pytestmark = pytest.mark.skipif(
@@ -83,8 +82,18 @@ def test_the_receipt_carries_a_resolvable_article_id():
 def test_two_documents_do_not_collide_on_one_article_id():
     """Guards the failure I mistakenly reported before measuring it: ids come
     from the compiled TITLE, so distinct documents must land distinct ids."""
-    a = _ingest({"raw_text": "An invoice for Q1 consulting.", "article": {**ARTICLE, "title": "Invoice Q1", "source": "Invoice.pdf"}})
-    b = _ingest({"raw_text": "A story about a beach.", "article": {**ARTICLE, "title": "Beach Story", "source": "Story.pdf"}})
+    a = _ingest(
+        {
+            "raw_text": "An invoice for Q1 consulting.",
+            "article": {**ARTICLE, "title": "Invoice Q1", "source": "Invoice.pdf"},
+        }
+    )
+    b = _ingest(
+        {
+            "raw_text": "A story about a beach.",
+            "article": {**ARTICLE, "title": "Beach Story", "source": "Story.pdf"},
+        }
+    )
     assert extract_ingest_article_id(a) != extract_ingest_article_id(b), (
         "two documents resolved to the same article id — the second overwrote the first"
     )

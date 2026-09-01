@@ -19,9 +19,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from pocketpaw_ee.cloud.files.service import UnifiedFile, UnifiedFilesService
 
 from pocketpaw.uploads.file_store import FileRecord
-from pocketpaw_ee.cloud.files.service import UnifiedFile, UnifiedFilesService
 
 # Every field the library writes onto an upload row and the panel renders.
 LIBRARY_METADATA = ("tags", "collections", "summary", "agent_id", "folder_path")

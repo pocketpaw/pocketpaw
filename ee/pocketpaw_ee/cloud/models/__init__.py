@@ -205,7 +205,6 @@ from pocketpaw_ee.cloud.models.fabric_ingest_state import (
 )
 from pocketpaw_ee.cloud.models.file import FileObj
 from pocketpaw_ee.cloud.models.file_comprehension_usage import FileComprehensionUsage
-from pocketpaw_ee.cloud.models.guest_turn_usage import GuestTurnUsage
 from pocketpaw_ee.cloud.models.file_transcription_usage import FileTranscriptionUsage
 from pocketpaw_ee.cloud.models.file_version import FileVersionDoc
 from pocketpaw_ee.cloud.models.foresight_backtest import ForesightBacktest
@@ -223,6 +222,7 @@ from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
     ForesightWorkspaceScenario,
 )
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
+from pocketpaw_ee.cloud.models.guest_turn_usage import GuestTurnUsage
 from pocketpaw_ee.cloud.models.icp import Icp
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc

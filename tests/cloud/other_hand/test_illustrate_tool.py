@@ -153,9 +153,8 @@ class TestTheBudgetItself:
 
     @pytest.mark.asyncio
     async def test_an_unreachable_database_fails_CLOSED(self, monkeypatch):
-        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
-
         from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
+        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
 
         monkeypatch.setenv("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", "5")
         # Establish the degraded database EXPLICITLY. This used to rely on
