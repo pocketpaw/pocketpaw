@@ -50,6 +50,13 @@
 #   (opens exactly one new checkout AND cancels the old sub id), does NOT cancel when
 #   there's no active sub (or only a cancelled row), and stays event_id-idempotent on
 #   the new subscription's active-webhook replay.
+# Updated 2026-09-02 (fix/billing-router-authorization): the ``billing_app_client``
+#   fixture now carries an OWNER identity for w1. POST /billing/cancel became gated
+#   on ``billing.manage`` (OWNER), so the route resolves ``current_active_user`` in
+#   addition to the two ids this fixture already overrode — and overriding only the
+#   ids left the real fastapi-users dependency to run and 401 both cancel-route
+#   tests. OWNER because that is who can cancel a subscription in production; the
+#   role gate itself is tested in tests/cloud/test_ee_guards.py, not here.
 
 from __future__ import annotations
 
@@ -735,20 +742,49 @@ async def test_cancel_with_only_cancelled_row_raises_402(mongo_db, monkeypatch):
 
 
 @pytest_asyncio.fixture
-async def billing_app_client() -> AsyncClient:
+async def billing_app_client(monkeypatch) -> AsyncClient:
     """A FastAPI app with ONLY the billing router mounted + auth/license overridden,
     scoped to workspace ``w1`` — so the POST /billing/cancel wiring is exercised
-    without a real JWT / license (mirrors the shared cloud_app_client fixture)."""
+    without a real JWT / license (mirrors the shared cloud_app_client fixture).
+
+    The caller is an OWNER of w1. Updated 2026-09-02
+    (fix/billing-router-authorization): /billing/cancel is now gated on
+    ``billing.manage`` (OWNER), so the route resolves ``current_active_user`` as
+    well as the two ids this fixture already overrode. Overriding only the ids left
+    the real fastapi-users dependency to run, and it 401s with no session. The
+    identity is OWNER because that is who can cancel a subscription in production —
+    a fixture whose caller would be refused is not exercising the cancel path, it is
+    exercising the gate, and the gate has its own tests in
+    tests/cloud/test_ee_guards.py.
+    """
+    from types import SimpleNamespace
+
     from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud.auth import current_active_user
     from pocketpaw_ee.cloud.billing.router import router as billing_router
     from pocketpaw_ee.cloud.license import require_license
     from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
+    from pocketpaw_ee.guards import deps as guards_deps
+
+    # Per-member action overrides are a separate mechanism and would otherwise drive
+    # a Mongo read on the deny path. Not what this file measures.
+    monkeypatch.setattr(guards_deps, "_has_action_override", lambda *a, **k: False)
+
+    owner = SimpleNamespace(
+        id="u1",
+        active_workspace="w1",
+        workspaces=[SimpleNamespace(workspace="w1", role="owner")],
+    )
+
+    async def _fake_current_active_user():
+        return owner
 
     app = FastAPI()
     add_error_handler(app)
     app.include_router(billing_router)
     app.dependency_overrides[current_user_id] = lambda: "u1"
     app.dependency_overrides[current_workspace_id] = lambda: "w1"
+    app.dependency_overrides[current_active_user] = _fake_current_active_user
     app.dependency_overrides[require_license] = lambda: None
 
     transport = ASGITransport(app=app)

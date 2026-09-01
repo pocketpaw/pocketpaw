@@ -26,6 +26,14 @@
 #   ok=False/denied=True/code, and the service is SPIED and asserted NOT called).
 #   READ tools EXECUTE directly on a gate pass (no Instinct proposal — that's
 #   writes only). The contract test now asserts all seven tool ids.
+# Updated: 2026-09-02 (fix/billing-router-authorization) — billing_usage_read's
+#   gate moved from ``workspace.view`` (MEMBER) to ``billing.view`` (ADMIN), in
+#   lockstep with the REST GET /billing/usage route it exists to mirror. The
+#   member-allowed test below is INVERTED rather than deleted (its envelope
+#   assertions are kept, now under an ADMIN identity), and a new test pins the
+#   ACTION KEY the handler passes — because every other test in this file stubs
+#   ``check_workspace_action`` to a blanket allow/deny, which means none of them
+#   would notice the key changing, or drifting back.
 #
 # What this pins — the WA-1/WA-2 tools, driven through the REAL handlers:
 #   * tool-id / server-name contract (SERVER_NAME, *_TOOL_ID, ADMIN_TOOL_IDS)
@@ -605,15 +613,26 @@ async def test_connectors_list_denied_no_service_call(monkeypatch, _patch_user):
 
 
 # ---------------------------------------------------------------------------
-# billing_usage_read — READ (workspace.view / MEMBER)
+# billing_usage_read — READ (billing.view / ADMIN)
+#
+# This was ``workspace.view`` / MEMBER until 2026-09-02. The tool's contract is to
+# mirror the REST GET /billing/usage route, and that route had no action gate at
+# all — so mirroring it meant inheriting a hole. Both moved to ``billing.view``
+# together; had only HTTP moved, a member refused the usage read over HTTP could
+# have asked the agent for the same numbers instead.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_billing_usage_read_member_allowed(monkeypatch, _patch_user):
-    """A MEMBER may read usage — gate passes; start/end are threaded to the
-    service as start_date/end_date and the summary comes back."""
-    monkeypatch.setattr("pocketpaw_ee.guards.deps.check_workspace_action", _allow())
+async def test_billing_usage_read_admin_allowed(monkeypatch, _patch_user):
+    """An ADMIN may read usage — gate passes; start/end are threaded to the
+    service as start_date/end_date and the summary comes back.
+
+    Body is the old ``test_billing_usage_read_member_allowed`` verbatim; only the
+    role it is granted under changed (see the section note above)."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action", _allow(WorkspaceRole.ADMIN)
+    )
 
     called = {}
 
@@ -651,11 +670,17 @@ async def test_billing_usage_read_member_allowed(monkeypatch, _patch_user):
 
 
 @pytest.mark.asyncio
-async def test_billing_usage_read_denied_no_service_call(monkeypatch, _patch_user):
-    """A gate failure → deny envelope; the usage service is NOT reached."""
+async def test_billing_usage_read_member_denied_no_service_call(monkeypatch, _patch_user):
+    """A MEMBER is refused → deny envelope; the usage service is NOT reached.
+
+    THE INVERSION. This file used to assert a member was ALLOWED here, and it was
+    right about the behaviour of its day: the REST route it mirrors was ungated, so
+    the tool matched an open door. Now that the route gates at ``billing.view``
+    (ADMIN), a member gets a deny envelope carrying the billing deny code.
+    """
     monkeypatch.setattr(
         "pocketpaw_ee.guards.deps.check_workspace_action",
-        _deny_forbidden("workspace.not_member"),
+        _deny_forbidden("billing.admin_only"),
     )
     hit = {"called": False}
 
@@ -666,13 +691,55 @@ async def test_billing_usage_read_denied_no_service_call(monkeypatch, _patch_use
 
     monkeypatch.setattr(usage_service, "get_workspace_usage", _get_workspace_usage)
 
-    with _identity(workspace="w1", user="outsider"):
+    with _identity(workspace="w1", user="member1"):
         res = await wa_mcp._billing_usage_read_handler({})
 
     body = _body(res)
     assert body["ok"] is False
     assert body["denied"] is True
+    assert body["code"] == "billing.admin_only"
     assert hit["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_billing_usage_read_gates_on_the_billing_action(monkeypatch, _patch_user):
+    """THE LOCKSTEP PIN — assert WHICH action key the handler asks about.
+
+    Every other test in this file stubs the gate to a blanket allow or deny, so
+    none of them can see the key. The two tests above would both still pass if this
+    tool silently went back to ``workspace.view`` (MEMBER) while the REST route
+    stayed at ADMIN — which is exactly the bypass this change closed. So assert the
+    key itself, and assert its tier from the canonical table rather than trusting a
+    copied string.
+    """
+    seen: dict = {}
+
+    def _record(user, workspace_id, action):  # noqa: ANN001
+        seen["action"] = action
+        return WorkspaceRole.ADMIN
+
+    monkeypatch.setattr("pocketpaw_ee.guards.deps.check_workspace_action", _record)
+
+    async def _get_workspace_usage(workspace_id, *, start_date=None, end_date=None):  # noqa: ANN001
+        return SimpleNamespace(
+            start_date="2026-06-01",
+            end_date="2026-06-30",
+            models=[],
+            total_credits=0,
+            buckets=[],
+        )
+
+    import pocketpaw_ee.cloud.billing.usage as usage_service
+
+    monkeypatch.setattr(usage_service, "get_workspace_usage", _get_workspace_usage)
+
+    with _identity(workspace="w1", user="u1"):
+        await wa_mcp._billing_usage_read_handler({})
+
+    from pocketpaw_ee.guards.actions import ACTIONS
+
+    assert seen["action"] == "billing.view"
+    assert ACTIONS[seen["action"]].minimum == WorkspaceRole.ADMIN
 
 
 # ---------------------------------------------------------------------------
