@@ -148,6 +148,33 @@ class GuestLimitError(CloudError):
         return base
 
 
+class GuestIllustrateForbidden(CloudError):
+    """Guests cannot generate illustrations (403, ``guest_illustrate_forbidden``).
+
+    Added 2026-09-01. The daily budget is a COST CEILING, not an entitlement:
+    it caps how much a workspace can spend, and a guest can mint a fresh
+    workspace to get a fresh ceiling. Generation costs real money on the
+    PLATFORM's account (a guest's own BYOK key pays for their tokens and not
+    for this), so the ceiling alone left an unbounded bill attached to a
+    signup form that asks for nothing.
+
+    Same contract discipline as ``GuestUploadForbidden``: top-level ``code``
+    beside the standard envelope, and the refusal doubles as the signup hook.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            403,
+            "guest_illustrate_forbidden",
+            "Sign up to have Otherhand draw for you.",
+        )
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base["code"] = self.code
+        return base
+
+
 class GuestUploadForbidden(CloudError):
     """Guests cannot upload files (403, ``guest_upload_forbidden``).
 

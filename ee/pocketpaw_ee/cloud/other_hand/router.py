@@ -40,7 +40,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, Path
 from pydantic import BaseModel, Field
 
-from pocketpaw_ee.cloud._core.deps import current_workspace_id
+from pocketpaw_ee.cloud._core.deps import current_user_id, current_workspace_id
 from pocketpaw_ee.cloud._core.errors import CloudError
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.other_hand import service as other_hand_service
@@ -138,6 +138,7 @@ __all__ = ["router"]
 async def illustrate(
     body: IllustrateRequest,
     workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     """Generate an illustration and return it as page-ops the caller can draw.
 
@@ -151,15 +152,26 @@ async def illustrate(
     on, and the caller has nothing useful to tell the user about a missing
     generator.
     """
+    from pocketpaw_ee.cloud.auth import guest_budget
     from pocketpaw_ee.cloud.other_hand import illustrate as illustrator
     from pocketpaw_ee.cloud.other_hand import illustration_budget
     from pocketpaw_ee.cloud.other_hand.svg_to_ink import Box
     from pocketpaw_ee.cloud.studio import fal_edit
 
+    # Guests do not get to spend platform money on pictures. The budget below
+    # is a cost CEILING, not an entitlement, and a guest can mint a fresh
+    # workspace to get a fresh ceiling, so the ceiling alone left an unbounded
+    # bill attached to a signup form that asks for nothing. Refused BEFORE the
+    # budget is claimed, so a refusal costs the workspace nothing.
+    if await guest_budget.load_guest(user_id) is not None:
+        from pocketpaw_ee.cloud._core.errors import GuestIllustrateForbidden
+
+        raise GuestIllustrateForbidden()
+
     # A pressed button authorises ONE generation; it does not cap how many.
     # Scripted, the same button is a loop, so the ceiling has to live here and
     # not in the UI. Claimed BEFORE the paid call and fail-closed, exactly like
-    # the MCP tool path — this route was the one caller that skipped it.
+    # the MCP tool path -- this route was the one caller that skipped it.
     allowed, spent, cap = await illustration_budget.try_spend(workspace_id)
     if not allowed:
         raise CloudError(

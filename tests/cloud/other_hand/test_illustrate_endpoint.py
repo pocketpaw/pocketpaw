@@ -162,3 +162,128 @@ class TestTheRouteHonoursTheDailyBudget:
 
         assert out["ops"], "an allowed call should still draw"
         assert claimed == ["ws-1"], "the claim must be scoped to the caller's workspace"
+
+
+# ---------------------------------------------------------------------------
+# Added 2026-09-01. The daily budget is a COST CEILING, not an entitlement: it
+# caps what one workspace spends, and a guest can mint a fresh workspace to get
+# a fresh ceiling. So guests are refused outright, on BOTH paths -- the REST
+# route and the MCP tool the agent calls when asked to draw. Gating only the
+# route would leave the feature reachable by simply asking.
+#
+# Mutation-checked: drop either guest check and the matching test goes red.
+# ---------------------------------------------------------------------------
+
+
+class TestGuestsCannotSpendPlatformMoneyOnPictures:
+    @pytest.mark.asyncio
+    async def test_the_route_refuses_a_guest_before_claiming_budget(self, monkeypatch):
+        from pocketpaw_ee.cloud._core.errors import GuestIllustrateForbidden
+        from pocketpaw_ee.cloud.auth import guest_budget
+        from pocketpaw_ee.cloud.other_hand import illustration_budget
+        from pocketpaw_ee.cloud.other_hand import router as oh_router
+
+        async def _is_a_guest(_user_id):
+            return {"id": "guest-1"}
+
+        monkeypatch.setattr(guest_budget, "load_guest", _is_a_guest)
+
+        async def _budget_must_not_be_touched(_workspace_id=None):
+            raise AssertionError("a refused guest still consumed the daily budget")
+
+        monkeypatch.setattr(illustration_budget, "try_spend", _budget_must_not_be_touched)
+
+        async def _must_not_run(*_a, **_k):
+            raise AssertionError("the route paid the generator for a guest")
+
+        monkeypatch.setattr(ill, "illustrate_as_ops", _must_not_run)
+
+        body = oh_router.IllustrateRequest(prompt="a honeybee", x=0, y=0, w=600, h=600)
+        with pytest.raises(GuestIllustrateForbidden) as caught:
+            await oh_router.illustrate(body=body, workspace_id="ws-1", user_id="u-guest")
+
+        assert caught.value.status_code == 403
+        assert caught.value.code == "guest_illustrate_forbidden"
+        # The frontend keys the signup prompt off a TOP-LEVEL code.
+        assert caught.value.to_dict()["code"] == "guest_illustrate_forbidden"
+
+    @pytest.mark.asyncio
+    async def test_a_real_account_still_draws(self, monkeypatch):
+        from pocketpaw_ee.cloud.auth import guest_budget
+        from pocketpaw_ee.cloud.other_hand import illustration_budget
+        from pocketpaw_ee.cloud.other_hand import router as oh_router
+
+        async def _not_a_guest(_user_id):
+            return None
+
+        monkeypatch.setattr(guest_budget, "load_guest", _not_a_guest)
+
+        async def _allow(_workspace_id=None):
+            return True, 1, 20
+
+        monkeypatch.setattr(illustration_budget, "try_spend", _allow)
+
+        async def _draw(*_a, **_k):
+            return [{"t": "path", "d": "M0 0 L1 1"}]
+
+        monkeypatch.setattr(ill, "illustrate_as_ops", _draw)
+
+        body = oh_router.IllustrateRequest(prompt="a honeybee", x=0, y=0, w=600, h=600)
+        out = await oh_router.illustrate(body=body, workspace_id="ws-1", user_id="u-real")
+        assert out["ops"], "a signed-up account should still get its drawing"
+
+    @pytest.mark.asyncio
+    async def test_the_mcp_tool_refuses_a_guest_too(self, monkeypatch):
+        """The path a guest reaches by ASKING the agent, rather than pressing."""
+        from pocketpaw_ee.agent.mcp_servers import other_hand as tool_mod
+        from pocketpaw_ee.cloud.auth import guest_budget
+        from pocketpaw_ee.cloud.chat import agent_service
+        from pocketpaw_ee.cloud.other_hand import illustrate as ill_mod
+        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+        from pocketpaw_ee.cloud.studio import fal_edit
+
+        monkeypatch.setattr(fal_edit, "fal_api_key", lambda: "test-key")
+        monkeypatch.setattr(agent_service, "current_user_id", lambda: "u-guest")
+
+        async def _is_a_guest(_user_id):
+            return {"id": "guest-1"}
+
+        monkeypatch.setattr(guest_budget, "load_guest", _is_a_guest)
+
+        async def _budget_must_not_be_touched(*_a, **_k):
+            raise AssertionError("a refused guest still consumed the daily budget")
+
+        monkeypatch.setattr(budget, "try_spend", _budget_must_not_be_touched)
+
+        async def _must_not_run(*_a, **_k):
+            raise AssertionError("the tool paid the generator for a guest")
+
+        monkeypatch.setattr(ill_mod, "illustrate_as_ops", _must_not_run)
+
+        res = await tool_mod._illustrate_handler({"subject": "a honeybee"})
+        assert "account" in res["content"][0]["text"].lower(), res
+
+    @pytest.mark.asyncio
+    async def test_the_mcp_tool_refuses_when_it_cannot_tell_who_is_asking(self, monkeypatch):
+        """No identity resolves to a refusal, not to a free drawing."""
+        from pocketpaw_ee.agent.mcp_servers import other_hand as tool_mod
+        from pocketpaw_ee.cloud.chat import agent_service
+        from pocketpaw_ee.cloud.other_hand import illustrate as ill_mod
+        from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+        from pocketpaw_ee.cloud.studio import fal_edit
+
+        monkeypatch.setattr(fal_edit, "fal_api_key", lambda: "test-key")
+        monkeypatch.setattr(agent_service, "current_user_id", lambda: None)
+
+        async def _budget_must_not_be_touched(*_a, **_k):
+            raise AssertionError("an unidentified caller still consumed budget")
+
+        monkeypatch.setattr(budget, "try_spend", _budget_must_not_be_touched)
+
+        async def _must_not_run(*_a, **_k):
+            raise AssertionError("the tool paid the generator for an unknown caller")
+
+        monkeypatch.setattr(ill_mod, "illustrate_as_ops", _must_not_run)
+
+        res = await tool_mod._illustrate_handler({"subject": "a honeybee"})
+        assert "account" in res["content"][0]["text"].lower(), res

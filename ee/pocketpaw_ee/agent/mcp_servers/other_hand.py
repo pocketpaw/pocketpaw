@@ -47,6 +47,32 @@ def _error(message: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": message}], "isError": True}
 
 
+# Stands in for "could not tell who this is" so the gate reads as one thing.
+_NO_IDENTITY = object()
+
+
+async def _guest_or_none() -> Any:
+    """The current caller's guest record, or None for a real account.
+
+    Resolved from the run context the same way the budget resolves tenancy, so
+    the tool needs no new plumbing. Any failure to resolve returns a guest-like
+    refusal rather than None: this gates SPEND, so an unknown caller is treated
+    as the case we do not want to pay for.
+    """
+    try:
+        from pocketpaw_ee.cloud.auth import guest_budget
+        from pocketpaw_ee.cloud.chat.agent_service import current_user_id
+
+        user_id = current_user_id()
+        if not user_id:
+            logger.warning("other-hand: illustration refused, no user in context")
+            return _NO_IDENTITY
+        return await guest_budget.load_guest(user_id)
+    except Exception:  # noqa: BLE001 - a spend gate refuses when it cannot tell
+        logger.warning("other-hand: illustration refused, guest check failed", exc_info=True)
+        return _NO_IDENTITY
+
+
 def _ok(message: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": message}]}
 
@@ -72,6 +98,18 @@ async def _illustrate_handler(args: dict) -> dict:
         )
 
     from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+
+    # Guests do not get to spend platform money on pictures, on this path
+    # either. The REST route refuses them too; gating only there would leave
+    # the whole feature reachable by simply ASKING the agent to draw, which is
+    # the more natural way in. Refused before the budget is claimed, and worded
+    # so the agent explains instead of retrying.
+    guest = await _guest_or_none()
+    if guest is not None:
+        return _error(
+            "Illustrations need an account. Say so plainly and offer to keep "
+            "going in words and your own drawing; do not try again this turn."
+        )
 
     allowed, spent, cap = await budget.try_spend()
     if not allowed:

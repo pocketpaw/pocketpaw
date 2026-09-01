@@ -39,6 +39,27 @@ def generator_ready(monkeypatch):
 
 
 @pytest.fixture
+def signed_up_caller(monkeypatch):
+    """A real, non-guest account in the run context.
+
+    Added 2026-09-01 with the guest gate. The tool now refuses a caller it
+    cannot identify, because it spends platform money and an unknown caller is
+    the case we do not want to pay for. That matches what the budget already
+    did (no tenancy resolves to a refusal), so these tests have to say who is
+    asking rather than the gate being loosened to let nobody through.
+    """
+    import pocketpaw_ee.cloud.chat.agent_service as agent_service
+    from pocketpaw_ee.cloud.auth import guest_budget
+
+    monkeypatch.setattr(agent_service, "current_user_id", lambda: "u-real")
+
+    async def _not_a_guest(_user_id):
+        return None
+
+    monkeypatch.setattr(guest_budget, "load_guest", _not_a_guest)
+
+
+@pytest.fixture
 def budget_open(monkeypatch):
     from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
 
@@ -51,7 +72,7 @@ def budget_open(monkeypatch):
 class TestTheDrawingDoesNotGoThroughTheModel:
     @pytest.mark.asyncio
     async def test_the_ops_are_pushed_to_the_client_not_returned(
-        self, captured, generator_ready, budget_open
+        self, captured, generator_ready, budget_open, signed_up_caller
     ):
         res = await tool_mod._illustrate_handler({"subject": "a honeybee"})
         text = res["content"][0]["text"]
@@ -66,7 +87,7 @@ class TestTheDrawingDoesNotGoThroughTheModel:
 
     @pytest.mark.asyncio
     async def test_the_model_is_told_not_to_redraw_it(
-        self, captured, generator_ready, budget_open
+        self, captured, generator_ready, budget_open, signed_up_caller
     ):
         res = await tool_mod._illustrate_handler({"subject": "a honeybee"})
         text = res["content"][0]["text"]
@@ -97,7 +118,7 @@ class TestItRefusesRatherThanSpends:
 
     @pytest.mark.asyncio
     async def test_an_exhausted_budget_refuses_before_generating(
-        self, captured, generator_ready, monkeypatch
+        self, captured, generator_ready, monkeypatch, signed_up_caller
     ):
         from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
 
