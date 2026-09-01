@@ -283,9 +283,7 @@ def build_image_to_video_arguments(
     if prompt:
         args["prompt"] = prompt
     if duration_sec and duration_sec > 0:
-        args["duration"] = _duration_value(
-            endpoint or DEFAULT_IMAGE_TO_VIDEO_MODEL, duration_sec
-        )
+        args["duration"] = _duration_value(endpoint or DEFAULT_IMAGE_TO_VIDEO_MODEL, duration_sec)
     if aspect_ratio:
         args["aspect_ratio"] = aspect_ratio
     return args

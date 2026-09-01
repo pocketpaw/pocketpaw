@@ -406,7 +406,17 @@ async def test_generate_video_happy_path(monkeypatch, studio_env) -> None:
     poster = b"\x89PNG\r\n\x1a\nfake-poster"
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None, resolution=None, generate_audio=None):
+    async def _fake_video(
+        *,
+        prompt,
+        duration_sec,
+        aspect_ratio,
+        model,
+        key=None,
+        image_urls=None,
+        resolution=None,
+        generate_audio=None,
+    ):
         seen.update(
             prompt=prompt,
             duration_sec=duration_sec,
@@ -448,7 +458,17 @@ async def test_generate_video_alias_resolves_endpoint(monkeypatch, studio_env) -
     by fal_video before dispatch."""
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None, resolution=None, generate_audio=None):
+    async def _fake_video(
+        *,
+        prompt,
+        duration_sec,
+        aspect_ratio,
+        model,
+        key=None,
+        image_urls=None,
+        resolution=None,
+        generate_audio=None,
+    ):
         seen["model"] = model
         return b"mp4", "video/mp4", None, None
 
@@ -466,7 +486,17 @@ async def test_generate_video_alias_resolves_endpoint(monkeypatch, studio_env) -
 async def test_generate_video_fal_failure_is_upstream_error(monkeypatch, studio_env) -> None:
     """A fal video upstream failure surfaces as StudioUpstreamError (→ 502)."""
 
-    async def _boom(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None, resolution=None, generate_audio=None):
+    async def _boom(
+        *,
+        prompt,
+        duration_sec,
+        aspect_ratio,
+        model,
+        key=None,
+        image_urls=None,
+        resolution=None,
+        generate_audio=None,
+    ):
         raise fal_video.FalVideoError("fal video 'x' failed: bad key")
 
     monkeypatch.setattr(fal_video, "run_fal_video", _boom)
@@ -484,7 +514,17 @@ async def test_generate_video_image_to_video_passes_all_images(monkeypatch, stud
     generated, history = studio_env
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None, resolution=None, generate_audio=None):
+    async def _fake_video(
+        *,
+        prompt,
+        duration_sec,
+        aspect_ratio,
+        model,
+        key=None,
+        image_urls=None,
+        resolution=None,
+        generate_audio=None,
+    ):
         seen.update(
             prompt=prompt,
             duration_sec=duration_sec,
@@ -521,7 +561,17 @@ async def test_generate_video_image_to_video_forwards_typed_prompt(monkeypatch, 
     generated, history = studio_env
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None, resolution=None, generate_audio=None):
+    async def _fake_video(
+        *,
+        prompt,
+        duration_sec,
+        aspect_ratio,
+        model,
+        key=None,
+        image_urls=None,
+        resolution=None,
+        generate_audio=None,
+    ):
         seen.update(prompt=prompt, image_urls=image_urls, duration_sec=duration_sec)
         return b"mp4", "video/mp4", None, None
 
@@ -561,7 +611,17 @@ async def test_generate_video_seedance_i2v_forwards_schema(monkeypatch, studio_e
     generated, history = studio_env
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None, resolution=None, generate_audio=None):
+    async def _fake_video(
+        *,
+        prompt,
+        duration_sec,
+        aspect_ratio,
+        model,
+        key=None,
+        image_urls=None,
+        resolution=None,
+        generate_audio=None,
+    ):
         seen.update(
             model=model,
             image_urls=image_urls,
@@ -1164,7 +1224,13 @@ def test_list_styles_includes_curated_registry() -> None:
     assert "scifi" in sci_fi.tags
     assert sci_fi.config is not None
     assert sci_fi.config.look.mood == "Futuristic and technological"
-    assert sci_fi.config.look.colorPalette == ["#00FFFF", "#0000FF", "#C0C0C0", "#800080", "#00FF00"]
+    assert sci_fi.config.look.colorPalette == [
+        "#00FFFF",
+        "#0000FF",
+        "#C0C0C0",
+        "#800080",
+        "#00FF00",
+    ]
     assert "holographic elements" in sci_fi.config.look.artStyle
     assert sci_fi.config.motion.camera
     assert len(sci_fi.config.references) == 3

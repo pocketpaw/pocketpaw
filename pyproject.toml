@@ -492,6 +492,11 @@ select = ["E", "F", "I", "UP"]
 "src/pocketpaw/ripple/_design.py" = ["E501"]
 "ee/pocketpaw_ee/cloud/decisions/explain/extractor.py" = ["E501"]
 "ee/pocketpaw_ee/cloud/decisions/explain/narrator.py" = ["E501"]
+# Studio style registry + softening prompts: each style carries rich
+# promptSuffix/config strings appended to the model prompt verbatim, so their
+# long single-line strings can't be wrapped without changing the rendered prompt.
+"ee/pocketpaw_ee/cloud/studio/style_catalog.py" = ["E501"]
+"ee/pocketpaw_ee/cloud/studio/prompt_soften.py" = ["E501"]
 # Embedded fake-herdr shim: canned JSON envelopes are single-line by
 # nature (an id + result + record) and can't be wrapped without breaking
 # the bash `echo` that emits them.

@@ -607,15 +607,15 @@ def test_is_seedance_i2v_endpoint() -> None:
         fal_video.is_seedance_i2v_endpoint("bytedance/seedance-2.5/enterprise/image-to-video")
         is True
     )
-    assert fal_video.is_seedance_i2v_endpoint("fal-ai/kling-video/v1/standard/image-to-video") is False
+    assert (
+        fal_video.is_seedance_i2v_endpoint("fal-ai/kling-video/v1/standard/image-to-video") is False
+    )
     assert fal_video.is_seedance_i2v_endpoint(None) is False
     assert fal_video.is_seedance_i2v_endpoint("") is False
 
 
 def test_build_seedance_i2v_arguments_minimal() -> None:
-    assert fal_video.build_seedance_i2v_arguments(image_url="data:img") == {
-        "image_url": "data:img"
-    }
+    assert fal_video.build_seedance_i2v_arguments(image_url="data:img") == {"image_url": "data:img"}
 
 
 def test_build_seedance_i2v_arguments_full() -> None:
