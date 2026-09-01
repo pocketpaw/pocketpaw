@@ -462,7 +462,6 @@ surface loads only the skill you are reading.
   existing react site (STEP 4). The tool for every follow-up edit; never
   re-create.
 - `mcp__pocketpaw_sites_manager__publish` — deploy, on explicit request (STEP 4)
-- `mcp__pocketpaw_design_systems__list_design_systems` / `get_design_system` — the token starting point
 - `mcp__pocketpaw_palette__scale_from_color` / `extract_palette` — brand colour
 - `mcp__pocketpaw_sites_manager__list_site_assets` — the owner's own uploaded images
 - `mcp__pocketpaw_stock__search_stock_images` — real photography

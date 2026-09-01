@@ -73,7 +73,7 @@
 # current file and match exactly once, and each description duly said "read it first" —
 # naming no tool, because none existed. ``get_pocket`` does carry ``source``, but it
 # lives on the ``pockets`` server and ``sites_allow`` is a hard whitelist
-# (SITES|STOCK|ICON|PALETTE|DESIGN_SYSTEM|ASK), so on /sites it is filtered out with no
+# (SITES|STOCK|ICON|PALETTE|ASK), so on /sites it is filtered out with no
 # error; the profile separately drops the file/shell built-ins on the stated assumption
 # that "the source map is a tool ARGUMENT", which holds only while the agent still has
 # the source it just authored in context. So the only REACHABLE edit form was a
