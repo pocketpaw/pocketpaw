@@ -2195,6 +2195,26 @@ Better, assert it in a test against the ASGI app with no session, the way
 spoofed `X-Forwarded-For`, so a remote caller cannot claim loopback — the trap
 here is local verification, not a production hole.
 
+### Guest onboarding (BYOK-first, 2026-09-01)
+
+| Endpoint | Notes |
+|---|---|
+| `POST /auth/guest` | `{api_key, provider?="anthropic"}`. Rate-limited per IP (429). Validates the key against the provider FIRST (422 `byok.key_rejected` / `byok.provider_unavailable` / `byok.provider_unsupported` — Anthropic only in v1); a dead key mints **nothing**. On success mints an anonymous user (`is_guest`) + workspace + default agent, stores the key encrypted (the same per-workspace Fernet store the `/byok` routes use), and answers exactly like `POST /auth/login` (204 + cookies). Public by necessity — a guest has no account yet; on the route-auth-audit allowlist with that reason. |
+| `POST /auth/guest/upgrade` | Authenticated guest only. `{email, password}` attaches real credentials to the **same user id** (workspace, sessions, key all stay) and flips `is_guest` off. 409 `auth.email_taken` / `auth.not_a_guest`. The stock `/auth/register` always creates a NEW user, hence the dedicated route. |
+
+Guest limits are server-side and fail-CLOSED: 2 sessions and 40 turns/day by
+default (per-user `guest_limits`). Over-limit responses are 402 with top-level
+`{"code": "guest_limit_reached", "kind": "sessions"|"turns"}`; uploads answer
+403 `{"code": "guest_upload_forbidden"}`; a guest whose stored key is missing
+or undecryptable gets 402 `{"code": "guest_key_required"}` — guests never fall
+back to platform credentials. `GET /auth/me` carries `is_guest`.
+
+Turn billing: every workspace with a stored BYOK key (guest or not) now runs
+its chat turns on that key — the executor resolves credentials per turn and
+threads them into the agent pool's isolated backend. The turn's model must
+belong to the key's provider (402-style `byok.model_provider_mismatch` error
+frame on a mismatch, never a silent upstream 401).
+
 ### Sign-in endpoints (no session — that is the point)
 
 | Endpoint | Notes |
