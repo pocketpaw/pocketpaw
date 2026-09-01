@@ -70,6 +70,8 @@ async def test_get_me_returns_dto_shape(app_client) -> None:
         "activeWorkspace",
         "workspaces",
         "mfa_enabled",
+        # 2026-09-01 (feat/byok-guest-backend) — see test_dto.py.
+        "is_guest",
     }
     assert body["id"] == str(user_doc.id)
     assert body["name"] == "Alice"

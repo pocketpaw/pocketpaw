@@ -47,6 +47,9 @@ def test_profile_out_keys_match_existing_wire_shape() -> None:
         "activeWorkspace",
         "workspaces",
         "mfa_enabled",
+        # 2026-09-01 (feat/byok-guest-backend): frozen with the BYOK-fe
+        # sibling — guests render signup nudges off this flag.
+        "is_guest",
     }
 
 
