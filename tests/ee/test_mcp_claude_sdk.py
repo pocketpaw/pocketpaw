@@ -97,9 +97,6 @@ from pocketpaw_ee.agent.mcp_servers.code import SERVER_NAME as _CODE_MCP_SERVER_
 from pocketpaw_ee.agent.mcp_servers.connectors import SERVER_NAME as _CONNECTORS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.daytona import SERVER_NAME as _DAYTONA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
-from pocketpaw_ee.agent.mcp_servers.design_systems import (
-    SERVER_NAME as _DESIGN_SYSTEMS_MCP_SERVER_NAME,
-)
 from pocketpaw_ee.agent.mcp_servers.external_actions import (
     SERVER_NAME as _EXTERNAL_ACTIONS_MCP_SERVER_NAME,
 )
@@ -170,14 +167,12 @@ def _strip_builtin_servers(result: dict) -> dict:
     # call search_stock_images for site imagery without an explicit opt-in.
     # Pure read (free Pexels + Unsplash photo search), no identity.
     out.pop(_STOCK_MCP_SERVER_NAME, None)
-    # ``pocketpaw_icons`` / ``pocketpaw_palette`` / ``pocketpaw_design_systems`` /
-    # ``pocketpaw_ask`` are always-on too — the /sites authoring toolbelt (icon
-    # search, palette derivation, the design-system library, and the interactive
-    # ask_user question chips) is ambient, same regime as stock/media. Pure read /
-    # in-process, no identity.
+    # ``pocketpaw_icons`` / ``pocketpaw_palette`` / ``pocketpaw_ask`` are always-on
+    # too — the /sites authoring toolbelt (icon search, palette derivation, and
+    # the interactive ask_user question chips) is ambient, same regime as
+    # stock/media. Pure read / in-process, no identity.
     out.pop(_ICONS_MCP_SERVER_NAME, None)
     out.pop(_PALETTE_MCP_SERVER_NAME, None)
-    out.pop(_DESIGN_SYSTEMS_MCP_SERVER_NAME, None)
     out.pop(_ASK_MCP_SERVER_NAME, None)
     # ``pocketpaw_belt`` is always-on too — the bundled `belt` skill calls
     # belt_propose_change without an explicit opt-in. ``loom`` is settings-gated
