@@ -101,8 +101,8 @@
   {
     "label": "the brand mark becomes a fetched asset a CSP can block",
     "file": "ee/pocketpaw_ee/sites/badge.py",
-    "find": "    '<svg width=\"17\" height=\"17\" viewBox=\"0 0 32 32\" aria-hidden=\"true\" '",
-    "replace": "    '<img src=\"https://pocketpaw.dev/favicon.svg\" width=\"17\" height=\"17\" alt=\"\"><svg viewBox=\"0 0 32 32\" aria-hidden=\"true\" '",
+    "find": "    '<svg width=\"17\" height=\"17\" viewBox=\"0 0 24 24\" aria-hidden=\"true\" '",
+    "replace": "    '<img src=\"https://pocketpaw.dev/favicon.svg\" width=\"17\" height=\"17\" alt=\"\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\" '",
     "tests": [
       "tests/ee/sites/test_free_badge.py::test_nothing_in_the_badge_is_fetched"
     ]
