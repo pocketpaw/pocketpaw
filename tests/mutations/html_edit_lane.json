@@ -4,118 +4,229 @@
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    await pockets_service.set_html_source_file(\n        pocket_id,\n        user_id,\n        file_path=file_path,\n        new_source=new_source,\n        create=create,\n    )",
     "replace": "    _ = (pockets_service, new_source, create)",
-    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py"
+    ]
   },
   {
     "label": "the path guard is skipped entirely",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    if (reason := html_path_rejection(file_path)) is not None:",
     "replace": "    if False and (reason := html_path_rejection(file_path)) is not None:",
-    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py"
+    ]
   },
   {
     "label": "the reserved namespace loses its trailing slash (prefix-matches siblings)",
     "file": "ee/pocketpaw_ee/sites/html_paths.py",
     "find": "HTML_RESERVED_PREFIX = \"_paw/\"",
     "replace": "HTML_RESERVED_PREFIX = \"_paw\"",
-    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py"
+    ]
   },
   {
     "label": "the path is not normalized before matching (a trivial spelling escapes)",
     "file": "ee/pocketpaw_ee/sites/html_paths.py",
     "find": "    return posixpath.normpath(path.replace(\"\\\\\", \"/\"))",
     "replace": "    return path",
-    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py"
+    ]
   },
   {
     "label": "escape detection drops the leading-.. check",
     "file": "ee/pocketpaw_ee/sites/html_paths.py",
     "find": "    return norm == \"..\" or norm.startswith(\"../\") or posixpath.isabs(norm)",
     "replace": "    return posixpath.isabs(norm)",
-    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py"
+    ]
   },
   {
     "label": "escape detection drops the absolute-path check",
     "file": "ee/pocketpaw_ee/sites/html_paths.py",
     "find": "    return norm == \"..\" or norm.startswith(\"../\") or posixpath.isabs(norm)",
     "replace": "    return norm == \"..\" or norm.startswith(\"../\")",
-    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py"
+    ]
   },
   {
     "label": "the write uses the raw path, so ./index.html shadows index.html",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    file_path = normalize_html_path(file_path)",
     "replace": "    file_path = file_path",
-    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py"
+    ]
   },
   {
     "label": "create no longer requires new_source",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    if create and new_source is None:\n        raise ValidationError(\n            \"site_edit.create_needs_source\",\n            \"Creating a new file needs `new_source` — the full contents of the new \"\n            \"file. There is nothing for `edits` to search against.\",\n        )",
     "replace": "    pass",
-    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py"
+    ]
   },
   {
     "label": "a diff against a missing file crashes with KeyError instead of 404",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    if not create and file_path not in source_map:\n        raise NotFound(\"site_component\", file_path)",
     "replace": "    pass",
-    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py"
+    ]
   },
   {
     "label": "the engine gate accepts any source-map pocket",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    if (pocket.get(\"engine\") or \"ripple\") != \"html\" or not isinstance(pocket.get(\"source\"), dict):\n        raise ValidationError(\n            \"pocket.not_html_site\",",
     "replace": "    if not isinstance(pocket.get(\"source\"), dict):\n        raise ValidationError(\n            \"pocket.not_html_site\",",
-    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py"
+    ]
   },
   {
     "label": "the exactly-one-edit-shape check is dropped",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    if (edits is None) == (new_source is None):\n        raise ValidationError(\n            \"site_edit.invalid_args\",\n            \"edit_html_file requires exactly one of `edits` (a targeted \"\n            \"search/replace diff) or `new_source` (a full file rewrite).\",\n        )",
     "replace": "    pass",
-    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py"
+    ]
   },
   {
     "label": "create overwrites an existing file at the pockets-service chokepoint",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
     "find": "    if create and exists:\n        raise ValidationError(\n            \"pocket.html_file_exists\",",
     "replace": "    if False and exists:\n        raise ValidationError(\n            \"pocket.html_file_exists\",",
-    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py"
+    ]
   },
   {
     "label": "the pockets-service engine gate accepts a non-html pocket",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
     "find": "    if getattr(doc, \"engine\", \"ripple\") != \"html\" or not isinstance(doc.source, dict):\n        raise ValidationError(\n            \"pocket.not_html_site\",",
     "replace": "    if not isinstance(doc.source, dict):\n        raise ValidationError(\n            \"pocket.not_html_site\",",
-    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py"
+    ]
   },
   {
     "label": "the edit republishes (pushes unvalidated markup live)",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    return {\"pocket_id\": pocket_id, \"file_path\": file_path, \"created\": create}",
-    "replace": "    await publish_pocket(workspace_id=\"\", user_id=user_id, pocket_id=pocket_id, name=\"\")\n    return {\"pocket_id\": pocket_id, \"file_path\": file_path, \"created\": create}",
-    "tests": ["tests/ee/sites/test_html_file_edit.py"]
+    "find": "    # NO publish, NO enqueue, NO native pre-warm — see the DRAFT-ONLY paragraph",
+    "replace": "    await publish_pocket(workspace_id=\"\", user_id=user_id, pocket_id=pocket_id, name=\"\")\n    # NO publish, NO enqueue, NO native pre-warm — see the DRAFT-ONLY paragraph",
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py"
+    ]
   },
   {
     "label": "the html refine branch is dropped, so an html site's chat falls back to the engine-unknown routing table instead of naming its own edit tool",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
     "find": "    elif engine == \"html\":",
     "replace": "    elif False:  # html refine branch dropped",
-    "tests": ["tests/cloud/surface/test_sites_handler.py::test_html_refine_routes_the_edit_to_the_html_edit_tool", "tests/cloud/surface/test_sites_handler.py::test_html_refine_can_offer_to_publish_the_change"]
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_html_refine_routes_the_edit_to_the_html_edit_tool",
+      "tests/cloud/surface/test_sites_handler.py::test_html_refine_can_offer_to_publish_the_change"
+    ]
   },
   {
     "label": "the html create step stops naming the edit tool, so a follow-up change in the same conversation goes back to a second create_html_site and a second site pocket",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "            \"page' \u2014 is `mcp__pocketpaw_sites_manager__edit_html_file` with the \"",
-    "replace": "            \"page' \u2014 is `create_html_site` again with the \"",
-    "tests": ["tests/cloud/surface/test_sites_handler.py::test_html_create_routes_follow_up_changes_to_the_edit_tool"]
+    "find": "            \"page' — is `mcp__pocketpaw_sites_manager__edit_html_file` with the \"",
+    "replace": "            \"page' — is `create_html_site` again with the \"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_html_create_routes_follow_up_changes_to_the_edit_tool"
+    ]
   },
   {
     "label": "the publish step is withheld from html again, so a saved html edit has no route to live and the agent cannot tell the user how to publish it",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
     "find": "    publish_step = \"\" if engine is None else _refine_publish_step(engine, pocket_id)",
     "replace": "    publish_step = \"\" if engine in (None, \"html\") else _refine_publish_step(engine, pocket_id)",
-    "tests": ["tests/cloud/surface/test_sites_handler.py::test_html_refine_can_offer_to_publish_the_change"]
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_html_refine_can_offer_to_publish_the_change"
+    ]
+  },
+  {
+    "label": "the orphan-create signal is hardcoded off: a page nothing links to reports a clean success, so an unreachable page is announced as added",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    unreferenced = create and not html_path_is_referenced(",
+    "replace": "    unreferenced = False and not html_path_is_referenced(",
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py::test_create_reports_the_new_page_is_linked_from_nowhere",
+      "tests/ee/sites/test_html_file_edit.py::test_a_page_whose_own_nav_links_to_it_is_still_unreferenced",
+      "tests/ee/sites/test_html_file_edit.py::test_an_external_url_that_merely_contains_the_path_is_not_a_reference"
+    ]
+  },
+  {
+    "label": "the signal is hardcoded on: every create nags, including a page that is already linked, which is how a warning gets ignored",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    unreferenced = create and not html_path_is_referenced(",
+    "replace": "    unreferenced = create or not html_path_is_referenced(",
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py::test_a_directory_link_reaches_that_directorys_index",
+      "tests/ee/sites/test_html_file_edit.py::test_a_css_url_reference_counts"
+    ]
+  },
+  {
+    "label": "the create scoping is gone: the scan runs on every edit, so touching an unlinked asset nags about wiring nobody asked to change",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    unreferenced = create and not html_path_is_referenced(",
+    "replace": "    unreferenced = not html_path_is_referenced(",
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py::test_an_ordinary_edit_never_reports_unreferenced"
+    ]
+  },
+  {
+    "label": "a directory link no longer reaches its index.html, so a page linked from the nav the ordinary way (href=/about) reports as unreachable",
+    "file": "ee/pocketpaw_ee/sites/html_paths.py",
+    "find": "        dir_alias = norm[: -len(\"/index.html\")]",
+    "replace": "        dir_alias = None",
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py::test_a_directory_link_reaches_that_directorys_index"
+    ]
+  },
+  {
+    "label": "off-site schemes are treated as local paths, so a stale external link to example.com/about/ passes for a link to the local about page",
+    "file": "ee/pocketpaw_ee/sites/html_paths.py",
+    "find": "    if not ref or ref.lower().startswith(_OFF_SITE_PREFIXES):",
+    "replace": "    if not ref:",
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py::test_an_external_url_that_merely_contains_the_path_is_not_a_reference",
+      "tests/ee/sites/test_html_file_edit.py::test_a_protocol_relative_url_is_not_a_local_path"
+    ]
+  },
+  {
+    "label": "the written file no longer skips itself, so a page carrying the site nav counts its own link and an unreachable page reports as linked",
+    "file": "ee/pocketpaw_ee/sites/html_paths.py",
+    "find": "        if referrer == norm:\n            continue",
+    "replace": "        if False and referrer == norm:\n            continue",
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py::test_a_page_whose_own_nav_links_to_it_is_still_unreferenced"
+    ]
+  },
+  {
+    "label": "CSS url() references stop counting, so a background image that is wired up reports as an orphan and the agent is invited to fix a working file",
+    "file": "ee/pocketpaw_ee/sites/html_paths.py",
+    "find": "    refs.extend(_CSS_URL_RE.findall(text))",
+    "replace": "    refs.extend([])",
+    "tests": [
+      "tests/ee/sites/test_html_file_edit.py::test_a_css_url_reference_counts"
+    ]
+  },
+  {
+    "label": "the handler drops the outstanding-link warning, so the agent narrates an unreachable page as an ordinary success",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "    if unreferenced:\n        message = (\n            f\"HALF DONE — `{result['file_path']}` was created",
+    "replace": "    if False and unreferenced:\n        message = (\n            f\"HALF DONE — `{result['file_path']}` was created",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_edit_html_file.py::TestUnreferencedCreateWarning::test_orphan_create_tells_the_agent_nothing_links_to_the_page"
+    ]
   }
 ]

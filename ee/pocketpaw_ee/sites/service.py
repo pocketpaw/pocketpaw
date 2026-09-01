@@ -1,6 +1,14 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-01 (fix/sites-html-orphan-create): ``edit_html_file`` gains the
+# same ``unreferenced`` verdict, for the same defect on the track where it costs
+# more. An unimported react component is invisible; an unlinked html page is written
+# AND DEPLOYED and simply cannot be navigated to, which is a state an agent can
+# reasonably describe as finished. The QUESTION is shared and the ANSWER is not — an
+# html site imports nothing, so ``html_path_is_referenced`` resolves URL references
+# instead of module specifiers (see that module's header).
+#
 # Updated 2026-09-01 (fix/sites-react-orphan-create): ``edit_react_component`` now
 # returns ``unreferenced`` alongside ``created``. Adding a section to a react site is
 # TWO calls — write ``src/components/<Name>.tsx``, then edit ``src/App.tsx`` to import
@@ -989,6 +997,7 @@ from pocketpaw_ee.sites.generator_client import (
     svelte_source_is_dynamic,
 )
 from pocketpaw_ee.sites.html_paths import (
+    html_path_is_referenced,
     html_path_rejection,
     is_reserved_html_path,
     normalize_html_path,
@@ -7131,10 +7140,27 @@ async def edit_html_file(
         create=create,
     )
 
+    # Does anything point at the file we just wrote? The react lane's question
+    # (see ``edit_react_component``), asked with html's answer: a page nothing links
+    # to is written into the output directory and no visitor can navigate to it, and
+    # a create used to report that identically to a change that is actually visible.
+    # Scoped to ``create`` for the same reason it is there — a warning on every edit
+    # is noise, and noise is how the one that matters gets skimmed. The map scanned
+    # is the POST-write one, keyed by the NORMALIZED path, because that is what the
+    # write above stored.
+    unreferenced = create and not html_path_is_referenced(
+        {**source_map, file_path: new_source}, file_path
+    )
+
     # NO publish, NO enqueue, NO native pre-warm — see the DRAFT-ONLY paragraph
     # above. The pre-warm serves the svelte native editor's shadow-render, which
     # reads a SvelteKit build; html has no such artifact.
-    return {"pocket_id": pocket_id, "file_path": file_path, "created": create}
+    return {
+        "pocket_id": pocket_id,
+        "file_path": file_path,
+        "created": create,
+        "unreferenced": unreferenced,
+    }
 
 
 async def _latest_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
