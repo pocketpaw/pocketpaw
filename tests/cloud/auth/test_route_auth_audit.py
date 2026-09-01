@@ -128,6 +128,10 @@ ROUTER_MODULES = [
 ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
     # You cannot hold a session before you have signed in.
     "POST /auth/login": "issues the session",
+    # BYOK-first onboarding (2026-09-01): a guest has no account yet by
+    # definition. Guarded by the per-IP mint rate limit + the provider key
+    # validation (a caller must present a working credential to get anything).
+    "POST /auth/guest": "mints the guest session; rate-limited per IP, key validated first",
     "POST /auth/bearer/login": "issues the session (native/API transport)",
     "POST /auth/register": "creates the account",
     "POST /auth/mfa/challenge": "second factor, carries its own short-lived mfa_token",
