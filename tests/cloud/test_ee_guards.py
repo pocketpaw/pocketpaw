@@ -402,8 +402,15 @@ class TestPolicyResult:
 class TestPlanFeatureTable:
     """Validate the PLAN_FEATURES table contract (consumer ladder)."""
 
-    def test_free_is_chat_and_pockets_only(self):
-        assert PLAN_FEATURES["free"] == {"pockets", "sessions"}
+    def test_free_is_chat_and_pockets_plus_the_approval_gate(self):
+        """The floor is the canvas, sessions, and the gate those sessions need.
+
+        ``instinct`` joined the floor in fix/instinct-is-a-gate-not-a-tier. It is
+        not a paid capability that leaked down — it is the approval gate agents
+        propose through, and ``sessions`` on this tier means agents ACT here. A
+        floor that can create proposals but not approve them strands them.
+        """
+        assert PLAN_FEATURES["free"] == {"pockets", "sessions", "instinct"}
 
     def test_go_has_core_four(self):
         assert {"pockets", "sessions", "agents", "memory"} <= PLAN_FEATURES["go"]
