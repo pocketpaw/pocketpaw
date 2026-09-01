@@ -45,6 +45,9 @@ class ProfileOut(BaseModel):
     activeWorkspace: str | None  # noqa: N815 - intentional camelCase wire key
     workspaces: list[WorkspaceMembershipDto]
     mfa_enabled: bool  # snake_case: matches the paw-enterprise auth types wire key
+    # snake_case wire key, frozen with the BYOK-fe sibling (2026-09-01): guests
+    # get signup nudges + upload blocks; the flag must survive a page reload.
+    is_guest: bool = False
 
 
 def auth_user_to_profile_out(user: AuthUser) -> ProfileOut:
@@ -59,6 +62,7 @@ def auth_user_to_profile_out(user: AuthUser) -> ProfileOut:
             WorkspaceMembershipDto(workspace=m.workspace, role=m.role) for m in user.workspaces
         ],
         mfa_enabled=user.mfa_enabled,
+        is_guest=user.is_guest,
     )
 
 

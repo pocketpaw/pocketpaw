@@ -5,6 +5,12 @@ message, submitting a ``Run`` to the configured executor, and tailing the
 run's Redis Stream so durability sits underneath the wire shape the
 frontend already speaks.
 
+Changes: 2026-09-01 (feat/byok-guest-backend) — ``post_agent_chat`` gained a
+CHECK-ONLY guest turn gate beside the billing fast-reject: a guest at their
+daily turn cap (or with no usable stored key) gets a clean pre-stream 402
+whose body carries the frozen top-level ``code``/``kind`` contract. The
+executor owns the single atomic spend (``run_core._reject_if_guest_over_limit``).
+
 Changes: 2026-06-30 (feat/billing-quota-enforcement, chunk 3) — the run-start
 credit gate now also enforces the MONTHLY QUOTA. Beside the existing BC-4
 ``check_balance`` call (inside the same ``if get_settings().billing_enforced:``
@@ -202,6 +208,18 @@ async def post_agent_chat(
 
         await credits_service.check_balance(workspace_id)
         await credits_service.check_quota(workspace_id)
+
+    # Guest turn gate, CHECK-ONLY (feat/byok-guest-backend, 2026-09-01). The
+    # guest sibling of the billing fast-reject above, and for the same reason:
+    # the browser gets a clean pre-stream 402 with no DB trace — the body
+    # carries the frozen top-level {"code": "guest_limit_reached",
+    # "kind": "turns"} (or {"code": "guest_key_required"}) the signup prompt
+    # keys on. Deliberately does NOT increment: the executor
+    # (run_core._reject_if_guest_over_limit) owns the single atomic spend, so
+    # a turn costs exactly one. No-op (one indexed read) for non-guests.
+    from pocketpaw_ee.cloud.auth.guest_gates import assert_guest_turn_allowed
+
+    await assert_guest_turn_allowed(user_id, ctx.workspace_id)
 
     transport = get_stream_transport()
     # Resolve the surface-aware context preamble AFTER scope is resolved

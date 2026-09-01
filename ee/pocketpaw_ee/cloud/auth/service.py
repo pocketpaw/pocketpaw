@@ -57,6 +57,7 @@ def _to_domain(doc: _UserDoc) -> AuthUser:
         is_verified=doc.is_verified,
         is_superuser=doc.is_superuser,
         mfa_enabled=doc.mfa_enabled,
+        is_guest=bool(getattr(doc, "is_guest", False)),
     )
 
 

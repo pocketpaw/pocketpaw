@@ -205,6 +205,7 @@ from pocketpaw_ee.cloud.models.fabric_ingest_state import (
 )
 from pocketpaw_ee.cloud.models.file import FileObj
 from pocketpaw_ee.cloud.models.file_comprehension_usage import FileComprehensionUsage
+from pocketpaw_ee.cloud.models.guest_turn_usage import GuestTurnUsage
 from pocketpaw_ee.cloud.models.file_transcription_usage import FileTranscriptionUsage
 from pocketpaw_ee.cloud.models.file_version import FileVersionDoc
 from pocketpaw_ee.cloud.models.foresight_backtest import ForesightBacktest
@@ -482,6 +483,9 @@ def get_all_documents():
         # Per-workspace/day file-comprehension spend counter (FC-3). Only
         # ``ee.cloud.uploads.comprehension_budget`` reads/writes this.
         FileComprehensionUsage,
+        # Per-guest-user/day turn counter (BYOK-first onboarding). Only
+        # ``ee.cloud.auth.guest_budget`` reads/writes this.
+        GuestTurnUsage,
         # Per-workspace/day media-transcription spend counter (T2). Only
         # ``ee.cloud.uploads.transcription_budget`` reads/writes this. Separate
         # from the comprehension counter on purpose: the two meter different

@@ -1,5 +1,12 @@
 # ee/pocketpaw_ee/cloud/byok/service.py — the only reader of ByokProviderKey.
 #
+# Updated 2026-09-01 (feat/byok-guest-backend): ``set_key`` gained
+# ``validate: bool = True`` so the guest-mint route (which validates BEFORE
+# minting anything) can store without a second provider round trip. Also added
+# ``SUPPORTED_PROVIDERS`` — the turn pipeline (validation call, LiteLLM
+# x-api-key forward, claude model set) is Anthropic-only today, and accepting
+# another provider's key would mint accounts whose every turn dead-ends.
+#
 # Created 2026-08-28 (feat/other-hand-byok).
 #
 # Two audiences, deliberately separated:
@@ -38,6 +45,12 @@ _VALIDATE_TIMEOUT_S = 15.0
 # a 400 both prove the credential is good (400 == we were understood, then
 # refused on content); only 401/403 prove it is not.
 _VALIDATE_MODEL = "claude-haiku-4-5-20251001"
+
+# The providers this deployment can actually spend a key against, end to end.
+# v1 is Anthropic-only: ``validate_key`` calls Anthropic, the LiteLLM forward
+# targets Anthropic upstreams, and the model set is claude-*. Widening this set
+# means widening ALL THREE, not just this constant.
+SUPPORTED_PROVIDERS = frozenset({"anthropic"})
 
 
 @dataclass(frozen=True)
@@ -124,8 +137,17 @@ async def set_key(
     *,
     provider: str = "anthropic",
     user_id: str | None = None,
+    validate: bool = True,
 ) -> ByokStatus:
-    """Validate, then encrypt-and-upsert. Never stores an unverified key."""
+    """Validate, then encrypt-and-upsert. Never stores an unverified key.
+
+    ``validate=False`` (2026-09-01, feat/byok-guest-backend) is for callers
+    that ALREADY ran ``validate_key`` in the same request — the guest-mint
+    route validates before minting anything, and a second provider round trip
+    would double the cost and the latency of every mint. Default True keeps
+    every existing caller byte-identical; never pass False with a key that has
+    not just been validated.
+    """
     if not crypto.is_configured():
         raise ValidationError(
             "byok.encryption_unavailable",
@@ -133,7 +155,8 @@ async def set_key(
             "is not set. Contact the operator.",
         )
 
-    await validate_key(api_key)
+    if validate:
+        await validate_key(api_key)
 
     doc = await ByokProviderKey.find_one(ByokProviderKey.workspace == workspace_id)
     if doc is None:
@@ -211,6 +234,32 @@ async def resolve_turn_credentials(workspace_id: str | None) -> TurnCredentials:
     if not plaintext:
         return TurnCredentials(source="platform")
     return TurnCredentials(source="byok", api_key=plaintext, provider=doc.provider)
+
+
+#: Model names that mean "let the backend pick" — never a cross-provider pin.
+_MODEL_SENTINELS = frozenset({"", "default", "auto", "inherit"})
+
+
+def provider_allows_model(provider: str, model: str | None) -> bool:
+    """Whether a turn pinned to ``provider``'s key may run ``model``.
+
+    The BYOK model-pinning rule (feat/byok-guest-backend): when a turn runs on
+    a stored key, the model must belong to that key's provider — an OpenAI key
+    cannot run a Claude model. A mismatch must surface as a CLEAR error at the
+    seam that decides, never as an upstream 401 that reads like the product
+    being broken. Sentinel names ("default" etc.) always pass: the backend's
+    own default is provider-correct by construction.
+
+    Anything but ``anthropic`` returns False for every real model name — the
+    pipeline cannot serve another provider end to end today (see
+    ``SUPPORTED_PROVIDERS``), and a loud mismatch beats a silent dead turn.
+    """
+    m = (model or "").strip().lower()
+    if m in _MODEL_SENTINELS:
+        return True
+    if provider == "anthropic":
+        return m.startswith("claude") or m.startswith("anthropic/")
+    return False
 
 
 def _hint(api_key: str) -> str:

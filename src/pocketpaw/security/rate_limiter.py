@@ -6,6 +6,7 @@ Pre-configured tiers:
   - login:    5 per 15 min, burst 5  (login/register/bearer-login, keyed by (ip, email))
   - ws:        2 conn/s, burst  5  (WebSocket connections)
   - api_key:   configurable per-key limiter (default 60 req/min)
+  - guest_mint: 3 per hour, burst 3  (POST /auth/guest, keyed by IP — 2026-09-01)
 
 No external dependencies — pure stdlib.
 """
@@ -156,6 +157,11 @@ auth_limiter = RateLimiter(rate=1.0, capacity=5)
 login_limiter = RateLimiter(rate=5.0 / 900.0, capacity=5)
 # MFA challenge: 5 wrong codes per 5 min, keyed by (ip, mfa_token_jti).
 mfa_challenge_limiter = RateLimiter(rate=5.0 / 300.0, capacity=5)
+# Guest mint (BYOK-first onboarding, 2026-09-01): each mint is a provider
+# round trip on our egress plus a user+workspace row — unthrottled it is both
+# a free key-checking oracle and a row-spam vector. 3 burst, ~3/hour refill,
+# per client IP. In-memory token bucket: denies when empty (fail closed).
+guest_mint_limiter = RateLimiter(rate=3.0 / 3600.0, capacity=3)
 ws_limiter = RateLimiter(rate=2.0, capacity=5)
 _api_key_limiter: RateLimiter | None = None
 

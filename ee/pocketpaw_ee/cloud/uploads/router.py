@@ -1,5 +1,9 @@
 """EE /uploads router — workspace-scoped upload endpoints.
 
+Updated 2026-09-01 (feat/byok-guest-backend): POST "" (the upload route)
+refuses guest accounts with 403 {"code": "guest_upload_forbidden"} before any
+other processing — uploads are the signup hook for BYOK guests.
+
 2026-08-28 (FC-1 "File comprehension"): ``PATCH /uploads/{file_id}`` accepts
 ``summary`` (str) so a person can correct or write what a file IS, and the
 response echoes it. This is the half of FC-1 that makes "never overwrite a
@@ -326,6 +330,17 @@ async def upload(
     workspace: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> dict:
+    # Guests cannot upload (BYOK-first onboarding, 2026-09-01): the upload
+    # affordance is the signup hook. Raised BEFORE any validation/side effect;
+    # ``GuestUploadForbidden`` is a 403 whose body carries the frozen
+    # top-level {"code": "guest_upload_forbidden"} contract. No-op (one
+    # indexed user read) for everyone else.
+    from pocketpaw_ee.cloud.auth import guest_budget
+
+    if await guest_budget.load_guest(user_id) is not None:
+        from pocketpaw_ee.cloud._core.errors import GuestUploadForbidden
+
+        raise GuestUploadForbidden()
     try:
         folder_path = normalize_path(path)
     except ValueError as e:

@@ -1,5 +1,11 @@
 """Sessions service — CRUD + history + activity tracking.
 
+Updated 2026-09-01 (feat/byok-guest-backend): ``create`` enforces the guest
+session cap on its NEW-ROW branch only (upsert/re-link of an existing session
+stays uncapped — it creates nothing), via ``auth.guest_gates``. Added
+``count_owned(user_id)`` so the guest budget can count sessions without
+touching this entity's Beanie document (cloud rule 2).
+
 Sole owner of writes to the ``Session`` Beanie document. Module-level
 ``async def`` API, no class wrapper, no Protocol-based repository.
 
@@ -88,6 +94,16 @@ def _to_domain(doc: _SessionDoc) -> DomainSession:
     )
 
 
+async def count_owned(user_id: str) -> int:
+    """How many session rows a user owns, across every workspace and surface.
+
+    # global-read: the guest session cap (auth/guest_budget) is a property of
+    # the USER, not one workspace — a guest's caps must not multiply by
+    # workspace. Only the guest budget calls this.
+    """
+    return await _SessionDoc.find(_SessionDoc.owner == user_id).count()
+
+
 def legacy_ctx(user_id: str, workspace_id: str | None = None) -> RequestContext:
     """Build a RequestContext for routers that haven't migrated to
     ``Depends(request_context)`` yet. Synthesizes request_id and scope."""
@@ -154,6 +170,15 @@ async def create(
         ctype = "pocket"
     else:
         ctype = "session"
+
+    # Guest session cap (BYOK-first onboarding): only the NEW-ROW branch —
+    # the upsert path above returns an EXISTING session and mints nothing.
+    # No-op for non-guest users; raises GuestLimitError("sessions") (402,
+    # the frozen signup-prompt contract) at the cap. Lazy import: auth and
+    # sessions must stay independently importable.
+    from pocketpaw_ee.cloud.auth.guest_gates import assert_guest_can_create_session
+
+    await assert_guest_can_create_session(ctx.user_id)
 
     doc = _SessionDoc(
         sessionId=sid,
