@@ -1,6 +1,18 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-09-01 (feat/scale-concurrency-knobs): Added ``agent_pool_max_instances``
+    (default 20), ``session_warm_max_per_tenant`` (default 8) and
+    ``session_warm_max_global`` (default 64) — the three agent-tier ceilings that
+    were previously HARDCODED constructor defaults reachable only by editing
+    ``pool.py`` / ``session_supervisor.py``, because both singletons are built with
+    no arguments (``AgentPool()``, ``SessionSupervisor()``). Every default is the
+    literal that was already in force, so no existing deploy changes behaviour;
+    they exist so a multi-user deploy can raise them from env. Note these are
+    PER-PROCESS ceilings — they bound one web or worker process, and replicas
+    multiply them. Distinct from ``max_concurrent_conversations`` below, which
+    gates only the OSS channel-adapter loop, and from ``POCKETPAW_ARQ_MAX_JOBS``,
+    which is the cluster-wide arq ceiling.
   - 2026-08-03 (PA-9): Re-measured ``prompt_pocket_summary_only``'s payoff against
     the live layer and corrected its description. The flag saves ~1,631 chars/turn
     (3,240 -> 1,609 on a 300-widget pocket), not the ~39.6k the old note implied —
@@ -2804,8 +2816,56 @@ class Settings(BaseSettings):
     )
 
     # Concurrency
+    #
+    # Three different ceilings live near each other and are easy to confuse, so:
+    #   * ``max_concurrent_conversations`` — the OSS AgentLoop semaphore. Gates the
+    #     CHANNEL adapters (Telegram / Discord / Slack / WhatsApp) only. The cloud
+    #     chat path (``ee.cloud.chat.runs.run_core``) does NOT import AgentLoop, so
+    #     raising this does nothing for a cloud deploy.
+    #   * ``agent_pool_max_instances`` / ``session_warm_*`` — PER-PROCESS agent-tier
+    #     ceilings, in force on both the web process and each arq worker.
+    #   * ``POCKETPAW_ARQ_MAX_JOBS`` (in the arq WorkerSettings, not here) — the
+    #     CLUSTER-WIDE concurrent-job ceiling. That is the one that bounds how many
+    #     agent runs execute at once in a cloud deploy.
     max_concurrent_conversations: int = Field(
-        default=5, gt=0, description="Max parallel conversations processed simultaneously"
+        default=5,
+        gt=0,
+        description=(
+            "Max parallel conversations processed simultaneously by the OSS "
+            "AgentLoop — the channel adapters (Telegram/Discord/Slack/WhatsApp). "
+            "Does NOT gate cloud chat runs, which bypass AgentLoop entirely; use "
+            "POCKETPAW_ARQ_MAX_JOBS for those."
+        ),
+    )
+    agent_pool_max_instances: int = Field(
+        default=20,
+        gt=0,
+        description=(
+            "Max live agent instances held by one process's AgentPool before it "
+            "refuses to build another. PER-PROCESS, not cluster-wide. Set via "
+            "POCKETPAW_AGENT_POOL_MAX_INSTANCES."
+        ),
+    )
+    session_warm_max_per_tenant: int = Field(
+        default=8,
+        gt=0,
+        description=(
+            "Max WARM session slots one workspace may hold in a single process. "
+            "Over the limit the SessionSupervisor LRU-evicts the oldest IDLE slot "
+            "(never a busy one). This is the per-tenant fairness knob: it stops one "
+            "workspace holding every warm slot. Set via "
+            "POCKETPAW_SESSION_WARM_MAX_PER_TENANT."
+        ),
+    )
+    session_warm_max_global: int = Field(
+        default=64,
+        gt=0,
+        description=(
+            "Max WARM session slots across ALL workspaces in a single process. Each "
+            "warm slot pins a live agent client (a subprocess under the default "
+            "claude_agent_sdk backend), so raise this with the container's memory "
+            "limit. Set via POCKETPAW_SESSION_WARM_MAX_GLOBAL."
+        ),
     )
 
     # Composio — MCP-direct tool provider for the parent cloud chat agent.

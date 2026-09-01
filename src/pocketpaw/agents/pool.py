@@ -3,6 +3,13 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-09-01 (feat/scale-concurrency-knobs) — ``get_agent_pool`` now builds the
+  singleton with ``max_instances`` from settings (``POCKETPAW_AGENT_POOL_MAX_INSTANCES``,
+  default 20 — the value that was already in force). The constructor default is
+  unchanged, so direct ``AgentPool(...)`` construction in tests is unaffected; only
+  the app's one shared instance reads config. The cap is PER-PROCESS: the web process
+  and each arq worker each hold their own pool.
+
 Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — ``_accepts_prompt_digest``
   and ``_accepts_prompt_digest_kwarg`` no longer live here; they moved to
   ``pocketpaw.agents.backend`` and are re-imported. The channel path grew a
@@ -1094,8 +1101,17 @@ _pool: AgentPool | None = None
 
 
 def get_agent_pool() -> AgentPool:
-    """Get or create the global agent pool."""
+    """Get or create the global agent pool.
+
+    ``max_instances`` is resolved from settings HERE rather than as a constructor
+    default so an explicit ``AgentPool(max_instances=...)`` — which every test uses
+    — keeps winning, and so the env knob reaches the one instance the app actually
+    runs on. The import is function-local for the same import-cycle reason as the
+    other ``Settings.load()`` calls in this module.
+    """
     global _pool
     if _pool is None:
-        _pool = AgentPool()
+        from pocketpaw.config import Settings
+
+        _pool = AgentPool(max_instances=Settings.load().agent_pool_max_instances)
     return _pool
