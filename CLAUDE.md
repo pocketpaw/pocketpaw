@@ -225,6 +225,31 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   env-configurable), marking queued/running `ChatRunDoc`s older than 10 minutes as
   `interrupted` so runs abandoned by a backend restart surface a retry affordance
   instead of leaving clients subscribed forever.
+- **Concurrency / capacity config**: four ceilings that are easy to confuse. In a
+  cloud deploy only the first one bounds how many agent runs execute at once.
+  `POCKETPAW_ARQ_MAX_JOBS` (default `10`, arq's own) — **cluster-wide**: concurrent
+  jobs ONE arq worker runs, shared across every lane it registers (chat runs,
+  workspace jobs, both `/ship` jobs, both site builds). It was unset until
+  2026-09-01, so every earlier deploy ran on arq's default with no way to raise
+  it; ten concurrent site publishes left no slot for a chat run, and job 11 was
+  neither rejected nor retried (`max_tries = 1`) — it waited in Redis behind a
+  30-minute `job_timeout`. Total concurrency is this value x worker replicas.
+  Raise it WITH the container's memory limit: the default `claude_agent_sdk`
+  backend spawns a Node subprocess per run, so RAM binds before CPU.
+  `POCKETPAW_AGENT_POOL_MAX_INSTANCES` (default `20`) — **per-process** AgentPool
+  ceiling; the web process and each worker each hold their own pool.
+  `POCKETPAW_SESSION_WARM_MAX_PER_TENANT` (default `8`) /
+  `POCKETPAW_SESSION_WARM_MAX_GLOBAL` (default `64`) — **per-process** warm
+  session slots. The per-tenant one is the fairness knob that stops one workspace
+  holding every slot; over the limit the oldest IDLE slot is evicted, never a busy
+  one. Each warm slot pins a live agent client, so raise the global one with the
+  container's memory limit.
+  `POCKETPAW_MAX_CONCURRENT_CONVERSATIONS` (default `5`) — the OSS `AgentLoop`
+  semaphore, which gates the CHANNEL adapters only. The cloud chat path
+  (`ee.cloud.chat.runs.run_core`) never imports `AgentLoop`, so raising this does
+  nothing for a cloud deploy. Every default above is the value that was already in
+  force, so shipping these knobs moved no deploy. Sizing guidance:
+  `docs/internal/2026-05-resumable-runs-deploy.md` -> "Sizing the worker".
 - **Growth outbound config (`GROWTH_SENDING_DOMAIN`)**: the secondary domain the
   `/growth` engine sends cold outreach from — **required**, with no default. The
   dispatch worker fails closed when it is unset (nothing goes out), validates the

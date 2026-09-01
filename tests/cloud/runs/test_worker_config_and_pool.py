@@ -22,6 +22,7 @@ descriptor magic.
 
 from __future__ import annotations
 
+import inspect
 from unittest.mock import AsyncMock
 
 import pytest
@@ -156,5 +157,56 @@ async def test_job_timeout_helper_invalid_or_nonpositive_falls_back(monkeypatch)
     for bad in ("not-a-number", "-5", "0", ""):
         monkeypatch.setenv("POCKETPAW_CLOUD_RUN_JOB_TIMEOUT", bad)
         assert worker_mod._job_timeout_seconds() == worker_mod._DEFAULT_RUN_JOB_TIMEOUT_SECONDS, (
+            f"{bad!r} should fall back to the default"
+        )
+
+
+# --- POCKETPAW_ARQ_MAX_JOBS: the cluster-wide concurrency ceiling ----------
+#
+# Added 2026-09-01 (feat/scale-concurrency-knobs). ``max_jobs`` was previously
+# UNSET on WorkerSettings, so arq's own default of 10 applied invisibly and
+# bounded every registered lane at once. These pin both halves of the fix: the
+# attribute reaches arq at all (same ``__dict__`` contract as redis_settings),
+# and the helper is fail-soft in the same way ``_job_timeout_seconds`` is.
+
+
+async def test_worker_settings_max_jobs_is_a_plain_int_in_dict():
+    """arq reads ``settings_cls.__dict__`` directly, so ``max_jobs`` must be a
+    concrete int there — not a property, not a descriptor. Same reason as
+    ``redis_settings`` above; a descriptor would be handed straight to
+    ``Worker.__init__`` and crash ``BoundedSemaphore(max_jobs + 1)``."""
+    raw = worker_mod.WorkerSettings.__dict__.get("max_jobs")
+    assert isinstance(raw, int), (
+        f"WorkerSettings.max_jobs in __dict__ is {type(raw).__name__}, expected int. "
+        "arq bypasses the descriptor protocol via __dict__ access."
+    )
+    assert raw > 0
+
+
+async def test_max_jobs_helper_default(monkeypatch):
+    monkeypatch.delenv("POCKETPAW_ARQ_MAX_JOBS", raising=False)
+    assert worker_mod._max_jobs() == worker_mod._DEFAULT_MAX_JOBS
+
+
+async def test_max_jobs_default_matches_arq_own_default():
+    """The default must stay arq's own (10), so merely shipping this knob does
+    not change the concurrency of any existing deploy."""
+    from arq.worker import Worker
+
+    arq_default = inspect.signature(Worker.__init__).parameters["max_jobs"].default
+    assert worker_mod._DEFAULT_MAX_JOBS == arq_default
+
+
+async def test_max_jobs_helper_env_override(monkeypatch):
+    monkeypatch.setenv("POCKETPAW_ARQ_MAX_JOBS", "40")
+    assert worker_mod._max_jobs() == 40
+
+
+async def test_max_jobs_helper_invalid_or_nonpositive_falls_back(monkeypatch):
+    """0 would wedge the worker into accepting no jobs and a negative would
+    crash arq's BoundedSemaphore, so neither may reach it."""
+    for bad in ("not-a-number", "-5", "0", "", "  "):
+        monkeypatch.setenv("POCKETPAW_ARQ_MAX_JOBS", bad)
+        assert worker_mod._max_jobs() == worker_mod._DEFAULT_MAX_JOBS, (
             f"{bad!r} should fall back to the default"
         )

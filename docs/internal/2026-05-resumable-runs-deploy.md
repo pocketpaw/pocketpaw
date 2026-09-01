@@ -57,6 +57,49 @@ POCKETPAW_CLOUD_RUN_EXECUTOR=arq
 Redeploy the web service. POST `/api/v1/cloud/chat/{scope}/{scope_id}/agent`
 will now enqueue an `execute_run_job` instead of spawning an `asyncio.Task`.
 
+## Sizing the worker
+
+`max_jobs` was unset until 2026-09-01, so every deploy before that ran on arq's
+default of **10 concurrent jobs per worker** — and that ceiling is shared by all
+six registered functions, not divided among them. Ten concurrent site publishes
+leave no slot for a chat message. The failure mode is invisible from the outside:
+job 11 is not rejected and, with `max_tries = 1`, not retried either. It waits in
+Redis behind a `job_timeout` of up to 30 minutes, so the user just sees a reply
+that never starts.
+
+Total cluster concurrency is `POCKETPAW_ARQ_MAX_JOBS x worker replicas`. Both
+levers work; they cost different things.
+
+**Raise `max_jobs` when the runs are IO-bound** (waiting on the model API). Costs
+memory in one container, and nothing else.
+
+**Add replicas when the runs are CPU- or memory-bound** (site builds, `/ship`
+deploys). Costs a whole container each, and they are safe to add: arq uses a
+single Redis-backed queue, so each job goes to exactly one worker.
+
+Two constraints bound how far `max_jobs` can go:
+
+- **Memory, not CPU, binds first.** The default `claude_agent_sdk` backend spawns
+  a Node subprocess per run. Raise the container's memory limit in the same change
+  — the Coolify worker ships with a 4G limit, which will not hold 10 concurrent
+  SDK runs, let alone more. The `pydantic_ai` backend runs in-process and is much
+  cheaper per run if you are concurrency-bound rather than capability-bound.
+- **Mongo connections.** Each worker opens its own pool (pymongo's default
+  `maxPoolSize` is 100 and nothing overrides it), so replicas multiply
+  connections against a single-node Mongo.
+
+**Set `POCKETPAW_CLOUD_WORKER_BOOT_SWEEP=false` before adding the second
+replica** — it defaults to false, so this is a "do not turn it on" rather than a
+change, but it is the one setting that is actively unsafe multi-replica: the boot
+sweep marks other workers' in-flight runs as `interrupted`.
+
+The per-process knobs (`POCKETPAW_AGENT_POOL_MAX_INSTANCES`,
+`POCKETPAW_SESSION_WARM_MAX_*`) bound each process independently, so they need to
+clear `max_jobs` on the worker — a worker allowed 40 concurrent jobs but only 20
+pool instances will queue on the pool instead. `SESSION_WARM_MAX_PER_TENANT` is
+the one to keep deliberately low: it is what stops a single busy workspace
+holding every warm slot on the box.
+
 ## Manual end-to-end verification (staging)
 
 Run with worker + web both up and `POCKETPAW_CLOUD_RUN_EXECUTOR=arq` on the web:
@@ -125,6 +168,10 @@ Env vars (all also documented in `backend/CLAUDE.md` → Key Conventions):
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `POCKETPAW_CLOUD_RUN_EXECUTOR` | `inprocess` | Set to `arq` on the web service to enable Tier 2 |
+| `POCKETPAW_ARQ_MAX_JOBS` | `10` | Concurrent jobs ONE worker runs, shared across every registered lane. Set on the **worker**; the web service ignores it. See "Sizing the worker" below |
+| `POCKETPAW_AGENT_POOL_MAX_INSTANCES` | `20` | Per-process AgentPool ceiling. Applies to the web process AND each worker |
+| `POCKETPAW_SESSION_WARM_MAX_PER_TENANT` | `8` | Per-process warm session slots one workspace may hold. The per-tenant fairness knob |
+| `POCKETPAW_SESSION_WARM_MAX_GLOBAL` | `64` | Per-process warm session slots across all workspaces |
 | `POCKETPAW_REDIS_URL` | — | Required for both tiers; web + worker must share |
 | `CLOUD_MONGODB_URI` | `mongodb://localhost:27017/paw-enterprise` | Web + worker must share |
 | `POCKETPAW_CLOUD_RUN_STREAM_TTL` | `3600` | Redis Stream retention after a run terminates |

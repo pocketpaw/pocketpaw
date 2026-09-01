@@ -1,5 +1,14 @@
 """arq worker entry point for Tier 2 run execution.
 
+Updated: 2026-09-01 (feat/scale-concurrency-knobs) — ``WorkerSettings.max_jobs`` is
+now set, from ``POCKETPAW_ARQ_MAX_JOBS`` (default 10, arq's own). It was previously
+unset, so arq's default applied silently and the whole cluster ran ten concurrent
+jobs across ALL SIX registered lanes. That is the ceiling a multi-user deploy hits
+first — and it is invisible, because job 11 is not rejected or retried, it just sits
+in Redis behind a ``job_timeout`` of up to 30 minutes. Raise it together with the
+worker container's memory limit: the default ``claude_agent_sdk`` backend spawns a
+Node subprocess per run, so RAM binds before CPU does.
+
 Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — registered the /ship
 deploy job ``deploy_app_job`` into ``WorkerSettings.functions``, wrapped the same
 way as ``provision_box_job``: its own long timeout (a deploy pulls an image and
@@ -254,6 +263,48 @@ def _job_timeout_seconds() -> int:
     return val
 
 
+# arq's own default is max_jobs=10 (arq/worker.py). That ceiling is shared by
+# EVERY function registered below — chat runs, workspace jobs, both /ship jobs
+# and both site builds — so ten concurrent site publishes leave no slot for a
+# chat run. It is the cluster-wide concurrency limit, not a per-lane one:
+# replicas multiply it, this value does not.
+_DEFAULT_MAX_JOBS = 10
+
+
+def _max_jobs() -> int:
+    """Resolve the worker's concurrent-job ceiling from ``POCKETPAW_ARQ_MAX_JOBS``.
+
+    Same fail-soft contract as ``_job_timeout_seconds``: an unparseable or
+    non-positive value falls back to the default rather than being handed to
+    arq, where ``0`` would wedge the worker into accepting nothing and a
+    negative would crash ``BoundedSemaphore``.
+
+    Raise this WITH the container's memory limit, not instead of it. The
+    default ``claude_agent_sdk`` backend spawns a Node subprocess per run, so
+    concurrency here is bounded by RAM long before it is bounded by CPU.
+    """
+    raw = os.environ.get("POCKETPAW_ARQ_MAX_JOBS", "").strip()
+    if not raw:
+        return _DEFAULT_MAX_JOBS
+    try:
+        val = int(raw)
+    except ValueError:
+        logger.warning(
+            "POCKETPAW_ARQ_MAX_JOBS=%r is not an int; using default %d",
+            raw,
+            _DEFAULT_MAX_JOBS,
+        )
+        return _DEFAULT_MAX_JOBS
+    if val <= 0:
+        logger.warning(
+            "POCKETPAW_ARQ_MAX_JOBS=%d is not positive; using default %d",
+            val,
+            _DEFAULT_MAX_JOBS,
+        )
+        return _DEFAULT_MAX_JOBS
+    return val
+
+
 # Workspace jobs (pp#1459) run on this same worker but get their OWN
 # per-function timeout via ``arq.worker.func`` so a long-running job can't be
 # clipped by the chat-run timeout and vice-versa. The dotted name the web
@@ -348,5 +399,11 @@ class WorkerSettings:
     # it and make it env-tunable (POCKETPAW_CLOUD_RUN_JOB_TIMEOUT, default 30 min).
     # Plain int in __dict__ for the same arq-reads-__dict__ reason as redis_settings.
     job_timeout = _job_timeout_seconds()
+    # Concurrent-job ceiling, shared across every lane in ``functions``. arq's
+    # default of 10 is the first limit a multi-user deploy hits: job 11 waits in
+    # Redis behind a 30-minute ``job_timeout`` with ``max_tries=1``, so it is not
+    # retried, just queued. Plain int in __dict__ for the arq-reads-__dict__
+    # reason documented on `_redis_settings`.
+    max_jobs = _max_jobs()
     # Eager: arq reads __dict__, which bypasses descriptors. See `_redis_settings`.
     redis_settings = _redis_settings()

@@ -1,0 +1,92 @@
+[
+  {
+    "label": "max_jobs is dropped from WorkerSettings, so arq silently falls back to its own default of 10 and the whole knob is dead — the exact bug this change fixes, reintroduced",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
+    "find": "    max_jobs = _max_jobs()\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_worker_config_and_pool.py"
+    ]
+  },
+  {
+    "label": "max_jobs becomes a property, so arq's __dict__ read hands a descriptor to BoundedSemaphore(max_jobs + 1) and the worker crashes on boot — the _LazyRedisSettings deploy crash, repeated",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
+    "find": "    max_jobs = _max_jobs()",
+    "replace": "    max_jobs = property(lambda self: _max_jobs())",
+    "tests": [
+      "tests/cloud/runs/test_worker_config_and_pool.py"
+    ]
+  },
+  {
+    "label": "the default stops tracking arq's own, so merely shipping this knob quietly changes the concurrency of every existing deploy",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
+    "find": "_DEFAULT_MAX_JOBS = 10",
+    "replace": "_DEFAULT_MAX_JOBS = 40",
+    "tests": [
+      "tests/cloud/runs/test_worker_config_and_pool.py"
+    ]
+  },
+  {
+    "label": "the non-positive guard is dropped, so POCKETPAW_ARQ_MAX_JOBS=0 wedges the worker into accepting no jobs and a negative crashes arq's BoundedSemaphore",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
+    "find": "    if val <= 0:\n        logger.warning(\n            \"POCKETPAW_ARQ_MAX_JOBS=%d is not positive; using default %d\",",
+    "replace": "    if False:\n        logger.warning(\n            \"POCKETPAW_ARQ_MAX_JOBS=%d is not positive; using default %d\",",
+    "tests": [
+      "tests/cloud/runs/test_worker_config_and_pool.py"
+    ]
+  },
+  {
+    "label": "a typoed POCKETPAW_ARQ_MAX_JOBS raises instead of falling back, so one bad env var takes the whole worker down at import",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
+    "find": "    raw = os.environ.get(\"POCKETPAW_ARQ_MAX_JOBS\", \"\").strip()\n    if not raw:\n        return _DEFAULT_MAX_JOBS\n    try:\n        val = int(raw)\n    except ValueError:",
+    "replace": "    raw = os.environ.get(\"POCKETPAW_ARQ_MAX_JOBS\", \"\").strip()\n    if not raw:\n        return _DEFAULT_MAX_JOBS\n    val = int(raw)\n    if False:",
+    "tests": [
+      "tests/cloud/runs/test_worker_config_and_pool.py"
+    ]
+  },
+  {
+    "label": "get_agent_pool stops reading settings, so POCKETPAW_AGENT_POOL_MAX_INSTANCES is accepted, documented, and silently ignored",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "        _pool = AgentPool(max_instances=Settings.load().agent_pool_max_instances)",
+    "replace": "        _pool = AgentPool()",
+    "tests": [
+      "tests/test_agent_pool_max_instances.py"
+    ]
+  },
+  {
+    "label": "the AgentPool constructor default drifts from the config default, so a direct construction and the app singleton disagree about the ceiling",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "    def __init__(self, max_idle: int = 300, max_instances: int = 20) -> None:",
+    "replace": "    def __init__(self, max_idle: int = 300, max_instances: int = 5) -> None:",
+    "tests": [
+      "tests/test_agent_pool_max_instances.py"
+    ]
+  },
+  {
+    "label": "get_session_supervisor stops reading settings, so both warm-slot knobs are accepted, documented, and silently ignored",
+    "file": "src/pocketpaw/agents/session_supervisor.py",
+    "find": "        _supervisor = SessionSupervisor(\n            max_warm_per_tenant=settings.session_warm_max_per_tenant,\n            max_warm_global=settings.session_warm_max_global,\n        )",
+    "replace": "        _supervisor = SessionSupervisor()",
+    "tests": [
+      "tests/test_session_supervisor.py"
+    ]
+  },
+  {
+    "label": "the two warm quotas are wired to each other's settings, so the per-tenant fairness cap silently becomes the global one and one workspace can hold every slot",
+    "file": "src/pocketpaw/agents/session_supervisor.py",
+    "find": "            max_warm_per_tenant=settings.session_warm_max_per_tenant,\n            max_warm_global=settings.session_warm_max_global,",
+    "replace": "            max_warm_per_tenant=settings.session_warm_max_global,\n            max_warm_global=settings.session_warm_max_per_tenant,",
+    "tests": [
+      "tests/test_session_supervisor.py"
+    ]
+  },
+  {
+    "label": "the config default for the global warm cap drifts from the constructor's, so shipping the knob moves a deploy nobody set it on",
+    "file": "src/pocketpaw/config.py",
+    "find": "    session_warm_max_global: int = Field(\n        default=64,",
+    "replace": "    session_warm_max_global: int = Field(\n        default=32,",
+    "tests": [
+      "tests/test_session_supervisor.py"
+    ]
+  }
+]
