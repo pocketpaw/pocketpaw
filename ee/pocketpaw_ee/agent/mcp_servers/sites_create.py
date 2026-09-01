@@ -1,6 +1,10 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated: 2026-09-01 (fix/sites-html-orphan-create) — ``edit_html_file`` carries the
+# same ``unreferenced`` key and its own warning, naming the wiring step this track
+# actually has: a LINK from an existing page, not an import.
+#
 # Updated: 2026-09-01 (fix/sites-react-orphan-create — a create that renders nothing
 # stopped narrating as a finished change). ``edit_react_component``'s success body now
 # carries ``unreferenced`` and, when it is true, a ``message`` that LEADS with the
@@ -2476,6 +2480,28 @@ async def _edit_html_file_handler(args: dict) -> dict:
 
     # The edit is a DRAFT. The chat agent narrates this payload, so — exactly like
     # both sibling edit tools — it must not contain a completed-state publish claim.
+    #
+    # ``unreferenced`` is the react tool's signal on the html track, and it matters
+    # more here rather than less: an unreached react component is invisible, while an
+    # unreached html page is WRITTEN AND DEPLOYED and simply cannot be navigated to,
+    # so "the page is live but nothing links to it" is a state the agent can very
+    # plausibly describe as done. The wiring step differs from react's — a link from
+    # an existing page, not an import — so the message names that instead.
+    unreferenced = bool(result.get("unreferenced"))
+    message = (
+        "Saved to the site's draft — it is NOT online yet. Tell the user the "
+        "change is in the draft they can preview under /sites, and offer to "
+        "publish it; only call the publish tool when they ask."
+    )
+    if unreferenced:
+        message = (
+            f"HALF DONE — `{result['file_path']}` was created, but NOTHING IN THE "
+            "SITE LINKS TO IT, so no visitor can reach it and the pages they can "
+            "reach are unchanged. Make your NEXT call an `edits` call adding the "
+            "link — usually the nav in `index.html`, or a stylesheet/image "
+            "reference on the page that should show it. Do NOT tell the user the "
+            "page is added until that second call succeeds.\n"
+        ) + message
     return _success_response(
         {
             "ok": True,
@@ -2484,11 +2510,8 @@ async def _edit_html_file_handler(args: dict) -> dict:
             "pocket_id": result["pocket_id"],
             "file_path": result["file_path"],
             "created": result["created"],
-            "message": (
-                "Saved to the site's draft — it is NOT online yet. Tell the user the "
-                "change is in the draft they can preview under /sites, and offer to "
-                "publish it; only call the publish tool when they ask."
-            ),
+            "unreferenced": unreferenced,
+            "message": message,
         }
     )
 
@@ -2619,7 +2642,11 @@ def make_edit_html_file_tool(tool: Any) -> Any:
             "Args: `pocket_id` (the html site pocket), `file_path`, and one of "
             "`edits` / `new_source`, plus optional `create`. Returns {ok, "
             "status:'draft', is_live:false, pocket_id, file_path, created, "
-            "message}. Relay the `message`: the change is in the DRAFT the user can "
+            "unreferenced, message}. `unreferenced:true` means nothing in the site "
+            "links to the file you just created — no visitor can reach it — so the "
+            "second call adding the link is still outstanding and you must not "
+            "report the page as added yet. Relay the `message`: the change is in "
+            "the DRAFT the user can "
             "preview under /sites, and publishing is their call — do NOT tell them "
             "it is live. ok=false with an error means NOTHING was saved: an "
             "old_string that matched 0 or >1 times means make it more specific and "

@@ -1978,8 +1978,26 @@ Write ONE file of an html site's `source` map as a reviewable draft.
 | `create` | boolean | Default `false`. Create a NEW file at `file_path`; the path must **not** already exist. |
 
 Returns `{ok: true, status: "draft", is_live: false, pocket_id, file_path,
-created, message}`. To **add a page**, call it twice: once with `create: true` for
-e.g. `about.html`, then again with `edits` on `index.html` to link to it.
+created, unreferenced, message}`. To **add a page**, call it twice: once with
+`create: true` for e.g. `about.html`, then again with `edits` on `index.html` to
+link to it.
+
+**`unreferenced` is the second call's reminder**, the same signal
+`edit_react_component` carries, resolved html's way. It is `true` when this call
+*created* a file that no other file in the map points at — no `href`, `src`,
+`srcset`, `poster`, CSS `url()` or `@import` resolves to it. The reference is
+resolved against the referring file's own directory, a link to a directory
+matches that directory's `index.html` (`/about` reaches `about/index.html`, which
+is what the preview resolver serves), and off-site schemes are excluded, so a
+stale `https://example.com/about/` in the markup is not mistaken for a local link.
+The file the call just wrote is skipped, because a page whose only link to itself
+comes from its own copied nav is still unreachable.
+
+It matters more here than on the react track rather than less: an unimported react
+component is invisible, while an unlinked html page is written and deployed and
+simply cannot be navigated to — a state that is easy to describe as finished. The
+`message` then leads with the outstanding link and says not to report the page as
+added yet. Advisory and never blocking, and always `false` for an ordinary edit.
 
 **The argument is `file_path`, not `component_path`, and the difference is not
 cosmetic.** svelte and react have a component model; html does not — the scaffold

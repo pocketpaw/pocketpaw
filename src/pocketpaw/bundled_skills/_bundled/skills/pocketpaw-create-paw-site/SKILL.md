@@ -129,6 +129,13 @@ whole page to change a phone number.
 To ADD a page, call it twice: once with `create=true` and `new_source` for the
 new file, then once with `edits` on `index.html` to link to it.
 
+The tool tells you when that second call is still outstanding. After a `create`
+the response carries `unreferenced: true` if nothing in the site links to the
+file you just wrote — the page is written and will deploy, but no visitor can
+navigate to it, and every page they can reach looks exactly as it did. Add the
+link before you report the page as added. It is not an error: `ok` is still true
+and the file really was written, so do not retry the create.
+
 **Paths are the same ones you authored** — `index.html`, `styles.css`,
 `about.html`, `img/logo.svg`. Do not prefix with `src/`; that is the react
 track. The only unwritable path is the generated `_paw/` namespace.

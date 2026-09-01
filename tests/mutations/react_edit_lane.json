@@ -336,8 +336,8 @@
   {
     "label": "the handler drops the outstanding-step warning, so the agent narrates an orphan create as an ordinary success",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
-    "find": "    if unreferenced:\n        message = (",
-    "replace": "    if False and unreferenced:\n        message = (",
+    "find": "    if unreferenced:\n        message = (\n            f\"HALF DONE — `{result['component_path']}` was created",
+    "replace": "    if False and unreferenced:\n        message = (\n            f\"HALF DONE — `{result['component_path']}` was created",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_edit_react_component.py::TestUnreferencedCreateWarning::test_orphan_create_tells_the_agent_the_page_is_unchanged"
     ]

@@ -114,7 +114,15 @@ async def test_targeted_edits_are_applied_and_persisted(beanie_test_db):
         edits=[{"old_string": "555-0100", "new_string": "555-0199"}],
     )
 
-    assert out == {"pocket_id": pocket_id, "file_path": "index.html", "created": False}
+    # Whole-dict equality on purpose: the agent narrates this payload, so a key
+    # arriving without a decision is a key it will narrate un-briefed. ``unreferenced``
+    # is False here because this is an edit, not a create — see the section at the end.
+    assert out == {
+        "pocket_id": pocket_id,
+        "file_path": "index.html",
+        "created": False,
+        "unreferenced": False,
+    }
     source = await _source_of(pocket_id)
     assert "555-0199" in source["index.html"]
     assert "555-0100" not in source["index.html"]
@@ -637,3 +645,244 @@ async def test_an_edit_elsewhere_leaves_the_capture_form_intact(beanie_test_db):
     index = (await _source_of(pocket_id))["index.html"]
     assert "New headline" in index
     assert form in index, "the targeted edit disturbed the capture form"
+
+
+# ---------------------------------------------------------------------------
+# The UNREFERENCED-CREATE signal — the second half of the two-call contract
+# ---------------------------------------------------------------------------
+#
+# The react defect (fix/sites-react-orphan-create, 2026-09-01) one engine over, and
+# it is the same shape because the contract is: "add an about page" needs a new FILE
+# plus a LINK from an existing one, and only the file half had a tool result. A page
+# nothing links to is unreachable — the generator writes it into the output
+# directory and no visitor can ever navigate to it — but ``create`` reported the
+# same flat success it reports for a page that is wired up. The caller could not
+# tell the two apart, so it announced work the user could not find.
+#
+# What differs from react is HOW a file is reached, and a scan that assumed react's
+# answer would be wrong here in both directions. An html site is not a module tree:
+# nothing imports anything. Files are reached by URL — `href`, `src`, `srcset`, CSS
+# `url()` and `@import` — resolved against the REFERRING file's directory, and a
+# link to a directory reaches that directory's `index.html` (which is exactly what
+# the preview resolver does: `resolved / "index.html"`).
+
+
+@pytest.mark.asyncio
+async def test_create_reports_the_new_page_is_linked_from_nowhere(beanie_test_db):
+    """The bug. A page no other file links to cannot be navigated to by anybody,
+    and the caller must be told so on the call that creates it.
+
+    THE MUTATION THAT BREAKS THIS: hardcode ``unreferenced`` to False. Run: the
+    unreachable page reported a clean success and the caller had no reason to add
+    the link."""
+    pocket_id = await _make_html_pocket("ws1", "u1")
+
+    out = await sites_service.edit_html_file(
+        user_id="u1",
+        pocket_id=pocket_id,
+        file_path="about/index.html",
+        new_source="<!doctype html><html><body><h1>About us</h1></body></html>\n",
+        create=True,
+    )
+
+    assert out["created"] is True
+    assert out["unreferenced"] is True, (
+        "nothing in the site links to about/, so no visitor can reach the page"
+    )
+    # The file still landed: this is advice about the NEXT call, not a rejection.
+    source = await _source_of(pocket_id)
+    assert "about/index.html" in source
+
+
+@pytest.mark.asyncio
+async def test_a_directory_link_reaches_that_directorys_index(beanie_test_db):
+    """``<a href="/about">`` is how a page actually gets linked — nobody writes
+    ``/about/index.html`` in a nav. The preview resolver serves ``about/index.html``
+    for that request, so the scan has to resolve it the same way or it calls every
+    correctly linked page an orphan.
+
+    THE MUTATION THAT BREAKS THIS: drop the directory-index alias and compare the
+    resolved reference to the raw path only. Run: a page linked from the nav the
+    ordinary way still reported as unreachable."""
+    pocket_id = await _make_html_pocket("ws1", "u1")
+    await sites_service.edit_html_file(
+        user_id="u1",
+        pocket_id=pocket_id,
+        file_path="index.html",
+        edits=[
+            {
+                "old_string": "  <h1>Bright Smile Dental</h1>",
+                "new_string": (
+                    '  <nav><a href="/about">About</a></nav>\n  <h1>Bright Smile Dental</h1>'
+                ),
+            }
+        ],
+    )
+
+    out = await sites_service.edit_html_file(
+        user_id="u1",
+        pocket_id=pocket_id,
+        file_path="about/index.html",
+        new_source="<!doctype html><html><body><h1>About us</h1></body></html>\n",
+        create=True,
+    )
+
+    assert out["created"] is True
+    assert out["unreferenced"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_css_url_reference_counts(beanie_test_db):
+    """Not every reference is an ``href``. A background image is reached from a
+    stylesheet's ``url()``, and an attribute-only scan would report it unused and
+    invite the caller to "fix" a file that is already wired up."""
+    pocket_id = await _make_html_pocket("ws1", "u1")
+    await sites_service.edit_html_file(
+        user_id="u1",
+        pocket_id=pocket_id,
+        file_path="styles.css",
+        edits=[
+            {
+                "old_string": "body{font-family:system-ui}",
+                "new_string": "body{font-family:system-ui;background:url('/img/hero.jpg')}",
+            }
+        ],
+    )
+
+    out = await sites_service.edit_html_file(
+        user_id="u1",
+        pocket_id=pocket_id,
+        file_path="img/hero.jpg",
+        new_source="(binary-ish placeholder)",
+        create=True,
+    )
+
+    assert out["created"] is True
+    assert out["unreferenced"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_edit_never_reports_unreferenced(beanie_test_db):
+    """Scoped to ``create``. The file edited here is ``img/logo.svg``, which nothing
+    in the fixture references — chosen deliberately, because editing ``styles.css``
+    (which index.html links) would report False whether the scoping is there or not
+    and the mutation below would sail past a green test.
+
+    THE MUTATION THAT BREAKS THIS: drop the ``create and`` so the scan runs on every
+    edit. Run: touching an unlinked asset nagged about wiring the caller never asked
+    to change."""
+    pocket_id = await _make_html_pocket("ws1", "u1")
+
+    out = await sites_service.edit_html_file(
+        user_id="u1",
+        pocket_id=pocket_id,
+        file_path="img/logo.svg",
+        new_source="<svg viewBox='0 0 2 2'/>",
+    )
+
+    assert out["created"] is False
+    assert out["unreferenced"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_external_url_that_merely_contains_the_path_is_not_a_reference(
+    beanie_test_db,
+):
+    """A link to somebody else's site is not a link to a file in this one. A
+    substring scan would read ``https://example.com/about/`` as proof the local
+    ``about/index.html`` is wired up, and the one case the signal exists for —
+    a page the author has not linked yet — is exactly where a stale external link
+    is most likely to be sitting in the markup."""
+    pocket_id = await _make_html_pocket("ws1", "u1")
+    await sites_service.edit_html_file(
+        user_id="u1",
+        pocket_id=pocket_id,
+        file_path="index.html",
+        edits=[
+            {
+                "old_string": '  <a href="tel:5550100">555-0100</a>',
+                "new_string": '  <a href="https://example.com/about/">Our old site</a>',
+            }
+        ],
+    )
+
+    out = await sites_service.edit_html_file(
+        user_id="u1",
+        pocket_id=pocket_id,
+        file_path="about/index.html",
+        new_source="<!doctype html><html><body><h1>About us</h1></body></html>\n",
+        create=True,
+    )
+
+    assert out["created"] is True
+    assert out["unreferenced"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_page_whose_own_nav_links_to_it_is_still_unreferenced(beanie_test_db):
+    """The realistic false positive on this track, and the reason the scan skips the
+    file it just wrote. Every page of a hand-written site carries the same nav, so a
+    new ``about/index.html`` almost always contains ``<a href="/about">`` — pointing
+    at itself. Counting that would mark the page reachable while no OTHER page links
+    to it, which is precisely the state the signal exists to catch, and it would
+    misfire on the most common way the bug actually appears.
+
+    THE MUTATION THAT BREAKS THIS: drop the ``continue`` that skips the written file.
+    Run: a page linked only by its own copied nav reported as reachable."""
+    pocket_id = await _make_html_pocket("ws1", "u1")
+
+    out = await sites_service.edit_html_file(
+        user_id="u1",
+        pocket_id=pocket_id,
+        file_path="about/index.html",
+        new_source=(
+            "<!doctype html><html><body>\n"
+            '  <nav><a href="/">Home</a><a href="/about">About</a></nav>\n'
+            "  <h1>About us</h1>\n"
+            "</body></html>\n"
+        ),
+        create=True,
+    )
+
+    assert out["created"] is True
+    assert out["unreferenced"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_protocol_relative_url_is_not_a_local_path(beanie_test_db):
+    """The case the off-site guard actually earns its place on, found by a mutation
+    that escaped without it.
+
+    A plain ``https://example.com/about/`` never collides by accident: it does not
+    start with ``/``, so it resolves to the nonsense ``https:/example.com/about``
+    and matches nothing whatever the guard does. A PROTOCOL-RELATIVE reference is
+    different — ``//img/hero.jpg`` means host ``img``, path ``/hero.jpg``, and it
+    DOES start with ``/``, so stripping the leading slashes yields ``img/hero.jpg``:
+    a real file in this very source map. Without the guard the scan would report an
+    off-site image as proof the local one is wired up.
+
+    THE MUTATION THAT BREAKS THIS: drop the ``_OFF_SITE_PREFIXES`` check. Run: the
+    off-site reference counted as a local one and the orphan reported as linked."""
+    pocket_id = await _make_html_pocket("ws1", "u1")
+    await sites_service.edit_html_file(
+        user_id="u1",
+        pocket_id=pocket_id,
+        file_path="index.html",
+        edits=[
+            {
+                "old_string": "  <p>Gentle care in the heart of town.</p>",
+                "new_string": '  <img src="//img/hero.jpg" alt="">',
+            }
+        ],
+    )
+
+    out = await sites_service.edit_html_file(
+        user_id="u1",
+        pocket_id=pocket_id,
+        file_path="img/hero.jpg",
+        new_source="(binary-ish placeholder)",
+        create=True,
+    )
+
+    assert out["created"] is True
+    assert out["unreferenced"] is True
