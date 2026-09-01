@@ -1072,6 +1072,7 @@ RESERVED_GATED_PARAM_KEYS: frozenset[str] = frozenset(
         "_artifact_change",
         "_admin_action",
         "_customer_reply",
+        "_site_plan_request",
     }
 )
 
@@ -1209,6 +1210,54 @@ def _assert_gated_workspaces(action: Any, current_workspace: str) -> None:
     # was written; folded in at the growth-v1 rebase so the chokepoint keeps its
     # every-gated-kind guarantee.
     _assert_customer_reply_workspace(action, current_workspace)
+    # A site-plan request — approving it BUYS a plan on this workspace's
+    # subscription, so it needs the same tenancy binding as every other kind.
+    _assert_site_plan_request_workspace(action, current_workspace)
+
+
+def _site_plan_request_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_site_plan_request`` blob on an Action, or ``None``.
+
+    The blob is an employee's request to put a site on a PAID plan — approving it
+    charges the workspace's subscription. See ``ee/cloud/site_plan_requests/``
+    for the propose + execute halves.
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_site_plan_request")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_site_plan_request_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting a site-plan request from another workspace.
+
+    SECURITY — approving one BUYS A PLAN against the blob's workspace
+    subscription. ``require_action_any_workspace("instinct.approve")`` only proves
+    the caller holds the role SOMEWHERE; this binds the request to their active
+    workspace, on BOTH the approve and the reject side (asymmetric tenant scope is
+    no tenant scope — pocketpaw#1183 / #1250).
+
+    FAIL-CLOSED on an empty claim, for the reason the artifact-change guard
+    already documents: a workspace-less blob aimed at a victim's pocket must not
+    be approvable by any operator in any workspace. A plan request's tenancy is
+    mandatory — ``propose_site_plan_request`` refuses to build one without it — so
+    an empty claim is a tampered or corrupt blob, never a legitimate case.
+    """
+    blob = _site_plan_request_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This site plan request has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_action",
+            "This site plan request belongs to another workspace",
+        )
 
 
 def _growth_send_blob(action: Any) -> dict[str, Any] | None:
@@ -2653,6 +2702,12 @@ async def approve_action(
     # blob's workspace, so a cross-workspace approve would deliver a decision into
     # another tenant's paw-bar surface. Gate it like every other blob kind.
     _assert_customer_reply_workspace(before, workspace_id)
+    # A ``_site_plan_request`` — approving it BUYS a site plan against this
+    # workspace's subscription, so it is bound to the caller's workspace exactly
+    # like every other spending kind. (``_assert_gated_workspaces`` below runs it
+    # too; this line keeps the explicit sweep complete rather than relying on the
+    # chokepoint alone, matching every sibling above.)
+    _assert_site_plan_request_workspace(before, workspace_id)
     # BLOCKER 1 — reject a cross-workspace gated approval before any state
     # mutation. ``require_action_any_workspace`` only proved the caller holds
     # ``instinct.approve`` somewhere; this binds the Action to the caller's
@@ -3135,6 +3190,37 @@ async def approve_action(
             )
         except Exception:
             logger.exception("admin-action execution after approval failed (non-fatal)")
+
+    # A ``_site_plan_request`` — an employee asked to put a site on a paid plan
+    # and an admin has now approved it. The executor re-checks the APPROVER's
+    # ``sites.buy_plan`` (NOT the proposer's — the proposer is a member who never
+    # had it, which is the premise of the feature) and then performs the publish
+    # that was refused. Same best-effort, lazy-import,
+    # never-break-the-approve-response shape as the hooks above; the EXECUTOR owns
+    # the chain close, so the router emits only ``human.corrected`` here.
+    site_plan_request = _site_plan_request_blob(approved)
+    if site_plan_request is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=site_plan_request,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(site_plan_request),
+        )
+        try:
+            from pocketpaw_ee.cloud.site_plan_requests import (
+                executor as site_plan_request_executor,
+            )
+
+            await site_plan_request_executor.execute_approved_site_plan_request(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("site-plan-request execution after approval failed (non-fatal)")
 
     # gap2 — when the approved Action carries a ``_customer_reply`` blob (a
     # paw-bar customer event awaiting a decision), deliver the owner's reply

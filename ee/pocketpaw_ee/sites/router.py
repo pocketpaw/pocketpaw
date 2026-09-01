@@ -257,6 +257,8 @@ from pocketpaw_ee.sites.dto import (
     SiteDataTablesResponse,
     SiteEntitlementsResponse,
     SiteInvoiceCreate,
+    SitePlanRequestBody,
+    SitePlanRequestResponse,
     SitePreviewRefreshResponse,
     SitePreviewResponse,
     SiteResponse,
@@ -341,6 +343,78 @@ async def publish_site(
         origin=request.headers.get("origin") or None,
     )
     return sites_service._to_response(doc)
+
+
+@router.post("/sites/plan-requests", response_model=SitePlanRequestResponse)
+async def request_site_plan(
+    body: SitePlanRequestBody,
+    ctx: RequestContext = Depends(request_context),
+    user: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SitePlanRequestResponse:
+    """Ask a workspace admin to put this site on a paid plan.
+
+    The other side of ``sites.plan_purchase_forbidden``. A member who publishes
+    and picks a paid tier is refused, correctly — a paid site is an add-on line
+    on the workspace's own subscription, so choosing one spends company money.
+    Before this endpoint the refusal was also a dead end: the employee who built
+    the site had no route forward except finding an admin out-of-band and
+    describing what they wanted.
+
+    This files an Instinct Action instead. An admin approves it in The Tray and
+    the executor performs the publish that was refused — re-checking the
+    APPROVER's ``sites.buy_plan`` at that moment, so approving is what authorizes
+    the spend and nothing here does.
+
+    Gated on ``fabric.write`` (MEMBER), the same action publishing needs: asking
+    is not spending, and a gate above MEMBER would refuse exactly the people this
+    exists for. An ADMIN may also call it — a request they can approve themselves
+    is a slower path to the same place, not a wrong one, and refusing it would
+    make the client's job harder for no benefit.
+
+    Returns the pending Action so the caller can link to it. NOTHING is published
+    and NOTHING is charged on this path.
+    """
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+    from pocketpaw_ee.cloud.billing import site_plans
+    from pocketpaw_ee.cloud.site_plan_requests import propose_site_plan_request
+
+    # Resolve the tier here as well as inside the propose helper — the response
+    # quotes a price, and a client showing "$0/month" for a tier we could not
+    # resolve would be worse than the refusal it replaced.
+    tier = site_plans.site_scoped_tier(site_plans.canonical_site_tier_key(body.site_plan_key))
+    if tier is None:
+        raise ValidationError(
+            "sites.unknown_plan_tier",
+            f"'{body.site_plan_key}' is not a plan a single site can be put on",
+        )
+
+    # The site's name for the Tray card, best-effort: an admin reading "Put
+    # Acme Dental on the Staff plan" can decide; one reading a pocket id cannot.
+    # A failure to resolve it must not block the request.
+    # Imported locally, like every other cross-entity read in this module: the
+    # sites service owns Site reads and reaches into pockets the same way.
+    site_name = ""
+    try:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+        pocket = await pockets_service.get(body.pocket_id, ctx.user_id)
+        site_name = str((pocket or {}).get("name") or "")
+    except Exception:  # noqa: BLE001 — a nicer card is not worth failing the ask
+        pass
+
+    action_id = await propose_site_plan_request(
+        workspace_id=ctx.workspace_id,
+        pocket_id=body.pocket_id,
+        site_plan_key=body.site_plan_key,
+        requested_by=ctx.user_id,
+        site_name=site_name,
+    )
+    return SitePlanRequestResponse(
+        action_id=action_id,
+        status="pending",
+        site_plan_key=tier.key,
+        monthly_price_usd=int(tier.monthly_price_usd or 0),
+    )
 
 
 @router.post("/sites/reserve", response_model=list[SiteResponse])
