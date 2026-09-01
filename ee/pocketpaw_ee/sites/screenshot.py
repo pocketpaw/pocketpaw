@@ -144,6 +144,17 @@
 # The DRAFT path is deliberately ungated: it renders markup at ``about:blank``, so
 # there is no address that could be unready, and a gate there would poll nothing and
 # reject every draft.
+#
+# Updated 2026-09-02 (the card's mark, not just its picture): ``take_draft_screenshot``
+# now hands the document it just assembled to ``sites.favicon`` before it resolves the
+# Cloudflare client. That is the ONLY favicon work this module does — the live lane is
+# its own scheduled task in ``sites.service``, because an icon costs one GET and must
+# not be gated on Browser Rendering being configured, while everything here is.
+# The hook sits inside this function purely because ``build_draft_markup`` can cost a
+# real Node build and a second lane would race this one into rebuilding the same
+# pocket; the ordering (before ``_cf_client``) is what keeps a draft's icon landing in
+# a deployment where the capture on the next line raises. See ``sites.favicon`` for
+# why that call cannot clear a stored icon.
 
 from __future__ import annotations
 
@@ -512,6 +523,29 @@ async def take_draft_screenshot(site: Any, *, cloudflare: Any | None = None) -> 
     markup = await build_draft_markup(site)
     if not markup:
         return ""
+
+    # 2026-09-02: the draft's ICON, off the document we have just assembled. Hung
+    # here rather than given its own scheduled task purely to avoid paying twice:
+    # ``build_draft_markup`` can cost a real Node build, and a second lane would
+    # race this one into building the same pocket again. Fired BEFORE the Cloudflare
+    # client is resolved, so a deployment with Browser Rendering unconfigured — where
+    # the next line raises — still gets its cards' marks.
+    #
+    # It cannot CLEAR a stored icon, and that is not incidental: ``inline_document``
+    # drops every local <link> that is not a stylesheet, icons included, so a missing
+    # icon in assembled draft markup is an artefact of the assembly, not a fact about
+    # the site. Only the live lane, which reads the served page, is allowed to
+    # conclude that an icon is gone.
+    try:
+        from pocketpaw_ee.sites.favicon import schedule_draft_favicon
+
+        schedule_draft_favicon(site, markup=markup)
+    except Exception:  # noqa: BLE001 — an icon is never a gate on a capture
+        logger.warning(
+            "sites.favicon: could not schedule draft icon lookup for site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
 
     from pocketpaw_ee.sites.service import _cf_client
 
