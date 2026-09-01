@@ -171,6 +171,15 @@
 # rather than a reused ``SiteResponse``: the call answers one question ("what is
 # the new picture"), and unlike every deploy-triggered capture it REPORTS failure
 # — a person asked for it and is waiting on the answer.
+# Updated 2026-09-02 (the card's MARK): both DTOs gain ``favicon_url`` — the site's
+# own icon, for the chip that had been a hard-coded globe on every card alike. It sits
+# beside ``preview_image_url`` and answers a different question ("whose site is this"
+# rather than "what does it look like"), and it differs from it in one way worth
+# knowing before reading either field: this one carries a data: URI INLINE rather than
+# an uploads link. An icon is a few KB, so paying for a blob row and a per-card auth
+# grant to serve it would cost more than the bytes; ``sites.favicon`` holds the cap
+# that keeps a list response bounded and drops anything over it. None whenever the
+# site declares no icon we can use, so the card falls back to the globe.
 
 from __future__ import annotations
 
@@ -356,6 +365,23 @@ class SiteResponse(BaseModel):
     # uuid-keyed row), so a client may treat a changed value as new art and a
     # cached one as unchanged — nothing ever overwrites bytes behind a stable URL.
     preview_image_url: str | None = None
+    # 2026-09-02: the site's own icon, as a data: URI, for the gallery card's mark
+    # chip. Until now that chip was a hard-coded globe tinted by a hash of the site
+    # id, so every card in a gallery wore the same glyph.
+    #
+    # A data: URI and not an uploads link, which is the one way this field differs
+    # from ``preview_image_url`` directly above. A screenshot is a 1280x800 PNG and
+    # needs blob storage behind the auth-gated ``/api/v1/uploads/{id}``, which is
+    # why the card resolves that one through a per-card grant. An icon is a few KB,
+    # so it rides on the wire and the card can paint it with no second request —
+    # see ``sites.favicon`` for the cap that keeps a list response bounded.
+    #
+    # WHEN IT CHANGES: looked up on every successful deploy (a republish included,
+    # for the reason the screenshot policy above gives) and from the tail of a draft
+    # capture. None whenever the site declares no icon we can use, the page could
+    # not be read, or the icon was over the cap; the card falls back to the globe,
+    # which is exactly the pre-existing card, so this is never a gate on anything.
+    favicon_url: str | None = None
 
 
 class SitePreviewRefreshResponse(BaseModel):
@@ -439,6 +465,12 @@ class SiteStatusResponse(BaseModel):
     # republish updates it), plus POST /sites/{site_id}/preview-refresh on demand,
     # and the value is a different uploads link every capture.
     preview_image_url: str | None = None
+    # 2026-09-02: the site's own icon as a data: URI — the same field the list
+    # response carries (see ``SiteResponse.favicon_url`` above for the full
+    # write-up), duplicated onto the by-pocket read for the same reason
+    # ``preview_image_url`` already is: a builder polling by pocket has nowhere else
+    # to look. None until a lookup lands, and whenever the site declares no icon.
+    favicon_url: str | None = None
     # ── SL-3: the build lane's state on the BY-POCKET read too ──────────────────
     # The same three fields ``SiteResponse`` carries (see there for the full write-up
     # of each). They are duplicated onto this DTO for the same reason ``deployed_at`` /

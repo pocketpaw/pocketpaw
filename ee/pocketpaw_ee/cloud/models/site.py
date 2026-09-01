@@ -503,6 +503,17 @@ class Site(TimestampedDocument):
     # public url, capture failed, Cloudflare unconfigured); the card falls back to
     # the text layout on empty, so this is never a gate on publishing.
     preview_image_url: str = ""
+    # 2026-09-02: the site's own ICON, as a data: URI, for the gallery card's mark
+    # chip — which until now was a hard-coded globe for every site alike. Written by
+    # the best-effort lookup ``sites.favicon`` schedules alongside the screenshot,
+    # via a targeted ``set`` for the same reason. Held INLINE rather than as an
+    # uploads link (and capped at a few KB by ``favicon._MAX_ICON_BYTES``): an icon
+    # is small enough that a blob row plus a per-card auth grant would cost more
+    # than the bytes themselves. "" when the site declares no icon we can use, when
+    # the page could not be read, or when the icon was over the cap — the card falls
+    # back to the globe on empty, so this is never a gate on publishing. Defaults ""
+    # so every existing row reads "no icon" — no migration.
+    favicon_url: str = ""
     # The site owner's record of WHO this site is for, and what they have billed
     # them. Two billing relationships meet on this document and they are not the
     # same one: ``plan_tier`` / ``subscription_status`` above are what the owner

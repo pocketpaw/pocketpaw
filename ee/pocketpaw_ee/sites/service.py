@@ -193,6 +193,19 @@
 # so nothing about it may fail, delay, or block the publish. On any failure the
 # field stays empty and the card falls back to its text layout.
 #
+# Updated 2026-09-02 (the card's MARK, not just its picture): both live-deploy tails
+# now also schedule ``_schedule_site_favicon``, and ``_to_response`` / ``pocket_status``
+# surface the resulting ``favicon_url`` on both DTOs — so the gallery card's chip can
+# be the site's own icon instead of the hard-coded globe every card wore. A SEPARATE
+# scheduler from the screenshot deliberately: a screenshot needs Cloudflare Browser
+# Rendering (paid, quota'd, unconfigured in plenty of deployments) while an icon needs
+# one GET of a page the readiness probe already proved is serving, so folding the two
+# together would cost every Browser-Rendering-less deployment its cards' marks for no
+# reason. Wrapped exactly like the screenshot and the KB sync, and for the same
+# reason: this runs at the tail of a publish that has already succeeded. The DRAFT
+# half is not scheduled here — it hangs off ``screenshot.take_draft_screenshot``,
+# which already holds the assembled markup and must not pay to build it twice.
+#
 # Updated 2026-08-07 (SC-2 — drafts get art too): ``create_draft_site`` now schedules
 # a capture of its own (``_schedule_draft_screenshot``). A draft has no url, so that
 # capture shoots the pocket's MARKUP rather than a page (``sites.draft_markup`` +
@@ -2050,6 +2063,11 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # None until a capture lands (empty string on the doc, and every pre-SC-1
         # row via the getattr default, read as None on the wire).
         preview_image_url=getattr(doc, "preview_image_url", "") or None,
+        # 2026-09-02: the site's own icon for the card's mark chip, as a data: URI.
+        # None until a lookup lands (empty string on the doc, and every row that
+        # predates the field via the getattr default, read as None on the wire) and
+        # whenever the site declares no icon — the card falls back to the globe.
+        favicon_url=getattr(doc, "favicon_url", "") or None,
         # SL-3: the build lane's state, straight off the persisted row. These three
         # were declared on the DTO by SG-9i and never populated here, so every
         # response carried the DEFAULTS — ``build_status`` frozen at "none" no matter
@@ -2939,6 +2957,12 @@ async def _deploy_site_doc(
     # already live, so a screenshot may never fail or delay the publish. A
     # preview publish never reaches here, so a draft is never photographed.
     _schedule_site_screenshot(doc)
+    # 2026-09-02: and its ICON, on the same trigger and under the same rule. A
+    # separate lane from the screenshot rather than a step inside it: this one costs
+    # a single GET of a page we already probe, so it must not be gated on Cloudflare
+    # Browser Rendering being configured — a deployment that gets no screenshots at
+    # all still gets its cards' marks.
+    _schedule_site_favicon(doc)
     return doc
 
 
@@ -3250,6 +3274,34 @@ def _schedule_site_screenshot(site: _SiteDoc) -> None:
     except Exception:  # noqa: BLE001 — never fail a live publish over a screenshot
         logger.warning(
             "sites.screenshot: could not schedule capture for site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
+
+
+def _schedule_site_favicon(site: _SiteDoc) -> None:
+    """Fire the background lookup of a LIVE site's own icon, for the gallery card's
+    mark chip. Non-async, never blocks, never raises. Looked up through the module so
+    tests can patch it, mirroring ``_schedule_site_screenshot`` directly above.
+
+    Its own scheduler rather than a step inside the screenshot's, because the two
+    have different dependencies and different failure modes. A screenshot needs
+    Cloudflare Browser Rendering — paid, quota'd, and unconfigured in plenty of
+    deployments; an icon needs one GET of a page the readiness probe has already
+    proved is serving. Folding this into the screenshot would mean every deployment
+    without Browser Rendering also lost its cards' marks, for no reason.
+
+    The try/except is the same requirement as the screenshot's and no weaker: this
+    runs from the tail of a LIVE deploy, so anything escaping fails a publish of a
+    site that is already deployed and serving — in exchange for an icon.
+    """
+    try:
+        from pocketpaw_ee.sites.favicon import schedule_site_favicon
+
+        schedule_site_favicon(site)
+    except Exception:  # noqa: BLE001 — never fail a live publish over an icon
+        logger.warning(
+            "sites.favicon: could not schedule icon lookup for site %s",
             getattr(site, "id", "?"),
             exc_info=True,
         )
@@ -4192,6 +4244,9 @@ async def finalize_provisioned_site(site: _SiteDoc, *, url: str, deploy_target: 
     # dynamic site becomes reachable, so it is the moment there is a page to
     # photograph. The url was stamped a few lines above.
     _schedule_site_screenshot(site)
+    # 2026-09-02: and its icon, for the same reason — a reachable page is a page
+    # whose <head> can finally be read.
+    _schedule_site_favicon(site)
 
 
 async def mark_provision_failed(site: _SiteDoc) -> None:
@@ -7775,6 +7830,10 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         preview_image_url=(getattr(doc, "preview_image_url", "") or None)
         if doc is not None
         else None,
+        # 2026-09-02: the same icon the list row carries, so a by-pocket status read
+        # can show the site's own mark too. None when there is no Site doc, no
+        # lookup has landed, or the site declares no icon we can use.
+        favicon_url=(getattr(doc, "favicon_url", "") or None) if doc is not None else None,
         # SL-3: the build lane's state on the read a builder polls BY POCKET. This is
         # the only GET keyed on a pocket id, so a client watching a build it just
         # triggered has nowhere else to look — without these it would have to fetch the
