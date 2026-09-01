@@ -3,7 +3,7 @@
 //
 // GENERATED, DO NOT EDIT BY HAND. Produced by `bun run build:loader` in the
 // paw-bar repo (loader/dist/loader.readable.js) and copied here verbatim.
-// Source: qbtrix/paw-bar loader/src/loader.ts @ e8c1d81
+// Source: qbtrix/paw-bar loader/src/loader.ts @ bf29d76
 //
 // It used to be hand-transcribed TypeScript with the annotations stripped by
 // hand. That drifts silently: this copy predated a whole session of loader
@@ -31,18 +31,30 @@
   var POS_KEY = "__pawbar_pos_v2";
   var DRAG_MIN_PX = 4;
   var BAR_W = 384;
+  var BAR_W_REST = 236;
   var DEFAULT_BAR_H = 96;
   var DEFAULT_CHIP = { w: 240, h: 72 };
   var MIN_H = 48;
   var VIEWPORT_MARGIN = 24;
-  var PANEL_W = 400;
-  var PANEL_MAX_H = 720;
-  var PANEL_MIN_VW = 460;
+  var PANEL_W = 520;
+  var PANEL_MAX_H = 840;
+  var PANEL_MIN_VW = 600;
   var PANEL_MIN_VH = 620;
+  var SCRIM_BLUR_PX = 10;
+  var SCRIM_DIM = "rgba(9,11,15,0.42)";
+  var SCRIM_DIM_NO_BLUR = "rgba(9,11,15,0.58)";
   var BOX_MS = 260;
   var BOX_EASE = "cubic-bezier(0.16, 1, 0.3, 1)";
+  function suppressed(win) {
+    try {
+      return new URLSearchParams(win.location.search).get("pawbar") === "off";
+    } catch {
+      return false;
+    }
+  }
   (function bootstrap(win) {
     if (win[LOADED_FLAG]) return;
+    if (suppressed(win)) return;
     const doc = win.document;
     const script = doc.currentScript ?? lastScriptWith("data-site-key", doc);
     if (!script) return;
@@ -74,6 +86,9 @@
     let dockView = "bar";
     let overlay = false;
     let expanded = false;
+    let barCompact = false;
+    let barOpen = false;
+    let barMotionUntil = 0;
     let anchor = readAnchor(win);
     let dragFrom = null;
     const size = {
@@ -90,7 +105,7 @@
       const vw = win.innerWidth || 0;
       const vh = win.innerHeight || 0;
       const maxW = vw ? vw - VIEWPORT_MARGIN : BAR_W;
-      const wantW = view === "bar" ? BAR_W : size[view].w;
+      const wantW = view === "bar" ? barCompact && !barOpen ? BAR_W_REST : BAR_W : size[view].w;
       const w = Math.min(wantW, maxW);
       const wantH = view === "panel" ? PANEL_MAX_H : size[view].h;
       const h = vh ? clamp(wantH, MIN_H, vh - VIEWPORT_MARGIN) : Math.max(MIN_H, wantH);
@@ -103,23 +118,57 @@
     function reduced() {
       return !!win.matchMedia && win.matchMedia("(prefers-reduced-motion: reduce)").matches;
     }
-    function setBox(x, y, w, h, animate) {
-      iframe.style.transition = animate && !reduced() ? `left ${BOX_MS}ms ${BOX_EASE}, top ${BOX_MS}ms ${BOX_EASE}, width ${BOX_MS}ms ${BOX_EASE}, height ${BOX_MS}ms ${BOX_EASE}` : "none";
+    function setBox(x, y, w, h, motion) {
+      const m = reduced() ? "none" : motion;
+      iframe.style.transition = m === "box" ? `left ${BOX_MS}ms ${BOX_EASE}, top ${BOX_MS}ms ${BOX_EASE}, width ${BOX_MS}ms ${BOX_EASE}, height ${BOX_MS}ms ${BOX_EASE}` : m === "width" ? `left ${BOX_MS}ms ${BOX_EASE}, width ${BOX_MS}ms ${BOX_EASE}` : "none";
       iframe.style.left = x;
       iframe.style.top = y;
       iframe.style.width = w;
       iframe.style.height = h;
     }
-    function applyDock(animate = false) {
+    let scrim = null;
+    let scrimOn = false;
+    function ensureScrim() {
+      if (scrim) return scrim;
+      const el = doc.createElement("div");
+      el.setAttribute("aria-hidden", "true");
+      const bs = el.style;
+      const blur = "backdropFilter" in bs || "webkitBackdropFilter" in bs;
+      el.style.cssText = "position:fixed;left:0;top:0;width:100%;height:100%;border:0;margin:0;padding:0;z-index:2147483646;opacity:0;pointer-events:none;background-color:" + (blur ? SCRIM_DIM : SCRIM_DIM_NO_BLUR);
+      if (blur) bs.webkitBackdropFilter = bs.backdropFilter = `blur(${SCRIM_BLUR_PX}px)`;
+      el.addEventListener("pointerdown", (ev) => {
+        if (overlayOpen) return;
+        ev.preventDefault();
+        view = dockView;
+        overlay = false;
+        expanded = false;
+        applyDock("box");
+        postToFrame({ type: "pawbar:host-close" });
+      });
+      (doc.body || doc.documentElement).appendChild(el);
+      scrim = el;
+      return el;
+    }
+    function setScrim(on) {
+      if (on === scrimOn) return;
+      scrimOn = on;
+      if (!on && !scrim) return;
+      const el = ensureScrim();
+      el.style.transition = reduced() ? "none" : `opacity ${BOX_MS}ms ${BOX_EASE}`;
+      el.style.opacity = on ? "1" : "0";
+      el.style.pointerEvents = on ? "auto" : "none";
+    }
+    function applyDock(motion = "none") {
+      setScrim(view === "panel");
       if (expanded || panelIsSheet()) {
-        goFullscreen(animate);
+        goFullscreen(motion);
         return;
       }
       const b = dockBox();
-      setBox(b.x + "px", b.y + "px", b.w + "px", b.h + "px", animate);
+      setBox(b.x + "px", b.y + "px", b.w + "px", b.h + "px", motion);
     }
-    function goFullscreen(animate = false) {
-      setBox("0px", "0px", "100vw", "100vh", animate);
+    function goFullscreen(motion = "none") {
+      setBox("0px", "0px", "100vw", "100vh", motion);
     }
     (doc.body || doc.documentElement).appendChild(iframe);
     applyDock();
@@ -157,7 +206,18 @@
           if (Number.isFinite(h)) size[view].h = h;
           const w = Number(data.w);
           if (view !== "bar" && Number.isFinite(w) && w > 0) size[view].w = w;
-          applyDock(false);
+          applyDock(Date.now() < barMotionUntil ? "width" : "none");
+          break;
+        }
+        case "pawbar:bar": {
+          const compact = data.compact === true;
+          const open = data.expanded === true;
+          if (compact === barCompact && open === barOpen) break;
+          barCompact = compact;
+          barOpen = open;
+          if (view !== "bar") break;
+          barMotionUntil = Date.now() + BOX_MS;
+          applyDock("width");
           break;
         }
         case "pawbar:view": {
@@ -168,22 +228,27 @@
               dockView = data.view;
               expanded = false;
             }
-            applyDock(true);
+            applyDock("box");
           }
           break;
         }
         case "pawbar:dead":
           watchHostPointer(false);
           iframe.remove();
+          if (scrim) {
+            scrim.remove();
+            scrim = null;
+            scrimOn = false;
+          }
           break;
         case "pawbar:open":
           view = "panel";
           overlay = false;
-          applyDock(true);
+          applyDock("box");
           break;
         case "pawbar:expand":
           expanded = data.on === true;
-          applyDock(true);
+          applyDock("box");
           break;
         case "pawbar:overlay":
           watchHostPointer(data.on === true);
@@ -192,7 +257,7 @@
           view = dockView;
           overlay = false;
           expanded = false;
-          applyDock(true);
+          applyDock("box");
           break;
         case "pawbar:drag": {
           if (data.phase === "start") {
@@ -230,14 +295,14 @@
       open() {
         view = "panel";
         overlay = false;
-        applyDock(true);
+        applyDock("box");
         postToFrame({ type: "pawbar:host-open" });
       },
       close() {
         view = dockView;
         overlay = false;
         expanded = false;
-        applyDock(true);
+        applyDock("box");
         postToFrame({ type: "pawbar:host-close" });
       }
     };
