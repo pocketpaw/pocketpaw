@@ -424,4 +424,3 @@ Never fall back to another engine's tool, and never fall back to
 - `mcp__pocketpaw_stock__search_stock_images` — real photography for a new section
 - `mcp__pocketpaw_icons__search_icons` — feature icons
 - `mcp__pocketpaw_palette__scale_from_color` / `extract_palette` — brand colour
-- `mcp__pocketpaw_design_systems__get_design_system` — the page's token vocabulary

@@ -14,7 +14,7 @@
 #   2. ``get_pocket`` DOES return ``pocket["source"]`` (``source`` is not in
 #      ``_AGENT_INVISIBLE_FIELDS``), but it lives on the ``pockets`` server, and
 #      ``sites_allow`` is a HARD whitelist of SITES|STOCK|ICON|PALETTE|
-#      DESIGN_SYSTEM|ASK. So on /sites it is silently filtered out.
+#      ASK. So on /sites it is silently filtered out.
 #   3. The /sites profile also drops the file/shell built-ins by design
 #      ("the source map / copy is a tool ARGUMENT" — surface_registry.py). True
 #      on CREATE, where the agent authored the source in-context. False on EDIT
