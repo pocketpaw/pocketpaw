@@ -188,9 +188,16 @@ async def test_missing_workspace_falls_back_to_free(patch_plan):
     assert ent.monthly_credit_allotment == 0
     # FAIL-CLOSED: a missing workspace caps at the Free ceiling, never uncapped.
     assert ent.monthly_ceiling == 1_000
-    # Crucially, free must NOT carry any paid-tier feature.
+    # Crucially, free must NOT carry any paid-tier feature. ``instinct`` used to
+    # be one of these sentinels and no longer is — it is the agent APPROVAL GATE,
+    # which every tier that runs agents needs (fix/instinct-is-a-gate-not-a-tier),
+    # so it would now pass here for the right reason and stop testing anything.
+    # The enterprise-only flags it was standing in for are asserted instead, so
+    # this keeps the same fail-closed strength.
     assert "fabric" not in ent.features
-    assert "instinct" not in ent.features
+    assert "audit" not in ent.features
+    assert "sso" not in ent.features
+    assert "custom_roles" not in ent.features
 
 
 async def test_empty_workspace_id_is_rejected_at_entry():
