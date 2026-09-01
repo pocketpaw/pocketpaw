@@ -137,7 +137,7 @@ __all__ = ["router"]
 @router.post("/illustrate")
 async def illustrate(
     body: IllustrateRequest,
-    workspace_id: str = Depends(current_workspace_id),  # noqa: ARG001 — auth boundary
+    workspace_id: str = Depends(current_workspace_id),
 ) -> dict[str, Any]:
     """Generate an illustration and return it as page-ops the caller can draw.
 
@@ -152,15 +152,28 @@ async def illustrate(
     generator.
     """
     from pocketpaw_ee.cloud.other_hand import illustrate as illustrator
+    from pocketpaw_ee.cloud.other_hand import illustration_budget
     from pocketpaw_ee.cloud.other_hand.svg_to_ink import Box
     from pocketpaw_ee.cloud.studio import fal_edit
+
+    # A pressed button authorises ONE generation; it does not cap how many.
+    # Scripted, the same button is a loop, so the ceiling has to live here and
+    # not in the UI. Claimed BEFORE the paid call and fail-closed, exactly like
+    # the MCP tool path — this route was the one caller that skipped it.
+    allowed, spent, cap = await illustration_budget.try_spend(workspace_id)
+    if not allowed:
+        raise CloudError(
+            429,
+            "other_hand.illustration_limit",
+            f"Today's illustration limit is used up ({spent}/{cap}).",
+        )
 
     try:
         ops = await illustrator.illustrate_as_ops(
             body.prompt,
             Box(x=body.x, y=body.y, w=body.w, h=body.h),
             api_key=fal_edit.fal_api_key(),
-            # The request itself is the authorisation — see IllustrateRequest.
+            # Budget claimed above; this flag is the generator's own gate.
             allowed=True,
         )
     except illustrator.IllustrateError as exc:

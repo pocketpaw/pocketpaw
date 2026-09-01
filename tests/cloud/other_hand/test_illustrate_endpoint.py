@@ -92,3 +92,73 @@ class TestTheRoundTrip:
         # A raster model here would silently break the whole premise: the
         # result would be a picture, and svg_to_ink would find no geometry.
         assert "text-to-vector" in fake_generator.last_endpoint
+
+
+# ---------------------------------------------------------------------------
+# Added 2026-09-01, from the pre-PR review of integration/session-2026-08-29.
+#
+# The tests above call `ill.illustrate_as_ops` DIRECTLY, which is why they all
+# passed while the route itself spent money with no ceiling: the REST handler
+# hard-wired `allowed=True` and never claimed the daily budget, so
+# `illustration_budget.try_spend` had exactly one caller in the whole repo —
+# the MCP tool. A signed-up user (guest accounts included) could script the
+# wand button into an unmetered bill at roughly $0.08 a call.
+#
+# These two tests exercise the HANDLER, not the generator, because that is
+# where the hole was. Mutation-checked: delete the `try_spend` claim in
+# router.py and `test_the_route_refuses_once_the_day_is_spent` fails.
+# ---------------------------------------------------------------------------
+
+
+class TestTheRouteHonoursTheDailyBudget:
+    """The paid route must claim the budget, and must not pay when refused."""
+
+    @pytest.mark.asyncio
+    async def test_the_route_refuses_once_the_day_is_spent(self, monkeypatch):
+        from pocketpaw_ee.cloud._core.errors import CloudError
+        from pocketpaw_ee.cloud.other_hand import illustration_budget
+        from pocketpaw_ee.cloud.other_hand import router as oh_router
+
+        async def _refuse(_workspace_id=None):
+            return False, 20, 20
+
+        monkeypatch.setattr(illustration_budget, "try_spend", _refuse)
+
+        # If the handler reaches the generator at all, that is the bug.
+        async def _must_not_run(*_a, **_k):
+            raise AssertionError("the route paid the generator while over cap")
+
+        monkeypatch.setattr(ill, "illustrate_as_ops", _must_not_run)
+
+        body = oh_router.IllustrateRequest(prompt="a honeybee", x=0, y=0, w=600, h=600)
+        with pytest.raises(CloudError) as caught:
+            await oh_router.illustrate(body=body, workspace_id="ws-1")
+
+        assert caught.value.status_code == 429
+        assert caught.value.code == "other_hand.illustration_limit"
+        assert "20/20" in caught.value.message
+
+    @pytest.mark.asyncio
+    async def test_the_route_claims_one_unit_before_it_draws(self, monkeypatch):
+        from pocketpaw_ee.cloud.other_hand import illustration_budget
+        from pocketpaw_ee.cloud.other_hand import router as oh_router
+
+        claimed: list[str | None] = []
+
+        async def _allow(workspace_id=None):
+            claimed.append(workspace_id)
+            return True, 1, 20
+
+        monkeypatch.setattr(illustration_budget, "try_spend", _allow)
+
+        async def _draw(*_a, **_k):
+            assert claimed, "the generator ran before the budget was claimed"
+            return [{"t": "path", "d": "M0 0 L1 1"}]
+
+        monkeypatch.setattr(ill, "illustrate_as_ops", _draw)
+
+        body = oh_router.IllustrateRequest(prompt="a honeybee", x=0, y=0, w=600, h=600)
+        out = await oh_router.illustrate(body=body, workspace_id="ws-1")
+
+        assert out["ops"], "an allowed call should still draw"
+        assert claimed == ["ws-1"], "the claim must be scoped to the caller's workspace"
