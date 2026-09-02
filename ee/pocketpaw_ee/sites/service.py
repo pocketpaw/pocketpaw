@@ -1,6 +1,13 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-02 (SA-5 — the entitlement on the wire): ``site_entitlements`` now
+# reports ``analytics``, echoed off the resolver. It is the cheap pre-check that lets
+# the dashboard disable the panel with a reason instead of calling the endpoint to be
+# refused. It does not replace that endpoint's ``status``, which stays authoritative:
+# entitlement alone cannot tell "your plan does not include this" from "it does, and
+# you have not republished since you upgraded", and those need different sentences.
+#
 # Updated 2026-09-02 (SA-4 — the visitor-analytics read): the read half of the feature
 # SA-1/SA-2 built. Two things landed here.
 #
@@ -4044,6 +4051,10 @@ async def site_entitlements(*, workspace_id: str, site_id: str) -> SiteEntitleme
         # tier that cannot hold a domain and hand back
         # ``billing.custom_domain_not_entitled``.
         domain_slots_available=resolved.custom_domain and not exceeded,
+        # Echoed straight off the resolver. There is no second condition to AND in
+        # here — unlike the domain slot, whose plan grant and workspace room are two
+        # different questions, analytics has no per-workspace count to exhaust.
+        analytics=resolved.analytics,
         concierge_entitled=resolved.concierge_entitled,
         concierge_enabled=resolved.concierge_enabled,
     )
