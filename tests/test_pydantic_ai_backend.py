@@ -1747,7 +1747,12 @@ async def test_a_cancelled_run_is_priced_under_the_same_convention_as_a_complete
     tokens get priced under two different conventions depending only on how the
     run ended. Every path here builds the payload through one function, and this
     is what keeps that true.
+
+    Skipped on an OSS-only install: the meter it asserts against lives in
+    ``pocketpaw_ee``, and the OSS lane does not install it.
     """
+    pytest.importorskip("pocketpaw_ee", reason="pocketpaw-ee not installed")
+
     from pocketpaw_ee.cloud.metering.service import _prompt_tokens
 
     completed = [
