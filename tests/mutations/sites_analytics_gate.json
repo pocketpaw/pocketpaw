@@ -65,17 +65,18 @@
   {
     "label": "a stale entry survives a paid-to-free republish — wrangler uploads it as an ordinary asset and the per-publish hash salt is downloadable",
     "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
-    "find": "        entry_path.unlink(missing_ok=True)",
-    "replace": "        pass",
+    "find": "            stale_path.unlink(missing_ok=True)",
+    "replace": "            pass",
     "tests": [
-      "tests/ee/sites/test_sites_analytics_gate.py"
+      "tests/ee/sites/test_sites_analytics_gate.py",
+      "tests/ee/sites/test_sites_analytics_shim.py"
     ]
   },
   {
     "label": "the stale-entry delete stops being failure-soft — a locked or read-only entry fails the whole publish of a site that is not even using analytics",
     "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
-    "find": "        try:\n            entry_path.unlink(missing_ok=True)\n        except OSError:",
-    "replace": "        if True:\n            entry_path.unlink(missing_ok=True)\n        elif False:",
+    "find": "        try:\n            stale_path.unlink(missing_ok=True)\n        except OSError:",
+    "replace": "        if True:\n            stale_path.unlink(missing_ok=True)\n        elif False:",
     "tests": [
       "tests/ee/sites/test_sites_analytics_gate.py"
     ]
@@ -92,13 +93,14 @@
     ]
   },
   {
-    "label": "the server-worker branch stops being excluded — a ripple / dynamic svelte deploy names our counter as main over SvelteKit's own worker",
+    "label": "the gate never reaches the deploy writer — every publish counts, free ones included, on both branches",
     "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
-    "find": "    count_pageviews = not emits_worker and analytics_worker.counting_enabled(",
-    "replace": "    count_pageviews = analytics_worker.counting_enabled(",
+    "find": "    count_pageviews = analytics_worker.counting_enabled(entitled=analytics_entitled)",
+    "replace": "    count_pageviews = True",
     "tests": [
+      "tests/ee/sites/test_sites_analytics_gate.py",
       "tests/ee/sites/test_sites_analytics_counter.py",
-      "tests/ee/sites/test_sites_analytics_gate.py"
+      "tests/ee/sites/test_sites_analytics_shim.py"
     ]
   },
   {
