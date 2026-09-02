@@ -15,6 +15,11 @@
 #   * Browser Rendering (SC-1) — screenshot a deployed site's live URL so its
 #     gallery card can show the page instead of a title and three pills; see
 #     capture_screenshot.
+#   * Workers Analytics Engine (SA-4) — run one SQL query against the pageview
+#     dataset a published site writes into, so the dashboard can serve real visitor
+#     numbers; see query_analytics_sql. It is the one method here whose request body
+#     is RAW SQL and whose success response is NOT the Cloudflare envelope, and it
+#     needs an ``Account Analytics Read`` token scope the deploy paths do not.
 # httpx-based; account id + token come from settings (env), not per-tenant rows
 # in v1. Non-2xx raises a CloudError so the standard envelope applies.
 #
@@ -131,6 +136,16 @@
 # The body is Cloudflare describing OUR request; the token only ever lives in a
 # request header, so nothing secret rides along.
 
+# Updated 2026-09-02 (SA-4 — the visitor-analytics read): added
+# ``query_analytics_sql``. It breaks two of this module's own conventions on purpose
+# and says so at the method: the request body is raw SQL rather than JSON (the
+# endpoint has no parameter binding, so nothing user-controlled may be interpolated),
+# and a SUCCESSFUL query answers ``{meta, data, rows}`` with no ``success`` key — so
+# ``_unwrap`` would raise on every good response and is deliberately not used on that
+# path. The failure branch still shares ``_error_detail``, which matters here because
+# the required token scope (``Account Analytics Read``) is one the deploy token does
+# not carry and a missing scope arrives as a 403.
+#
 from __future__ import annotations
 
 import json
@@ -589,3 +604,67 @@ class CloudflareClient:
             raise ValidationError("sites.cloudflare_error", "D1 query statement failed")
         rows = first.get("results")
         return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+    async def query_analytics_sql(self, sql: str) -> list[dict]:
+        """Run ONE SQL query against Workers Analytics Engine and return its rows
+        (SA-4 — the read half of Paw Sites visitor analytics).
+
+        POSTs to ``/accounts/{acct}/analytics_engine/sql``. Two things about this
+        endpoint are unlike every other method on this client, and both are load-
+        bearing rather than trivia:
+
+        * **The body is RAW SQL, not JSON.** Cloudflare's own example is
+          ``curl ... --data "SELECT ..."``. There is no parameter binding, so the
+          caller MUST NOT interpolate anything a user controls into the statement.
+          ``sites.service`` builds the only statements that reach here, and the one
+          value it substitutes is a site id it has already round-tripped through
+          ``ObjectId`` — 24 hex characters, checked again at the call site.
+        * **The response is NOT the Cloudflare success envelope.** A query answers
+          ``{"meta": [...], "data": [...], "rows": N}`` with no ``success`` key at
+          all, so ``_unwrap`` cannot read it: that helper raises on a body whose
+          ``success`` is absent, which would turn every SUCCESSFUL query into a
+          Cloudflare error. Only the failure branch is shared, through
+          ``_error_detail``.
+
+        Returns the ``data`` rows as a list of dicts. An empty ``data`` is a real,
+        legitimate answer — the query matched nothing — and is returned as ``[]``.
+
+        FAIL-CLOSED, and here that is the whole requirement rather than a habit. A
+        non-2xx, a body that is not JSON, and a 2xx whose ``data`` is missing or not
+        a list all raise ValidationError. The alternative — returning ``[]`` — would
+        render a customer's dashboard as "0 visitors" when the truth is "the read
+        failed", and a panel that reports an outage as a quiet week is worse than one
+        that reports nothing at all.
+
+        The API token needs ``Account Analytics Read``, which is a DIFFERENT
+        permission from the Workers and SSL scopes the deploy paths use. A token
+        without it answers 403, and ``_error_detail`` puts Cloudflare's own sentence
+        (and its code) in the raised message so the missing scope is diagnosable
+        rather than a bare status."""
+        url = f"{_CF_API}/accounts/{self._account_id}/analytics_engine/sql"
+        async with self._client() as client:
+            resp = await client.post(
+                url, content=sql.encode("utf-8"), headers={"Content-Type": "text/plain"}
+            )
+        if resp.status_code // 100 != 2:
+            raise ValidationError(
+                "sites.cloudflare_error",
+                f"Analytics Engine SQL {resp.status_code}: {_error_detail(resp)}",
+            )
+        try:
+            body = resp.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValidationError(
+                "sites.cloudflare_error",
+                "Analytics Engine returned a non-JSON body for a SQL query.",
+            ) from exc
+        rows = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(rows, list):
+            # A 2xx with no ``data`` array is a contract break, not an empty result:
+            # an empty result IS a ``data`` of ``[]``. Reporting it as no rows would
+            # manufacture the zeros this method exists to never manufacture.
+            raise ValidationError(
+                "sites.cloudflare_error",
+                "Analytics Engine returned no data array for a SQL query.",
+            )
+        return [r for r in rows if isinstance(r, dict)]

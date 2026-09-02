@@ -2,6 +2,16 @@
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
 #
+# Updated 2026-09-02 (SA-4 — the visitor-analytics read): added
+# ``SiteAnalyticsResponse`` / ``SiteAnalyticsBreakdown`` and the three
+# ``ANALYTICS_STATUS_*`` constants, backing GET /sites/{site_id}/analytics. The
+# shape is a discriminated one because the alternative renders three different
+# customer situations as the same panel of zeros: not on a plan that buys
+# analytics, on one but never republished since, and genuinely no traffic. Every
+# metric is None unless the status says the numbers are real, and a FAILED read is
+# not a status value at all — it is an error response, so an outage can never arrive
+# looking like a quiet week.
+#
 # Updated 2026-08-24 (SP-2 — draft preview joins the ephemeral build lane):
 # ``NativeArtifactResponse`` gained ``build_status`` / ``build_reason`` /
 # ``build_job_id`` and defaulted ``body_html`` / ``css`` to empty strings. A cold
@@ -887,3 +897,86 @@ class SiteAssetDeleteRequest(BaseModel):
     """The storage key to remove. Validated against the site's own prefix."""
 
     key: str
+
+
+# ── SA-4: the visitor-analytics read ────────────────────────────────────────
+#
+# ``status`` is a CLOSED vocabulary and the most important field on the response.
+# Four outcomes are possible and three of them would otherwise render identically
+# as a panel full of zeros, which is the specific failure this slice exists to
+# prevent: "your plan does not include this", "you have not published since you
+# upgraded", and "nobody visited" are three different sentences to a customer, and
+# only one of them is about their traffic.
+#
+#   ``ok``            — counted, and the numbers below are real. They may be zero.
+#   ``not_entitled``  — this site's plan does not buy analytics. Nothing was ever
+#                       recorded, and nothing can be until the plan changes.
+#   ``never_counted`` — entitled, but no publish has yet deployed a counter, so
+#                       there is nothing to read. Republishing starts it. Upgrading
+#                       does NOT backfill: history begins at that publish.
+#
+# The FOURTH outcome — the read itself failed — is deliberately NOT a status value.
+# It surfaces as an error response, because a failed read is not a report about the
+# site's traffic and must not arrive on the same shape as one. A client that
+# defaults an unknown status to "no data" would otherwise turn a Cloudflare outage
+# into a quiet week.
+ANALYTICS_STATUS_OK = "ok"
+ANALYTICS_STATUS_NOT_ENTITLED = "not_entitled"
+ANALYTICS_STATUS_NEVER_COUNTED = "never_counted"
+
+
+class SiteAnalyticsBreakdown(BaseModel):
+    """One row of a breakdown — a page, a referrer host, a country, a device class.
+
+    ``visitors`` is a distinct count within this row and does NOT sum to the
+    response's total: one visitor who reads three pages is one visitor overall and
+    one visitor on each of three rows. A UI that adds a column here gets a number
+    that means nothing, so the field is named for the row rather than for the total.
+    """
+
+    label: str
+    pageviews: int
+    visitors: int
+
+
+class SiteAnalyticsResponse(BaseModel):
+    """Visitor analytics for one site over one window (GET
+    /sites/{site_id}/analytics).
+
+    Shaped after ``cloud.mission_control.dto.AnalyticsResponse`` and it inherits that
+    model's one rule about absence: a metric that is not known is None, never 0. Here
+    that rule is load-bearing rather than cosmetic — see ``status`` above. Every
+    metric field is None unless ``status`` is ``ok``, so a client that renders the
+    numbers without reading the status shows blanks rather than a confident zero.
+
+    ``counting_since`` is the ISO stamp of the publish that first deployed a counter,
+    and it is what makes an honest chart possible: the series does not begin at the
+    site's creation, it begins here, and a window that reaches further back is
+    reaching into time nobody recorded. None when nothing has ever counted.
+
+    ``unrecorded`` names the dimensions the stored row cannot answer AT ALL, as
+    opposed to answered-and-empty. It is empty today for pages, referrers and
+    countries, and carries ``"devices"``: the row a published site writes holds the
+    path, the referrer host, the country and a per-day visitor hash, and nothing
+    about the device. The user-agent is read at the edge only to reject bots and to
+    salt that hash, and the hash is one-way, so no device breakdown can be recovered
+    from data already stored either. Naming it beats returning an empty list that a
+    chart would render as "no devices", and beats omitting the field, which a client
+    cannot tell from a version skew.
+    """
+
+    site_id: str
+    window: str
+    status: str
+    counting_since: str | None = None
+    # Retention is three months at Cloudflare, so a window is capped there and a
+    # series older than this is gone rather than empty. On the wire so a UI can say
+    # why the earliest date it can offer is the one it offers.
+    retention_days: int = 90
+    pageviews: int | None = None
+    visitors: int | None = None
+    top_pages: list[SiteAnalyticsBreakdown] | None = None
+    referrers: list[SiteAnalyticsBreakdown] | None = None
+    countries: list[SiteAnalyticsBreakdown] | None = None
+    devices: list[SiteAnalyticsBreakdown] | None = None
+    unrecorded: list[str] = []

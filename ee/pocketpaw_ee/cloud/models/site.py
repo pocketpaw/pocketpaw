@@ -4,6 +4,15 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-02 (SA-4 — the visitor-analytics read): added
+# ``analytics_since``, the UTC stamp of the first publish that actually deployed a
+# pageview counter. It is the ONLY thing on this document that separates "this site
+# has never recorded anything" from "this site is recording and nobody visited" —
+# ``deployed_at`` says a publish happened, not that it carried a counter. The read
+# endpoint reports those two as different states rather than serving 0 for both,
+# which is the whole point of the field. None on every pre-existing row, and None
+# reads as "not counting yet", so no migration.
+#
 # Updated 2026-08-12 (sites Settings consolidation): added the owner's CLIENT
 # record — ``client_name`` / ``client_contact`` / ``client_notes`` and a
 # ``client_invoices`` list of ``SiteInvoice``. TWO BILLING RELATIONSHIPS NOW MEET
@@ -274,6 +283,30 @@ class Site(TimestampedDocument):
     # flips True) — never on a preview/edit build, never on a plain updatedAt bump.
     # None until the pocket has been deployed at least once (old rows read null).
     deployed_at: datetime | None = None
+    # SA-4: when this site's visitors STARTED being counted (UTC) — the first
+    # publish that actually deployed a pageview counter, and never re-stamped after.
+    #
+    # It exists so the analytics read can tell "nothing was ever recorded" apart from
+    # "recorded, and genuinely nobody visited". Nothing else on this document can:
+    # ``deployed_at`` says a publish happened, not that it carried a counter, and a
+    # site upgraded an hour ago looks identical to a quiet site that has been counting
+    # for a month. Serving 0 for both is the exact failure the analytics read exists
+    # to avoid, so the two states get a field between them rather than a guess.
+    #
+    # WRITTEN FROM WHAT THE DEPLOY LEFT ON DISK, not from a second copy of the
+    # counting rule — see ``sites.service.publish``. That rule has three parts (the
+    # plan, the operator kill switch, and whether the engine emits its own worker),
+    # all resolved inside ``workers_deploy._write_deploy_files``, and re-deriving it
+    # here would be a fourth place for them to disagree.
+    #
+    # None on every site that has never counted, which is every row written before
+    # this field existed. That reads as "not counting yet" — correct for all of them,
+    # so there is no migration.
+    #
+    # FIRST-SET-WINS. It is "since", not "last": a site that lapses and renews keeps
+    # its original stamp, because recording really did begin then, and the retention
+    # window (three months) is shorter than most such gaps anyway.
+    analytics_since: datetime | None = None
     # Canonical deployed URL. LOCAL mode: the localhost URL the per-site static
     # server serves. CF mode: "" in v1 (reached via custom domain).
     url: str = ""
