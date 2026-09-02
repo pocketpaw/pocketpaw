@@ -783,3 +783,83 @@ async def test_the_endpoint_distinguishes_never_counted_from_a_quiet_week(client
     assert a["pageviews"] is None
     assert b["status"] == "ok"
     assert b["pageviews"] == 0
+
+
+# ── 7. gaps the first mutation sweep found ───────────────────────────────────
+#
+# Each of these was written because a mutation ESCAPED — the code was already right
+# and nothing would have noticed it going wrong. The failures they pin are all of one
+# family: a guard that is load-bearing but whose absence changes nothing any OTHER test
+# looks at.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["totals", "breakdown"])
+async def test_a_failure_on_ONE_query_still_fails_the_whole_read(beanie_test_db, failing):
+    """A read is FIVE queries — totals plus four breakdowns — and a swallow on ANY ONE of
+    them is the outage-as-quiet-week failure wearing a smaller hat. A panel whose totals
+    are real and whose referrer chart is silently empty is worse than an error, because
+    nothing on screen says a query failed.
+
+    BOTH DIRECTIONS, because a client that fails on every query does not distinguish
+    them and that is precisely how the first sweep's mutation escaped: a try/except
+    around the totals call alone left every assertion in this file passing, since the
+    breakdown loop went on raising. Each half here has to fail on its own."""
+
+    class _FailsOne:
+        def __init__(self, which: str) -> None:
+            self.which = which
+            self.queries: list[str] = []
+
+        async def query_analytics_sql(self, sql: str) -> list[dict]:
+            self.queries.append(sql)
+            is_breakdown = "GROUP BY" in sql
+            if (self.which == "breakdown") == is_breakdown:
+                raise ValidationError("sites.cloudflare_error", "Analytics Engine SQL 500")
+            return [] if is_breakdown else [{"pageviews": 500, "visitors": 200}]
+
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+
+    with pytest.raises(CloudError):
+        await sites_service.site_analytics(
+            workspace_id="ws-read", site_id=str(site.id), _cloudflare=_FailsOne(failing)
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_sql_builder_refuses_anything_that_is_not_a_site_id(beanie_test_db):
+    """THE LAST GUARD IN FRONT OF RAW SQL, asserted directly on the builder.
+
+    Every path that reaches it today goes through ``_load``, which round-trips the id
+    through ``ObjectId`` — so removing this check breaks no end-to-end test, which is
+    why the mutation escaped. It stays because the cost of the next caller not having
+    done that round-trip is an injected query against the account's whole analytics
+    dataset, and a guard nothing tests is a guard somebody deletes."""
+    with pytest.raises(ValidationError):
+        sites_service._analytics_sql(select="1", site_id="' OR 1=1 --", days=7)
+    with pytest.raises(ValidationError):
+        sites_service._analytics_sql(select="1", site_id="507F1F77BCF86CD799439011", days=7)
+    with pytest.raises(ValidationError):
+        sites_service._analytics_sql(select="1", site_id="507f1f77bcf86cd7994390", days=7)
+
+    ok = sites_service._analytics_sql(select="1", site_id="507f1f77bcf86cd799439011", days=7)
+    assert "507f1f77bcf86cd799439011" in ok
+
+
+@pytest.mark.asyncio
+async def test_the_endpoint_honours_a_window_other_than_the_default(client, monkeypatch):
+    """The route must FORWARD the window, not merely accept it. A handler that dropped
+    it would answer 200 with correct-looking numbers for the wrong period — and every
+    service test would still pass, because they call the service directly.
+
+    Asserted on the response AND on the SQL, so a route that echoed the parameter back
+    without using it is caught too."""
+    site = await _seed_site(workspace_id="ws-http", counting_since=datetime(2026, 6, 1, tzinfo=UTC))
+    cf = _FakeAnalyticsCF(totals={"pageviews": 9, "visitors": 4})
+    monkeypatch.setattr(sites_service, "_cf_client", lambda: cf)
+
+    resp = await client.get(f"/api/v1/sites/{site.id}/analytics?window=90d")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["window"] == "90d"
+    assert cf.queries and all("INTERVAL '90' DAY" in sql for sql in cf.queries)
