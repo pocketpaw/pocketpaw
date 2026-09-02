@@ -1,0 +1,785 @@
+# tests/ee/sites/test_sites_analytics_read.py — SA-4, the read half of Paw Sites
+# visitor analytics: GET /sites/{site_id}/analytics and the aggregation behind it.
+#
+# Created 2026-09-02 (feat/sites-analytics-read).
+#
+# THE REQUIREMENT THIS WHOLE FILE EXISTS FOR: never invent a zero. Four situations can
+# leave a dashboard looking empty and they are four different sentences to a customer:
+#
+#   1. this plan does not buy analytics
+#   2. it does, but no publish has deployed a counter, so nothing was ever recorded
+#   3. a counter is up, and genuinely nobody visited
+#   4. the read itself failed
+#
+# Only the third is a report about their traffic. Serving 0 for the first two tells
+# someone their marketing is dead when the truth is they have not upgraded, or have not
+# republished since they did. And the fourth is deliberately NOT a status value: a
+# client that maps an unfamiliar status to "no data" would render a Cloudflare outage
+# as a quiet week, so a failed read is an error response. Each of the four is asserted
+# here, and asserted as DISTINGUISHABLE rather than merely as "not a crash".
+#
+# THE ROW SHAPE IS A MOVING TARGET, which the device tests are about. SA-3 appends a
+# device class at ``blobs[4]`` in a separate slice that may or may not land. A row
+# written before it has four blobs and one written after has five, Analytics Engine has
+# no schema and answers an empty string for a blob a row never carried, so BOTH shapes
+# arrive inside one window. Neither may crash, and neither may silently miscount — an
+# empty device is bucketed as unknown rather than dropped, because dropping it rescales
+# every other device's share.
+#
+# The Cloudflare client is FAKED at the seam that speaks HTTP (``query_analytics_sql``)
+# rather than at the service function, so everything between the route and the wire —
+# the entitlement gate, the SQL, the row mapping, the cache — is real code under test.
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+pytest.importorskip("pocketpaw_ee")
+
+from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, ValidationError  # noqa: E402
+from pocketpaw_ee.sites import service as sites_service  # noqa: E402
+
+SITE_TIER = "site"
+
+
+class _FakeAnalyticsCF:
+    """A Cloudflare client that answers SQL from a scripted table.
+
+    Faked at ``query_analytics_sql`` — the one method that speaks HTTP — so the SQL
+    text, the row mapping, the status decision and the cache are all real code here.
+    Every statement is recorded, which is how the injection and window tests assert on
+    what was actually sent rather than on what the caller meant to send.
+    """
+
+    def __init__(self, rows_by_blob: dict[str, list[dict]] | None = None, totals=None) -> None:
+        self.rows_by_blob = rows_by_blob or {}
+        self.totals = totals
+        self.queries: list[str] = []
+
+    async def query_analytics_sql(self, sql: str) -> list[dict]:
+        self.queries.append(sql)
+        if "GROUP BY" not in sql:
+            return [] if self.totals is None else [self.totals]
+        for blob, rows in self.rows_by_blob.items():
+            if f"{blob} AS label" in sql:
+                return rows
+        return []
+
+
+class _ExplodingCF:
+    """A client whose read fails the way the real one does — see
+    ``cloudflare_client.query_analytics_sql``, which is fail-closed on a non-2xx, a
+    non-JSON body, and a 2xx with no data array."""
+
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    async def query_analytics_sql(self, sql: str) -> list[dict]:
+        self.queries.append(sql)
+        raise ValidationError(
+            "sites.cloudflare_error", "Analytics Engine SQL 503: service unavailable"
+        )
+
+
+def _rows(*pairs: tuple[str, int, int]) -> list[dict]:
+    return [{"label": label, "pageviews": pv, "visitors": v} for label, pv, v in pairs]
+
+
+async def _seed_site(
+    *,
+    workspace_id: str = "ws-read",
+    pocket_id: str = "pk-read",
+    plan_tier: str | None = SITE_TIER,
+    subscription_status: str | None = "active",
+    counting_since: datetime | None = None,
+) -> Any:
+    """Insert a Site document directly.
+
+    Built rather than published because every case here is about the state of a row a
+    publish has ALREADY produced — the publish path's own writes are asserted in
+    test_sites_analytics_since.py, and going through it would make each of these tests
+    depend on a build, a deploy and a badge stamper that have nothing to do with the
+    read.
+    """
+    from bson import ObjectId
+    from pocketpaw_ee.cloud.models.site import Site
+
+    doc = Site(
+        id=ObjectId(),
+        workspace=workspace_id,
+        pocket_id=pocket_id,
+        owner="u1",
+        name="Read Site",
+        deployed=True,
+        plan_tier=plan_tier,
+        subscription_status=subscription_status,
+        analytics_since=counting_since,
+    )
+    await doc.insert()
+    return doc
+
+
+@pytest.fixture(autouse=True)
+def _empty_cache():
+    """Clear the read cache around every test.
+
+    It is process-global, so without this a response assembled by one test would be
+    served to the next — which would also hide a cache bug behind whichever test ran
+    first."""
+    sites_service._analytics_cache.clear()
+    yield
+    sites_service._analytics_cache.clear()
+
+
+# ── 1. the four outcomes ─────────────────────────────────────────────────────
+#
+# Named for the CUSTOMER SITUATION rather than for the input, because the failure being
+# guarded against is one where all four render the same and only the wording of the
+# assertion tells you which one broke.
+
+
+@pytest.mark.asyncio
+async def test_a_site_whose_plan_does_not_buy_analytics_says_so(beanie_test_db):
+    """State 1. Nothing was ever recorded and nothing can be until the plan changes, so
+    every metric is None — a UI that renders the numbers without reading the status
+    shows blanks rather than a confident zero."""
+    site = await _seed_site(plan_tier="free", counting_since=datetime.now(UTC))
+    cf = _FakeAnalyticsCF()
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert out.status == "not_entitled"
+    assert out.pageviews is None
+    assert out.visitors is None
+    assert out.counting_since is None
+    assert cf.queries == [], "an unentitled site must not spend a billed read"
+
+
+@pytest.mark.asyncio
+async def test_an_entitled_site_that_has_never_counted_says_so(beanie_test_db):
+    """State 2, and the state the ``analytics_since`` field exists to make knowable.
+    The site is paying; no publish has deployed a counter, so there is nothing to read
+    and republishing is the fix. Distinguishable from state 3 below, which is the whole
+    point."""
+    site = await _seed_site(counting_since=None)
+    cf = _FakeAnalyticsCF()
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert out.status == "never_counted"
+    assert out.pageviews is None
+    assert out.counting_since is None
+    assert cf.queries == [], "there is nothing recorded to query"
+
+
+@pytest.mark.asyncio
+async def test_a_counting_site_with_no_traffic_reports_a_real_zero(beanie_test_db):
+    """State 3. A counter IS up, the query really ran, and it really found nothing.
+    THIS is the only state in which a zero is honest — and it carries
+    ``counting_since``, so the panel can say how long that zero has been true."""
+    began = datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
+    site = await _seed_site(counting_since=began)
+    cf = _FakeAnalyticsCF(totals={"pageviews": 0, "visitors": 0})
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert out.status == "ok"
+    assert out.pageviews == 0
+    assert out.visitors == 0
+    assert out.counting_since == began.isoformat()
+    assert cf.queries, "state 3 is the one that actually queries"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_raises_rather_than_reporting_a_quiet_week(beanie_test_db):
+    """State 4, and the reason it is NOT a status value. A Cloudflare outage arriving on
+    the same shape as a report would be read by any client as zero traffic — silently,
+    and exactly when the customer is least able to tell.
+
+    The status vocabulary is asserted as CLOSED here too: were a failure ever added to
+    it, this test is what fails."""
+    site = await _seed_site(counting_since=datetime.now(UTC))
+    cf = _ExplodingCF()
+
+    with pytest.raises(CloudError) as exc:
+        await sites_service.site_analytics(
+            workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+        )
+
+    assert exc.value.code == "sites.cloudflare_error"
+    assert "not_entitled" not in str(exc.value)
+    from pocketpaw_ee.sites import dto
+
+    assert {
+        dto.ANALYTICS_STATUS_OK,
+        dto.ANALYTICS_STATUS_NOT_ENTITLED,
+        dto.ANALYTICS_STATUS_NEVER_COUNTED,
+    } == {"ok", "not_entitled", "never_counted"}
+
+
+@pytest.mark.asyncio
+async def test_the_four_outcomes_are_actually_distinguishable(beanie_test_db):
+    """The claim the four tests above make INDIVIDUALLY, asserted as a set. Each one
+    alone would pass against an implementation that answered the same thing for two of
+    them, and "your plan does not include this" collapsing into "nobody visited" is the
+    exact failure this slice exists to prevent."""
+    began = datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
+    unentitled = await _seed_site(pocket_id="pk-d1", plan_tier="free", counting_since=began)
+    never = await _seed_site(pocket_id="pk-d2", counting_since=None)
+    quiet = await _seed_site(pocket_id="pk-d3", counting_since=began)
+    # A FOURTH site for the outage, not a re-read of ``quiet``. A site read successfully
+    # a moment ago is cached, so a Cloudflare failure inside the TTL is correctly served
+    # from the cache and never reaches the client — real behaviour, and it would make
+    # this assertion pass or fail on cache timing rather than on the status vocabulary.
+    broken = await _seed_site(pocket_id="pk-d4", counting_since=began)
+
+    async def _read(site, cf):
+        return await sites_service.site_analytics(
+            workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+        )
+
+    a = await _read(unentitled, _FakeAnalyticsCF())
+    b = await _read(never, _FakeAnalyticsCF())
+    c = await _read(quiet, _FakeAnalyticsCF(totals={"pageviews": 0, "visitors": 0}))
+
+    assert len({a.status, b.status, c.status}) == 3
+    # And the fourth is not on the same axis at all.
+    with pytest.raises(CloudError):
+        await _read(broken, _ExplodingCF())
+
+
+# ── 2. real aggregates ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_site_with_traffic_returns_its_aggregates(beanie_test_db):
+    """The endpoint's actual job. Totals plus the three dimensions the stored row
+    carries, in the order the query returned them (the SQL sorts by pageviews)."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _FakeAnalyticsCF(
+        totals={"pageviews": 1280, "visitors": 431},
+        rows_by_blob={
+            "blob1": _rows(("/", 800, 300), ("/pricing", 480, 210)),
+            "blob2": _rows(("news.ycombinator.com", 300, 260), ("", 700, 190)),
+            "blob3": _rows(("US", 900, 320), ("DE", 380, 111)),
+        },
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert out.status == "ok"
+    assert (out.pageviews, out.visitors) == (1280, 431)
+    assert [(r.label, r.pageviews, r.visitors) for r in out.top_pages] == [
+        ("/", 800, 300),
+        ("/pricing", 480, 210),
+    ]
+    assert [r.label for r in out.countries] == ["US", "DE"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_referrer_is_reported_as_direct_and_never_dropped(beanie_test_db):
+    """A blank referrer is a REAL answer — a direct visit or a same-site link, which the
+    counting Worker deliberately writes as empty. Dropping the row would inflate every
+    remaining referrer's share, which is how a chart lies without a single wrong number
+    in it."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _FakeAnalyticsCF(
+        totals={"pageviews": 10, "visitors": 8},
+        rows_by_blob={"blob2": _rows(("", 7, 6), ("example.com", 3, 2))},
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert [(r.label, r.pageviews) for r in out.referrers] == [("(direct)", 7), ("example.com", 3)]
+
+
+@pytest.mark.asyncio
+async def test_a_64_bit_sum_arriving_as_a_string_is_still_a_number(beanie_test_db):
+    """ClickHouse-shaped APIs serialise 64-bit aggregates as JSON STRINGS to survive
+    JavaScript's integer limit, so ``SUM(_sample_interval)`` can arrive quoted. Read as
+    text it would reach the wire as a string on a field typed ``int`` and 500 the
+    endpoint for exactly the busiest sites."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _FakeAnalyticsCF(
+        totals={"pageviews": "9007199254740993", "visitors": "12"},
+        rows_by_blob={"blob1": [{"label": "/", "pageviews": "5", "visitors": "4"}]},
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert out.pageviews == 9007199254740993
+    assert out.visitors == 12
+    assert out.top_pages[0].pageviews == 5
+
+
+# ── 3. the row shape SA-3 is changing under this reader ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_four_blob_row_reads_as_devices_unrecorded(beanie_test_db):
+    """The row shape shipped by SA-1. There is no fifth blob, so Analytics Engine
+    answers an empty string for it and no device is knowable. Reported as
+    ``devices: None`` plus ``"devices"`` in ``unrecorded`` — a client renders "not
+    recorded", where an empty list would render "no devices" and an omitted field is
+    indistinguishable from a version skew."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _FakeAnalyticsCF(
+        totals={"pageviews": 40, "visitors": 20},
+        rows_by_blob={"blob1": _rows(("/", 40, 20)), "blob5": _rows(("", 40, 20))},
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert out.status == "ok"
+    assert out.devices is None
+    assert out.unrecorded == ["devices"]
+    assert out.pageviews == 40, "the rest of the panel is unaffected"
+
+
+@pytest.mark.asyncio
+async def test_a_five_blob_row_reads_its_device_class(beanie_test_db):
+    """The shape SA-3 writes. The same reader, no version flag, and ``unrecorded`` goes
+    empty on its own the moment real device rows exist."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _FakeAnalyticsCF(
+        totals={"pageviews": 100, "visitors": 60},
+        rows_by_blob={"blob5": _rows(("mobile", 70, 44), ("desktop", 30, 16))},
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert [(r.label, r.pageviews) for r in out.devices] == [("mobile", 70), ("desktop", 30)]
+    assert out.unrecorded == []
+
+
+@pytest.mark.asyncio
+async def test_both_row_shapes_in_one_window_bucket_the_old_rows_as_unknown(beanie_test_db):
+    """THE CASE THAT ACTUALLY HAPPENS on the day SA-3 deploys: a seven-day window spans
+    the change, so four-blob and five-blob rows come back together. The old rows must be
+    BUCKETED, not dropped — dropping them would rescale mobile and desktop against a
+    smaller total and quietly overstate both."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _FakeAnalyticsCF(
+        totals={"pageviews": 100, "visitors": 60},
+        rows_by_blob={"blob5": _rows(("", 55, 30), ("mobile", 30, 20), ("desktop", 15, 10))},
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    labels = {r.label: r.pageviews for r in out.devices}
+    assert labels == {"unknown": 55, "mobile": 30, "desktop": 15}
+    assert sum(labels.values()) == out.pageviews
+    assert out.unrecorded == []
+
+
+# ── 4. tenancy, windows and the SQL ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_another_workspaces_site_is_a_404(beanie_test_db):
+    """Matches every sibling per-site read. The tenancy check runs BEFORE the
+    entitlement one, so a caller cannot learn that another workspace's site exists —
+    let alone what it is paying — by watching which error comes back."""
+    site = await _seed_site(workspace_id="ws-owner", counting_since=datetime.now(UTC))
+    cf = _FakeAnalyticsCF(totals={"pageviews": 5, "visitors": 5})
+
+    with pytest.raises(NotFound):
+        await sites_service.site_analytics(
+            workspace_id="ws-intruder", site_id=str(site.id), _cloudflare=cf
+        )
+    assert cf.queries == []
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_site_id_is_a_404_and_never_reaches_the_sql(beanie_test_db):
+    """``_load`` guards the ObjectId cast, so a malformed id is "no such site" rather
+    than a 500 — and, on this endpoint specifically, never becomes a fragment of a raw
+    SQL statement."""
+    cf = _FakeAnalyticsCF()
+    with pytest.raises(NotFound):
+        await sites_service.site_analytics(
+            workspace_id="ws-read", site_id="' OR 1=1 --", _cloudflare=cf
+        )
+    assert cf.queries == []
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_window_is_refused_before_any_query(beanie_test_db):
+    """THE WINDOW IS A SQL CONTROL, not only input hygiene. The Analytics Engine
+    endpoint takes raw text with no parameter binding, so a window that reached the
+    statement would be an injection. It selects a row from a closed table instead, and
+    anything else is a 422 raised before a client is even built."""
+    site = await _seed_site(counting_since=datetime.now(UTC))
+    cf = _FakeAnalyticsCF(totals={"pageviews": 1, "visitors": 1})
+
+    with pytest.raises(ValidationError):
+        await sites_service.site_analytics(
+            workspace_id="ws-read",
+            site_id=str(site.id),
+            window="7d' OR '1'='1",
+            _cloudflare=cf,
+        )
+    assert cf.queries == []
+
+
+@pytest.mark.asyncio
+async def test_the_window_selects_the_interval_and_the_site_scopes_the_query(beanie_test_db):
+    """Every statement is scoped to THIS site's index and to the requested window. The
+    index filter is the tenancy boundary inside a dataset every site shares, so a
+    missing one would serve another customer's numbers with no error anywhere."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _FakeAnalyticsCF(totals={"pageviews": 1, "visitors": 1})
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), window="30d", _cloudflare=cf
+    )
+
+    assert out.window == "30d"
+    assert cf.queries
+    for sql in cf.queries:
+        assert f"index1 = '{site.id}'" in sql
+        assert "INTERVAL '30' DAY" in sql
+    # Sampling is accounted for. A plain COUNT() under-reports precisely the busiest
+    # sites, which are the ones that would notice.
+    assert "SUM(_sample_interval)" in cf.queries[0]
+
+
+@pytest.mark.asyncio
+async def test_the_default_window_is_seven_days(beanie_test_db):
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _FakeAnalyticsCF(totals={"pageviews": 1, "visitors": 1})
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert out.window == "7d"
+    assert "INTERVAL '7' DAY" in cf.queries[0]
+    assert out.retention_days == 90, "three months at Cloudflare, on the wire so a UI can say why"
+
+
+@pytest.mark.asyncio
+async def test_a_naive_stored_stamp_reaches_the_wire_as_utc(beanie_test_db):
+    """Mongo stores a datetime with no zone, so a stamp written as tz-aware reads back
+    NAIVE. On the wire bare it would be read as the client's local time — a silent
+    several-hour lie about when counting began, on the exact value a chart's x-axis
+    starts at."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, 9, 0))
+    cf = _FakeAnalyticsCF(totals={"pageviews": 1, "visitors": 1})
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert out.counting_since is not None
+    assert out.counting_since.endswith("+00:00")
+    assert datetime.fromisoformat(out.counting_since) == datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
+
+
+# ── 5. the cache ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_second_read_inside_the_window_costs_no_cloudflare_query(beanie_test_db):
+    """Analytics Engine bills READ queries against a small daily allowance, and this
+    panel's whole usage pattern is somebody reloading it. Asserted on the query log
+    rather than on a timing, so it says what it means."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _FakeAnalyticsCF(totals={"pageviews": 12, "visitors": 9})
+
+    first = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+    sent = len(cf.queries)
+    second = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert len(cf.queries) == sent, "the reload re-queried Cloudflare"
+    assert second.pageviews == first.pageviews == 12
+
+
+@pytest.mark.asyncio
+async def test_each_window_is_cached_separately(beanie_test_db):
+    """A cache keyed on the site alone would serve the 7-day numbers for a 90-day
+    request — the same panel, a different question, and no error anywhere to notice
+    it."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _FakeAnalyticsCF(totals={"pageviews": 3, "visitors": 3})
+
+    week = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), window="7d", _cloudflare=cf
+    )
+    quarter = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), window="90d", _cloudflare=cf
+    )
+
+    assert (week.window, quarter.window) == ("7d", "90d")
+    assert any("INTERVAL '90' DAY" in sql for sql in cf.queries)
+
+
+@pytest.mark.asyncio
+async def test_the_cache_never_answers_a_different_tenant(beanie_test_db):
+    """TENANCY BEATS THE CACHE. Two workspaces cannot share a site id in practice, but a
+    key that omitted the workspace would make that assumption load-bearing across a
+    process that serves every tenant — and the tenancy check runs first regardless, so a
+    cached entry can never short-circuit it."""
+    site = await _seed_site(workspace_id="ws-owner", counting_since=datetime.now(UTC))
+    cf = _FakeAnalyticsCF(totals={"pageviews": 77, "visitors": 40})
+
+    await sites_service.site_analytics(
+        workspace_id="ws-owner", site_id=str(site.id), _cloudflare=cf
+    )
+    with pytest.raises(NotFound):
+        await sites_service.site_analytics(
+            workspace_id="ws-intruder", site_id=str(site.id), _cloudflare=cf
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_expired_entry_is_re_queried(beanie_test_db):
+    """The TTL actually expires. Driven by rewriting the stored deadline rather than by
+    sleeping — a real wait would add a minute to the suite to prove arithmetic."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _FakeAnalyticsCF(totals={"pageviews": 12, "visitors": 9})
+
+    await sites_service.site_analytics(workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf)
+    sent = len(cf.queries)
+    key = ("ws-read", str(site.id), "7d")
+    _, cached = sites_service._analytics_cache[key]
+    sites_service._analytics_cache[key] = (0.0, cached)
+
+    await sites_service.site_analytics(workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf)
+
+    assert len(cf.queries) > sent
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_is_not_cached(beanie_test_db):
+    """Caching a failure would turn a Cloudflare blip into a minute of errors for
+    everyone who reloads, and would hold the panel dark after the outage ended."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+
+    with pytest.raises(CloudError):
+        await sites_service.site_analytics(
+            workspace_id="ws-read", site_id=str(site.id), _cloudflare=_ExplodingCF()
+        )
+
+    healthy = _FakeAnalyticsCF(totals={"pageviews": 5, "visitors": 4})
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=healthy
+    )
+
+    assert out.status == "ok"
+    assert healthy.queries, "the recovery read must reach Cloudflare"
+
+
+@pytest.mark.asyncio
+async def test_the_cache_is_bounded(beanie_test_db):
+    """A workspace with thousands of sites must not grow this without limit. The policy
+    is deliberately dumb — sweep the expired, and clear if that was not enough — because
+    an entry is worth a fraction of a cent and the next request simply re-queries."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cap = sites_service._ANALYTICS_CACHE_MAX_ENTRIES
+    for i in range(cap + 5):
+        sites_service._analytics_cache[("ws-x", f"site-{i}", "7d")] = (
+            float("inf"),
+            sites_service._analytics_empty(f"site-{i}", "7d", "ok", None),
+        )
+
+    await sites_service.site_analytics(
+        workspace_id="ws-read",
+        site_id=str(site.id),
+        _cloudflare=_FakeAnalyticsCF(totals={"pageviews": 1, "visitors": 1}),
+    )
+
+    assert len(sites_service._analytics_cache) <= cap
+
+
+# ── 6. over HTTP ─────────────────────────────────────────────────────────────
+
+
+class _FakeMembership:
+    def __init__(self, workspace: str, role: str = "member") -> None:
+        self.workspace = workspace
+        self.role = role
+
+
+class _FakeUser:
+    """Member of the test workspace — ``fabric.read`` is member-tier."""
+
+    def __init__(self, workspace_id: str) -> None:
+        self.id = "user-test-1"
+        self.active_workspace = workspace_id
+        self.workspaces = [_FakeMembership(workspace=workspace_id)]
+
+
+def _build_app(workspace_id: str) -> FastAPI:
+    """The sites router behind stubbed auth, mirroring test_router.py.
+
+    No plan patch here — the tree's conftest already patches ``get_workspace_plan``, and
+    a second patch on the same target unwinds in the wrong order and leaks a mock across
+    test trees. See test_router.py's own note.
+    """
+    from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
+    from pocketpaw_ee.cloud._core.deps import current_workspace_id
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud.auth import current_active_user
+    from pocketpaw_ee.cloud.license import require_license
+    from pocketpaw_ee.sites.router import router as sites_router
+
+    fake_user = _FakeUser(workspace_id)
+    app = FastAPI()
+    add_error_handler(app)
+    app.include_router(sites_router, prefix="/api/v1")
+
+    async def _ctx() -> RequestContext:
+        return RequestContext(
+            user_id=str(fake_user.id),
+            workspace_id=workspace_id,
+            request_id="test",
+            scope=ScopeKind.WORKSPACE,
+            started_at=datetime.now(UTC),
+        )
+
+    app.dependency_overrides[request_context] = _ctx
+    app.dependency_overrides[current_active_user] = lambda: fake_user
+    app.dependency_overrides[current_workspace_id] = lambda: workspace_id
+    app.dependency_overrides[require_license] = lambda: None
+    return app
+
+
+@pytest_asyncio.fixture
+async def client(beanie_test_db):
+    app = _build_app("ws-http")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        yield c
+
+
+@pytest.mark.asyncio
+async def test_the_endpoint_serves_the_aggregates(client, monkeypatch):
+    """End to end through the route, which is where the response MODEL is enforced —
+    the service tests above would pass against a DTO the wire cannot serialise."""
+    site = await _seed_site(
+        workspace_id="ws-http", counting_since=datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
+    )
+    cf = _FakeAnalyticsCF(
+        totals={"pageviews": 210, "visitors": 88},
+        rows_by_blob={"blob1": _rows(("/", 210, 88))},
+    )
+    monkeypatch.setattr(sites_service, "_cf_client", lambda: cf)
+
+    resp = await client.get(f"/api/v1/sites/{site.id}/analytics?window=7d")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["pageviews"] == 210
+    assert body["visitors"] == 88
+    assert body["window"] == "7d"
+    assert body["counting_since"].startswith("2026-08-01T09:00:00")
+    assert body["top_pages"][0]["label"] == "/"
+    assert body["devices"] is None
+    assert body["unrecorded"] == ["devices"]
+
+
+@pytest.mark.asyncio
+async def test_the_endpoint_404s_a_cross_tenant_site(client):
+    """Same as the sibling per-site endpoints. Asserted over HTTP because the mapping
+    from ``NotFound`` to a 404 lives in the error handler, not in the service."""
+    site = await _seed_site(workspace_id="ws-somebody-else", counting_since=datetime.now(UTC))
+
+    resp = await client.get(f"/api/v1/sites/{site.id}/analytics")
+
+    assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.asyncio
+async def test_the_endpoint_reports_an_outage_as_an_error_not_as_zero(client, monkeypatch):
+    """The end-to-end form of state 4, and the one that matters most on the wire. A
+    5xx is unmissable; a 200 carrying zeros is indistinguishable from a quiet week to
+    every client that will ever be written against this."""
+    site = await _seed_site(workspace_id="ws-http", counting_since=datetime.now(UTC))
+    monkeypatch.setattr(sites_service, "_cf_client", _ExplodingCF)
+
+    resp = await client.get(f"/api/v1/sites/{site.id}/analytics")
+
+    assert resp.status_code >= 400, resp.text
+    assert "pageviews" not in resp.json()
+
+
+@pytest.mark.asyncio
+async def test_the_endpoint_refuses_an_unknown_window(client):
+    site = await _seed_site(workspace_id="ws-http", counting_since=datetime.now(UTC))
+
+    resp = await client.get(f"/api/v1/sites/{site.id}/analytics?window=all-time")
+
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_the_endpoint_states_the_plan_case_without_numbers(client):
+    """What a free site's panel is built from. A 200 rather than a 402: the site exists
+    and the answer is a real one — "not on this plan" — which the UI turns into an
+    upgrade prompt rather than an error."""
+    site = await _seed_site(
+        workspace_id="ws-http", plan_tier="free", counting_since=datetime.now(UTC)
+    )
+
+    resp = await client.get(f"/api/v1/sites/{site.id}/analytics")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "not_entitled"
+    assert body["pageviews"] is None
+    assert body["top_pages"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_endpoint_distinguishes_never_counted_from_a_quiet_week(client, monkeypatch):
+    """The two states a customer is most likely to confuse, side by side over HTTP.
+    Same status code, same shape, and the only thing separating "republish to start
+    counting" from "nobody came" is the field this test reads."""
+    never = await _seed_site(workspace_id="ws-http", pocket_id="pk-h1", counting_since=None)
+    quiet = await _seed_site(
+        workspace_id="ws-http",
+        pocket_id="pk-h2",
+        counting_since=datetime.now(UTC) - timedelta(days=30),
+    )
+    monkeypatch.setattr(
+        sites_service,
+        "_cf_client",
+        lambda: _FakeAnalyticsCF(totals={"pageviews": 0, "visitors": 0}),
+    )
+
+    a = (await client.get(f"/api/v1/sites/{never.id}/analytics")).json()
+    b = (await client.get(f"/api/v1/sites/{quiet.id}/analytics")).json()
+
+    assert a["status"] == "never_counted"
+    assert a["pageviews"] is None
+    assert b["status"] == "ok"
+    assert b["pageviews"] == 0

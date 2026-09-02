@@ -3,6 +3,15 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# Updated 2026-09-02 (SA-4 — the visitor-analytics read): GET
+# ``/sites/{site_id}/analytics``, the read half of the counter SA-1/SA-2 deploy.
+# Gated ``fabric.read`` and tenant-scoped through the service's ``_load`` like the
+# per-site reads beside it. Its response leads with a ``status`` because THREE
+# different customer situations otherwise render as the same panel of zeros — not
+# on a plan that buys analytics, on one but not republished since, and genuinely no
+# traffic — and a FAILED read is an error response rather than a fourth status, so
+# an outage cannot arrive looking like a quiet week.
+#
 # Updated 2026-08-31 (feat/sites-public-asset-uploads): three endpoints for the
 # site's PUBLIC asset rail — POST/GET/DELETE ``/sites/by-pocket/{pocket_id}/assets``.
 # A site could not display an image the owner supplied: the source map the generator
@@ -227,7 +236,16 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
@@ -248,6 +266,7 @@ from pocketpaw_ee.sites.dto import (
     NativeArtifactResponse,
     PublishRequest,
     RequestPublishResponse,
+    SiteAnalyticsResponse,
     SiteAssetDeleteRequest,
     SiteAssetListResponse,
     SiteAssetResponse,
@@ -965,6 +984,36 @@ async def get_site_entitlements(
     lookup.
     """
     return await sites_service.site_entitlements(workspace_id=ctx.workspace_id, site_id=site_id)
+
+
+@router.get("/sites/{site_id}/analytics", response_model=SiteAnalyticsResponse)
+async def site_analytics(
+    site_id: str,
+    window: str = Query(default="7d", description="24h | 7d | 30d | 90d"),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteAnalyticsResponse:
+    """This site's visitor numbers over one window, for the builder's Analytics panel.
+
+    ``status`` is the field to read FIRST, and the response is shaped so a client that
+    ignores it shows blanks rather than confident zeros. Three situations produce an
+    empty panel and they are three different sentences to the customer: the plan does
+    not include analytics, it does but nothing has been published since (so nothing was
+    ever recorded), or a counter is up and genuinely nobody visited. Only the last is
+    about their traffic.
+
+    A read that FAILS is an error response, never a status — see the service. A client
+    that defaults an unknown status to "no data" would otherwise render a Cloudflare
+    outage as a quiet week.
+
+    ``window`` is validated against a closed set (a bad one is a 422), which is a SQL
+    control and not only input hygiene: the Analytics Engine endpoint takes raw text
+    with no parameter binding. Tenant-scoped like every sibling per-site read, so a
+    cross-tenant or missing site is a 404.
+    """
+    return await sites_service.site_analytics(
+        workspace_id=ctx.workspace_id, site_id=site_id, window=window
+    )
 
 
 @router.get("/sites/{site_id}/client", response_model=SiteClientResponse)
