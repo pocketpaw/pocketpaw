@@ -120,10 +120,55 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import suppress
 from typing import Any
 
 _run_sweeper_logger = logging.getLogger(__name__)
+
+# Heartbeat cadence for the sweep loop below. 300s is the historical value and
+# stays the default; it was hardcoded, while every sibling sweeper in the
+# codebase (fabric_ingest, mandates, decisions) already reads its interval from
+# env. Made configurable for the same reason they are: this loop is the ONLY
+# thing between a finished run and a visible charge, so an operator tuning
+# billing latency should not have to edit source.
+#
+# The floor is deliberate. Each tick queries unbilled runs, iterates every
+# provisioned tenant and, in the LiteLLM cutover modes, calls the proxy admin API
+# once per tenant. A one-second interval would hammer the proxy rather than speed
+# anything up, so a lower value is clamped and logged rather than honoured.
+_DEFAULT_SWEEP_INTERVAL_SECONDS = 300
+_MIN_SWEEP_INTERVAL_SECONDS = 30
+_ENV_SWEEP_INTERVAL = "POCKETPAW_SWEEPER_INTERVAL_SECONDS"
+
+
+def _sweep_interval_seconds() -> int:
+    """Read the sweep cadence from env, default 300s, floored at 30s."""
+    raw = os.environ.get(_ENV_SWEEP_INTERVAL, "").strip()
+    if not raw:
+        return _DEFAULT_SWEEP_INTERVAL_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        _run_sweeper_logger.warning(
+            "%s=%r is not an int — falling back to %ds",
+            _ENV_SWEEP_INTERVAL,
+            raw,
+            _DEFAULT_SWEEP_INTERVAL_SECONDS,
+        )
+        return _DEFAULT_SWEEP_INTERVAL_SECONDS
+    if value < _MIN_SWEEP_INTERVAL_SECONDS:
+        _run_sweeper_logger.warning(
+            "%s=%d is below the %ds floor — clamping. Each tick hits the proxy "
+            "admin API once per provisioned tenant.",
+            _ENV_SWEEP_INTERVAL,
+            value,
+            _MIN_SWEEP_INTERVAL_SECONDS,
+        )
+        return _MIN_SWEEP_INTERVAL_SECONDS
+    return value
+
+
 _sweeper_task: asyncio.Task[None] | None = None
 _xproc_consumer_task: asyncio.Task[None] | None = None
 
@@ -136,9 +181,12 @@ async def _sweeper_loop() -> None:
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
 
+    interval = _sweep_interval_seconds()
+    _run_sweeper_logger.info("sweeper loop started (interval=%ds)", interval)
+
     while True:
         try:
-            await asyncio.sleep(300)
+            await asyncio.sleep(interval)
             await sweep_stale_runs()
         except asyncio.CancelledError:
             raise
