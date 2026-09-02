@@ -59,6 +59,15 @@
 # rather than mutating + saving the foreign document itself.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-3): new entity.
+# Updated 2026-09-02 (feat/bill-on-completion): added ``bill_run_now``, called by
+#   both run executors the moment ``execute_run`` returns. Nothing charged at
+#   completion before, so the wallet, the allowance meter and the activity list
+#   were all a sweep interval stale after every run — a customer who checked
+#   immediately saw the state from before their own message. The sweeper is
+#   unchanged and is still the backstop: ``bill_run`` is idempotent on
+#   ``run:{run_id}``, so a run billed at completion is a no-op on the tick, and a
+#   run this misses is picked up by it. Gated OFF in the WU-F ``live`` mode for
+#   the same reason the sweep is — exactly one meter charges.
 # Updated 2026-06-24 (B3 review fix): ``bill_run`` no longer does
 # ``run_doc.billed=True; run_doc.save()`` directly (a foreign cross-entity write).
 # It now delegates the flag write to ``chat.runs.service.mark_billed(run_id)``.
@@ -291,6 +300,60 @@ def load_rate_card() -> RateCard:
 # ---------------------------------------------------------------------------
 
 
+async def bill_run_now(run_id: str) -> BillResult | None:
+    """Bill one run the moment it finishes, so the wallet is not a sweep behind.
+
+    Called by the two run executors right after ``execute_run`` returns. Without
+    it nothing charges until the next five-minute tick, which means the balance,
+    the allowance meter and the activity list are all stale for a whole interval
+    after every run — and a customer who checks immediately sees the state from
+    before their own message, with nothing on screen saying so.
+
+    **This does not replace the sweeper, and must not.** It is an optimisation on
+    top of it. ``bill_run`` is idempotent on ``run:{run_id}``, so a run billed
+    here is a no-op when the sweep later reaches it, and a run this misses (a
+    crash between the terminal write and this call, an executor path that does
+    not reach here, a transient failure below) is still picked up on the next
+    tick. That is why every failure here is swallowed: the cost of losing this
+    optimisation is five minutes, and the cost of raising is failing a run that
+    already succeeded.
+
+    Returns the ``BillResult`` when it billed, or ``None`` when it deliberately
+    did nothing — the run is missing, already billed, or LiteLLM is the sole
+    meter.
+    """
+    # Lazy import — same reason the sweeper does it: avoids a
+    # metering <-> llm_provisioning module-load cycle.
+    from pocketpaw_ee.cloud.llm_provisioning import service as provisioning_service
+
+    try:
+        # WU-F single-meter gate, identical to the sweeper's. In ``live`` LiteLLM
+        # is the sole meter and per-run metering must not charge, at completion
+        # any more than on a tick.
+        if provisioning_service.spend_mode() == "live":
+            return None
+
+        doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == run_id)
+        if doc is None:
+            logger.debug(
+                "metering.bill_run_now: run=%s not found — leaving it to the sweep", run_id
+            )
+            return None
+        if doc.billed:
+            return None
+        if doc.status not in _TERMINAL_STATES_FOR_IMMEDIATE_BILLING:
+            # Not finished (or finished in a state the sweeper owns). The sweep
+            # picks it up once it settles.
+            return None
+
+        return await bill_run(doc)
+    except Exception:
+        # Never let billing fail a run that already succeeded. The sweeper is the
+        # backstop and this run keeps ``billed=False`` until it runs.
+        logger.exception("metering.bill_run_now: run=%s failed — the sweep will retry it", run_id)
+        return None
+
+
 async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) -> BillResult:
     """Bill ``run_doc``'s compute cost to its workspace wallet, exactly once.
 
@@ -382,8 +445,14 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
     )
 
 
+# The states a finished run can be in. Mirrors the sweeper's ``_TERMINAL_STATES``
+# — kept as its own constant here rather than imported so the metering entity
+# does not depend on its own sweeper module.
+_TERMINAL_STATES_FOR_IMMEDIATE_BILLING = ("completed", "interrupted", "failed", "cancelled")
+
 __all__ = [
     "bill_run",
+    "bill_run_now",
     "load_rate_card",
     "resolve_cost",
     "run_moment",

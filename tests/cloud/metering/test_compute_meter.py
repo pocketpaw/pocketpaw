@@ -501,3 +501,114 @@ async def test_a_long_context_run_bills_the_long_context_tier(mongo_db):
 
     assert result.cost_usd == 1.50
     assert result.credits_charged == 375
+
+
+# ===========================================================================
+# BILL AT COMPLETION — the wallet should not be a sweep interval behind.
+# ===========================================================================
+
+
+async def test_bill_run_now_charges_without_waiting_for_a_sweep(mongo_db):
+    # The point of the whole thing: a finished run is charged immediately, so a
+    # customer who opens billing straight after chatting sees their own message.
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _make_run(run_id="r-now", usage={"total_cost_usd": 0.04})
+
+    result = await metering.bill_run_now("r-now")
+
+    assert result is not None
+    assert result.debited is True
+    assert result.credits_charged == 10  # round(0.04 * 250)
+    assert await credits.balance(WS) == 990
+
+    doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == "r-now")
+    assert doc.billed is True
+
+
+async def test_the_sweeper_does_not_charge_again_for_a_run_billed_at_completion(mongo_db):
+    """The money invariant. Completion billing is an optimisation ON TOP of the
+    sweep, not a replacement, so both running must still charge exactly once."""
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _make_run(run_id="r-once", usage={"total_cost_usd": 0.04})
+
+    await metering.bill_run_now("r-once")
+    assert await credits.balance(WS) == 990
+
+    # The sweep reaches it later and must move nothing.
+    swept = await sweep_unbilled_runs(rate_card=RATE)
+    assert swept == 0
+    assert await credits.balance(WS) == 990
+
+    entries = await CreditLedgerEntry.find(
+        CreditLedgerEntry.workspace == WS,
+        CreditLedgerEntry.idempotency_key == "run:r-once",
+    ).to_list()
+    assert len(entries) == 1
+
+
+async def test_an_already_billed_run_is_left_alone(mongo_db):
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _make_run(run_id="r-done", usage={"total_cost_usd": 0.04}, billed=True)
+
+    assert await metering.bill_run_now("r-done") is None
+    assert await credits.balance(WS) == 1000
+
+
+async def test_a_run_still_in_flight_is_left_to_the_sweep(mongo_db):
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _make_run(run_id="r-running", status="running", usage={"total_cost_usd": 0.04})
+
+    assert await metering.bill_run_now("r-running") is None
+    assert await credits.balance(WS) == 1000
+
+
+async def test_a_missing_run_is_not_an_error(mongo_db):
+    # A crash between the terminal write and this call leaves nothing to bill.
+    assert await metering.bill_run_now("r-nope") is None
+
+
+async def test_live_mode_gates_completion_billing_off(mongo_db, monkeypatch):
+    """The single-meter guarantee has to hold at completion too, not just on the
+    tick. Otherwise flipping to ``live`` would silently double-charge every run:
+    LiteLLM from proxy spend, and this from the run doc."""
+    import pocketpaw_ee.cloud.llm_provisioning.service as provisioning
+
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _make_run(run_id="r-live", usage={"total_cost_usd": 0.04})
+    monkeypatch.setattr(provisioning, "spend_mode", lambda: "live")
+
+    assert await metering.bill_run_now("r-live") is None
+    assert await credits.balance(WS) == 1000
+
+    doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == "r-live")
+    assert doc.billed is False, "live mode must not flip the flag either"
+
+
+async def test_a_billing_failure_never_propagates_into_the_run(mongo_db, monkeypatch):
+    """A run that already succeeded must not be failed by its own accounting.
+    Swallowing here is safe precisely because the sweeper retries."""
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _make_run(run_id="r-boom", usage={"total_cost_usd": 0.04})
+
+    async def _explode(*a, **k):
+        raise RuntimeError("ledger unreachable (simulated)")
+
+    monkeypatch.setattr(metering, "bill_run", _explode)
+
+    assert await metering.bill_run_now("r-boom") is None  # no raise
+
+    # Still unbilled, so the sweep will pick it up.
+    doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == "r-boom")
+    assert doc.billed is False
+
+
+async def test_a_run_missed_at_completion_is_still_swept(mongo_db):
+    # Completion billing is best-effort; the sweeper remains the backstop and
+    # must still charge a run that never reached bill_run_now.
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _make_run(run_id="r-missed", usage={"total_cost_usd": 0.04})
+
+    swept = await sweep_unbilled_runs(rate_card=RATE)
+
+    assert swept == 1
+    assert await credits.balance(WS) == 990

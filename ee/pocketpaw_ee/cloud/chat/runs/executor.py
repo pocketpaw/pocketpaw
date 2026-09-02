@@ -32,6 +32,13 @@ class InProcessExecutor:
     async def _guarded(self, spec: RunSpec) -> None:
         try:
             await execute_run(spec)
+            # Bill immediately rather than waiting for the sweep tick, so the
+            # wallet and the usage meter are current the moment the run ends.
+            # Best-effort by construction: it swallows its own failures and the
+            # sweeper remains the backstop for anything it misses.
+            from pocketpaw_ee.cloud.metering.service import bill_run_now
+
+            await bill_run_now(spec.run_id)
         except Exception:
             logger.exception("in-process run %s crashed", spec.run_id)
 
