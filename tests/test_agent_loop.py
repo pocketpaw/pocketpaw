@@ -1,6 +1,12 @@
 # Tests for Unified Agent Loop
 # Updated for AgentEvent-based architecture (no more dict chunks)
 #
+# Updated: 2026-09-02 (fix/metering-partial-usage-capture) —
+# ``test_cumulative_token_usage_is_recorded_as_a_delta`` pins that the loop
+# records the DIFFERENCE between token_usage payloads. The payloads are the
+# run's running total and ``usage_tracker.record`` is additive, so recording
+# them whole counted turn 1 again in every later payload.
+#
 # Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the loop now calls
 # ``AgentContextBuilder.assemble_system_prompt`` (which returns text AND the
 # prompt's ``stable_digest``) instead of ``build_system_prompt``, so every stub
@@ -1532,3 +1538,98 @@ async def test_router_stop_failure_logged_as_warning(
     assert any("router" in m.lower() or "stop" in m.lower() for m in warning_messages), (
         "router.stop() failure must be logged at WARNING level"
     )
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@patch("pocketpaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
+async def test_cumulative_token_usage_is_recorded_as_a_delta(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+):
+    """``token_usage`` payloads are RUN-CUMULATIVE and ``usage_tracker.record``
+    is ADDITIVE, so handing it each payload whole counts turn 1 again in every
+    later payload.
+
+    This was latent while every backend reported once per run. It stopped being
+    latent when ``pydantic_ai`` began reporting as the run progresses — which it
+    has to, because the cloud run loop abandons a cancelled run's stream and
+    never sees a payload produced at the end.
+    """
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+
+    token_router = MagicMock()
+
+    async def mock_run(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
+        for in_tok, out_tok, cost in ((100, 20, 0.001), (350, 60, 0.004)):
+            yield AgentEvent(
+                type="token_usage",
+                content="",
+                metadata={
+                    "backend": "pydantic_ai",
+                    "model": "claude-3-haiku",
+                    "input_tokens": in_tok,
+                    "output_tokens": out_tok,
+                    "cached_input_tokens": 0,
+                    "total_cost_usd": cost,
+                },
+            )
+        yield AgentEvent(type="done", content="")
+
+    token_router.run = mock_run
+    token_router.stop = AsyncMock()
+    mock_router_cls.return_value = token_router
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
+
+    recorded = []
+
+    class _Tracker:
+        def record(self, **kwargs):
+            recorded.append(kwargs)
+
+        def get_stats(self, *a, **k):
+            return MagicMock(total_cost_usd=0.0)
+
+    with (
+        patch("pocketpaw.agents.loop.get_settings") as mock_settings,
+        patch("pocketpaw.agents.loop.Settings") as mock_settings_cls,
+        patch("pocketpaw.usage_tracker.get_usage_tracker", return_value=_Tracker()),
+    ):
+        settings = MagicMock()
+        settings.agent_backend = "pydantic_ai"
+        settings.max_concurrent_conversations = 5
+        mock_settings.return_value = settings
+        mock_settings_cls.load.return_value = settings
+
+        loop = AgentLoop()
+        await loop._process_message(
+            InboundMessage(
+                channel=Channel.CLI,
+                sender_id="user1",
+                chat_id="chat1",
+                content="Tokens please",
+            )
+        )
+
+    assert len(recorded) == 2, f"expected one record per payload, got {recorded}"
+    # Turn 1 whole...
+    assert recorded[0]["input_tokens"] == 100
+    assert recorded[0]["output_tokens"] == 20
+    # ...then only what turn 2 ADDED, not the cumulative 350/60.
+    assert recorded[1]["input_tokens"] == 250
+    assert recorded[1]["output_tokens"] == 40
+    # The run total is the sum of the deltas, and it is the real total.
+    assert sum(r["input_tokens"] for r in recorded) == 350
+    assert sum(r["output_tokens"] for r in recorded) == 60
+    assert recorded[1]["total_cost_usd"] == pytest.approx(0.003)
