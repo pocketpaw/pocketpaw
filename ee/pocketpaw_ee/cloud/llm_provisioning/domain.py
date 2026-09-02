@@ -8,6 +8,9 @@
 #                           provisioned with, resolved from runtime settings. The
 #                           declarative knobs the proxy enforces per tenant.
 #   * ``ProvisionResult`` — the outcome of ``ensure_tenant_key``: the workspace,
+#   * ``CutoverPreparation`` — the outcome of ``prepare_spend_cutover``: how many
+#                           tenants are provisioned, how many were stamped with the
+#                           billing seam, and how many already had a mark.
 #                           its virtual key, and ``created`` (True only on a real
 #                           first mint, False on the idempotent already-exists
 #                           path) so callers can gate a one-time side effect on it.
@@ -114,6 +117,26 @@ class SpendIngestResult:
     cost_usd: float
     cached_tokens: int
     balance_after: int
+
+
+@dataclass(frozen=True)
+class CutoverPreparation:
+    """The outcome of stamping the billing-cutover mark on every tenant.
+
+    ``provisioned`` is how many tenants have a live proxy key at all — the only
+    ones ``live`` mode bills, which is why a workspace with no key must be
+    provisioned BEFORE the flip or its usage becomes free. ``seeded`` is how many
+    had no high-water mark and got one; ``already_marked`` how many were left
+    alone because ingestion had already begun for them (overwriting a live mark
+    would skip real spend). ``cutover_at`` is the ISO instant stamped, and it is
+    the seam: BC-3 owns every run before it, LiteLLM every proxy row after.
+    """
+
+    cutover_at: str
+    provisioned: int
+    seeded: int
+    already_marked: int
+    dry_run: bool
 
 
 @dataclass(frozen=True)

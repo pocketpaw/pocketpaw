@@ -48,6 +48,16 @@
 # exception) which a system-job caller logs + retries, never a bare HTTPException.
 #
 # Created 2026-06-26 (integration/model-catalog-v2, MCG-8): new entity.
+# Updated 2026-09-02 (feat/litellm-spend-cutover): two changes that make ``live``
+#   safe to flip. ``prepare_spend_cutover`` stamps the high-water mark on every
+#   provisioned tenant, so the first live sweep bills FORWARD instead of charging
+#   the whole proxy history — which would have re-billed every chat run BC-3
+#   already charged, under a key BC-1 cannot dedup against. And the high-water
+#   skip now compares PARSED instants rather than raw ISO strings: the proxy emits
+#   naive, Z-suffixed and offset-bearing shapes interchangeably, and a naive
+#   timestamp is a string PREFIX of the offset-bearing form of the SAME instant,
+#   so a boundary row was silently dropped by the meter that is meant to be the
+#   only one charging. See docs/deployment/litellm-billing-cutover.md.
 # Updated 2026-06-26 (feat/litellm-billing-cutover, WU-F): three changes for the
 # billing cutover from per-run metering (BC-3) to LiteLLM as the single meter,
 # done through a safe shadow-compare phase.
@@ -78,6 +88,7 @@ from pocketpaw_ee.catalog.admin_client import LiteLLMAdminClient, LiteLLMAdminEr
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.credits import service as credits_service
 from pocketpaw_ee.cloud.llm_provisioning.domain import (
+    CutoverPreparation,
     KeyBudget,
     ProvisionResult,
     SpendCredits,
@@ -293,6 +304,76 @@ async def list_provisioned_workspaces() -> list[str]:
     return [d.workspace for d in docs if d.litellm_key]
 
 
+async def prepare_spend_cutover(
+    *,
+    at: datetime | None = None,
+    dry_run: bool = False,
+) -> CutoverPreparation:
+    """Stamp the billing-cutover mark so ``live`` mode bills forward, not backward.
+
+    **Run this before setting POCKETPAW_LITELLM_SPEND_MODE=live.** Without it the
+    first live sweep bills each tenant's ENTIRE ``/spend/logs`` history in one
+    debit run, because ``ingest_tenant_spend`` skips rows older than
+    ``last_spend_ingest_ts`` and that field is ``None`` until something ingests.
+    Worse than the size of that bill is its overlap: those rows include every text
+    chat run BC-3 already charged, under a different idempotency key
+    (``litellm:{request_id}`` vs ``run:{run_id}``), so BC-1's unique index cannot
+    dedup them. The module header calls row-level dedup against BC-3 a deliberate
+    product decision rather than a default, and there is no ``run_id`` on the key
+    metadata to dedup against in any case.
+
+    Stamping a mark makes the seam clean instead of overlapping: **BC-3 owns every
+    run before ``at``, LiteLLM owns every proxy row after it.**
+
+    Only tenants with NO mark are stamped. A tenant already ingesting has a live
+    high-water mark, and moving it forward would silently drop the spend between
+    the old mark and ``at``.
+
+    ORDER MATTERS, and the ordering is the operator's to get right:
+
+      1. Let the BC-3 sweep drain, so no completed run is still unbilled. The
+         sweep no-ops entirely once the mode is ``live``, and a run left unbilled
+         at the flip whose proxy rows predate ``at`` is billed by NEITHER meter.
+      2. Call this (``dry_run=True`` first to see the counts).
+      3. Confirm ``provisioned`` matches the number of workspaces you expect to
+         bill. **Live mode bills provisioned tenants only** — a workspace with no
+         proxy key is swept by nothing and its usage is free.
+      4. Set the mode to ``live``.
+
+    ``at`` defaults to now (UTC). ``dry_run`` reports what would be stamped and
+    writes nothing.
+    """
+    at = at or datetime.now(tz=UTC)
+    cutover_at = at.isoformat()
+
+    docs = await LiteLLMTenantKey.find(LiteLLMTenantKey.litellm_key != None).to_list()  # noqa: E711
+    provisioned = [d for d in docs if d.litellm_key]
+
+    unmarked = [d for d in provisioned if not d.last_spend_ingest_ts]
+    already = len(provisioned) - len(unmarked)
+
+    if not dry_run:
+        for doc in unmarked:
+            doc.last_spend_ingest_ts = cutover_at
+            await doc.save()
+
+    logger.info(
+        "prepare_spend_cutover: %s cutover_at=%s provisioned=%d seeded=%d already_marked=%d",
+        "DRY RUN — nothing written" if dry_run else "stamped",
+        cutover_at,
+        len(provisioned),
+        len(unmarked),
+        already,
+    )
+    return CutoverPreparation(
+        cutover_at=cutover_at,
+        provisioned=len(provisioned),
+        seeded=len(unmarked),
+        already_marked=already,
+        dry_run=dry_run,
+    )
+
+
 async def ensure_tenant_key(
     workspace: str,
     *,
@@ -469,7 +550,17 @@ async def ingest_tenant_spend(
     rows = await client.spend_logs(api_key=doc.litellm_key)
 
     high_water = doc.last_spend_ingest_ts
+    # Compare PARSED instants, not the raw strings. LiteLLM emits naive,
+    # Z-suffixed and offset-bearing ``startTime`` shapes interchangeably, and
+    # lexicographic ordering across those is wrong in both directions: a naive
+    # "2026-09-02T14:00:00" sorts BELOW an aware "2026-09-02T14:00:00+00:00"
+    # despite being the same instant, so a mark written in one shape silently
+    # re-reads or silently skips rows written in the other. Every other timestamp
+    # in this module already goes through ``_parse_iso``; this one did not, and a
+    # seeded cutover mark makes that latent bug load-bearing.
+    high_water_dt = _parse_iso(high_water)
     newest_ts = high_water
+    newest_dt = high_water_dt
 
     rows_read = 0
     rows_billed = 0
@@ -490,12 +581,15 @@ async def ingest_tenant_spend(
         # unique index), so an already-ingested boundary row no-ops while a new
         # boundary row bills exactly once. The mark stays an optimisation that bounds
         # the read; the per-row request_id is the real exactly-once guard.
-        if high_water is not None and start_ts is not None and start_ts < high_water:
+        start_dt = _parse_iso(start_ts)
+        if high_water_dt is not None and start_dt is not None and start_dt < high_water_dt:
             continue
 
         rows_read += 1
-        if newest_ts is None or (start_ts is not None and start_ts > newest_ts):
+        advances = newest_dt is None or (start_dt is not None and start_dt > newest_dt)
+        if start_ts is not None and advances:
             newest_ts = start_ts
+            newest_dt = start_dt
 
         cost_usd = _num(row.get("spend"))
         cached_total += _cached_tokens(row)
@@ -756,6 +850,7 @@ __all__ = [
     "list_provisioned_workspaces",
     "load_key_budget",
     "load_spend_credits",
+    "prepare_spend_cutover",
     "reconcile_gap_threshold",
     "reconcile_tenant_spend",
     "spend_ingest_enabled",

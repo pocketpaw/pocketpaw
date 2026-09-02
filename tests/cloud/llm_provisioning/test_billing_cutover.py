@@ -569,3 +569,153 @@ async def test_high_water_boundary_same_second_rows_both_billed_once(mongo_db):
         ).to_list()
         assert len(entries) == 1, f"{rid} must have exactly one ledger row"
         assert entries[0].amount_delta == delta
+
+
+# ===========================================================================
+# CUTOVER PREPARATION — the mark that makes ``live`` bill forward, not backward.
+# ===========================================================================
+
+
+async def _key_doc(workspace: str):
+    from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
+
+    return await LiteLLMTenantKey.find_one(LiteLLMTenantKey.workspace == workspace)
+
+
+async def test_prepare_cutover_seeds_only_unmarked_tenants(mongo_db):
+    # Two tenants: one already ingesting (has a high-water mark), one fresh.
+    # Moving a live mark forward would silently drop the spend between the old
+    # mark and the cutover, so an already-marked tenant must be left alone.
+    other = "ws_cutover_other"
+    await provisioning.ensure_tenant_key(WS, budget=KeyBudget(), admin_client=FakeAdmin())
+    await provisioning.ensure_tenant_key(other, budget=KeyBudget(), admin_client=FakeAdmin())
+
+    existing = await _key_doc(other)
+    existing.last_spend_ingest_ts = "2026-01-01T00:00:00+00:00"
+    await existing.save()
+
+    at = datetime(2026, 9, 2, 12, 0, 0, tzinfo=UTC)
+    result = await provisioning.prepare_spend_cutover(at=at)
+
+    assert result.provisioned == 2
+    assert result.seeded == 1
+    assert result.already_marked == 1
+    assert result.dry_run is False
+
+    assert (await _key_doc(WS)).last_spend_ingest_ts == at.isoformat()
+    # Untouched — its own mark still governs.
+    assert (await _key_doc(other)).last_spend_ingest_ts == "2026-01-01T00:00:00+00:00"
+
+
+async def test_prepare_cutover_dry_run_writes_nothing(mongo_db):
+    await provisioning.ensure_tenant_key(WS, budget=KeyBudget(), admin_client=FakeAdmin())
+
+    result = await provisioning.prepare_spend_cutover(
+        at=datetime(2026, 9, 2, 12, 0, 0, tzinfo=UTC), dry_run=True
+    )
+
+    assert result.seeded == 1  # what it WOULD have stamped
+    assert result.dry_run is True
+    assert (await _key_doc(WS)).last_spend_ingest_ts is None  # nothing written
+
+
+async def test_without_a_mark_live_rebills_the_whole_history(mongo_db):
+    """The reason prepare_spend_cutover exists, stated as a failing scenario.
+
+    ``ingest_tenant_spend`` skips rows older than the high-water mark, and that
+    mark is None until something ingests. So the FIRST live sweep bills every row
+    /spend/logs returns — including rows for chat runs BC-3 already charged under
+    a different idempotency key, which BC-1's unique index therefore cannot dedup.
+    """
+    await credits.grant(WS, 10_000, cause="top_up", idempotency_key="seed")
+    await provisioning.ensure_tenant_key(WS, budget=KeyBudget(), admin_client=FakeAdmin())
+
+    rows = [
+        # Ancient history: already billed by BC-3 under ``run:{run_id}``.
+        {"request_id": "req-old-1", "spend": 0.40, "startTime": "2026-01-05T10:00:00"},
+        {"request_id": "req-old-2", "spend": 0.40, "startTime": "2026-02-05T10:00:00"},
+        # After the cutover instant — genuinely LiteLLM's to bill.
+        {"request_id": "req-new", "spend": 0.04, "startTime": "2026-09-02T13:00:00"},
+    ]
+
+    import pocketpaw_ee.cloud.llm_provisioning.service as svc
+
+    orig, orig_load = svc.LiteLLMAdminClient, svc.load_spend_credits
+    svc.LiteLLMAdminClient = lambda *a, **k: FakeAdmin(spend_rows=rows)  # type: ignore[assignment]
+    svc.load_spend_credits = lambda: SPEND  # type: ignore[assignment]
+    try:
+        # NO cutover mark — every row bills. 0.40+0.40+0.04 = 0.84 usd -> 210 credits.
+        result = await provisioning.ingest_tenant_spend(WS)
+    finally:
+        svc.LiteLLMAdminClient, svc.load_spend_credits = orig, orig_load  # type: ignore[assignment]
+
+    assert result.rows_billed == 3, "history was billed, which is the bug"
+    assert result.credits_debited == 210
+
+
+async def test_a_cutover_mark_bills_only_what_came_after_it(mongo_db):
+    """The fix, on the same rows: BC-3 owns everything before the seam."""
+    await credits.grant(WS, 10_000, cause="top_up", idempotency_key="seed")
+    await provisioning.ensure_tenant_key(WS, budget=KeyBudget(), admin_client=FakeAdmin())
+
+    rows = [
+        {"request_id": "req-old-1", "spend": 0.40, "startTime": "2026-01-05T10:00:00"},
+        {"request_id": "req-old-2", "spend": 0.40, "startTime": "2026-02-05T10:00:00"},
+        {"request_id": "req-new", "spend": 0.04, "startTime": "2026-09-02T13:00:00"},
+    ]
+
+    await provisioning.prepare_spend_cutover(at=datetime(2026, 9, 2, 12, 0, 0, tzinfo=UTC))
+
+    import pocketpaw_ee.cloud.llm_provisioning.service as svc
+
+    orig, orig_load = svc.LiteLLMAdminClient, svc.load_spend_credits
+    svc.LiteLLMAdminClient = lambda *a, **k: FakeAdmin(spend_rows=rows)  # type: ignore[assignment]
+    svc.load_spend_credits = lambda: SPEND  # type: ignore[assignment]
+    try:
+        result = await provisioning.ingest_tenant_spend(WS)
+    finally:
+        svc.LiteLLMAdminClient, svc.load_spend_credits = orig, orig_load  # type: ignore[assignment]
+
+    assert result.rows_billed == 1, "only the post-cutover row is LiteLLM's to bill"
+    assert result.credits_debited == 10  # round(0.04 * 250)
+
+    # And the historical rows produced no ledger movement at all.
+    for rid in ("req-old-1", "req-old-2"):
+        entries = await CreditLedgerEntry.find(
+            CreditLedgerEntry.workspace == WS,
+            CreditLedgerEntry.idempotency_key == f"litellm:{rid}",
+        ).to_list()
+        assert entries == [], f"{rid} was billed despite predating the cutover"
+
+
+async def test_high_water_compares_instants_not_strings(mongo_db):
+    """A naive row at the SAME instant as an offset-bearing mark must not vanish.
+
+    ``prepare_spend_cutover`` writes an offset-bearing mark
+    (``...T12:00:00+00:00``) while LiteLLM frequently emits NAIVE timestamps
+    (``...T12:00:00``). Under the old raw-string comparison the naive form is a
+    prefix of the aware one, so it sorts BELOW it and the row was silently
+    skipped — dropped by a meter that is supposed to be the only one charging.
+    """
+    await credits.grant(WS, 10_000, cause="top_up", idempotency_key="seed")
+    await provisioning.ensure_tenant_key(WS, budget=KeyBudget(), admin_client=FakeAdmin())
+
+    at = datetime(2026, 9, 2, 12, 0, 0, tzinfo=UTC)
+    await provisioning.prepare_spend_cutover(at=at)
+    assert (await _key_doc(WS)).last_spend_ingest_ts == "2026-09-02T12:00:00+00:00"
+
+    # Same instant as the mark, naive — a prefix of the mark as a string.
+    rows = [{"request_id": "req-boundary", "spend": 0.04, "startTime": "2026-09-02T12:00:00"}]
+
+    import pocketpaw_ee.cloud.llm_provisioning.service as svc
+
+    orig, orig_load = svc.LiteLLMAdminClient, svc.load_spend_credits
+    svc.LiteLLMAdminClient = lambda *a, **k: FakeAdmin(spend_rows=rows)  # type: ignore[assignment]
+    svc.load_spend_credits = lambda: SPEND  # type: ignore[assignment]
+    try:
+        result = await provisioning.ingest_tenant_spend(WS)
+    finally:
+        svc.LiteLLMAdminClient, svc.load_spend_credits = orig, orig_load  # type: ignore[assignment]
+
+    assert result.rows_billed == 1, "a boundary row was dropped by a string compare"
+    assert result.credits_debited == 10
