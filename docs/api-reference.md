@@ -8,8 +8,10 @@ things a reader could not get from the endpoint's own fields. First, what the
 subscription and not only a tier, and that UPGRADING DOES NOT BACKFILL — the
 consequence customers hit, and one the `never_counted` row alone does not explain,
 since it reads as a temporary state rather than as a permanent hole in the history.
-Also recorded that `svelte` and `ripple` sites do not count at all yet, which is
-otherwise indistinguishable from a site that simply has not been republished.
+Also recorded which builds cannot count at all yet, which is otherwise
+indistinguishable from a site that simply has not been republished. That is a
+BUILD-shape question and not an engine one: a static svelte build deploys assets-only
+and counts, a dynamic one does not.
 Second, `GET /sites/{site_id}/entitlements`, which was undocumented in this file
 entirely — it is the pre-check that lets a panel disable itself before the call, and
 the section says plainly that it does NOT supersede the analytics `status`, because
@@ -1733,13 +1735,15 @@ The same applies in reverse. A publish that deploys no counter clears
 `never_counted` until it is republished, rather than claiming a start date from an era
 that stopped recording months ago.
 
-**Not every engine carries a counter yet.** Sites built by the `html` and `react`
-generators deploy as assets-only Workers and take the counter. Sites built by `svelte`
-or `ripple` already deploy their own server worker, and a second entry cannot be put in
-front of it from a config key, so they do not count regardless of plan. Such a site is
-entitled and still answers `never_counted` however often it is republished. The
-[engineering note](design/2026-09-02-sites-visitor-analytics.md) carries the table and
-what is planned.
+**Not every build carries a counter yet.** The counter rides the assets-only deploy
+path, and whether a site takes that path is decided by its **build output** rather than
+by its engine: `html`, `react` and a *static* `svelte` build all deploy assets-only and
+count. A build that emits its own `_worker.js` — a *dynamic* `svelte` build, or any
+`ripple` build — cannot take a second entry in front of that worker, so it does not
+count regardless of plan. Such a site is entitled and still answers `never_counted`
+however often it is republished. The
+[engineering note](design/2026-09-02-sites-visitor-analytics.md) has the full table,
+and notes that #2049 closes most of this gap.
 
 ### `GET /sites/{site_id}/entitlements` — the pre-check
 

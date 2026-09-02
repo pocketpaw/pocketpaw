@@ -3,8 +3,11 @@
      in sites/service.py. Records the three things a field list cannot show and that
      the customer-facing API reference is the wrong place for: WHY counting is sold
      rather than given away (the cost model, with its derivation, so nobody has to
-     re-derive it), which engines actually carry a counter today, and what the privacy
+     re-derive it), which BUILDS actually carry a counter today, and what the privacy
      model is in enough detail to defend it.
+     The counter question is per-build and not per-engine, which the first draft of
+     this file got wrong: resolve_emits_server_worker reads the build output, so a
+     static svelte site deploys assets-only and counts while a dynamic one does not.
      The cost numbers are Cloudflare's published prices as of this date, with the URL
      against each one. They move; re-check before quoting them at a customer. -->
 
@@ -82,26 +85,46 @@ That is inherent to putting a server in front of a static site.
 
 ## Which sites actually count today
 
-The counter rides the **assets-only** deploy branch, and only that branch:
-
-| Engine | Emits its own `_worker.js` | Carries a counter |
-|--------|---------------------------|-------------------|
-| `html` | no | yes |
-| `react` | no | yes |
-| `svelte` | yes | **no** |
-| `ripple` | yes | **no** |
-
+The counter rides the **assets-only** deploy branch, and only that branch.
 `workers_deploy._write_deploy_files` gates on
-`not emits_worker and analytics_worker.counting_enabled(entitled=...)`. For `svelte`
-and `ripple` the config's `main` is already SvelteKit's own worker, and a second entry
-cannot be bolted in front of it from a config key. That is a later slice, not an
-oversight.
+`not emits_worker and analytics_worker.counting_enabled(entitled=...)`, where
+`emits_worker` comes from `engines.resolve_emits_server_worker(project_dir, engine)`.
 
-**The consequence to know about:** a `svelte` or `ripple` site on a paid tier is
-entitled to analytics and will report `never_counted` no matter how often it is
-republished. The entitlement says the plan buys the capability; it does not say the
-site's engine can deliver it yet. If that combination reaches customers before the
-server-worker slice lands, it needs a sentence on screen rather than a shrug.
+**That question is asked of the BUILD, not of the engine.**
+`resolve_emits_server_worker` looks for a `_worker.js` on disk in the build output and
+answers False when there is not one, even for an engine that usually emits one. So the
+row to read is the build shape, not the engine name:
+
+| Build | `_worker.js` in the output | Carries a counter |
+|-------|---------------------------|-------------------|
+| `html` | never | yes |
+| `react` | never | yes |
+| `svelte`, static | no | yes |
+| `svelte`, dynamic | yes | **no** |
+| `ripple` | always | **no** |
+
+`svelte` spans both rows because SL-1 split the track across two adapters, chosen by a
+property of the build rather than by the engine name. `engines.expects_server_worker`
+returns `None` for it for exactly that reason: either answer is legitimate, so only
+the artifact can say. Asking the engine name instead would point `main` at a
+`build/_worker.js` that does not exist and fail the deploy outright, which is the
+failure that predicate was introduced to prevent.
+
+For a dynamic build the config's `main` is already SvelteKit's own worker, and a
+second entry cannot be bolted in front of it from a config key. That is why those
+builds do not count here.
+
+**The consequence to know about, and its bounds:** a site whose build emits its own
+worker is entitled to analytics on a paid tier and still reports `never_counted`
+however often it is republished. The entitlement says the plan buys the capability; it
+does not say this build shape can deliver it.
+
+That gap is already being closed rather than left open. #2049 adds a wrapper shim that
+makes `ripple` and dynamic `svelte` count, and it is a **sibling** of this branch
+rather than an ancestor, which is why nothing here reflects it. What remains open
+after #2049 is narrower: a dynamic site provisioned through the durable provision job,
+which passes `analytics_entitled=False` unconditionally, since that function holds a
+site id and a directory and cannot resolve a plan. That case is tracked as SA-8.
 
 ## Retention: three months, and then it is gone
 
