@@ -20,10 +20,11 @@
   {
     "label": "the hash salt becomes the site id (an attacker holding a row can brute-force the visitor's IP, so the row is personal data)",
     "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
-    "find": "secret=secrets.token_hex(16)",
-    "replace": "secret=site_id",
+    "find": "        secret = secrets.token_hex(16)",
+    "replace": "        secret = site_id",
     "tests": [
-      "tests/ee/sites/test_sites_analytics_counter.py"
+      "tests/ee/sites/test_sites_analytics_counter.py",
+      "tests/ee/sites/test_sites_analytics_shim.py"
     ]
   },
   {

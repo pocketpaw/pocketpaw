@@ -42,13 +42,15 @@ import json
 import re
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pocketpaw_ee")
 
-from pocketpaw_ee.sites import analytics_worker, workers_deploy
+from pocketpaw_ee.sites import analytics_worker, local_server, workers_deploy
 
 from tests.ee.sites.test_sites_analytics_counter import _route_for, _wrangler_rule_errors
 
@@ -709,3 +711,73 @@ def test_the_shim_carries_a_fresh_salt_per_publish(tmp_path):
     assert first and second
     assert first.group(1) != second.group(1)
     assert SITE_ID not in first.group(1)
+
+
+# ── the salt does not reach the local server either ─────────────────────────
+
+
+def _get(url: str):
+    """Fetch ``url``, treating an HTTP error as a result — a 404 is the assertion."""
+    req = urllib.request.Request(url)  # noqa: S310 - localhost
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310 - localhost
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+
+
+@pytest.fixture
+def server(tmp_path, monkeypatch):
+    """A freshly-rooted local static server, torn down afterwards. The server is a
+    process singleton that captures its served root at startup, so resetting it is what
+    makes this test's root the one actually served."""
+    monkeypatch.setenv("PAW_SITES_LOCAL_DIR", str(tmp_path / "sites"))
+
+    previous = local_server._server
+    local_server._server = None
+    try:
+        yield local_server
+    finally:
+        started = local_server._server
+        if started is not None:
+            started.shutdown()
+            started.server_close()
+        local_server._server = previous
+
+
+def test_the_local_server_does_not_serve_the_shim(server, tmp_path):
+    """The shim carries the same per-publish salt the assets-only entry does, so it gets
+    the same treatment when the local target copies a project dir.
+
+    THE CASE IS AN ENGINE FLIP, and it is why this is worth a test rather than a
+    symmetry. Both counters live at the project ROOT. For ripple that is outside the
+    served tree (``.svelte-kit/cloudflare``), so nothing there can leak. For html the
+    served tree IS the project root — so a shim left by an earlier ripple publish into
+    the same working dir lands in a tree the local server hands out, salt and all. The
+    deploy write deletes that leftover; this is the second line of defence behind it,
+    which is exactly the case a test has to construct by hand.
+
+    Asserted OVER HTTP rather than by listing the copied dir, because "was it copied"
+    and "is it served" are different questions and only the second is the exposure. The
+    page beside it is fetched too — an ignore that swallowed the site would pass a
+    404-only test."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "index.html").write_text("<!doctype html><h1>hi</h1>")
+    (project / "styles.css").write_text("h1{color:#111}")
+    shim = project / analytics_worker.SHIM_FILENAME
+    shim.write_text(
+        analytics_worker.build_shim_js(
+            site_id=SITE_ID, secret="0123456789abcdef0123456789abcdef", output_rel=OUTPUT_REL
+        ),
+        encoding="utf-8",
+    )
+    assert shim.is_file(), "the fixture must actually have a shim to leak"
+
+    url = server.deploy_local("site-shim-1", str(project), engine="html")
+
+    assert _get(f"{url}{analytics_worker.SHIM_FILENAME}")[0] == 404
+    status, body = _get(url)
+    assert status == 200
+    assert b"<h1>hi</h1>" in body
+    assert _get(f"{url}styles.css")[0] == 200
