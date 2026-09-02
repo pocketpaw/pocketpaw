@@ -5,13 +5,15 @@
 # SaaS hostname lifecycle the Domains panel polls.
 #
 # Updated 2026-09-02 (SA-4 — the visitor-analytics read): added
-# ``analytics_since``, the UTC stamp of the first publish that actually deployed a
-# pageview counter. It is the ONLY thing on this document that separates "this site
-# has never recorded anything" from "this site is recording and nobody visited" —
+# ``analytics_since``, which says whether this site's visitors are being counted and,
+# if so, when that started. It is the ONLY thing on this document that separates "this
+# site has never recorded anything" from "this site is recording and nobody visited" —
 # ``deployed_at`` says a publish happened, not that it carried a counter. The read
-# endpoint reports those two as different states rather than serving 0 for both,
-# which is the whole point of the field. None on every pre-existing row, and None
-# reads as "not counting yet", so no migration.
+# endpoint reports those two as different states rather than serving 0 for both, which
+# is the whole point of the field. It is SET by a publish that deploys a counter and
+# CLEARED by one that does not, so a site that lapsed and re-upgraded cannot report a
+# stale start date over months nothing was recording. None on every pre-existing row,
+# and None reads as "not counting yet", so no migration.
 #
 # Updated 2026-08-12 (sites Settings consolidation): added the owner's CLIENT
 # record — ``client_name`` / ``client_contact`` / ``client_notes`` and a
@@ -283,8 +285,9 @@ class Site(TimestampedDocument):
     # flips True) — never on a preview/edit build, never on a plain updatedAt bump.
     # None until the pocket has been deployed at least once (old rows read null).
     deployed_at: datetime | None = None
-    # SA-4: when this site's visitors STARTED being counted (UTC) — the first
-    # publish that actually deployed a pageview counter, and never re-stamped after.
+    # SA-4: when this site's visitors STARTED being counted (UTC), and None whenever
+    # they are not being counted at all. Read it as a state rather than as history —
+    # "counting is on, and it began at this stamp".
     #
     # It exists so the analytics read can tell "nothing was ever recorded" apart from
     # "recorded, and genuinely nobody visited". Nothing else on this document can:
@@ -293,19 +296,33 @@ class Site(TimestampedDocument):
     # for a month. Serving 0 for both is the exact failure the analytics read exists
     # to avoid, so the two states get a field between them rather than a guess.
     #
-    # WRITTEN FROM WHAT THE DEPLOY LEFT ON DISK, not from a second copy of the
-    # counting rule — see ``sites.service.publish``. That rule has three parts (the
-    # plan, the operator kill switch, and whether the engine emits its own worker),
-    # all resolved inside ``workers_deploy._write_deploy_files``, and re-deriving it
-    # here would be a fourth place for them to disagree.
+    # WRITTEN FROM WHAT THE DEPLOY LEFT ON DISK, not from a second copy of the counting
+    # rule — see ``sites.service._deploy_site_doc``. That rule has three parts (the
+    # plan, the operator kill switch, and whether the engine emits its own worker), all
+    # resolved inside ``workers_deploy._write_deploy_files``, and re-deriving it here
+    # would be a fourth place for them to disagree.
     #
-    # None on every site that has never counted, which is every row written before
-    # this field existed. That reads as "not counting yet" — correct for all of them,
-    # so there is no migration.
+    # THE WRITE RULE HAS TWO HALVES:
+    #   * a publish that DEPLOYED a counter sets it to now if it is None, and otherwise
+    #     leaves it alone. First-set-wins WITHIN a counting era, so an ordinary
+    #     republish does not restart a paying site's history.
+    #   * a publish that deployed NO counter sets it back to None. Nothing is recording,
+    #     so there is no "since".
     #
-    # FIRST-SET-WINS. It is "since", not "last": a site that lapses and renews keeps
-    # its original stamp, because recording really did begin then, and the retention
-    # window (three months) is shorter than most such gaps anyway.
+    # CLEARING IS THE HALF THAT MAKES THE FIELD TRUSTWORTHY. A site that counted in
+    # June, dropped to free in July and re-upgraded today is entitled again — but no
+    # publish has carried a counter since the lapse, so nothing is recording. Against a
+    # stamp that was never cleared the read would answer "counting since June, and
+    # nobody visited", which is the invented zero this whole slice exists to prevent.
+    # Cleared, ``entitled AND analytics_since is None`` is exactly "you have not
+    # republished", with nothing left to guess.
+    #
+    # The price is that a lapse loses the earlier era's start date, and that is the
+    # right way round: Cloudflare drops the rows after three months, so a stamp older
+    # than the retention window already points at data that is gone.
+    #
+    # None on every row written before this field existed, which reads as "not counting
+    # yet" — correct for all of them, so there is no migration.
     analytics_since: datetime | None = None
     # Canonical deployed URL. LOCAL mode: the localhost URL the per-site static
     # server serves. CF mode: "" in v1 (reached via custom domain).
