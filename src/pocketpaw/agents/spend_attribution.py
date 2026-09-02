@@ -49,6 +49,19 @@ TWO DEPLOYMENT PRECONDITIONS, both on the proxy and neither visible from here:
   is concerned. Unset by default; set it and it becomes a second, quieter budget
   next to the per-key one.
 
+THE ID IS OURS TO SET, NOT A CALLER'S TO DECLARE
+------------------------------------------------
+LiteLLM's own cost-tracking documentation warns that a caller can put any ``user``
+it likes in a request body and the proxy will attribute the cost to whatever it
+says — one tenant could bill another.
+
+That warning does not reach us, and it is worth writing down WHY so the exemption
+is not assumed later. The field is set here, from the run's own bound identity, at
+the point the model is built; no part of a customer's request body is forwarded to
+the proxy. Both conditions have to hold. If a tenant is ever handed a proxy key to
+call directly, or a request body is ever proxied verbatim, this becomes a
+spoofing surface and the id has to move to a header the server sets.
+
 WHAT THE ID IS
 --------------
 The workspace, and nothing finer. The credit ledger's grain is the workspace —
