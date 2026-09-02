@@ -501,10 +501,17 @@ async def sync_site_addons(
     one renewal date, one payment method, and a per-site charge that prorates
     against the term the workspace has already paid for.
 
-    Idempotent by construction. The cart is recomputed from the ``Site``
-    documents on every call and sent whole, so calling this twice with no change
-    between sends the same cart twice and the second is a no-op at the gateway.
-    Callers do not need to know whether a sync is "needed".
+    The cart is recomputed from the ``Site`` documents on every call and sent
+    whole, so callers do not need to know whether a sync is "needed" — the same
+    cart sent twice describes the same subscription.
+
+    That is NOT the same as being safe to call twice in quick succession, and
+    this docstring used to claim it was. A change that prorates has to be PAID
+    before it settles, and until it does, Dodo refuses a second one with
+    ``409 PENDING_PLAN_CHANGE_EXISTS``. So a second publish arriving before the
+    first proration clears raises ``ConflictError`` rather than no-opping. That
+    is the honest behaviour: the gateway is telling us the earlier change is
+    still in flight, and the caller has to leave it alone until it lands.
 
     RAISES ``NoActiveSubscription`` WHEN THE WORKSPACE HAS NO SUBSCRIPTION, and
     that refusal is the deliberate shape of the feature rather than a gap in it.
