@@ -45,6 +45,34 @@
 # no counter, because ``main`` there is already SvelteKit's own worker and a second
 # entry cannot be bolted in front of it from a config key. That is a later slice.
 #
+# Updated 2026-09-02 (SA-3 — the shim) — THAT LATER SLICE IS THIS ONE, and the sentence
+# above is now history: a ripple / dynamic-svelte publish counts too. The step it was
+# missing is that a second entry cannot be bolted in front of the SvelteKit worker FROM
+# A CONFIG KEY, but it can from a MODULE. ``analytics_worker.build_shim_js`` generates
+# one that imports the adapter's ``_worker.js``, wraps its ``fetch`` and delegates, and
+# the config points ``main`` at the shim instead. The adapter's own file is never
+# edited — the adapter regenerates it on every build, so an edit would survive exactly
+# one build.
+#
+# THE COUNTING SERVER-WORKER CONFIG ALSO GAINS ``run_worker_first``, and without it this
+# slice would count nothing. With a ``main`` and an ``assets`` block and no routing
+# rules, Cloudflare's asset router serves an EXISTING asset directly and only falls
+# through to the Worker when none matches — which is exactly how a ripple site's
+# prerendered ``index.html`` is served today, without ever invoking the worker. The
+# shim would have seen SSR routes and nothing else. The rules are the same page
+# allow-list ``analytics_worker`` builds for the assets-only branch, over the adapter's
+# output dir, so subresources stay on the free path; the cost model in that module
+# governs both branches now.
+#
+# Routing a prerendered page through the worker is safe rather than merely acceptable:
+# adapter-cloudflare's worker checks its own prerendered manifest first and answers
+# from ``env.ASSETS.fetch(req)``, so the page it serves is the same file the asset
+# router would have served.
+#
+# ``nodejs_compat``, the ``ASSETS`` binding and any D1 binding are carried through
+# untouched. A dynamic site's remote functions still reach their database; the shim
+# only changes which module is the entry.
+#
 # Updated 2026-09-02 (SA-2 — the gate) — THE COUNTER IS NO LONGER UNCONDITIONAL. SA-1
 # wired it onto every assets-only publish; a Worker invocation is billed and a static
 # asset is not, so that spent money on sites paying nothing. ``_write_deploy_files``
@@ -147,12 +175,33 @@ logger = logging.getLogger(__name__)
 # to ``"."`` for html (whose raw static tree IS the project dir).
 _CF_OUTPUT_REL = ".svelte-kit/cloudflare"
 
-# The REQUIRED .assetsignore contents for a ripple/svelte (server-worker) deploy —
-# exact three lines, no trailing blank. Drops the Pages-style worker/routing/header
-# files so wrangler 4.x does not try to upload the worker entry as a static asset
-# (which it HARD-ERRORS on). adapter-cloudflare does not emit this file, so the
-# deploy step writes it.
-_ASSETSIGNORE_LINES = ("_worker.js", "_routes.json", "_headers")
+# BOTH generated counters, named in EVERY .assetsignore this module writes, on both
+# branches, whether or not this publish counts. One constant rather than a line in each
+# list, so the two can never disagree about which files are deploy scaffold.
+#
+# The unconditional part is what makes the stale-counter delete in ``_write_deploy_files``
+# safe to swallow: the delete may fail (a lock, a read-only file), and a file left on
+# disk is still excluded from the upload. Whichever counter this publish did not write
+# is a per-publish hash salt with no config naming it, and wrangler would otherwise
+# upload it as an ordinary static asset — see the privacy note in ``analytics_worker``.
+#
+# On the ASSETS-ONLY branch that exclusion is load-bearing: an html site's asset dir IS
+# the project root, so a leftover counter sits inside the served tree. On the
+# SERVER-WORKER branch both counters live at the project root while the asset dir is
+# ``.svelte-kit/cloudflare``, so nothing there could be uploaded anyway and the lines
+# are belt-and-braces. They are written all the same, because "the counters are named
+# on every publish" is an invariant worth being able to state without a caveat, and a
+# name that matches no file is a no-op.
+_COUNTER_FILENAMES = (
+    analytics_worker.ENTRY_FILENAME,
+    analytics_worker.SHIM_FILENAME,
+)
+
+# The REQUIRED .assetsignore contents for a ripple/svelte (server-worker) deploy. Drops
+# the Pages-style worker/routing/header files so wrangler 4.x does not try to upload the
+# worker entry as a static asset (which it HARD-ERRORS on). adapter-cloudflare does not
+# emit this file, so the deploy step writes it. SA-3 appends the counter filenames above.
+_ASSETSIGNORE_LINES = ("_worker.js", "_routes.json", "_headers") + _COUNTER_FILENAMES
 
 # The .assetsignore contents for an ASSETS-ONLY deploy (html, react — anything with
 # no ``_worker.js``). An html site's ``assets.directory`` is the project ROOT
@@ -182,8 +231,7 @@ _ASSETSIGNORE_LINES = ("_worker.js", "_routes.json", "_headers")
 _ASSETS_ONLY_ASSETSIGNORE_LINES = (
     "wrangler.jsonc",
     ".assetsignore",
-    analytics_worker.ENTRY_FILENAME,
-)
+) + _COUNTER_FILENAMES
 
 # wrangler reads the worker name + name-segment of the workers.dev URL from
 # ``wrangler.jsonc``'s ``name``. It must match this (lowercase alnum + hyphen,
@@ -265,12 +313,17 @@ def _wrangler_jsonc(
       allow-list that keeps stylesheets, scripts, fonts and images off the Worker.
       The counter is not the SvelteKit worker under another name; ``main`` still
       never points into the build output.
-    * ripple / DYNAMIC svelte (worker emitted) → the SvelteKit Cloudflare worker,
-      UNCHANGED. ``main`` points at the worker entry adapter-cloudflare emits INSIDE
-      the asset dir (``.svelte-kit/cloudflare``), and
-      ``assets.directory`` points at that SAME dir (the ``.assetsignore`` we write
-      keeps wrangler from uploading the worker entry as an asset). ``nodejs_compat``
-      is what the SvelteKit worker needs at runtime.
+    * ripple / DYNAMIC svelte (worker emitted) → the SvelteKit Cloudflare worker.
+      ``assets.directory`` points at the adapter's output dir
+      (``.svelte-kit/cloudflare``), which is also where the worker entry sits (the
+      ``.assetsignore`` we write keeps wrangler from uploading it as an asset).
+      ``nodejs_compat`` is what the SvelteKit worker needs at runtime. SA-3 — WHEN THE
+      SITE COUNTS, ``main`` moves to the generated SHIM at the project root, which
+      imports that worker and delegates to it; ``nodejs_compat``, the ``ASSETS``
+      binding and any D1 binding are carried through unchanged, and the config also
+      gains the dataset binding and the ``run_worker_first`` page allow-list. Without
+      those rules the asset router would serve every prerendered page itself and the
+      shim would never run — see the header.
 
     Why the predicate changed: until react, "runs a Node build" and "emits a server
     entry" were the same set, so ``needs_node_build`` read correctly here by
@@ -286,8 +339,9 @@ def _wrangler_jsonc(
     remote functions reach their per-tenant database on the FREE tier. Dynamic html is
     out of scope (it has no server runtime), so an html config never carries a binding.
 
-    ``count_pageviews`` (SA-2) picks between the two ASSETS-ONLY shapes: True is the
-    counting config above, False is the PRE-ANALYTICS config byte for byte. It is the
+    ``count_pageviews`` (SA-2) picks between the two shapes on EITHER branch (SA-3 —
+    it used to reach only the assets-only one): True is the counting config above,
+    False is the PRE-ANALYTICS config byte for byte. It is the
     already-resolved answer — the site's plan ANDed with the operator kill switch, via
     ``analytics_worker.counting_enabled`` in ``_write_deploy_files`` — and NOT a
     question this function re-asks, so there is exactly one place that decides.
@@ -368,14 +422,53 @@ def _wrangler_jsonc(
         }
         return json.dumps(config, indent=2) + "\n"
 
-    config = {
-        "name": name,
-        "main": f"{output_rel}/_worker.js",
-        "compatibility_date": "2024-09-23",
-        "compatibility_flags": ["nodejs_compat"],
-        "workers_dev": True,
-        "assets": {"binding": "ASSETS", "directory": output_rel},
-    }
+    # SA-3 — the server-worker branch counts too, and the counting shape is this same
+    # config with ``main`` MOVED: the generated shim at the project root, which imports
+    # ``<output_rel>/_worker.js`` and delegates to it. Everything the SvelteKit worker
+    # needs at runtime rides along untouched — ``nodejs_compat``, the ``ASSETS`` binding
+    # it reads prerendered pages and static files through, and (below) the D1 binding a
+    # dynamic site's remote functions reach their database by. Losing any of those would
+    # trade a working dynamic site for a counted broken one.
+    #
+    # ``run_worker_first`` IS NOT OPTIONAL HERE EITHER, for the opposite reason to the
+    # assets-only branch. There it stops the Worker being invoked for subresources; here
+    # it is what causes the Worker to be invoked for pages AT ALL. With a ``main`` and no
+    # rules the asset router serves any request whose asset exists — which for a ripple
+    # site is every prerendered page — and only falls through to the Worker when none
+    # matches. The shim would have seen SSR routes and nothing else, and counted almost
+    # nothing while looking deployed. The rules are the same page allow-list, over the
+    # same builder, so the cost floor is unchanged: subresources still route to the
+    # free asset path.
+    if not count_pageviews:
+        config = {
+            "name": name,
+            "main": f"{output_rel}/_worker.js",
+            "compatibility_date": "2024-09-23",
+            "compatibility_flags": ["nodejs_compat"],
+            "workers_dev": True,
+            "assets": {"binding": "ASSETS", "directory": output_rel},
+        }
+    else:
+        config = {
+            "name": name,
+            "main": analytics_worker.SHIM_FILENAME,
+            "compatibility_date": "2024-09-23",
+            "compatibility_flags": ["nodejs_compat"],
+            "workers_dev": True,
+            "assets": {
+                "binding": "ASSETS",
+                "directory": output_rel,
+                "run_worker_first": analytics_worker.run_worker_first_rules(
+                    Path(project_dir, output_rel)
+                ),
+            },
+            "analytics_engine_datasets": [
+                {
+                    "binding": analytics_worker.DATASET_BINDING,
+                    "dataset": analytics_worker.dataset_name(),
+                }
+            ],
+        }
     if d1_database_id:
         config["d1_databases"] = [
             {"binding": _D1_BINDING_NAME, "database_name": name, "database_id": d1_database_id}
@@ -453,10 +546,19 @@ def _write_deploy_files(
     resolved by ``entitlements.site_analytics_entitled`` at the publish seam. The
     operator kill switch is the other half and is read here, not passed, because it is
     global and per-publish: ``analytics_worker.counting_enabled`` ANDs the two, and its
-    answer decides BOTH whether the config names a ``main`` and whether an entry file
-    exists at all. Those two must move together — a config naming an absent ``main``
-    fails the deploy, and an entry with no config naming it is a salt served as a
-    static asset.
+    answer decides BOTH what the config names as ``main`` and which counter file exists
+    on disk. Those two must move together — a config naming an absent ``main`` fails
+    the deploy, and a counter with no config naming it is a salt served as a static
+    asset.
+
+    SA-3 — the answer now reaches BOTH branches, and the two write different files.
+    Assets-only writes ``analytics_worker.ENTRY_FILENAME``, which serves the page
+    through ``ASSETS`` after counting. Server-worker writes
+    ``analytics_worker.SHIM_FILENAME``, which imports the worker adapter-cloudflare
+    emitted and delegates to it — the adapter's ``_worker.js`` is never touched, since
+    the adapter rewrites it on every build. Whichever this publish did not write is
+    deleted, because a working dir is reused across publishes and across a change of
+    build shape.
 
     WHEN COUNTING IS OFF THE ENTRY IS DELETED rather than merely not written, and that
     is not tidiness. A publish reuses the pocket's working dir, so a site that
@@ -492,46 +594,69 @@ def _write_deploy_files(
     ignore_lines = _ASSETSIGNORE_LINES if emits_worker else _ASSETS_ONLY_ASSETSIGNORE_LINES
     (out_dir / ".assetsignore").write_text("\n".join(ignore_lines) + "\n")
     # SA-2 — the whole counting decision, resolved once and read twice below so the
-    # config and the file on disk can never disagree. The server-worker branch never
-    # counts whatever the plan says: ``main`` there is already SvelteKit's own worker.
-    count_pageviews = not emits_worker and analytics_worker.counting_enabled(
-        entitled=analytics_entitled
+    # config and the file on disk can never disagree. SA-3 — it no longer excludes the
+    # server-worker branch: that branch now gets a SHIM IN FRONT OF SvelteKit's worker
+    # rather than a counter in place of it, so the plan is the only thing that decides.
+    count_pageviews = analytics_worker.counting_enabled(entitled=analytics_entitled)
+    # WHICH counter, and therefore which file is stale. The assets-only entry serves the
+    # page itself through ``ASSETS``; the shim imports the worker the adapter emitted
+    # and delegates to it. Neither can stand in for the other — the shim cannot even
+    # load in a project with no ``_worker.js``, and the entry would drop a dynamic
+    # site's server rendering entirely — so exactly one is written and the other is
+    # removed below.
+    counter_path = Path(
+        project_dir,
+        analytics_worker.SHIM_FILENAME if emits_worker else analytics_worker.ENTRY_FILENAME,
     )
-    entry_path = Path(project_dir, analytics_worker.ENTRY_FILENAME)
     if count_pageviews:
-        # The counter the assets-only config names as ``main``. Written BEFORE the
-        # config so a crash between the two leaves a project with no config rather
-        # than one naming an entry that isn't there. The salt is minted here, fresh
-        # per publish — see the privacy note in ``analytics_worker``.
-        entry_path.write_text(
-            analytics_worker.build_entry_js(site_id=site_id, secret=secrets.token_hex(16)),
+        # The counter the config names as ``main``. Written BEFORE the config so a
+        # crash between the two leaves a project with no config rather than one naming
+        # an entry that isn't there. The salt is minted here, fresh per publish — see
+        # the privacy note in ``analytics_worker`` — and once, so both generators stamp
+        # the same one and neither call can quietly get its own.
+        secret = secrets.token_hex(16)
+        counter_path.write_text(
+            analytics_worker.build_shim_js(site_id=site_id, secret=secret, output_rel=output_rel)
+            if emits_worker
+            else analytics_worker.build_entry_js(site_id=site_id, secret=secret),
             encoding="utf-8",
         )
-    else:
-        # A leftover from an earlier counting publish into this same working dir. The
-        # config about to be written names no ``main``, so an entry left here is a
-        # salt uploaded as an ordinary static asset.
-        #
-        # FAILURE-SOFT, and this is the one delete on the publish path so it is worth
-        # saying why it may swallow. ``missing_ok`` covers only the missing file; a
-        # read-only file, a Windows lock held by another process, and a directory
-        # sitting where the entry should be all raise ``PermissionError`` — and an
-        # unwrapped raise here fails the whole publish of a site that is otherwise
-        # perfectly fine, over analytics the site is not even using.
-        #
-        # Swallowing is safe ONLY because of the line above: ``.assetsignore`` names
-        # the entry on every assets-only publish, and it is written BEFORE this runs.
-        # So a delete that fails leaves the file on disk and still excluded from the
-        # upload, which is the whole point of keeping that line unconditional. Move
-        # the ``.assetsignore`` write after this block and the swallow stops being
-        # safe.
+    # EVERYTHING THIS PUBLISH DID NOT WRITE. Two leftovers are possible in a working dir
+    # that publishes over and over: the counter from a paid publish that is now free,
+    # and the OTHER branch's counter from before this site's build changed shape (an
+    # engine change, or a svelte site that stopped emitting a server entry). Neither is
+    # named by the config about to be written, so each is a per-publish salt that
+    # wrangler would upload as an ordinary static asset.
+    #
+    # FAILURE-SOFT, and this is the one delete on the publish path so it is worth
+    # saying why it may swallow. ``missing_ok`` covers only the missing file; a
+    # read-only file, a Windows lock held by another process, and a directory
+    # sitting where the counter should be all raise ``PermissionError`` — and an
+    # unwrapped raise here fails the whole publish of a site that is otherwise
+    # perfectly fine, over analytics the site may not even be using.
+    #
+    # Swallowing is safe ONLY because of the ``.assetsignore`` above: it names BOTH
+    # counter filenames on every publish, and it is written BEFORE this runs. So a
+    # delete that fails leaves the file on disk and still excluded from the upload,
+    # which is the whole point of keeping those lines unconditional. Move the
+    # ``.assetsignore`` write after this block and the swallow stops being safe.
+    #
+    # The counter WRITE above is deliberately NOT wrapped: the config is about to name
+    # that file as ``main``, and wrangler fails a deploy on a missing ``main``, so a
+    # swallow there would trade a clear error for a confusing one.
+    for stale_path in (
+        Path(project_dir, analytics_worker.ENTRY_FILENAME),
+        Path(project_dir, analytics_worker.SHIM_FILENAME),
+    ):
+        if count_pageviews and stale_path == counter_path:
+            continue
         try:
-            entry_path.unlink(missing_ok=True)
+            stale_path.unlink(missing_ok=True)
         except OSError:
             logger.warning(
                 "sites.workers: could not remove the stale analytics entry at %s — "
                 "publishing anyway; .assetsignore still excludes it from the upload",
-                entry_path,
+                stale_path,
                 exc_info=True,
             )
     Path(project_dir, _CONFIG_FILENAME).write_text(
@@ -581,7 +706,15 @@ async def deploy_workers(
     names it as ``main``. ``site_id`` is the Analytics Engine index it stamps, which
     is what makes a site's traffic queryable; the ``run_worker_first`` allow-list in
     the emitted config is what keeps that counter off every request that is not a
-    page. The server-worker shape is untouched and carries no counter.
+    page.
+
+    SA-3 — the server-worker shape counts too. ``main`` becomes a generated SHIM that
+    imports adapter-cloudflare's ``_worker.js``, wraps its ``fetch`` and delegates;
+    ``nodejs_compat``, the ``ASSETS`` binding and any D1 binding ride along unchanged,
+    so a dynamic site still reaches its database. That config carries the page
+    allow-list too, for the opposite reason to the assets-only one: without it the
+    asset router would serve every prerendered page itself and the shim would never be
+    invoked.
 
     SA-2 — ``analytics_entitled`` says whether THIS site's plan buys the counter, as
     resolved at the publish seam by ``entitlements.site_analytics_entitled``. False

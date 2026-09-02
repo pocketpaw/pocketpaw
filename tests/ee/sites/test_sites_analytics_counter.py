@@ -504,43 +504,68 @@ async def test_the_public_deploy_entry_writes_the_counter(tmp_path, monkeypatch)
         assert _route_for(cfg["assets"]["run_worker_first"], path, asset_exists=True) == "assets"
 
 
-# ── the server-worker branch is untouched ────────────────────────────────────
+# ── the server-worker branch, un-counted ─────────────────────────────────────
+#
+# SA-1 scoped itself to the assets-only branch and these two tests pinned that
+# scope. SA-3 built the missing half — a shim in front of the SvelteKit worker —
+# so what still holds is the UN-COUNTED shape, which is what both now assert. The
+# counting server-worker shape is asserted in test_sites_analytics_shim.py.
 
 
-def test_server_worker_config_is_unchanged(tmp_path):
-    """SA-1 is scoped to the assets-only branch. A ripple / dynamic-svelte deploy
-    keeps the exact proven SvelteKit config: its own ``main``, ``nodejs_compat``, the
-    adapter output as the asset dir, and the three-line ``.assetsignore``."""
+def test_un_counted_server_worker_config_is_the_proven_recipe(tmp_path):
+    """An un-counted ripple / dynamic-svelte deploy keeps the exact proven SvelteKit
+    config: adapter-cloudflare's own ``main``, ``nodejs_compat``, and the adapter output
+    as the asset dir.
+
+    This is the shape the free tier and the operator kill switch both fall back to, so
+    "nearly it" is not good enough — a rollback that lands on a different config is not
+    a rollback."""
     project = Path(_build_server_worker_project(tmp_path))
     workers_deploy._write_deploy_files(
-        str(project), f"paw-site-{SITE_ID}", "ripple", None, site_id=SITE_ID
+        str(project),
+        f"paw-site-{SITE_ID}",
+        "ripple",
+        None,
+        site_id=SITE_ID,
+        analytics_entitled=False,
     )
     cfg = json.loads((project / "wrangler.jsonc").read_text())
 
     assert cfg["main"] == ".svelte-kit/cloudflare/_worker.js"
     assert cfg["compatibility_flags"] == ["nodejs_compat"]
     assert cfg["assets"] == {"binding": "ASSETS", "directory": ".svelte-kit/cloudflare"}
-    assert (project / ".svelte-kit/cloudflare/.assetsignore").read_text().splitlines() == [
+    # The Pages-style entry is still dropped from the upload; the counter filenames
+    # follow it, named on every publish whether or not one was written.
+    assert (project / ".svelte-kit/cloudflare/.assetsignore").read_text().splitlines()[:3] == [
         "_worker.js",
         "_routes.json",
         "_headers",
     ]
 
 
-def test_server_worker_branch_gets_no_counter(tmp_path):
+def test_a_free_server_worker_publish_gets_no_counter(tmp_path):
     """Stated as the failure it prevents: no counter file, no dataset binding and no
-    routing rules on the branch where ``main`` is already SvelteKit's own worker. A
-    second entry cannot be bolted in front of that one from a config key — that is a
-    later slice, not a silent partial."""
+    routing rules for a site whose plan does not buy them.
+
+    A Worker invocation is billed and a static asset is not, and on this branch the
+    counting config ALSO adds ``run_worker_first`` — which turns prerendered pages that
+    were served free into billed invocations. Getting this wrong spends money on a site
+    paying nothing, which is the whole reason SA-2 exists."""
     project = Path(_build_server_worker_project(tmp_path))
     workers_deploy._write_deploy_files(
-        str(project), f"paw-site-{SITE_ID}", "ripple", None, site_id=SITE_ID
+        str(project),
+        f"paw-site-{SITE_ID}",
+        "ripple",
+        None,
+        site_id=SITE_ID,
+        analytics_entitled=False,
     )
     cfg = json.loads((project / "wrangler.jsonc").read_text())
 
     assert "analytics_engine_datasets" not in cfg
     assert "run_worker_first" not in cfg["assets"]
     assert not (project / analytics_worker.ENTRY_FILENAME).exists()
+    assert not (project / analytics_worker.SHIM_FILENAME).exists()
 
 
 # ── driving the generated Worker under node ──────────────────────────────────
@@ -828,6 +853,25 @@ emit({ referrers: rec.rows.map((row) => row.blobs[1]) });
 # One user-agent per class, all real. The Android pair is the reason the classifier
 # tests tablet first: an Android TABLET is an Android that omits ``Mobile``, so the two
 # strings differ by one token and a naive order files the tablet under desktop.
+# The two driver bodies below are module constants for the same reason
+# ``_DRIVER_PRELUDE`` is: a ``%`` on a literal is a lint error, and the JavaScript reads
+# better unindented than folded into a call.
+_DEVICE_PROBE_JS = """
+const agents = %s;
+const classes = {};
+for (const [name, ua] of Object.entries(agents)) classes[name] = deviceClass(ua);
+emit({ classes });
+"""
+
+_DEVICE_ROW_JS = """
+const agents = %s;
+const rec = recorder();
+for (const ua of Object.values(agents)) {
+  await count(request("https://site.example.dev/", { "user-agent": ua }), { PAW_ANALYTICS: rec });
+}
+emit({ devices: rec.rows.map((row) => row.blobs[4]), rows: rec.rows.length });
+"""
+
 _DEVICE_AGENTS = {
     "desktop": HUMAN_UA,
     "mobile": (
@@ -915,10 +959,7 @@ def test_every_device_class_is_reachable_and_correct(tmp_path):
     token alone."""
     out = _run_node(
         tmp_path,
-        """
-const agents = %s;
-emit({ classes: Object.fromEntries(Object.entries(agents).map(([k, ua]) => [k, deviceClass(ua)])) });
-"""
+        _DEVICE_PROBE_JS
         % json.dumps(
             {
                 **_DEVICE_AGENTS,
@@ -962,18 +1003,7 @@ def test_the_device_class_never_carries_the_user_agent(tmp_path):
     touches; the row's claim is that it cannot single anyone out, so what lands in
     ``blobs[4]`` must be one of exactly four words and never a substring of the agent
     that produced it."""
-    out = _run_node(
-        tmp_path,
-        """
-const agents = %s;
-const rec = recorder();
-for (const ua of Object.values(agents)) {
-  await count(request("https://site.example.dev/", { "user-agent": ua }), { PAW_ANALYTICS: rec });
-}
-emit({ devices: rec.rows.map((row) => row.blobs[4]), rows: rec.rows.length });
-"""
-        % json.dumps(_DEVICE_AGENTS),
-    )
+    out = _run_node(tmp_path, _DEVICE_ROW_JS % json.dumps(_DEVICE_AGENTS))
 
     assert out["rows"] == len(_DEVICE_AGENTS)
     assert set(out["devices"]) <= {"desktop", "mobile", "tablet", "unknown"}
