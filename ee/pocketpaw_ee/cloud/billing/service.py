@@ -691,11 +691,14 @@ async def cancel(
     *,
     provider: IPaymentsProvider | None = None,
 ) -> dict:
-    """Cancel the workspace's ACTIVE recurring subscription at the gateway.
+    """Cancel the workspace's BILLABLE recurring subscription at the gateway.
 
-    Loads the workspace's currently-active ``Subscription`` row and tells the
-    gateway to stop billing it (``provider.cancel_subscription``). Returns
-    ``{"ok": True}``.
+    Loads the workspace's billable ``Subscription`` row and tells the gateway to
+    stop billing it (``provider.cancel_subscription``). Returns ``{"ok": True}``.
+
+    BILLABLE, not strictly active: a subscription in dunning (``on_hold``) is
+    still being charged for and must remain cancellable, or a buyer whose card is
+    failing gets a 402 when they try to stop the retries.
 
     The entitlement revert (``Workspace.plan`` -> free) and the Subscription-row
     status flip are NOT done here — they land REACTIVELY on the verified
@@ -703,8 +706,10 @@ async def cancel(
     upgrade to the ``subscription.active`` webhook; the webhook handler is the sole
     writer of that plan mutation, so cancelling here would duplicate it).
 
-    Raises 402 ``billing.no_active_subscription`` when the workspace has no active
-    subscription — only historical / already-cancelled rows, or never subscribed.
+    Raises 402 ``billing.no_active_subscription`` when the workspace has no
+    billable subscription — only historical / already-cancelled / expired rows,
+    or never subscribed. The error code keeps its wire name; only the predicate
+    behind it widened.
     """
     # Rule 6 — validate at entry.
     if not workspace_id:
