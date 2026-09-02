@@ -73,6 +73,22 @@
 # untouched. A dynamic site's remote functions still reach their database; the shim
 # only changes which module is the entry.
 #
+# ONE COMMENT ELSEWHERE IS NOW FALSE, and it is named here because a stale comment
+# asserting something is IMPOSSIBLE is worse than no comment — the next reader believes
+# it. ``sites.service._deploy_dynamic_site`` (the provision lane) passes
+# ``analytics_entitled=False`` unconditionally, and says it does so because no counter
+# can be bolted in front of the SvelteKit worker from a config key. That reason no
+# longer holds: a module can do what a config key could not, and this file is where it
+# is done. The lane still counts nothing, which is a FOLLOW-UP rather than a bug in
+# this slice.
+#
+# The follow-up is deliberately not bundled here, and the ordering is the reason.
+# Flipping that lane to pass a resolved entitlement is only safe once the shim exists —
+# doing both at once could deploy a config naming a shim that is not there. It lands
+# after this, not beside it. Until then the main publish seam
+# (``_deploy_site_doc``) is the lane that counts, and it already passes the resolved
+# entitlement for every engine.
+#
 # Updated 2026-09-02 (SA-2 — the gate) — THE COUNTER IS NO LONGER UNCONDITIONAL. SA-1
 # wired it onto every assets-only publish; a Worker invocation is billed and a static
 # asset is not, so that spent money on sites paying nothing. ``_write_deploy_files``
