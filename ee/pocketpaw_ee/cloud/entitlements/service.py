@@ -65,6 +65,15 @@
 #   to the free floor exactly as an unknown key does. The same call also resolves
 #   the LEGACY basic/pro/business keys, which is what stops the rekey demoting every
 #   already-published site the day it deploys.
+# Updated 2026-09-02 (feat/sites-analytics-gate, SA-2): added
+#   ``site_analytics_entitled`` — "may this site's visitors be counted", the gate
+#   the publish path reads before it deploys a pageview counter and the read
+#   endpoint will read before it serves the numbers. A module-level PURE function
+#   beside ``site_domain_allowance`` rather than a field on ``SiteEntitlements``,
+#   for the reason that function's own docstring gives: more than one seam asks it,
+#   and one of them (the deploy) holds two strings rather than a resolved
+#   entitlements object. Keeping it a function is what makes both seams able to
+#   share the single predicate instead of each re-deriving it.
 
 from __future__ import annotations
 
@@ -185,6 +194,48 @@ def site_domain_allowance(*, plan_tier: str | None, subscription_status: str | N
     if tier is not None and _subscription_is_active(subscription_status):
         allowance = tier.max_domained_sites
     return allowance
+
+
+def site_analytics_entitled(*, plan_tier: str | None, subscription_status: str | None) -> bool:
+    """May THIS site have its visitors counted?
+
+    THE ONE PREDICATE for visitor analytics, and public for that reason. Two seams
+    ask it and they must never disagree: the PUBLISH path (SA-2) decides whether
+    the deployed config carries a pageview counter at all, and the read endpoint
+    (SA-4) decides whether a site's numbers may be served. A site whose publish
+    counted but whose read refuses is a customer paying for a blank chart; the
+    reverse serves numbers a site was never entitled to gather.
+
+    Pure and synchronous over the site's two billing fields, exactly like
+    ``site_domain_allowance`` beside it, so the caller that owns the ``Site``
+    document passes what it owns (EE cloud rule 2 — ``entitlements`` may not import
+    ``models.site``).
+
+    A PAID grant, not a floor one, and the difference is money rather than tidiness.
+    A Worker invocation is billed and a static asset is not, so counting a free
+    site's traffic spends real money against no revenue — the cost has to track the
+    plan. The consequence is that upgrading does not backfill: a site's history
+    begins at the publish that first carried a counter, because nothing was
+    recorded before it. That is a product decision, and it belongs on screen rather
+    than in a docstring.
+
+    Tier AND active subscription, the same conjunction every other paid capability
+    here uses. Reading the tier alone is the bug this module exists to prevent —
+    cancellation leaves ``plan_tier`` on the paid key, and an unconfigured Dodo
+    product records a paid tier that was never charged at all.
+
+    Fails closed on every unknown. ``site_scoped_tier`` returns None for a missing
+    key, an unrecognised one, and an ORG-scoped key that has no business on a single
+    site; all three land on False.
+    """
+    tier = site_plan_catalog.site_scoped_tier(plan_tier)
+    if tier is None or not _subscription_is_active(subscription_status):
+        return False
+    # Read off the RESOLVED catalog row rather than the raw feature map, so the
+    # legacy key aliases (``pro`` → ``site``) resolve here exactly as they do for
+    # the badge and the domain allowance. A site whose document still holds a
+    # pre-rekey key is entitled to what it has always paid for.
+    return site_plan_catalog.ANALYTICS_FEATURE in tier.cloudflare_features
 
 
 def resolve_site_entitlements(

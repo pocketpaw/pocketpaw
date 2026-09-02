@@ -45,6 +45,27 @@
 # no counter, because ``main`` there is already SvelteKit's own worker and a second
 # entry cannot be bolted in front of it from a config key. That is a later slice.
 #
+# Updated 2026-09-02 (SA-2 — the gate) — THE COUNTER IS NO LONGER UNCONDITIONAL. SA-1
+# wired it onto every assets-only publish; a Worker invocation is billed and a static
+# asset is not, so that spent money on sites paying nothing. ``_write_deploy_files``
+# now takes ``analytics_entitled`` — the site's plan, resolved at the publish seam by
+# ``entitlements.site_analytics_entitled`` — ANDs it with the operator kill switch
+# ``PAW_SITES_ANALYTICS_DISABLED``, and writes ONE of two shapes.
+#
+# THE OFF SHAPE IS THE PRE-ANALYTICS CONFIG, BYTE FOR BYTE: no ``main``, no dataset
+# binding, no ``run_worker_first``, and an ``assets`` block of nothing but
+# ``directory`` — not even the ``ASSETS`` binding SA-1 added, because there is no
+# entry to bind it for. That exactness is the point of the kill switch rather than a
+# nicety: an operator pulling it in an incident is asking for the config that was
+# proven before analytics existed, and "nearly that config" is not a rollback.
+#
+# The entry file is DELETED, not merely skipped, whenever counting is off. A publish
+# reuses the pocket's working dir, so a site that published paid and then publishes
+# free still has the earlier entry on disk — and with no ``main`` naming it, wrangler
+# uploads it as an ordinary asset and serves the per-publish salt to anyone who asks.
+# The ``.assetsignore`` still lists it on every assets-only publish for the same
+# reason, counting or not.
+#
 # Updated 2026-08-07 (RX-1 — the react engine) — the assets-only branch now keys on
 # ``emits_server_worker(engine)`` instead of ``not needs_node_build(engine)``. Those
 # two questions had the same answer for ripple/svelte/html, so the old condition read
@@ -151,6 +172,13 @@ _ASSETSIGNORE_LINES = ("_worker.js", "_routes.json", "_headers")
 # The entry carries the per-publish salt the visitor hash is built on; served as a
 # public asset it hands out the salt, and the hash stops being irreversible. Removing
 # this line does not break a deploy — it breaks the privacy claim, silently.
+#
+# SA-2 — that line is written on EVERY assets-only publish, including the ones that
+# deploy no counter at all. Naming a file that is not there is a no-op (the same
+# reason both engines share this one list), and the case it covers is real: a site
+# that publishes paid and then free reuses the working dir, so a leftover entry can
+# still be sitting in it. ``_write_deploy_files`` deletes that leftover; this line is
+# what stands if the delete ever stops happening.
 _ASSETS_ONLY_ASSETSIGNORE_LINES = (
     "wrangler.jsonc",
     ".assetsignore",
@@ -219,6 +247,7 @@ def _wrangler_jsonc(
     d1_database_id: str | None = None,
     *,
     project_dir: str | os.PathLike[str],
+    count_pageviews: bool = True,
 ) -> str:
     """The clean wrangler config for a workers.dev deploy (the proven recipe).
 
@@ -230,12 +259,12 @@ def _wrangler_jsonc(
     * html / react / STATIC svelte (no worker emitted) → an ASSETS-ONLY Worker. The
       build output is a static tree with no ``_worker.js``, so the config carries no
       ``nodejs_compat`` and serves ``assets.directory`` (``"."`` for html, ``"dist"``
-      for react, ``build`` for static svelte). SA-1 — it DOES carry a ``main`` now:
-      the generated pageview counter, plus the ``ASSETS`` binding it serves through,
-      the analytics dataset binding, and the ``run_worker_first`` allow-list that
-      keeps stylesheets, scripts, fonts and images off the Worker. The counter is not
-      the SvelteKit worker under another name; ``main`` still never points into the
-      build output.
+      for react, ``build`` for static svelte). SA-1 — it carries a ``main`` WHEN THE
+      SITE COUNTS: the generated pageview counter, plus the ``ASSETS`` binding it
+      serves through, the analytics dataset binding, and the ``run_worker_first``
+      allow-list that keeps stylesheets, scripts, fonts and images off the Worker.
+      The counter is not the SvelteKit worker under another name; ``main`` still
+      never points into the build output.
     * ripple / DYNAMIC svelte (worker emitted) → the SvelteKit Cloudflare worker,
       UNCHANGED. ``main`` points at the worker entry adapter-cloudflare emits INSIDE
       the asset dir (``.svelte-kit/cloudflare``), and
@@ -256,6 +285,20 @@ def _wrangler_jsonc(
     binding — the same binding WfP's ``put_worker`` passes — so a dynamic site's
     remote functions reach their per-tenant database on the FREE tier. Dynamic html is
     out of scope (it has no server runtime), so an html config never carries a binding.
+
+    ``count_pageviews`` (SA-2) picks between the two ASSETS-ONLY shapes: True is the
+    counting config above, False is the PRE-ANALYTICS config byte for byte. It is the
+    already-resolved answer — the site's plan ANDed with the operator kill switch, via
+    ``analytics_worker.counting_enabled`` in ``_write_deploy_files`` — and NOT a
+    question this function re-asks, so there is exactly one place that decides.
+
+    It DEFAULTS TO TRUE, which is worth naming rather than leaving to be discovered.
+    This is a private config builder whose only production caller passes an explicitly
+    resolved value; the default keeps the direct-call tests (and the SA-1 shape they
+    pin) reading as the subject rather than the exception. The gate that actually
+    protects revenue is at the publish seam, and it is asserted end-to-end there — a
+    default here can never be what decides whether a free site counts, because the one
+    caller always passes.
 
     Deliberately still NO Queue bindings. The generator's own wrangler.toml declares
     ``LEADS_QUEUE`` / ``WRITEBACK_QUEUE`` producers, but Cloudflare Queues is a paid
@@ -281,7 +324,29 @@ def _wrangler_jsonc(
     # asset router would send every request, subresources included, through the
     # Worker. ``analytics_worker`` owns the rules and the reasoning; the ``ASSETS``
     # binding is what the entry serves the page through once it has counted.
+    #
+    # SA-2 — ``count_pageviews`` selects between the two shapes, and the FALSE one is
+    # written to be the pre-analytics config EXACTLY: no ``main``, no dataset binding,
+    # no routing rules, and an ``assets`` block of nothing but ``directory``. Not even
+    # the ``ASSETS`` binding, which SA-1 added — a free site's config has no entry to
+    # bind it for, and a spare binding is a difference a byte-for-byte comparison
+    # would find. The two shapes are built as separate literals rather than one dict
+    # with keys popped off it, because "which keys does the un-analytics config have"
+    # is then something a reader can see rather than replay.
     if not resolve_emits_server_worker(project_dir, engine):
+        if not count_pageviews:
+            return (
+                json.dumps(
+                    {
+                        "name": name,
+                        "compatibility_date": "2024-09-23",
+                        "workers_dev": True,
+                        "assets": {"directory": output_rel},
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
         config: dict[str, object] = {
             "name": name,
             "main": analytics_worker.ENTRY_FILENAME,
@@ -350,6 +415,7 @@ def _write_deploy_files(
     d1_database_id: str | None = None,
     *,
     site_id: str = "",
+    analytics_entitled: bool = True,
 ) -> None:
     """Write the recipe files into the project: an ``.assetsignore`` inside the asset
     dir + the clean ``wrangler.jsonc`` at the project root, and — on the assets-only
@@ -381,7 +447,24 @@ def _write_deploy_files(
     branch, which writes no counter at all. The counter is written REGARDLESS of
     whether the id is empty: skipping it would leave the emitted ``main`` pointing at
     a file that is not there, and wrangler fails a deploy on a missing ``main``. An
-    empty id costs unqueryable rows; the only caller always has a real one."""
+    empty id costs unqueryable rows; the only caller always has a real one.
+
+    ``analytics_entitled`` (SA-2) is the SITE's half of the counting decision, as
+    resolved by ``entitlements.site_analytics_entitled`` at the publish seam. The
+    operator kill switch is the other half and is read here, not passed, because it is
+    global and per-publish: ``analytics_worker.counting_enabled`` ANDs the two, and its
+    answer decides BOTH whether the config names a ``main`` and whether an entry file
+    exists at all. Those two must move together — a config naming an absent ``main``
+    fails the deploy, and an entry with no config naming it is a salt served as a
+    static asset.
+
+    WHEN COUNTING IS OFF THE ENTRY IS DELETED rather than merely not written, and that
+    is not tidiness. A publish reuses the pocket's working dir, so a site that
+    published paid and then publishes free still has the earlier entry on disk. The
+    free config names no ``main``, so wrangler would upload that leftover as an
+    ordinary asset and hand out the per-publish salt from a config that mentions
+    nothing. The ``.assetsignore`` names the entry on EVERY assets-only publish,
+    counting or not, as the second line of defence behind the delete."""
     # SL-1 — RESOLVED against the artifact, not predicted from the engine name. A
     # static svelte site builds on adapter-static: its output is ``build`` and it emits
     # no ``_worker.js``, so it must deploy assets-only exactly as react does. Answering
@@ -400,17 +483,35 @@ def _write_deploy_files(
     emits_worker = resolve_emits_server_worker(project_dir, engine)
     ignore_lines = _ASSETSIGNORE_LINES if emits_worker else _ASSETS_ONLY_ASSETSIGNORE_LINES
     (out_dir / ".assetsignore").write_text("\n".join(ignore_lines) + "\n")
-    if not emits_worker:
+    # SA-2 — the whole counting decision, resolved once and read twice below so the
+    # config and the file on disk can never disagree. The server-worker branch never
+    # counts whatever the plan says: ``main`` there is already SvelteKit's own worker.
+    count_pageviews = not emits_worker and analytics_worker.counting_enabled(
+        entitled=analytics_entitled
+    )
+    entry_path = Path(project_dir, analytics_worker.ENTRY_FILENAME)
+    if count_pageviews:
         # The counter the assets-only config names as ``main``. Written BEFORE the
         # config so a crash between the two leaves a project with no config rather
         # than one naming an entry that isn't there. The salt is minted here, fresh
         # per publish — see the privacy note in ``analytics_worker``.
-        Path(project_dir, analytics_worker.ENTRY_FILENAME).write_text(
+        entry_path.write_text(
             analytics_worker.build_entry_js(site_id=site_id, secret=secrets.token_hex(16)),
             encoding="utf-8",
         )
+    else:
+        # A leftover from an earlier counting publish into this same working dir. The
+        # config about to be written names no ``main``, so an entry left here is a
+        # salt uploaded as an ordinary static asset.
+        entry_path.unlink(missing_ok=True)
     Path(project_dir, _CONFIG_FILENAME).write_text(
-        _wrangler_jsonc(name, engine, d1_database_id, project_dir=project_dir)
+        _wrangler_jsonc(
+            name,
+            engine,
+            d1_database_id,
+            project_dir=project_dir,
+            count_pageviews=count_pageviews,
+        )
     )
 
 
@@ -423,7 +524,12 @@ def _cf_env() -> dict[str, str]:
 
 
 async def deploy_workers(
-    site_id: str, project_dir: str, *, engine: str = "ripple", d1_database_id: str | None = None
+    site_id: str,
+    project_dir: str,
+    *,
+    engine: str = "ripple",
+    d1_database_id: str | None = None,
+    analytics_entitled: bool = True,
 ) -> str:
     """Deploy a Paw Site as a regular Worker on the free workers.dev tier.
 
@@ -447,6 +553,17 @@ async def deploy_workers(
     the emitted config is what keeps that counter off every request that is not a
     page. The server-worker shape is untouched and carries no counter.
 
+    SA-2 — ``analytics_entitled`` says whether THIS site's plan buys the counter, as
+    resolved at the publish seam by ``entitlements.site_analytics_entitled``. False
+    deploys the pre-analytics config: no ``main``, no dataset binding, no routing
+    rules, no entry on disk. The operator kill switch
+    (``PAW_SITES_ANALYTICS_DISABLED``) is ANDed in one layer down and produces the
+    same shape for every site, entitled or not.
+
+    It defaults to True for the same reason ``_wrangler_jsonc``'s does, and with the
+    same caveat: this is the mechanism, the gate is at the publish seam, and the
+    publish seam always passes an explicitly resolved value.
+
     ``d1_database_id`` (DYNAMIC ripple/svelte sites) binds the site's per-tenant D1 as
     ``DB``, so a dynamic site can serve its live data WITHOUT a Workers-for-Platforms
     dispatch namespace (a paid add-on). The D1 must already exist and be migrated — the
@@ -463,7 +580,14 @@ async def deploy_workers(
             "sites.workers_bad_name",
             f"Computed an invalid worker name from site id {site_id!r}.",
         )
-    _write_deploy_files(project_dir, name, engine, d1_database_id, site_id=site_id)
+    _write_deploy_files(
+        project_dir,
+        name,
+        engine,
+        d1_database_id,
+        site_id=site_id,
+        analytics_entitled=analytics_entitled,
+    )
 
     # ``--config`` is REQUIRED, not cosmetic: a dynamic project dir also holds the
     # generator's wrangler.toml (whose queue producers reference queues that do not

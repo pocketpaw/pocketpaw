@@ -6,6 +6,17 @@
 # Created 2026-09-02 (feat/sites-analytics-counter, SA-1). Slice 1 of Paw Sites
 # visitor analytics: an ``html`` site counts a real pageview, queryable by site id.
 #
+# Updated 2026-09-02 (feat/sites-analytics-gate, SA-2) — NOT EVERY SITE COUNTS ANY
+# MORE, and this module gained the two functions that say so. SA-1 wired the counter
+# onto every assets-only publish regardless of who was paying; a Worker invocation is
+# billed and a static asset is not, so that spent money on free sites. The gate is
+# ``counting_enabled(entitled=...)``, and its two halves are deliberately separate:
+# the per-site entitlement is resolved by ``entitlements.site_analytics_entitled``
+# at the publish seam (the only layer that can see a ``Site`` document), while the
+# operator kill switch ``PAW_SITES_ANALYTICS_DISABLED`` lives here and is global.
+# When counting is off the emitted config is the PRE-ANALYTICS one, byte for byte,
+# and no entry is written — see ``workers_deploy._wrangler_jsonc``.
+#
 # SHAPE MIRRORS ``badge.py`` / ``paw_bar/embed.py`` — a per-site injection into the
 # artifact between build and deploy, so what lands is already correct and there is no
 # second deploy and no post-publish patch. What differs is WHAT is injected: those two
@@ -92,14 +103,24 @@
 # before and after a republish on the same day counts twice. That is the safe
 # direction (over-splitting, never over-linking) and a republish is rare.
 #
-# ONE RESIDUAL EXPOSURE, stated rather than left to be discovered. The Cloudflare
-# deploy is not the only thing that serves a project dir: ``sites.local_server``
-# copies the WHOLE dir and serves it, deploy scaffold included, for the local target
-# and for previews. It already serves ``wrangler.jsonc`` that way; after a workers
-# publish into the same working dir it would serve this entry too, salt and all. That
-# server is loopback, so the reach is a developer's own machine rather than the
-# internet — but the fix, if it is ever wanted, belongs there (an ``ignore`` on the
-# copytree that skips the scaffold) and not here.
+# THE RESIDUAL EXPOSURE SA-1 NAMED HERE IS CLOSED (SA-2). The Cloudflare deploy is
+# not the only thing that serves a project dir: ``sites.local_server`` copies the
+# WHOLE dir and serves it, deploy scaffold included, for the local target. It already
+# served ``wrangler.jsonc`` that way, and after a workers publish into the same
+# per-pocket working dir it would have served this entry too, salt and all. The reach
+# was loopback — a developer's own machine rather than the internet — but the salt is
+# exactly what makes the visitor hash irreversible, so it does not get to leak on a
+# technicality. ``local_server.persist_site`` now passes an ``ignore`` to that
+# copytree, which is where SA-1 said the fix belonged.
+#
+# THE STALE-ENTRY CASE, which the gate created and which is handled in
+# ``workers_deploy``. A site that publishes paid and then publishes free reuses the
+# same working dir, so an entry written by the earlier publish is still sitting
+# there. The free config names no ``main``, so wrangler would upload that leftover as
+# a plain asset — the salt, downloadable, from a config that mentions nothing.
+# ``_write_deploy_files`` therefore DELETES the entry whenever counting is off, and
+# the ``.assetsignore`` keeps listing it unconditionally as the second line of
+# defence.
 #
 # ── THE ANALYTICS ENGINE ROW ──────────────────────────────────────────────────
 #
@@ -150,6 +171,28 @@ DATASET_BINDING = "PAW_ANALYTICS"
 _DEFAULT_DATASET = "paw_site_pageviews"
 _DATASET_ENV = "PAW_SITES_ANALYTICS_DATASET"
 
+# THE KILL SWITCH. Set it and the very next publish emits the pre-analytics config
+# again — no ``main``, no dataset binding, no routing rules, and no generated entry
+# on disk — for every site, paid ones included.
+#
+# It exists for ONE failure mode, and the mitigation has to be faster than a deploy
+# because of what that failure does. If this Cloudflare account turns out to be on
+# the Workers FREE plan, a config carrying a ``main`` starts drawing on a 100,000
+# request/day ceiling that is ACCOUNT-WIDE, and breaching it does not degrade
+# analytics — Cloudflare stops serving the Workers behind it. Every published site
+# goes dark together. A code change plus a release is minutes at best; an
+# environment variable plus a republish is the length of one publish.
+#
+# The value is read at PUBLISH time, not at import, so setting it takes effect for
+# the next publish without restarting anything that is already running.
+_DISABLED_ENV = "PAW_SITES_ANALYTICS_DISABLED"
+
+# The truthy spellings, matching ``sites.service``'s own env flags. A kill switch
+# read with ``bool(os.environ.get(...))`` would fire on ``=0`` and ``=false``, which
+# is the wrong direction to be surprising in — an operator who explicitly writes
+# "false" must not silently disable the feature.
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
 # Page suffixes the route enumeration walks — the same pair ``badge.py`` and
 # ``paw_bar/embed.py`` treat as pages, so a file that earns a badge is a file that
 # earns a pageview.
@@ -189,6 +232,34 @@ def dataset_name() -> str:
     not.
     """
     return os.environ.get(_DATASET_ENV, "").strip() or _DEFAULT_DATASET
+
+
+def counting_disabled() -> bool:
+    """Is the operator kill switch set? See ``_DISABLED_ENV`` for what it is for.
+
+    Separate from ``counting_enabled`` below so a test — and an operator reading a
+    log line — can tell "this site is not entitled" apart from "counting is off
+    everywhere". They call for completely different responses.
+    """
+    return os.environ.get(_DISABLED_ENV, "").strip().lower() in _TRUTHY
+
+
+def counting_enabled(*, entitled: bool) -> bool:
+    """Does THIS publish carry a pageview counter?
+
+    The whole decision in one place: the site's plan entitles it AND the operator
+    has not pulled the switch. Both halves have to be false-able independently —
+    the entitlement is per site and answers to billing, the switch is global and
+    answers to an incident — but the config builder needs one boolean, and deriving
+    it at each call site is how the two halves eventually stop agreeing.
+
+    ``entitled`` is resolved by ``entitlements.site_analytics_entitled`` at the
+    publish seam, which is the only layer that can see a ``Site`` document. This
+    module deliberately does not resolve it: it would have to reach across into the
+    cloud billing layer to do so, and a generator of Worker source is the wrong
+    place to decide who is paying.
+    """
+    return entitled and not counting_disabled()
 
 
 def _clean_url(rel_posix: str, suffix: str) -> str:
@@ -371,6 +442,8 @@ __all__ = [
     "DATASET_BINDING",
     "ENTRY_FILENAME",
     "build_entry_js",
+    "counting_disabled",
+    "counting_enabled",
     "dataset_name",
     "run_worker_first_rules",
 ]

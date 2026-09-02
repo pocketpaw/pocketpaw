@@ -59,6 +59,15 @@
 # P0a fix ``bun run build`` always runs, so a missing build dir should no longer
 # happen on the normal path — this is a defensive backstop, not the happy path.
 #
+# Updated 2026-09-02 (feat/sites-analytics-gate, SA-2 — the copy skips the deploy
+# scaffold): ``persist_site`` copied the whole static-output tree, and for an html site
+# that tree IS the project root, so it took ``wrangler.jsonc``, ``.assetsignore`` and —
+# once SA-1 landed — the generated analytics entry along with the pages, then served
+# all three. The entry carries the per-publish salt the visitor hash is built on, which
+# is the thing making that hash irreversible; loopback reach lowers the stakes but does
+# not change the direction. The copytree now takes an ``ignore``. See
+# ``_DEPLOY_SCAFFOLD_NAMES``.
+#
 # Design:
 #   * One server per process, rooted at the sites home (~/.pocketpaw/sites by
 #     default, override with PAW_SITES_LOCAL_DIR). A request for /<site_id>/
@@ -87,10 +96,33 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pocketpaw_ee.sites import artifact_preview
+from pocketpaw_ee.sites import analytics_worker, artifact_preview
 from pocketpaw_ee.sites.engines import resolve_static_output_rel
 
 logger = logging.getLogger(__name__)
+
+# The DEPLOY SCAFFOLD — files ``workers_deploy`` writes into a project so wrangler can
+# ship it. None of them is site content, and ``persist_site`` copies right past them
+# into a tree this server hands out as plain static files.
+#
+# The generated counter entry is the one that made this a control rather than a tidy-up
+# (SA-2). It carries the per-publish salt the visitor hash is built on, and a salt an
+# attacker can read turns that hash into a confirmation oracle: given a candidate IP
+# and user-agent, recompute and compare. The reach here is loopback — a developer's own
+# machine, not the internet — which lowers the stakes without changing the direction.
+# A workers publish and a local publish share the pocket's working dir, so an entry
+# written by one is sitting there for the other to copy.
+#
+# ``wrangler.jsonc`` and ``.assetsignore`` join it because they are the same kind of
+# thing: deploy plumbing that a visitor to the served site has no business fetching.
+# Cloudflare already excludes all three from what it uploads (the ``.assetsignore``
+# ``workers_deploy`` writes), so this makes the local target agree with the deployed
+# one rather than inventing a new rule.
+_DEPLOY_SCAFFOLD_NAMES = (
+    analytics_worker.ENTRY_FILENAME,
+    "wrangler.jsonc",
+    ".assetsignore",
+)
 
 # The deployable static-output dir, relative to the project dir, is resolved off the
 # ARTIFACT via ``resolve_static_output_rel`` (HE-4 engine-awareness, SL-1 artifact-
@@ -126,14 +158,24 @@ def persist_site(site_id: str, project_dir: str, engine: str = "ripple") -> Path
     and return that dir. Replaces any prior deploy of the same site so a re-publish
     serves fresh content. The source tree is ``resolve_static_output_rel(...)`` —
     ``.svelte-kit/cloudflare`` for ripple and dynamic svelte, ``build`` for a STATIC
-    svelte site (SL-1), the project root for html."""
+    svelte site (SL-1), the project root for html.
+
+    THE DEPLOY SCAFFOLD DOES NOT COME WITH IT (SA-2). For an html site the static
+    output dir IS the project root, so an unfiltered copy takes the wrangler config
+    and the generated analytics entry along with the pages and then serves them. See
+    ``_DEPLOY_SCAFFOLD_NAMES`` for why the entry in particular must not travel.
+
+    ``shutil.ignore_patterns`` matches by NAME at every level rather than only at the
+    copy root, which is what we want: those three names are ours, no site authors a
+    file called any of them, and a nested one would be exactly as wrong as a top-level
+    one."""
     src = Path(project_dir, resolve_static_output_rel(project_dir, engine))
     if not src.is_dir():
         raise FileNotFoundError(f"no built static site at {src}")
     dest = sites_home() / site_id
     if dest.exists():
         shutil.rmtree(dest)
-    shutil.copytree(src, dest)
+    shutil.copytree(src, dest, ignore=shutil.ignore_patterns(*_DEPLOY_SCAFFOLD_NAMES))
     return dest
 
 
