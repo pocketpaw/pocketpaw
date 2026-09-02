@@ -109,5 +109,32 @@
     "tests": [
       "tests/test_trace_collector.py::test_cumulative_token_usage_becomes_one_entry_per_call"
     ]
+  },
+  {
+    "label": "hard-cancel recovery is removed — a run cancelled mid-response loses the tokens that response already burned, because no later event exists to carry a snapshot out",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            if snapshot is not None:\n                yield snapshot\n            raise",
+    "replace": "            raise",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_a_hard_cancel_still_delivers_the_usage_it_had"
+    ]
+  },
+  {
+    "label": "the cancel handler widens to BaseException, so it also catches GeneratorExit and yields under it — turning every early break into RuntimeError out of the consumer's aclose()",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        except asyncio.CancelledError:",
+    "replace": "        except BaseException:",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_an_early_break_does_not_crash_the_consumers_aclose"
+    ]
+  },
+  {
+    "label": "the structured cache lines are dropped, so the meter reads the payload as OpenAI-shaped and prices the UNCACHED REMAINDER as the whole prompt — every cached turn underbills",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "                \"cache_read_tokens\": savings.cache_read_tokens,\n                \"cache_write_tokens\": savings.cache_write_tokens,",
+    "replace": "",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_a_cancelled_run_is_priced_under_the_same_convention_as_a_completed_one"
+    ]
   }
 ]

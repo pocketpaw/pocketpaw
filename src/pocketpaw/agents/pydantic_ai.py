@@ -2191,11 +2191,33 @@ class PydanticAIBackend:
                         yield snapshot
 
         except asyncio.CancelledError:
-            # Caller cancelled this run specifically — the correct per-run
-            # cancellation path. Propagate; do not degrade it into "done".
-            # Nothing is emitted here on purpose: the consumer has already
-            # stopped reading, and the usage this run burned was delivered by
-            # the in-run snapshots above.
+            # HARD-CANCEL RECOVERY. Yielding while an exception is propagating
+            # sounds impossible, but for a cancel it is not: a consumer that
+            # cancelled a pending ``__anext__`` receives this value from that
+            # await, and the CancelledError resumes propagating afterwards, so
+            # the cancel is delivered rather than swallowed. Measured, both
+            # halves, before this was written.
+            #
+            # It catches ``CancelledError`` SPECIFICALLY and never
+            # ``BaseException``. GeneratorExit is a sibling of CancelledError,
+            # not a subclass, so it stays uncaught here — which is the whole
+            # point: yielding while GeneratorExit propagates raises
+            # ``RuntimeError: async generator ignored GeneratorExit`` out of the
+            # consumer's ``aclose()``, and ``agents/loop.py`` calls exactly that
+            # on every early break. Widening this to BaseException would trade a
+            # billing gap for a crash on a path that today merely under-bills.
+            #
+            # This covers the one case the in-run snapshots cannot: usage that
+            # advanced with no further event behind it to carry a snapshot out —
+            # the response cut off mid-flight. Best-effort, because a cancel must
+            # never be blocked by the bookkeeping that describes it.
+            try:
+                snapshot = _usage_snapshot()
+            except Exception:
+                logger.debug("usage snapshot failed on cancel", exc_info=True)
+                snapshot = None
+            if snapshot is not None:
+                yield snapshot
             raise
         except Exception as exc:
             logger.error("Pydantic AI streaming error: %s", exc, exc_info=True)

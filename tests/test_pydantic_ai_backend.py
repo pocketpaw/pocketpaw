@@ -1681,6 +1681,99 @@ async def test_usage_payloads_are_run_cumulative_and_never_shrink():
     assert totals == sorted(totals), f"payloads must never shrink: {totals}"
 
 
+async def test_a_hard_cancel_still_delivers_the_usage_it_had():
+    """A consumer that cancels a pending ``__anext__`` still receives the run's
+    usage, and the cancel still propagates afterwards.
+
+    This covers the one case the in-run snapshots cannot reach: usage that
+    advanced with no further event behind it to carry a snapshot out. Yielding
+    from the ``except CancelledError`` handler delivers the value to that
+    cancelled await before the exception resumes.
+    """
+    started = asyncio.Event()
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        yield "partial "
+        started.set()
+        await asyncio.sleep(30)  # cancelled here, mid-response
+        yield "never"
+
+    gen = _backend_with_model(FunctionModel(stream_function=stream_fn)).run("go")
+
+    received = []
+    received.append(await gen.__anext__())
+
+    # The pending pull is what drives the model into its mid-response wait, so
+    # it has to exist BEFORE we wait on the event — otherwise nothing advances.
+    pending = asyncio.create_task(gen.__anext__())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await asyncio.sleep(0.1)
+    pending.cancel()
+    try:
+        received.append(await pending)
+    except asyncio.CancelledError:
+        pass
+
+    usage = [e for e in received if getattr(e, "type", None) == "token_usage"]
+    assert usage, f"a hard cancel delivered no usage: {[getattr(e, 'type', e) for e in received]}"
+    assert usage[-1].metadata["input_tokens"] > 0
+
+
+async def test_an_early_break_does_not_crash_the_consumers_aclose():
+    """The reason usage is NOT emitted from a ``finally:``.
+
+    ``agents/loop.py`` closes this generator on every early break. A generator
+    that yields while GeneratorExit is propagating raises ``RuntimeError: async
+    generator ignored GeneratorExit`` out of that ``aclose()`` — trading a
+    billing gap for a crash on a path that today merely under-bills. The cancel
+    handler is deliberately narrow (``CancelledError``, not ``BaseException``)
+    so GeneratorExit passes through untouched.
+    """
+    gen = _search_backend("c1").run("search for pocketpaw")
+
+    async for _ev in gen:
+        break  # walk away mid-stream, exactly as the OSS loop can
+
+    await gen.aclose()  # must not raise
+
+
+async def test_a_cancelled_run_is_priced_under_the_same_convention_as_a_completed_one():
+    """The meter reads a payload's CONVENTION off its own shape: one carrying
+    ``cache_read_tokens`` / ``cache_write_tokens`` is Anthropic-shaped and its
+    ``input_tokens`` is the UNCACHED REMAINDER, anything else is OpenAI-shaped
+    and ``input_tokens`` already includes the cached subset.
+
+    So a partial run must emit the SAME shape as a completed one, or the same
+    tokens get priced under two different conventions depending only on how the
+    run ended. Every path here builds the payload through one function, and this
+    is what keeps that true.
+    """
+    from pocketpaw_ee.cloud.metering.service import _prompt_tokens
+
+    completed = [
+        e.metadata
+        for e in await _collect(_search_backend("c1"), "search for pocketpaw")
+        if e.type == "token_usage"
+    ][-1]
+
+    partial = None
+    async for ev in _search_backend("c1").run("search for pocketpaw"):
+        if ev.type == "token_usage":
+            partial = ev.metadata
+        if ev.type == "tool_result":
+            break
+
+    assert partial is not None
+    assert sorted(partial) == sorted(completed), "a partial run emitted a different payload shape"
+    # Both must land on the Anthropic branch — the one that reads input_tokens
+    # as the uncached remainder. Emitting the inclusive total instead would make
+    # the meter add the cache lines a second time and overbill.
+    for name, payload in (("completed", completed), ("partial", partial)):
+        assert "cache_read_tokens" in payload and "cache_write_tokens" in payload, name
+        inclusive, read, write = _prompt_tokens(payload)
+        assert inclusive == payload["input_tokens"] + read + write, name
+
+
 def test_the_abnormal_path_names_the_model_the_run_resolved():
     """No mid-stream event carries a model name — the event union is parts,
     tools and enqueued messages only — so an abnormal-path payload falls back to
