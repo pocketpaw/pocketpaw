@@ -712,4 +712,11 @@ ignore_imports = [
     "pocketpaw.tools.builtin.studio_flow_tool -> pocketpaw_ee.cloud.chat.agent_service",
     "pocketpaw.tools.builtin.studio_flow_tool -> pocketpaw_ee.cloud.studio.schemas",
     "pocketpaw.tools.builtin.studio_flow_tool -> pocketpaw_ee.cloud.studio.service",
+    # Proxy spend attribution: both agent backends stamp the paying workspace on
+    # a LiteLLM proxy request, and the workspace comes from the same run-identity
+    # ContextVar the Library verbs above read. One lazy try/except runtime import
+    # inside a function, caught broadly on purpose — the module top-level imports
+    # only stdlib, and a community install has no workspaces to bill, so it
+    # returns None and the request goes out untagged exactly as before.
+    "pocketpaw.agents.spend_attribution -> pocketpaw_ee.cloud.chat.agent_service",
 ]
