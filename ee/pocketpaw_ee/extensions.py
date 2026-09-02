@@ -106,6 +106,14 @@ Updated: 2026-07-24 (CX-3, feat/code-agent-exclusive-tools) —
 agent (``ensure_code_agent_all_workspaces``) beside the default ``pocketpaw``
 one, so existing workspaces resolve ``/code`` turns to the exclusive-file-tool
 agent without waiting for the first-turn lazy seed.
+
+Updated: 2026-09-02 (fix/billing-reversals-and-dunning, M5) — the sweeper
+heartbeat gained ``billing.service.sweep_subscription_grace``, at boot and on
+every tick. A ``subscription.on_hold`` webhook only stamps a grace deadline and
+nothing arrives from the gateway when it passes, so this pass is the thing that
+actually ends the grace period and revokes the plan. It is idempotent (an
+already-suspended row is skipped) and never touches credits, so a five-minute
+cadence against a deadline measured in days is deliberate rather than lax.
 """
 
 from __future__ import annotations
@@ -122,6 +130,7 @@ _xproc_consumer_task: asyncio.Task[None] | None = None
 
 async def _sweeper_loop() -> None:
     from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
+    from pocketpaw_ee.cloud.billing.service import sweep_subscription_grace
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
     from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
@@ -167,6 +176,15 @@ async def _sweeper_loop() -> None:
             await sweep_pending_sites()
         except Exception:
             _run_sweeper_logger.exception("sweep_pending_sites tick failed")
+        # M5 dunning: revoke the plan of any subscription still on hold past its
+        # grace deadline. The webhook only stamps the deadline — nothing arrives
+        # from the gateway when it passes, so this pass is what actually ends the
+        # grace period. Own try so a failure here can't suppress the other sweeps
+        # (or vice versa). Never touches credits.
+        try:
+            await sweep_subscription_grace()
+        except Exception:
+            _run_sweeper_logger.exception("sweep_subscription_grace tick failed")
 
 
 async def start_run_sweeper() -> None:
@@ -176,10 +194,13 @@ async def start_run_sweeper() -> None:
     metering sweep (bill any terminal runs left unbilled by the prior process), the
     WU-F LiteLLM billing-cutover sweep (no-op / shadow-compare / live-ingest per the
     cutover mode), the charge-first pending-site reconciliation sweep (surface paid
-    sites stuck pending), and the ART-3 agent-jail GC (reclaim scratch left by a
-    prior process's idle runs); the 5-minute loop then ticks all of them.
+    sites stuck pending), the M5 dunning grace sweep (revoke the plan of a
+    subscription left on hold past its deadline while this process was down), and
+    the ART-3 agent-jail GC (reclaim scratch left by a prior process's idle runs);
+    the 5-minute loop then ticks all of them.
     """
     from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
+    from pocketpaw_ee.cloud.billing.service import sweep_subscription_grace
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
     from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
@@ -194,6 +215,8 @@ async def start_run_sweeper() -> None:
         await run_cutover_sweep()
     with suppress(Exception):
         await sweep_pending_sites()
+    with suppress(Exception):
+        await sweep_subscription_grace()
     with suppress(Exception):
         await sweep_agent_jails()
     _sweeper_task = asyncio.create_task(_sweeper_loop())
