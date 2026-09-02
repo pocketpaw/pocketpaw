@@ -9,6 +9,14 @@ tags: ["api", "configuration"]
 
 {/*
   docs/api/configuration-reference.mdx
+  Updated 2026-09-02 (docs/sites-analytics, SA-7) — EXTENDED the SA-2 section below
+  rather than adding a second one, with the two operator facts the variables alone do
+  not carry. The READ needs an Account Analytics Read token scope that the deploy
+  paths do not use, so a publish-only token deploys counters and then 403s every
+  read — a failure that looks like broken analytics rather than like a missing
+  permission. And these knobs govern html/react sites only: svelte and ripple deploy
+  their own server worker and carry no counter, so setting either variable does
+  nothing for them.
   Updated 2026-09-02 (feat/sites-analytics-shim, SA-3) — the "Paw Sites — visitor
   analytics" section now says which engines count and what the off shape is on each
   branch. SA-2's kill-switch row said the off shape has "no main", which was true
@@ -294,3 +302,24 @@ again.
 |---------|-------------|------|---------|-------------|
 | — | `PAW_SITES_ANALYTICS_DISABLED` | boolean | unset (off) | **Operator kill switch.** Truthy (`1`, `true`, `yes`, `on`; case-insensitive) makes the next publish of **every** site emit the pre-analytics config shape: no Analytics Engine binding, no `run_worker_first` rules, and no generated counter file. On an assets-only site that means no `main` at all; on a `ripple` or dynamic `svelte` site `main` goes back to naming SvelteKit's own `_worker.js` directly, which is the config that shipped before analytics existed. Paid sites included — it overrides the plan entitlement, it does not consult it. It exists for one failure: if the Cloudflare account is on the **Workers Free plan**, a `main` in the request path starts consuming a 100,000 request/day ceiling that is **account-wide**, and breaching that stops Cloudflare serving the Workers behind it rather than degrading analytics. Every published site goes dark together, so the mitigation has to be faster than a code change and a release. Already-deployed sites keep counting until they are republished, so pulling this switch during an incident means republishing the affected sites. Any other value, including `0` and `false`, leaves analytics on. |
 | — | `PAW_SITES_ANALYTICS_DATASET` | string | `paw_site_pageviews` | The Cloudflare Analytics Engine dataset the counter writes into. One dataset for all sites, partitioned by site id in `indexes[0]` — Analytics Engine is queried by index, and a dataset per site would need provisioning per site for no gain. Override it so a dev or staging publish cannot pollute the production dataset. An empty or whitespace-only value falls back to the default rather than emitting an empty dataset name, which wrangler accepts and Cloudflare does not. Changing it does not migrate existing rows: sites published against the old dataset keep writing there until they are republished, and Analytics Engine retains data for three months. |
+
+### The token scope the read needs
+
+Serving a site's numbers back through `GET /sites/{site_id}/analytics` queries the
+Analytics Engine SQL API, and that call needs an **Account Analytics Read**
+permission on `PAW_CF_API_TOKEN`. It is a different scope from the Workers and SSL
+permissions the deploy paths use, so a token minted for publishing alone will deploy
+counters happily and then fail every read.
+
+A token without it answers `403`, which surfaces as `sites.cloudflare_error` with
+Cloudflare's own message attached. Sites that count perfectly well while the
+dashboard cannot read them is the exact shape this failure takes, so check the scope
+before looking anywhere else.
+
+### Which sites this applies to
+
+Only sites whose engine deploys as an assets-only Worker — `html` and `react`.
+`svelte` and `ripple` sites deploy their own server worker and carry no counter
+regardless of plan or of these variables. The cost model and the rest of the
+engineering detail are in the
+[visitor analytics design note](https://github.com/pocketpaw/pocketpaw/blob/dev/docs/design/2026-09-02-sites-visitor-analytics.md).
