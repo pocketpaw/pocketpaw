@@ -320,6 +320,29 @@ meter faithfully billed them zero. Three things carry the fix:
 same object either way, but only a completed run has a response to read the
 model name off, so the caller supplies it. The abnormal path falls back to the
 resolved model — no mid-stream event carries one.
+
+Updated 2026-09-02 (feat/proxy-spend-by-workspace) — **a proxy request now says
+which workspace pays for it.** Every run on the ``litellm`` provider carries the
+workspace id in the request body's ``user`` field, via the per-run
+``openai_user`` model setting. Nothing about the run changes; the proxy stamps
+the id onto its spend row's ``end_user`` column, which is what makes the row
+findable by tenant.
+
+It had to be findable by something. The comment in ``_resolve_openai_compatible``
+said the key this backend sends is "the tenant's virtual key" and it never was —
+it is ``settings.litellm_api_key``, one deployment-wide key — so the billing
+cutover's per-tenant spend read (``/spend/logs?api_key=<tenant key>``) matched no
+chat row at all. In ``live`` mode, where per-run metering is gated off so exactly
+one meter charges, that made chat free: production logged ``ingested spend for
+3/3 tenants -> 0 credits`` against runs the proxy had priced in real dollars. The
+comment is corrected in the same change, because a wrong comment at the seam is
+how this survived review.
+
+Per-RUN, beside ``usage_limits`` and ``max_tokens``, for the reason those are:
+``AgentPool`` shares one cached agent across runs, so anything belonging to THIS
+run cannot live on it. The full chain, its two proxy-side preconditions, and why
+the id is the workspace rather than the session are in
+``agents/spend_attribution.py``.
 """
 
 from __future__ import annotations
@@ -334,6 +357,7 @@ from typing import Any
 
 from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
 from pocketpaw.agents.protocol import AgentEvent
+from pocketpaw.agents.spend_attribution import end_user_id_for
 from pocketpaw.config import Settings
 from pocketpaw.tools.policy import ToolPolicy
 
@@ -938,6 +962,51 @@ class PydanticAIBackend:
             logger.debug("Could not resolve a max output token cap", exc_info=True)
             return None
 
+    def _run_model_settings(self) -> Any:
+        """The ``model_settings`` for THIS run, or None to send none.
+
+        Two per-run values live here, both of which the cached agent must not
+        carry: the output-token cap resolved for the model this run picked, and
+        the id of the workspace that pays for it.
+
+        ``openai_user`` is pydantic-ai's name for the OpenAI ``user`` body field.
+        Our LiteLLM proxy reads it as the request's end-user and stamps it on the
+        spend row, which is the only thing that makes a chat run's cost
+        attributable to a tenant — the API key on the request is the deployment's,
+        shared by every workspace. It is set ONLY on the ``litellm`` provider;
+        ``spend_attribution.end_user_id_for`` owns that decision and the reasoning.
+
+        Returns None when neither value applies, so the run sends no
+        ``model_settings`` at all rather than an empty dict — byte-for-byte the
+        behaviour before either setting existed.
+        """
+        settings: dict[str, Any] = {}
+
+        max_output = self._resolve_max_output_tokens()
+        if max_output:
+            settings["max_tokens"] = max_output
+
+        # The provider is re-parsed rather than threaded down because
+        # ``_resolve_max_output_tokens`` already parses it the same way; the two
+        # cannot disagree about which model this run resolved.
+        provider, _model = self._parse_provider_model()
+        end_user = end_user_id_for(provider)
+        if end_user:
+            settings["openai_user"] = end_user
+
+        if not settings:
+            return None
+
+        # Returned as a plain dict rather than through
+        # ``OpenAIChatModelSettings``, which is where ``openai_user`` is
+        # declared. Both are TypedDicts — identical at runtime — but importing
+        # the OpenAI-flavoured one pulls in ``pydantic_ai.models.openai`` and
+        # therefore the ``openai`` SDK, on EVERY run including an
+        # ``anthropic``-only install that has no reason to carry it. The key is
+        # only ever present on the ``litellm`` path, which is OpenAI-compatible
+        # by definition, so the model that reads it always understands it.
+        return settings
+
     def _build_model(self, model_spec: str | None = None) -> Any:
         """Build the pydantic-ai model client for the configured provider."""
         provider, model = self._parse_provider_model(model_spec)
@@ -1044,9 +1113,16 @@ class PydanticAIBackend:
             base = (self.settings.litellm_api_base or "http://localhost:4000").rstrip("/")
             if not base.endswith("/v1"):
                 base = f"{base}/v1"
-            # The proxy is the auth boundary: this is the tenant's virtual key,
-            # not an upstream provider key. A placeholder keeps the OpenAI client
-            # happy on proxies configured without auth.
+            # The proxy is the auth boundary, so this is a PROXY credential
+            # rather than an upstream provider key. It is the DEPLOYMENT's key,
+            # one for the whole install — not the tenant's. This comment used to
+            # say the opposite, and the billing cutover was built on the claim:
+            # its per-tenant spend read filters ``/spend/logs`` by the tenant's
+            # virtual key, which no chat request has ever sent, so in ``live``
+            # mode chat billed zero for everyone. Attribution rides on the
+            # request's ``user`` field instead (see ``_run_model_settings``).
+            # A placeholder keeps the OpenAI client happy on proxies configured
+            # without auth.
             return (
                 base,
                 self.settings.litellm_api_key or "not-needed",
@@ -2157,14 +2233,13 @@ class PydanticAIBackend:
                 kwargs["usage_limits"] = UsageLimits(request_limit=max_turns)
 
             # Per-RUN like ``usage_limits`` above, and for the same reason: the
-            # cached agent is shared across runs, while the cap is a property of
-            # the model THIS run resolved. The fast-model path builds its own
-            # model and is unaffected.
-            max_output = self._resolve_max_output_tokens()
-            if max_output:
-                from pydantic_ai.settings import ModelSettings
-
-                kwargs["model_settings"] = ModelSettings(max_tokens=max_output)
+            # cached agent is shared across runs, while these are properties of
+            # the model and the tenant THIS run resolved. The fast-model path
+            # swaps the model but reuses these settings, which is what keeps a
+            # run that downshifts mid-flight attributed to the same workspace.
+            run_settings = self._run_model_settings()
+            if run_settings:
+                kwargs["model_settings"] = run_settings
 
             # Hand the SDK the ledger built above. Per-RUN like ``usage_limits``
             # and ``model_settings``: the cached agent is shared across runs, so

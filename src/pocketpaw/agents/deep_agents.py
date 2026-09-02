@@ -8,6 +8,28 @@ Uses the Deep Agents SDK (pip install deepagents) which provides:
 
 Requires: pip install deepagents
 
+Updated 2026-09-02 (feat/proxy-spend-by-workspace): a run on the ``litellm``
+provider now tells the proxy which workspace pays for it, by putting the
+workspace id in the request body's ``user`` field. The API key on the request is
+``settings.litellm_api_key`` — the DEPLOYMENT's key, one for the whole install —
+so the billing cutover's per-tenant spend read, which filters on the tenant's own
+virtual key, matched nothing this backend ever sent. Sibling change in
+``pydantic_ai``; the chain and its proxy-side preconditions are documented once,
+in ``agents/spend_attribution.py``.
+
+Two halves, and the second is the load-bearing one:
+
+  * ``_build_model`` sets ``model_kwargs["user"]``. ChatLiteLLM spreads
+    ``model_kwargs`` into the completion call, so it rides the wire as the
+    OpenAI ``user`` field.
+  * ``_get_or_create_agent`` keys the compiled-graph cache on the same value.
+    ``_build_model`` runs per turn, but ``create_deep_agent`` BAKES the model
+    into the graph and this backend hands back the cached graph whenever the key
+    matches — so without it in the key, one instance serving two workspaces would
+    bill the second one's runs to the first. Both sides read
+    ``_proxy_end_user()``, so they cannot disagree about the value. The sibling
+    backend has no such hazard: it passes the id per run, not per agent.
+
 Updated 2026-09-02 (fix/deep-agents-usage-parity): THE RUNS ON THIS BACKEND
 BILLED ZERO, all of them. The ``token_usage`` event added by MCG-11 below was
 built for the prompt-cache A/B and carried only what that needed, so it reached
@@ -97,6 +119,7 @@ from typing import Any
 
 from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
 from pocketpaw.agents.protocol import AgentEvent
+from pocketpaw.agents.spend_attribution import end_user_id_for
 from pocketpaw.config import Settings
 from pocketpaw.tools.policy import ToolPolicy
 
@@ -884,6 +907,22 @@ class DeepAgentsBackend:
             provider = "anthropic"
         return provider, model_str.strip() or "claude-sonnet-4-6"
 
+    def _proxy_end_user(self) -> str | None:
+        """The workspace id to bill this run's proxy requests to, or None.
+
+        The single source for both users of the value — the model kwarg in
+        ``_build_model`` and the compiled-graph cache key in
+        ``_get_or_create_agent``. They are two expressions of one fact (which
+        tenant this graph's model charges), and a graph cached under a different
+        answer than the model carries is a cross-tenant billing error, so they
+        read the same call rather than each deciding for themselves.
+
+        None off the proxy path and None outside a cloud chat dispatch; see
+        ``spend_attribution`` for both.
+        """
+        provider, _model = self._parse_provider_model()
+        return end_user_id_for(provider)
+
     def _build_model(self) -> Any:
         """Build the LangChain chat model with proper provider configuration.
 
@@ -955,7 +994,18 @@ class DeepAgentsBackend:
             # accept ``use_responses_api``.
             base = (self.settings.litellm_api_base or "http://localhost:4000").rstrip("/")
             kwargs["api_base"] = base
+            # The DEPLOYMENT's proxy key, shared by every workspace — which is
+            # why the request also has to say who it is FOR. ``model_kwargs`` is
+            # the only way in: ChatLiteLLM drops unknown top-level kwargs
+            # silently (the same trap the thinking flag below documents) but
+            # spreads ``model_kwargs`` into the completion call, so ``user``
+            # reaches the proxy as the standard OpenAI end-user field.
             kwargs["api_key"] = self.settings.litellm_api_key or "not-needed"
+            end_user = self._proxy_end_user()
+            if end_user:
+                model_kwargs = dict(kwargs.get("model_kwargs") or {})
+                model_kwargs["user"] = end_user
+                kwargs["model_kwargs"] = model_kwargs
             if not model:
                 model = self.settings.litellm_model or ""
 
@@ -1081,6 +1131,14 @@ class DeepAgentsBackend:
             tuple(skills),
             tuple(memory),
             is_pocket_session,
+            # In the key because the MODEL is baked into the compiled graph and
+            # the model now carries a tenant id (``_build_model`` sets
+            # ``model_kwargs["user"]`` on the proxy path). Everything else here
+            # shapes behaviour; this one decides who gets billed, so leaving it
+            # out would let a graph compiled for one workspace charge its runs to
+            # another. ``None`` off the proxy path and outside a cloud chat
+            # dispatch, which keys exactly as before.
+            self._proxy_end_user(),
         )
         if self._cached_agent is not None and self._cached_model_key == model_key:
             return self._cached_agent
