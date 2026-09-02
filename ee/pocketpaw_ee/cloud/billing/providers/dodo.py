@@ -104,6 +104,17 @@
 #   "leave the cart alone" at this gateway, it is "empty the cart". Forwarding
 #   unconditionally means the destructive case only happens when a caller asked
 #   for it.
+#
+# Updated 2026-09-02 (fix/billing-reversals-and-dunning, M1):
+#   ``verify_and_parse_webhook`` now recognizes a THIRD family — ``refund.*`` and
+#   ``dispute.*`` normalize to a ``ReversalEvent``. They cannot ride
+#   ``GatewayEvent``: a ``Refund`` puts its money on ``data.amount`` (optional
+#   int) while a ``Dispute`` puts it on ``data.amount`` as a STRING, neither has
+#   ``total_amount``, and a ``Dispute`` carries no ``metadata`` at all — so
+#   ``data.payment_id`` is the only field that can route a clawback back to a
+#   workspace. ``_reversal_amount`` reads both shapes and returns 0 for anything
+#   it cannot parse, which the service treats as "reverse the whole grant"
+#   rather than as a partial figure nobody stated.
 from __future__ import annotations
 
 import json
@@ -114,6 +125,7 @@ from pocketpaw_ee.cloud._core.errors import BadRequest, ValidationError
 from pocketpaw_ee.cloud.billing.domain import (
     GatewayEvent,
     OneTimeCheckout,
+    ReversalEvent,
     SubscriptionCheckout,
     SubscriptionEvent,
 )
@@ -125,6 +137,13 @@ logger = logging.getLogger(__name__)
 # updated) are still parsed into a SubscriptionEvent — the service decides which
 # ones act — but these three are the ones BC-7's grant/revert logic keys on.
 _SUBSCRIPTION_EVENT_PREFIX = "subscription."
+
+# The verified REVERSAL families this provider normalizes (M1). EVERY
+# ``refund.*`` / ``dispute.*`` delivery becomes a ``ReversalEvent`` — the
+# SERVICE decides which of them move money (``refund.succeeded`` and
+# ``dispute.lost``; the other five dispute deliveries are lifecycle), exactly
+# as it already does for the subscription family.
+_REVERSAL_EVENT_PREFIXES = ("refund.", "dispute.")
 
 # Default billing country for the hosted checkout. Dodo requires a country on
 # the billing address; the buyer can change it on the hosted page. "US" is a
@@ -148,6 +167,44 @@ def _customer_param(email: str | None) -> dict[str, str]:
     """
     e = email or _PLACEHOLDER_EMAIL
     return {"email": e, "name": e.split("@", 1)[0] or "Customer"}
+
+
+def _reversal_amount(raw: Any, *, event_type: str, event_id: str) -> int:
+    """The reversed money in the currency's lowest denomination, or 0.
+
+    Dodo states this field in two DIFFERENT SHAPES and both reach here:
+    ``Refund.amount`` is an OPTIONAL int, while ``Dispute.amount`` is a required
+    STRING ("represented as a string to accommodate precision"). A string of
+    digits is that same lowest-denomination integer, so it is parsed; anything
+    else — a decimal string, a float, None — yields 0.
+
+    0 means "the gateway named no usable amount", which the service reads as a
+    FULL reversal capped at what the payment actually granted. That is the right
+    reading for the only two events that move money here (a completed refund and
+    a lost chargeback both take the whole charge unless they say otherwise), and
+    it keeps a money field we could not parse from being turned into a partial
+    figure nobody stated.
+    """
+    if isinstance(raw, bool):
+        value = None
+    elif isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str) and raw.strip().isdigit():
+        value = int(raw.strip())
+    else:
+        value = None
+    if value is None:
+        if raw is not None:
+            # Nothing to leak — it is not a number we could read.
+            logger.warning(
+                "billing.webhook: %s carried an unreadable amount (type=%s, event_id=%s) — "
+                "treating it as unstated; the reversal falls back to the full recorded grant",
+                event_type,
+                type(raw).__name__,
+                event_id,
+            )
+        return 0
+    return max(value, 0)
 
 
 class DodoProvider:
@@ -413,7 +470,7 @@ class DodoProvider:
         *,
         payload: bytes,
         headers: dict[str, str],
-    ) -> GatewayEvent | SubscriptionEvent:
+    ) -> GatewayEvent | SubscriptionEvent | ReversalEvent:
         if not self._webhook_secret:
             raise ValidationError(
                 "billing.webhook_unconfigured",
@@ -483,6 +540,26 @@ class DodoProvider:
                 product_id=product_id,
                 subscription_id=subscription_id,
                 site_id=site_id,
+                raw=verified,
+            )
+
+        # REVERSAL family (M1) — a ``refund.*`` / ``dispute.*`` delivery
+        # normalizes to a ``ReversalEvent``, NOT a GatewayEvent. Every field
+        # that matters differs: the money is on ``data.amount`` rather than
+        # ``total_amount``, and a ``Dispute`` carries no metadata at all, so
+        # ``data.payment_id`` is the only route back to a workspace. Parsed for
+        # the WHOLE family; the service picks which ones move money.
+        if event_type.startswith(_REVERSAL_EVENT_PREFIXES):
+            return ReversalEvent(
+                event_id=event_id,
+                type=event_type,
+                payment_id=str(data.get("payment_id") or ""),
+                amount_credits=_reversal_amount(
+                    data.get("amount"), event_type=event_type, event_id=event_id
+                ),
+                currency=str(data.get("currency") or ""),
+                workspace_id=workspace_id,
+                is_partial=bool(data.get("is_partial")),
                 raw=verified,
             )
 

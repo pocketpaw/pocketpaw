@@ -17,6 +17,10 @@
 #     webhook event (active / renewed / cancelled). Carries the tier (plan_key)
 #     and the gateway subscription id so the service can grant the allotment and
 #     update the workspace plan. Like ``GatewayEvent``, only built post-verify.
+#   * ``ReversalEvent``        — a VERIFIED, normalized inbound REVERSAL webhook
+#     event (refund / dispute): money going back out. Carries the ``payment_id``
+#     it is against, which is the ONLY route back to a workspace because a
+#     dispute carries no metadata at all.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-2): new entity.
 # Updated 2026-06-24 (BC-7): added ``SubscriptionCheckout`` + ``SubscriptionEvent``
@@ -32,6 +36,13 @@
 #   id (the subscription is created at payment, not at checkout-create), with the
 #   real gateway subscription id arriving on the subscription.active webhook. Field
 #   shape is unchanged (no breaking change to the consumers / sites flow).
+# Updated 2026-09-02 (fix/billing-reversals-and-dunning, M1): added
+#   ``ReversalEvent`` — the normalized shape for a ``refund.*`` / ``dispute.*``
+#   delivery. It needs its own type rather than riding ``GatewayEvent`` because
+#   the two differ in every field that matters: the money sits on ``data.amount``
+#   (not ``total_amount``) and arrives as an int for a refund but a STRING for a
+#   dispute, and a dispute carries no metadata whatsoever — so ``payment_id``,
+#   not ``workspace_id``, is what routes a clawback back to a wallet.
 
 from __future__ import annotations
 
@@ -125,4 +136,43 @@ class SubscriptionEvent:
     product_id: str
     subscription_id: str
     site_id: str = ""
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ReversalEvent:
+    """A VERIFIED, normalized inbound REVERSAL webhook event (refund / dispute).
+
+    Money leaving the way it came in. Only constructed AFTER the provider has
+    verified the signature, so the fields can be trusted. ``event_id`` is the
+    gateway's unique delivery id (Standard Webhooks ``webhook-id``) — the same
+    idempotency key the grant path uses, so a redelivered reversal claws back
+    nothing a second time.
+
+    ``payment_id`` IS THE WHOLE REASON THIS SHAPE EXISTS. A ``Dispute`` carries
+    no metadata and no ``workspace_id``: unlike every other event family, there
+    is nothing on the wire that names the tenant, so the only route back to a
+    wallet is the payment the reversal is against. ``workspace_id`` is filled in
+    opportunistically (a ``Refund`` does carry a metadata dict) and is
+    logging-grade — never the join key.
+
+    ``amount_credits`` is the reversed money in the currency's lowest
+    denomination, and **0 means the gateway named no usable amount**. That is a
+    real state rather than a defect: ``Refund.amount`` is optional and
+    ``Dispute.amount`` arrives as a STRING. The service reads 0 as "reverse
+    everything this payment granted", which is what a completed refund and a
+    lost chargeback both mean, and it never invents a partial figure out of a
+    field it could not parse. ``is_partial`` (refunds only) says the gateway
+    returned part of the charge, so its stated amount is the one to honour.
+
+    ``raw`` is the parsed event body, retained for audit (it carries no secret).
+    """
+
+    event_id: str
+    type: str
+    payment_id: str
+    amount_credits: int = 0
+    currency: str = ""
+    workspace_id: str = ""
+    is_partial: bool = False
     raw: dict = field(default_factory=dict)

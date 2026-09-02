@@ -177,6 +177,13 @@ Changes:
     separate per-site subscription. ``dodo_site_products`` is deliberately kept
     alongside it: per-site subscriptions are live in production and their renewal
     and cancel webhooks still route through the product map.
+  - 2026-09-02: Added ``billing_dunning_grace_days`` (default 7, env
+    ``POCKETPAW_BILLING_DUNNING_GRACE_DAYS``) — how long a workspace keeps its
+    paid plan after a renewal payment fails. A ``subscription.on_hold`` webhook
+    stamps the deadline; the grace sweep revokes the plan once it passes, and a
+    successful retry clears it. Configurable because the right number depends on
+    the gateway's own retry schedule, and suspending a customer while the charge
+    is still being recovered is worse than a few extra days of service.
   - 2026-08-21: Added ``sites_billing_enforced`` (default False, env
     ``POCKETPAW_SITES_BILLING_ENFORCED``) — the PER-SITE paywall switch, so the
     Paw Sites seams (custom-domain capability + count caps, concierge
@@ -2476,6 +2483,21 @@ class Settings(BaseSettings):
             "daily call budget and the storage cap. Default False, so OSS / "
             "self-host sees no paywall and the seams do no extra database read. Set "
             "via POCKETPAW_SITES_BILLING_ENFORCED."
+        ),
+    )
+    billing_dunning_grace_days: int = Field(
+        default=7,
+        description=(
+            "Days a workspace keeps its paid plan after a renewal payment fails "
+            "(M5 dunning). A verified subscription.on_hold stamps now + this "
+            "many days onto the subscription; the grace sweep revokes the plan "
+            "once that deadline passes and a successful retry clears it. Set it "
+            "long enough to outlast the gateway's own retry schedule — cutting a "
+            "customer off while Dodo is still recovering the charge is worse "
+            "than a few extra days of service — and short enough that a card "
+            "that will never clear stops costing us. 0 suspends on the first "
+            "failed charge, which is deliberate but aggressive. Set via "
+            "POCKETPAW_BILLING_DUNNING_GRACE_DAYS."
         ),
     )
 
