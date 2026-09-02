@@ -8,6 +8,9 @@
 #                           provisioned with, resolved from runtime settings. The
 #                           declarative knobs the proxy enforces per tenant.
 #   * ``ProvisionResult`` — the outcome of ``ensure_tenant_key``: the workspace,
+#   * ``CutoverPreparation`` — the outcome of ``prepare_spend_cutover``: how many
+#                           tenants are provisioned, how many were stamped with the
+#                           billing seam, and how many already had a mark.
 #                           its virtual key, and ``created`` (True only on a real
 #                           first mint, False on the idempotent already-exists
 #                           path) so callers can gate a one-time side effect on it.
@@ -20,6 +23,10 @@
 #                           and the coverage-gap verdict. Carries NO debit — shadow
 #                           only reads + compares. The Beanie persistence twin is
 #                           ``models.spend_reconciliation.SpendReconciliation``.
+#   * ``SpendCoverage``   — the outcome of one attribution-coverage check: how many
+#                           proxy spend rows a window holds versus how many any
+#                           tenant claims. The difference is spend nobody is billed
+#                           for, which is the failure this whole seam presents as.
 #   * ``SpendCredits``    — the per-tenant spend rate card: USD-cost markup + the
 #                           per-credit USD denomination. Mirrors metering's
 #                           ``RateCard`` shape deliberately so proxy-spend and
@@ -30,6 +37,12 @@
 # ``SpendReconciliation`` — the value object returned by the shadow-mode compare
 # (``service.reconcile_tenant_spend``). Distinct from the Beanie doc of the same
 # concept; this is the framework-free shape the sweep logs + the doc is built from.
+# Updated 2026-09-02 (feat/proxy-spend-ingest-by-customer): added ``SpendCoverage``
+# — what ``service.spend_attribution_coverage`` returns. It exists because the bug
+# that motivated this branch was invisible: chat spend was attributed to nobody, the
+# per-tenant reads all succeeded, and the sweep logged a confident
+# ``3/3 tenants -> 0 credits``. A count of rows no tenant claims is the one number
+# that would have said so on the first tick.
 
 from __future__ import annotations
 
@@ -114,6 +127,55 @@ class SpendIngestResult:
     cost_usd: float
     cached_tokens: int
     balance_after: int
+
+
+@dataclass(frozen=True)
+class CutoverPreparation:
+    """The outcome of stamping the billing-cutover mark on every tenant.
+
+    ``provisioned`` is how many tenants have a live proxy key at all — the only
+    ones ``live`` mode bills, which is why a workspace with no key must be
+    provisioned BEFORE the flip or its usage becomes free. ``seeded`` is how many
+    had no high-water mark and got one; ``already_marked`` how many were left
+    alone because ingestion had already begun for them (overwriting a live mark
+    would skip real spend). ``cutover_at`` is the ISO instant stamped, and it is
+    the seam: BC-3 owns every run before it, LiteLLM every proxy row after.
+    """
+
+    cutover_at: str
+    provisioned: int
+    seeded: int
+    already_marked: int
+    dry_run: bool
+
+
+@dataclass(frozen=True)
+class SpendCoverage:
+    """How much of a window's proxy spend any tenant actually claims.
+
+    ``total_rows`` is every spend row the proxy recorded in the window;
+    ``attributed_rows`` is the sum of the per-tenant counts over the workspaces
+    checked. ``unattributed_rows`` is the remainder — requests that reached the
+    proxy carrying no workspace, or one nobody is sweeping.
+
+    Any non-zero remainder is a billing hole, and reading it as a ROW count rather
+    than a dollar amount is deliberate: a count needs one cheap request per tenant
+    and answers the question that matters ("is anything falling through?") without
+    pretending to be an invoice. The reconciliation compare is where amounts belong.
+
+    ``degraded`` marks a check that could not complete — a proxy that failed one of
+    the counts. The remainder is then unreliable and must not be read as a verdict,
+    which is a distinction the log line has to keep: "no gap" and "could not tell"
+    look identical in a bare zero.
+    """
+
+    window_start: str
+    window_end: str
+    total_rows: int
+    attributed_rows: int
+    unattributed_rows: int
+    workspaces_checked: int
+    degraded: bool
 
 
 @dataclass(frozen=True)
