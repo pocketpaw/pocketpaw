@@ -17,6 +17,14 @@
 #   * a missing static-build dir raises a clean ValidationError before any subprocess.
 #
 # Created: 2026-06-25 (feat/sites-workers-deploy-mode).
+#
+# Updated 2026-09-02 (SA-1 — the visitor counter): the two assets-only tests asserting
+# ``"main" not in cfg`` were REPLACED, not removed. The assets-only config now names
+# the generated pageview counter as ``main``, so the old assertion is false — but the
+# bug it guarded (a ``main`` pointing at a ``_worker.js`` no static build produces,
+# which fails the deploy outright) is still real, and each test now asserts that
+# directly. The counter's own behaviour, and the ``run_worker_first`` rules that keep
+# it from being billed on every subresource, live in test_sites_analytics_counter.py.
 
 from __future__ import annotations
 
@@ -185,11 +193,18 @@ def _build_html_project(tmp_path: Path) -> str:
 
 
 @pytest.mark.asyncio
-async def test_html_deploy_is_assets_only_no_main(tmp_path, monkeypatch):
-    """An html site is a raw static tree with NO server worker, so its wrangler
-    config is assets-only: no ``main`` (there is no ``_worker.js``), no
-    ``nodejs_compat`` (nothing runs the node runtime), and ``assets.directory`` is
-    the project root itself (``static_output_rel("html") == "."``)."""
+async def test_html_deploy_names_no_svelte_worker(tmp_path, monkeypatch):
+    """An html site is a raw static tree with NO server worker, so its wrangler config
+    takes the assets-only shape: no ``nodejs_compat`` (nothing runs the node runtime),
+    no D1, and ``assets.directory`` is the project root itself
+    (``static_output_rel("html") == "."``).
+
+    SA-1 CHANGED WHAT THIS TEST CAN CLAIM. The config now DOES carry a ``main`` — the
+    generated pageview counter — so the old assertion (``"main" not in cfg``) has been
+    replaced rather than deleted. The fact it was protecting survives intact and is
+    the one asserted here: ``main`` must never name a ``_worker.js`` the build does not
+    produce, which is the RX-1 failure this branch exists to prevent. The counter's own
+    shape is covered in ``test_sites_analytics_counter.py``."""
     project = _build_html_project(tmp_path)
     site_id = "507f1f77bcf86cd799439011"
     proc = _FakeProc(0, b"https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev\n", b"")
@@ -197,12 +212,13 @@ async def test_html_deploy_is_assets_only_no_main(tmp_path, monkeypatch):
 
     url = await workers_deploy.deploy_workers(site_id, project, engine="html")
 
-    cfg = json.loads(Path(project, "wrangler.jsonc").read_text())
+    raw = Path(project, "wrangler.jsonc").read_text()
+    cfg = json.loads(raw)
     assert cfg["name"] == f"paw-site-{site_id}"
     assert cfg["workers_dev"] is True
-    assert cfg["assets"] == {"directory": "."}
-    # The assets-only shape drops every server-worker key.
-    assert "main" not in cfg
+    assert cfg["assets"]["directory"] == "."
+    assert "_worker.js" not in raw
+    assert ".svelte-kit" not in raw
     assert "compatibility_flags" not in cfg
     assert "d1_databases" not in cfg
     assert url == "https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev"
@@ -267,12 +283,16 @@ def _build_react_project(tmp_path: Path) -> str:
 
 
 @pytest.mark.asyncio
-async def test_react_deploy_is_assets_only_no_main(tmp_path, monkeypatch):
+async def test_react_deploy_takes_the_assets_only_shape(tmp_path, monkeypatch):
     """A react site builds to a PRERENDERED static tree with no server worker, so its
-    wrangler config is assets-only — despite the engine needing a full Node build.
+    wrangler config takes the assets-only shape — despite the engine needing a full
+    Node build.
 
-    This is the assertion that separates the two capabilities: ``main`` must be
-    absent even though ``needs_node_build("react")`` is True."""
+    This is the assertion that separates the two capabilities. It used to read
+    ``"main" not in cfg``; SA-1 puts the pageview counter on this branch too, so the
+    claim is now the precise one: ``main`` is OUR generated entry at the project root
+    and never a ``dist/_worker.js`` that react does not write, which is what wrangler
+    would fail the deploy on."""
     project = _build_react_project(tmp_path)
     site_id = "507f1f77bcf86cd799439011"
     proc = _FakeProc(0, b"https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev\n", b"")
@@ -284,10 +304,9 @@ async def test_react_deploy_is_assets_only_no_main(tmp_path, monkeypatch):
     assert cfg["name"] == f"paw-site-{site_id}"
     assert cfg["workers_dev"] is True
     # Vite's client output, NOT the SvelteKit adapter path.
-    assert cfg["assets"] == {"directory": "dist"}
-    # The assets-only shape drops every server-worker key. A ``main`` here would
-    # point at a dist/_worker.js that react never writes, and wrangler would fail.
-    assert "main" not in cfg
+    assert cfg["assets"]["directory"] == "dist"
+    assert cfg["main"] == "_paw_analytics.js"
+    assert Path(project, cfg["main"]).is_file()
     assert "compatibility_flags" not in cfg
     assert "d1_databases" not in cfg
     assert url == "https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev"

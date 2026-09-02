@@ -50,10 +50,11 @@
   {
     "label": "the assets-only .assetsignore stops excluding itself (wrangler serves it as a public asset)",
     "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
-    "find": "_ASSETS_ONLY_ASSETSIGNORE_LINES = (\"wrangler.jsonc\", \".assetsignore\")",
-    "replace": "_ASSETS_ONLY_ASSETSIGNORE_LINES = (\"wrangler.jsonc\",)",
+    "find": "    \"wrangler.jsonc\",\n    \".assetsignore\",\n",
+    "replace": "    \"wrangler.jsonc\",\n",
     "tests": [
-      "tests/ee/sites/test_workers_deploy.py"
+      "tests/ee/sites/test_workers_deploy.py",
+      "tests/ee/sites/test_sites_analytics_counter.py"
     ]
   }
 ]
