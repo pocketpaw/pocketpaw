@@ -8,10 +8,13 @@ things a reader could not get from the endpoint's own fields. First, what the
 subscription and not only a tier, and that UPGRADING DOES NOT BACKFILL — the
 consequence customers hit, and one the `never_counted` row alone does not explain,
 since it reads as a temporary state rather than as a permanent hole in the history.
-Also recorded which builds cannot count at all yet, which is otherwise
-indistinguishable from a site that simply has not been republished. That is a
-BUILD-shape question and not an engine one: a static svelte build deploys assets-only
-and counts, a dynamic one does not.
+Also recorded how a site counts and the one case that still cannot, which is
+otherwise indistinguishable from a site nobody has republished. WRITTEN FOR THE STATE
+AFTER #2049, which merges first: every engine counts, in one of two shapes chosen by
+the BUILD rather than the engine name, and the row carries a device class. The
+`devices: null` example this section used to show was retired for the same reason —
+it is a real response, but only for a site that has not republished since, so leading
+with it taught clients that the field is always null.
 Second, `GET /sites/{site_id}/entitlements`, which was undocumented in this file
 entirely — it is the pre-check that lets a panel disable itself before the call, and
 the section says plainly that it does NOT supersede the analytics `status`, because
@@ -1655,8 +1658,8 @@ Response `200`:
   "top_pages":  [{"label": "/",         "pageviews": 800, "visitors": 300}],
   "referrers":  [{"label": "(direct)",  "pageviews": 700, "visitors": 190}],
   "countries":  [{"label": "US",        "pageviews": 900, "visitors": 320}],
-  "devices": null,
-  "unrecorded": ["devices"]
+  "devices":    [{"label": "desktop",   "pageviews": 760, "visitors": 250}],
+  "unrecorded": []
 }
 ```
 
@@ -1680,7 +1683,11 @@ Response `200`:
 - `unrecorded` names the dimensions the stored row cannot answer **at all**, as
   opposed to answered-and-empty. A dimension listed here is `null` rather than `[]`,
   because an empty list reads as "none of these exist" and an omitted field is
-  indistinguishable from a version skew.
+  indistinguishable from a version skew. In practice the only dimension that can
+  appear here is `devices`, and it means **this site has not published a counter that
+  records devices yet** rather than a permanent gap. It clears once the site is
+  republished and takes traffic. Render the name, not a chart of one bar called
+  unknown.
 
 **A visitor is per-day.** The counter identifies a visitor by a salted one-way hash
 that rotates at UTC midnight and never leaves a cookie, so somebody who returns
@@ -1735,15 +1742,18 @@ The same applies in reverse. A publish that deploys no counter clears
 `never_counted` until it is republished, rather than claiming a start date from an era
 that stopped recording months ago.
 
-**Not every build carries a counter yet.** The counter rides the assets-only deploy
-path, and whether a site takes that path is decided by its **build output** rather than
-by its engine: `html`, `react` and a *static* `svelte` build all deploy assets-only and
-count. A build that emits its own `_worker.js` — a *dynamic* `svelte` build, or any
-`ripple` build — cannot take a second entry in front of that worker, so it does not
-count regardless of plan. Such a site is entitled and still answers `never_counted`
-however often it is republished. The
-[engineering note](design/2026-09-02-sites-visitor-analytics.md) has the full table,
-and notes that #2049 closes most of this gap.
+**Every engine counts, in one of two shapes.** A build with no server entry (`html`,
+`react`, a *static* `svelte` site) gets a counter that serves the page through the
+`ASSETS` binding. A build that emits its own `_worker.js` (`ripple`, a *dynamic*
+`svelte` site) gets a shim that imports that worker, counts, and returns its response
+untouched. Which shape a site gets is decided by its **build output**, not by its
+engine name, which is why `svelte` appears on both sides.
+
+One case still does not count, and it is not an engine: a dynamic site provisioned
+through the durable provision job, which cannot resolve a plan from what it holds. Such
+a site is entitled and still answers `never_counted` however often it is republished.
+The [engineering note](design/2026-09-02-sites-visitor-analytics.md) has the table and
+the tracking issue.
 
 ### `GET /sites/{site_id}/entitlements` — the pre-check
 

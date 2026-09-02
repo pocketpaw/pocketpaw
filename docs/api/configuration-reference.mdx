@@ -9,15 +9,13 @@ tags: ["api", "configuration"]
 
 {/*
   docs/api/configuration-reference.mdx
-  Updated 2026-09-02 (docs/sites-analytics, SA-7) — EXTENDED the SA-2 section below
-  rather than adding a second one, with the two operator facts the variables alone do
-  not carry. The READ needs an Account Analytics Read token scope that the deploy
-  paths do not use, so a publish-only token deploys counters and then 403s every
-  read — a failure that looks like broken analytics rather than like a missing
-  permission. And these knobs only reach a site that deploys assets-only, which is a
-  BUILD-shape question rather than an engine one: html, react and a STATIC svelte
-  build all count, while a dynamic svelte or any ripple build emits its own
-  _worker.js, carries no counter, and is unaffected by either variable.
+  Updated 2026-09-02 (docs/sites-analytics, SA-7) — EXTENDED the SA-2/SA-3 section
+  below rather than adding a second one, with the one operator fact the variables
+  alone do not carry: the READ needs an Account Analytics Read token scope that the
+  deploy paths do not use, so a publish-only token deploys counters and then 403s
+  every read — a failure that looks like broken analytics rather than like a missing
+  permission. Deliberately adds nothing about which engines count. The SA-3 entry below
+  already answers that, and this branch merges AFTER it.
   Updated 2026-09-02 (feat/sites-analytics-shim, SA-3) — the "Paw Sites — visitor
   analytics" section now says which engines count and what the off shape is on each
   branch. SA-2's kill-switch row said the off shape has "no main", which was true
@@ -317,11 +315,5 @@ Cloudflare's own message attached. Sites that count perfectly well while the
 dashboard cannot read them is the exact shape this failure takes, so check the scope
 before looking anywhere else.
 
-### Which sites this applies to
-
-Only sites that deploy as an assets-only Worker, which is decided by the **build
-output** rather than by the engine: `html`, `react` and a *static* `svelte` build all
-qualify. A build that emits its own `_worker.js` — a *dynamic* `svelte` build, or any
-`ripple` build — carries no counter regardless of plan, so neither variable changes
-anything for it. The cost model and the rest of the engineering detail are in the
+The cost model and the rest of the engineering detail are in the
 [visitor analytics design note](https://github.com/pocketpaw/pocketpaw/blob/dev/docs/design/2026-09-02-sites-visitor-analytics.md).
