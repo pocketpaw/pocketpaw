@@ -97,6 +97,13 @@ rebuild — dynamic-source split + input-keyspace confinement) and GET
 /sites/by-pocket/{id}/native-artifact (serve the armed build's body_html + css
 for shadow render — per-GET arm-build cost, path-traversal-guarded CSS reader).
 
+Updated: 2026-09-02 (SA-4) — documented the Sites — Visitor Analytics section:
+GET /sites/{site_id}/analytics, the read half of the pageview counter SA-1/SA-2
+deploy. The response leads with a status because three different customer
+situations otherwise render as the same panel of zeros (not on a plan that buys
+analytics, on one but not republished since, and genuinely no traffic), and a
+FAILED read is an error response rather than a fourth status so an outage cannot
+arrive looking like a quiet week. Every metric is null unless the status is ok.
 Updated: 2026-08-24 (SP-2) — GET /sites/by-pocket/{id}/native-artifact has two
 response shapes now. A cold miss no longer builds in the API container (there is
 no bun there, so it 5xx'd as sites.generator_failed on every cold preview); it
@@ -1582,6 +1589,100 @@ Errors:
 | 404 | `pocket.not_found` | Unknown pocket id. |
 | 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
 | 503 | `sites.preview_build_unavailable` | The armed build could not be QUEUED (the job queue is unreachable). Retryable. A failed enqueue is deliberately an error rather than a pending response — a job id for a job nobody will run makes a client poll forever. A build that queues and then FAILS is not an error here: it comes back `200` with `build_status: "failed"` and a rung in `build_reason`. |
+
+## Sites — Visitor Analytics
+
+SA-4. `GET /sites/{site_id}/analytics` serves a published site's visitor numbers
+for the builder's Analytics panel. The rows come from Cloudflare Workers Analytics
+Engine, written by the pageview counter a paid site's publish deploys in front of
+it (SA-1/SA-2). Source: `ee/pocketpaw_ee/sites/router.py`.
+
+Authenticated, workspace-scoped, `fabric.read`, and behind the same `sites` plan
+feature as the rest of the router. Tenant-scoped on the request context, so a site
+in another workspace is a `404` — the same as every sibling per-site read.
+
+### `GET /sites/{site_id}/analytics`
+
+| Query | Type | Default | Notes |
+|-------|------|---------|-------|
+| `window` | string | `7d` | One of `24h`, `7d`, `30d`, `90d`. Anything else is a `422`. The set is closed because the Analytics Engine SQL endpoint has no parameter binding, so this is a query-safety control rather than only input validation. `90d` is the longest window that can return anything: Cloudflare retains the rows for three months. |
+
+**Read `status` first.** Three different customer situations produce an empty
+panel, and they are three different sentences:
+
+| `status` | Means | What fixes it |
+|----------|-------|---------------|
+| `ok` | A counter is up and the numbers are real. **They may legitimately be zero.** | Nothing — this is a report about the site's traffic. |
+| `not_entitled` | The site's plan does not include analytics, so nothing was ever recorded. | Upgrading the site's plan, then republishing. |
+| `never_counted` | The plan includes it, but no publish has yet deployed a counter. Nothing is recording. | Republishing the site. Upgrading alone does **not** backfill — history begins at the publish that first carried a counter, because no rows exist before it. |
+
+**A failed read is not a status.** If the Analytics Engine query fails, the
+endpoint returns an **error response**, never a `200` carrying zeros. A client that
+maps an unknown status to "no data" would otherwise render a Cloudflare outage as a
+quiet week, which is the one failure this shape exists to prevent.
+
+**Every metric is `null` unless `status` is `ok`.** Not `0` — a client that renders
+the numbers without reading the status shows blanks rather than a confident zero.
+
+Response `200`:
+
+```json
+{
+  "site_id": "68b6f2c1a4d3e50012ab34cd",
+  "window": "7d",
+  "status": "ok",
+  "counting_since": "2026-08-14T10:22:41+00:00",
+  "retention_days": 90,
+  "pageviews": 1280,
+  "visitors": 431,
+  "top_pages":  [{"label": "/",         "pageviews": 800, "visitors": 300}],
+  "referrers":  [{"label": "(direct)",  "pageviews": 700, "visitors": 190}],
+  "countries":  [{"label": "US",        "pageviews": 900, "visitors": 320}],
+  "devices": null,
+  "unrecorded": ["devices"]
+}
+```
+
+- `counting_since` is when this site's visitors started being counted, ISO-8601 in
+  UTC, and `null` when nothing is counting. It is what makes an honest chart
+  possible: the series begins here, not at the site's creation, and a window
+  reaching further back is reaching into time nobody recorded.
+- `retention_days` is `90`. On the wire so a UI can explain why the earliest date it
+  offers is the one it offers, rather than looking like it lost the data.
+- Each breakdown is a **top-10** list ordered by pageviews. Its `visitors` is a
+  distinct count **within that row** and does **not** sum to the response total: one
+  visitor who reads three pages is one visitor overall and one visitor on each of
+  three rows. Summing the column gives a number that means nothing.
+- A blank dimension is **named, never dropped** — `(direct)` for a referrer (a direct
+  visit or a same-site link), `(unknown)` for a country Cloudflare could not
+  geolocate. Dropping those rows would inflate every remaining share.
+- `unrecorded` names the dimensions the stored row cannot answer **at all**, as
+  opposed to answered-and-empty. A dimension listed here is `null` rather than `[]`,
+  because an empty list reads as "none of these exist" and an omitted field is
+  indistinguishable from a version skew.
+
+**A visitor is per-day.** The counter identifies a visitor by a salted one-way hash
+that rotates at UTC midnight and never leaves a cookie, so somebody who returns
+tomorrow counts as two visitors. That is the privacy design rather than a rounding
+error, and no join across days is possible even in principle.
+
+**Sampling is accounted for.** Analytics Engine downsamples a hot index and reports
+the rate per row, so the aggregates weight by it. A plain row count would
+under-report precisely the busiest sites.
+
+**Cached for 60 seconds per site and window.** Analytics Engine bills read queries
+against a small daily account-wide allowance, and this panel's usage pattern is
+somebody reloading it. The cache is in-process, so a second API replica keeps its
+own; only successful reads are cached, so an outage is not extended past its end.
+
+Errors:
+
+| HTTP | Code | When |
+|------|------|------|
+| 404 | `site.not_found` | Unknown, malformed, or cross-tenant site id. |
+| 422 | `sites.invalid_analytics_window` | `window` is not one of the four accepted values. |
+| 422 | `sites.cloudflare_error` | The Analytics Engine query failed — a non-2xx, an unparseable body, or a `200` with no data array. Includes Cloudflare's own message. A `403` here usually means the API token is missing the **Account Analytics Read** permission, which is a different scope from the ones the deploy paths use. |
+| 422 | `sites.cloudflare_unconfigured` | `PAW_CF_ACCOUNT_ID` / `PAW_CF_API_TOKEN` / `PAW_CF_ZONE_ID` are not all set. |
 
 ## Ship — Managed Deploys
 
