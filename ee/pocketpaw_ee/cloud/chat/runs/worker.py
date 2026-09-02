@@ -132,6 +132,11 @@ async def execute_run_job(ctx: dict[str, Any], spec_dict: dict[str, Any]) -> Non
     spec = RunSpec.model_validate(spec_dict)
     logger.info("worker: starting run %s", spec.run_id)
     await execute_run(spec)
+    # Same as the in-process executor: charge at completion so the balance is not
+    # a sweep interval behind. Idempotent, best-effort, sweeper still the backstop.
+    from pocketpaw_ee.cloud.metering.service import bill_run_now
+
+    await bill_run_now(spec.run_id)
 
 
 async def _startup(ctx: dict[str, Any]) -> None:
