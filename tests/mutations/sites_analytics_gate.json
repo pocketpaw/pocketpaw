@@ -72,6 +72,26 @@
     ]
   },
   {
+    "label": "the stale-entry delete stops being failure-soft — a locked or read-only entry fails the whole publish of a site that is not even using analytics",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "        try:\n            entry_path.unlink(missing_ok=True)\n        except OSError:",
+    "replace": "        if True:\n            entry_path.unlink(missing_ok=True)\n        elif False:",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_gate.py"
+    ]
+  },
+  {
+    "label": "the assetsignore is written AFTER the delete, so a failed delete leaves an entry with nothing excluding it and the salt ships",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "    (out_dir / \".assetsignore\").write_text(\"\\n\".join(ignore_lines) + \"\\n\")",
+    "replace": "    (out_dir / \".assetsignore\").write_text(\"\")",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_gate.py",
+      "tests/ee/sites/test_sites_analytics_counter.py",
+      "tests/ee/sites/test_workers_deploy.py"
+    ]
+  },
+  {
     "label": "the server-worker branch stops being excluded — a ripple / dynamic svelte deploy names our counter as main over SvelteKit's own worker",
     "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
     "find": "    count_pageviews = not emits_worker and analytics_worker.counting_enabled(",

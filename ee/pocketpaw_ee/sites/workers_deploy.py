@@ -464,7 +464,15 @@ def _write_deploy_files(
     free config names no ``main``, so wrangler would upload that leftover as an
     ordinary asset and hand out the per-publish salt from a config that mentions
     nothing. The ``.assetsignore`` names the entry on EVERY assets-only publish,
-    counting or not, as the second line of defence behind the delete."""
+    counting or not, as the second line of defence behind the delete.
+
+    THE DELETE CANNOT FAIL A PUBLISH. It is wrapped, because ``missing_ok`` covers
+    only the missing file and a locked or read-only one raises. Nothing in the
+    analytics path may cost a site its publish, and the ``.assetsignore`` line above
+    is what makes swallowing safe rather than merely convenient. The counter WRITE on
+    the other branch is deliberately NOT wrapped: the config is about to name that
+    file as ``main``, and wrangler fails a deploy on a missing ``main``, so a swallow
+    there would trade a clear error for a confusing one."""
     # SL-1 — RESOLVED against the artifact, not predicted from the engine name. A
     # static svelte site builds on adapter-static: its output is ``build`` and it emits
     # no ``_worker.js``, so it must deploy assets-only exactly as react does. Answering
@@ -503,7 +511,29 @@ def _write_deploy_files(
         # A leftover from an earlier counting publish into this same working dir. The
         # config about to be written names no ``main``, so an entry left here is a
         # salt uploaded as an ordinary static asset.
-        entry_path.unlink(missing_ok=True)
+        #
+        # FAILURE-SOFT, and this is the one delete on the publish path so it is worth
+        # saying why it may swallow. ``missing_ok`` covers only the missing file; a
+        # read-only file, a Windows lock held by another process, and a directory
+        # sitting where the entry should be all raise ``PermissionError`` — and an
+        # unwrapped raise here fails the whole publish of a site that is otherwise
+        # perfectly fine, over analytics the site is not even using.
+        #
+        # Swallowing is safe ONLY because of the line above: ``.assetsignore`` names
+        # the entry on every assets-only publish, and it is written BEFORE this runs.
+        # So a delete that fails leaves the file on disk and still excluded from the
+        # upload, which is the whole point of keeping that line unconditional. Move
+        # the ``.assetsignore`` write after this block and the swallow stops being
+        # safe.
+        try:
+            entry_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "sites.workers: could not remove the stale analytics entry at %s — "
+                "publishing anyway; .assetsignore still excludes it from the upload",
+                entry_path,
+                exc_info=True,
+            )
     Path(project_dir, _CONFIG_FILENAME).write_text(
         _wrangler_jsonc(
             name,
