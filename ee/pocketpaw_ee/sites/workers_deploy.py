@@ -120,11 +120,15 @@
 #   1. ``<project>/.svelte-kit/cloudflare/.assetsignore`` — REQUIRED. wrangler 4.x
 #      HARD-ERRORS ("Uploading a Pages _worker.js file as an asset") if the worker
 #      entry sits inside the asset dir without it, and adapter-cloudflare does NOT
-#      emit it. Contents are exactly the three lines ``_worker.js`` / ``_routes.json``
-#      / ``_headers``.
+#      emit it. The RECIPE lines are ``_worker.js`` / ``_routes.json`` / ``_headers``;
+#      SA-3 appends the two generated counter filenames, which are named on every
+#      publish whether or not one was written (see ``_COUNTER_FILENAMES``).
 #   2. ``<project>/wrangler.jsonc`` — the clean static config: ``main`` →
 #      ``.svelte-kit/cloudflare/_worker.js``, ``assets.directory`` → the SAME dir,
-#      ``workers_dev: true``, ``nodejs_compat``. We do NOT reuse the generator's own
+#      ``workers_dev: true``, ``nodejs_compat``. SA-3 — when the site COUNTS, ``main``
+#      is the generated shim at the project root instead, and it is the shim that
+#      imports ``_worker.js``. Everything else in this recipe is unchanged.
+#      We do NOT reuse the generator's own
 #      ``wrangler.toml`` (it stamps an UNDERSCORE name variant + D1/Queue bindings
 #      for the dynamic path — invalid for a clean static worker).
 # Deploy: ``bunx wrangler@4.101.0 deploy`` with ``CLOUDFLARE_API_TOKEN`` +
