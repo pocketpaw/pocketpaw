@@ -153,6 +153,29 @@
 # ``QuotaExceeded`` (402 ``credits.quota_exceeded``) when month-to-date spend is
 # ``>=`` that effective ceiling. Reads only; charges nothing. Chunk 3 wires the
 # gate at run-start — this chunk owns only the reusable read + assertion.
+# Changed 2026-09-02 (fix/credits-spend-by-model-aggregation): ``spend_by_model``
+# now folds SERVER-SIDE. It used to run ``CreditLedgerEntry.find(query).to_list()``
+# and group the result in a Python loop, under a comment claiming the load was
+# "bounded — matches ``sum_debits_by_cause``". Neither is bounded: the window is
+# the caller's, and ``billing/usage.py`` lets it reach 366 days, so a busy
+# workspace's whole year of debits was materialised as Beanie documents to produce
+# a few dozen rows. The new ``_spend_by_model_pipeline`` does the work in Mongo —
+# ``$match`` (tenant + causes + applied + window + ``amount_delta < 0``) then
+# ``$group`` on (``$dateToString`` day, ``ref.model``) with ``$sum`` / ``$sum: 1``
+# for credits, requests and tokens — using the same cross-driver cursor idiom as
+# ``_sum_amount_delta`` (``inspect.isawaitable``: the pymongo-async client returns
+# a coroutine, mongomock-motor a directly-iterable cursor). Only the process
+# memory changed: every documented semantic is preserved, including the skip (not
+# clamp) of a non-negative delta, the ``"unknown"`` bucket for unattributed spend
+# so the chart still reconciles with the wallet, and the UTC day boundary. Rows
+# now come back sorted by (day, model) — ``$group`` order is unspecified, and the
+# old dict order was incidental. The one difference is a ``ref.total_tokens``
+# stored as something ``int()`` would coerce but BSON does not call a number — a
+# numeric string, a bool — which the pipeline reads as 0; the field's only writer
+# (``metering.service._total_tokens``) returns a non-negative ``int``, so no such
+# document exists, and 0 is the safer reading of junk. Still a pure read — no
+# writes, no change to anything charged. The ``(workspace, createdAt)`` compound
+# index on ``CreditLedgerEntry`` already serves the ``$match``.
 
 from __future__ import annotations
 
@@ -670,6 +693,72 @@ async def month_to_date_spend(workspace: str) -> int:
     return max(-net, 0)
 
 
+def _spend_by_model_pipeline(query: dict[str, Any]) -> list[dict[str, Any]]:
+    """The ``$match`` + ``$group`` that folds a spend window by (UTC day, model).
+
+    ``query`` is the caller's tenant + cause + applied + ``createdAt`` filter; the
+    pipeline adds ``amount_delta < 0`` to it. That predicate is load-bearing:
+    spend is debit-only, and a stray non-negative delta under a spend cause must
+    be SKIPPED ENTIRELY rather than clamped — out of the credits sum, out of the
+    request count, out of the token sum, and unable to conjure a (day, model)
+    group of its own. A ``$match`` is the one construct that does all four at
+    once. It also drops an entry with no ``createdAt``: a missing or null field
+    never satisfies a date range.
+
+    ``day`` uses ``$dateToString`` with NO ``timezone`` key, so it takes Mongo's
+    UTC default — the same boundary ``createdAt.date()`` gave on the UTC datetimes
+    the driver returns. ``model`` falls back to ``"unknown"`` for a null, missing
+    or empty ``ref.model``, because unattributed spend still has to chart for the
+    total to reconcile with the wallet. The ``$ifNull`` subexpression is repeated
+    instead of bound to a variable: ``$let`` is unimplemented in the
+    mongomock-motor harness this read is tested against.
+
+    ``tokens`` sums ``ref.total_tokens`` per group, counting a value only when it
+    is a real number above zero — missing, null, negative and non-numeric refs all
+    read 0. ``$isNumber`` has to gate ``$toLong``: Mongo's cross-type ordering
+    sorts a string ABOVE any number, so a bare ``$gt`` would wave junk through and
+    ``$toLong`` would then fail the whole aggregation.
+    """
+    # ``$cond`` returns "unknown" for null / missing / empty, matching what the
+    # Python ``ref.get("model") or "unknown"`` did. A falsy NON-string (0, False)
+    # would differ, but the field's only writer stores ``str | None``.
+    model_or_unknown = {
+        "$cond": [
+            {"$eq": [{"$ifNull": ["$ref.model", ""]}, ""]},
+            "unknown",
+            "$ref.model",
+        ]
+    }
+    tokens_or_zero = {
+        "$cond": [
+            {"$isNumber": "$ref.total_tokens"},
+            {
+                "$cond": [
+                    {"$gt": ["$ref.total_tokens", 0]},
+                    {"$toLong": "$ref.total_tokens"},
+                    0,
+                ]
+            },
+            0,
+        ]
+    }
+    return [
+        {"$match": {**query, "amount_delta": {"$lt": 0}}},
+        {
+            "$group": {
+                "_id": {
+                    "day": {"$dateToString": {"format": "%Y-%m-%d", "date": "$createdAt"}},
+                    "model": model_or_unknown,
+                },
+                # A debit's delta is negative; flip it to positive credits spent.
+                "credits": {"$sum": {"$subtract": [0, "$amount_delta"]}},
+                "requests": {"$sum": 1},
+                "tokens": {"$sum": tokens_or_zero},
+            }
+        },
+    ]
+
+
 async def spend_by_model(
     workspace: str,
     *,
@@ -704,6 +793,13 @@ async def spend_by_model(
     metering path now records it — a legacy entry without it contributes 0, so the
     figure reflects real volume going forward without breaking historical reads).
 
+    The fold runs SERVER-SIDE (``_spend_by_model_pipeline``): a Mongo ``$match``
+    on the tenant, causes, applied flag and window feeds a ``$group`` on (day,
+    model), so a busy tenant's window is never materialised in the process. The
+    window is the CALLER's and ``billing/usage.py`` allows up to 366 days of it,
+    which is exactly why this must not be a pull-all-then-fold. The
+    ``(workspace, createdAt)`` compound index serves the ``$match``.
+
     EE entity-isolation: billing must not read ``CreditLedgerEntry`` directly, so
     this owns the read (sibling to ``sum_debits_by_cause``). It performs NO writes.
     """
@@ -716,40 +812,29 @@ async def spend_by_model(
         "applied": True,
         "createdAt": {"$gte": since, "$lt": until},
     }
-    entries = await CreditLedgerEntry.find(query).to_list()
+    # ``aggregate()`` returns a coroutine under the pymongo-async client the app
+    # uses in prod and a directly-iterable latent cursor under mongomock-motor;
+    # discriminate the same way ``_sum_amount_delta`` does.
+    cursor = CreditLedgerEntry.get_pymongo_collection().aggregate(_spend_by_model_pipeline(query))
+    if inspect.isawaitable(cursor):
+        cursor = await cursor
 
-    # In-Python aggregation over the fetched window (bounded — matches
-    # ``sum_debits_by_cause``). Group by (UTC day, model); sum positive-debited
-    # credits and count entries. A stray positive ``amount_delta`` under a spend
-    # cause (there should be none — spend is debit-only) is skipped so a bad row
-    # can't make a group read as a refund.
-    # (day, model) -> [credits, requests, tokens]
-    grouped: dict[tuple[str, str], list[int]] = {}
-    for e in entries:
-        delta = int(e.amount_delta)
-        if delta >= 0:
-            continue
-        created = getattr(e, "createdAt", None)
-        if created is None:
-            continue
-        day = created.date().isoformat()
-        ref = e.ref or {}
-        model = ref.get("model") or "unknown"
-        # ``total_tokens`` is the real per-run volume the metering path stamps on
-        # the ref; a legacy entry without it (or a non-int) reads 0.
-        try:
-            tokens = int(ref.get("total_tokens") or 0)
-        except (TypeError, ValueError):
-            tokens = 0
-        bucket = grouped.setdefault((day, model), [0, 0, 0])
-        bucket[0] += -delta  # positive credits debited
-        bucket[1] += 1  # one more request in this group
-        bucket[2] += tokens if tokens > 0 else 0  # real token volume
-
-    return [
-        ModelSpendRow(day=day, model=model, credits=credits, requests=requests, tokens=tokens)
-        for (day, model), (credits, requests, tokens) in grouped.items()
-    ]
+    rows: list[ModelSpendRow] = []
+    async for doc in cursor:
+        key = doc.get("_id") or {}
+        rows.append(
+            ModelSpendRow(
+                day=str(key.get("day") or ""),
+                model=str(key.get("model") or "unknown"),
+                credits=int(doc.get("credits") or 0),
+                requests=int(doc.get("requests") or 0),
+                tokens=int(doc.get("tokens") or 0),
+            )
+        )
+    # ``$group`` makes no ordering promise (nor did the dict this used to build).
+    # The caller sorts for display; sort here too so the read itself is stable.
+    rows.sort(key=lambda r: (r.day, r.model))
+    return rows
 
 
 async def history(
