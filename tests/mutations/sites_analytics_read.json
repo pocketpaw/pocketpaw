@@ -211,7 +211,7 @@
   {
     "label": "the stamp is derived from the plan rather than from what the deploy left on disk — a fourth copy of the counting rule, so the kill switch and the engine's own worker both stamp a site that is not counting",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        counter_deployed = Path(build.project_dir, analytics_worker.ENTRY_FILENAME).is_file()",
+    "find": "        counter_deployed = any(\n            Path(build.project_dir, name).is_file()\n            for name in (analytics_worker.ENTRY_FILENAME, analytics_worker.SHIM_FILENAME)\n        )",
     "replace": "        counter_deployed = counts_pageviews",
     "tests": [
       "tests/ee/sites/test_sites_analytics_since.py"
@@ -251,6 +251,16 @@
     "replace": "        workspace_id=ctx.workspace_id, site_id=site_id\n    )",
     "tests": [
       "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the stamp sees only the assets-only counter, so a shim build counts and reports never_counted forever",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        counter_deployed = any(\n            Path(build.project_dir, name).is_file()\n            for name in (analytics_worker.ENTRY_FILENAME, analytics_worker.SHIM_FILENAME)\n        )",
+    "replace": "        counter_deployed = Path(build.project_dir, analytics_worker.ENTRY_FILENAME).is_file()",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_since.py::test_a_shim_build_stamps_the_start_like_any_other_counter",
+      "tests/ee/sites/test_sites_analytics_since.py::test_a_republish_that_keeps_the_shim_keeps_the_original_stamp"
     ]
   }
 ]

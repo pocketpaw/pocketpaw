@@ -91,25 +91,38 @@ class _FakeGenerator:
         return BuildResult(project_dir=str(self._project_dir), ripple_version="0.2.0")
 
 
-def _deployer(*, writes_counter: bool, seen: dict | None = None):
+def _deployer(*, writes_counter: bool, seen: dict | None = None, artifact: str | None = None):
     """A workers deployer that reproduces the ONE disk effect the real one has:
-    ``_write_deploy_files`` writes the generated entry when counting is on and deletes
-    it when counting is off.
+    ``_write_deploy_files`` writes the generated counter when counting is on and
+    deletes it when counting is off.
 
     ``writes_counter`` is deliberately INDEPENDENT of ``analytics_entitled``. The
     publish seam only knows the plan, and the deploy resolves two more things (the
     operator kill switch, and whether the engine already emits its own worker) — so a
     test has to be able to say "entitled, and yet no counter was deployed" or the claim
-    that the stamp follows the artifact cannot be tested at all."""
+    that the stamp follows the artifact cannot be tested at all.
+
+    ``artifact`` picks WHICH generated file is left behind, and it is not a detail.
+    ``_write_deploy_files`` emits one of two: ``ENTRY_FILENAME`` for an assets-only
+    build, where the counter IS the worker, and ``SHIM_FILENAME`` for a build that
+    already ships its own worker (ripple, dynamic svelte), where the counter wraps it.
+    Both mean counting is on, so both must stamp. Defaults to the entry so every test
+    written before the shim existed keeps testing what it always did.
+
+    The off case deletes BOTH names rather than the one it would have written. A
+    deploy that stops counting stops counting, and leaving the other name on disk would
+    let a previous publish's artifact answer for this one.
+    """
 
     async def _deploy(site_id: str, project_dir: str, *, analytics_entitled=False, **_: object):
         if seen is not None:
             seen["analytics_entitled"] = analytics_entitled
-        entry = Path(project_dir) / analytics_worker.ENTRY_FILENAME
         if writes_counter:
-            entry.write_text("// a counter", encoding="utf-8")
+            name = artifact or analytics_worker.ENTRY_FILENAME
+            (Path(project_dir) / name).write_text("// a counter", encoding="utf-8")
         else:
-            entry.unlink(missing_ok=True)
+            for name in (analytics_worker.ENTRY_FILENAME, analytics_worker.SHIM_FILENAME):
+                (Path(project_dir) / name).unlink(missing_ok=True)
         return f"https://paw-site-{site_id}.acct.workers.dev"
 
     return _deploy
@@ -328,4 +341,98 @@ async def test_a_local_deploy_never_stamps_even_with_a_stale_entry_on_disk(
     )
 
     assert (project / analytics_worker.ENTRY_FILENAME).is_file(), "the stale entry must survive"
+    assert await _stamp(site.id) is None
+
+
+# ---------------------------------------------------------------------------
+# The shim is a counter too (fix/sites-analytics-since-shim)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_shim_build_stamps_the_start_like_any_other_counter(
+    beanie_test_db, tmp_path, clock
+):
+    """The regression. A ripple or dynamic svelte build already ships its own worker, so
+    the counter cannot be put in front of it from a config key — the deploy writes a
+    SHIM that imports that worker and wraps it. The shim is a counter. It counts real
+    visitors into the same dataset from the same publish.
+
+    The stamp check knew only the assets-only filename, because when it was written that
+    was the only artifact; the shim landed on a sibling branch. Neither slice was wrong
+    alone and the merge is what made this wrong, which is why no test caught it.
+
+    The failure it produced is the worst shape this feature has. The site counts. The
+    panel says counting has never started. The panel offers a Publish button as the fix,
+    and the next publish fails the same check, so the button can never work.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+
+    site = await _publish("pk-since-shim", project, _deployer(writes_counter=False))
+    await _mark_paid(site.id)
+
+    moment = clock(datetime(2026, 6, 2, 9, 30, tzinfo=UTC))
+    await _publish(
+        "pk-since-shim",
+        project,
+        _deployer(writes_counter=True, artifact=analytics_worker.SHIM_FILENAME),
+    )
+
+    assert (project / analytics_worker.SHIM_FILENAME).is_file(), (
+        "the fixture must leave a shim on disk, or this asserts nothing"
+    )
+    assert not (project / analytics_worker.ENTRY_FILENAME).is_file(), (
+        "and it must NOT also leave the assets-only entry, or the old check would pass "
+        "for the wrong reason and the regression would be invisible"
+    )
+    assert await _stamp(site.id) == moment
+
+
+@pytest.mark.asyncio
+async def test_a_republish_that_keeps_the_shim_keeps_the_original_stamp(
+    beanie_test_db, tmp_path, clock
+):
+    """The stamp is when counting BEGAN, not when it was last confirmed. A ripple site
+    that republishes weekly must keep its first date, or the read would slide the start
+    of the series forward and quietly hide the history it does have."""
+    project = tmp_path / "project"
+    project.mkdir()
+    shim = _deployer(writes_counter=True, artifact=analytics_worker.SHIM_FILENAME)
+
+    site = await _publish("pk-since-shim-2", project, _deployer(writes_counter=False))
+    await _mark_paid(site.id)
+
+    first = clock(datetime(2026, 6, 2, 9, 30, tzinfo=UTC))
+    await _publish("pk-since-shim-2", project, shim)
+
+    clock(datetime(2026, 7, 14, 11, 0, tzinfo=UTC))
+    await _publish("pk-since-shim-2", project, shim)
+
+    assert await _stamp(site.id) == first
+
+
+@pytest.mark.asyncio
+async def test_a_shim_site_that_stops_counting_clears_the_stamp(beanie_test_db, tmp_path, clock):
+    """The clearing half, on the shim path. A lapsed ripple site republishes without a
+    counter, and the stamp has to go — otherwise the read answers "counting since June"
+    across months in which nothing was recording, which is the invented zero this whole
+    feature exists to avoid."""
+    project = tmp_path / "project"
+    project.mkdir()
+
+    site = await _publish("pk-since-shim-3", project, _deployer(writes_counter=False))
+    await _mark_paid(site.id)
+
+    clock(datetime(2026, 6, 2, 9, 30, tzinfo=UTC))
+    await _publish(
+        "pk-since-shim-3",
+        project,
+        _deployer(writes_counter=True, artifact=analytics_worker.SHIM_FILENAME),
+    )
+    assert await _stamp(site.id) is not None
+
+    clock(datetime(2026, 8, 1, 9, 0, tzinfo=UTC))
+    await _publish("pk-since-shim-3", project, _deployer(writes_counter=False))
+
     assert await _stamp(site.id) is None

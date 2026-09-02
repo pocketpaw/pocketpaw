@@ -2921,9 +2921,24 @@ async def _deploy_site_doc(
         # where the delete legitimately fails — a directory sitting on the entry's name,
         # which ``_write_deploy_files`` swallows — reads as no counter, which is what
         # wrangler will actually deploy.
+        #
+        # BOTH names, and the reason is a bug this shipped with for one afternoon.
+        # ``_write_deploy_files`` emits ONE OF TWO artifacts: ``ENTRY_FILENAME`` for an
+        # assets-only build, whose counter IS the worker, and ``SHIM_FILENAME`` for a
+        # build that already has a worker of its own (ripple, dynamic svelte), whose
+        # counter wraps it. This check knew only the first, because when it was written
+        # only the first existed — the shim arrived on a SIBLING branch, so neither
+        # slice was wrong alone and the merge is what made this wrong. The result was
+        # the worst-shaped failure this feature has: a paid ripple site deployed a
+        # working counter, counted real visitors, and told its owner counting had never
+        # started, with a Publish button that could not fix it because the next publish
+        # failed the same check.
         from pocketpaw_ee.sites import analytics_worker
 
-        counter_deployed = Path(build.project_dir, analytics_worker.ENTRY_FILENAME).is_file()
+        counter_deployed = any(
+            Path(build.project_dir, name).is_file()
+            for name in (analytics_worker.ENTRY_FILENAME, analytics_worker.SHIM_FILENAME)
+        )
     else:  # "wfp"
         cf = cloudflare or _cf_client()
         bundle = bundle_reader(build.project_dir)
