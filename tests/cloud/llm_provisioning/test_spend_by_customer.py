@@ -57,6 +57,10 @@ class FakeAdmin:
 
     ``counts`` drives the coverage check: ``None`` is the unfiltered total, a
     workspace id its own count.
+
+    ``customers`` is what ``/customer/list`` returns — every id the proxy has seen
+    spend for, whether or not we ever minted that workspace a key. It is the only
+    source that knows about a workspace which pays for chat and nothing else.
     """
 
     def __init__(
@@ -65,15 +69,19 @@ class FakeAdmin:
         key_rows: list[dict] | None = None,
         customer_rows: list[dict] | None = None,
         counts: dict[str | None, int] | None = None,
+        customers: list[str] | None = None,
         fail_customer_read: bool = False,
         fail_key_read: bool = False,
+        fail_customer_list: bool = False,
         fail_counts_for: set[str | None] | None = None,
     ) -> None:
         self.key_rows = key_rows or []
         self.customer_rows = customer_rows or []
         self.counts = counts or {}
+        self.customers = customers or []
         self.fail_customer_read = fail_customer_read
         self.fail_key_read = fail_key_read
+        self.fail_customer_list = fail_customer_list
         self.fail_counts_for = fail_counts_for or set()
         self.windows: list[tuple[str, str]] = []
         self.count_calls: list[str | None] = []
@@ -97,6 +105,11 @@ class FakeAdmin:
         if end_user in self.fail_counts_for:
             raise LiteLLMAdminError("count failed (simulated)")
         return self.counts.get(end_user, 0)
+
+    async def list_customers(self):
+        if self.fail_customer_list:
+            raise LiteLLMAdminError("customer list failed (simulated)")
+        return list(self.customers)
 
 
 async def _provision(workspace: str = WS) -> LiteLLMTenantKey:

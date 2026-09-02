@@ -59,7 +59,18 @@ class LiteLLMTenantKey(TimestampedDocument):
     # The proxy virtual key (the ``key`` from POST /key/generate). Sent as the
     # Bearer token on this tenant's proxy calls so the proxy attributes spend +
     # enforces the budget.
-    litellm_key: str
+    #
+    # OPTIONAL since 2026-09-02 (fix/bill-workspaces-the-sweep-cannot-see). A row
+    # is now also created for a workspace the SPEND sweep discovered on the proxy
+    # but that never minted a key — the row exists to hold that tenant's
+    # ``last_spend_ingest_ts``, which is what makes its spend billable exactly
+    # once. Every reader already coped with a missing key
+    # (``list_provisioned_workspaces`` filters on ``!= None``, the per-key spend
+    # read is guarded by ``if doc.litellm_key``), so this aligns the schema with
+    # code that was already written for it rather than loosening a guarantee.
+    # ``ensure_tenant_key`` upserts on ``workspace``, so a later mint fills this
+    # in on the same row instead of colliding with it.
+    litellm_key: str | None = None
     # The alias the proxy stamped on the key (``ws-<workspace>``) — for operator
     # legibility in the proxy admin UI / spend logs.
     key_alias: str | None = None

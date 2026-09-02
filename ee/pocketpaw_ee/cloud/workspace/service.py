@@ -74,8 +74,15 @@ Beanie-writes-only-from-service contract.
 per-tenant LiteLLM key provisioning trigger — a BEST-EFFORT, NON-BLOCKING
 ensure_tenant_key(workspace) call. A proxy outage / mint failure is logged and
 swallowed (workspace creation NEVER fails on a provisioning error); the call is
-idempotent, so the billing-cutover sweep and any later workspace touch back-fill
-a key that didn't mint here. Mirrors the best-effort seed_default_agent step.
+idempotent, so a later workspace touch can mint a key that didn't mint here.
+Mirrors the best-effort seed_default_agent step.
+2026-09-02 (fix/bill-workspaces-the-sweep-cannot-see): the note above used to say
+the billing-cutover sweep back-filled a key that failed to mint here. It never
+did — the sweep started from the workspaces that ALREADY had one, so a swallowed
+mint failure meant a workspace nothing swept, and its chat spend was served free.
+The sweep now discovers such a workspace from the proxy's customer list and bills
+it without a key, so a failed mint costs the tenant their per-key budget ceiling
+rather than costing us the entire bill. Minting is still not retried here.
 2026-07-05 (fix/atlas-admin-security-hardening, FINDING A): privilege-escalation
 guard on ownership. ``update_member_role`` now refuses to GRANT the ``owner``
 role unless the ACTOR already holds owner (code ``owner_grant_requires_owner``),
