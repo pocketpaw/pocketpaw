@@ -230,6 +230,33 @@ def test_the_entry_is_deleted_when_a_counting_site_publishes_free(tmp_path):
     assert not (project / analytics_worker.ENTRY_FILENAME).exists()
 
 
+def test_a_delete_that_cannot_run_does_not_fail_the_publish(tmp_path):
+    """FAILURE-SOFT ON THE ONE DELETE. ``missing_ok`` covers the absent file and
+    nothing else: a read-only entry, a Windows lock held by another process, and a
+    directory sitting where the entry should be all raise ``PermissionError``. This
+    runs on every free publish, and nothing in the analytics path may cost a site
+    its publish.
+
+    A real directory rather than a patched ``unlink``, because the failure being
+    guarded against is one the filesystem produces, and a patch would prove only
+    that the ``except`` clause names the exception the patch was told to raise. The
+    same condition raises ``PermissionError`` on Windows and ``IsADirectoryError``
+    on POSIX; both are ``OSError``, which is what the wrap catches.
+
+    THE PUBLISH IS STILL SAFE, which is the second half and the reason swallowing
+    is allowed at all: the file survives, and ``.assetsignore`` still names it, so
+    wrangler does not upload it and the salt does not ship."""
+    project = _build_html_project(tmp_path)
+    blocker = project / analytics_worker.ENTRY_FILENAME
+    blocker.mkdir()
+
+    cfg = _write(project, entitled=False)
+
+    assert cfg == PRE_ANALYTICS_HTML_CONFIG
+    assert blocker.is_dir(), "the delete must actually have failed for this to prove anything"
+    assert analytics_worker.ENTRY_FILENAME in (project / ".assetsignore").read_text().splitlines()
+
+
 def test_the_assetsignore_names_the_entry_even_when_nothing_counts(tmp_path):
     """The second line of defence behind that delete. Naming a file that is not there
     costs nothing; not naming one that IS there costs the salt."""

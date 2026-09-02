@@ -9,6 +9,13 @@ tags: ["api", "configuration"]
 
 {/*
   docs/api/configuration-reference.mdx
+  Updated 2026-09-02 (feat/sites-analytics-gate, SA-2) — added the "Paw Sites —
+  visitor analytics" section with PAW_SITES_ANALYTICS_DISABLED (the operator kill
+  switch SA-2 introduces) and PAW_SITES_ANALYTICS_DATASET (which SA-1 shipped
+  undocumented). They are the first entries in this file with NO settings field:
+  the Paw Sites deploy path reads its configuration from the environment directly,
+  so the lead sentence above no longer claims every variable carries the
+  POCKETPAW_ prefix.
   Updated 2026-08-03 (feat/prompt-bulk-retrieval, PA-8a) — added the "Prompt
   Assembly" section with prompt_pocket_summary_only, the default-off switch that
   moves bulk pocket widget detail out of the system prompt and onto the
@@ -20,7 +27,7 @@ tags: ["api", "configuration"]
 
 # Configuration Reference
 
-Complete reference of all configuration settings. All environment variables use the `POCKETPAW_` prefix.
+Complete reference of all configuration settings. Environment variables backed by a settings field use the `POCKETPAW_` prefix. The Paw Sites deploy knobs at the end are the exception — they are read straight from the process environment and carry no settings field.
 
 ## Core Settings
 
@@ -242,3 +249,26 @@ The pocket specialist does NOT receive Composio — its tool surface stays narro
 | Setting | Env Variable | Type | Default | Description |
 |---------|-------------|------|---------|-------------|
 | `fabric_source_truth_mode` | `POCKETPAW_FABRIC_SOURCE_TRUTH_MODE` | enum | `off` | Rollout mode for Fabric source truth (`off`, `shadow`, `enforce`). `off` = pure last-writer-wins, no statements. `shadow` = provenance statements + divergence log lines recorded alongside the LWW cache. `enforce` = the trust-ladder resolver's winner owns the cache. Gate the flip to `enforce` with `python -m pocketpaw.fabric.divergence_report` — see [Fabric Source Truth](/concepts/architecture#fabric-source-truth). |
+
+## Paw Sites — visitor analytics
+
+A published Paw Site on a paid per-site tier carries a small generated Cloudflare
+Worker that records one Analytics Engine row per pageview. These two variables are
+the deploy-side knobs for it.
+
+Both are read **straight from the process environment** and have no `POCKETPAW_`
+settings field, so the Setting column below is empty. That is deliberate: the Paw
+Sites deploy path reads its Cloudflare configuration (`PAW_CF_*`) from the
+environment directly rather than through the settings object, and these ride the
+same seam. The rest of the `PAW_SITES_*` and `PAW_CF_*` deploy variables are not
+catalogued here yet.
+
+Both take effect **at the next publish**. Neither one rewrites a site that is
+already deployed: the config and the counter are written into the project at publish
+time, so a site keeps whatever it was last published with until it is published
+again.
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| — | `PAW_SITES_ANALYTICS_DISABLED` | boolean | unset (off) | **Operator kill switch.** Truthy (`1`, `true`, `yes`, `on`; case-insensitive) makes the next publish of **every** site emit the pre-analytics config shape: no `main`, no Analytics Engine binding, no `run_worker_first` rules, and no generated counter file. Paid sites included — it overrides the plan entitlement, it does not consult it. It exists for one failure: if the Cloudflare account is on the **Workers Free plan**, a `main` in the request path starts consuming a 100,000 request/day ceiling that is **account-wide**, and breaching that stops Cloudflare serving the Workers behind it rather than degrading analytics. Every published site goes dark together, so the mitigation has to be faster than a code change and a release. Already-deployed sites keep counting until they are republished, so pulling this switch during an incident means republishing the affected sites. Any other value, including `0` and `false`, leaves analytics on. |
+| — | `PAW_SITES_ANALYTICS_DATASET` | string | `paw_site_pageviews` | The Cloudflare Analytics Engine dataset the counter writes into. One dataset for all sites, partitioned by site id in `indexes[0]` — Analytics Engine is queried by index, and a dataset per site would need provisioning per site for no gain. Override it so a dev or staging publish cannot pollute the production dataset. An empty or whitespace-only value falls back to the default rather than emitting an empty dataset name, which wrangler accepts and Cloudflare does not. Changing it does not migrate existing rows: sites published against the old dataset keep writing there until they are republished, and Analytics Engine retains data for three months. |
