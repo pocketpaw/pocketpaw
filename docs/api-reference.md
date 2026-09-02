@@ -2,6 +2,21 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-02 (SA-7) — finished the Visitor Analytics section with the two
+things a reader could not get from the endpoint's own fields. First, what the
+`analytics` grant actually buys: which tiers carry it, that it needs an active
+subscription and not only a tier, and that UPGRADING DOES NOT BACKFILL — the
+consequence customers hit, and one the `never_counted` row alone does not explain,
+since it reads as a temporary state rather than as a permanent hole in the history.
+Also recorded that `svelte` and `ripple` sites do not count at all yet, which is
+otherwise indistinguishable from a site that simply has not been republished.
+Second, `GET /sites/{site_id}/entitlements`, which was undocumented in this file
+entirely — it is the pre-check that lets a panel disable itself before the call, and
+the section says plainly that it does NOT supersede the analytics `status`, because
+entitlement cannot tell "your plan excludes this" from "you have not republished".
+The `retention_days` bullet stopped naming the number, which invited clients to copy
+it; the field is the source of truth and the note now says so.
+
 Updated: 2026-08-18 (fix/sites-html-refine-names-the-edit-tool) — documented
 `edit_html_file`, the html track's chat edit tool. It shipped in db083bfc without
 reaching this file, so the section below still said html had no edit tool and was
@@ -1647,8 +1662,12 @@ Response `200`:
   UTC, and `null` when nothing is counting. It is what makes an honest chart
   possible: the series begins here, not at the site's creation, and a window
   reaching further back is reaching into time nobody recorded.
-- `retention_days` is `90`. On the wire so a UI can explain why the earliest date it
-  offers is the one it offers, rather than looking like it lost the data.
+- `retention_days` is how far back the data goes, and it is on the wire so a UI can
+  explain why the earliest date it offers is the one it offers, rather than looking
+  like it lost the data. **Read the field; do not copy the number into a client.**
+  Cloudflare keeps a row for three months and there is no rollup store behind it, so
+  anything older is gone rather than summarised — and a client holding its own `90`
+  will keep displaying it after the day that stops being true.
 - Each breakdown is a **top-10** list ordered by pageviews. Its `visitors` is a
   distinct count **within that row** and does **not** sum to the response total: one
   visitor who reads three pages is one visitor overall and one visitor on each of
@@ -1683,6 +1702,84 @@ Errors:
 | 422 | `sites.invalid_analytics_window` | `window` is not one of the four accepted values. |
 | 422 | `sites.cloudflare_error` | The Analytics Engine query failed — a non-2xx, an unparseable body, or a `200` with no data array. Includes Cloudflare's own message. A `403` here usually means the API token is missing the **Account Analytics Read** permission, which is a different scope from the ones the deploy paths use. |
 | 422 | `sites.cloudflare_unconfigured` | `PAW_CF_ACCOUNT_ID` / `PAW_CF_API_TOKEN` / `PAW_CF_ZONE_ID` are not all set. |
+
+### What the `analytics` grant buys
+
+Visitor counting is a **paid grant on the site's own plan**, not a floor one. It rides
+the `analytics` member of the plan's Cloudflare feature set, and it needs the tier
+**and** an active subscription — a cancelled site keeps its `plan_tier` string, so
+reading the tier alone would keep counting for a site that stopped paying.
+
+| Per-site tier | Monthly | Buys analytics |
+|---------------|---------|----------------|
+| `free` | $0 | no |
+| `site` | $7 | yes |
+| `staff` | $19 | yes |
+
+The legacy keys resolve to what they always paid for: `basic` reads as `free`, `pro`
+as `site`, `business` as `staff`. The org-scoped tiers (`studio`, `agency`) are not
+legal values for a site's own `plan_tier`, and one appearing there resolves to the
+free floor rather than to its own capabilities.
+
+**Upgrading does not backfill, and this is the thing customers hit.** A site's history
+begins at the publish that first deployed a counter, because nothing existed to record
+before it. Buying the plan changes what the next publish deploys; it cannot create
+rows for the weeks that went uncounted. The sequence that works is upgrade, then
+republish — and until that republish the endpoint answers `never_counted`, which is
+the panel's cue to ask for a republish rather than to draw a flat line at zero.
+
+The same applies in reverse. A publish that deploys no counter clears
+`counting_since`, so a site that lapsed to free and later re-upgraded reports
+`never_counted` until it is republished, rather than claiming a start date from an era
+that stopped recording months ago.
+
+**Not every engine carries a counter yet.** Sites built by the `html` and `react`
+generators deploy as assets-only Workers and take the counter. Sites built by `svelte`
+or `ripple` already deploy their own server worker, and a second entry cannot be put in
+front of it from a config key, so they do not count regardless of plan. Such a site is
+entitled and still answers `never_counted` however often it is republished. The
+[engineering note](design/2026-09-02-sites-visitor-analytics.md) carries the table and
+what is planned.
+
+### `GET /sites/{site_id}/entitlements` — the pre-check
+
+Same auth, same tenant scoping, same `404` on a cross-tenant site. It answers what the
+site may do, so a surface can disable a control and name the reason instead of
+offering a button that 402s.
+
+Response `200`:
+
+```json
+{
+  "site_id": "68b6f2c1a4d3e50012ab34cd",
+  "plan_tier": "site",
+  "subscription_active": true,
+  "badge_required": false,
+  "custom_domain": true,
+  "max_domained_sites": null,
+  "domained_sites_used": 2,
+  "domain_slots_available": true,
+  "analytics": true,
+  "concierge_entitled": false,
+  "concierge_enabled": false
+}
+```
+
+- `analytics` says whether this site's plan buys visitor counting. It is resolved by
+  the same predicate the publish path gates the counter on, so a site whose publish
+  counted cannot be a site whose read refuses.
+- `subscription_active` separates a lapsed paid site from one that never had the
+  capability. The tier stays recorded; only the payment stopped, and the UI should say
+  which.
+- `max_domained_sites` is `null` for uncapped. It reports what the plan grants, while
+  `domain_slots_available` reports what the gate will actually do — they differ when
+  enforcement is off.
+
+**`analytics` is a pre-check, not the answer.** The analytics endpoint's `status` stays
+authoritative, because entitlement alone cannot separate "your plan does not include
+this" from "it does, and you have not republished since you upgraded". Those are two
+different sentences and two different buttons. Use this field to disable the panel
+before the call; use `status` to decide what the panel says.
 
 ## Ship — Managed Deploys
 
