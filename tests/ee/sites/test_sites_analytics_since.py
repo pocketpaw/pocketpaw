@@ -177,6 +177,38 @@ async def test_a_publish_that_deploys_a_counter_stamps_the_start(beanie_test_db,
 
 
 @pytest.mark.asyncio
+async def test_a_first_publish_that_deploys_a_counter_stamps_on_insert(
+    beanie_test_db, tmp_path, clock, monkeypatch
+):
+    """THE INSERT BRANCH, which the other tests here never reach.
+
+    Every case above publishes twice — the first publish is what creates the document,
+    and a first publish resolves the plan against a document that does not exist yet, so
+    it can never be entitled. That leaves the insert's stamp untested: a mutation
+    hard-coding it to None escaped the first sweep, because the second publish takes the
+    UPDATE branch and repairs it.
+
+    It is reachable in production through the charge-first lane: ``activate_site``
+    stamps the plan on payment confirmation and THEN deploys, so the deploy can carry a
+    counter for a site whose row is being inserted by that same deploy. Without the
+    stamp here that site reads as ``never_counted`` until something unrelated happens to
+    republish it.
+
+    Driven by making the deploy's artifact the source of truth — the deployer writes the
+    entry — rather than by reproducing the whole charge-first sequence, which is
+    ``activate_site``'s own tree and would test that seam instead of this one."""
+    project = tmp_path / "project"
+    project.mkdir()
+    moment = clock(datetime(2026, 6, 10, 11, 0, tzinfo=UTC))
+
+    site = await _publish("pk-since-first", project, _deployer(writes_counter=True))
+
+    doc = await sites_service._SiteDoc.find_one({"_id": site.id})
+    assert doc is not None, "this must be the INSERT branch"
+    assert await _stamp(site.id) == moment
+
+
+@pytest.mark.asyncio
 async def test_a_publish_that_deploys_no_counter_leaves_it_unset(beanie_test_db, tmp_path, clock):
     """A free site's first publish. None is the honest value and it is what the read
     reports as ``never_counted`` — "nothing has been recorded", not "a quiet week"."""
