@@ -1,6 +1,26 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-02 (SA-4 — the visitor-analytics read): the read half of the feature
+# SA-1/SA-2 built. Two things landed here.
+#
+# ``site_analytics`` aggregates a site's pageview rows out of Workers Analytics Engine
+# and answers ``SiteAnalyticsResponse``. Its governing rule is that it NEVER INVENTS A
+# ZERO: not entitled, entitled-but-never-counted, counting-and-genuinely-quiet, and a
+# read that failed are four different answers to a customer, and three of them would
+# otherwise render as the same panel of zeros. The first three are ``status`` values
+# with every metric left None; the fourth is an exception, so a Cloudflare outage
+# cannot arrive shaped like a quiet week. It gates on the SAME
+# ``entitlements.site_analytics_entitled`` the publish path reads, never a second copy.
+#
+# ``_deploy_site_doc`` now stamps ``Site.analytics_since``, which is what makes the
+# second of those states knowable. The value is read off WHAT THE DEPLOY LEFT ON DISK
+# (the generated entry ``workers_deploy`` writes or deletes) rather than re-derived
+# from the plan, because the counting rule already lives in three places and a fourth
+# would be one more thing to disagree. Set on a publish that deployed a counter,
+# CLEARED on one that did not — a site that lapsed and re-upgraded is entitled with no
+# stamp, which is exactly "you have not republished yet".
+#
 # Updated 2026-09-02 (feat/sites-analytics-gate, SA-2): the workers deploy now carries
 # whether THIS site's plan buys the visitor pageview counter. SA-1 wired that counter
 # onto every assets-only publish; a Worker invocation is billed where a static asset is
@@ -2835,6 +2855,10 @@ async def _deploy_site_doc(
         mode = "wfp"
 
     url = ""
+    # SA-4: did THIS deploy actually leave a pageview counter in front of the site?
+    # Only the workers branch can, so every other target answers False without asking.
+    # ``analytics_since`` is written from this below.
+    counter_deployed = False
     if mode == "local":
         from pocketpaw_ee.sites import local_server
 
@@ -2871,6 +2895,22 @@ async def _deploy_site_doc(
         url = await deploy_w(
             site_id, build.project_dir, engine=engine, analytics_entitled=counts_pageviews
         )
+        # SA-4: and read back what the deploy ACTUALLY did, from the artifact rather
+        # than from ``counts_pageviews``. The counting rule has three parts — the plan
+        # (above), the operator kill switch, and whether the engine emits its own
+        # worker — and only the last two are resolved inside
+        # ``workers_deploy._write_deploy_files``. Re-deriving the answer here would put
+        # a fourth copy of that rule in the tree, and the field this feeds exists
+        # precisely to be trusted when the copies disagree.
+        #
+        # The generated entry is the artifact of the decision: written when counting is
+        # on, deleted when it is off. ``is_file`` rather than ``exists`` so the one case
+        # where the delete legitimately fails — a directory sitting on the entry's name,
+        # which ``_write_deploy_files`` swallows — reads as no counter, which is what
+        # wrangler will actually deploy.
+        from pocketpaw_ee.sites import analytics_worker
+
+        counter_deployed = Path(build.project_dir, analytics_worker.ENTRY_FILENAME).is_file()
     else:  # "wfp"
         cf = cloudflare or _cf_client()
         bundle = bundle_reader(build.project_dir)
@@ -2925,6 +2965,10 @@ async def _deploy_site_doc(
             script_name=site_id,
             deployed=True,
             deployed_at=now,
+            # SA-4: the stamp says counting is ON and began here. A first publish that
+            # deployed no counter records None, which the read reports as "nothing has
+            # been recorded yet" rather than as a quiet week.
+            analytics_since=now if counter_deployed else None,
             # Record WHICH target this deploy used, not which one was configured. The
             # custom-domain lane needs "does this site have its own route-addressable
             # Worker", and PAW_CF_DEPLOY_MODE cannot answer it at request time.
@@ -2956,6 +3000,18 @@ async def _deploy_site_doc(
         doc.deployed_at = now
         doc.deploy_target = mode
         doc.url = url
+        # SA-4, and unlike ``deployed_at`` this is NOT "last" — it is "since", so a
+        # republish that keeps counting keeps the original stamp. First-set-wins holds
+        # only WITHIN a counting era: a publish that carried no counter clears the field
+        # outright, because nothing is recording and there is no "since" to report.
+        #
+        # Clearing is what closes the lapse hole. A site that counted in June, dropped
+        # to free in July and re-upgraded today is entitled again, but no publish has
+        # carried a counter since the lapse. Left stamped, the read would answer
+        # "counting since June, and nobody visited" over months in which nothing was
+        # recording at all — the invented zero this feature exists to avoid. Cleared,
+        # entitled-with-no-stamp is exactly "you have not republished".
+        doc.analytics_since = (doc.analytics_since or now) if counter_deployed else None
         # The deploy may have moved (local → workers, or a new sites domain), so
         # re-assert the site's own host on every publish. Idempotent and additive:
         # a host already present is not duplicated, and a custom domain appended by
@@ -4305,6 +4361,12 @@ async def finalize_provisioned_site(site: _SiteDoc, *, url: str, deploy_target: 
     site.deployed = True
     site.deployed_at = datetime.now(UTC)
     site.url = url
+    # SA-4: this lane deploys no pageview counter and says so outright —
+    # ``provision_deploy`` passes ``analytics_entitled=False`` because a dynamic site's
+    # ``main`` is already SvelteKit's own worker. So the honest value here is None: a
+    # site that stood up through this job is not recording, whatever an earlier static
+    # publish may have left on the field.
+    site.analytics_since = None
     if deploy_target:
         site.deploy_target = deploy_target
     await site.save()
