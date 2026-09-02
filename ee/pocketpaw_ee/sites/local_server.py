@@ -105,6 +105,11 @@ logger = logging.getLogger(__name__)
 # ship it. None of them is site content, and ``persist_site`` copies right past them
 # into a tree this server hands out as plain static files.
 #
+# BOTH generated counters are listed (SA-3 added the second). A workers publish writes
+# one of them depending on whether the build emitted a server entry, and a working dir
+# that has published both ways can hold either — so filtering only the one this build
+# would write is filtering the wrong file half the time.
+#
 # The generated counter entry is the one that made this a control rather than a tidy-up
 # (SA-2). It carries the per-publish salt the visitor hash is built on, and a salt an
 # attacker can read turns that hash into a confirmation oracle: given a candidate IP
@@ -120,6 +125,7 @@ logger = logging.getLogger(__name__)
 # one rather than inventing a new rule.
 _DEPLOY_SCAFFOLD_NAMES = (
     analytics_worker.ENTRY_FILENAME,
+    analytics_worker.SHIM_FILENAME,
     "wrangler.jsonc",
     ".assetsignore",
 )

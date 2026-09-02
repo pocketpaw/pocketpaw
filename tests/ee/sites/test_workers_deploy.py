@@ -37,7 +37,7 @@ import pytest
 pytest.importorskip("pocketpaw_ee")
 
 from pocketpaw_ee.cloud._core.errors import Internal, ValidationError
-from pocketpaw_ee.sites import workers_deploy
+from pocketpaw_ee.sites import analytics_worker, workers_deploy
 
 
 class _FakeProc:
@@ -111,16 +111,30 @@ def test_sanitize_empty_falls_back():
 
 @pytest.mark.asyncio
 async def test_deploy_writes_assetsignore_and_wrangler_jsonc(tmp_path, monkeypatch):
+    """The proven recipe, pinned on a site that does NOT count (SA-3).
+
+    ``analytics_entitled=False`` is the subject rather than a detail: this test guards
+    the config that was proven live, and after SA-3 a counting ripple publish moves
+    ``main`` to the shim. The un-counted shape is the one that has to stay byte for
+    byte, because it is what the kill switch and the free tier both fall back to."""
     project = _build_project(tmp_path)
     site_id = "507f1f77bcf86cd799439011"
     proc = _FakeProc(0, b"https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev\n", b"")
     _patch_subprocess(monkeypatch, proc)
 
-    url = await workers_deploy.deploy_workers(site_id, project)
+    url = await workers_deploy.deploy_workers(site_id, project, analytics_entitled=False)
 
-    # .assetsignore — EXACTLY the three recipe lines, in order.
+    # .assetsignore — the three recipe lines, then both counter filenames. The counters
+    # are named on every publish, counting or not, so a delete that fails still leaves
+    # the per-publish salt out of the upload.
     assetsignore = Path(project, ".svelte-kit/cloudflare/.assetsignore").read_text()
-    assert assetsignore.splitlines() == ["_worker.js", "_routes.json", "_headers"]
+    assert assetsignore.splitlines() == [
+        "_worker.js",
+        "_routes.json",
+        "_headers",
+        analytics_worker.ENTRY_FILENAME,
+        analytics_worker.SHIM_FILENAME,
+    ]
 
     # wrangler.jsonc — the clean static config (parse it; it is JSON-compatible).
     cfg = json.loads(Path(project, "wrangler.jsonc").read_text())
@@ -367,12 +381,18 @@ async def test_react_deploy_without_a_build_fails_cleanly(tmp_path, monkeypatch)
 async def test_static_svelte_config_unchanged_by_engine_default(tmp_path, monkeypatch):
     """Regression guard: the default engine (ripple/svelte) keeps the exact
     server-worker config — ``main`` + ``nodejs_compat`` + the ``.svelte-kit/cloudflare``
-    asset dir — byte-for-byte, so HE-4 does not touch the proven path."""
+    asset dir — byte-for-byte, so HE-4 does not touch the proven path.
+
+    Pinned on an UN-COUNTED publish since SA-3, which is what the guard was always
+    about: HE-4 must not change the shape, and the counting shape is a deliberate
+    change made somewhere else and asserted somewhere else."""
     project = _build_project(tmp_path)
     proc = _FakeProc(0, b"https://x.y.workers.dev\n", b"")
     _patch_subprocess(monkeypatch, proc)
 
-    await workers_deploy.deploy_workers("507f1f77bcf86cd799439011", project)
+    await workers_deploy.deploy_workers(
+        "507f1f77bcf86cd799439011", project, analytics_entitled=False
+    )
 
     cfg = json.loads(Path(project, "wrangler.jsonc").read_text())
     assert cfg["main"] == ".svelte-kit/cloudflare/_worker.js"
@@ -380,7 +400,7 @@ async def test_static_svelte_config_unchanged_by_engine_default(tmp_path, monkey
     assert cfg["assets"] == {"binding": "ASSETS", "directory": ".svelte-kit/cloudflare"}
     # The svelte/ripple .assetsignore still drops the Pages worker entry.
     assetsignore = Path(project, ".svelte-kit/cloudflare/.assetsignore").read_text().splitlines()
-    assert assetsignore == ["_worker.js", "_routes.json", "_headers"]
+    assert assetsignore[:3] == ["_worker.js", "_routes.json", "_headers"]
 
 
 @pytest.mark.asyncio
