@@ -172,7 +172,7 @@ def persist_site(site_id: str, project_dir: str, engine: str = "ripple") -> Path
     ``_DEPLOY_SCAFFOLD_NAMES`` for why the entry in particular must not travel.
 
     ``shutil.ignore_patterns`` matches by NAME at every level rather than only at the
-    copy root, which is what we want: those three names are ours, no site authors a
+    copy root, which is what we want: every name in that tuple is ours, no site authors a
     file called any of them, and a nested one would be exactly as wrong as a top-level
     one."""
     src = Path(project_dir, resolve_static_output_rel(project_dir, engine))
