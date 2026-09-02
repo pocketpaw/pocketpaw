@@ -124,6 +124,13 @@
 # paid selections as the free floor — the exact failure the 2026-08-22 rekey note
 # above describes. Per-site subscriptions already sold stay live and keep
 # renewing through the product half; only NEW purchases take the add-on rail.
+#
+# Updated 2026-09-02 (feat/sites-analytics-gate, SA-2): added
+# ``ANALYTICS_FEATURE`` — the name of the ``cloudflare_features`` member that
+# gates the visitor pageview counter. No new rule and no new column: the tiers
+# that resell ``analytics`` are the ones this catalog has listed since the pricing
+# ladder landed. What is new is that a seam finally READS it, so the string needs
+# a home other than a literal retyped at each caller. See its own comment.
 
 from __future__ import annotations
 
@@ -166,6 +173,22 @@ _SITE_PLAN_SCOPE: dict[str, str] = {
     "studio": ORG_SCOPE,
     "agency": ORG_SCOPE,
 }
+
+# The ``cloudflare_features`` member that gates VISITOR ANALYTICS: the pageview
+# counter a published site carries (``sites.analytics_worker``, SA-1). Named here
+# rather than spelled as a literal at the seams, because more than one seam asks
+# the same question — the PUBLISH path decides whether to deploy a counter at all
+# (SA-2), and the read endpoint decides whether a site's numbers may be served
+# (SA-4). A literal retyped at each of them is one typo away from a free site that
+# counts, or a paid one that does not.
+#
+# It names a member of ``_SITE_PLAN_CF_FEATURES`` below, which is deliberately
+# still written as literals — that dict is the declarative catalog and reads best
+# flat. ``tests/ee/sites/test_sites_analytics_gate.py`` pins the pairing, so a
+# rename of one without the other fails there rather than silently entitling
+# nobody: every other test in that file goes through this constant and would keep
+# passing against a catalog that no longer mentions the feature at all.
+ANALYTICS_FEATURE = "analytics"
 
 # The Cloudflare features each tier resells (BC-10 provisions them on publish).
 # A higher tier is a superset of the one below it.
@@ -673,6 +696,7 @@ def site_scoped_tier(key: str | None) -> SitePlanTier | None:
 
 
 __all__ = [
+    "ANALYTICS_FEATURE",
     "BASE_SITE_PLAN_KEY",
     "ORG_SCOPE",
     "SITE_SCOPE",

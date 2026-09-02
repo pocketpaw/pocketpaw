@@ -1,0 +1,102 @@
+[
+  {
+    "label": "the plan is never consulted — every site is entitled to analytics, so a free site is counted at a billed Worker invocation against no revenue",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    return site_plan_catalog.ANALYTICS_FEATURE in tier.cloudflare_features",
+    "replace": "    return True",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_gate.py"
+    ]
+  },
+  {
+    "label": "the subscription is ignored — a cancelled site keeps its counter forever, because cancellation never resets plan_tier",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    if tier is None or not _subscription_is_active(subscription_status):\n        return False",
+    "replace": "    if tier is None:\n        return False",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_gate.py"
+    ]
+  },
+  {
+    "label": "an ORG key stored on a site resolves — one site is handed the analytics an org flat buys for twenty-five",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    tier = site_plan_catalog.site_scoped_tier(plan_tier)\n    if tier is None or not _subscription_is_active(subscription_status):",
+    "replace": "    tier = site_plan_catalog.get_site_plan(plan_tier)\n    if tier is None or not _subscription_is_active(subscription_status):",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_gate.py"
+    ]
+  },
+  {
+    "label": "the publish path stops passing the resolved entitlement — the deploy writer's counting default wins and the gate is dead code",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            site_id, build.project_dir, engine=engine, analytics_entitled=counts_pageviews",
+    "replace": "            site_id, build.project_dir, engine=engine",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_gate.py"
+    ]
+  },
+  {
+    "label": "the kill switch does nothing — the one mitigation for a Workers-free-plan ceiling breach needs a deploy instead of an env var",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "    return entitled and not counting_disabled()",
+    "replace": "    return entitled",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_gate.py"
+    ]
+  },
+  {
+    "label": "the kill switch fires on any value including =false, so an operator who explicitly disables it turns the feature off",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "    return os.environ.get(_DISABLED_ENV, \"\").strip().lower() in _TRUTHY",
+    "replace": "    return bool(os.environ.get(_DISABLED_ENV, \"\"))",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_gate.py"
+    ]
+  },
+  {
+    "label": "the un-analytics config keeps the ASSETS binding — the kill switch restores a shape that is nearly the pre-analytics one, which is not a rollback",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "                        \"assets\": {\"directory\": output_rel},",
+    "replace": "                        \"assets\": {\"binding\": \"ASSETS\", \"directory\": output_rel},",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_gate.py"
+    ]
+  },
+  {
+    "label": "a stale entry survives a paid-to-free republish — wrangler uploads it as an ordinary asset and the per-publish hash salt is downloadable",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "        entry_path.unlink(missing_ok=True)",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_gate.py"
+    ]
+  },
+  {
+    "label": "the server-worker branch stops being excluded — a ripple / dynamic svelte deploy names our counter as main over SvelteKit's own worker",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "    count_pageviews = not emits_worker and analytics_worker.counting_enabled(",
+    "replace": "    count_pageviews = analytics_worker.counting_enabled(",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py",
+      "tests/ee/sites/test_sites_analytics_gate.py"
+    ]
+  },
+  {
+    "label": "the local server copies the deploy scaffold again — it serves the generated entry, and with it the salt that makes the visitor hash irreversible",
+    "file": "ee/pocketpaw_ee/sites/local_server.py",
+    "find": "    shutil.copytree(src, dest, ignore=shutil.ignore_patterns(*_DEPLOY_SCAFFOLD_NAMES))",
+    "replace": "    shutil.copytree(src, dest)",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_gate.py"
+    ]
+  },
+  {
+    "label": "the ignore list drops the generated entry and keeps only the wrangler config — the salt is served while the copy looks filtered",
+    "file": "ee/pocketpaw_ee/sites/local_server.py",
+    "find": "_DEPLOY_SCAFFOLD_NAMES = (\n    analytics_worker.ENTRY_FILENAME,\n",
+    "replace": "_DEPLOY_SCAFFOLD_NAMES = (\n",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_gate.py"
+    ]
+  }
+]

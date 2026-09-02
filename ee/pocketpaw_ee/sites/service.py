@@ -1,6 +1,24 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-02 (feat/sites-analytics-gate, SA-2): the workers deploy now carries
+# whether THIS site's plan buys the visitor pageview counter. SA-1 wired that counter
+# onto every assets-only publish; a Worker invocation is billed where a static asset is
+# not, so a free site was costing money for numbers nobody paid for.
+#
+# The resolution belongs HERE and nowhere lower, because this is the only layer that
+# can see the Site document the plan lives on — ``_site_counts_pageviews`` reads the
+# two billing fields and hands them to ``entitlements.site_analytics_entitled``, which
+# is the single predicate the read endpoint gates on too. The deploy writer defaults to
+# counting, so the gate is worth nothing unless this call is actually made; that is
+# asserted end to end in ``tests/ee/sites/test_sites_analytics_gate.py`` rather than
+# left to the deploy writer's own unit tests, which would pass either way.
+#
+# ``provision_deploy`` (the dynamic lane) passes False outright. It holds a site id and
+# a directory and cannot resolve a plan from either, and a dynamic site's ``main`` is
+# already SvelteKit's own worker — so the honest value is a stated False rather than an
+# inherited default.
+#
 # Updated 2026-09-01 (fix/sites-html-orphan-create): ``edit_html_file`` gains the
 # same ``unreferenced`` verdict, for the same defect on the track where it costs
 # more. An unimported react component is invisible; an unlinked html page is written
@@ -2843,7 +2861,16 @@ async def _deploy_site_doc(
         # HE-4 / RX-1: pass the engine so an html OR react site deploys as an
         # assets-only Worker (no server script — react builds, but to a prerendered
         # static dist/), while ripple/svelte keep the SvelteKit-worker config.
-        url = await deploy_w(site_id, build.project_dir, engine=engine)
+        #
+        # SA-2: and pass whether this site's plan buys the visitor counter. Resolved
+        # HERE rather than defaulted in the deployer, because this is the only layer
+        # that can see the Site document the plan lives on — a Worker invocation is
+        # billed where a static asset is not, so a free site must deploy the config
+        # that ships no Worker at all.
+        counts_pageviews = await _site_counts_pageviews(workspace_id=workspace_id, site_id=site_id)
+        url = await deploy_w(
+            site_id, build.project_dir, engine=engine, analytics_entitled=counts_pageviews
+        )
     else:  # "wfp"
         cf = cloudflare or _cf_client()
         bundle = bundle_reader(build.project_dir)
@@ -3202,6 +3229,44 @@ async def _stamp_free_badge(
         len(changed),
         site_id,
     )
+
+
+async def _site_counts_pageviews(*, workspace_id: str, site_id: str) -> bool:
+    """May this site's visitors be counted? Resolved from its OWN per-site plan.
+
+    The publish path's read of ``entitlements.site_analytics_entitled`` (SA-2), which
+    is where the RULE lives — this function only fetches the two billing fields that
+    predicate takes. The read endpoint (SA-4) calls the same predicate over the same
+    fields, which is the whole reason it is a named function rather than a condition
+    written twice: a site whose publish counted but whose read refuses is a customer
+    paying for a blank chart.
+
+    A SEPARATE DOCUMENT READ from ``_stamp_free_badge``'s, deliberately. Sharing one
+    would mean threading a resolved object through two seams with opposite failure
+    postures — the badge aborts a publish, this one only decides a config key — and
+    this file already reads the doc per question (the concierge embed and the D1 id do
+    the same). One extra ``find_one`` on a path that runs a full site build is not the
+    cost worth trading that clarity for.
+
+    Fails closed on a missing doc, exactly as the badge does and for a related reason.
+    A FIRST publish reaches here before the ``Site`` row is inserted, so "no doc" has
+    to mean "free": ``getattr(None, "plan_tier", None)`` is already that answer. The
+    consequence is a real one and belongs on screen rather than buried here — a site's
+    first publish never counts, and nothing backfills what was not recorded.
+    """
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+    entitled = entitlements_service.site_analytics_entitled(
+        plan_tier=getattr(doc, "plan_tier", None),
+        subscription_status=getattr(doc, "subscription_status", None),
+    )
+    if not entitled:
+        logger.info(
+            "sites: site %s is not entitled to visitor analytics — deploying with no counter",
+            site_id,
+        )
+    return entitled
 
 
 def _with_deployed_host(allowed_origins: list[str], url: str) -> list[str]:
@@ -4174,8 +4239,15 @@ async def provision_deploy(
     if mode == "workers":
         from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
 
+        # SA-2 — explicitly NOT counting, rather than riding the deployer's default.
+        # This lane provisions DYNAMIC sites, whose ``main`` is already SvelteKit's own
+        # worker, so no counter can be bolted in front of it from a config key and the
+        # answer is False whatever the plan says. Stating it here means a build that
+        # somehow resolved assets-only on this lane still cannot deploy a counter for a
+        # site whose plan was never consulted — this function holds a site id and a
+        # directory, and cannot resolve one.
         url = await workers_deploy_mod.deploy_workers(
-            site_id, project_dir, d1_database_id=d1_database_id
+            site_id, project_dir, d1_database_id=d1_database_id, analytics_entitled=False
         )
         return url, "workers"
 
