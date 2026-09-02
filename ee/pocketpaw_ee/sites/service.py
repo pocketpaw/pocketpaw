@@ -997,6 +997,7 @@ import json
 import logging
 import re
 import secrets
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1024,10 +1025,15 @@ from pocketpaw_ee.cloud.models.site import SiteInvoice as _SiteInvoiceDoc
 from pocketpaw_ee.sites.build_state import claim_precondition
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
+    ANALYTICS_STATUS_NEVER_COUNTED,
+    ANALYTICS_STATUS_NOT_ENTITLED,
+    ANALYTICS_STATUS_OK,
     AuditFinding,
     AuditResponse,
     DevPreviewResponse,
     DomainStatusResponse,
+    SiteAnalyticsBreakdown,
+    SiteAnalyticsResponse,
     SiteClientResponse,
     SiteClientUpdate,
     SiteDataRowsResponse,
@@ -5071,6 +5077,392 @@ async def domain_status(
     await site.save()
     return DomainStatusResponse(
         hostname=dom.hostname, cname_target=dom.cname_target, status=status.value
+    )
+
+
+# ── SA-4: the visitor-analytics read ────────────────────────────────────────
+#
+# THE ONE RULE GOVERNING EVERYTHING BELOW: never invent a zero. Four situations can
+# produce an empty-looking dashboard and they are four different sentences to the
+# customer —
+#
+#   1. this plan does not buy analytics                    → ``not_entitled``
+#   2. it does, but nothing has ever been recorded         → ``never_counted``
+#   3. counting, and genuinely nobody visited              → ``ok`` with real zeros
+#   4. the read itself failed                              → an EXCEPTION, never a status
+#
+# Only the third is a report about traffic. Rendering the first two as "0 visitors"
+# tells a customer their marketing is not working when the truth is that they have not
+# upgraded, or have not republished since they did. And the fourth is deliberately not
+# a status value at all: a client that maps an unfamiliar status to "no data" would
+# turn a Cloudflare outage into a quiet week, so a failed read leaves as a CloudError
+# and arrives as an error response.
+#
+# THE WINDOWS ARE A CLOSED SET, and that is a SQL-injection control rather than a UX
+# choice. The Analytics Engine SQL endpoint takes raw text with no parameter binding
+# (see ``cloudflare_client.query_analytics_sql``), so nothing user-controlled may be
+# interpolated into a statement. A caller's ``window`` selects a row from this table
+# and never reaches the SQL; the only other substitution is the site id, which has
+# already round-tripped through ``ObjectId`` and is re-checked at the call site.
+#
+# Retention at Cloudflare is THREE MONTHS, so ``90d`` is the longest window that can
+# return anything and there is no point offering more.
+_ANALYTICS_WINDOWS: dict[str, int] = {"24h": 1, "7d": 7, "30d": 30, "90d": 90}
+_ANALYTICS_DEFAULT_WINDOW = "7d"
+
+# Cloudflare drops a row three months after it is written. On the wire (see
+# ``SiteAnalyticsResponse.retention_days``) so a UI can say why the earliest date it
+# offers is the one it offers, rather than looking like it lost the data.
+_ANALYTICS_RETENTION_DAYS = 90
+
+# How many rows a breakdown returns. A top-N list, not a full inventory: a site with
+# four thousand paths would otherwise send four thousand rows to render ten.
+_ANALYTICS_BREAKDOWN_LIMIT = 10
+
+# THE CACHE. A dashboard reload must not be a Cloudflare round trip: Analytics Engine
+# bills READ queries and the free allowance is 10,000 a day for the whole account,
+# which four people leaning on F5 can spend by lunchtime. One entry per (site, window)
+# holding the assembled response.
+#
+# Sixty seconds, chosen against what the data can actually do rather than picked round.
+# The counter writes a row per pageview with no aggregation delay, so a shorter TTL
+# buys freshness that visitors cannot produce; a longer one starts to feel stale on the
+# release-day reload this panel exists for.
+#
+# IN-PROCESS AND DELIBERATELY NOT SHARED. A second API replica keeps its own, so the
+# worst case is one query set per replica per minute rather than one per account —
+# still far under the allowance, and it costs no Redis dependency on a read whose whole
+# value is being cheap. Bounded so a workspace with thousands of sites cannot grow it
+# without limit.
+#
+# ONLY SUCCESSES ARE CACHED. A failed read raises, and caching a failure would extend a
+# Cloudflare blip into a minute of errors for everyone.
+_ANALYTICS_CACHE_TTL_SECONDS = 60.0
+_ANALYTICS_CACHE_MAX_ENTRIES = 512
+_analytics_cache: dict[tuple[str, str, str], tuple[float, SiteAnalyticsResponse]] = {}
+
+
+def _analytics_cache_get(key: tuple[str, str, str]) -> SiteAnalyticsResponse | None:
+    """The cached response for this (workspace, site, window), or None.
+
+    ``monotonic`` rather than wall time so an NTP correction or a DST jump cannot make
+    an entry look hours old — or hours in the future, which would pin it forever."""
+    hit = _analytics_cache.get(key)
+    if hit is None:
+        return None
+    expires_at, response = hit
+    if time.monotonic() >= expires_at:
+        _analytics_cache.pop(key, None)
+        return None
+    return response
+
+
+def _analytics_cache_put(key: tuple[str, str, str], response: SiteAnalyticsResponse) -> None:
+    """Cache one assembled response, evicting expired entries first.
+
+    The eviction sweep is what keeps this bounded without an LRU: entries expire in a
+    minute anyway, so dropping the dead ones is almost always enough. The hard cap
+    behind it clears the whole map rather than choosing a victim — at this size the
+    next request simply re-queries, and a correct dumb policy beats a clever one on a
+    cache whose entries are worth a fraction of a cent each."""
+    if len(_analytics_cache) >= _ANALYTICS_CACHE_MAX_ENTRIES:
+        now = time.monotonic()
+        for stale in [k for k, (expires_at, _) in _analytics_cache.items() if now >= expires_at]:
+            _analytics_cache.pop(stale, None)
+        if len(_analytics_cache) >= _ANALYTICS_CACHE_MAX_ENTRIES:
+            _analytics_cache.clear()
+    _analytics_cache[key] = (time.monotonic() + _ANALYTICS_CACHE_TTL_SECONDS, response)
+
+
+def _analytics_int(row: dict, key: str) -> int:
+    """One numeric cell out of an Analytics Engine row.
+
+    The SQL API answers JSON, and an aggregate comes back as a number or — for the
+    64-bit sums — as a STRING holding one, which is how ClickHouse-shaped APIs avoid
+    JavaScript's integer limit. Both are read; anything else is 0 rather than a 500,
+    because a malformed cell in one breakdown row must not cost the whole panel.
+
+    A missing key is 0 too, and that is safe HERE and only here: this runs after the
+    caller has established that the read SUCCEEDED. The "never invent a zero" rule is
+    about the four states above, not about a cell inside a row that really came back.
+
+    A string is parsed as an INTEGER FIRST and only then as a float. Going through
+    ``float`` unconditionally would round every count above 2^53 to the nearest even —
+    which is precisely the range the string encoding exists to protect, so the shortcut
+    would corrupt exactly the values it was written to handle."""
+    raw = row.get(key)
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        try:
+            return int(float(text))
+        except ValueError:
+            return 0
+    return 0
+
+
+def _analytics_label(row: dict, key: str, *, empty: str) -> str:
+    """One label cell, with the name an empty one is reported under.
+
+    A blank is a REAL answer for most of these dimensions and must not be dropped: an
+    empty referrer is a direct visit, an empty country is a request Cloudflare could
+    not geolocate. Silently discarding those rows would inflate every remaining
+    percentage — the classic way a chart lies without a single wrong number in it."""
+    raw = row.get(key)
+    text = raw.strip() if isinstance(raw, str) else ""
+    return text or empty
+
+
+def _analytics_breakdown(
+    rows: list[dict], *, label_key: str, empty: str
+) -> list[SiteAnalyticsBreakdown]:
+    """Map query rows onto breakdown rows, in the order the query returned them."""
+    return [
+        SiteAnalyticsBreakdown(
+            label=_analytics_label(row, label_key, empty=empty),
+            pageviews=_analytics_int(row, "pageviews"),
+            visitors=_analytics_int(row, "visitors"),
+        )
+        for row in rows
+    ]
+
+
+def _analytics_sql(*, select: str, site_id: str, days: int, group: str = "", limit: int = 0) -> str:
+    """Build ONE Analytics Engine statement over this site's pageview rows.
+
+    EVERY value interpolated here is one this module controls: ``site_id`` is
+    re-validated as a 24-character hex ObjectId immediately below, ``days`` comes from
+    ``_ANALYTICS_WINDOWS``, and ``select`` / ``group`` are literals written in this
+    file. Nothing a request carries reaches the statement, which is the contract the
+    SQL endpoint demands — it has no parameter binding, so a caller that interpolates a
+    request value has written an injection.
+
+    ``SUM(_sample_interval)`` rather than ``COUNT()``: Analytics Engine downsamples a
+    hot index and exposes the sampling rate per row, so a plain count under-reports
+    exactly the busiest sites — the ones most likely to notice. Distinct visitors are
+    counted the way they are stored, on the per-day hash in ``blob4``, so a visitor who
+    returns tomorrow counts twice. That is the privacy design rather than a defect: the
+    salt rotates at UTC midnight, so no join across days is possible even in principle.
+    """
+    if not re.fullmatch(r"[0-9a-f]{24}", site_id):
+        # Belt and braces behind ``_load``'s ObjectId round-trip. This is the last
+        # place before raw SQL, and the cost of being wrong is an injected query
+        # against the account's whole analytics dataset.
+        raise ValidationError("sites.invalid_site_id", "site_id is not a site identifier")
+    from pocketpaw_ee.sites import analytics_worker
+
+    parts = [
+        f"SELECT {select}",
+        f"FROM {analytics_worker.dataset_name()}",
+        f"WHERE index1 = '{site_id}' AND timestamp > NOW() - INTERVAL '{int(days)}' DAY",
+    ]
+    if group:
+        parts.append(f"GROUP BY {group}")
+        parts.append("ORDER BY pageviews DESC")
+    if limit:
+        parts.append(f"LIMIT {int(limit)}")
+    parts.append("FORMAT JSON")
+    return "\n".join(parts)
+
+
+# The dimensions a stored row can answer, and the blob each sits in. The layout is a
+# CONTRACT with ``analytics_worker`` — Analytics Engine columns are positional and have
+# no names, so reading the wrong blob silently reports referrers as countries.
+#
+# ``blob5`` is a DEVICE CLASS that may or may not be there. A row written before SA-3
+# has four blobs and a row written after has five; Analytics Engine has no schema and
+# answers an empty string for a blob a row never carried, so both shapes arrive here in
+# one window and neither may crash. See ``_analytics_devices`` for what an empty one
+# means and why it is bucketed rather than dropped.
+_ANALYTICS_DIMENSIONS: tuple[tuple[str, str, str], ...] = (
+    ("top_pages", "blob1", "(unknown)"),
+    ("referrers", "blob2", "(direct)"),
+    ("countries", "blob3", "(unknown)"),
+    ("devices", "blob5", "unknown"),
+)
+
+
+async def site_analytics(
+    *,
+    workspace_id: str,
+    site_id: str,
+    window: str = _ANALYTICS_DEFAULT_WINDOW,
+    _cloudflare: Any | None = None,
+) -> SiteAnalyticsResponse:
+    """Visitor analytics for ONE site over ONE window (GET /sites/{id}/analytics).
+
+    Tenant-scoped through ``_load``, so a missing, malformed or cross-tenant site id is
+    a 404 exactly as it is on every sibling per-site read. That check runs FIRST — a
+    caller must not be able to learn that another workspace's site exists by watching
+    which error comes back.
+
+    Entitlement is resolved through ``entitlements.site_analytics_entitled``, the SAME
+    predicate the publish path gates the counter on. Not a second copy: a site whose
+    publish counted but whose read refuses is a customer paying for a blank chart, and
+    the reverse serves numbers a site was never entitled to gather.
+
+    THE FOUR OUTCOMES, and why three of them return no numbers at all:
+
+    * NOT ENTITLED — nothing was ever recorded and nothing can be until the plan
+      changes. The metrics stay None so a UI that renders them without reading the
+      status shows blanks rather than a confident zero.
+    * NEVER COUNTED — entitled, but ``analytics_since`` is None, which after the SA-4
+      write rule means precisely "no publish has deployed a counter, so nothing is
+      recording". Republishing starts it; upgrading does not backfill, because the rows
+      do not exist to backfill from.
+    * OK — a counter is up. The numbers are real, and they may legitimately be zero.
+    * THE READ FAILED — this raises. ``query_analytics_sql`` is fail-closed by design
+      and its ValidationError travels out of here untouched, because a failed read is
+      not a report about the site's traffic and must not arrive shaped like one.
+
+    ``devices`` may come back None with ``"devices"`` in ``unrecorded`` — see
+    ``_analytics_devices``.
+    """
+    doc = await _load(workspace_id, site_id)
+
+    window = window.strip() or _ANALYTICS_DEFAULT_WINDOW
+    days = _ANALYTICS_WINDOWS.get(window)
+    if days is None:
+        raise ValidationError(
+            "sites.invalid_analytics_window",
+            f"window must be one of: {', '.join(sorted(_ANALYTICS_WINDOWS))}",
+        )
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    entitled = entitlements_service.site_analytics_entitled(
+        plan_tier=getattr(doc, "plan_tier", None),
+        subscription_status=getattr(doc, "subscription_status", None),
+    )
+    if not entitled:
+        return _analytics_empty(site_id, window, ANALYTICS_STATUS_NOT_ENTITLED, None)
+
+    since = getattr(doc, "analytics_since", None)
+    if since is None:
+        # Exactly "counting is off", after the write rule that CLEARS this field on a
+        # publish carrying no counter. Nothing to query, and querying anyway would
+        # spend a billed read to confirm an emptiness whose reason is already known.
+        return _analytics_empty(site_id, window, ANALYTICS_STATUS_NEVER_COUNTED, None)
+
+    # The cache is checked AFTER the two states above, which cost nothing to recompute,
+    # and after ``_load``, so a cached entry can never answer a cross-tenant request.
+    cache_key = (workspace_id, site_id, window)
+    cached = _analytics_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    cf = _cloudflare or _cf_client()
+    totals_rows = await cf.query_analytics_sql(
+        _analytics_sql(
+            select="SUM(_sample_interval) AS pageviews, COUNT(DISTINCT blob4) AS visitors",
+            site_id=site_id,
+            days=days,
+        )
+    )
+    # An aggregate with no GROUP BY answers exactly one row. No rows at all means the
+    # window held no data — a real answer, and the ``ok``-with-zeros state rather than a
+    # failure. A failure would already have raised out of the client.
+    totals = totals_rows[0] if totals_rows else {}
+
+    breakdowns: dict[str, list[SiteAnalyticsBreakdown]] = {}
+    for field, blob, empty in _ANALYTICS_DIMENSIONS:
+        rows = await cf.query_analytics_sql(
+            _analytics_sql(
+                select=(
+                    f"{blob} AS label, SUM(_sample_interval) AS pageviews, "
+                    "COUNT(DISTINCT blob4) AS visitors"
+                ),
+                site_id=site_id,
+                days=days,
+                group="label",
+                limit=_ANALYTICS_BREAKDOWN_LIMIT,
+            )
+        )
+        breakdowns[field] = _analytics_breakdown(rows, label_key="label", empty=empty)
+
+    devices, unrecorded = _analytics_devices(breakdowns["devices"])
+    response = SiteAnalyticsResponse(
+        site_id=site_id,
+        window=window,
+        status=ANALYTICS_STATUS_OK,
+        counting_since=_analytics_iso(since),
+        retention_days=_ANALYTICS_RETENTION_DAYS,
+        pageviews=_analytics_int(totals, "pageviews"),
+        visitors=_analytics_int(totals, "visitors"),
+        top_pages=breakdowns["top_pages"],
+        referrers=breakdowns["referrers"],
+        countries=breakdowns["countries"],
+        devices=devices,
+        unrecorded=unrecorded,
+    )
+    _analytics_cache_put(cache_key, response)
+    return response
+
+
+def _analytics_devices(
+    rows: list[SiteAnalyticsBreakdown],
+) -> tuple[list[SiteAnalyticsBreakdown] | None, list[str]]:
+    """Split the device breakdown into what to serve and what to declare unrecorded.
+
+    THE ROW SHAPE CHANGED UNDER THIS READER, which is why this is its own function. A
+    pageview row written before SA-3's device class holds four blobs; one written after
+    holds five. Analytics Engine has no schema and no column names — a blob a row never
+    carried reads as an empty string — so both shapes arrive here together inside a
+    single window, and neither may crash.
+
+    An EMPTY device label is therefore ambiguous in one direction only: it is a row that
+    recorded nothing about the device, whether because it predates the change or because
+    the class could not be determined. Either way it belongs in the ``unknown`` bucket
+    rather than being discarded, since discarding it would rescale every real device's
+    share against a smaller total.
+
+    When EVERY row is unknown the dimension is not answered-and-empty, it is
+    unanswerable: SA-3 has not landed, or nothing has been published since it did. That
+    returns None plus ``"devices"`` in ``unrecorded``, which a client renders as "not
+    recorded" instead of as a chart of one bar called unknown. An empty list would read
+    as "no devices", and omitting the field is indistinguishable from a version skew.
+    """
+    if not rows or all(row.label == "unknown" for row in rows):
+        return None, ["devices"]
+    return rows, []
+
+
+def _analytics_iso(moment: datetime) -> str:
+    """A stored stamp as an ISO-8601 string in UTC.
+
+    Mongo stores a datetime with no zone, so a value written as tz-aware reads back
+    NAIVE. Putting that on the wire bare would let a client read a UTC instant as its
+    own local time — a silent several-hour lie about when counting started, which is
+    the very value a chart's x-axis begins at.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC).isoformat()
+
+
+def _analytics_empty(
+    site_id: str, window: str, status: str, since: datetime | None
+) -> SiteAnalyticsResponse:
+    """A response carrying a STATUS and no numbers.
+
+    Every metric is left at its None default rather than zeroed, and that is the point
+    of the shape: a client that renders the numbers without reading the status shows
+    blanks, which is honest, instead of zeros, which are a claim about traffic nobody
+    measured.
+    """
+    return SiteAnalyticsResponse(
+        site_id=site_id,
+        window=window,
+        status=status,
+        counting_since=_analytics_iso(since) if since is not None else None,
+        retention_days=_ANALYTICS_RETENTION_DAYS,
     )
 
 
