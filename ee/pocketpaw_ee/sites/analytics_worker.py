@@ -17,6 +17,13 @@
 # When counting is off the emitted config is the PRE-ANALYTICS one, byte for byte,
 # and no entry is written — see ``workers_deploy._wrangler_jsonc``.
 #
+# Updated 2026-09-02 (feat/sites-analytics-shim, SA-3) — the row grew a fifth blob: a
+# COARSE DEVICE CLASS (``desktop`` / ``mobile`` / ``tablet`` / ``unknown``) at
+# ``blobs[4]``, derived from the user-agent this Worker was already parsing for the bot
+# filter and the visitor hash. It is appended, never inserted, and rows written before
+# it carry four blobs forever — the reader tolerates both. The full argument for why it
+# is this coarse, and why the append is not negotiable, is in the row contract below.
+#
 # SHAPE MIRRORS ``badge.py`` / ``paw_bar/embed.py`` — a per-site injection into the
 # artifact between build and deploy, so what lands is already correct and there is no
 # second deploy and no post-publish patch. What differs is WHAT is injected: those two
@@ -140,10 +147,26 @@
 #   blobs[1]   — referrer host, empty for a direct visit or a same-site link.
 #   blobs[2]   — ``request.cf.country``.
 #   blobs[3]   — the visitor hash.
+#   blobs[4]   — the device class: ``desktop`` / ``mobile`` / ``tablet`` / ``unknown``.
 #   doubles[0] — 1, the pageview.
 #
 # Do not reorder these without changing the reader in the same PR: Analytics Engine
-# columns are positional and have no names.
+# columns are positional and have no names. APPEND-ONLY for the same reason: SA-3 added
+# ``blobs[4]`` at the END rather than anywhere more logical, because inserting it
+# earlier would silently re-label every row already in the dataset, and the retention
+# window is three months. Rows written before SA-3 carry FOUR blobs and are not
+# backfilled — Analytics Engine has no update — so the reader must tolerate both
+# lengths and read a missing device as ``unknown``.
+#
+# WHY A DEVICE CLASS IS THE ONE THING WORTH ADDING HERE, and why it is this coarse. The
+# user-agent is already parsed on this path (the bot filter reads it, and it is an
+# input to the visitor hash), but the hash is one-way and the string itself is never
+# stored, so a device breakdown is not recoverable later from what is in the row — it
+# has to be derived at write time or not at all. FOUR VALUES IS THE CEILING, not a
+# starting point: the privacy claim this whole feature rests on is that a row cannot be
+# traced to a person, and every bit of user-agent entropy that reaches the row chips at
+# it. A browser name, a version, an OS build, a screen size — each is individually
+# reasonable and collectively a fingerprint. Two bits is not.
 
 from __future__ import annotations
 
@@ -358,6 +381,33 @@ export function isBot(ua) {{
   return BOT_RE.test(ua);
 }}
 
+// The device class stored as blobs[4] — FOUR VALUES AND NO MORE. See the row contract
+// in analytics_worker.py for why the ceiling is the point rather than a first pass: the
+// user-agent is the highest-entropy thing this Worker touches, and the row's privacy
+// claim survives only while what lands in it cannot single anyone out.
+//
+// ORDER IS LOAD-BEARING. Tablet is tested FIRST because a tablet's user-agent is a
+// superset of a phone's on both platforms that matter: an iPad announces `iPad` beside
+// `Mobile`, and an Android tablet is an Android that OMITS `Mobile` — which is why the
+// Android arm is a negative lookahead rather than a token. Testing mobile first would
+// file every iPad under mobile and every Android tablet under desktop.
+//
+// Desktop is a POSITIVE match on a platform token, not the fallback. Making it the
+// fallback would label every unrecognised string `desktop` and quietly inflate the one
+// number a site owner is most likely to act on; `unknown` is the honest answer for a
+// user-agent this does not recognise, and it stays reachable because of that choice.
+const TABLET_RE = /(ipad|tablet|playbook|silk|kindle|android(?!.*mobile))/i;
+const MOBILE_RE = /(android|iphone|ipod|iemobile|blackberry|opera mini|mobile|phone)/i;
+const DESKTOP_RE = /(windows nt|macintosh|mac os x|x11|linux|cros)/i;
+
+export function deviceClass(ua) {{
+  if (!ua) return "unknown";
+  if (TABLET_RE.test(ua)) return "tablet";
+  if (MOBILE_RE.test(ua)) return "mobile";
+  if (DESKTOP_RE.test(ua)) return "desktop";
+  return "unknown";
+}}
+
 // The salt's rotating half: the UTC calendar day. Rotating at midnight is what makes
 // the visitor hash self-expiring — today's hash cannot be joined to yesterday's.
 export function dayKey(nowMs) {{
@@ -409,6 +459,7 @@ export async function count(request, env, nowMs) {{
         referrerHost(request, url.host),
         (request.cf && request.cf.country) || "",
         visitor,
+        deviceClass(ua),
       ],
       doubles: [1],
     }});

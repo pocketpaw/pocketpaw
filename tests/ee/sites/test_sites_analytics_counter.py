@@ -4,6 +4,14 @@
 #
 # Created 2026-09-02 (feat/sites-analytics-counter).
 #
+# Updated 2026-09-02 (feat/sites-analytics-shim, SA-3) — the row grew ``blobs[4]``, a
+# coarse device class. The tests for it live HERE rather than beside the shim, because
+# what they pin is this file's subject: the shape of the row the counting core writes,
+# which both generated entries share. The section at the foot asserts the append is an
+# APPEND — positions 0 through 3 read the same in the row that carries a device as they
+# did before there was one — since a shifted column silently re-labels three months of
+# history and nothing else in the suite would notice.
+#
 # THE CENTRE OF THIS FILE IS THE COST MODEL, not the config keys. Cloudflare bills a
 # Worker invocation and serves a static asset free, so a ``run_worker_first`` rule that
 # matches a page's subresources multiplies the per-pageview cost by roughly twenty.
@@ -538,7 +546,7 @@ def test_server_worker_branch_gets_no_counter(tmp_path):
 # ── driving the generated Worker under node ──────────────────────────────────
 
 _DRIVER_PRELUDE = """
-import worker, { isBot, dayKey, visitorHash, count } from "./entry.mjs";
+import worker, { isBot, dayKey, visitorHash, count, deviceClass } from "./entry.mjs";
 
 const request = (url, headers = {}, cf = {}) => ({
   url,
@@ -813,3 +821,162 @@ emit({ referrers: rec.rows.map((row) => row.blobs[1]) });
     )
 
     assert out["referrers"] == ["", "", ""]
+
+
+# ── SA-3: the device class at blobs[4] ───────────────────────────────────────
+
+# One user-agent per class, all real. The Android pair is the reason the classifier
+# tests tablet first: an Android TABLET is an Android that omits ``Mobile``, so the two
+# strings differ by one token and a naive order files the tablet under desktop.
+_DEVICE_AGENTS = {
+    "desktop": HUMAN_UA,
+    "mobile": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+    ),
+    "tablet": (
+        "Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+    ),
+    "unknown": "Mozilla/5.0",
+}
+
+
+def test_the_row_carries_a_device_class_at_blob_four(tmp_path):
+    """SA-3's half of the row contract, driven end to end through the default handler
+    rather than through ``deviceClass`` alone — a classifier that is right and a
+    ``count`` that never calls it would pass the unit check and store nothing."""
+    out = _run_node(
+        tmp_path,
+        """
+const rec = recorder();
+const pending = [];
+const res = await worker.fetch(
+  request(
+    "https://site.example.dev/about.html",
+    { "user-agent": HUMAN, "cf-connecting-ip": "203.0.113.9" },
+    { country: "DE" },
+  ),
+  { ASSETS: page(200), PAW_ANALYTICS: rec },
+  { waitUntil: (p) => pending.push(p) },
+);
+await Promise.all(pending);
+emit({ status: res.status, rows: rec.rows });
+""",
+    )
+
+    assert out["status"] == 200
+    assert len(out["rows"]) == 1
+    assert out["rows"][0]["blobs"][4] == "desktop"
+
+
+def test_the_device_class_is_appended_and_shifts_nothing(tmp_path):
+    """THE MUTATION THIS SECTION EXISTS FOR. Analytics Engine columns are positional
+    and unnamed, so inserting the device anywhere but the end re-labels every row
+    already written — three months of them, unfixably, because there is no update.
+
+    Asserted on the row that CARRIES the device, so it cannot pass by reading a
+    pre-SA-3 row: path, referrer host, country and visitor hash must still be at 0, 1,
+    2 and 3 with the fifth blob present beside them."""
+    out = _run_node(
+        tmp_path,
+        """
+const rec = recorder();
+await count(
+  request(
+    "https://site.example.dev/docs/guide.html",
+    { "user-agent": HUMAN, "cf-connecting-ip": "203.0.113.9",
+      referer: "https://news.example.com/story" },
+    { country: "DE" },
+  ),
+  { PAW_ANALYTICS: rec },
+);
+emit({ rows: rec.rows });
+""",
+    )
+
+    blobs = out["rows"][0]["blobs"]
+    assert blobs[0] == "/docs/guide.html"
+    assert blobs[1] == "news.example.com"
+    assert blobs[2] == "DE"
+    assert re.fullmatch(r"[0-9a-f]{32}", blobs[3])
+    assert blobs[4] == "desktop"
+    assert len(blobs) == 5
+    assert out["rows"][0]["doubles"] == [1]
+
+
+def test_every_device_class_is_reachable_and_correct(tmp_path):
+    """All four values, one real user-agent each — including ``unknown``, which is only
+    reachable because desktop is a POSITIVE platform match rather than the fallback. A
+    classifier that returned ``desktop`` for anything unrecognised would inflate the
+    number a site owner is most likely to act on, and no other test here would see it.
+
+    The Android pair is the ordering trap: the two strings differ by the ``Mobile``
+    token alone."""
+    out = _run_node(
+        tmp_path,
+        """
+const agents = %s;
+emit({ classes: Object.fromEntries(Object.entries(agents).map(([k, ua]) => [k, deviceClass(ua)])) });
+"""
+        % json.dumps(
+            {
+                **_DEVICE_AGENTS,
+                "android-phone": (
+                    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+                ),
+                "android-tablet": (
+                    "Mozilla/5.0 (Linux; Android 14; SM-X700) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+                ),
+                "windows": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+                ),
+                "linux": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+                ),
+                "empty": "",
+            }
+        ),
+    )
+
+    assert out["classes"] == {
+        "desktop": "desktop",
+        "mobile": "mobile",
+        "tablet": "tablet",
+        "unknown": "unknown",
+        "android-phone": "mobile",
+        "android-tablet": "tablet",
+        "windows": "desktop",
+        "linux": "desktop",
+        "empty": "unknown",
+    }
+
+
+def test_the_device_class_never_carries_the_user_agent(tmp_path):
+    """The privacy ceiling, asserted as a property of the stored row rather than as a
+    promise in a comment. The user-agent is the highest-entropy thing this Worker
+    touches; the row's claim is that it cannot single anyone out, so what lands in
+    ``blobs[4]`` must be one of exactly four words and never a substring of the agent
+    that produced it."""
+    out = _run_node(
+        tmp_path,
+        """
+const agents = %s;
+const rec = recorder();
+for (const ua of Object.values(agents)) {
+  await count(request("https://site.example.dev/", { "user-agent": ua }), { PAW_ANALYTICS: rec });
+}
+emit({ devices: rec.rows.map((row) => row.blobs[4]), rows: rec.rows.length });
+"""
+        % json.dumps(_DEVICE_AGENTS),
+    )
+
+    assert out["rows"] == len(_DEVICE_AGENTS)
+    assert set(out["devices"]) <= {"desktop", "mobile", "tablet", "unknown"}
+    # Nothing version-shaped, platform-shaped or otherwise narrowing rides along.
+    for device in out["devices"]:
+        assert re.fullmatch(r"desktop|mobile|tablet|unknown", device)
