@@ -55,6 +55,12 @@
 #   attribution a chat row has. ``spend_log_count`` exists for the sweep's coverage
 #   check: it asks for one row and reads the ``total``, which is how unattributed
 #   spend becomes visible rather than merely uncharged.
+# Updated 2026-09-02 (fix/bill-workspaces-the-sweep-cannot-see): added
+#   ``list_customers`` (GET /customer/list). The spend reads above can only be
+#   aimed at a customer id somebody already knows; every caller got that list from
+#   our OWN provisioning table, so a workspace that spends without a provisioned
+#   key was unreachable by any of them. This asks the PROXY who spent instead,
+#   which is the only source that includes those workspaces.
 
 from __future__ import annotations
 
@@ -398,6 +404,60 @@ class LiteLLMAdminClient:
             page_size=1,
         )
         return total
+
+    async def list_customers(self) -> list[str]:
+        """Every customer id the proxy has recorded spend against.
+
+        ``GET /customer/list``. A customer is what LiteLLM calls the ``user`` field
+        on a request body, which for us is the workspace that should pay — so this
+        is the proxy's own answer to "who has been spending", independent of
+        anything we provisioned.
+
+        That independence is the point. Every other spend read here takes a
+        customer id or a virtual key from the caller, and the only list of those we
+        kept was our provisioning table. A workspace that never minted a key is
+        absent from that table, so its spend was unreadable and therefore unbilled,
+        while the coverage check reported it as untagged. Both symptoms came from
+        asking ourselves who the tenants were instead of asking the proxy.
+
+        Ids only. The endpoint also returns a lifetime ``spend`` per customer, but
+        that is a running total the proxy never resets, so billing off it would
+        re-charge history on every sweep; the per-window row reads stay the source
+        of truth for money.
+        """
+        async with self._client() as client:
+            resp = await client.get(f"{self._base_url}/customer/list")
+
+        # This route answers with a bare JSON list, not the ``{"data": [...]}``
+        # envelope the /spend routes use.
+        if resp.status_code // 100 != 2:
+            raise LiteLLMAdminError(f"LiteLLM admin /customer/list returned {resp.status_code}")
+        try:
+            body = resp.json()
+        except Exception as exc:
+            raise LiteLLMAdminError(
+                "LiteLLM admin /customer/list returned a malformed body"
+            ) from exc
+
+        if isinstance(body, list):
+            rows: list[Any] = body
+        elif isinstance(body, dict) and isinstance(body.get("data"), list):
+            rows = body["data"]
+        else:
+            return []
+
+        customers: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            # ``user_id`` is LiteLLM's column name for the customer id. Blank ids
+            # are dropped rather than passed on: an empty string is a legal Mongo
+            # query that matches no workspace, so it would read as a tenant with
+            # no spend forever instead of as the malformed row it is.
+            cid = str(row.get("user_id") or "").strip()
+            if cid:
+                customers.append(cid)
+        return customers
 
     async def delete_keys(self, keys: list[str]) -> dict[str, Any]:
         """POST /key/delete — revoke the given virtual keys. Used by the live-check

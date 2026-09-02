@@ -37,6 +37,10 @@
 # ``SpendReconciliation`` — the value object returned by the shadow-mode compare
 # (``service.reconcile_tenant_spend``). Distinct from the Beanie doc of the same
 # concept; this is the framework-free shape the sweep logs + the doc is built from.
+# Updated 2026-09-02 (fix/bill-workspaces-the-sweep-cannot-see): ``SpendCoverage``
+# now splits its remainder into rows that name an unswept workspace and rows that
+# name none, and carries the unswept ids. One number could not tell an operator
+# which of two unrelated bugs they had.
 # Updated 2026-09-02 (feat/proxy-spend-ingest-by-customer): added ``SpendCoverage``
 # — what ``service.spend_attribution_coverage`` returns. It exists because the bug
 # that motivated this branch was invisible: chat spend was attributed to nobody, the
@@ -155,8 +159,19 @@ class SpendCoverage:
 
     ``total_rows`` is every spend row the proxy recorded in the window;
     ``attributed_rows`` is the sum of the per-tenant counts over the workspaces
-    checked. ``unattributed_rows`` is the remainder — requests that reached the
-    proxy carrying no workspace, or one nobody is sweeping.
+    checked. ``unattributed_rows`` is the remainder, and it has two very different
+    halves that this object now reports apart:
+
+      * ``unswept_rows`` — rows that DO name a workspace, but one the sweep was
+        not iterating. The request was tagged correctly and the bug is on our
+        side of the wire.
+      * the rest — rows carrying no workspace at all, which is the failure the
+        request-tagging exists to prevent.
+
+    They were one number until 2026-09-02, and conflating them cost real
+    debugging time: the log line blamed missing ``user`` fields while a third of
+    the window was tagged and simply unswept. A fix for one does nothing for the
+    other, so an operator has to be able to tell which they are looking at.
 
     Any non-zero remainder is a billing hole, and reading it as a ROW count rather
     than a dollar amount is deliberate: a count needs one cheap request per tenant
@@ -174,8 +189,13 @@ class SpendCoverage:
     total_rows: int
     attributed_rows: int
     unattributed_rows: int
-    workspaces_checked: int
-    degraded: bool
+    # The half of ``unattributed_rows`` that names a workspace the sweep skipped.
+    # ``unswept_workspaces`` lists those ids so the log can name them; an operator
+    # who can see the id can go and ask why it is not being swept.
+    unswept_rows: int = 0
+    unswept_workspaces: tuple[str, ...] = ()
+    workspaces_checked: int = 0
+    degraded: bool = False
 
 
 @dataclass(frozen=True)

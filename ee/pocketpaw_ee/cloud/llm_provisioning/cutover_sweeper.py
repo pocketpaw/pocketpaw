@@ -38,6 +38,14 @@
 # tenant never wedges the whole sweep — the same isolation the BC-3 sweep uses.
 #
 # Created 2026-06-26 (feat/litellm-billing-cutover, WU-F): new entity.
+# Updated 2026-09-02 (fix/bill-workspaces-the-sweep-cannot-see): the sweep now
+#   iterates ``list_sweepable_workspaces`` — provisioned tenants UNION the
+#   workspaces the proxy has customer spend for. It iterated provisioned tenants
+#   alone, and on the deployment where this was caught those two sets did not
+#   overlap at all: three tenants with keys and no spend, three customers with
+#   spend and no keys. Every tick logged ``3/3 tenants -> 0 credits`` and every
+#   chat dollar was free. The coverage remainder is also split now, because it
+#   read as "nobody sent a ``user`` field" while the rows were tagged fine.
 # Updated 2026-09-02 (feat/proxy-spend-ingest-by-customer): added the
 #   attribution-coverage check to both the shadow and live branches, and put
 #   ``unattributed`` in the summary dict so a caller sees it without reading logs.
@@ -85,13 +93,22 @@ async def run_cutover_sweep(*, mode: str | None = None) -> dict[str, int]:
         # Spend rows in the trailing window that no swept workspace claims. Zero is
         # the healthy value; anything else is served-and-unbilled compute.
         "unattributed": 0,
+        # The half of ``unattributed`` that names a workspace the sweep skipped —
+        # reported apart because it is a different bug with a different fix, and
+        # because the two were one number for the hours it took to tell them apart.
+        "unswept": 0,
     }
 
     if resolved == "off":
         # Nothing to do — BC-3 bills as today.
         return summary
 
-    workspaces = await provisioning_service.list_provisioned_workspaces()
+    # Every workspace with spend, not just every workspace with a KEY. Chat sends
+    # the deployment key and names its workspace in the request body, so a tenant
+    # can spend forever without ever appearing in the provisioning table — and did:
+    # the swept set and the spending set were completely disjoint in production
+    # while this read ``list_provisioned_workspaces``.
+    workspaces = await provisioning_service.list_sweepable_workspaces()
     summary["tenants"] = len(workspaces)
 
     # BEFORE the empty-tenant early return, deliberately. A deployment with no
@@ -99,11 +116,11 @@ async def run_cutover_sweep(*, mode: str | None = None) -> dict[str, int]:
     # failure this check exists for, and returning first would be the one case
     # where it says nothing.
     coverage_until = datetime.now(UTC)
-    summary["unattributed"] = (
-        await provisioning_service.spend_attribution_coverage(
-            workspaces, since=coverage_until - _SHADOW_WINDOW, until=coverage_until
-        )
-    ).unattributed_rows
+    coverage = await provisioning_service.spend_attribution_coverage(
+        workspaces, since=coverage_until - _SHADOW_WINDOW, until=coverage_until
+    )
+    summary["unattributed"] = coverage.unattributed_rows
+    summary["unswept"] = coverage.unswept_rows
 
     if not workspaces:
         return summary
@@ -153,13 +170,15 @@ async def run_cutover_sweep(*, mode: str | None = None) -> dict[str, int]:
                 )
         logger.info(
             "run_cutover_sweep[live]: ingested spend for %d/%d tenants -> %d credits, "
-            "%d failed, %d unattributed row(s) in the trailing window "
+            "%d failed, %d unattributed row(s) in the trailing window (%d of them "
+            "naming a workspace nobody swept) "
             "(LiteLLM is the sole meter; BC-3 gated off)",
             summary["processed"],
             summary["tenants"],
             summary["credits"],
             summary["failed"],
             summary["unattributed"],
+            summary["unswept"],
         )
         return summary
 
