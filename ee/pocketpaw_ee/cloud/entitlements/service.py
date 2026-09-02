@@ -74,6 +74,15 @@
 #   and one of them (the deploy) holds two strings rather than a resolved
 #   entitlements object. Keeping it a function is what makes both seams able to
 #   share the single predicate instead of each re-deriving it.
+# Updated 2026-09-02 (feat/sites-analytics-entitlement-field, SA-5):
+#   ``resolve_site_entitlements`` now also reports that answer as
+#   ``SiteEntitlements.analytics``, so the dashboard can disable the analytics panel
+#   and say why rather than calling the endpoint to be refused. This does NOT
+#   supersede the entry above: the function stays THE predicate and the field CALLS
+#   it, exactly as ``max_domained_sites`` calls ``site_domain_allowance``. The
+#   function exists for the seams that hold two strings and no resolved object; the
+#   field exists for the one reader that already has the object. Neither re-derives
+#   the rule, which is the only property that matters.
 
 from __future__ import annotations
 
@@ -296,6 +305,19 @@ def resolve_site_entitlements(
         plan_tier=plan_tier, subscription_status=subscription_status
     )
 
+    # --- The analytics grant, borrowed rather than re-derived ---------------- #
+    # Not folded into the paid branch below as ``ANALYTICS_FEATURE in
+    # tier.cloudflare_features``, even though that is what it reduces to.
+    # ``site_analytics_entitled`` is already THE predicate for this capability: the
+    # publish seam asks it to decide whether the deployed config carries a counter,
+    # and the read endpoint asks it to decide whether numbers may be served. A
+    # third expression of the rule here would be a third thing to keep in step, and
+    # the two ways it can fall out of step are both bad — a site counting traffic it
+    # is never shown, or a customer paying for a chart that refuses to load.
+    analytics = site_analytics_entitled(
+        plan_tier=plan_tier, subscription_status=subscription_status
+    )
+
     # --- PAID grants: the tier AND an active subscription ------------------- #
     # Written as an explicit branch rather than ``paid and tier.x`` so the
     # None-narrowing is visible to the type checker instead of resting on
@@ -325,6 +347,7 @@ def resolve_site_entitlements(
         # at the attach seam in ``sites.service``.
         custom_domain=max_domained_sites != 0,
         max_domained_sites=max_domained_sites,
+        analytics=analytics,
         # Echoed unchanged — the owner's switch is not a billing question. The
         # AND of the two is ``concierge_available``, which is what seams ask.
         concierge_enabled=bool(concierge_enabled),

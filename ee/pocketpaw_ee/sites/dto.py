@@ -12,6 +12,12 @@
 # not a status value at all — it is an error response, so an outage can never arrive
 # looking like a quiet week.
 #
+# Updated 2026-09-02 (SA-5 — the entitlement on the wire): added
+# ``SiteEntitlementsResponse.analytics``, resolved by the same predicate the publish
+# seam and the read endpoint use. Without it the dashboard's only way to learn that
+# a site's plan excludes analytics was to request the numbers and read the refusal,
+# which is the exact shape this response type was created to stop.
+#
 # Updated 2026-08-24 (SP-2 — draft preview joins the ephemeral build lane):
 # ``NativeArtifactResponse`` gained ``build_status`` / ``build_reason`` /
 # ``build_job_id`` and defaulted ``body_html`` / ``css`` to empty strings. A cold
@@ -735,6 +741,14 @@ class SiteEntitlementsResponse(BaseModel):
     catalog. ``subscription_active`` distinguishes a lapsed paid site from a site
     that never had the capability — the tier stays recorded, only the payment
     stopped, and the UI should say so.
+
+    ``analytics`` says whether this site's plan buys visitor counting. It is what
+    lets the panel disable itself with a reason BEFORE the call, and it is
+    deliberately not the last word: the analytics endpoint's own ``status`` is
+    authoritative, because entitlement alone cannot distinguish "your plan does not
+    include this" from "it does, and you have not republished since you upgraded".
+    Those need different sentences and different buttons. This field is the cheap
+    pre-check; the endpoint is the answer.
     """
 
     site_id: str
@@ -745,6 +759,7 @@ class SiteEntitlementsResponse(BaseModel):
     max_domained_sites: int | None = 0
     domained_sites_used: int = 0
     domain_slots_available: bool = False
+    analytics: bool = False
     concierge_entitled: bool = False
     concierge_enabled: bool = False
 
