@@ -10,6 +10,16 @@
 # 2026-08-15 (HTN-1): declares a ``narration`` — the reference implementation
 #   for humanized tool narration, so a search reads as "Searching the web for
 #   quarterly filings" instead of the bare tool name.
+# 2026-09-02 (fix/attribute-proxy-search-spend): the 'litellm' provider now names
+#   the paying workspace on the request. It authenticates with the DEPLOYMENT's
+#   key, so every search the agent ran was spend the billing sweep could not
+#   attribute to any tenant — served and never charged, and counted as untagged in
+#   the attribution-coverage check. Completions solved this with the body's
+#   ``user`` field; a search cannot use it, because this body is forwarded to the
+#   search vendor and the vendor rejects unknown fields (measured: Parallel AI
+#   returns ``extra_forbidden`` and the call 500s). The id rides the
+#   ``x-litellm-end-user-id`` header instead, which the proxy consumes and does
+#   not forward.
 
 import logging
 from typing import Any
@@ -248,6 +258,13 @@ class WebSearchTool(BaseTool):
             )
         tool_name = str(getattr(settings, "litellm_search_tool_name", "") or "web_search")
 
+        # The workspace this run bills to, or None outside a cloud chat dispatch.
+        # ``end_user_id_for`` owns the "is this our proxy" decision, and this branch
+        # only runs when the search is going to it.
+        from pocketpaw.agents.spend_attribution import end_user_id_for
+
+        end_user = end_user_id_for("litellm")
+
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
@@ -257,6 +274,23 @@ class WebSearchTool(BaseTool):
                         # was configured that way; sending an empty bearer is
                         # worse than sending none.
                         **({"Authorization": f"Bearer {key}"} if key else {}),
+                        # Name the workspace that pays for this search. Completions
+                        # do this with the request body's ``user`` field; a search
+                        # CANNOT, because the proxy forwards this body to the search
+                        # vendor and the vendor rejects fields it does not know —
+                        # Parallel AI answers a body-level ``user`` with
+                        # ``extra_forbidden`` and a 500, so the obvious version of
+                        # this fix breaks search outright. The header is read by the
+                        # proxy and stripped before the upstream call, which is why
+                        # it is the mechanism here.
+                        #
+                        # Without it every search the agent runs is spend no tenant
+                        # claims: the key on the request is the deployment's, shared
+                        # by everyone. Omitted entirely when there is no workspace
+                        # (a CLI turn, a background job) rather than sent blank —
+                        # the proxy treats an empty id as an id, which would pool
+                        # every untagged search under one nameless customer.
+                        **({"x-litellm-end-user-id": end_user} if end_user else {}),
                         "Content-Type": "application/json",
                     },
                     json={
