@@ -1,0 +1,256 @@
+[
+  {
+    "label": "an unentitled site is served real numbers — a free site sees analytics it never paid for, and the read disagrees with the publish that refused to deploy its counter",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not entitled:\n        return _analytics_empty(site_id, window, ANALYTICS_STATUS_NOT_ENTITLED, None)",
+    "replace": "    if False:\n        return _analytics_empty(site_id, window, ANALYTICS_STATUS_NOT_ENTITLED, None)",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "never-counted collapses into ok — a site that has not republished since upgrading is told nobody visited, which is the invented zero this whole slice exists to prevent",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        return _analytics_empty(site_id, window, ANALYTICS_STATUS_NEVER_COUNTED, None)",
+    "replace": "        return _analytics_empty(site_id, window, ANALYTICS_STATUS_OK, None)",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the empty states carry zeros instead of nulls — every one of the three renders as a panel of confident zeros, whatever the status says",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        counting_since=_analytics_iso(since) if since is not None else None,\n        retention_days=_ANALYTICS_RETENTION_DAYS,\n    )",
+    "replace": "        counting_since=_analytics_iso(since) if since is not None else None,\n        retention_days=_ANALYTICS_RETENTION_DAYS,\n        pageviews=0,\n        visitors=0,\n        top_pages=[],\n    )",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "a failed Cloudflare read is swallowed into an ok-with-zeros response — an outage arrives on the customer's dashboard looking exactly like a quiet week",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    cf = _cloudflare or _cf_client()\n    totals_rows = await cf.query_analytics_sql(\n        _analytics_sql(\n            select=\"SUM(_sample_interval) AS pageviews, COUNT(DISTINCT blob4) AS visitors\",\n            site_id=site_id,\n            days=days,\n        )\n    )",
+    "replace": "    cf = _cloudflare or _cf_client()\n    try:\n        totals_rows = await cf.query_analytics_sql(\n            _analytics_sql(\n                select=\"SUM(_sample_interval) AS pageviews, COUNT(DISTINCT blob4) AS visitors\",\n                site_id=site_id,\n                days=days,\n            )\n        )\n    except CloudError:\n        totals_rows = []",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the SQL client returns [] on a non-2xx instead of raising — the same outage-as-quiet-week failure, one layer lower, where it looks like ordinary defensive code",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "        if resp.status_code // 100 != 2:\r\n            raise ValidationError(\r\n                \"sites.cloudflare_error\",\r\n                f\"Analytics Engine SQL {resp.status_code}: {_error_detail(resp)}\",\r\n            )",
+    "replace": "        if resp.status_code // 100 != 2:\r\n            return []",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client.py",
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "a 2xx with no data array reads as an empty result — a contract break is reported as zero traffic rather than as a failure",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "        if not isinstance(rows, list):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client.py"
+    ]
+  },
+  {
+    "label": "the SQL body is sent as JSON instead of raw text — the endpoint has no JSON form, so every read fails against the real Cloudflare while the fake in the service tests never notices",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "                url, content=sql.encode(\"utf-8\"), headers={\"Content-Type\": \"text/plain\"}",
+    "replace": "                url, json={\"sql\": sql}",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client.py"
+    ]
+  },
+  {
+    "label": "the query drops its site filter — every site in the account is aggregated into one customer's dashboard, which is a cross-tenant data leak with no error anywhere",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        f\"WHERE index1 = '{site_id}' AND timestamp > NOW() - INTERVAL '{int(days)}' DAY\",",
+    "replace": "        f\"WHERE timestamp > NOW() - INTERVAL '{int(days)}' DAY\",",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the window is interpolated raw instead of resolving to a day count — the caller's string reaches a SQL endpoint that has no parameter binding",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    days = _ANALYTICS_WINDOWS.get(window)\n    if days is None:",
+    "replace": "    days = _ANALYTICS_WINDOWS.get(window, window)\n    if days is None:",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the site id is no longer re-checked before it reaches raw SQL — the last guard in front of an unbound statement is gone",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not re.fullmatch(r\"[0-9a-f]{24}\", site_id):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the tenancy read is dropped — another workspace's site answers with its numbers instead of a 404",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    doc = await _load(workspace_id, site_id)\n\n    window = window.strip() or _ANALYTICS_DEFAULT_WINDOW",
+    "replace": "    doc = await _SiteDoc.find_one({\"_id\": ObjectId(site_id)})\n\n    window = window.strip() or _ANALYTICS_DEFAULT_WINDOW",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "COUNT() replaces SUM(_sample_interval) — Analytics Engine downsamples a hot index, so the busiest sites are under-reported by exactly the sampling rate",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            select=\"SUM(_sample_interval) AS pageviews, COUNT(DISTINCT blob4) AS visitors\",",
+    "replace": "            select=\"COUNT() AS pageviews, COUNT(DISTINCT blob4) AS visitors\",",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "a device row with no class is dropped instead of bucketed — rows written before the device class rescale mobile and desktop against a smaller total and overstate both",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not rows or all(row.label == \"unknown\" for row in rows):\n        return None, [\"devices\"]\n    return rows, []",
+    "replace": "    kept = [row for row in rows if row.label != \"unknown\"]\n    if not kept:\n        return None, [\"devices\"]\n    return kept, []",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "an all-unknown device breakdown is served as a real one — a four-blob row shape renders as a chart of one bar called unknown instead of saying the dimension is not recorded",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not rows or all(row.label == \"unknown\" for row in rows):",
+    "replace": "    if not rows:",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "a blank breakdown label is dropped rather than named — direct visits vanish from the referrer chart and every remaining share is inflated",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    text = raw.strip() if isinstance(raw, str) else \"\"\n    return text or empty",
+    "replace": "    text = raw.strip() if isinstance(raw, str) else \"\"\n    return text",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "a 64-bit count arriving as a JSON string goes through float — the value is rounded to the nearest even above 2^53, corrupting exactly the counts the string encoding exists to protect",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        text = raw.strip()\n        try:\n            return int(text)\n        except ValueError:\n            pass",
+    "replace": "        text = raw.strip()\n        if False:\n            pass",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the cache is never read — every dashboard reload spends billed Analytics Engine queries against a 10,000/day account-wide allowance",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    cached = _analytics_cache_get(cache_key)\n    if cached is not None:\n        return cached",
+    "replace": "    cached = None\n    if cached is not None:\n        return cached",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the cache is keyed on the site alone — a 90-day request is served the 7-day numbers, same panel, different question, no error",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    cache_key = (workspace_id, site_id, window)",
+    "replace": "    cache_key = (workspace_id, site_id, \"\")",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "cache entries never expire — a site's numbers freeze at whatever the first read of the process returned",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if time.monotonic() >= expires_at:\n        _analytics_cache.pop(key, None)\n        return None",
+    "replace": "    if False:\n        _analytics_cache.pop(key, None)\n        return None",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the cache grows without bound — a workspace with thousands of sites has no ceiling on the map",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if len(_analytics_cache) >= _ANALYTICS_CACHE_MAX_ENTRIES:\n        now = time.monotonic()",
+    "replace": "    if False:\n        now = time.monotonic()",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "a counting publish never stamps analytics_since — every entitled site reads as never_counted forever, so the read reports 'republish to start counting' at a site that is already counting",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        doc.analytics_since = (doc.analytics_since or now) if counter_deployed else None",
+    "replace": "        doc.analytics_since = None",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_since.py",
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the stamp is never cleared — a site that lapsed and re-upgraded reports counting since its old start date over months in which nothing was recording at all",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        doc.analytics_since = (doc.analytics_since or now) if counter_deployed else None\n",
+    "replace": "        doc.analytics_since = doc.analytics_since or (now if counter_deployed else None)\n",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_since.py"
+    ]
+  },
+  {
+    "label": "the stamp is re-set on every counting publish — 'since' silently becomes 'last', so an ordinary republish moves the start of the series forward and hides history still sitting in the dataset",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        doc.analytics_since = (doc.analytics_since or now) if counter_deployed else None\n        # The deploy may have moved",
+    "replace": "        doc.analytics_since = now if counter_deployed else None\n        # The deploy may have moved",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_since.py"
+    ]
+  },
+  {
+    "label": "the stamp is derived from the plan rather than from what the deploy left on disk — a fourth copy of the counting rule, so the kill switch and the engine's own worker both stamp a site that is not counting",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        counter_deployed = Path(build.project_dir, analytics_worker.ENTRY_FILENAME).is_file()",
+    "replace": "        counter_deployed = counts_pageviews",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_since.py"
+    ]
+  },
+  {
+    "label": "a stale entry left in the reused working dir stamps a non-workers deploy — a localhost preview is recorded as a live counting site",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    counter_deployed = False\n    if mode == \"local\":",
+    "replace": "    counter_deployed = True\n    if mode == \"local\":",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_since.py"
+    ]
+  },
+  {
+    "label": "a first publish that deploys a counter inserts no stamp — the site counts from day one and the read calls it never_counted until something happens to republish it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            analytics_since=now if counter_deployed else None,",
+    "replace": "            analytics_since=None,",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_since.py"
+    ]
+  },
+  {
+    "label": "a naive stored stamp reaches the wire without its zone — a client reads a UTC instant as local time, so the chart's x-axis silently starts hours off",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if moment.tzinfo is None:\n        moment = moment.replace(tzinfo=UTC)\n    return moment.astimezone(UTC).isoformat()",
+    "replace": "    return moment.isoformat()",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the route stops forwarding the requested window — every panel reads the default seven days whatever the customer picked",
+    "file": "ee/pocketpaw_ee/sites/router.py",
+    "find": "        workspace_id=ctx.workspace_id, site_id=site_id, window=window\n    )",
+    "replace": "        workspace_id=ctx.workspace_id, site_id=site_id\n    )",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  }
+]
