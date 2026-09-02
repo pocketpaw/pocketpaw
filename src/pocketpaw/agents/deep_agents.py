@@ -8,6 +8,32 @@ Uses the Deep Agents SDK (pip install deepagents) which provides:
 
 Requires: pip install deepagents
 
+Updated 2026-09-02 (fix/deep-agents-usage-parity): THE RUNS ON THIS BACKEND
+BILLED ZERO, all of them. The ``token_usage`` event added by MCG-11 below was
+built for the prompt-cache A/B and carried only what that needed, so it reached
+``metering.resolve_cost`` with no ``model``, no ``output_tokens`` and no
+``total_cost_usd`` — exactly the three that function needs — and it was GATED on
+cache activity, so a cold turn emitted nothing and the run persisted
+``usage: {}``. ``pydantic_ai`` carried the identical defect until 2026-08-21;
+the fix was never swept across the siblings. Four changes:
+
+  * ``_accumulate_cache_usage`` now keeps ``output_tokens`` and the INCLUSIVE
+    input total alongside the uncached remainder. The remainder is what
+    ``report_savings`` and the meter read; the inclusive total is what
+    ``price_run`` reads, because it subtracts the cached portion itself and
+    handing it the remainder subtracts that portion twice.
+  * Cache WRITES are summed across ``cache_creation`` and the two ephemeral
+    TTL keys. ``langchain_anthropic`` zeroes the generic key whenever a TTL
+    key carries the value, and this backend marks every prefix 5m or 1h, so
+    reading only the generic key saw 0 writes forever. This one is telemetry,
+    not money: writes were already inside the inclusive total, so the bill was
+    unaffected — the hit rate was not.
+  * ``_build_usage_event`` prices the run and names the model that answered,
+    read off ``response_metadata`` rather than off configuration.
+  * The emit is unconditional, and survives a mid-stream error or a hard
+    cancel via the except handlers rather than ``finally`` — a yield from
+    ``finally`` raises out of the consumer's ``aclose()``.
+
 Updated 2026-08-03 (PA-9, feat/prompt-budget-measurement): ``_ANTHROPIC_CACHE_MIN_CHARS``
 is now measured. The value is unchanged at 4000, but the reasoning attached to it
 was wrong on all three counts — the chars/token ratio, the per-model floors, and
@@ -440,34 +466,194 @@ def _unwrap(value: Any) -> Any:
     return value
 
 
-def _accumulate_cache_usage(msg_chunk: Any, acc: dict[str, int]) -> None:
-    """Fold a LangChain ``AIMessageChunk``'s cache token counts into ``acc``
-    (MCG-11 telemetry).
+# Every key LangChain can file a cache WRITE under. ``langchain_anthropic``
+# copies Anthropic's per-TTL breakdown across as ``ephemeral_5m_input_tokens`` /
+# ``ephemeral_1h_input_tokens`` and then ZEROES the generic ``cache_creation`` so
+# its own total does not double-count (``_create_usage_metadata``). Reading only
+# the generic key therefore sees 0 for every write this backend actually makes —
+# it marks its prefixes 5m or 1h, never untagged. Summing all three is safe
+# precisely because that zeroing guarantees at most one of them is ever set.
+_CACHE_WRITE_KEYS = (
+    "cache_creation",
+    "ephemeral_5m_input_tokens",
+    "ephemeral_1h_input_tokens",
+)
 
-    LangChain normalises provider usage onto ``usage_metadata``:
-    ``input_tokens`` is the TOTAL input (cached + uncached) and the cache split
-    lives under ``input_token_details.{cache_read, cache_creation}``. A tool
-    loop yields several AI turns, each with its own ``usage_metadata``, so we
-    SUM across chunks. ``acc`` carries Anthropic-NATIVE keys (read / write /
-    total) so it can be handed straight to ``report_savings`` — which expects
-    ``input_tokens`` to be the UNCACHED remainder, hence we store
-    ``uncached = total - read - write``.
+
+def _accumulate_cache_usage(msg_chunk: Any, acc: dict[str, int]) -> None:
+    """Fold a LangChain ``AIMessageChunk``'s token counts into ``acc``.
+
+    LangChain normalises provider usage onto ``usage_metadata``, where
+    ``input_tokens`` is the INCLUSIVE input — ``UsageMetadata`` documents it as
+    the "sum of all input token types", and ``langchain_anthropic`` adds the
+    cache lines back onto Anthropic's disjoint count to get there. The split
+    lives under ``input_token_details``. A tool loop yields several AI turns,
+    each with its own ``usage_metadata``, so we SUM across chunks.
+
+    Three of the accumulated keys are load-bearing for the invoice and were not
+    here before, which is most of why every run on this backend billed $0:
+
+    * ``input_tokens`` is the UNCACHED REMAINDER, because that is the shape
+      ``report_savings`` reads and the shape ``metering._prompt_tokens`` expects
+      from an Anthropic-shaped payload.
+    * ``inclusive_input_tokens`` keeps the total that remainder came out of, and
+      it is NOT redundant with it. ``price_run`` subtracts the cached portion
+      itself, so pricing off the remainder removes those tokens a second time.
+      The remainder is what the meter wants; the inclusive total is what the
+      price wants; both have to survive the fold.
+    * ``output_tokens`` is simply the half of a conversation that costs the most
+      — Anthropic bills output at roughly 5x input — and this function used to
+      drop it on the floor.
     """
     um = getattr(msg_chunk, "usage_metadata", None)
     if not isinstance(um, dict):
         return
-    total_input = um.get("input_tokens") or 0
     details = um.get("input_token_details") or {}
-    read = details.get("cache_read") or 0
-    write = details.get("cache_creation") or 0
+    if not isinstance(details, dict):
+        details = {}
     try:
-        total_input, read, write = int(total_input), int(read), int(write)
+        total_input = int(um.get("input_tokens") or 0)
+        output = int(um.get("output_tokens") or 0)
+        read = int(details.get("cache_read") or 0)
+        # A write is filed under whichever key the marker's TTL selected.
+        write = sum(int(details.get(key) or 0) for key in _CACHE_WRITE_KEYS)
     except (TypeError, ValueError):
         return
-    uncached = max(0, total_input - read - write)
-    acc["cache_read_input_tokens"] += max(0, read)
-    acc["cache_creation_input_tokens"] += max(0, write)
-    acc["input_tokens"] += uncached
+    total_input, output = max(0, total_input), max(0, output)
+    read, write = max(0, read), max(0, write)
+    acc["cache_read_input_tokens"] += read
+    acc["cache_creation_input_tokens"] += write
+    acc["input_tokens"] += max(0, total_input - read - write)
+    acc["inclusive_input_tokens"] += total_input
+    acc["output_tokens"] += output
+
+
+def _model_name_from_chunk(msg_chunk: Any) -> str | None:
+    """The model that actually answered this turn, off ``response_metadata``.
+
+    ``langchain_anthropic`` stamps ``model_name`` from the provider's own
+    ``message_start`` event onto the first chunk of EVERY AI turn, and that is
+    the only truthful source. The configured setting can be an alias, can carry
+    a ``provider:`` prefix the price library does not know, and can be
+    overridden per run; the tokens being priced belong to whatever the provider
+    actually served. ``claude_sdk`` takes the model off the CLI's own report for
+    the same reason. Other integrations spell it ``model``, so both are read.
+
+    Returns None for most chunks, which is expected rather than a miss: the
+    model rides ``message_start`` and the usage rides ``message_delta``, so the
+    caller keeps the last non-None it saw instead of reading both off one chunk.
+    """
+    meta = getattr(msg_chunk, "response_metadata", None)
+    if not isinstance(meta, dict):
+        return None
+    for key in ("model_name", "model"):
+        value = meta.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _build_usage_event(acc: dict[str, int], model: str | None) -> AgentEvent:
+    """Build the ``token_usage`` event from an accumulated stream.
+
+    THIS EVENT IS THE INVOICE. It was written for the MCG-11 prompt-cache A/B
+    and carried only what that measurement needed, so every deep_agents run
+    reached ``metering.resolve_cost`` with no ``model``, no ``output_tokens``
+    and no ``total_cost_usd`` — precisely the set that function needs — and
+    billed zero. ``pydantic_ai`` carried the identical defect until 2026-08-21,
+    where it cost 37 unbillable runs before anyone noticed; the fix was never
+    swept across the siblings, and this is that sweep.
+
+    It is built UNCONDITIONALLY. The old emit was gated on cache activity, so a
+    cold turn — a first message, a short chat, any prompt under the 4000-char
+    marker threshold — emitted nothing at all and the run persisted
+    ``usage: {}``. A turn with no cache activity is a real, priceable turn, and
+    gating the invoice on a telemetry signal is how it stayed invisible.
+
+    The two input numbers point opposite ways ON PURPOSE:
+
+    * The payload's ``input_tokens`` is the UNCACHED REMAINDER. Any payload
+      carrying ``cache_read_tokens`` / ``cache_write_tokens`` is read as
+      Anthropic-shaped by ``metering._prompt_tokens``, which reconstitutes the
+      inclusive prompt by adding the cache lines back. Sending the inclusive
+      total here would count the cache twice and overbill.
+    * ``price_run`` is handed the INCLUSIVE total, because both pricing rungs
+      subtract the cached portion themselves. Handing it the remainder would
+      subtract that portion a second time.
+
+    Pricing happens here rather than being left to the meter's estimator for the
+    reason ``pydantic_ai`` gives: this runs the instant the run finished, so
+    ``now()`` genuinely IS the run's moment. The meter cannot say that — it
+    bills off a sweeper draining a backlog, which is why ``resolve_cost`` takes
+    the run's own timestamp instead.
+    """
+    from pocketpaw.llm.caching import report_savings
+
+    savings = report_savings(acc)
+    read = acc.get("cache_read_input_tokens", 0)
+    write = acc.get("cache_creation_input_tokens", 0)
+    inclusive = acc.get("inclusive_input_tokens", 0)
+    output = acc.get("output_tokens", 0)
+
+    if read or write:
+        logger.info(
+            "[deep_agents] prompt-cache: read=%d write=%d "
+            "hit_rate=%.1f%% est_saved=%.0f input-tok-equiv",
+            savings.cache_read_tokens,
+            savings.cache_write_tokens,
+            savings.hit_rate * 100,
+            savings.est_tokens_saved,
+        )
+
+    cost = 0.0
+    if model and (inclusive or output):
+        from datetime import UTC, datetime
+
+        from pocketpaw.usage_tracker import price_run
+
+        priced = price_run(
+            model,
+            input_tokens=inclusive,
+            output_tokens=output,
+            cache_read_tokens=read,
+            cache_write_tokens=write,
+            at=datetime.now(tz=UTC),
+        )
+        if priced is not None:
+            cost = float(priced)
+        else:
+            logger.warning(
+                "[deep_agents] no price for model %r — this turn bills $0 "
+                "(in=%d out=%d cache_read=%d cache_write=%d). Add a row to "
+                "usage_tracker._PRICING if genai-prices lacks the id.",
+                model,
+                inclusive,
+                output,
+                read,
+                write,
+            )
+
+    return AgentEvent(
+        type="token_usage",
+        content="",
+        metadata={
+            "input_tokens": acc.get("input_tokens", 0),
+            "output_tokens": output,
+            # Read PLUS write, matching ``claude_sdk``. ``_prompt_tokens``
+            # ignores this key on the Anthropic branch, but ``_total_tokens``
+            # sums input + output + cached_input, and with ``input_tokens``
+            # carrying the remainder only read+write closes that back to the
+            # real total.
+            "cached_input_tokens": read + write,
+            "cache_read_tokens": savings.cache_read_tokens,
+            "cache_write_tokens": savings.cache_write_tokens,
+            "cache_hit_rate": savings.hit_rate,
+            "cache_est_tokens_saved": savings.est_tokens_saved,
+            "total_cost_usd": cost,
+            "model": model,
+            "backend": "deep_agents",
+        },
+    )
 
 
 def _extract_content_text(content: Any) -> str:
@@ -1037,6 +1223,25 @@ class DeepAgentsBackend:
         # except branch, generator-close from caller).
         _stream: Any = None
 
+        # Usage accumulates in the RUN-level scope rather than inside the try,
+        # because the handlers below emit the invoice on the failure paths too
+        # and a crash before the stream opens would otherwise leave these
+        # unbound — trading a billing bug for a NameError.
+        cache_usage: dict[str, int] = {
+            "input_tokens": 0,
+            "inclusive_input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        }
+        # Seeded from configuration and overwritten by the first AI turn that
+        # names a model, last-seen-wins (see ``_model_name_from_chunk``). The
+        # seed is the weaker source — it can be an alias, and for a
+        # ``provider:model`` setting only the model half is priceable — but a
+        # weak id still prices, and None prices at nothing.
+        _, _answering_model = self._parse_provider_model()
+        _usage_emitted = False
+
         try:
             model = self._build_model()
             instructions = system_prompt or _DEFAULT_IDENTITY
@@ -1074,17 +1279,6 @@ class DeepAgentsBackend:
             # path emits the final args. Same tool_call_id → emit once.
             announced_tool_ids: set[str] = set()
 
-            # MCG-11 — accumulate prompt-cache token usage across the stream's
-            # AI turns (Anthropic-native keys, so report_savings consumes it
-            # directly). Emitted as a token_usage event before "done" so the
-            # margin from the 1h-cached specialist prefix is MEASURABLE on this
-            # backend (the pocket specialist's default).
-            cache_usage: dict[str, int] = {
-                "input_tokens": 0,
-                "cache_read_input_tokens": 0,
-                "cache_creation_input_tokens": 0,
-            }
-
             # Stream using LangGraph's async streaming. Hold the stream in
             # a variable so the ``finally`` block below can call
             # ``aclose()`` on it. LangGraph's astream is backed by
@@ -1113,9 +1307,14 @@ class DeepAgentsBackend:
                         continue
                     # v2 format: data is (AIMessageChunk, metadata_dict) tuple
                     msg_chunk = data[0] if isinstance(data, tuple | list) else data
-                    # Fold this turn's cache token counts into the accumulator
-                    # (no-op when the chunk carries no usage_metadata).
+                    # Fold this turn's token counts into the accumulator
+                    # (no-op when the chunk carries no usage_metadata) and
+                    # remember which model answered. The two ride DIFFERENT
+                    # chunks — usage on ``message_delta``, the model on
+                    # ``message_start`` — so both are read off every chunk and
+                    # the model keeps its last non-None value.
                     _accumulate_cache_usage(msg_chunk, cache_usage)
+                    _answering_model = _model_name_from_chunk(msg_chunk) or _answering_model
                     text, thinking = _split_content_text_and_thinking(
                         getattr(msg_chunk, "content", "")
                     )
@@ -1197,40 +1396,44 @@ class DeepAgentsBackend:
                                     metadata={"name": tool_name},
                                 )
 
-            # MCG-11 — emit prompt-cache telemetry before "done" so the margin
-            # from the 1h-cached specialist prefix is observable on this backend
-            # (the pocket specialist's default). Mirrors the claude_sdk hook.
-            if cache_usage["cache_read_input_tokens"] or cache_usage["cache_creation_input_tokens"]:
-                from pocketpaw.llm.caching import report_savings
-
-                savings = report_savings(cache_usage)
-                logger.info(
-                    "[deep_agents] prompt-cache: read=%d write=%d "
-                    "hit_rate=%.1f%% est_saved=%.0f input-tok-equiv",
-                    savings.cache_read_tokens,
-                    savings.cache_write_tokens,
-                    savings.hit_rate * 100,
-                    savings.est_tokens_saved,
-                )
-                yield AgentEvent(
-                    type="token_usage",
-                    content="",
-                    metadata={
-                        "input_tokens": cache_usage["input_tokens"],
-                        "cache_read_tokens": savings.cache_read_tokens,
-                        "cache_write_tokens": savings.cache_write_tokens,
-                        "cache_hit_rate": savings.hit_rate,
-                        "cache_est_tokens_saved": savings.est_tokens_saved,
-                        "backend": "deep_agents",
-                    },
-                )
+            # The invoice, emitted before "done". UNCONDITIONAL as of
+            # 2026-09-02: it used to be gated on cache activity, so a cold turn
+            # billed nothing at all. See ``_build_usage_event``.
+            _usage_emitted = True
+            yield _build_usage_event(cache_usage, _answering_model)
 
             yield AgentEvent(type="done", content="")
 
+        except GeneratorExit:
+            # The consumer closed the stream — an early ``break``, or GC. A
+            # yield from here raises "async generator ignored GeneratorExit"
+            # OUT OF the caller's ``aclose()``, turning a billing gap into a
+            # crash, so the usage for a half-consumed run is genuinely
+            # unrecoverable on this path. Re-raise untouched.
+            raise
         except Exception as e:
+            # Usage FIRST. The turns that completed before the failure consumed
+            # real tokens and the provider has already billed us for them;
+            # yielding the error without them is how a failed run bills $0.
+            if not _usage_emitted:
+                _usage_emitted = True
+                yield _build_usage_event(cache_usage, _answering_model)
             logger.error("Deep Agents streaming error: %s", e, exc_info=True)
             yield AgentEvent(type="error", content=f"Deep Agents error: {e}")
             yield AgentEvent(type="done", content="")
+        except BaseException:
+            # A hard cancel lands here — ``CancelledError`` is a BaseException
+            # and the handler above never sees it. ``usage_metadata`` rides the
+            # ``message_delta`` chunk at the END of each AI turn, so every turn
+            # that finished before the cancel is already accumulated and is
+            # billable. A yield from an except handler DOES reach the consumer
+            # before the exception resumes propagating; a yield from ``finally``
+            # does not, and breaks ``aclose()`` besides, which is why the
+            # recovery lives here and not down there.
+            if not _usage_emitted:
+                _usage_emitted = True
+                yield _build_usage_event(cache_usage, _answering_model)
+            raise
         finally:
             # Close the astream generator so LangGraph's background
             # Queue readers are cancelled cleanly. Without this, those
