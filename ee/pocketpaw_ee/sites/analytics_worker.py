@@ -545,8 +545,8 @@ def build_shim_js(*, site_id: str, secret: str, output_rel: str) -> str:
     THE EXPORT SHAPE THIS RESTS ON, read off the pinned toolchain rather than assumed.
     ``@sveltejs/adapter-cloudflare`` (the scaffold pins ``^7.0.0``; npm's latest 7 is
     7.2.9) COPIES its own ``src/worker.js`` to a single-file ``_worker.js`` —
-    ``builder.copy(`${{files}}/worker.js`, worker_dest)`` — whose only export is
-    ``export default {{ async fetch(req, env, ctx) }}``. A plain object, not a class
+    ``builder.copy(<files>/worker.js, worker_dest)`` — whose only export is
+    ``export default { async fetch(req, env, ctx) }``. A plain object, not a class
     extending ``WorkerEntrypoint``, and no named exports. So a wrapper can spread it and
     override one method.
 
