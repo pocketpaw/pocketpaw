@@ -986,6 +986,12 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
     Otherwise it is the full remaining grant, which is what a completed refund
     and a lost chargeback both mean.
 
+    UNLESS the gateway said BOTH "this is partial" and nothing we could parse as
+    an amount. Those two claims contradict each other, and defaulting to the full
+    grant there would over-reverse on the strength of a number we could not read.
+    That case takes nothing and logs at ERROR: an under-reversal is recoverable
+    by hand, money taken from a customer who did not owe it is not.
+
     IDEMPOTENCY is the ledger's, keyed on the webhook event id exactly as the
     grant path keys on it, so a redelivery collides on BC-1's unique
     ``(workspace, idempotency_key)`` index and moves nothing. The debit runs
@@ -1063,6 +1069,23 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
     same_currency = bool(event.currency) and event.currency.upper() == (doc.currency or "").upper()
     if event.amount_credits > 0 and same_currency:
         amount = min(event.amount_credits, remaining)
+    elif event.is_partial:
+        # A PARTIAL reversal whose amount we could not read. Falling through to
+        # the full remaining grant here would seize credits the buyer still paid
+        # for, on the strength of a number we admit we could not parse. The
+        # gateway has told us two things and they disagree, so we take nothing
+        # and alarm — an under-reversal is recoverable by hand, an over-reversal
+        # is money taken from a customer who did not owe it.
+        logger.error(
+            "billing.webhook: %s for payment=%s (event_id=%s) is PARTIAL but named no usable "
+            "amount in %s — NOT clawing back; reversing the full grant would take credits the "
+            "buyer still paid for. Needs a human",
+            event.type,
+            event.payment_id,
+            event.event_id,
+            doc.currency or "the payment's currency",
+        )
+        return _reversal_ack()
     else:
         amount = remaining
 

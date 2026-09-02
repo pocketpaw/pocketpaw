@@ -247,6 +247,40 @@ async def test_a_partial_refund_reverses_only_what_came_back(mongo_db):
     assert await credits.balance(WS) == 300
 
 
+async def test_a_partial_refund_with_no_readable_amount_takes_nothing(mongo_db, caplog):
+    """The gateway saying "partial" and naming no amount we can read is a
+    CONTRADICTION, not a default. Falling through to the full grant there takes
+    credits the buyer still paid for on the strength of a number we admit we
+    could not parse, so the reversal refuses and alarms instead."""
+    await _grant_topup(amount=500)
+
+    body = _refund_body(amount=None, is_partial=True)
+    with caplog.at_level("ERROR"):
+        result = await billing.handle_webhook(
+            payload=body.encode(),
+            headers=_sign(body, msg_id="evt_refund_part_unreadable"),
+            provider=_provider(),
+        )
+
+    assert result == {"ok": True, "granted": False, "reversed": 0}
+    assert await credits.balance(WS) == 500
+    assert any("PARTIAL" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_full_refund_with_no_stated_amount_reverses_everything(mongo_db):
+    """The other side of that guard: ``is_partial`` false and no amount is not a
+    contradiction, it is how a full refund reads. Reverse the whole grant."""
+    await _grant_topup(amount=500)
+
+    body = _refund_body(amount=None, is_partial=False)
+    result = await billing.handle_webhook(
+        payload=body.encode(), headers=_sign(body, msg_id="evt_refund_full"), provider=_provider()
+    )
+
+    assert result == {"ok": True, "granted": False, "reversed": 500}
+    assert await credits.balance(WS) == 0
+
+
 # ---------------------------------------------------------------------------
 # M1 — idempotency. A redelivery is a no-op, and the per-payment cap stops a
 # refund and a lost dispute on ONE payment clawing the same credits twice.
