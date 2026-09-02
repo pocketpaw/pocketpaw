@@ -9,6 +9,11 @@ tags: ["api", "configuration"]
 
 {/*
   docs/api/configuration-reference.mdx
+  Updated 2026-09-02 (feat/sites-analytics-shim, SA-3) — the "Paw Sites — visitor
+  analytics" section now says which engines count and what the off shape is on each
+  branch. SA-2's kill-switch row said the off shape has "no main", which was true
+  while only assets-only sites counted; a ripple or dynamic svelte site has a main
+  either way, because that main is SvelteKit's own worker.
   Updated 2026-09-02 (feat/sites-analytics-gate, SA-2) — added the "Paw Sites —
   visitor analytics" section with PAW_SITES_ANALYTICS_DISABLED (the operator kill
   switch SA-2 introduces) and PAW_SITES_ANALYTICS_DATASET (which SA-1 shipped
@@ -256,6 +261,23 @@ A published Paw Site on a paid per-site tier carries a small generated Cloudflar
 Worker that records one Analytics Engine row per pageview. These two variables are
 the deploy-side knobs for it.
 
+**Every engine counts, in one of two shapes.** A site whose build emits no server
+entry (`html`, `react`, a static `svelte` landing site) gets a counter that serves the
+page through the `ASSETS` binding. A site whose build emits one (`ripple`, a dynamic
+`svelte` site) gets a shim that imports SvelteKit's own worker, counts, and returns
+its response unchanged — so `main` points at the shim rather than at
+`_worker.js`, and `nodejs_compat`, the `ASSETS` binding and any D1 binding are
+carried through untouched.
+
+**Counting costs invocations on both, and on the server-worker branch it costs more
+than it used to.** Cloudflare bills a Worker invocation and serves a static asset for
+free. A counting config carries `run_worker_first` rules that route page-shaped paths
+to the Worker and leave stylesheets, scripts, fonts and images on the free path. On a
+`ripple` site those rules also route its **prerendered** pages through the Worker,
+which the asset router had been serving for nothing. That is what makes the counting
+possible at all — without the rules the shim is never invoked for a prerendered page
+— and it is a real per-pageview cost that arrives with the paid tier.
+
 Both are read **straight from the process environment** and have no `POCKETPAW_`
 settings field, so the Setting column below is empty. That is deliberate: the Paw
 Sites deploy path reads its Cloudflare configuration (`PAW_CF_*`) from the
@@ -270,5 +292,5 @@ again.
 
 | Setting | Env Variable | Type | Default | Description |
 |---------|-------------|------|---------|-------------|
-| — | `PAW_SITES_ANALYTICS_DISABLED` | boolean | unset (off) | **Operator kill switch.** Truthy (`1`, `true`, `yes`, `on`; case-insensitive) makes the next publish of **every** site emit the pre-analytics config shape: no `main`, no Analytics Engine binding, no `run_worker_first` rules, and no generated counter file. Paid sites included — it overrides the plan entitlement, it does not consult it. It exists for one failure: if the Cloudflare account is on the **Workers Free plan**, a `main` in the request path starts consuming a 100,000 request/day ceiling that is **account-wide**, and breaching that stops Cloudflare serving the Workers behind it rather than degrading analytics. Every published site goes dark together, so the mitigation has to be faster than a code change and a release. Already-deployed sites keep counting until they are republished, so pulling this switch during an incident means republishing the affected sites. Any other value, including `0` and `false`, leaves analytics on. |
+| — | `PAW_SITES_ANALYTICS_DISABLED` | boolean | unset (off) | **Operator kill switch.** Truthy (`1`, `true`, `yes`, `on`; case-insensitive) makes the next publish of **every** site emit the pre-analytics config shape: no Analytics Engine binding, no `run_worker_first` rules, and no generated counter file. On an assets-only site that means no `main` at all; on a `ripple` or dynamic `svelte` site `main` goes back to naming SvelteKit's own `_worker.js` directly, which is the config that shipped before analytics existed. Paid sites included — it overrides the plan entitlement, it does not consult it. It exists for one failure: if the Cloudflare account is on the **Workers Free plan**, a `main` in the request path starts consuming a 100,000 request/day ceiling that is **account-wide**, and breaching that stops Cloudflare serving the Workers behind it rather than degrading analytics. Every published site goes dark together, so the mitigation has to be faster than a code change and a release. Already-deployed sites keep counting until they are republished, so pulling this switch during an incident means republishing the affected sites. Any other value, including `0` and `false`, leaves analytics on. |
 | — | `PAW_SITES_ANALYTICS_DATASET` | string | `paw_site_pageviews` | The Cloudflare Analytics Engine dataset the counter writes into. One dataset for all sites, partitioned by site id in `indexes[0]` — Analytics Engine is queried by index, and a dataset per site would need provisioning per site for no gain. Override it so a dev or staging publish cannot pollute the production dataset. An empty or whitespace-only value falls back to the default rather than emitting an empty dataset name, which wrangler accepts and Cloudflare does not. Changing it does not migrate existing rows: sites published against the old dataset keep writing there until they are republished, and Analytics Engine retains data for three months. |
