@@ -1,3 +1,12 @@
+# service.py — UploadService: validates, stores, and persists upload metadata.
+# Updated: 2026-06-16 — accept SVG logos (image/svg+xml). The magic-byte
+#   sniff now has a narrow SVG special-case (declared image/svg+xml + .svg
+#   filename + <?xml/<svg signature, via svg_safety.looks_like_svg), since an
+#   SVG is XML text and won't match any binary image signature. SVG uploads
+#   are sanitized in full (svg_safety.sanitize_svg strips <script>, on*
+#   handlers, <foreignObject>, javascript: URLs, DOCTYPE/ENTITY) BEFORE they
+#   hit storage — defense-in-depth alongside the serving routers' attachment
+#   + CSP headers. Non-SVG uploads keep the unchanged streaming path.
 """UploadService — validates, stores, persists metadata, and generates thumbnails."""
 
 from __future__ import annotations
@@ -15,7 +24,7 @@ from typing import Literal
 from fastapi import UploadFile
 
 from pocketpaw.uploads.adapter import StorageAdapter
-from pocketpaw.uploads.config import UploadSettings, extension_for
+from pocketpaw.uploads.config import SVG_MIME, UploadSettings, extension_for
 from pocketpaw.uploads.errors import (
     EmptyFile,
     NotFound,
@@ -26,6 +35,7 @@ from pocketpaw.uploads.errors import (
 )
 from pocketpaw.uploads.file_store import FileRecord, JSONLFileStore
 from pocketpaw.uploads.keys import new_storage_key
+from pocketpaw.uploads.svg_safety import looks_like_svg, sanitize_svg
 
 logger = logging.getLogger(__name__)
 
@@ -155,28 +165,65 @@ class UploadService:
         if len(head) > cap:
             raise TooLarge(f"file exceeds {cap} bytes")
 
-        mime = _sniff_mime(head, file.content_type or "application/octet-stream")
+        declared = file.content_type or "application/octet-stream"
+        mime = _sniff_mime(head, declared)
+
+        # SVG special-case. An SVG is XML text, so _sniff_mime can only return
+        # the declared content-type for it — never a binary image signature.
+        # Accepting that on the client's word alone would let a caller smuggle
+        # arbitrary XML/HTML into the image allow-list, so we re-verify against
+        # a narrow gate (declared image/svg+xml AND .svg filename AND a real
+        # <?xml/<svg signature). A blob that claims image/svg+xml but fails the
+        # gate is rejected as unsupported rather than stored as an image.
+        is_svg = False
+        if mime == SVG_MIME:
+            if looks_like_svg(head, declared, file.filename):
+                is_svg = True
+            else:
+                raise UnsupportedMime(f"mime not allowed: {mime}")
+
         if mime not in self._cfg.allowed_mimes:
             raise UnsupportedMime(f"mime not allowed: {mime}")
 
         ext = extension_for(mime)
         key = new_storage_key("chat", ext)
 
-        first = head
-
-        async def _body() -> AsyncIterator[bytes]:
-            size = len(first)
-            if size > cap:
-                raise TooLarge(f"file exceeds {cap} bytes")
-            yield first
+        if is_svg:
+            # SVGs are small (logos) and need whole-file rewriting, so we buffer
+            # the full body, sanitize it (strip <script>, on* handlers,
+            # <foreignObject>, javascript: URLs, DOCTYPE/ENTITY), then store the
+            # cleaned bytes. This is one of three XSS defenses — the serving
+            # routers also force Content-Disposition: attachment and a
+            # script-blocking CSP so a direct navigation can't execute either.
+            body = head
             while True:
                 chunk = await file.read(64 * 1024)
                 if not chunk:
                     break
-                size += len(chunk)
+                body += chunk
+                if len(body) > cap:
+                    raise TooLarge(f"file exceeds {cap} bytes")
+            cleaned = sanitize_svg(body)
+
+            async def _body() -> AsyncIterator[bytes]:
+                yield cleaned
+
+        else:
+            first = head
+
+            async def _body() -> AsyncIterator[bytes]:
+                size = len(first)
                 if size > cap:
                     raise TooLarge(f"file exceeds {cap} bytes")
-                yield chunk
+                yield first
+                while True:
+                    chunk = await file.read(64 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > cap:
+                        raise TooLarge(f"file exceeds {cap} bytes")
+                    yield chunk
 
         try:
             obj = await self._adapter.put(key, _body(), mime)

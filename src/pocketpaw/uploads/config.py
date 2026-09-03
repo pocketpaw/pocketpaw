@@ -1,3 +1,13 @@
+# config.py — upload size limits, mime allowlist, storage root.
+# Updated: 2026-06-16 — accept SVG logos (image/svg+xml) in the upload
+#   allow-list so the white-label Branding panel's "Upload logo — SVG or
+#   PNG" works. SVG is intentionally kept OUT of ``INLINE_MIMES``: an SVG
+#   is active content (it can carry <script>), so it must be served as a
+#   download (Content-Disposition: attachment) plus a locked-down CSP, never
+#   rendered inline from a direct navigation to the signed URL. The image
+#   <img src> path that actually renders the logo never executes script,
+#   so the panel still works. See ``service.py`` (sniff + sanitize) and the
+#   serving routers (CSP headers) for the matching XSS defenses.
 """Upload configuration — size limits, mime allowlist, storage root."""
 
 from __future__ import annotations
@@ -7,6 +17,8 @@ from pathlib import Path
 
 # Mimes safe to render inline (images, pdf, plain text). Everything else gets
 # Content-Disposition: attachment to avoid in-origin HTML/SVG tricks.
+# NOTE: image/svg+xml is deliberately ABSENT here. SVG is active content and
+# must never be served inline from a same-origin URL — see SVG_MIME below.
 INLINE_MIMES: frozenset[str] = frozenset(
     {
         "image/png",
@@ -20,6 +32,10 @@ INLINE_MIMES: frozenset[str] = frozenset(
     }
 )
 
+# Canonical SVG mime. Centralized so the sniff special-case, the allow-list,
+# the extension map, and the serving routers all agree on one spelling.
+SVG_MIME = "image/svg+xml"
+
 DEFAULT_ALLOWED_MIMES: frozenset[str] = frozenset(
     {
         # Images
@@ -27,6 +43,9 @@ DEFAULT_ALLOWED_MIMES: frozenset[str] = frozenset(
         "image/jpeg",
         "image/gif",
         "image/webp",
+        # SVG — accepted for logos/branding. Served with XSS defenses
+        # (sanitize-on-upload + attachment + locked-down CSP), never inline.
+        SVG_MIME,
         # Documents
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
@@ -90,6 +109,7 @@ _MIME_TO_EXT: dict[str, str] = {
     "image/jpeg": ".jpg",
     "image/gif": ".gif",
     "image/webp": ".webp",
+    SVG_MIME: ".svg",
     "application/pdf": ".pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",

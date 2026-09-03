@@ -89,7 +89,8 @@ class TestUploadServiceSingle:
 
     async def test_rejects_disallowed_mime(self, service):
         svc, _, _ = service
-        file = _upload(b"<svg/>", "x.svg", "image/svg+xml")
+        # image/tiff is a real image type that is NOT on the allow-list.
+        file = _upload(b"II*\x00rest", "x.tiff", "image/tiff")
         with pytest.raises(UnsupportedMime):
             await svc.upload(file, owner_id="u1", chat_id=None)
 
@@ -113,6 +114,70 @@ class TestUploadServiceSingle:
         assert rec.filename == "evil.png"
 
 
+SVG_PLAIN = b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect/></svg>'
+SVG_WITH_PROLOG = b'<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg"><circle/></svg>'
+SVG_WITH_SCRIPT = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)">'
+    b"<script>alert(document.cookie)</script>"
+    b'<a href="javascript:alert(2)">x</a>'
+    b'<foreignObject><body onclick="evil()">hi</body></foreignObject>'
+    b"<rect/></svg>"
+)
+
+
+class TestSvgUpload:
+    """SVG logos are accepted (with sanitization) but only when genuinely SVG."""
+
+    async def test_plain_svg_accepted(self, service):
+        svc, _, _ = service
+        file = _upload(SVG_PLAIN, "logo.svg", "image/svg+xml")
+        rec = await svc.upload(file, owner_id="u1", chat_id=None)
+        assert rec.mime == "image/svg+xml"
+        assert rec.filename == "logo.svg"
+
+    async def test_svg_with_xml_prolog_accepted(self, service):
+        svc, _, _ = service
+        file = _upload(SVG_WITH_PROLOG, "logo.svg", "image/svg+xml")
+        rec = await svc.upload(file, owner_id="u1", chat_id=None)
+        assert rec.mime == "image/svg+xml"
+
+    async def test_svg_stored_bytes_are_sanitized(self, service):
+        """The blob written to storage must have no script/handler vectors."""
+        svc, adapter, _ = service
+        file = _upload(SVG_WITH_SCRIPT, "logo.svg", "image/svg+xml")
+        rec = await svc.upload(file, owner_id="u1", chat_id=None)
+        # Pull the stored bytes back out of the fake adapter.
+        stored = adapter.blobs[rec.storage_key]
+        lowered = stored.lower()
+        assert b"<script" not in lowered
+        assert b"javascript:" not in lowered
+        assert b"onload" not in lowered
+        assert b"onclick" not in lowered
+        assert b"<foreignobject" not in lowered
+        # The legitimate shape survives.
+        assert b"<rect" in lowered
+
+    async def test_declared_svg_without_signature_rejected(self, service):
+        """A blob that claims image/svg+xml but isn't XML/SVG is rejected."""
+        svc, _, _ = service
+        file = _upload(b"not xml at all", "fake.svg", "image/svg+xml")
+        with pytest.raises(UnsupportedMime):
+            await svc.upload(file, owner_id="u1", chat_id=None)
+
+    async def test_svg_content_with_wrong_extension_rejected(self, service):
+        """Real SVG bytes but a non-.svg name don't sneak through as an image."""
+        svc, _, _ = service
+        file = _upload(SVG_PLAIN, "logo.txt", "image/svg+xml")
+        with pytest.raises(UnsupportedMime):
+            await svc.upload(file, owner_id="u1", chat_id=None)
+
+    async def test_png_still_accepted(self, service):
+        svc, _, _ = service
+        file = _upload(PNG_MAGIC, "logo.png", "image/png")
+        rec = await svc.upload(file, owner_id="u1", chat_id=None)
+        assert rec.mime == "image/png"
+
+
 class TestUploadServiceBulk:
     async def test_all_succeed(self, service):
         svc, _, _ = service
@@ -131,7 +196,7 @@ class TestUploadServiceBulk:
         files = [
             _upload(PNG_MAGIC, "good.png", "image/png"),
             _upload(b"x" * 500, "big.bin", "application/octet-stream"),
-            _upload(b"<svg/>", "bad.svg", "image/svg+xml"),
+            _upload(b"II*\x00rest", "bad.tiff", "image/tiff"),
         ]
         result = await svc.upload_many(files, owner_id="u1", chat_id=None)
         assert len(result.uploaded) == 1
