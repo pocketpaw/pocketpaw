@@ -215,6 +215,39 @@ class EditRequest(BaseModel):
     params: dict[str, Any] | None = None
 
 
+# ── Transcription (speech-to-text) ─────────────────────────────────────────
+
+
+class TranscriptWord(BaseModel):
+    """One recognised word with its timing, in MILLISECONDS — the same domain
+    the editor's ``CaptionWord`` uses, so the frontend can drop these straight
+    onto a cue without converting anything.
+
+    ``confidence`` is Deepgram's per-word score (0..1), passed through so the
+    UI can flag low-confidence words for review instead of silently shipping a
+    wrong caption. It stays optional because a model that does not report it
+    must not break the response shape."""
+
+    text: str
+    startMs: int
+    endMs: int
+    confidence: float | None = None
+
+
+class TranscriptResponse(BaseModel):
+    """Body of ``POST /studio/transcribe`` — the transcript of uploaded audio.
+
+    Deliberately NOT a ``Generation``: transcription is an INPUT operation, not
+    a produced asset, so it never enters the gallery or the workspace history
+    (the same reasoning as the ``audio_transcribe`` MCP tool). ``words`` may be
+    empty for a model that returns only running text; ``text`` is always
+    non-empty on a 200."""
+
+    text: str
+    words: list[TranscriptWord] = Field(default_factory=list)
+    model: str
+
+
 class VideoElementsRequest(BaseModel):
     """Body of ``POST /studio/video-elements`` — the "Edit video" panel.
 

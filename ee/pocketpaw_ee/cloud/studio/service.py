@@ -55,6 +55,7 @@ from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
 from pocketpaw_ee.cloud.media import storage as media_storage
 
 from . import (
+    deepgram_stt,
     fal_edit,
     fal_elements,
     fal_image,
@@ -1601,6 +1602,52 @@ def suggest_prompt(sentence: str) -> schemas.PromptSuggestion:
     return schemas.PromptSuggestion(prompt=enriched, kind=kind)
 
 
+# ── Transcription (speech-to-text) ─────────────────────────────────────────
+
+
+async def transcribe(
+    audio_bytes: bytes,
+    *,
+    content_type: str = "audio/wav",
+    model: str | None = None,
+    language: str | None = None,
+) -> schemas.TranscriptResponse:
+    """Transcribe an uploaded audio file DIRECTLY against Deepgram.
+
+    The /studio editor extracts a clip's audio in the browser with Mediabunny
+    and posts it here as multipart ``file``; the result is running text plus
+    word-level millisecond timings, which the frontend feeds straight into the
+    existing caption path (``captions.ts`` → ``CaptionWord``).
+
+    Empty bytes are a ValueError (router →400); a provider failure surfaces as
+    StudioUpstreamError (router →502), matching every other media route here.
+
+    Nothing is persisted: transcription is a read on the user's own media, not a
+    generated asset, so it does not enter the gallery or workspace history.
+    """
+    if not audio_bytes:
+        raise ValueError("audio file is empty")
+
+    try:
+        result = await deepgram_stt.transcribe_bytes(
+            audio_bytes=audio_bytes,
+            content_type=content_type,
+            model=model,
+            language=language,
+        )
+    except deepgram_stt.DeepgramError as exc:
+        raise StudioUpstreamError(str(exc)) from exc
+
+    words = [schemas.TranscriptWord(**word) for word in result["words"]]
+    logger.info(
+        "studio: transcribed %d bytes as %d words via Deepgram %s",
+        len(audio_bytes),
+        len(words),
+        result["model"],
+    )
+    return schemas.TranscriptResponse(text=result["text"], words=words, model=result["model"])
+
+
 __all__ = [
     "STYLES",
     "StudioNotSupported",
@@ -1616,4 +1663,5 @@ __all__ = [
     "generate_video_elements",
     "generate_video_motion",
     "suggest_prompt",
+    "transcribe",
 ]

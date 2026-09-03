@@ -14,6 +14,7 @@
 #   POST /studio/video-elements  → Generation             (fal.ai Kling Elements)
 #   POST /studio/video-motion-control → Generation        (fal.ai Kling Motion Control)
 #   POST /studio/music           → Generation             (fal.ai music, kind=audio)
+#   POST /studio/transcribe      → TranscriptResponse     (Deepgram STT, multipart audio)
 #   POST /studio/suggest-prompt  → PromptSuggestion       (heuristic, no LLM)
 #
 # The tenant is attached per-request via ``current_workspace_id`` (the frontend
@@ -25,7 +26,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from pocketpaw_ee.catalog.litellm_client import CatalogUpstreamError
 from pocketpaw_ee.cloud._core.deps import current_workspace_id
@@ -176,6 +177,37 @@ async def suggest_prompt(req: schemas.SuggestPromptRequest) -> schemas.PromptSug
     """Enrich a plain sentence into a generation prompt + inferred media kind.
     Heuristic mirror of the mock (no LLM call)."""
     return service.suggest_prompt(req.sentence)
+
+
+@router.post("/transcribe", response_model=schemas.TranscriptResponse)
+async def transcribe(
+    file: UploadFile = File(..., description="Audio extracted from a clip (wav/mp3/m4a/ogg)"),
+    model: str | None = Form(default=None, description="Deepgram model override (e.g. nova-2)"),
+    language: str | None = Form(default=None, description="BCP-47 language hint (e.g. en-US)"),
+) -> schemas.TranscriptResponse:
+    """Transcribe speech in an uploaded audio file via Deepgram.
+
+    The /studio editor decodes a clip's audio track with Mediabunny and posts
+    it here as multipart; the response carries word-level millisecond timings
+    so the frontend can lay them on the caption track without a second call.
+
+    Multipart rather than JSON because the payload is raw audio bytes. An empty
+    upload returns 400; a provider failure or missing key returns 502 with
+    Deepgram's message relayed plainly, so the UI never shows a phantom
+    transcript. License-gated by the router-wide dependency like every other
+    route here."""
+    audio_bytes = await file.read()
+    try:
+        return await service.transcribe(
+            audio_bytes,
+            content_type=file.content_type or "audio/wav",
+            model=model,
+            language=language,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except service.StudioUpstreamError as exc:
+        raise HTTPException(502, f"Transcription failed: {exc}") from exc
 
 
 # ── Flow projects (persisted server-side, workspace-scoped) ─────────────────
