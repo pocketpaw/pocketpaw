@@ -360,6 +360,24 @@ name the provider does not recognise. ``_build_model`` now sets it for the
 providers that front a self-hosted server. Doing it in the profile rather than
 by joining our own instructions keeps capability- and toolset-contributed
 instructions working, which a single joined string would not.
+
+Updated 2026-09-04 (fix/model-ids-with-a-colon) — **a model whose NAME contains
+a colon was read as a provider.** Selecting the gateway's
+``minimax/minimax-m3:free`` failed with ``unsupported provider
+'minimax/minimax-m3'``. ``_parse_provider_model`` split on the first colon
+unconditionally, and OpenRouter spells its variants that way (``:free``,
+``:nitro``, ``:extended``) while Ollama spells its tags that way
+(``llama3.2:latest``). The split now happens only when the prefix names a
+provider we actually support; otherwise the whole string is the model and the
+provider settings decide, which is what a bare vendor-qualified name like
+``deepseek/deepseek-v4-flash`` already did.
+
+``supported_providers`` on the descriptor and the set the error message prints
+are now the same object the parser consults, so the three cannot drift.
+
+``deep_agents`` has the identical split and is deliberately NOT touched here.
+The claim in ``_parse_provider_model`` that the two mirror each other no longer
+holds, and fixing it there is its own change.
 """
 
 from __future__ import annotations
@@ -404,6 +422,20 @@ _OPENAI_COMPATIBLE = frozenset({"litellm", "openai", "openai_compatible", "openr
 # Not applied to ``openai``/``openrouter``: both accept multiple system
 # messages, and a merge there would be a behaviour change for nothing.
 _STRICT_SYSTEM_MESSAGE_PROVIDERS = frozenset({"litellm", "openai_compatible", "ollama"})
+
+# The providers a ``provider:model`` spec may name. The parser consults it
+# before it splits, because a model NAME can contain a colon too: OpenRouter
+# spells its variants that way (``minimax/minimax-m3:free``, ``:nitro``,
+# ``:extended``) and Ollama spells its tags that way (``llama3.2:latest``).
+# Splitting on the first colon unconditionally read the whole vendor-qualified
+# name as a provider and rejected the model with
+# ``unsupported provider 'minimax/minimax-m3'``.
+#
+# The trade: a genuine provider typo (``openrotuer:gpt-4o``) is no longer
+# caught here. It falls through as a model name and fails downstream, at the
+# gateway, as an unknown model. That is the cheaper mistake — a real model the
+# operator configured must work, and a typo still fails, just one hop later.
+_KNOWN_PROVIDERS = _OPENAI_COMPATIBLE | {"anthropic", "agentapi"}
 
 # Same gate as ``claude_sdk`` and ``deep_agents``: ``<pocket-scope>`` opens every
 # pocket/site prompt. Retained for the prompt-shape signal it carries into the
@@ -861,15 +893,7 @@ class PydanticAIBackend:
             builtin_tools=[],
             tool_policy_map={},
             required_keys=[],
-            supported_providers=[
-                "litellm",
-                "agentapi",
-                "anthropic",
-                "openai",
-                "openai_compatible",
-                "openrouter",
-                "ollama",
-            ],
+            supported_providers=sorted(_KNOWN_PROVIDERS),
             install_hint={
                 "pip_package": "pydantic-ai-slim",
                 "pip_spec": "pocketpaw[pydantic-ai]",
@@ -973,7 +997,10 @@ class PydanticAIBackend:
         ).strip()
         if ":" in model_str:
             provider, _, model = model_str.partition(":")
-            return provider.strip(), model.strip()
+            if provider.strip() in _KNOWN_PROVIDERS:
+                return provider.strip(), model.strip()
+            # Not a provider, so the colon belongs to the model name. Fall
+            # through and let the provider settings decide.
 
         provider = getattr(self.settings, "pydantic_ai_provider", "auto")
         if provider == "auto":
@@ -1085,7 +1112,7 @@ class PydanticAIBackend:
         if provider not in _OPENAI_COMPATIBLE:
             raise ValueError(
                 f"pydantic_ai backend: unsupported provider {provider!r}. "
-                f"Supported: {', '.join(sorted(_OPENAI_COMPATIBLE | {'anthropic', 'agentapi'}))}."
+                f"Supported: {', '.join(sorted(_KNOWN_PROVIDERS))}."
             )
 
         from pydantic_ai.models.openai import OpenAIChatModel

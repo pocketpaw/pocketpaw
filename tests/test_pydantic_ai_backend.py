@@ -155,6 +155,18 @@ def test_model_routing_entry_exists():
         ("some-model", "auto", "auto", ("litellm", "some-model")),
         ("some-model", "auto", "ollama", ("ollama", "some-model")),
         ("some-model", "openrouter", "ollama", ("openrouter", "some-model")),
+        # A model NAME may contain a colon, so the prefix is only a provider
+        # when it names one. The first row is the gateway group that reported
+        # this: splitting it blind asked for a provider called
+        # minimax/minimax-m3.
+        ("minimax/minimax-m3:free", "auto", "auto", ("litellm", "minimax/minimax-m3:free")),
+        (
+            "openrouter:minimax/minimax-m3:free",
+            "auto",
+            "auto",
+            ("openrouter", "minimax/minimax-m3:free"),
+        ),
+        ("llama3.2:latest", "auto", "ollama", ("ollama", "llama3.2:latest")),
     ],
 )
 def test_parse_provider_model(model_setting, provider_setting, llm_provider, expected):
@@ -188,9 +200,24 @@ def test_litellm_base_url_not_double_suffixed():
 
 
 def test_unsupported_provider_raises():
-    backend = PydanticAIBackend(_settings(pydantic_ai_model="wat:some-model"))
+    """Reached through the provider SETTING, which can only be a provider."""
+    backend = PydanticAIBackend(
+        _settings(pydantic_ai_model="some-model", pydantic_ai_provider="wat")
+    )
     with pytest.raises(ValueError, match="unsupported provider"):
         backend._build_model()
+
+
+def test_an_unknown_prefix_stays_part_of_the_model_name():
+    """The cost of letting a model name carry a colon, stated as a test.
+
+    wat: used to raise here. It cannot any more, because the parser has no
+    way to tell a typo'd provider from a real vendor prefix, and a real model
+    the operator configured has to work. The typo still fails, one hop later,
+    as an unknown model at the gateway.
+    """
+    backend = PydanticAIBackend(_settings(pydantic_ai_model="wat:some-model", llm_provider="auto"))
+    assert backend._parse_provider_model() == ("litellm", "wat:some-model")
 
 
 async def _wire_roles(model) -> list[str]:
