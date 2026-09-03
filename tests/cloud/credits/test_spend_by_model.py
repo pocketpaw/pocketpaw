@@ -50,7 +50,7 @@ from datetime import UTC, datetime
 
 import pytest
 from pocketpaw_ee.cloud.credits import service as credits
-from pocketpaw_ee.cloud.credits.domain import ModelSpendRow
+from pocketpaw_ee.cloud.credits.domain import ModelSpendRow, credits_to_micro
 from pocketpaw_ee.cloud.models.credit import CreditLedgerEntry
 
 WS = "ws_spend_by_model"
@@ -86,8 +86,9 @@ async def _seed(
     entry = CreditLedgerEntry(
         workspace=ws,
         kind="spend",
-        amount_delta=amount_delta,
-        balance_after=0,
+        # Seeded in WHOLE credits; stored as micro. See the note in test_quota.
+        amount_delta_micro=credits_to_micro(amount_delta),
+        balance_after_micro=0,
         applied=applied,
         conditional=False,
         cause=cause,
@@ -470,7 +471,7 @@ def test_pipeline_groups_server_side():
     # query rather than by a post-hoc clamp.
     assert match_stage["$match"]["workspace"] == WS
     assert match_stage["$match"]["applied"] is True
-    assert match_stage["$match"]["amount_delta"] == {"$lt": 0}
+    assert match_stage["$match"]["amount_delta_micro"] == {"$lt": 0}
     assert query == {"workspace": WS, "applied": True}  # caller's dict untouched
 
     group = group_stage["$group"]
@@ -478,7 +479,7 @@ def test_pipeline_groups_server_side():
     assert group["_id"]["day"] == {"$dateToString": {"format": "%Y-%m-%d", "date": "$createdAt"}}
     assert "timezone" not in group["_id"]["day"]["$dateToString"]
     # All three measures accumulate in the ``$group``, not in a Python loop.
-    assert group["credits"] == {"$sum": {"$subtract": [0, "$amount_delta"]}}
+    assert group["credits"] == {"$sum": {"$subtract": [0, "$amount_delta_micro"]}}
     assert group["requests"] == {"$sum": 1}
     assert set(group["tokens"]) == {"$sum"}
 

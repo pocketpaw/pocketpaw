@@ -36,6 +36,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pocketpaw_ee.cloud._core.errors import QuotaExceeded
 from pocketpaw_ee.cloud.credits import service as credits
+from pocketpaw_ee.cloud.credits.domain import credits_to_micro
 from pocketpaw_ee.cloud.models.credit import CreditLedgerEntry
 from pocketpaw_ee.cloud.models.workspace import Workspace
 
@@ -63,8 +64,11 @@ async def _seed(
     entry = CreditLedgerEntry(
         workspace=ws,
         kind="grant" if amount_delta > 0 else "spend",
-        amount_delta=amount_delta,
-        balance_after=0,
+        # Callers seed in WHOLE credits (what the quota ceiling speaks); the
+        # ledger stores micro-credits. Converting here keeps every call site
+        # readable as the amount the test is actually reasoning about.
+        amount_delta_micro=credits_to_micro(amount_delta),
+        balance_after_micro=0,
         applied=applied,
         conditional=False,
         cause=cause,

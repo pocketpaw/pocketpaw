@@ -44,6 +44,7 @@ from datetime import UTC, datetime
 
 import pytest
 from pocketpaw_ee.cloud.credits import service as credits
+from pocketpaw_ee.cloud.credits.domain import credits_to_micro
 from pocketpaw_ee.cloud.metering import service as metering
 from pocketpaw_ee.cloud.metering.domain import RateCard
 from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
@@ -115,7 +116,7 @@ async def test_reported_cost_debits_expected_credits(mongo_db):
     entries = await CreditLedgerEntry.find(CreditLedgerEntry.workspace == WS).to_list()
     spend = [e for e in entries if e.idempotency_key == "run:run-1"]
     assert len(spend) == 1
-    assert spend[0].amount_delta == -10
+    assert spend[0].amount_delta_micro == credits_to_micro(-10)
     assert spend[0].cause == "compute_spend"
     assert spend[0].ref.get("run_id") == "run-1"
 
@@ -150,7 +151,11 @@ async def test_estimate_fallback_when_no_reported_cost(mongo_db, reported):
     assert result.cost_source == "estimated"
     assert result.credits_charged > 0
     assert result.credits_charged == 3
-    assert await credits.balance(WS) == before - result.credits_charged
+    # The wallet moved by the EXACT charge, which is 3.125 credits here — not the
+    # 3 that ``credits_charged`` shows after truncation. Asserting against the
+    # displayed figure would pass only while every cost happened to land on a whole
+    # credit, which is exactly the assumption the micro unit removed.
+    assert await credits.balance_micro(WS) == credits_to_micro(before) - result.micro_charged
 
 
 # ---------------------------------------------------------------------------

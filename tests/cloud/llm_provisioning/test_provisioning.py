@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 from pocketpaw_ee.cloud.credits import service as credits
+from pocketpaw_ee.cloud.credits.domain import credits_to_micro
 from pocketpaw_ee.cloud.llm_provisioning import service as provisioning
 from pocketpaw_ee.cloud.llm_provisioning.domain import KeyBudget, SpendCredits
 from pocketpaw_ee.cloud.models.credit import CreditLedgerEntry
@@ -170,9 +171,9 @@ async def test_ingest_spend_debits_existing_credit_ledger(mongo_db):
     ).to_list()
     assert {e.idempotency_key for e in spend_entries} == {"litellm:req-1", "litellm:req-2"}
     by_key = {e.idempotency_key: e for e in spend_entries}
-    assert by_key["litellm:req-1"].amount_delta == -10
+    assert by_key["litellm:req-1"].amount_delta_micro == credits_to_micro(-10)
     assert by_key["litellm:req-1"].ref.get("cached_tokens") == 128
-    assert by_key["litellm:req-2"].amount_delta == -5
+    assert by_key["litellm:req-2"].amount_delta_micro == credits_to_micro(-5)
 
 
 async def test_reingest_is_idempotent_even_if_high_water_reset(mongo_db):

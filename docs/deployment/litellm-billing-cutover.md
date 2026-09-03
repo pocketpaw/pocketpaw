@@ -107,6 +107,50 @@ Nothing to do about it operationally. It is here because `0 credits` on a sweep 
 read real dollars used to be the symptom, and that is worth recognising rather than
 re-diagnosing.
 
+## When a charge actually lands
+
+Two things bill proxy spend, and they bill the same rows through the same code.
+
+The **sweep** runs every five minutes on the API heartbeat and again at worker
+boot. It is the backstop and it is what guarantees nothing is missed.
+
+The **run-end trigger** fires about 20 seconds after any run reaches a terminal
+state, in `live` mode only. Without it a customer's balance lagged their usage by
+up to a full sweep interval, and the run-start balance gate could admit a run the
+previous one had already spent the credits for.
+
+The delay is measured, not guessed. LiteLLM writes its spend row from a background
+task after the response is already sent: on the production gateway the row
+appeared at about 15 seconds and was definitively absent at 6. A trigger that read
+immediately would find an empty window every time and bill nothing, which looks
+identical to working.
+
+The two race constantly and that is fine. Both debit under
+`litellm:{request_id}`, so whichever arrives first charges and the other is a
+no-op on the ledger's unique index.
+
+```
+POCKETPAW_SPEND_TRIGGER_ENABLED         default true; false leaves only the sweep
+POCKETPAW_SPEND_TRIGGER_DELAY_SECONDS   default 20
+```
+
+Turn it off if the extra proxy reads become expensive. They scale with run volume
+rather than with time, so a busy deployment pays more for them than a quiet one.
+
+### Why not read the cost off the response instead
+
+The proxy returns `x-litellm-response-cost` and `x-litellm-call-id` on every
+completion, which would need no delay at all. Two things rule it out.
+
+The call-id header is not the id the spend log records. Measured 2026-09-03: the
+header carried one uuid while the row's `request_id` was the response body's `id`.
+Billing on the header id would key the ledger on something the sweep can never
+match, so the sweep would charge the same call again under the real id.
+
+And the header only exists where our own code makes the HTTP call. The agent
+backends go through pydantic-ai and ChatLiteLLM, neither of which surfaces
+response headers, and that is where the spend actually is.
+
 ## The procedure
 
 **1. Run `shadow` for a while.** It reads proxy spend and the ledger over the same

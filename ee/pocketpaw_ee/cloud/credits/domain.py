@@ -81,7 +81,12 @@ class LedgerEntry:
 
     Mirrors ``models.credit.CreditLedgerEntry`` with framework-free types.
     ``amount_delta`` is signed; ``balance_after`` is the wallet balance once
-    this movement landed.
+    this movement landed. Both are WHOLE credits, for display — the exact figures
+    are the ``_micro`` pair beside them, and the two can differ by up to a credit
+    on a sub-credit movement (a $0.0015 proxy call is 375_000 micro, which is 0
+    whole credits). Anything reasoning about money must read the micro fields;
+    ``amount_delta`` exists so the HTTP layer and the audit UI keep rendering the
+    unit a customer understands.
     """
 
     id: str
@@ -91,6 +96,54 @@ class LedgerEntry:
     balance_after: int
     member_id: str | None
     cause: str | None
+    amount_delta_micro: int = 0
+    balance_after_micro: int = 0
     ref: dict = field(default_factory=dict)
     idempotency_key: str = ""
     created_at: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
+# The wallet's storage unit (2026-09-04, feat/exact-credit-deduction).
+# ---------------------------------------------------------------------------
+#
+# Balances and ledger amounts are stored in MICRO-CREDITS: millionths of a
+# credit, so 1 credit == 1_000_000 micro == $0.01.
+#
+# WHY. The wallet used to store whole credits, and a credit is a cent, while the
+# proxy prices a single API call — routinely a tenth of a cent or less. Every
+# debit therefore had to round to a unit far coarser than the thing it was
+# charging for. Rounding down served cheap calls free; rounding to the nearest
+# credit was unbiased in aggregate but wrong on every individual charge, and
+# unboundedly wrong for a workload of uniformly cheap calls where nothing rounds
+# up to offset anything. A thousand $0.0015 requests cost $1.50 and billed zero.
+#
+# A micro-credit is $0.00000001 of pre-markup compute. The smallest spend row
+# observed on the production proxy ($0.00014545) is 36,362 of them, so per-row
+# rounding error is about eight orders of magnitude below the amount charged.
+# Summed over real proxy rows the drift is 2e-9 USD. That is exact for money.
+#
+# INTEGER, still. This is a finer integer unit, NOT a float: floats cannot hold a
+# ledger invariant, and ``balance == sum(amount_delta)`` is checked by
+# ``reconcile``. Every atomic ``$inc`` and every CAS comparison keeps working
+# unchanged because they are all integer operations either way.
+#
+# WHAT THE CUSTOMER SEES IS UNCHANGED. The HTTP surface still speaks whole
+# credits — ``dto`` converts at the boundary — so no balance, plan, top-up or
+# price changes meaning. This is a storage precision change, not a repricing.
+MICRO_PER_CREDIT = 1_000_000
+
+
+def credits_to_micro(credits: int | float) -> int:
+    """Whole credits -> micro-credits. For callers that speak the public unit."""
+    return round(credits * MICRO_PER_CREDIT)
+
+
+def micro_to_credits(micro: int) -> int:
+    """Micro-credits -> whole credits for DISPLAY, rounded toward zero.
+
+    Truncating rather than rounding is deliberate on the balance: showing a
+    customer a credit they cannot spend is worse than showing them one fewer than
+    they hold. The exact figure is always in the stored value.
+    """
+    return int(micro / MICRO_PER_CREDIT)

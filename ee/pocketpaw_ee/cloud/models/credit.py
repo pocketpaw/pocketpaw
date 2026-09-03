@@ -37,6 +37,16 @@
 # invariant: the balance MAY go slightly negative from metered compute overage
 # (BC-3) — the no-overdraft guarantee is enforced at run-start, not by clamping
 # the balance to >= 0 here.
+# Changed 2026-09-04 (feat/exact-credit-deduction): the wallet's storage unit is
+# now MICRO-CREDITS (1_000_000 == 1 credit == $0.01), and the three amount fields
+# are renamed to say so — ``balance_credits`` -> ``balance_micro``,
+# ``amount_delta`` -> ``amount_delta_micro``, ``balance_after`` ->
+# ``balance_after_micro``. A whole-credit wallet could not charge for an API call
+# worth a tenth of a cent without rounding it away, which is how sub-credit proxy
+# spend was served free. The rename is the migration's safety net: a reader left
+# on the old name gets an AttributeError instead of a number a million times too
+# large. Requires ``scripts/migrations/2026_09_04_micro_credits.py``; see
+# ``credits.domain.MICRO_PER_CREDIT``.
 # Changed 2026-06-30 (feat/billing-quota-enforcement, chunk 2): added a second
 # ``CreditLedgerEntry`` index ``ix_workspace_created_at`` on
 # ``(workspace, createdAt)``. The monthly-quota read (``month_to_date_spend``)
@@ -57,7 +67,7 @@ class CreditBalance(TimestampedDocument):
 
     Exactly one row per workspace (the ``workspace`` index is UNIQUE). The
     balance is mutated only by the atomic conditional ``$inc`` in
-    ``credits.service`` — a debit uses a ``{balance_credits: {$gte: amount}}``
+    ``credits.service`` — a debit uses a ``{balance_micro: {$gte: amount}}``
     filter so two racing debits can never both pass the funds check
     (compare-and-swap, not read-then-write).
     """
@@ -65,14 +75,25 @@ class CreditBalance(TimestampedDocument):
     # UNIQUE — one balance row per workspace. The grant path upserts on this
     # key; the debit path CAS-updates the matching row.
     workspace: Indexed(str, unique=True)  # type: ignore[valid-type]
-    # Integer credits; 1 credit == $0.01. Usually >= 0 — a STRICT debit CAS only
-    # decrements a row that already holds >= the debit amount. It MAY go slightly
-    # negative from a metered ``allow_negative`` compute-spend debit (BC-3): a
-    # completed run is always billed, the spend already happened, so the overage
-    # is recorded as a legitimate negative balance rather than dropped. The
-    # no-overdraft guarantee is enforced at run-start (a later task) — NOT by
-    # clamping this field to >= 0. Always integer; never a float.
-    balance_credits: int = 0
+    # Integer MICRO-CREDITS; 1_000_000 micro == 1 credit == $0.01. See
+    # ``credits.domain.MICRO_PER_CREDIT`` for why the unit is this fine: a credit
+    # is a cent and the proxy prices one API call, so a whole-credit wallet could
+    # not charge for a call worth a tenth of a cent without rounding it away.
+    #
+    # RENAMED from ``balance_credits`` 2026-09-04 deliberately. Reading a micro
+    # value as though it were credits over-reports a balance by a factor of a
+    # million, and every such read is a plain attribute access that no type
+    # checker would catch. The rename turns a silent wrong answer into an
+    # AttributeError at the one moment anyone can act on it.
+    #
+    # Usually >= 0 — a STRICT debit CAS only decrements a row that already holds
+    # >= the debit amount. It MAY go slightly negative from a metered
+    # ``allow_negative`` compute-spend debit (BC-3): a completed run is always
+    # billed, the spend already happened, so the overage is recorded as a
+    # legitimate negative balance rather than dropped. The no-overdraft guarantee
+    # is enforced at run-start — NOT by clamping this field to >= 0. Always
+    # integer; never a float (a ledger invariant cannot survive float drift).
+    balance_micro: int = 0
 
     class Settings:
         name = "credit_balances"
@@ -87,10 +108,10 @@ class CreditLedgerEntry(TimestampedDocument):
     movement collide on insert (``DuplicateKeyError`` / Mongo code 11000) so
     the service returns the current balance without re-applying.
 
-    ``amount_delta`` is signed (positive for grant/genesis, negative for
-    spend). ``balance_after`` is the wallet balance once this entry's effect
+    ``amount_delta_micro`` is signed (positive for grant/genesis, negative
+    for spend). ``balance_after`` is the wallet balance once this entry's effect
     landed — stamped after the atomic ``$inc`` returns the new balance.
-    ``reconcile`` recomputes ``balance == sum(amount_delta)`` over the rows whose
+    ``reconcile`` recomputes ``balance == sum(amount_delta_micro)`` over the rows whose
     effect actually landed (``applied is True``).
 
     ``applied`` closes the crash window. An entry is inserted FIRST (the
@@ -110,10 +131,15 @@ class CreditLedgerEntry(TimestampedDocument):
     workspace: Indexed(str)  # type: ignore[valid-type]
     # One of: ``genesis`` | ``grant`` | ``spend`` | ``transfer``.
     kind: str
-    # Signed delta this entry applied (e.g. +500 on a grant, -120 on a spend).
-    amount_delta: int
-    # Wallet balance once this entry's effect landed. Stamped after the $inc.
-    balance_after: int = 0
+    # Signed delta this entry applied, in MICRO-CREDITS (1_000_000 == 1 credit ==
+    # $0.01). A 500-credit grant is +500_000_000; a $0.0015 proxy call after the
+    # 2.5x markup is -375_000. RENAMED from ``amount_delta`` alongside the balance
+    # field, for the same reason: a stale reader that finds the attribute still
+    # there would report a million-fold wrong amount and never raise.
+    amount_delta_micro: int
+    # Wallet balance in micro-credits once this entry's effect landed. Stamped
+    # after the $inc returns the new balance.
+    balance_after_micro: int = 0
     # The balance $inc for this entry has LANDED. False is the crash-window
     # state: the entry committed but its effect never reached the balance.
     # ``reconcile`` re-drives every ``applied is False`` entry, then sums only the
