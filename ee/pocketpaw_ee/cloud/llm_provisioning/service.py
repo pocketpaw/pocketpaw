@@ -153,6 +153,18 @@
 #      dropped row in the same pass and nothing accumulated. Per-run metering shares
 #      the conversion and never showed this, because it priced a whole RUN at once;
 #      the cutover kept the arithmetic and made the unit ~100x smaller.
+#      SIZE, honestly: ``round`` is unbiased, so a row at $0.003 rounds UP to a credit
+#      it has not earned and offsets one at $0.0015 rounding down. Over a week of real
+#      traffic (2026-08-28..09-04) the two cancelled — one tenant over-billed by a
+#      credit, another under-billed by one. This is not a steady drain; it is being
+#      wrong per tenant in BOTH directions, and unboundedly wrong for a workload of
+#      uniformly cheap calls where nothing rounds up to offset anything. A thousand
+#      $0.0015 requests cost $1.50 and bill zero. The carry makes it exact instead.
+#      It does NOT bill what was already dropped: the reads start at the mark minus
+#      ``_SPEND_READ_OVERLAP``. A dropped row has no ledger entry, so rewinding a
+#      tenant's mark WOULD recover it and the request_id key still stops a double
+#      debit — but never rewind past the ``prepare_spend_cutover`` mark, where BC-3
+#      owns the billing under a key this ledger cannot dedup against.
 #      The already-recorded check MOVED ABOVE the conversion as part of this: a row
 #      folded into the remainder carries a zero-value ledger entry rather than a
 #      debit, and the customer read re-offers 15 minutes of settled rows every tick,
