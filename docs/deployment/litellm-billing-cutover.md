@@ -67,12 +67,45 @@ of it was lying. Every tick now also counts the window's spend rows that no swep
 workspace claims, and says so:
 
 ```
-spend_attribution_coverage: [...] 41 of 128 proxy spend row(s) belong to NO swept
-workspace — that spend is being served and not billed
+spend_attribution_coverage: [...] 41 of 128 proxy spend row(s) claimed by no tenant
+($1.284000) — 0 name a workspace the sweep did not visit (none), 41 are a real
+caller that named nobody ($1.284000), 0 are the proxy's own dashboard /
+health-check traffic and are nobody's to bill
 ```
 
-Treat a non-zero count as blocking. It is the number that tells you whether the
-meter you are about to trust alone can see what people are actually spending.
+**Watch `untagged`, not `unattributed`.** They are not the same number and the
+difference is the whole point. A LiteLLM proxy logs traffic of its own beside
+yours — a human trying a model in its admin dashboard, its periodic model health
+check — and none of it can name a workspace or be billed to one. `unattributed`
+counts that too, so on a live deployment it never reaches zero.
+
+This mattered in practice. On 2026-09-03 a sweep reported 8 of 19 rows served and
+not billed, which read as a serious under-bill and cost hours to chase. All 8 were
+the dashboard and the health check, worth $0.00014545 between them. Meanwhile the
+11 rows that WERE attributed cost exactly $0.00, because the models in use were
+free — so the `0 credits` beside them was correct too, and nothing was wrong at all.
+
+So the gate is: **`untagged` must be zero, and `unswept` must be zero.**
+`unattributed` is context. The dollar figures are there because a count cannot
+tell a hundredth of a cent of dashboard poking from a dollar of unbilled chat, and
+that is exactly the distinction this decision turns on.
+
+## Spend smaller than a credit
+
+A credit is one cent and the proxy prices a single API call, so most spend rows are
+worth a fraction of one. The sweep carries that fraction forward on the tenant's
+`pending_spend_usd` and debits a credit the moment the running total covers one.
+
+It used to convert each row on its own and drop anything that rounded to zero. With
+the default rate card that is `round(usd * 250)`, so every call under $0.002 billed
+nothing — and permanently, because the high-water mark advanced past the dropped row
+in the same pass and nothing accumulated it. Per-run metering shares the conversion
+and never showed this, because it priced a whole run at once; the cutover kept the
+arithmetic and made the unit about a hundred times smaller.
+
+Nothing to do about it operationally. It is here because `0 credits` on a sweep that
+read real dollars used to be the symptom, and that is worth recognising rather than
+re-diagnosing.
 
 ## The procedure
 
@@ -88,12 +121,15 @@ per-tenant `delta`, and `unattributed`.
 ```python
 from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
 await run_cutover_sweep(mode="shadow")
-# {'tenants': 3, 'processed': 3, 'gaps': 0, 'credits': 0, 'unattributed': 0}
+# {'tenants': 3, 'processed': 3, 'gaps': 0, 'credits': 0,
+#  'unattributed': 8, 'unswept': 0, 'untagged': 0}
 ```
 
-`unattributed` must be zero, and a zero you got while a count was failing does not
-count — the log line says `INCOMPLETE` in that case rather than reporting a
-finding.
+`untagged` and `unswept` must be zero. A non-zero `unattributed` alongside them is
+the proxy's own traffic and is fine. A zero you got while a count was failing does
+not count — the log line says `INCOMPLETE` in that case rather than reporting a
+finding, and a split it could not read is flagged as coming from a truncated
+sample rather than passed off as a finding.
 
 **2. Drain the per-run sweep.** Let it run until no completed run is still
 unbilled. A run left unbilled at the moment you flip is billed by neither meter:

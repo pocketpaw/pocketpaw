@@ -25,7 +25,14 @@
 # in ``cloud.models.__init__`` (``get_all_documents()`` + ``__all__``) so
 # ``init_beanie`` wires the ``litellm_tenant_keys`` collection.
 
+# Updated 2026-09-04 (fix/litellm-spend-leaks): added ``pending_spend_usd``, the
+# per-tenant sub-credit remainder. Credits are integers and the proxy prices one API
+# call, so most rows are worth a fraction of one; the sweep used to discard every
+# such row. This is where the fraction waits for the row that tips it over.
+
 from __future__ import annotations
+
+from datetime import datetime
 
 from beanie import Indexed
 
@@ -92,6 +99,26 @@ class LiteLLMTenantKey(TimestampedDocument):
     # /spend/logs row already debited to the ledger. The sweep reads rows AFTER
     # this and advances it; None means nothing has been ingested yet.
     last_spend_ingest_ts: str | None = None
+    # Spend this tenant has incurred that is not yet worth a whole credit, carried
+    # forward to the next sweep. Credits are integers (1 == $0.01) and the proxy
+    # prices a single API call, so most rows are worth a fraction of one; the sweep
+    # used to convert each row on its own and discard anything that rounded to
+    # zero, which served every cheap call for free and permanently, because the
+    # high-water mark moved past the dropped row in the same pass. Always less than
+    # one credit's worth of USD — the moment it covers a whole credit, that credit
+    # is debited and this drops back below the line.
+    pending_spend_usd: float = 0.0
+    # Lease held by whoever is currently ingesting this tenant's spend, as the UTC
+    # instant it expires. ``pending_spend_usd`` is a read-modify-write and the
+    # ledger's per-row key cannot protect it: two overlapping sweeps read the same
+    # remainder, each fold in a DIFFERENT row, and each cross the credit line, so
+    # both debit under distinct idempotency keys and the tenant pays twice. The
+    # overlap is not hypothetical — the 5-minute sweep runs in the API process and
+    # again at worker boot, and the per-run trigger makes it routine.
+    #
+    # An expiry rather than a boolean so a holder that crashes mid-sweep cannot
+    # wedge a tenant's billing forever; the next sweep past the expiry takes it.
+    spend_ingest_lease_until: datetime | None = None
 
     class Settings:
         name = "litellm_tenant_keys"
