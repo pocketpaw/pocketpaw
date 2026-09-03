@@ -1,6 +1,20 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-04 (AD-2 — visits, bounce rate and visit duration): ``site_analytics``
+# answers a VISIT block beside the pageview totals, read off the visit id AD-1 stamps on
+# every row. It costs one more query — SIX per uncached read, up from five — and it is the
+# only statement in this module with a subquery, which is why ``_analytics_sql`` grew an
+# ``outer`` parameter. That shape is not a preference: the SQL API documents a subquery in
+# FROM but neither JOIN, UNION nor a CTE, so grouping by a visit id STORED at write time is
+# the only way these three numbers are reachable at all.
+#
+# It brings a FOURTH empty state, governed by the same rule as the other three. A window
+# whose rows all predate the visit id is not a site with a zero bounce rate; it is a site
+# that has not republished since the counter learned to record visits. It reads as
+# ``visits: null`` with ``"visits"`` named in ``unrecorded``, exactly as the device class
+# already reports a row shape that cannot answer it.
+#
 # Updated 2026-09-02 (SA-5 — the entitlement on the wire): ``site_entitlements`` now
 # reports ``analytics``, echoed off the resolver. It is the cheap pre-check that lets
 # the dashboard disable the panel with a reason instead of calling the endpoint to be
@@ -1041,6 +1055,7 @@ from pocketpaw_ee.sites.dto import (
     DomainStatusResponse,
     SiteAnalyticsBreakdown,
     SiteAnalyticsResponse,
+    SiteAnalyticsVisits,
     SiteClientResponse,
     SiteClientUpdate,
     SiteDataRowsResponse,
@@ -5260,7 +5275,16 @@ def _analytics_breakdown(
     ]
 
 
-def _analytics_sql(*, select: str, site_id: str, days: int, group: str = "", limit: int = 0) -> str:
+def _analytics_sql(
+    *,
+    select: str,
+    site_id: str,
+    days: int,
+    group: str = "",
+    limit: int = 0,
+    where: str = "",
+    outer: str = "",
+) -> str:
     """Build ONE Analytics Engine statement over this site's pageview rows.
 
     EVERY value interpolated here is one this module controls: ``site_id`` is
@@ -5276,6 +5300,15 @@ def _analytics_sql(*, select: str, site_id: str, days: int, group: str = "", lim
     counted the way they are stored, on the per-day hash in ``blob4``, so a visitor who
     returns tomorrow counts twice. That is the privacy design rather than a defect: the
     salt rotates at UTC midnight, so no join across days is possible even in principle.
+
+    ``where`` ANDs one more condition onto the window filter, and ``outer`` wraps the
+    whole statement in a second SELECT reading its rows — the SUBQUERY FORM the visit
+    metrics need, and the only shape in which they are reachable, since the SQL API
+    documents a subquery in FROM but neither JOIN, UNION nor a CTE. Both are literals
+    written in this file exactly as ``select`` and ``group`` are, for the same reason.
+    The dataset, the site filter and the window all stay on the INNER half — the only
+    half that touches a table — so a subquery form is scoped by the same two conditions
+    every other statement here is.
     """
     if not re.fullmatch(r"[0-9a-f]{24}", site_id):
         # Belt and braces behind ``_load``'s ObjectId round-trip. This is the last
@@ -5289,11 +5322,19 @@ def _analytics_sql(*, select: str, site_id: str, days: int, group: str = "", lim
         f"FROM {analytics_worker.dataset_name()}",
         f"WHERE index1 = '{site_id}' AND timestamp > NOW() - INTERVAL '{int(days)}' DAY",
     ]
+    if where:
+        parts.append(f"AND {where}")
     if group:
         parts.append(f"GROUP BY {group}")
-        parts.append("ORDER BY pageviews DESC")
+        if not outer:
+            # The sort is what makes a breakdown's LIMIT a top-N. An aggregate reading a
+            # subquery does not care what order its rows arrive in, so the outer form does
+            # not pay Cloudflare to sort a site's whole visit table and then discard it.
+            parts.append("ORDER BY pageviews DESC")
     if limit:
         parts.append(f"LIMIT {int(limit)}")
+    if outer:
+        parts = [f"SELECT {outer}", "FROM (", *parts, ")"]
     parts.append("FORMAT JSON")
     return "\n".join(parts)
 
@@ -5312,6 +5353,56 @@ _ANALYTICS_DIMENSIONS: tuple[tuple[str, str, str], ...] = (
     ("referrers", "blob2", "(direct)"),
     ("countries", "blob3", "(unknown)"),
     ("devices", "blob5", "unknown"),
+)
+
+
+# ── AD-2: the visit statement ────────────────────────────────────────────────
+#
+# A VISIT is a run of pageviews sharing ``blob6``, the id the counting Worker stamps on
+# every row under a salt that rotates on the HOUR — ``analytics_worker``'s row contract
+# holds the construction and the hour-boundary caveat. Grouping by an id STORED at write
+# time is the whole reason these numbers are reachable: the SQL API documents a subquery
+# in FROM but neither JOIN, UNION nor a CTE, so RECONSTRUCTING a visit at read time —
+# ordering one visitor's timestamps and cutting them on an inactivity gap — is not
+# expressible here at all, and the fallback is pulling raw rows and clustering them in
+# Python on a read path whose entire value is being cheap.
+#
+# The inner statement answers ONE ROW PER VISIT: how many pages it viewed, how long it
+# lasted, and the sampling interval its rows carry. The outer collapses those into three
+# integers. Bounce rate and mean duration are deliberately NOT computed in SQL — they are
+# ratios whose denominators go to zero in two ordinary situations (a window with no
+# visits, and a window of nothing but bounces), and both have to be answered as "not
+# measurable" rather than as a zero. That belongs where it can be said.
+#
+# WHY THE OUTER SUMS AN INTERVAL RATHER THAN COUNTING ROWS. Analytics Engine downsamples
+# a hot index: it keeps a fraction of the rows and sets ``_sample_interval`` on each
+# survivor to the number of rows it stands for. Counting the subquery's rows would
+# under-report visits by exactly that factor on the busiest sites — the failure
+# ``SUM(_sample_interval)`` exists to prevent, one level up — and it would leave visits on
+# a different scale from the pageviews they are divided into. Each visit is therefore
+# weighted by the interval its own rows carry, ``MAX`` of them so a sampling rate that
+# changed mid-visit cannot round the estimate down. The weight is exact for a
+# single-pageview visit, which is every bounce, and generous for a long visit that
+# survived sampling on several rows. Unsampled traffic weighs 1 and the question does not
+# arise.
+_ANALYTICS_VISIT_SELECT = (
+    "blob6 AS visit, "
+    "SUM(_sample_interval) AS pageviews, "
+    "MAX(_sample_interval) AS sample_interval, "
+    "toUnixTimestamp(MAX(timestamp)) - toUnixTimestamp(MIN(timestamp)) AS seconds"
+)
+
+# Rows written before AD-1 carry no visit id, and Analytics Engine answers an empty string
+# for a blob a row never held. Left in, every one of them would group TOGETHER into a
+# single fabricated visit spanning the window: one visit, thousands of pageviews, a
+# duration measured in days, and not one number on the panel true. Dropped instead — and
+# their absence is what the fourth empty state is read from.
+_ANALYTICS_VISIT_RECORDED = "blob6 != ''"
+
+_ANALYTICS_VISIT_TOTALS = (
+    "SUM(sample_interval) AS visits, "
+    "sumIf(sample_interval, pageviews = 1) AS bounces, "
+    "sumIf(seconds * sample_interval, pageviews > 1) AS total_seconds"
 )
 
 
@@ -5348,8 +5439,11 @@ async def site_analytics(
       and its ValidationError travels out of here untouched, because a failed read is
       not a report about the site's traffic and must not arrive shaped like one.
 
-    ``devices`` may come back None with ``"devices"`` in ``unrecorded`` — see
-    ``_analytics_devices``.
+    ``devices`` and ``visits`` may each come back None with their own name in
+    ``unrecorded``. That is not a fifth status: the stored row has GROWN twice since
+    the oldest rows in a window were written, so one part of an otherwise healthy
+    response can be unanswerable while the rest of it is real. See
+    ``_analytics_devices`` and ``_analytics_visits``.
     """
     doc = await _load(workspace_id, site_id)
 
@@ -5396,6 +5490,25 @@ async def site_analytics(
     # window held no data — a real answer, and the ``ok``-with-zeros state rather than a
     # failure. A failure would already have raised out of the client.
     totals = totals_rows[0] if totals_rows else {}
+    pageviews = _analytics_int(totals, "pageviews")
+
+    # THE VISIT QUERY, read here rather than beside the breakdowns because its empty
+    # state is decided against the totals above: no visits AND no pageviews is a quiet
+    # week, while no visits AND real pageviews is a window written before the visit id
+    # existed. Those are different sentences — see ``_analytics_visits``.
+    visit_rows = await cf.query_analytics_sql(
+        _analytics_sql(
+            select=_ANALYTICS_VISIT_SELECT,
+            site_id=site_id,
+            days=days,
+            group="visit",
+            where=_ANALYTICS_VISIT_RECORDED,
+            outer=_ANALYTICS_VISIT_TOTALS,
+        )
+    )
+    visits, visits_unrecorded = _analytics_visits(
+        visit_rows[0] if visit_rows else {}, pageviews=pageviews
+    )
 
     breakdowns: dict[str, list[SiteAnalyticsBreakdown]] = {}
     for field, blob, empty in _ANALYTICS_DIMENSIONS:
@@ -5420,13 +5533,14 @@ async def site_analytics(
         status=ANALYTICS_STATUS_OK,
         counting_since=_analytics_iso(since),
         retention_days=_ANALYTICS_RETENTION_DAYS,
-        pageviews=_analytics_int(totals, "pageviews"),
+        pageviews=pageviews,
         visitors=_analytics_int(totals, "visitors"),
+        visits=visits,
         top_pages=breakdowns["top_pages"],
         referrers=breakdowns["referrers"],
         countries=breakdowns["countries"],
         devices=devices,
-        unrecorded=unrecorded,
+        unrecorded=unrecorded + visits_unrecorded,
     )
     _analytics_cache_put(cache_key, response)
     return response
@@ -5458,6 +5572,52 @@ def _analytics_devices(
     if not rows or all(row.label == "unknown" for row in rows):
         return None, ["devices"]
     return rows, []
+
+
+def _analytics_visits(row: dict, *, pageviews: int) -> tuple[SiteAnalyticsVisits | None, list[str]]:
+    """The visit block for one window, or None plus ``"visits"`` in ``unrecorded``.
+
+    THE FOURTH EMPTY STATE IS DECIDED HERE, and it is the device class's problem one
+    metric over. A site published before AD-1 is counting pageviews perfectly well and
+    stamping a visit id on none of them, so the visit query answers nothing while the
+    totals answer real traffic. Rendering that as 0 visits and a 0% bounce rate would be
+    the invented zero this whole endpoint is built against — and a worse one than the
+    others, because 0% bounce does not look like an empty panel, it looks like a
+    spectacular result. Real pageviews with no visits therefore returns None and names
+    ``"visits"`` unrecorded, which a client shows as "republish to start measuring
+    visits", the way it already shows a device class it cannot answer.
+
+    NO pageviews and no visits is a different sentence and keeps its numbers: the site is
+    counting, the window is genuinely quiet, and that zero is honest. The two ratios stay
+    None even then, because a bounce rate over zero visits is undefined rather than zero.
+
+    A MIXED WINDOW — some rows before the republish, some after — reports the visits it
+    can measure and under-states them until the window has rolled past that publish. It
+    is the shape ``counting_since`` already has, and it is transient by the length of the
+    window; refusing the whole block instead would black the panel out for up to ninety
+    days after an upgrade."""
+    visits = _analytics_int(row, "visits")
+    if visits <= 0:
+        if pageviews > 0:
+            return None, ["visits"]
+        return SiteAnalyticsVisits(visits=0), []
+    # Clamped because the remainder is a denominator below. More bounces than visits is
+    # impossible out of the statement above, and a negative mean duration reaching a
+    # customer's screen is not worth the one call it costs to make it unreachable.
+    bounces = min(_analytics_int(row, "bounces"), visits)
+    measured = visits - bounces
+    total_seconds = _analytics_int(row, "total_seconds")
+    return (
+        SiteAnalyticsVisits(
+            visits=visits,
+            # Rounded because a ratio of two sampled estimates means nothing in its
+            # fifteenth decimal place, and the wire should not carry float noise that a
+            # UI then has to hide.
+            bounce_rate=round(bounces / visits, 4),
+            visit_duration_seconds=round(total_seconds / measured, 1) if measured else None,
+        ),
+        [],
+    )
 
 
 def _analytics_iso(moment: datetime) -> str:

@@ -2,6 +2,16 @@
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
 #
+# Updated 2026-09-04 (AD-2 — the visit metrics on the wire): added
+# ``SiteAnalyticsVisits`` and ``SiteAnalyticsResponse.visits``, the visits / bounce rate /
+# visit duration block the overview leads with. It carries this model's absence rule
+# further than the metrics above it needed to: a bounce rate over zero visits and a mean
+# duration over zero measurable visits are both None rather than 0.0, because a ratio of
+# nothing is not a result of nothing. And the block ITSELF is None, with ``"visits"`` named
+# in ``unrecorded``, when every row in the window was written before the counter learned to
+# stamp a visit id — the FOURTH empty state, which is the device class's problem one metric
+# over.
+#
 # Updated 2026-09-02 (SA-4 — the visitor-analytics read): added
 # ``SiteAnalyticsResponse`` / ``SiteAnalyticsBreakdown`` and the three
 # ``ANALYTICS_STATUS_*`` constants, backing GET /sites/{site_id}/analytics. The
@@ -954,6 +964,32 @@ class SiteAnalyticsBreakdown(BaseModel):
     visitors: int
 
 
+class SiteAnalyticsVisits(BaseModel):
+    """Visits, bounce rate and visit duration for one site over one window.
+
+    A VISIT is the run of pageviews sharing the visit id the counting Worker stamps on
+    every row, under a salt that rotates on the hour. So a visit that crosses the top of
+    an hour is counted as TWO. That is accepted rather than fixed, and it is stated here
+    because it is part of what these numbers mean: the error over-splits and never
+    over-merges, the direction the daily visitor salt already accepts, and it leaves
+    visits slightly generous and duration slightly pessimistic.
+
+    ``bounce_rate`` is a FRACTION and not a percentage — bounces over visits, where a
+    bounce is a visit of exactly one pageview. None when there were no visits at all,
+    because a rate over zero is undefined and 0.0 would say nobody bounced.
+
+    ``visit_duration_seconds`` is the mean over visits of MORE THAN ONE pageview. A
+    single-pageview visit has no measurable duration — its one row carries one timestamp
+    — so averaging it in as a zero would drag the mean down in proportion to how well the
+    landing page holds people, which is backwards. None when every visit was a bounce,
+    for the same reason the rate is None when there were no visits.
+    """
+
+    visits: int
+    bounce_rate: float | None = None
+    visit_duration_seconds: float | None = None
+
+
 class SiteAnalyticsResponse(BaseModel):
     """Visitor analytics for one site over one window (GET
     /sites/{site_id}/analytics).
@@ -969,15 +1005,14 @@ class SiteAnalyticsResponse(BaseModel):
     site's creation, it begins here, and a window that reaches further back is
     reaching into time nobody recorded. None when nothing has ever counted.
 
-    ``unrecorded`` names the dimensions the stored row cannot answer AT ALL, as
-    opposed to answered-and-empty. It is empty today for pages, referrers and
-    countries, and carries ``"devices"``: the row a published site writes holds the
-    path, the referrer host, the country and a per-day visitor hash, and nothing
-    about the device. The user-agent is read at the edge only to reject bots and to
-    salt that hash, and the hash is one-way, so no device breakdown can be recovered
-    from data already stored either. Naming it beats returning an empty list that a
-    chart would render as "no devices", and beats omitting the field, which a client
-    cannot tell from a version skew.
+    ``unrecorded`` names the parts of this response the stored rows cannot answer AT
+    ALL, as opposed to answered-and-empty. WHICH parts is not fixed, because the row has
+    grown twice since this model was written and a window ninety days long can span the
+    change: it carries ``"devices"`` while every row in the window predates the device
+    class, and ``"visits"`` while every row predates the visit id, and it empties on its
+    own once real rows exist. Naming a part beats returning an empty list, which a chart
+    renders as "no devices", and beats omitting the field, which a client cannot tell
+    from a version skew.
     """
 
     site_id: str
@@ -990,6 +1025,11 @@ class SiteAnalyticsResponse(BaseModel):
     retention_days: int = 90
     pageviews: int | None = None
     visitors: int | None = None
+    # None with ``"visits"`` in ``unrecorded`` when no row in the window carries a
+    # visit id, which means the site has not republished since the counter learned to
+    # stamp one. Never a zeroed block: a 0% bounce rate is not an empty panel, it is a
+    # spectacular result, and this site has not measured a single visit.
+    visits: SiteAnalyticsVisits | None = None
     top_pages: list[SiteAnalyticsBreakdown] | None = None
     referrers: list[SiteAnalyticsBreakdown] | None = None
     countries: list[SiteAnalyticsBreakdown] | None = None

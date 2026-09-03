@@ -262,5 +262,95 @@
       "tests/ee/sites/test_sites_analytics_since.py::test_a_shim_build_stamps_the_start_like_any_other_counter",
       "tests/ee/sites/test_sites_analytics_since.py::test_a_republish_that_keeps_the_shim_keeps_the_original_stamp"
     ]
+  },
+  {
+    "label": "the visit subquery counts rows instead of summing the sampling interval — visits and pageviews end up on different scales, so pages-per-visit and the bounce rate are both wrong on exactly the busiest sites",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    \"blob6 AS visit, \"\n    \"SUM(_sample_interval) AS pageviews, \"",
+    "replace": "    \"blob6 AS visit, \"\n    \"COUNT() AS pageviews, \"",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the outer aggregate counts visit rows instead of weighting them — a downsampled index reports a fraction of its visits with no error anywhere",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    \"SUM(sample_interval) AS visits, \"",
+    "replace": "    \"COUNT() AS visits, \"",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the visits are grouped by the device class in the slot next door — the number of device classes is reported as the number of visits, which is a plausible small number on a chart and raises nothing",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "_ANALYTICS_VISIT_SELECT = (\n    \"blob6 AS visit, \"",
+    "replace": "_ANALYTICS_VISIT_SELECT = (\n    \"blob5 AS visit, \"",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "a bounce becomes a visit of MORE than one pageview — the bounce rate inverts, and a site whose visitors all leave immediately reports 0%",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    \"sumIf(sample_interval, pageviews = 1) AS bounces, \"",
+    "replace": "    \"sumIf(sample_interval, pageviews > 1) AS bounces, \"",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the duration total stops excluding single-pageview visits — every bounce adds a zero to a sum that is then divided by the visits that are not bounces",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    \"sumIf(seconds * sample_interval, pageviews > 1) AS total_seconds\"",
+    "replace": "    \"SUM(seconds * sample_interval) AS total_seconds\"",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "rows carrying no visit id are no longer filtered out — every pageview written before the visit id existed groups into ONE fabricated visit spanning the window, and the fourth empty state can never be reached",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            where=_ANALYTICS_VISIT_RECORDED,",
+    "replace": "            where=\"\",",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the mean visit duration is divided by visits rather than by the visits that have one — a site's time-on-page falls every time somebody reads one page and leaves, which is backwards",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    measured = visits - bounces",
+    "replace": "    measured = visits",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "a window written before the visit id reports zero visits instead of saying so — a 0% bounce rate does not look like an empty panel, it looks like a triumph, and it would be printed for every site that has not republished",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if pageviews > 0:\n            return None, [\"visits\"]",
+    "replace": "        if False:\n            return None, [\"visits\"]",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "a genuinely quiet window invents a zero bounce rate — a ratio over zero visits is undefined, and 0.0 says nobody bounced",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        return SiteAnalyticsVisits(visits=0), []",
+    "replace": "        return SiteAnalyticsVisits(visits=0, bounce_rate=0.0, visit_duration_seconds=0.0), []",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "a window of nothing but bounces reports a mean duration of zero seconds — a claim that everyone left instantly, from rows that carry one timestamp each and can measure no duration at all",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            visit_duration_seconds=round(total_seconds / measured, 1) if measured else None,",
+    "replace": "            visit_duration_seconds=round(total_seconds / measured, 1) if measured else 0.0,",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
   }
 ]
