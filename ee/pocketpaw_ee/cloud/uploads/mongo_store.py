@@ -1,5 +1,12 @@
 """Mongo-backed metadata store, workspace-scoped.
 
+2026-08-28 (FC-1 "File comprehension"): ``summary`` is threaded exactly the way
+``tags`` is — ``set_library_metadata`` grew a ``summary`` keyword, and both
+``iter_by_workspace`` / ``iter_by_pocket`` dict rows now carry it so the
+/files listing can show what a file IS without a second query. Same
+only-touch-what-was-passed rule as the other library fields, and the same
+always-applied workspace filter, so a caller still cannot write across tenants.
+
 2026-08-04 (Living-wiki API): ``iter_by_workspace`` rows now also carry
 ``kb_article_id`` and ``kb_scope`` (the FL-11b ingest-tracking columns) so
 GET /knowledge/uploads can derive ``has_article`` without a second query,
@@ -103,13 +110,20 @@ class MongoFileStore:
         tags: list[str] | None = None,
         collections: list[str] | None = None,
         hide_from_ai: bool | None = None,
+        summary: str | None = None,
     ) -> FileUpload | None:
-        """Set library metadata on one live row, workspace-scoped (FL-1).
+        """Set library metadata on one live row, workspace-scoped (FL-1, FC-1).
 
         Only the fields passed as non-``None`` are updated — omitted fields
         keep their current value. Returns the updated doc, or ``None`` if no
         live row matches ``(file_id, workspace)``. The workspace filter is
         always applied, so a caller cannot mutate another tenant's rows.
+
+        ``summary`` (FC-1) follows the same rule, which means this setter
+        cannot CLEAR a summary — ``None`` is "leave it alone", not "erase it".
+        That is deliberate and matches the other fields; the only writer that
+        would want to erase one is a human, and the PATCH route handles an
+        explicit empty string by writing ``""``.
         """
         doc = await self.get_doc_scoped(file_id, workspace)
         if doc is None:
@@ -120,6 +134,8 @@ class MongoFileStore:
             doc.collections = [str(c) for c in collections]
         if hide_from_ai is not None:
             doc.hide_from_ai = bool(hide_from_ai)
+        if summary is not None:
+            doc.summary = str(summary)
         await doc.save()
         return doc
 
@@ -314,6 +330,8 @@ class MongoFileStore:
                 "tags": list(getattr(doc, "tags", []) or []),
                 "collections": list(getattr(doc, "collections", []) or []),
                 "hide_from_ai": bool(getattr(doc, "hide_from_ai", False)),
+                # FC-1: read defensively — legacy rows predate the field.
+                "summary": getattr(doc, "summary", None),
                 # Living-wiki API: FL-11b ingest tracking, so /knowledge/uploads
                 # can derive has_article without a second query; pocket_id so
                 # workspace-level listings can exclude pocket-private rows.
@@ -427,6 +445,8 @@ class MongoFileStore:
                 "tags": list(getattr(doc, "tags", []) or []),
                 "collections": list(getattr(doc, "collections", []) or []),
                 "hide_from_ai": bool(getattr(doc, "hide_from_ai", False)),
+                # FC-1: read defensively — legacy rows predate the field.
+                "summary": getattr(doc, "summary", None),
             }
 
     async def count_by_pocket(self, workspace: str, pocket_id: str) -> int:
