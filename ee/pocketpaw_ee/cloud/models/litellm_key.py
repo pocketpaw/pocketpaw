@@ -32,6 +32,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from beanie import Indexed
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
@@ -106,6 +108,17 @@ class LiteLLMTenantKey(TimestampedDocument):
     # one credit's worth of USD — the moment it covers a whole credit, that credit
     # is debited and this drops back below the line.
     pending_spend_usd: float = 0.0
+    # Lease held by whoever is currently ingesting this tenant's spend, as the UTC
+    # instant it expires. ``pending_spend_usd`` is a read-modify-write and the
+    # ledger's per-row key cannot protect it: two overlapping sweeps read the same
+    # remainder, each fold in a DIFFERENT row, and each cross the credit line, so
+    # both debit under distinct idempotency keys and the tenant pays twice. The
+    # overlap is not hypothetical — the 5-minute sweep runs in the API process and
+    # again at worker boot, and the per-run trigger makes it routine.
+    #
+    # An expiry rather than a boolean so a holder that crashes mid-sweep cannot
+    # wedge a tenant's billing forever; the next sweep past the expiry takes it.
+    spend_ingest_lease_until: datetime | None = None
 
     class Settings:
         name = "litellm_tenant_keys"

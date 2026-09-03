@@ -194,3 +194,88 @@ async def test_a_re_read_cheap_row_is_not_charged_twice(mongo_db):
         f"${CHEAP_USD * CHEAP_ROWS:.4f} of compute billed {charged} credits after "
         f"five overlapping sweeps"
     )
+
+
+async def test_two_concurrent_sweeps_do_not_double_bill_the_remainder(mongo_db):
+    """The remainder is a read-modify-write, so it needs a lease.
+
+    Two ingests for one workspace can overlap: the 5-minute sweep runs in the API
+    process and again at worker boot, and a per-run trigger makes the overlap
+    routine. Both load the same ``pending_spend_usd``, both add their own row to it,
+    both cross the credit line, and both debit — on DIFFERENT rows, so the ledger's
+    unique key never fires and nothing looks wrong afterwards.
+
+    The overlap is forced rather than hoped for. ``ingest_tenant_spend`` loads the
+    bookkeeping row BEFORE it reads spend, so a barrier inside the spend read holds
+    both callers until each is holding the same stale remainder. Left to chance the
+    two coroutines simply run to completion in turn and the race never appears,
+    which is exactly why it survived review.
+
+    Here: $0.003 already carried, plus one $0.0015 row on each side. Six tenths of a
+    cent is worth one credit with $0.002 left over. Without a lease it bills two.
+    """
+    import asyncio
+
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    doc = await _provision()
+    doc.pending_spend_usd = 0.003
+    await doc.save()
+
+    both_loaded = asyncio.Event()
+    arrived = 0
+
+    class BarrierAdmin(FakeAdmin):
+        """Blocks inside the spend read until BOTH ingests hold the same doc."""
+
+        async def spend_logs(self, *, api_key: str):
+            nonlocal arrived
+            arrived += 1
+            if arrived >= 2:
+                both_loaded.set()
+            # A short timeout, not a hard barrier. When the lease works the second
+            # caller never reaches here at all, so waiting for it would deadlock the
+            # first — the test has to survive the fix as well as catch the bug.
+            try:
+                await asyncio.wait_for(both_loaded.wait(), timeout=0.5)
+            except TimeoutError:
+                pass
+            return list(self.key_rows)
+
+    left = [
+        {
+            "request_id": "req-left",
+            "spend": CHEAP_USD,
+            "startTime": "2026-09-02T10:00:00",
+            "model": "gpt-5.2-mini",
+        }
+    ]
+    right = [
+        {
+            "request_id": "req-right",
+            "spend": CHEAP_USD,
+            "startTime": "2026-09-02T10:00:01",
+            "model": "gpt-5.2-mini",
+        }
+    ]
+
+    await asyncio.gather(
+        provisioning.ingest_tenant_spend(
+            WS, spend_card=SPEND, admin_client=BarrierAdmin(key_rows=left)
+        ),
+        provisioning.ingest_tenant_spend(
+            WS, spend_card=SPEND, admin_client=BarrierAdmin(key_rows=right)
+        ),
+    )
+
+    charged = 1000 - await credits.balance(WS)
+    assert charged == 1, f"$0.006 of spend billed {charged} credits across two overlapping sweeps"
+
+    # And the row the skipped caller was holding is not lost — it carries no ledger
+    # entry, so a later sweep picks it up and folds it into the remainder.
+    await provisioning.ingest_tenant_spend(
+        WS, spend_card=SPEND, admin_client=FakeAdmin(key_rows=left + right)
+    )
+    assert 1000 - await credits.balance(WS) == 1
+    doc = await LiteLLMTenantKey.find_one(LiteLLMTenantKey.workspace == WS)
+    assert doc is not None
+    assert doc.pending_spend_usd == pytest.approx(0.002)

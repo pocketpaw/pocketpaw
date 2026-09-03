@@ -165,6 +165,13 @@
 #      tenant's mark WOULD recover it and the request_id key still stops a double
 #      debit — but never rewind past the ``prepare_spend_cutover`` mark, where BC-3
 #      owns the billing under a key this ledger cannot dedup against.
+#      The carry also needs a LEASE, which the ledger cannot provide. It is a
+#      read-modify-write: two overlapping ingests read the same remainder, each folds
+#      in a row the other has not seen, each crosses the credit line, and both debit
+#      under different ``litellm:{request_id}`` keys — so the unique index never
+#      fires and the tenant quietly pays twice. ``ingest_tenant_spend`` is now a
+#      lease wrapper around ``_ingest_tenant_spend_locked``; a caller that cannot
+#      take the lease returns ``lease_skipped`` rather than waiting.
 #      The already-recorded check MOVED ABOVE the conversion as part of this: a row
 #      folded into the remainder carries a zero-value ledger entry rather than a
 #      debit, and the customer read re-offers 15 minutes of settled rows every tick,
@@ -781,6 +788,67 @@ def _customer_read_window(doc: LiteLLMTenantKey, *, now: datetime) -> tuple[date
     return (created if created is not None else now - _SPEND_READ_OVERLAP), now
 
 
+# How long a spend-ingest lease is held before anyone else may take it. Long enough
+# to cover a slow sweep (the per-key read walks a tenant's whole history), short
+# enough that a process killed mid-sweep does not wedge a tenant's billing for long.
+_SPEND_LEASE_TTL = timedelta(seconds=60)
+
+
+async def _acquire_spend_lease(workspace: str) -> bool:
+    """Take the exclusive right to ingest ``workspace``'s spend. True if we got it.
+
+    A single-document compare-and-swap: claim the row only if nobody holds it or the
+    holder's lease has expired. The same idiom ``credits.debit`` uses for the wallet,
+    and for the same reason — read-then-write cannot serialise two racers.
+
+    WHY A LEASE AT ALL, when every debit is already idempotent per row.
+    ``pending_spend_usd`` is the part the ledger cannot protect. Two ingests read the
+    same remainder, each folds in a row the OTHER has not seen, and each crosses the
+    credit line — so both debit, under different ``litellm:{request_id}`` keys, and
+    the unique index never fires. Nothing errors and nothing looks wrong; the tenant
+    is simply billed twice for one credit's worth of spend. The overlap is routine:
+    the sweep runs on the API process heartbeat AND at worker boot, and the per-run
+    trigger makes it happen on every run.
+
+    Mongo rather than an ``asyncio.Lock`` because the racers are in different
+    PROCESSES — runs execute in the arq worker, the sweep loop in the API.
+    """
+    now = datetime.now(UTC)
+    coll = LiteLLMTenantKey.get_pymongo_collection()
+    updated = await coll.find_one_and_update(
+        {
+            "workspace": workspace,
+            "$or": [
+                {"spend_ingest_lease_until": None},
+                {"spend_ingest_lease_until": {"$exists": False}},
+                {"spend_ingest_lease_until": {"$lt": now}},
+            ],
+        },
+        {"$set": {"spend_ingest_lease_until": now + _SPEND_LEASE_TTL}},
+    )
+    return updated is not None
+
+
+async def _release_spend_lease(workspace: str) -> None:
+    """Hand the lease back. Best effort — the expiry is the real guarantee.
+
+    Released in a ``finally`` so a failed sweep does not hold a tenant for the full
+    TTL, but a crash that skips this is survivable by design: the next caller past
+    the expiry takes the lease anyway.
+    """
+    try:
+        coll = LiteLLMTenantKey.get_pymongo_collection()
+        await coll.update_one(
+            {"workspace": workspace}, {"$set": {"spend_ingest_lease_until": None}}
+        )
+    except Exception:  # noqa: BLE001 — never fail a completed sweep on cleanup
+        logger.debug(
+            "llm_provisioning: could not release the spend lease for workspace=%s "
+            "— it expires on its own",
+            workspace,
+        )
+
+
 async def _spend_bookkeeping_row(workspace: str) -> LiteLLMTenantKey:
     """This tenant's spend row, created keyless if provisioning never ran.
 
@@ -901,6 +969,53 @@ async def _read_tenant_spend_rows(
 
 
 async def ingest_tenant_spend(
+    workspace: str,
+    *,
+    spend_card: SpendCredits | None = None,
+    admin_client: LiteLLMAdminClient | None = None,
+) -> SpendIngestResult:
+    """Bill ``workspace``'s proxy spend, under an exclusive per-tenant lease.
+
+    Thin wrapper over ``_ingest_tenant_spend_locked``, which holds the real logic
+    and its documentation. Everything here is the lease.
+
+    A tenant is ingested by one caller at a time because the sub-credit remainder is
+    a read-modify-write and the ledger's per-row idempotency key cannot protect it —
+    see ``_acquire_spend_lease``. A caller that cannot get the lease returns an empty
+    result with ``lease_skipped`` set rather than waiting: whoever holds it is
+    already reading the same rows, and the next sweep is at most five minutes out.
+    Skipping is therefore never a lost bill, only a later one.
+    """
+    _require_workspace(workspace)
+    # The lease is a CAS on this row, so the row has to exist before we can claim it.
+    await _spend_bookkeeping_row(workspace)
+
+    if not await _acquire_spend_lease(workspace):
+        logger.debug(
+            "llm_provisioning.ingest_tenant_spend: workspace=%s is already being "
+            "ingested — skipping this pass",
+            workspace,
+        )
+        return SpendIngestResult(
+            workspace_id=workspace,
+            rows_read=0,
+            rows_billed=0,
+            credits_debited=0,
+            cost_usd=0.0,
+            cached_tokens=0,
+            balance_after=await credits_service.balance(workspace),
+            lease_skipped=True,
+        )
+
+    try:
+        return await _ingest_tenant_spend_locked(
+            workspace, spend_card=spend_card, admin_client=admin_client
+        )
+    finally:
+        await _release_spend_lease(workspace)
+
+
+async def _ingest_tenant_spend_locked(
     workspace: str,
     *,
     spend_card: SpendCredits | None = None,

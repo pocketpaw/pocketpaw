@@ -173,6 +173,10 @@ class SpendIngestResult:
     cost_usd: float
     cached_tokens: int
     balance_after: int
+    # True when this call did no work because another ingest already held the
+    # tenant's lease. Distinct from a genuine zero: nothing was read, so the caller
+    # must not treat the zero as evidence the tenant has no spend.
+    lease_skipped: bool = False
 
 
 @dataclass(frozen=True)
