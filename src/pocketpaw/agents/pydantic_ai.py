@@ -343,6 +343,23 @@ Per-RUN, beside ``usage_limits`` and ``max_tokens``, for the reason those are:
 run cannot live on it. The full chain, its two proxy-side preconditions, and why
 the id is the workspace rather than the session are in
 ``agents/spend_attribution.py``.
+
+Updated 2026-09-04 (fix/pydantic-ai-strict-system-messages) — **a self-hosted
+model group 400s on the second system message we send.** ``litellm:...`` against
+a vLLM-backed group returned ``System message must be at the beginning.`` on
+every turn. The cause is not history and not the retry: pydantic-ai holds
+instructions as a list of ``InstructionPart`` and the OpenAI chat mapper emits
+one ``system`` message per part, so a run with ``Planning`` plus the skills
+catalog puts two of them at the head of the FIRST request. Measured on the
+shipped stack: ``['system', 'system', 'user']``.
+
+The merge that collapses them lives in pydantic-ai
+(``_merge_leading_system_messages``) and is gated on
+``openai_chat_supports_multiple_system_messages``, which no profile sets for a
+name the provider does not recognise. ``_build_model`` now sets it for the
+providers that front a self-hosted server. Doing it in the profile rather than
+by joining our own instructions keeps capability- and toolset-contributed
+instructions working, which a single joined string would not.
 """
 
 from __future__ import annotations
@@ -367,6 +384,26 @@ logger = logging.getLogger(__name__)
 # served by ``OpenAIChatModel`` + ``OpenAIProvider(base_url=...)``; only the
 # base URL and key source differ.
 _OPENAI_COMPATIBLE = frozenset({"litellm", "openai", "openai_compatible", "openrouter", "ollama"})
+
+# Providers that reject a ``system`` message anywhere but index 0, with
+# ``System message must be at the beginning.`` — the chat template a
+# self-hosted vLLM/SGLang server applies, reached either directly
+# (``openai_compatible``, ``ollama``) or through a LiteLLM model group
+# (``litellm``, which surfaces it as ``Custom_openaiException``).
+#
+# We send more than one because pydantic-ai keeps instructions as a LIST of
+# ``InstructionPart`` — one for the joined literals, one per instruction
+# function, one per toolset that implements ``get_instructions`` (``Planning``
+# and the skills catalog both do, and so does any MCP server shipping an
+# ``instructions`` field) — and ``OpenAIChatModel._map_messages`` emits ONE
+# system message per part. So the wire is ``system, system, user`` on the very
+# first turn, and this fails deterministically rather than on the retry.
+#
+# pydantic-ai already ships the merge; it is gated on a profile flag no
+# provider sets for an unrecognised model name like ``hetzner/Qwen3.8-27B``.
+# Not applied to ``openai``/``openrouter``: both accept multiple system
+# messages, and a merge there would be a behaviour change for nothing.
+_STRICT_SYSTEM_MESSAGE_PROVIDERS = frozenset({"litellm", "openai_compatible", "ollama"})
 
 # Same gate as ``claude_sdk`` and ``deep_agents``: ``<pocket-scope>`` opens every
 # pocket/site prompt. Retained for the prompt-shape signal it carries into the
@@ -1066,7 +1103,17 @@ class PydanticAIBackend:
             base_url,
         )
         cls = _reasoning_echo_model_class(model) or OpenAIChatModel
-        return cls(model, provider=OpenAIProvider(**provider_kwargs))
+        model_kwargs: dict[str, Any] = {"provider": OpenAIProvider(**provider_kwargs)}
+        if provider in _STRICT_SYSTEM_MESSAGE_PROVIDERS:
+            from pydantic_ai.profiles.openai import OpenAIModelProfile
+
+            # A partial profile MERGES onto the provider-inferred one (see
+            # ``Model.profile``), so this keeps the json-schema transformer and
+            # tool support the model name would otherwise resolve to.
+            model_kwargs["profile"] = OpenAIModelProfile(
+                openai_chat_supports_multiple_system_messages=False,
+            )
+        return cls(model, **model_kwargs)
 
     def _get_http_client(self) -> Any:
         """The instance's shared HTTP client, built once.
