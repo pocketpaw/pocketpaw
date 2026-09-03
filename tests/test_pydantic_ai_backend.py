@@ -193,6 +193,55 @@ def test_unsupported_provider_raises():
         backend._build_model()
 
 
+async def _wire_roles(model) -> list[str]:
+    """The ``role`` of every message this model would put on the wire.
+
+    Asserting on the ROLES rather than on the profile flag on purpose: the flag
+    is what we set, and the roles are what the server rejects. A profile that
+    stopped being merged would still carry the flag we passed.
+    """
+    from pydantic_ai.messages import InstructionPart, ModelRequest, UserPromptPart
+    from pydantic_ai.models import ModelRequestParameters
+
+    mapped = await model._map_messages(
+        [ModelRequest(parts=[UserPromptPart(content="hi")])],
+        ModelRequestParameters(
+            # Two parts is the shipped shape, not a contrivance: the joined
+            # literals are one, and every toolset with ``get_instructions``
+            # (``Planning``, the skills catalog, an MCP server that ships an
+            # ``instructions`` field) contributes another.
+            instruction_parts=[
+                InstructionPart(content="persona"),
+                InstructionPart(content="skills catalog", dynamic=True),
+            ]
+        ),
+    )
+    return [m["role"] for m in mapped]
+
+
+async def test_litellm_sends_one_leading_system_message():
+    """A vLLM-backed model group 400s on the second one.
+
+    ``System message must be at the beginning.`` — surfaced through LiteLLM as
+    ``Custom_openaiException``, and it fires on the FIRST turn, so a retry
+    reproduces it rather than recovering from it.
+    """
+    backend = PydanticAIBackend(_settings(pydantic_ai_model="litellm:hetzner/Qwen3.8-27B"))
+    assert await _wire_roles(backend._build_model()) == ["system", "user"]
+
+
+async def test_openrouter_keeps_its_system_messages_separate():
+    """The merge is scoped to providers that front a self-hosted server.
+
+    OpenRouter and OpenAI accept several leading system messages, so collapsing
+    them there would be a behaviour change bought for nothing.
+    """
+    backend = PydanticAIBackend(
+        _settings(pydantic_ai_model="openrouter:some/model", openrouter_api_key="sk-test")
+    )
+    assert await _wire_roles(backend._build_model()) == ["system", "system", "user"]
+
+
 # --------------------------------------------------------------------------
 # streaming + event mapping
 # --------------------------------------------------------------------------
