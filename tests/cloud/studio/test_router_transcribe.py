@@ -101,9 +101,7 @@ def test_transcribe_empty_upload_is_400(
         raise ValueError("audio file is empty")
 
     monkeypatch.setattr(studio_service, "transcribe", fake)
-    resp = client.post(
-        "/api/v1/studio/transcribe", files={"file": ("clip.wav", b"", "audio/wav")}
-    )
+    resp = client.post("/api/v1/studio/transcribe", files={"file": ("clip.wav", b"", "audio/wav")})
     assert resp.status_code == 400
     assert "empty" in resp.json()["detail"]
 
@@ -123,8 +121,6 @@ def test_transcribe_upstream_failure_relays_reason(
         )
 
     monkeypatch.setattr(studio_service, "transcribe", fake)
-    resp = client.post(
-        "/api/v1/studio/transcribe", files={"file": ("clip.wav", b"x", "audio/wav")}
-    )
+    resp = client.post("/api/v1/studio/transcribe", files={"file": ("clip.wav", b"x", "audio/wav")})
     assert resp.status_code == 502
     assert "POCKETPAW_DEEPGRAM_API_KEY" in resp.json()["detail"]

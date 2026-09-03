@@ -166,7 +166,7 @@ async def test_list_models_maps_image_and_video_entries(monkeypatch) -> None:
     # LiteLLM-derived rows, deduplicated by id.
     assert "fal-ai/nano-banana-2" in ids
     assert "openai/gpt-image-2" in ids
-    assert "bytedance/seedance-2.5/enterprise/text-to-video" in ids
+    assert "bytedance/seedance-2.5/text-to-video" in ids
     assert "google/gemini-omni-flash/edit" in ids
     audio = [m for m in models if m.kind == "audio"]
     assert {m.id for m in audio} == {
@@ -202,7 +202,7 @@ async def test_list_models_appends_fal_video_fallback_when_catalog_has_none(
     assert fallback.aspectRatios == ["16:9", "9:16", "1:1"]
     # The curated video registries are appended alongside the fallback.
     video_ids = {m.id for m in video}
-    assert "bytedance/seedance-2.5/enterprise/text-to-video" in video_ids
+    assert "bytedance/seedance-2.5/text-to-video" in video_ids
     assert "google/gemini-omni-flash/edit" in video_ids
 
 
@@ -229,7 +229,7 @@ async def test_list_models_does_not_append_fallback_when_video_served(
     # No fallback row is appended (its label would be "Kling Video 1.0"), but the
     # curated video registries still are.
     assert not any(m.label == "Kling Video 1.0" for m in videos)
-    assert "bytedance/seedance-2.5/enterprise/text-to-video" in {m.id for m in videos}
+    assert "bytedance/seedance-2.5/text-to-video" in {m.id for m in videos}
 
 
 async def test_list_models_upstream_failure_propagates(monkeypatch) -> None:

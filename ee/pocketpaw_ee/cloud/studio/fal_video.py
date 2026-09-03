@@ -68,6 +68,18 @@ DEFAULT_I2V_PROMPT = "animate this scene with smooth, natural motion"
 # ("480p"/"720p") + ``duration`` (a STRING enum "auto"/"4".."30") + a string
 # ``aspect_ratio`` enum (incl. "auto") + ``generate_audio`` (sync audio).
 SEEDANCE_I2V_MODEL = "bytedance/seedance-2.5/image-to-video"
+
+# Seedance 2.5 TEXT-to-video. Same family, same argument shape minus the frames.
+#
+# This is the PUBLIC route. The catalog used to advertise
+# ``bytedance/seedance-2.5/enterprise/text-to-video``, which is not a routable
+# fal path — every generation with it came back
+# ``404 … Path /enterprise/text-to-video not found`` (→ our 502). The enterprise
+# variant exists but sits behind a request-access gate, so it cannot be the
+# default a picker offers. The dead id is aliased below rather than deleted, so
+# projects that already saved it keep working.
+SEEDANCE_T2V_MODEL = "bytedance/seedance-2.5/text-to-video"
+SEEDANCE_T2V_ENTERPRISE_MODEL = "bytedance/seedance-2.5/enterprise/text-to-video"
 SEEDANCE_RESOLUTIONS: tuple[str, ...] = ("480p", "720p")
 # The durations the composer offers for this endpoint (Seedance accepts "4".."30",
 # so 5s / 10s / 30s all map to valid string enums).
@@ -96,6 +108,10 @@ VIDEO_MODEL_ALIASES: dict[str, str] = {
     "kling-v2": "fal-ai/kling-video/v1/standard/text-to-video",
     "kwaivgi/kling-v2.0": "fal-ai/kling-video/v1/standard/text-to-video",
     "fal-ai/kling-video/v1/standard/text-to-video": "fal-ai/kling-video/v1/standard/text-to-video",
+    # The access-gated id the catalog used to ship → the public route. Kept as an
+    # alias so a saved project or an in-flight client that still names it keeps
+    # generating instead of 404-ing.
+    SEEDANCE_T2V_ENTERPRISE_MODEL: SEEDANCE_T2V_MODEL,
 }
 
 # Durations the composer offers (mirrors the frontend's catalog ``durationsSec``
@@ -129,13 +145,17 @@ _ENDPOINT_NAMESPACES: tuple[str, ...] = (
 
 CURATED_VIDEO_MODELS: dict[str, dict[str, Any]] = {
     "seedance_2_5": {
-        "id": "bytedance/seedance-2.5/enterprise/text-to-video",
+        "id": SEEDANCE_T2V_MODEL,  # bytedance/seedance-2.5/text-to-video
         "name": "Seedance 2.5",
         "vendor": "ByteDance",
         "kind": "text-to-video",
         "aspect_ratios": ("16:9", "9:16", "1:1"),
         "durations": (5, 10),
-        "duration_as_string": False,
+        # fal declares Seedance's `duration` as an ENUM whose members are strings
+        # ("auto", "4".."30"), not an integer field — the same encoding its
+        # image-to-video sibling already used. This said False, which was the
+        # next failure waiting behind the 404.
+        "duration_as_string": True,
     },
     "kling": {
         "id": DEFAULT_VIDEO_MODEL,  # fal-ai/kling-video/v1/standard/text-to-video
@@ -168,9 +188,19 @@ CURATED_VIDEO_MODELS: dict[str, dict[str, Any]] = {
 
 
 def _duration_value(endpoint: str, duration_sec: int) -> int | str:
-    """Encode ``duration`` the way the endpoint expects: Kling takes a string
-    enum ("5"/"10"); Seedance / Gemini take an integer of seconds."""
-    if "kling-video" in endpoint:
+    """Encode ``duration`` the way the endpoint expects.
+
+    Kling and Seedance both take a string enum ("5" / "10"); Gemini and anything
+    else take an integer of seconds.
+
+    Seedance was on the integer branch, which was wrong: fal types its
+    ``duration`` as an enum of string members ("auto", "4".."30") and its
+    documented payload sends ``"duration": "auto"``. The image-to-video builder
+    had this right already (`str(int(duration_sec))`) — the text path did not,
+    and nobody noticed because the endpoint it pointed at 404'd before fal ever
+    validated an argument.
+    """
+    if "kling-video" in endpoint or "seedance" in endpoint:
         return str(int(duration_sec))
     return int(duration_sec)
 
@@ -194,14 +224,42 @@ class FalVideoError(Exception):
 def resolve_endpoint(model_id: str | None) -> str:
     """Map a requested model id onto a real fal endpoint.
 
-    Endpoint-looking ids (``fal-ai/…``, ``bytedance/…``, ``google/…``, …) pass
-    straight through; known catalog aliases resolve to their endpoint; anything
+    Known aliases resolve first; otherwise endpoint-looking ids (``fal-ai/…``,
+    ``bytedance/…``, ``google/…``, …) pass straight through, and anything
     unknown falls back to ``DEFAULT_VIDEO_MODEL``.
+
+    Aliases are checked BEFORE the namespace passthrough so a dead endpoint id
+    can be redirected. That ordering is the whole reason the Seedance enterprise
+    entry works: it starts with ``bytedance/``, so under a passthrough-first rule
+    it would sail past the alias table and 404 at fal. Every pre-existing alias
+    maps an endpoint-looking id to itself, so nothing else changes meaning.
     """
     m = (model_id or "").strip()
+    aliased = VIDEO_MODEL_ALIASES.get(m)
+    if aliased:
+        return aliased
     if m.startswith(_ENDPOINT_NAMESPACES):
         return m
-    return VIDEO_MODEL_ALIASES.get(m, DEFAULT_VIDEO_MODEL)
+    return DEFAULT_VIDEO_MODEL
+
+
+def supports_generate_audio(endpoint: str | None) -> bool:
+    """True when ``endpoint`` accepts a ``generate_audio`` flag.
+
+    Seedance generates picture and sound together in one pass — ``generate_audio``
+    is a documented boolean on both its text-to-video and image-to-video
+    contracts, default ``true``, and fal charges the same either way. Kling has
+    no such field at all.
+
+    This is a CAPABILITY check rather than an image/text one on purpose. The flag
+    used to ride along only on the image-to-video path, which meant a Seedance
+    text-to-video run silently lost the user's choice: audio came back on, since
+    that is fal's default, whatever the switch said. Gating on the model instead
+    is also what keeps the UI honest — a toggle offered for Kling would be a
+    control that cannot do anything, and an argument fal does not know is exactly
+    the kind of thing a provider drops without complaining.
+    """
+    return "seedance" in (endpoint or "").strip().lower()
 
 
 def build_arguments(
@@ -210,6 +268,7 @@ def build_arguments(
     duration_sec: int | None,
     aspect_ratio: str | None,
     endpoint: str | None = None,
+    generate_audio: bool | None = None,
 ) -> dict[str, Any]:
     """Build the fal ``arguments`` dict for a text-to-video call.
 
@@ -218,12 +277,18 @@ def build_arguments(
     seconds — ``_duration_value`` encodes per-endpoint. ``aspect_ratio`` is one
     of "16:9" / "9:16" / "1:1". Unsupported values pass through and the
     endpoint's own validation reports them (clearer than silently clamping).
+
+    ``generate_audio`` is forwarded only to endpoints that document it (see
+    ``supports_generate_audio``) and only when the caller actually expressed a
+    preference — ``None`` leaves it out so fal applies its own default.
     """
     args: dict[str, Any] = {"prompt": prompt}
     if duration_sec and duration_sec > 0:
         args["duration"] = _duration_value(endpoint or DEFAULT_VIDEO_MODEL, duration_sec)
     if aspect_ratio:
         args["aspect_ratio"] = aspect_ratio
+    if generate_audio is not None and supports_generate_audio(endpoint or DEFAULT_VIDEO_MODEL):
+        args["generate_audio"] = bool(generate_audio)
     return args
 
 
@@ -713,7 +778,11 @@ async def run_fal_video(
 
     endpoint = resolve_endpoint(model)
     arguments = build_arguments(
-        prompt=text, duration_sec=duration_sec, aspect_ratio=aspect_ratio, endpoint=endpoint
+        prompt=text,
+        duration_sec=duration_sec,
+        aspect_ratio=aspect_ratio,
+        endpoint=endpoint,
+        generate_audio=generate_audio,
     )
 
     result = await _run_fal(endpoint, arguments, key=api_key)
@@ -741,6 +810,8 @@ __all__ = [
     "IMAGE_TO_VIDEO_PAIR_MODEL",
     "DEFAULT_I2V_PROMPT",
     "SEEDANCE_I2V_MODEL",
+    "SEEDANCE_T2V_MODEL",
+    "SEEDANCE_T2V_ENTERPRISE_MODEL",
     "SEEDANCE_RESOLUTIONS",
     "SEEDANCE_DURATIONS",
     "VIDEO_MODEL_ALIASES",
@@ -754,5 +825,6 @@ __all__ = [
     "build_image_to_video_arguments",
     "build_seedance_i2v_arguments",
     "is_seedance_i2v_endpoint",
+    "supports_generate_audio",
     "run_fal_video",
 ]

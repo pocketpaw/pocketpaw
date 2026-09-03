@@ -690,3 +690,190 @@ async def test_run_fal_video_seedance_i2v_dispatches_single_call(monkeypatch) ->
         "generate_audio": True,
     }
     assert seen["key"] == "k"
+
+
+# ── generate_audio on the TEXT-to-video path ─────────────────────────────────
+#
+# The flag used to ride along only on the image-to-video call. That made the
+# composer's Audio switch depend on having attached a start/character image,
+# and — worse — a Seedance text-to-video run silently discarded the user's
+# choice: `run_fal_video` accepted `generate_audio` and then never passed it to
+# `build_arguments`, so fal applied its own default (audio ON) whatever the
+# switch said. Nothing errored, which is the whole problem.
+#
+# It is gated on the MODEL, not on whether images were attached: Seedance
+# documents `generate_audio` on both its contracts, Kling has no such field, and
+# an argument an endpoint does not know is the kind of thing a provider drops
+# without complaining.
+
+
+def test_supports_generate_audio_covers_every_seedance_contract() -> None:
+    assert fal_video.supports_generate_audio("bytedance/seedance-2.5/text-to-video") is True
+    assert fal_video.supports_generate_audio("bytedance/seedance-2.5/image-to-video") is True
+    assert (
+        fal_video.supports_generate_audio("bytedance/seedance-2.5/enterprise/text-to-video") is True
+    )
+    assert fal_video.supports_generate_audio("  BYTEDANCE/Seedance-2.5/text-to-video ") is True
+
+
+def test_supports_generate_audio_is_false_for_models_without_the_field() -> None:
+    assert fal_video.supports_generate_audio(fal_video.DEFAULT_VIDEO_MODEL) is False
+    assert fal_video.supports_generate_audio(fal_video.IMAGE_TO_VIDEO_PAIR_MODEL) is False
+    assert fal_video.supports_generate_audio(None) is False
+    assert fal_video.supports_generate_audio("") is False
+
+
+def test_build_arguments_forwards_generate_audio_to_seedance_text_to_video() -> None:
+    args = fal_video.build_arguments(
+        prompt="a lighthouse at dusk",
+        duration_sec=10,
+        aspect_ratio="16:9",
+        endpoint="bytedance/seedance-2.5/text-to-video",
+        generate_audio=False,
+    )
+    assert args["generate_audio"] is False
+
+
+def test_build_arguments_omits_generate_audio_for_kling() -> None:
+    # Kling has no such field; sending it would be a switch that does nothing.
+    args = fal_video.build_arguments(
+        prompt="a lighthouse at dusk",
+        duration_sec=10,
+        aspect_ratio="16:9",
+        endpoint=fal_video.DEFAULT_VIDEO_MODEL,
+        generate_audio=False,
+    )
+    assert "generate_audio" not in args
+
+
+def test_build_arguments_omits_generate_audio_when_unset() -> None:
+    # None means "no preference" — leave it out so fal applies its own default.
+    args = fal_video.build_arguments(
+        prompt="a lighthouse at dusk",
+        duration_sec=10,
+        aspect_ratio="16:9",
+        endpoint="bytedance/seedance-2.5/text-to-video",
+        generate_audio=None,
+    )
+    assert "generate_audio" not in args
+
+
+async def test_run_fal_video_sends_generate_audio_with_no_images_attached(monkeypatch) -> None:
+    """The regression: audio off must reach the wire on a pure text-to-video run.
+
+    No `image_urls` at all — this is the path the composer takes when nothing is
+    attached, and the one that used to drop the flag."""
+    seen: dict = {}
+
+    async def _fake_run(endpoint, arguments, *, key, client_timeout=..., start_timeout=...):
+        seen.update(endpoint=endpoint, arguments=arguments)
+        return {"video": {"url": "https://fal.test/out.mp4"}}
+
+    async def _fake_download(url):
+        return b"MP4DATA", "video/mp4"
+
+    monkeypatch.setattr(fal_video, "_run_fal", _fake_run)
+    monkeypatch.setattr(fal_video, "_download", _fake_download)
+
+    await fal_video.run_fal_video(
+        prompt="a lighthouse at dusk",
+        duration_sec=10,
+        aspect_ratio="16:9",
+        model="bytedance/seedance-2.5/text-to-video",
+        generate_audio=False,
+        key="k",
+    )
+
+    assert seen["endpoint"] == "bytedance/seedance-2.5/text-to-video"
+    assert seen["arguments"]["generate_audio"] is False
+
+
+async def test_run_fal_video_text_path_omits_generate_audio_for_kling(monkeypatch) -> None:
+    seen: dict = {}
+
+    async def _fake_run(endpoint, arguments, *, key, client_timeout=..., start_timeout=...):
+        seen.update(endpoint=endpoint, arguments=arguments)
+        return {"video": {"url": "https://fal.test/out.mp4"}}
+
+    async def _fake_download(url):
+        return b"MP4DATA", "video/mp4"
+
+    monkeypatch.setattr(fal_video, "_run_fal", _fake_run)
+    monkeypatch.setattr(fal_video, "_download", _fake_download)
+
+    await fal_video.run_fal_video(
+        prompt="a lighthouse at dusk",
+        duration_sec=10,
+        aspect_ratio="16:9",
+        model=fal_video.DEFAULT_VIDEO_MODEL,
+        generate_audio=True,
+        key="k",
+    )
+
+    assert "generate_audio" not in seen["arguments"]
+
+
+# ── The Seedance text-to-video route ─────────────────────────────────────────
+#
+# The catalog shipped `bytedance/seedance-2.5/enterprise/text-to-video`, which is
+# not a routable fal path: every generation returned
+# `404 … Path /enterprise/text-to-video not found`, surfacing as a 502. The
+# enterprise variant is real but request-access gated, so it cannot be a picker
+# default. Two things had to change together — the id, and the `duration`
+# encoding sitting behind it, which was an int where fal wants a string enum.
+
+
+def test_curated_seedance_text_to_video_points_at_a_routable_path() -> None:
+    cfg = fal_video.CURATED_VIDEO_MODELS["seedance_2_5"]
+    assert cfg["id"] == "bytedance/seedance-2.5/text-to-video"
+    assert "/enterprise/" not in cfg["id"]
+
+
+def test_dead_enterprise_id_is_aliased_rather_than_left_to_404() -> None:
+    # A saved project may still name it. Alias lookup has to beat the
+    # `bytedance/` namespace passthrough or this resolves to itself and 404s.
+    assert (
+        fal_video.resolve_endpoint(fal_video.SEEDANCE_T2V_ENTERPRISE_MODEL)
+        == fal_video.SEEDANCE_T2V_MODEL
+    )
+
+
+def test_resolve_endpoint_still_passes_unknown_endpoint_ids_through() -> None:
+    assert fal_video.resolve_endpoint("bytedance/some-future-model") == (
+        "bytedance/some-future-model"
+    )
+    assert fal_video.resolve_endpoint("not-a-model") == fal_video.DEFAULT_VIDEO_MODEL
+    assert fal_video.resolve_endpoint(None) == fal_video.DEFAULT_VIDEO_MODEL
+
+
+def test_seedance_duration_is_a_string_enum_not_an_integer() -> None:
+    # fal types Seedance's `duration` as an enum of strings ("auto", "4".."30").
+    # The i2v builder always had this right; the text path sent an int.
+    args = fal_video.build_arguments(
+        prompt="an octopus finds a football",
+        duration_sec=10,
+        aspect_ratio="16:9",
+        endpoint=fal_video.SEEDANCE_T2V_MODEL,
+    )
+    assert args["duration"] == "10"
+    assert isinstance(args["duration"], str)
+
+
+def test_curated_seedance_metadata_agrees_with_the_encoder() -> None:
+    # `duration_as_string` is served to the picker; `_duration_value` is what
+    # actually goes on the wire. They disagreed, which is how the int survived.
+    cfg = fal_video.CURATED_VIDEO_MODELS["seedance_2_5"]
+    encoded = fal_video.build_arguments(
+        prompt="p", duration_sec=5, aspect_ratio=None, endpoint=cfg["id"]
+    )["duration"]
+    assert cfg["duration_as_string"] is isinstance(encoded, str)
+
+
+def test_kling_duration_encoding_is_unchanged() -> None:
+    args = fal_video.build_arguments(
+        prompt="p",
+        duration_sec=5,
+        aspect_ratio="16:9",
+        endpoint=fal_video.DEFAULT_VIDEO_MODEL,
+    )
+    assert args["duration"] == "5"
