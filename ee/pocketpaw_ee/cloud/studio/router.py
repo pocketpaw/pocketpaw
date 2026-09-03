@@ -55,6 +55,15 @@ async def list_styles() -> schemas.StudioStylesResponse:
     return schemas.StudioStylesResponse(styles=service.list_styles())
 
 
+@router.get("/camera-catalog", response_model=schemas.CameraCatalogResponse)
+async def list_camera_catalog() -> schemas.CameraCatalogResponse:
+    """List the Camera & lighting dialog's pick-lists (static, backend-owned).
+
+    Served rather than mirrored into the client so there is exactly one copy of
+    the phrasing that gets injected into prompts."""
+    return service.list_camera_catalog()
+
+
 @router.get("/generations", response_model=schemas.GenerationsResponse)
 async def list_generations(
     workspace_id: str = Depends(current_workspace_id),

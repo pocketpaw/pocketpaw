@@ -55,6 +55,7 @@ from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
 from pocketpaw_ee.cloud.media import storage as media_storage
 
 from . import (
+    camera_catalog,
     deepgram_stt,
     fal_edit,
     fal_elements,
@@ -724,15 +725,133 @@ async def _save_image_bytes(
     return await media_storage.save_generated(image_bytes, mime=mime, ext=ext)
 
 
-async def _apply_style(prompt: str, style_id: str | None) -> str:
-    """Compose the final prompt by appending the active style's suffix (kept
-    explicit so the user always sees what the style does — same as the mock)."""
+def _find_style(style_id: str | None) -> dict[str, Any] | None:
+    """Resolve a style id across BOTH catalogs the picker offers.
+
+    ``list_styles`` serves the 7 legacy quick styles PLUS ``CURATED_STYLES``, but
+    this lookup used to search ``STYLES`` alone. Picking any of the ~20 curated
+    styles therefore matched nothing and the generation ran with no style at all
+    — silently, with the styleId echoed back in the response as if it had worked.
+    """
     if not style_id or style_id == "none":
-        return prompt
-    style = next((s for s in STYLES if s["id"] == style_id), None)
-    if style and style.get("promptSuffix"):
-        return f"{prompt}{style['promptSuffix']}"
-    return prompt
+        return None
+    for style in STYLES:
+        if style["id"] == style_id:
+            return style
+    for style in style_catalog.CURATED_STYLES:
+        if style["id"] == style_id:
+            return style
+    return None
+
+
+def _rebuild_style_suffix(config: dict[str, Any], *, drop_lighting: bool, drop_camera: bool) -> str:
+    """Re-render a curated style's suffix from its structured config, leaving out
+    the dimensions the user has overridden.
+
+    Curated styles each prescribe their own lighting and camera prose. If the user
+    picks "Neo-Noir Thriller" (venetian-blind shadows, high contrast) and then
+    explicitly asks for soft high-key light, appending both hands the model two
+    contradictory instructions and the explicit pick tends to lose. So the explicit
+    pick wins and the style's competing sentence is dropped — possible only because
+    ``look.lighting`` and ``motion.camera`` are kept as separate fields rather than
+    being readable only from the flat pre-baked string.
+    """
+    look = config.get("look") or {}
+    motion = config.get("motion") or {}
+    sections: list[tuple[str, Any]] = [
+        ("Art style", look.get("artStyle")),
+        ("Mood", look.get("mood")),
+        ("Lighting", None if drop_lighting else look.get("lighting")),
+        ("Camera", None if drop_camera else motion.get("camera")),
+        ("Color grading", look.get("colorGrading")),
+    ]
+    parts = [f"{label}: {value}." for label, value in sections if value]
+    refs = config.get("references") or []
+    if refs:
+        parts.append(f"Inspired by: {', '.join(str(r) for r in refs)}.")
+    return f" {' '.join(parts)}" if parts else ""
+
+
+def _end_sentence(text: str) -> str:
+    """Close ``text`` off with a period unless it already ends in terminal
+    punctuation, so the next clause starts a sentence instead of running on."""
+    stripped = text.rstrip()
+    if not stripped or stripped.endswith((".", "!", "?", ":", ";")):
+        return stripped
+    return f"{stripped}."
+
+
+def compose_prompt(
+    prompt: str,
+    style_id: str | None = None,
+    camera: Any = None,
+    lighting: Any = None,
+) -> str:
+    """Assemble the prompt that actually reaches the model.
+
+    Order is subject → camera → lighting → style suffix. The subject stays first
+    and the technical direction sits ahead of the style's long descriptive block
+    so it isn't buried a thousand characters deep.
+
+    With no camera or lighting picks this returns exactly what the old
+    ``_apply_style`` returned (the flat suffix concatenated straight onto the
+    prompt), so existing generations are unchanged apart from curated styles now
+    applying at all.
+    """
+    head = (prompt or "").strip()
+    camera_clause = camera_catalog.compose_camera_phrase(camera)
+    lighting_clause = camera_catalog.compose_lighting_phrase(lighting)
+
+    style = _find_style(style_id)
+    config = (style or {}).get("config") if style else None
+    if style and config and (camera_clause or lighting_clause):
+        suffix = _rebuild_style_suffix(
+            config,
+            drop_lighting=bool(lighting_clause),
+            drop_camera=bool(camera_clause),
+        )
+    else:
+        suffix = str((style or {}).get("promptSuffix") or "")
+
+    # A quick style's suffix is a comma-continuation (", cinematic lighting, …")
+    # written to butt straight onto the prompt. With no clauses in between, keep
+    # that concatenation byte for byte so existing generations are unchanged.
+    if not camera_clause and not lighting_clause and suffix.lstrip().startswith(","):
+        return f"{head}{suffix}"
+
+    for clause in (camera_clause, lighting_clause):
+        if not clause:
+            continue
+        head = f"{_end_sentence(head)} {clause}".strip()
+
+    if not suffix.strip():
+        return head
+    tail = suffix.strip()
+    if tail.startswith(","):
+        # The comma now dangles after a full sentence — promote it to its own.
+        tail = tail.lstrip(", ")
+        tail = tail[0].upper() + tail[1:] if tail else tail
+    return f"{_end_sentence(head)} {tail}".strip() if tail else head
+
+
+async def _apply_style(prompt: str, style_id: str | None) -> str:
+    """Back-compat shim for callers that pass no camera/lighting."""
+    return compose_prompt(prompt, style_id)
+
+
+def list_camera_catalog() -> schemas.CameraCatalogResponse:
+    """Return the Camera & lighting dialog's two tabs.
+
+    Served rather than duplicated into TypeScript on purpose: the style catalog is
+    hand-mirrored TS<->Python and that mirror is what let the style lookup above
+    drift out of sync with what the picker offered.
+    """
+    return schemas.CameraCatalogResponse(
+        camera=[schemas.CameraCatalogGroup.model_validate(g) for g in camera_catalog.CAMERA_GROUPS],
+        lighting=[
+            schemas.CameraCatalogGroup.model_validate(g) for g in camera_catalog.LIGHTING_GROUPS
+        ],
+    )
 
 
 def _new_generation(
@@ -808,7 +927,7 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
             req, model=model, prompt=prompt, workspace_id=workspace_id
         )
 
-    final_prompt = await _apply_style(prompt, req.styleId)
+    final_prompt = compose_prompt(prompt, req.styleId, req.camera, req.lighting)
     size = _SIZE_MAP.get(req.aspectRatio)
     auth_key = await _resolve_auth_key(workspace_id)
     count = max(1, min(int(req.count or 1), _MAX_GENERATED_ASSETS))
@@ -840,6 +959,8 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
         "aspectRatio": req.aspectRatio,
         "count": count,
         "styleId": req.styleId,
+        "camera": req.camera,
+        "lighting": req.lighting,
         "negativePrompt": req.negativePrompt,
         "seed": req.seed,
         "durationSec": req.durationSec,
@@ -869,7 +990,7 @@ async def _generate_curated_image(
     endpoint returns ``num_images``), and each returned image persists through
     media storage.
     """
-    final_prompt = await _apply_style(prompt, req.styleId)
+    final_prompt = compose_prompt(prompt, req.styleId, req.camera, req.lighting)
     count = max(1, min(int(req.count or 1), _MAX_GENERATED_ASSETS))
     try:
         results = await fal_image.run_fal_image(
@@ -896,6 +1017,8 @@ async def _generate_curated_image(
         "aspectRatio": req.aspectRatio,
         "count": len(assets),
         "styleId": req.styleId,
+        "camera": req.camera,
+        "lighting": req.lighting,
         "negativePrompt": req.negativePrompt,
         "seed": req.seed,
         "durationSec": req.durationSec,
@@ -927,7 +1050,7 @@ async def _generate_image_edit(
     if not refs:
         raise ValueError("at least one reference image is required for an image edit")
 
-    final_prompt = await _apply_style(prompt, req.styleId)
+    final_prompt = compose_prompt(prompt, req.styleId, req.camera, req.lighting)
     data_urls: list[str] = []
     for url in refs:
         data_url, _ = await _resolve_source_data_url(url)
@@ -960,6 +1083,8 @@ async def _generate_image_edit(
         "aspectRatio": req.aspectRatio,
         "count": len(assets),
         "styleId": req.styleId,
+        "camera": req.camera,
+        "lighting": req.lighting,
         "negativePrompt": req.negativePrompt,
         "seed": req.seed,
     }
@@ -1097,7 +1222,7 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
     # Image-to-video runs without a typed prompt — fal_video applies its own
     # default motion prompt, so a user can wire images and hit Generate directly.
     effective_prompt = prompt or fal_video.DEFAULT_I2V_PROMPT
-    final_prompt = await _apply_style(effective_prompt, req.styleId)
+    final_prompt = compose_prompt(effective_prompt, req.styleId, req.camera, req.lighting)
 
     input_data_urls: list[str] | None = None
     if image_urls:
@@ -1138,6 +1263,8 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
         "aspectRatio": req.aspectRatio,
         "count": 1,
         "styleId": req.styleId,
+        "camera": req.camera,
+        "lighting": req.lighting,
         "negativePrompt": req.negativePrompt,
         "seed": req.seed,
         "durationSec": req.durationSec,

@@ -7,6 +7,11 @@
 # below), matching the TS interfaces.
 #
 # Created 2026-08-17 (studio-real-backend): new DTO module.
+# 2026-09-03 (studio-camera-lighting): added ``CameraSpec`` / ``LightingSpec``
+#   and the camera-catalog envelope. Both specs ride on ``GenerateRequest`` as
+#   STRUCTURED ids, never as text the client baked into ``prompt`` — the backend
+#   renders them to prose (``camera_catalog``) so the phrasing stays tunable
+#   without a client release and one-tap remix can restore the dialog's state.
 
 from __future__ import annotations
 
@@ -105,6 +110,64 @@ class StudioStyle(BaseModel):
     config: StudioStyleConfig | None = None
 
 
+# ── Camera & lighting ───────────────────────────────────────────────────────
+
+
+class CameraSpec(BaseModel):
+    """The user's camera picks, as catalog ids. EVERY field is optional and an
+    absent field means "Auto" — which renders to no words at all, not to the word
+    "auto". See ``camera_catalog`` for the phrasing each id maps to."""
+
+    body: str | None = None
+    lens: str | None = None
+    focalLengthMm: int | None = None
+    customFocalLength: str | None = None
+    aperture: str | None = None
+    angle: str | None = None
+    shotSize: str | None = None
+
+
+class LightingSpec(BaseModel):
+    """The user's lighting picks, as catalog ids. Same Auto-means-silence rule as
+    ``CameraSpec``."""
+
+    setup: str | None = None
+    source: str | None = None
+    quality: str | None = None
+    direction: str | None = None
+
+
+class CameraCatalogOption(BaseModel):
+    """One selectable chip. ``phrase`` is the model-facing copy the backend
+    injects; it ships to the client so the dialog can show exactly what a pick
+    adds to the prompt instead of leaving it a black box."""
+
+    id: str
+    label: str
+    hint: str | None = None
+    phrase: str = ""
+    mm: int | None = None
+    custom: bool = False
+
+
+class CameraCatalogGroup(BaseModel):
+    """One slot card in the dialog. ``field`` names the ``CameraSpec`` /
+    ``LightingSpec`` attribute this group writes, so the client renders all of
+    them through a single generic component."""
+
+    id: str
+    field: str
+    label: str
+    options: list[CameraCatalogOption] = Field(default_factory=list)
+
+
+class CameraCatalogResponse(BaseModel):
+    """Body of ``GET /studio/camera-catalog`` — the two tabs of the dialog."""
+
+    camera: list[CameraCatalogGroup] = Field(default_factory=list)
+    lighting: list[CameraCatalogGroup] = Field(default_factory=list)
+
+
 # ── Generation domain ───────────────────────────────────────────────────────
 
 
@@ -133,6 +196,11 @@ class GenerationParams(BaseModel):
     seed: int | None = None
     durationSec: int | None = None
     inputImageCount: int | None = None
+    # Echoed back so the gallery can label a result and one-tap remix can reopen
+    # the Camera & lighting dialog with the same chips lit. Storing the structured
+    # picks rather than the rendered sentence is what makes that possible.
+    camera: CameraSpec | None = None
+    lighting: LightingSpec | None = None
 
 
 class Generation(BaseModel):
@@ -179,6 +247,11 @@ class GenerateRequest(BaseModel):
     # audio. Only read when the video model resolves to Seedance i2v.
     resolution: str | None = None
     generateAudio: bool | None = None
+    # Camera & lighting picks as catalog ids. The backend renders them to prose
+    # and splices them between the subject and the style suffix; an omitted spec
+    # (or one whose fields are all None) changes the prompt not at all.
+    camera: CameraSpec | None = None
+    lighting: LightingSpec | None = None
 
 
 class MusicRequest(BaseModel):
@@ -399,6 +472,11 @@ __all__ = [
     "SuggestPromptRequest",
     "StudioModelsResponse",
     "StudioStylesResponse",
+    "CameraSpec",
+    "LightingSpec",
+    "CameraCatalogOption",
+    "CameraCatalogGroup",
+    "CameraCatalogResponse",
     "GenerationsResponse",
     "FlowNode",
     "FlowEdge",
