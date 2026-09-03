@@ -12,6 +12,16 @@
 # did before there was one — since a shifted column silently re-labels three months of
 # history and nothing else in the suite would notice.
 #
+# Updated 2026-09-04 (feat/sites-analytics-visit-id, AD-1) — the row grew ``blobs[5]``,
+# the VISIT id, and its tests live here for the same reason: the subject is the row the
+# shared counting core writes. ``test_the_device_class_is_appended_and_shifts_nothing``
+# now expects SIX blobs rather than five; that number is the append-check itself, not a
+# claim about the device class, and the device stays asserted at position 4 beside it.
+# The visit section at the foot pins three things a passing hex pattern alone would not:
+# the id is STABLE inside a UTC hour, it ROTATES across the boundary, and it DISTINGUISHES
+# two visitors in the same hour — the last of those fails for a visit id that hashed the
+# hour and dropped the visitor, which every other assertion here would accept.
+#
 # THE CENTRE OF THIS FILE IS THE COST MODEL, not the config keys. Cloudflare bills a
 # Worker invocation and serves a static asset free, so a ``run_worker_first`` rule that
 # matches a page's subresources multiplies the per-pageview cost by roughly twenty.
@@ -571,7 +581,8 @@ def test_a_free_server_worker_publish_gets_no_counter(tmp_path):
 # ── driving the generated Worker under node ──────────────────────────────────
 
 _DRIVER_PRELUDE = """
-import worker, { isBot, dayKey, visitorHash, count, deviceClass } from "./entry.mjs";
+import worker, { isBot, dayKey, hourKey, visitorHash, visitId, count, deviceClass }
+  from "./entry.mjs";
 
 const request = (url, headers = {}, cf = {}) => ({
   url,
@@ -921,7 +932,12 @@ def test_the_device_class_is_appended_and_shifts_nothing(tmp_path):
 
     Asserted on the row that CARRIES the device, so it cannot pass by reading a
     pre-SA-3 row: path, referrer host, country and visitor hash must still be at 0, 1,
-    2 and 3 with the fifth blob present beside them."""
+    2 and 3 with the fifth blob present beside them.
+
+    The length moved to SIX with AD-1's visit id. The length is the append-check — it
+    catches a slot inserted anywhere but the end — and it has to track the contract as
+    the contract grows. What it must never do is stop naming the position each field is
+    read at, which is why every one of them is still asserted individually."""
     out = _run_node(
         tmp_path,
         """
@@ -945,7 +961,8 @@ emit({ rows: rec.rows });
     assert blobs[2] == "DE"
     assert re.fullmatch(r"[0-9a-f]{32}", blobs[3])
     assert blobs[4] == "desktop"
-    assert len(blobs) == 5
+    assert re.fullmatch(r"[0-9a-f]{32}", blobs[5])
+    assert len(blobs) == 6
     assert out["rows"][0]["doubles"] == [1]
 
 
@@ -1010,3 +1027,151 @@ def test_the_device_class_never_carries_the_user_agent(tmp_path):
     # Nothing version-shaped, platform-shaped or otherwise narrowing rides along.
     for device in out["devices"]:
         assert re.fullmatch(r"desktop|mobile|tablet|unknown", device)
+
+
+# ── AD-1: the visit id at blobs[5] ───────────────────────────────────────────
+
+
+def test_the_row_carries_a_visit_id_at_blob_five(tmp_path):
+    """AD-1's half of the row contract, driven end to end through the default handler.
+    A derivation that is right and a ``count`` that never calls it would pass a unit
+    check on the helper and store nothing, which is the failure this catches.
+
+    The other five fields are asserted beside it because the id was APPENDED: a slot
+    inserted anywhere earlier re-labels three months of stored rows, silently, and
+    Analytics Engine has no update to fix them with."""
+    out = _run_node(
+        tmp_path,
+        """
+const rec = recorder();
+const pending = [];
+const res = await worker.fetch(
+  request(
+    "https://site.example.dev/docs/guide.html",
+    { "user-agent": HUMAN, "cf-connecting-ip": "203.0.113.9",
+      referer: "https://news.example.com/story" },
+    { country: "DE" },
+  ),
+  { ASSETS: page(200), PAW_ANALYTICS: rec },
+  { waitUntil: (p) => pending.push(p) },
+);
+await Promise.all(pending);
+emit({ status: res.status, rows: rec.rows });
+""",
+    )
+
+    assert out["status"] == 200
+    assert len(out["rows"]) == 1
+    blobs = out["rows"][0]["blobs"]
+    assert blobs[0] == "/docs/guide.html"
+    assert blobs[1] == "news.example.com"
+    assert blobs[2] == "DE"
+    assert re.fullmatch(r"[0-9a-f]{32}", blobs[3])
+    assert blobs[4] == "desktop"
+    assert re.fullmatch(r"[0-9a-f]{32}", blobs[5])
+    assert len(blobs) == 6
+    assert out["rows"][0]["doubles"] == [1]
+
+
+def test_the_visit_id_is_stable_within_the_hour_and_rotates_across_it(tmp_path):
+    """What makes a visit countable: every pageview of one visit carries one id, and
+    the id does not survive the hour.
+
+    Asserted on the ROW rather than on the helper, so a derivation that rotates
+    correctly and a ``count`` that writes something else would still fail. The visitor
+    hash is read off the same three rows and must NOT move — it rotates daily, the visit
+    rotates hourly, and a change that collapsed the two into one clock would pass every
+    other assertion in this section.
+
+    The 10:58 → 11:02 pair is the accepted over-split named in the module's row
+    contract: one real visit, two ids, counted twice. There is nowhere to carry an id
+    across the boundary, so the error is designed to run in this direction."""
+    out = _run_node(
+        tmp_path,
+        """
+const rec = recorder();
+const env = { PAW_ANALYTICS: rec };
+const req = request(
+  "https://site.example.dev/",
+  { "user-agent": HUMAN, "cf-connecting-ip": "203.0.113.9" },
+  { country: "US" },
+);
+const early = Date.UTC(2026, 8, 2, 10, 5, 0);
+const late = Date.UTC(2026, 8, 2, 10, 58, 0);
+const nextHour = Date.UTC(2026, 8, 2, 11, 2, 0);
+await count(req, env, early);
+await count(req, env, late);
+await count(req, env, nextHour);
+emit({
+  visits: rec.rows.map((row) => row.blobs[5]),
+  visitors: rec.rows.map((row) => row.blobs[3]),
+  hours: [hourKey(early), hourKey(late), hourKey(nextHour)],
+});
+""",
+    )
+
+    assert out["hours"] == ["2026-09-02T10", "2026-09-02T10", "2026-09-02T11"]
+    early, late, next_hour = out["visits"]
+    assert early == late
+    assert next_hour != early
+    # One visitor across all three: the day did not turn, so only the visit rotated.
+    assert len(set(out["visitors"])) == 1
+
+
+def test_two_visitors_in_the_same_hour_get_different_visit_ids(tmp_path):
+    """The assertion a visit id of ``hash(salt | hour)`` alone would fail, and which
+    every other check in this section would let through: the id has to identify a
+    VISIT, so two people browsing at the same moment cannot share one.
+
+    Driven through ``count`` with a single fixed clock, so the only thing that differs
+    between the two rows is who sent the request."""
+    out = _run_node(
+        tmp_path,
+        """
+const rec = recorder();
+const env = { PAW_ANALYTICS: rec };
+const when = Date.UTC(2026, 8, 2, 10, 5, 0);
+for (const ip of ["203.0.113.9", "198.51.100.4"]) {
+  await count(
+    request("https://site.example.dev/", { "user-agent": HUMAN, "cf-connecting-ip": ip }),
+    env,
+    when,
+  );
+}
+emit({
+  visits: rec.rows.map((row) => row.blobs[5]),
+  visitors: rec.rows.map((row) => row.blobs[3]),
+});
+""",
+    )
+
+    assert out["visits"][0] != out["visits"][1]
+    assert out["visitors"][0] != out["visitors"][1]
+    # And the visit is a DERIVED value, not the visitor hash copied into a second slot —
+    # a duplicate column would count visits as visitors and read as working.
+    assert out["visits"][0] != out["visitors"][0]
+
+
+def test_the_visit_id_rotates_with_the_per_publish_salt(tmp_path):
+    """The visit inherits every privacy property the visitor hash has, because it is
+    derived from it and salted by the same secret. A republish mints a fresh salt, so
+    ids from before and after it cannot be joined — the same over-split the hour
+    boundary accepts, for the same reason."""
+    out = _run_node(
+        tmp_path,
+        """
+const SECRET = "0123456789abcdef0123456789abcdef";
+const when = Date.UTC(2026, 8, 2, 10, 5, 0);
+const visitor = await visitorHash("203.0.113.9", HUMAN, SECRET, dayKey(when));
+emit({
+  visitor,
+  visit: await visitId(visitor, SECRET, hourKey(when)),
+  otherSalt: await visitId(visitor, "a-different-secret", hourKey(when)),
+});
+""",
+    )
+
+    assert re.fullmatch(r"[0-9a-f]{32}", out["visit"])
+    assert out["otherSalt"] != out["visit"]
+    assert out["visit"] != out["visitor"]
+    assert "203.0.113.9" not in json.dumps(out)

@@ -24,6 +24,17 @@
 # it carry four blobs forever — the reader tolerates both. The full argument for why it
 # is this coarse, and why the append is not negotiable, is in the row contract below.
 #
+# Updated 2026-09-04 (feat/sites-analytics-visit-id, AD-1) — the row grew a SIXTH blob:
+# a VISIT ID at ``blobs[5]``, so a pageview can be attributed to the visit it belongs to
+# and visits become countable at all. It is ``SHA-256(secret | UTC-hour | visitor-hash)``
+# truncated to 16 bytes: the day-rotating visitor hash with an hourly rotation on top,
+# which is how Umami derives a visit from a session — a hash of the session id and a
+# salt that rotates on the hour. Appended, never inserted, for exactly the reason SA-3
+# appended the device class; rows written before this carry FIVE blobs forever and the
+# sixth reads as an empty string. A visit that crosses the top of the hour gets a new id
+# and counts as two, which is accepted rather than fixed — the argument is in the row
+# contract below.
+#
 # SHAPE MIRRORS ``badge.py`` / ``paw_bar/embed.py`` — a per-site injection into the
 # artifact between build and deploy, so what lands is already correct and there is no
 # second deploy and no post-publish patch. What differs is WHAT is injected: those two
@@ -148,15 +159,19 @@
 #   blobs[2]   — ``request.cf.country``.
 #   blobs[3]   — the visitor hash.
 #   blobs[4]   — the device class: ``desktop`` / ``mobile`` / ``tablet`` / ``unknown``.
+#   blobs[5]   — the visit id: which visit this pageview belongs to, rotating hourly.
 #   doubles[0] — 1, the pageview.
 #
 # Do not reorder these without changing the reader in the same PR: Analytics Engine
 # columns are positional and have no names. APPEND-ONLY for the same reason: SA-3 added
 # ``blobs[4]`` at the END rather than anywhere more logical, because inserting it
 # earlier would silently re-label every row already in the dataset, and the retention
-# window is three months. Rows written before SA-3 carry FOUR blobs and are not
-# backfilled — Analytics Engine has no update — so the reader must tolerate both
-# lengths and read a missing device as ``unknown``.
+# window is three months. AD-1 added ``blobs[5]`` under the same rule. A reordered write
+# against an unchanged reader raises nothing — it reports referrers as countries — which
+# is why this is a constraint and not a preference. Rows written before SA-3 carry FOUR
+# blobs and rows written before AD-1 carry FIVE; neither is backfilled, because Analytics
+# Engine has no update, so the reader must tolerate all three lengths, read a missing
+# device as ``unknown`` and a missing visit as empty.
 #
 # WHY A DEVICE CLASS IS THE ONE THING WORTH ADDING HERE, and why it is this coarse. The
 # user-agent is already parsed on this path (the bot filter reads it, and it is an
@@ -167,6 +182,27 @@
 # traced to a person, and every bit of user-agent entropy that reaches the row chips at
 # it. A browser name, a version, an OS build, a screen size — each is individually
 # reasonable and collectively a fingerprint. Two bits is not.
+#
+# WHY A VISIT IS AN HOUR, AND WHAT THE BOUNDARY COSTS. A pageview count answers "how
+# much traffic"; a visit count answers "how many times somebody came", and the gap
+# between them is the pages-per-visit ratio a bounce rate is read off. Nothing in the
+# row could recover that after the fact — the visitor hash is per DAY, so grouping by it
+# collapses a morning and an evening visit into one — which is why the id has to be
+# derived at write time.
+#
+# It is derived FROM the visitor hash rather than from the IP and user-agent again, so
+# it inherits the daily rotation: a visit id cannot outlive the identifier it is built
+# from, and the hour is a SECOND rotation on top of that rather than a longer-lived one.
+#
+# THE HOUR BOUNDARY IS A KNOWN, ACCEPTED ERROR AND NOT A BUG AWAITING A FIX. A visit
+# that starts at 10:58 and continues at 11:02 gets a new id and counts as TWO. There is
+# nowhere to carry an id across the boundary — no cookie, no storage, and a Worker holds
+# nothing between requests — so the choice is a fixed window or an identifier that
+# persists, and an identifier that persists is the one thing this feature exists to not
+# store. The error therefore runs in one direction only: it OVER-SPLITS and never
+# over-merges, the same direction the daily salt already accepts at midnight and a
+# republish already accepts mid-day. A visit count is an upper bound on sessions, never
+# an exact one, and whoever renders it should not imply otherwise.
 
 from __future__ import annotations
 
@@ -463,16 +499,39 @@ export function dayKey(nowMs) {{
   return new Date(nowMs).toISOString().slice(0, 10);
 }}
 
-// SHA-256 over the secret, the day, the IP and the user-agent, truncated to 16 bytes.
-// Truncation is a storage decision, not a security one: 128 bits is far past the
-// collision budget of one site-day, and the row is smaller for it.
-export async function visitorHash(ip, ua, secret, day) {{
-  const data = new TextEncoder().encode(`${{secret}}|${{day}}|${{ip}}|${{ua}}`);
-  const digest = await crypto.subtle.digest("SHA-256", data);
+// The VISIT's rotating half: the UTC calendar hour, `YYYY-MM-DDTHH`. An hour is the
+// whole session model — see the row contract in analytics_worker.py for why there is
+// nowhere to carry a visit across the boundary, and why the resulting over-split is
+// accepted rather than fixed.
+export function hourKey(nowMs) {{
+  return new Date(nowMs).toISOString().slice(0, 13);
+}}
+
+// SHA-256, truncated to 16 bytes, rendered hex. ONE copy of the construction, because
+// the visitor hash and the visit id are the same digest over different components and a
+// second transcription is how the two stop agreeing about what they mean. Truncation is
+// a storage decision, not a security one: 128 bits is far past the collision budget of
+// one site-day, and the row is smaller for it.
+async function sha256Hex16(input) {{
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
   const bytes = new Uint8Array(digest).subarray(0, 16);
   let hex = "";
   for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
   return hex;
+}}
+
+// SHA-256 over the secret, the day, the IP and the user-agent: WHO, for one UTC day.
+export async function visitorHash(ip, ua, secret, day) {{
+  return sha256Hex16(`${{secret}}|${{day}}|${{ip}}|${{ua}}`);
+}}
+
+// SHA-256 over the secret, the hour and the day's visitor hash: WHICH VISIT, stored at
+// blobs[5]. Built FROM the visitor hash rather than from the IP and user-agent a second
+// time, so it inherits the daily rotation and can never outlive the identifier it is
+// derived from; the hour is a second rotation on top. This mirrors how Umami derives a
+// visit from a session — a hash of the session id plus a salt that rotates hourly.
+export async function visitId(visitor, secret, hour) {{
+  return sha256Hex16(`${{secret}}|${{hour}}|${{visitor}}`);
 }}
 
 // A same-site referrer is not a referrer — it is internal navigation, and reporting it
@@ -499,8 +558,12 @@ export async function count(request, env, nowMs) {{
     if (isBot(ua)) return;
     const url = new URL(request.url);
     const ip = request.headers.get("cf-connecting-ip") || "";
-    const day = dayKey(typeof nowMs === "number" ? nowMs : Date.now());
+    // ONE reading of the clock feeds both rotations. Two calls to Date.now() could
+    // straddle a boundary and pair a day with an hour that is not inside it.
+    const now = typeof nowMs === "number" ? nowMs : Date.now();
+    const day = dayKey(now);
     const visitor = await visitorHash(ip, ua, SALT, day);
+    const visit = await visitId(visitor, SALT, hourKey(now));
     dataset.writeDataPoint({{
       indexes: [SITE_ID],
       blobs: [
@@ -509,6 +572,7 @@ export async function count(request, env, nowMs) {{
         (request.cf && request.cf.country) || "",
         visitor,
         deviceClass(ua),
+        visit,
       ],
       doubles: [1],
     }});

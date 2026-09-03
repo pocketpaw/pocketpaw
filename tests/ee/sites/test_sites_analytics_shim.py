@@ -5,6 +5,14 @@
 #
 # Created 2026-09-02 (feat/sites-analytics-shim).
 #
+# Updated 2026-09-04 (feat/sites-analytics-visit-id, AD-1) — the row grew ``blobs[5]``,
+# the visit id. The derivation and its rotation are pinned beside the counter, where the
+# row contract lives; what belongs HERE is that the shim branch writes the same six
+# columns as the assets-only one. The two entries share one counting core precisely so
+# they cannot drift, and this file is where that stops being an assumption: a dataset
+# holding two positional shapes with no column names to tell them apart is unreadable,
+# and nothing would raise.
+#
 # THE TWO CLAIMS THIS FILE EXISTS TO KEEP HONEST, because both fail silently:
 #
 #   1. THE SITE STILL WORKS. The shim sits in front of the module that RENDERS a
@@ -665,6 +673,8 @@ emit({ rows: rec.rows });
     assert row["blobs"][2] == "DE"
     assert re.fullmatch(r"[0-9a-f]{32}", row["blobs"][3])
     assert row["blobs"][4] == "desktop"
+    assert re.fullmatch(r"[0-9a-f]{32}", row["blobs"][5])
+    assert len(row["blobs"]) == 6
     assert row["doubles"] == [1]
 
 
