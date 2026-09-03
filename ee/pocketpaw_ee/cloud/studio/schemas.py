@@ -137,6 +137,52 @@ class LightingSpec(BaseModel):
     direction: str | None = None
 
 
+class RigLamp(BaseModel):
+    """One lamp on the light-rig stage. ``x``/``y`` are normalised to [-1, 1] with
+    the subject at the origin and **+y UP** — the client flips its screen-space y
+    before sending, so the stored geometry reads the way a person describes it."""
+
+    enabled: bool = False
+    x: float = 0.0
+    y: float = 0.0
+    strength: int = 70
+    warmth: int = 50
+    quality: str = "soft"
+    colour: str | None = None
+
+
+class RigEnvironment(BaseModel):
+    """An optional HDRI the user loaded. ``dominantTone`` is a colour NAME sampled
+    from the image on the client — the panorama itself never reaches the model, so
+    what it contributes is the ambient colour it implies, described in words."""
+
+    name: str | None = None
+    dominantTone: str | None = None
+
+
+class LightRig(BaseModel):
+    """A manual three-point setup. Takes precedence over ``LightingSpec`` when
+    enabled: both describe the same thing, and sending both would put two
+    lighting sentences in the prompt arguing with each other."""
+
+    enabled: bool = False
+    ambience: str = "day"
+    key: RigLamp = Field(default_factory=RigLamp)
+    fill: RigLamp = Field(default_factory=RigLamp)
+    rim: RigLamp = Field(default_factory=RigLamp)
+    presetId: str | None = None
+    environment: RigEnvironment | None = None
+
+
+class LightRigPreset(BaseModel):
+    """A named rig snapshot. ``swatch`` is the dot colour the picker renders."""
+
+    id: str
+    label: str
+    swatch: str = "#FFFFFF"
+    rig: LightRig
+
+
 class CameraCatalogOption(BaseModel):
     """One selectable chip. ``phrase`` is the model-facing copy the backend
     injects; it ships to the client so the dialog can show exactly what a pick
@@ -166,6 +212,9 @@ class CameraCatalogResponse(BaseModel):
 
     camera: list[CameraCatalogGroup] = Field(default_factory=list)
     lighting: list[CameraCatalogGroup] = Field(default_factory=list)
+    # Rig presets ride along on the same fetch — a preset IS a rig snapshot, and
+    # a client copy of them is how this drifts from what the renderer expects.
+    lightRigPresets: list[LightRigPreset] = Field(default_factory=list)
 
 
 # ── Generation domain ───────────────────────────────────────────────────────
@@ -201,6 +250,7 @@ class GenerationParams(BaseModel):
     # picks rather than the rendered sentence is what makes that possible.
     camera: CameraSpec | None = None
     lighting: LightingSpec | None = None
+    lightRig: LightRig | None = None
 
 
 class Generation(BaseModel):
@@ -252,6 +302,9 @@ class GenerateRequest(BaseModel):
     # (or one whose fields are all None) changes the prompt not at all.
     camera: CameraSpec | None = None
     lighting: LightingSpec | None = None
+    # A manual lamp placement. When enabled it REPLACES `lighting` rather than
+    # adding to it — see LightRig.
+    lightRig: LightRig | None = None
 
 
 class MusicRequest(BaseModel):
@@ -474,6 +527,10 @@ __all__ = [
     "StudioStylesResponse",
     "CameraSpec",
     "LightingSpec",
+    "RigLamp",
+    "RigEnvironment",
+    "LightRig",
+    "LightRigPreset",
     "CameraCatalogOption",
     "CameraCatalogGroup",
     "CameraCatalogResponse",

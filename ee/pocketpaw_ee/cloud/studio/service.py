@@ -66,6 +66,7 @@ from . import (
     schemas,
     style_catalog,
 )
+from . import light_rig as light_rig_mod
 
 logger = logging.getLogger(__name__)
 
@@ -786,6 +787,7 @@ def compose_prompt(
     style_id: str | None = None,
     camera: Any = None,
     lighting: Any = None,
+    light_rig: Any = None,
 ) -> str:
     """Assemble the prompt that actually reaches the model.
 
@@ -800,7 +802,11 @@ def compose_prompt(
     """
     head = (prompt or "").strip()
     camera_clause = camera_catalog.compose_camera_phrase(camera)
-    lighting_clause = camera_catalog.compose_lighting_phrase(lighting)
+    # A manual rig REPLACES the pick-lists rather than joining them. Both answer
+    # "how is this lit", and emitting two lighting sentences would leave the model
+    # arbitrating between them — the same contradiction the style override avoids.
+    rig_clause = light_rig_mod.compose_light_rig_phrase(light_rig)
+    lighting_clause = rig_clause or camera_catalog.compose_lighting_phrase(lighting)
 
     style = _find_style(style_id)
     config = (style or {}).get("config") if style else None
@@ -850,6 +856,9 @@ def list_camera_catalog() -> schemas.CameraCatalogResponse:
         camera=[schemas.CameraCatalogGroup.model_validate(g) for g in camera_catalog.CAMERA_GROUPS],
         lighting=[
             schemas.CameraCatalogGroup.model_validate(g) for g in camera_catalog.LIGHTING_GROUPS
+        ],
+        lightRigPresets=[
+            schemas.LightRigPreset.model_validate(p) for p in light_rig_mod.LIGHT_RIG_PRESETS
         ],
     )
 
@@ -927,7 +936,7 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
             req, model=model, prompt=prompt, workspace_id=workspace_id
         )
 
-    final_prompt = compose_prompt(prompt, req.styleId, req.camera, req.lighting)
+    final_prompt = compose_prompt(prompt, req.styleId, req.camera, req.lighting, req.lightRig)
     size = _SIZE_MAP.get(req.aspectRatio)
     auth_key = await _resolve_auth_key(workspace_id)
     count = max(1, min(int(req.count or 1), _MAX_GENERATED_ASSETS))
@@ -961,6 +970,7 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
         "styleId": req.styleId,
         "camera": req.camera,
         "lighting": req.lighting,
+        "lightRig": req.lightRig,
         "negativePrompt": req.negativePrompt,
         "seed": req.seed,
         "durationSec": req.durationSec,
@@ -990,7 +1000,7 @@ async def _generate_curated_image(
     endpoint returns ``num_images``), and each returned image persists through
     media storage.
     """
-    final_prompt = compose_prompt(prompt, req.styleId, req.camera, req.lighting)
+    final_prompt = compose_prompt(prompt, req.styleId, req.camera, req.lighting, req.lightRig)
     count = max(1, min(int(req.count or 1), _MAX_GENERATED_ASSETS))
     try:
         results = await fal_image.run_fal_image(
@@ -1019,6 +1029,7 @@ async def _generate_curated_image(
         "styleId": req.styleId,
         "camera": req.camera,
         "lighting": req.lighting,
+        "lightRig": req.lightRig,
         "negativePrompt": req.negativePrompt,
         "seed": req.seed,
         "durationSec": req.durationSec,
@@ -1050,7 +1061,7 @@ async def _generate_image_edit(
     if not refs:
         raise ValueError("at least one reference image is required for an image edit")
 
-    final_prompt = compose_prompt(prompt, req.styleId, req.camera, req.lighting)
+    final_prompt = compose_prompt(prompt, req.styleId, req.camera, req.lighting, req.lightRig)
     data_urls: list[str] = []
     for url in refs:
         data_url, _ = await _resolve_source_data_url(url)
@@ -1085,6 +1096,7 @@ async def _generate_image_edit(
         "styleId": req.styleId,
         "camera": req.camera,
         "lighting": req.lighting,
+        "lightRig": req.lightRig,
         "negativePrompt": req.negativePrompt,
         "seed": req.seed,
     }
@@ -1222,7 +1234,9 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
     # Image-to-video runs without a typed prompt — fal_video applies its own
     # default motion prompt, so a user can wire images and hit Generate directly.
     effective_prompt = prompt or fal_video.DEFAULT_I2V_PROMPT
-    final_prompt = compose_prompt(effective_prompt, req.styleId, req.camera, req.lighting)
+    final_prompt = compose_prompt(
+        effective_prompt, req.styleId, req.camera, req.lighting, req.lightRig
+    )
 
     input_data_urls: list[str] | None = None
     if image_urls:
@@ -1265,6 +1279,7 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
         "styleId": req.styleId,
         "camera": req.camera,
         "lighting": req.lighting,
+        "lightRig": req.lightRig,
         "negativePrompt": req.negativePrompt,
         "seed": req.seed,
         "durationSec": req.durationSec,
