@@ -35,6 +35,7 @@
 
 from __future__ import annotations
 
+from pocketpaw_ee.cloud.credits.domain import micro_to_credits
 from pocketpaw_ee.cloud.llm_provisioning import cutover_sweeper
 from pocketpaw_ee.cloud.llm_provisioning import service as provisioning
 from pocketpaw_ee.cloud.llm_provisioning.domain import KeyBudget, SpendCredits
@@ -61,9 +62,15 @@ async def _workspace(slug: str) -> str:
 
 
 async def _credits(workspace: str) -> int:
-    """Credits actually debited to this wallet. ``amount_delta`` is signed."""
+    """Whole credits actually debited to this wallet.
+
+    The ledger stores micro-credits (1_000_000 == 1 credit), so the sum is taken
+    in that unit and converted once — summing per-entry conversions would round
+    each row separately and lose exactly the sub-credit spend this suite is about.
+    """
     entries = await CreditLedgerEntry.find(CreditLedgerEntry.workspace == workspace).to_list()
-    return -sum(e.amount_delta for e in entries if e.amount_delta < 0)
+    micro = -sum(e.amount_delta_micro for e in entries if e.amount_delta_micro < 0)
+    return micro_to_credits(micro)
 
 
 # ===========================================================================

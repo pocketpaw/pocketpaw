@@ -93,6 +93,7 @@ from typing import Any
 
 from pocketpaw_ee.cloud.chat.runs import service as chat_runs_service
 from pocketpaw_ee.cloud.credits import service as credits_service
+from pocketpaw_ee.cloud.credits.domain import micro_to_credits
 from pocketpaw_ee.cloud.metering.domain import ComputeCost, RateCard
 from pocketpaw_ee.cloud.metering.dto import BillResult
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
@@ -376,7 +377,10 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
     cost = resolve_cost(run_doc.usage, at=run_moment(run_doc))
     # The Decimal when there is one: the price came back exact and rounding it to
     # a float on the way into a rounding function is two roundings for one bill.
-    credits = card.to_credits(
+    # Micro-credits: a run priced at $0.0015 is 375_000 of them, where rounding to
+    # whole credits made it 0 and served the run free. Same rate card, same money,
+    # a unit fine enough to express it.
+    micro = card.to_micro_credits(
         cost.cost_usd_exact if cost.cost_usd_exact is not None else cost.cost_usd
     )
     # Real per-run token volume (see ``_total_tokens``) — stamped on the debit ref
@@ -387,10 +391,10 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
     workspace = run_doc.workspace
     run_id = run_doc.run_id
 
-    if credits > 0:
+    if micro > 0:
         balance_after = await credits_service.debit(
             workspace=workspace,
-            amount=credits,
+            amount_micro=micro,
             cause=_COMPUTE_SPEND_CAUSE,
             idempotency_key=f"run:{run_id}",
             ref={
@@ -404,11 +408,11 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
         )
         debited = True
         logger.info(
-            "metering.bill_run: run=%s workspace=%s billed %d credits "
+            "metering.bill_run: run=%s workspace=%s billed %d micro-credits "
             "(cost_usd=%.6f, source=%s, model=%r) -> balance=%d",
             run_id,
             workspace,
-            credits,
+            micro,
             cost.cost_usd,
             cost.source,
             cost.model,
@@ -419,7 +423,7 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
         balance_after = await credits_service.balance(workspace)
         debited = False
         logger.debug(
-            "metering.bill_run: run=%s workspace=%s cost rounds to 0 credits "
+            "metering.bill_run: run=%s workspace=%s is genuinely free "
             "(cost_usd=%.6f, source=%s) — marking billed, no debit",
             run_id,
             workspace,
@@ -437,7 +441,8 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
         run_id=run_id,
         workspace_id=workspace,
         cost_usd=cost.cost_usd,
-        credits_charged=credits,
+        credits_charged=micro_to_credits(micro),
+        micro_charged=micro,
         balance_after=balance_after,
         debited=debited,
         cost_source=cost.source,

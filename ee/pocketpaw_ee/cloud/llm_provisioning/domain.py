@@ -59,7 +59,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import floor
+
+from pocketpaw_ee.cloud.credits.domain import MICRO_PER_CREDIT
 
 
 @dataclass(frozen=True)
@@ -115,42 +116,31 @@ class SpendCredits:
         ``metering.domain.RateCard.to_credits``. A non-positive cost yields 0
         credits (no debit).
 
-        Correct for ONE total. Do NOT call it per spend row and add the results
-        up: the rounding is applied to each row separately, and a row worth less
-        than half a credit rounds to nothing. Summing the USD first and converting
-        once is what ``whole_credits`` + ``usd_for_credits`` are for.
+        Correct for ONE total, which is what the shadow compare wants. Do NOT call
+        it per spend row and add the results up: the rounding applies to each row
+        separately, so a row worth less than half a credit contributes nothing.
+        Per-row billing uses ``to_micro_credits``, which needs no rounding at all.
         """
         if cost_usd <= 0:
             return 0
         return round(cost_usd * self.markup / self.credit_usd)
 
-    def whole_credits(self, cost_usd: float) -> int:
-        """How many WHOLE credits ``cost_usd`` covers. Never rounds up.
+    def to_micro_credits(self, cost_usd: float) -> int:
+        """Convert a USD spend amount into MICRO-credits (1_000_000 == 1 credit).
 
-        The billing half of the remainder carry. ``to_credits`` rounds, which is
-        right for a single total and wrong for a running one: rounding up would
-        bill money the tenant has not spent yet, and the next row would be billed
-        for it a second time. Flooring bills only what is fully covered and leaves
-        the rest in the remainder, where ``usd_for_credits`` can take it back out.
+        The conversion the spend ingest actually bills on, and the reason the
+        wallet's storage unit had to get finer. ``to_credits`` cannot express one
+        API call: a $0.0015 row is 0.375 of a credit, so rounding it down serves it
+        free and rounding it up charges for money nobody spent. In micro-credits
+        that row is exactly 375_000 — an integer, with nothing left over to carry.
 
-        The ``round(..., 9)`` is not cosmetic. The remainder is accumulated by
-        repeated float addition, so a sum that is exactly three credits arrives as
-        2.9999999999999996 and a bare ``floor`` would bill two — re-creating the
-        under-bill this method exists to end, just further down the decimal.
+        Per-row error is at most half a micro-credit, or $0.000000002 of pre-markup
+        compute. Summed over real proxy rows the drift is 2e-9 USD, which is exact
+        as far as any ledger is concerned.
         """
         if cost_usd <= 0:
             return 0
-        return floor(round(cost_usd * self.markup / self.credit_usd, 9))
-
-    def usd_for_credits(self, credits: int) -> float:
-        """The USD that ``credits`` whole credits accounts for.
-
-        The inverse of ``whole_credits``, used to take the billed part back out of
-        the running remainder so what is left is exactly the unbilled fraction.
-        """
-        if credits <= 0:
-            return 0.0
-        return credits * self.credit_usd / self.markup
+        return round(cost_usd * self.markup / self.credit_usd * MICRO_PER_CREDIT)
 
 
 @dataclass(frozen=True)
@@ -173,10 +163,10 @@ class SpendIngestResult:
     cost_usd: float
     cached_tokens: int
     balance_after: int
-    # True when this call did no work because another ingest already held the
-    # tenant's lease. Distinct from a genuine zero: nothing was read, so the caller
-    # must not treat the zero as evidence the tenant has no spend.
-    lease_skipped: bool = False
+    # The exact figure ``credits_debited`` rounds. A sweep of cheap calls can debit
+    # real money and still show 0 whole credits, so anything reconciling this
+    # against the ledger has to read the micro value.
+    micro_debited: int = 0
 
 
 @dataclass(frozen=True)

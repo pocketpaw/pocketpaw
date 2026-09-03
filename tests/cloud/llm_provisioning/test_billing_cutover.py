@@ -36,6 +36,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from pocketpaw_ee.cloud.credits import service as credits
+from pocketpaw_ee.cloud.credits.domain import credits_to_micro
 from pocketpaw_ee.cloud.llm_provisioning import cutover_sweeper
 from pocketpaw_ee.cloud.llm_provisioning import service as provisioning
 from pocketpaw_ee.cloud.llm_provisioning.domain import KeyBudget, SpendCredits
@@ -307,7 +308,7 @@ async def test_live_cutover_sweep_debits_proxy_spend_once(mongo_db):
         CreditLedgerEntry.idempotency_key == "litellm:req-1",
     ).to_list()
     assert len(entries) == 1
-    assert entries[0].amount_delta == -10
+    assert entries[0].amount_delta_micro == credits_to_micro(-10)
 
 
 async def test_no_double_charge_same_usage_live(mongo_db):
@@ -568,7 +569,7 @@ async def test_high_water_boundary_same_second_rows_both_billed_once(mongo_db):
             CreditLedgerEntry.idempotency_key == f"litellm:{rid}",
         ).to_list()
         assert len(entries) == 1, f"{rid} must have exactly one ledger row"
-        assert entries[0].amount_delta == delta
+        assert entries[0].amount_delta_micro == credits_to_micro(delta)
 
 
 # ===========================================================================

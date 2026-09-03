@@ -203,7 +203,13 @@ from pocketpaw_ee.cloud._core.errors import (
 )
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import CreditMovement
-from pocketpaw_ee.cloud.credits.domain import GrantResult, LedgerEntry, ModelSpendRow
+from pocketpaw_ee.cloud.credits.domain import (
+    GrantResult,
+    LedgerEntry,
+    ModelSpendRow,
+    credits_to_micro,
+    micro_to_credits,
+)
 from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 
 logger = logging.getLogger(__name__)
@@ -219,8 +225,12 @@ def _entry_to_domain(doc: CreditLedgerEntry) -> LedgerEntry:
         id=str(doc.id),
         workspace_id=doc.workspace,
         kind=doc.kind,
-        amount_delta=doc.amount_delta,
-        balance_after=doc.balance_after,
+        # The domain object speaks WHOLE credits — it is what the HTTP layer
+        # renders. The exact micro figures stay on the document.
+        amount_delta=micro_to_credits(doc.amount_delta_micro),
+        balance_after=micro_to_credits(doc.balance_after_micro),
+        amount_delta_micro=doc.amount_delta_micro,
+        balance_after_micro=doc.balance_after_micro,
         member_id=doc.member_id,
         cause=doc.cause,
         ref=dict(doc.ref or {}),
@@ -230,9 +240,14 @@ def _entry_to_domain(doc: CreditLedgerEntry) -> LedgerEntry:
 
 
 async def _current_balance(workspace: str) -> int:
-    """Read the workspace's current balance, or 0 when no row exists yet."""
+    """The workspace's current balance in MICRO-credits, or 0 when no row exists.
+
+    Internal and exact. The public ``balance`` truncates this to whole credits;
+    every arithmetic path inside this module uses the micro figure, so rounding
+    happens once, at the surface, and never compounds.
+    """
     doc = await CreditBalance.find_one(CreditBalance.workspace == workspace)
-    return int(doc.balance_credits) if doc is not None else 0
+    return int(doc.balance_micro) if doc is not None else 0
 
 
 async def _emit_movement(entry: CreditLedgerEntry) -> None:
@@ -242,8 +257,15 @@ async def _emit_movement(entry: CreditLedgerEntry) -> None:
             data={
                 "workspace_id": entry.workspace,
                 "kind": entry.kind,
-                "amount_delta": entry.amount_delta,
-                "balance_after": entry.balance_after,
+                # The event is a published contract, so its credit-denominated
+                # keys keep their names and meaning. The exact figures ride
+                # alongside for any consumer that needs sub-credit precision —
+                # a metered spend is routinely a fraction of a credit, so both
+                # whole-credit values can read 0 on a real charge.
+                "amount_delta": micro_to_credits(entry.amount_delta_micro),
+                "balance_after": micro_to_credits(entry.balance_after_micro),
+                "amount_delta_micro": entry.amount_delta_micro,
+                "balance_after_micro": entry.balance_after_micro,
                 "cause": entry.cause,
                 "idempotency_key": entry.idempotency_key,
             }
@@ -277,11 +299,18 @@ async def grant(
 
     ``kind`` defaults to ``"grant"``; pass ``"genesis"`` to seed a fresh
     wallet's first credits (the ledger origin row).
+
+    ``amount`` is WHOLE credits and the returned balance is whole credits, both
+    unchanged. Grants are top-ups and plan allowances, which are priced in whole
+    credits by definition — nobody buys a millionth of one. The storage unit
+    underneath is micro-credits; the conversion happens here so no caller of this
+    function had to change.
     """
     # Rule 6 — validate at entry. Money-handling: an amount must be a positive
     # integer (1 credit == $0.01) and the idempotency key must be present.
     if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
         raise ValidationError("credits.invalid_amount", "Grant amount must be a positive integer")
+    amount_micro = credits_to_micro(amount)
     if not workspace:
         raise ValidationError("credits.invalid_workspace", "workspace is required")
     if not idempotency_key:
@@ -293,8 +322,8 @@ async def grant(
     entry = CreditLedgerEntry(
         workspace=workspace,
         kind=kind,
-        amount_delta=amount,
-        balance_after=0,  # stamped after the $inc returns the new balance
+        amount_delta_micro=amount_micro,
+        balance_after_micro=0,  # stamped after the $inc returns the new balance
         applied=False,
         conditional=False,
         member_id=member_id,
@@ -308,7 +337,9 @@ async def grant(
         # This movement was already applied — return the current balance and
         # signal a replay (created=False) so the caller suppresses any
         # money-moved side effect (e.g. a capture-event emit).
-        return GrantResult(balance=await _current_balance(workspace), created=False)
+        return GrantResult(
+            balance=micro_to_credits(await _current_balance(workspace)), created=False
+        )
 
     # Step 2 — apply the effect: unconditional $inc with upsert (creates the
     # balance row at 0 then increments in one atomic call).
@@ -316,37 +347,51 @@ async def grant(
     updated = await coll.find_one_and_update(
         {"workspace": workspace},
         {
-            "$inc": {"balance_credits": amount},
+            "$inc": {"balance_micro": amount_micro},
             "$setOnInsert": {"createdAt": datetime.now(UTC)},
             "$currentDate": {"updatedAt": True},
         },
         upsert=True,
         return_document=ReturnDocument.AFTER,
     )
-    new_balance = int(updated["balance_credits"])
+    new_balance_micro = int(updated["balance_micro"])
 
     # Step 3 — the $inc landed: stamp balance_after and mark the entry applied so
     # reconcile counts it (and never re-drives it as a phantom).
-    entry.balance_after = new_balance
+    entry.balance_after_micro = new_balance_micro
     entry.applied = True
     await entry.save()
 
     await _emit_movement(entry)
-    return GrantResult(balance=new_balance, created=True)
+    return GrantResult(balance=micro_to_credits(new_balance_micro), created=True)
 
 
 async def debit(
     workspace: str,
-    amount: int,
-    cause: str,
-    idempotency_key: str,
+    amount: int | None = None,
+    cause: str = "",
+    idempotency_key: str = "",
     *,
+    amount_micro: int | None = None,
     member_id: str | None = None,
     ref: dict | None = None,
     kind: str = "spend",
     allow_negative: bool = False,
 ) -> int:
-    """Remove ``amount`` credits from the workspace wallet. Atomic + idempotent.
+    """Remove credits from the workspace wallet. Atomic + idempotent.
+
+    Takes EITHER ``amount`` (whole credits, the original signature) or
+    ``amount_micro`` (micro-credits, 1_000_000 == 1 credit). Exactly one.
+
+    ``amount_micro`` exists because metered compute cannot be expressed in whole
+    credits. A credit is a cent and the proxy prices a single API call, so a
+    $0.0015 call is 0.375 of a credit — a real charge with no whole-credit
+    representation. Rounding it down served it free; rounding to nearest billed a
+    number that was simply not what the customer used. The finer unit is how the
+    deduction becomes exactly what was consumed.
+
+    The return value stays WHOLE credits so existing callers are unaffected. Use
+    ``balance_micro`` when you need the exact figure.
 
     Returns the new balance. A retried call with the same
     ``(workspace, idempotency_key)`` is a no-op that returns the current balance.
@@ -367,11 +412,27 @@ async def debit(
       negative balance. The no-overdraft guarantee is enforced at run-start, not
       here. The entry is tagged ``conditional=False``.
     """
-    # Rule 6 — validate at entry.
-    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
-        raise ValidationError("credits.invalid_amount", "Debit amount must be a positive integer")
+    # Rule 6 — validate at entry. Exactly one unit, never both: a caller passing
+    # each would otherwise silently get whichever the code happened to prefer, and
+    # the two differ by a factor of a million.
+    if (amount is None) == (amount_micro is None):
+        raise ValidationError(
+            "credits.invalid_amount", "Pass exactly one of amount or amount_micro"
+        )
+    if amount is not None:
+        if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+            raise ValidationError(
+                "credits.invalid_amount", "Debit amount must be a positive integer"
+            )
+        amount_micro = credits_to_micro(amount)
+    if not isinstance(amount_micro, int) or isinstance(amount_micro, bool) or amount_micro <= 0:
+        raise ValidationError(
+            "credits.invalid_amount", "Debit amount_micro must be a positive integer"
+        )
     if not workspace:
         raise ValidationError("credits.invalid_workspace", "workspace is required")
+    if not cause:
+        raise ValidationError("credits.invalid_cause", "cause is required")
     if not idempotency_key:
         raise ValidationError("credits.invalid_key", "idempotency_key is required")
 
@@ -383,8 +444,8 @@ async def debit(
     entry = CreditLedgerEntry(
         workspace=workspace,
         kind=kind,
-        amount_delta=-amount,
-        balance_after=0,  # stamped after the $inc returns the new balance
+        amount_delta_micro=-amount_micro,
+        balance_after_micro=0,  # stamped after the $inc returns the new balance
         applied=False,
         conditional=not allow_negative,
         member_id=member_id,
@@ -396,7 +457,7 @@ async def debit(
         await entry.insert()
     except DuplicateKeyError:
         # This movement was already applied — return the current balance.
-        return await _current_balance(workspace)
+        return micro_to_credits(await _current_balance(workspace))
 
     coll = CreditBalance.get_pymongo_collection()
     if allow_negative:
@@ -406,7 +467,7 @@ async def debit(
         updated = await coll.find_one_and_update(
             {"workspace": workspace},
             {
-                "$inc": {"balance_credits": -amount},
+                "$inc": {"balance_micro": -amount_micro},
                 "$setOnInsert": {"createdAt": datetime.now(UTC)},
                 "$currentDate": {"updatedAt": True},
             },
@@ -420,8 +481,8 @@ async def debit(
         # wallet that doesn't exist yet has zero credits and cannot satisfy the
         # filter.
         updated = await coll.find_one_and_update(
-            {"workspace": workspace, "balance_credits": {"$gte": amount}},
-            {"$inc": {"balance_credits": -amount}, "$currentDate": {"updatedAt": True}},
+            {"workspace": workspace, "balance_micro": {"$gte": amount_micro}},
+            {"$inc": {"balance_micro": -amount_micro}, "$currentDate": {"updatedAt": True}},
             return_document=ReturnDocument.AFTER,
         )
         if updated is None:
@@ -429,19 +490,19 @@ async def debit(
             # 1 so the rejected debit leaves NO trace (invariant b) and a retry
             # with the same key can re-evaluate cleanly (the key is free again).
             await entry.delete()
-            available = await _current_balance(workspace)
-            raise InsufficientCredits(amount, available)
+            available = micro_to_credits(await _current_balance(workspace))
+            raise InsufficientCredits(micro_to_credits(amount_micro), available)
 
-    new_balance = int(updated["balance_credits"])
+    new_balance_micro = int(updated["balance_micro"])
 
     # Step 3 — the $inc landed: stamp balance_after and mark the entry applied so
     # reconcile counts it (and never re-drives it as a phantom).
-    entry.balance_after = new_balance
+    entry.balance_after_micro = new_balance_micro
     entry.applied = True
     await entry.save()
 
     await _emit_movement(entry)
-    return new_balance
+    return micro_to_credits(new_balance_micro)
 
 
 async def record_no_movement(
@@ -479,8 +540,8 @@ async def record_no_movement(
     entry = CreditLedgerEntry(
         workspace=workspace,
         kind=kind,
-        amount_delta=0,
-        balance_after=await _current_balance(workspace),
+        amount_delta_micro=0,
+        balance_after_micro=await _current_balance(workspace),
         # Nothing to land, so it is applied on arrival. An unapplied zero would
         # read as a crash-window phantom to reconcile and be re-driven forever.
         applied=True,
@@ -502,7 +563,23 @@ async def record_no_movement(
 
 
 async def balance(workspace: str) -> int:
-    """Return the workspace's current spendable balance (0 when no wallet)."""
+    """The workspace's spendable balance in WHOLE credits (0 when no wallet).
+
+    Truncated toward zero, so a wallet holding 4.7 credits reads as 4: showing a
+    customer a credit they cannot spend is the worse error. ``balance_micro`` is
+    the exact figure, and it is what every guard here compares against.
+    """
+    if not workspace:
+        raise ValidationError("credits.invalid_workspace", "workspace is required")
+    return micro_to_credits(await _current_balance(workspace))
+
+
+async def balance_micro(workspace: str) -> int:
+    """The workspace's exact balance in micro-credits (1_000_000 == 1 credit).
+
+    For callers that must not lose the fraction — the spend ingest's reporting,
+    and any future pre-flight estimate that reasons about sub-credit amounts.
+    """
     if not workspace:
         raise ValidationError("credits.invalid_workspace", "workspace is required")
     return await _current_balance(workspace)
@@ -521,9 +598,13 @@ async def check_balance(workspace: str) -> None:
     ``available`` is the clamped non-negative balance so the message reads
     sensibly even on a metered-overage negative wallet.
     """
-    bal = await balance(workspace)
-    if bal <= 0:
-        raise InsufficientCredits(1, max(bal, 0))
+    # Compare the EXACT balance, not the displayed one. ``balance`` truncates, so
+    # a wallet holding half a credit reads as 0 there — and this gate would lock a
+    # customer out of a run they can genuinely pay for. Sub-credit balances were
+    # impossible when the wallet stored whole credits; they are routine now.
+    bal_micro = await _current_balance(workspace)
+    if bal_micro <= 0:
+        raise InsufficientCredits(1, max(micro_to_credits(bal_micro), 0))
 
 
 # The grant cause that EXTENDS the monthly ceiling — a PURCHASED one-time top-up
@@ -557,8 +638,10 @@ async def _period_topup_credits(workspace: str) -> int:
         "applied": True,
         "createdAt": {"$gte": month_start},
     }
-    net = await _sum_amount_delta(query)
-    return max(net, 0)
+    # ``_sum_amount_delta`` sums the stored MICRO field; the ceiling this feeds is
+    # expressed in whole credits, so convert before returning.
+    net_micro = await _sum_amount_delta(query)
+    return micro_to_credits(max(net_micro, 0))
 
 
 async def check_quota(workspace: str) -> None:
@@ -672,8 +755,10 @@ async def sum_debits_by_cause(
     # "credits debited" figure. A stray positive delta under this cause (there
     # should be none — compute_spend is debit-only) is clamped out so a bad row
     # can't make the spend total read as a refund.
-    total = sum(-int(e.amount_delta) for e in entries if int(e.amount_delta) < 0)
-    return total, len(entries)
+    total_micro = sum(-int(e.amount_delta_micro) for e in entries if int(e.amount_delta_micro) < 0)
+    # Whole credits: the shadow compare puts this beside a LiteLLM-side figure that
+    # is also whole credits, and a delta between two units would be meaningless.
+    return micro_to_credits(total_micro), len(entries)
 
 
 # The spend causes that count toward the monthly quota — the SAME two the usage
@@ -692,7 +777,9 @@ def _utc_month_start(now: datetime) -> datetime:
 
 
 async def _sum_amount_delta(query: dict[str, Any]) -> int:
-    """Server-side ``$sum`` of ``amount_delta`` over the entries matching ``query``.
+    """Server-side ``$sum`` of ``amount_delta_micro`` over entries matching ``query``.
+
+    Returns MICRO-credits. Callers that surface a whole-credit figure convert.
 
     Runs a Mongo ``$match`` + ``$group`` aggregation in the DB (NOT a
     pull-all-then-sum in Python) and returns the summed ``amount_delta`` (signed),
@@ -707,7 +794,7 @@ async def _sum_amount_delta(query: dict[str, Any]) -> int:
     cursor = CreditLedgerEntry.get_pymongo_collection().aggregate(
         [
             {"$match": query},
-            {"$group": {"_id": None, "total": {"$sum": "$amount_delta"}}},
+            {"$group": {"_id": None, "total": {"$sum": "$amount_delta_micro"}}},
         ]
     )
     if inspect.isawaitable(cursor):
@@ -747,10 +834,13 @@ async def month_to_date_spend(workspace: str) -> int:
         "applied": True,
         "createdAt": {"$gte": month_start},
     }
-    # ``amount_delta`` is negative for a debit, so the grouped sum is <= 0. Flip to
-    # positive credits spent; clamp a stray net-positive to 0 (spend is debit-only).
-    net = await _sum_amount_delta(query)
-    return max(-net, 0)
+    # ``amount_delta_micro`` is negative for a debit, so the grouped sum is <= 0.
+    # Flip to positive spend; clamp a stray net-positive to 0 (spend is debit-only).
+    # Converted to whole credits because the quota ceiling is denominated that way —
+    # this is the one place the fine unit is deliberately coarsened, and it rounds
+    # DOWN, so the gate never fires early on a fraction the customer has not spent.
+    net_micro = await _sum_amount_delta(query)
+    return micro_to_credits(max(-net_micro, 0))
 
 
 def _spend_by_model_pipeline(query: dict[str, Any]) -> list[dict[str, Any]]:
@@ -803,7 +893,7 @@ def _spend_by_model_pipeline(query: dict[str, Any]) -> list[dict[str, Any]]:
         ]
     }
     return [
-        {"$match": {**query, "amount_delta": {"$lt": 0}}},
+        {"$match": {**query, "amount_delta_micro": {"$lt": 0}}},
         {
             "$group": {
                 "_id": {
@@ -811,7 +901,7 @@ def _spend_by_model_pipeline(query: dict[str, Any]) -> list[dict[str, Any]]:
                     "model": model_or_unknown,
                 },
                 # A debit's delta is negative; flip it to positive credits spent.
-                "credits": {"$sum": {"$subtract": [0, "$amount_delta"]}},
+                "credits": {"$sum": {"$subtract": [0, "$amount_delta_micro"]}},
                 "requests": {"$sum": 1},
                 "tokens": {"$sum": tokens_or_zero},
             }
@@ -886,7 +976,8 @@ async def spend_by_model(
             ModelSpendRow(
                 day=str(key.get("day") or ""),
                 model=str(key.get("model") or "unknown"),
-                credits=int(doc.get("credits") or 0),
+                # The pipeline sums the micro field; the graph plots whole credits.
+                credits=micro_to_credits(int(doc.get("credits") or 0)),
                 requests=int(doc.get("requests") or 0),
                 tokens=int(doc.get("tokens") or 0),
             )
@@ -991,11 +1082,11 @@ async def reconcile(workspace: str) -> int:
         if entry.conditional:
             # Strict debit: re-apply only if the funds are there. ``amount_delta``
             # is negative, so the required balance is ``-amount_delta``.
-            required = -int(entry.amount_delta)
+            required = -int(entry.amount_delta_micro)
             updated = await coll.find_one_and_update(
-                {"workspace": workspace, "balance_credits": {"$gte": required}},
+                {"workspace": workspace, "balance_micro": {"$gte": required}},
                 {
-                    "$inc": {"balance_credits": int(entry.amount_delta)},
+                    "$inc": {"balance_micro": int(entry.amount_delta_micro)},
                     "$currentDate": {"updatedAt": True},
                 },
                 return_document=ReturnDocument.AFTER,
@@ -1007,7 +1098,7 @@ async def reconcile(workspace: str) -> int:
                     "(key=%s, delta=%d) — insufficient funds, never authorized",
                     workspace,
                     entry.idempotency_key,
-                    int(entry.amount_delta),
+                    int(entry.amount_delta_micro),
                 )
                 await entry.delete()
                 continue
@@ -1017,7 +1108,7 @@ async def reconcile(workspace: str) -> int:
             updated = await coll.find_one_and_update(
                 {"workspace": workspace},
                 {
-                    "$inc": {"balance_credits": int(entry.amount_delta)},
+                    "$inc": {"balance_micro": int(entry.amount_delta_micro)},
                     "$setOnInsert": {"createdAt": datetime.now(UTC)},
                     "$currentDate": {"updatedAt": True},
                 },
@@ -1026,16 +1117,16 @@ async def reconcile(workspace: str) -> int:
             )
 
         # The re-drive landed: stamp and mark applied.
-        entry.balance_after = int(updated["balance_credits"])
+        entry.balance_after_micro = int(updated["balance_micro"])
         entry.applied = True
         await entry.save()
         logger.warning(
             "credits.reconcile: workspace=%s re-drove unapplied entry (key=%s, delta=%d) "
-            "→ balance_after=%d",
+            "→ balance_after_micro=%d",
             workspace,
             entry.idempotency_key,
-            int(entry.amount_delta),
-            entry.balance_after,
+            int(entry.amount_delta_micro),
+            entry.balance_after_micro,
         )
 
     # Phase 2 — the canonical balance is the sum over the APPLIED entries.
@@ -1043,7 +1134,7 @@ async def reconcile(workspace: str) -> int:
         CreditLedgerEntry.workspace == workspace,
         CreditLedgerEntry.applied == True,  # noqa: E712 — Beanie field equality, not `is`
     ).to_list()
-    computed = sum(int(e.amount_delta) for e in applied_entries)
+    computed = sum(int(e.amount_delta_micro) for e in applied_entries)
 
     if computed < 0:
         # Not an error — a metered allow_negative overage legitimately drives the
@@ -1064,7 +1155,7 @@ async def reconcile(workspace: str) -> int:
         await coll.update_one(
             {"workspace": workspace},
             {
-                "$set": {"balance_credits": computed},
+                "$set": {"balance_micro": computed},
                 "$setOnInsert": {"createdAt": datetime.now(UTC)},
                 "$currentDate": {"updatedAt": True},
             },
@@ -1076,27 +1167,30 @@ async def reconcile(workspace: str) -> int:
             workspace,
             computed,
         )
-        return computed
+        return micro_to_credits(computed)
 
-    if int(bal_doc.balance_credits) != computed:
+    if int(bal_doc.balance_micro) != computed:
         logger.warning(
             "credits.reconcile: workspace=%s balance drifted (stored=%d, applied-ledger=%d); "
             "repaired",
             workspace,
-            int(bal_doc.balance_credits),
+            int(bal_doc.balance_micro),
             computed,
         )
         await coll.update_one(
             {"workspace": workspace},
-            {"$set": {"balance_credits": computed}, "$currentDate": {"updatedAt": True}},
+            {"$set": {"balance_micro": computed}, "$currentDate": {"updatedAt": True}},
         )
-    return computed
+    # The repair above works in micro end to end — that is what keeps the ledger
+    # invariant exact. Only the reported figure is coarsened, for the caller.
+    return micro_to_credits(computed)
 
 
 __all__ = [
     "GrantResult",
     "ModelSpendRow",
     "balance",
+    "balance_micro",
     "check_balance",
     "check_quota",
     "debit",

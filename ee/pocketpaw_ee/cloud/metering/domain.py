@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Literal
 
+from pocketpaw_ee.cloud.credits.domain import MICRO_PER_CREDIT
+
 # Where a run's resolved cost came from — for the bill ref + debug logging.
 #
 # ``unpriced`` was split out of ``none`` on 2026-09-02. They used to be the same
@@ -75,6 +77,31 @@ class RateCard:
         exact = cost_usd if isinstance(cost_usd, Decimal) else Decimal(str(cost_usd))
         credits = exact * Decimal(str(self.markup)) / Decimal(str(self.credit_usd))
         return int(credits.quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
+
+    def to_micro_credits(self, cost_usd: Decimal | float) -> int:
+        """Convert a USD compute cost into MICRO-credits (1_000_000 == 1 credit).
+
+        The conversion the per-run debit uses. ``to_credits`` rounds a whole run to
+        the nearest cent, which was defensible when a run was the billing unit and
+        cost several cents — but the same run priced at $0.0015 rounds to nothing,
+        and a workload of cheap runs is billed zero however many of them there are.
+        The finer unit removes the rounding decision rather than choosing a
+        direction for it.
+
+        Kept in ``Decimal`` end to end for the same reason ``to_credits`` is: the
+        price arrives exact from ``usage_tracker.price_run`` and converting through
+        a float would round it on the way into a rounding function.
+        """
+        if cost_usd <= 0:
+            return 0
+        exact = cost_usd if isinstance(cost_usd, Decimal) else Decimal(str(cost_usd))
+        micro = (
+            exact
+            * Decimal(str(self.markup))
+            / Decimal(str(self.credit_usd))
+            * Decimal(MICRO_PER_CREDIT)
+        )
+        return int(micro.quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
 
 
 @dataclass(frozen=True)
