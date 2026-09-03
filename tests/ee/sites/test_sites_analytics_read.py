@@ -3,6 +3,13 @@
 #
 # Created 2026-09-02 (feat/sites-analytics-read).
 #
+# Updated 2026-09-04 (AD-2 — visits, bounce rate and visit duration): section 8 covers
+# the visit block and the FOURTH empty state, a window whose rows all predate the visit
+# id and which has to read as "republish to start measuring visits" rather than as a zero
+# bounce rate. Its fixtures are RAW PAGEVIEWS rather than scripted aggregates, so the
+# hour-boundary split is present in the data instead of being asserted into existence —
+# the section's own note says why that distinction is the point.
+#
 # THE REQUIREMENT THIS WHOLE FILE EXISTS FOR: never invent a zero. Four situations can
 # leave a dashboard looking empty and they are four different sentences to a customer:
 #
@@ -57,19 +64,42 @@ class _FakeAnalyticsCF:
     what was actually sent rather than on what the caller meant to send.
     """
 
-    def __init__(self, rows_by_blob: dict[str, list[dict]] | None = None, totals=None) -> None:
+    def __init__(
+        self,
+        rows_by_blob: dict[str, list[dict]] | None = None,
+        totals=None,
+        visits: dict | None = None,
+    ) -> None:
         self.rows_by_blob = rows_by_blob or {}
         self.totals = totals
+        self.visits = visits
         self.queries: list[str] = []
 
     async def query_analytics_sql(self, sql: str) -> list[dict]:
         self.queries.append(sql)
+        if "blob6 AS visit" in sql:
+            return [self.visits if self.visits is not None else self._default_visits()]
         if "GROUP BY" not in sql:
             return [] if self.totals is None else [self.totals]
         for blob, rows in self.rows_by_blob.items():
             if f"{blob} AS label" in sql:
                 return rows
         return []
+
+    def _default_visits(self) -> dict:
+        """The smallest visit answer COHERENT with this fake's scripted totals.
+
+        Every test written before AD-2 needs one. Defaulting to nothing would drop all of
+        them into the fourth empty state — "no row here has ever carried a visit id" —
+        which is a real answer to a question they are not asking, and they would then be
+        asserting it by accident. So a fixture that scripts pageviews gets one visit that
+        bounced, and a fixture that scripts none gets none. Section 8 does not use this
+        path: its fake aggregates raw rows."""
+        raw = (self.totals or {}).get("pageviews", 0)
+        counted = int(raw) if str(raw).isdigit() else 0
+        if counted <= 0:
+            return {"visits": 0, "bounces": 0, "total_seconds": 0}
+        return {"visits": 1, "bounces": 1, "total_seconds": 0}
 
 
 class _ExplodingCF:
@@ -863,3 +893,336 @@ async def test_the_endpoint_honours_a_window_other_than_the_default(client, monk
     assert resp.status_code == 200, resp.text
     assert resp.json()["window"] == "90d"
     assert cf.queries and all("INTERVAL '90' DAY" in sql for sql in cf.queries)
+
+
+# ── 8. AD-2: visits, bounce rate and visit duration ──────────────────────────
+#
+# THE FIXTURES HERE ARE RAW PAGEVIEWS, NOT SCRIPTED AGGREGATES, and that is the whole
+# design of the section. A fake that answers ``{"visits": 3, "bounces": 1}`` can only
+# contain the cases whoever wrote the query already had in mind, and the case this
+# feature is most likely to get wrong is one nobody types in by hand: a person reading
+# two pages either side of the top of an hour, whom the hourly visit salt splits into TWO
+# visits. A fixture built to match the query leaves that out and then certifies the split
+# as absent — the same trap as a contract test whose one payload is the shape where a
+# wrong expression gives the right answer.
+#
+# So ``_RawRowsCF`` models what ANALYTICS ENGINE does with the statement: group the rows
+# by the stored visit id, sum the sampling intervals, take the span from a visit's first
+# pageview to its last. The visit id itself comes from ``_pv``, which derives it from the
+# HOUR the pageview happened in the way the generated Worker does, so the split is a
+# property of the data rather than of the assertion. Bounce rate and mean duration are
+# the service's own arithmetic and every test below asserts them against numbers worked
+# out by hand.
+
+
+def _pv(when: datetime, visitor: str, *, sample: int = 1, visit: str | None = None) -> dict:
+    """One stored pageview, as the counting Worker would have written it.
+
+    ``visit`` defaults to the id AD-1 stamps: the visitor under a salt that rotates on the
+    hour, so two pageviews by one person inside one hour share it and two either side of
+    the hour do not. Pass ``""`` for a row written BEFORE AD-1, which is the only way a
+    stored row carries no visit id at all."""
+    return {
+        "when": when,
+        "visitor": visitor,
+        "sample": sample,
+        "visit": f"{visitor}@{when:%Y-%m-%dT%H}" if visit is None else visit,
+    }
+
+
+class _RawRowsCF:
+    """An Analytics Engine that AGGREGATES a fixture of raw pageviews.
+
+    It reads the two parts of the statement that change the answer — which blob the
+    visits are grouped by, and whether rows carrying no visit id are filtered out — so a
+    query that grouped by the device class, or that stopped excluding the unrecorded
+    rows, gets a different answer here instead of the same one. What the statement does
+    that no fake can check on the reader's behalf (the sampling sum, the bounce
+    condition, the duration's own filter) is asserted as TEXT in
+    ``test_the_visit_statement_is_the_one_cloudflare_will_run``, because Cloudflare is the
+    only thing that can execute this SQL and the statement is therefore the artifact."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+        self.queries: list[str] = []
+
+    async def query_analytics_sql(self, sql: str) -> list[dict]:
+        self.queries.append(sql)
+        if "blob6 AS visit" in sql:
+            return [self._visits(drop_unrecorded="blob6 != ''" in sql)]
+        if "GROUP BY" in sql:
+            return []
+        return [
+            {
+                "pageviews": sum(row["sample"] for row in self.rows),
+                "visitors": len({row["visitor"] for row in self.rows}),
+            }
+        ]
+
+    def _visits(self, *, drop_unrecorded: bool) -> dict:
+        """The outer aggregate, computed the way the two-level statement computes it."""
+        grouped: dict[str, list[dict]] = {}
+        for row in self.rows:
+            if drop_unrecorded and row["visit"] == "":
+                continue
+            grouped.setdefault(row["visit"], []).append(row)
+        visits = bounces = total_seconds = 0
+        for group in grouped.values():
+            weight = max(row["sample"] for row in group)
+            pageviews = sum(row["sample"] for row in group)
+            visits += weight
+            if pageviews == 1:
+                bounces += weight
+            else:
+                span = max(row["when"] for row in group) - min(row["when"] for row in group)
+                total_seconds += int(span.total_seconds()) * weight
+        return {"visits": visits, "bounces": bounces, "total_seconds": total_seconds}
+
+
+@pytest.mark.asyncio
+async def test_a_visit_that_crosses_the_top_of_the_hour_counts_as_two(beanie_test_db):
+    """THE ACCEPTED ERROR, asserted so that it stays accepted rather than becoming a
+    surprise. One person, three pageviews, never more than eight minutes apart — one
+    reading session to any human looking at the log. The visit id rotates on the hour, so
+    the two before 11:00 are one visit and the one after is another, and the endpoint
+    answers two. It over-splits and never over-merges, the direction the daily visitor
+    salt already accepts.
+
+    Driven from raw pageviews for exactly this reason: a fixture that scripted the
+    aggregate would say two because its author typed two."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _RawRowsCF(
+        [
+            _pv(datetime(2026, 9, 3, 10, 50, tzinfo=UTC), "reader"),
+            _pv(datetime(2026, 9, 3, 10, 58, tzinfo=UTC), "reader"),
+            _pv(datetime(2026, 9, 3, 11, 3, tzinfo=UTC), "reader"),
+        ]
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert out.pageviews == 3
+    assert out.visitors == 1, "one person, whatever the visit id was split into"
+    assert out.visits.visits == 2, "the hourly salt cut one reading session in two"
+    # The first visit ran 10:50 to 10:58. The second is a single pageview and therefore a
+    # bounce, which is what the tail of a split visit always looks like.
+    assert out.visits.bounce_rate == 0.5
+    assert out.visits.visit_duration_seconds == 480.0
+
+
+@pytest.mark.asyncio
+async def test_a_one_page_visit_is_a_bounce_and_never_dilutes_the_duration(beanie_test_db):
+    """A visit of one pageview has no measurable duration — its single row carries a
+    single timestamp — so it counts as a bounce and stays OUT of the duration's
+    denominator. The mean here is 300 over the one visit that has a duration, not 300 over
+    both visits: dividing by visits would make a site's average time on page fall every
+    time somebody read one page and left, which is backwards."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _RawRowsCF(
+        [
+            _pv(datetime(2026, 9, 3, 10, 0, tzinfo=UTC), "deep"),
+            _pv(datetime(2026, 9, 3, 10, 2, tzinfo=UTC), "deep"),
+            _pv(datetime(2026, 9, 3, 10, 5, tzinfo=UTC), "deep"),
+            _pv(datetime(2026, 9, 3, 10, 1, tzinfo=UTC), "quick"),
+        ]
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert (out.pageviews, out.visitors) == (4, 2)
+    assert out.visits.visits == 2
+    assert out.visits.bounce_rate == 0.5
+    assert out.visits.visit_duration_seconds == 300.0, "300 / 1 measurable visit, not 300 / 2"
+
+
+@pytest.mark.asyncio
+async def test_every_visit_a_bounce_leaves_the_duration_unmeasurable(beanie_test_db):
+    """Three people, one page each. The bounce rate is a real 100% and the duration is
+    genuinely unknown — every visit carries one timestamp, so there is nothing to measure.
+    Reporting 0 seconds would claim everyone left instantly, which is a statement about
+    the site that the stored rows cannot support."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _RawRowsCF(
+        [
+            _pv(datetime(2026, 9, 3, 10, 0, tzinfo=UTC), "a"),
+            _pv(datetime(2026, 9, 3, 10, 10, tzinfo=UTC), "b"),
+            _pv(datetime(2026, 9, 3, 10, 20, tzinfo=UTC), "c"),
+        ]
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert out.visits.visits == 3
+    assert out.visits.bounce_rate == 1.0
+    assert out.visits.visit_duration_seconds is None
+
+
+@pytest.mark.asyncio
+async def test_a_window_written_before_the_visit_id_says_republish_not_zero(beanie_test_db):
+    """THE FOURTH EMPTY STATE, and the reason this slice needed one. The site is counting
+    and the pageviews are real; every row was written by a publish that predates the visit
+    id, so not one of them can be attributed to a visit.
+
+    A zero bounce rate here would be the worst invented zero on this endpoint. The other
+    three empty states look empty; 0% bounce looks like a triumph — and it would be
+    printed for every site that has not republished since the day this shipped."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _RawRowsCF(
+        [
+            _pv(datetime(2026, 9, 3, 10, 0, tzinfo=UTC), "old", visit=""),
+            _pv(datetime(2026, 9, 3, 10, 4, tzinfo=UTC), "old", visit=""),
+            _pv(datetime(2026, 9, 3, 11, 0, tzinfo=UTC), "older", visit=""),
+        ]
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert out.status == "ok", "the read succeeded; only one part of it is unanswerable"
+    assert out.pageviews == 3, "the rest of the panel is unaffected"
+    assert out.visits is None
+    assert "visits" in out.unrecorded
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_window_reports_zero_visits_rather_than_calling_them_unrecorded(
+    beanie_test_db,
+):
+    """The state next door, which must not collapse into the one above. Nothing was
+    recorded because nobody came, not because the rows cannot answer — so the block is
+    served with a real zero, and only the two RATIOS are None, because a bounce rate over
+    zero visits is undefined rather than zero."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _RawRowsCF([])
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert out.status == "ok"
+    assert out.pageviews == 0
+    assert out.visits is not None, "a quiet week is not a version skew"
+    assert out.visits.visits == 0
+    assert out.visits.bounce_rate is None
+    assert out.visits.visit_duration_seconds is None
+    assert "visits" not in out.unrecorded
+
+
+@pytest.mark.asyncio
+async def test_a_window_spanning_the_republish_measures_the_rows_that_can_be(beanie_test_db):
+    """THE CASE THAT ACTUALLY HAPPENS on the day a site republishes: old rows with no
+    visit id and new rows with one, inside a single window. The measurable ones are
+    reported and the block does NOT go unrecorded — refusing it while any old row survives
+    would black the panel out for up to ninety days after the upgrade that fixed it.
+
+    The cost is that visits under-state the window until it has rolled past the publish,
+    which is the shape ``counting_since`` already has and is transient by the window's own
+    length."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _RawRowsCF(
+        [
+            _pv(datetime(2026, 9, 3, 9, 0, tzinfo=UTC), "before", visit=""),
+            _pv(datetime(2026, 9, 3, 9, 30, tzinfo=UTC), "before", visit=""),
+            _pv(datetime(2026, 9, 3, 12, 0, tzinfo=UTC), "after"),
+            _pv(datetime(2026, 9, 3, 12, 4, tzinfo=UTC), "after"),
+        ]
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
+    )
+
+    assert out.pageviews == 4, "every row still counts as a pageview"
+    assert out.visits.visits == 1, "only the rows that carry a visit id can be a visit"
+    assert out.visits.bounce_rate == 0.0
+    assert out.visits.visit_duration_seconds == 240.0
+    assert "visits" not in out.unrecorded
+
+
+@pytest.mark.asyncio
+async def test_the_visit_statement_is_the_one_cloudflare_will_run(beanie_test_db):
+    """The statement is the artifact, so it is asserted as text.
+
+    Nothing in this suite executes SQL — Cloudflare is the only thing that can — and a
+    fake will happily answer a query that reads the wrong column, aggregates the wrong
+    way, or filters nothing. The sampling rule is already pinned this way for the totals
+    query above; these are the same assertions for a statement that has two levels and
+    four expressions to get wrong.
+
+    ``blob6`` rather than ``blob5`` is the one that raises nothing anywhere: the device
+    class sits in the slot next door, and grouping by it would report the number of device
+    classes as the number of visits and look entirely plausible on a chart."""
+    site = await _seed_site(counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _RawRowsCF([_pv(datetime(2026, 9, 3, 10, 0, tzinfo=UTC), "one")])
+
+    await sites_service.site_analytics(workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf)
+
+    visit_sql = next(sql for sql in cf.queries if "AS visits" in sql)
+    assert "blob6 AS visit" in visit_sql, "blob5 is the device class"
+    assert "SUM(_sample_interval) AS pageviews" in visit_sql
+    assert "SUM(sample_interval) AS visits" in visit_sql
+    assert "COUNT(" not in visit_sql, "a plain count under-reports a downsampled index"
+    assert "sumIf(sample_interval, pageviews = 1) AS bounces" in visit_sql
+    assert "sumIf(seconds * sample_interval, pageviews > 1) AS total_seconds" in visit_sql
+    assert "blob6 != ''" in visit_sql, "rows with no visit id would merge into one visit"
+    assert "GROUP BY visit" in visit_sql
+    assert visit_sql.count("SELECT") == 2, "the subquery form is what makes this reachable"
+    # The site and the window still scope it, because both live on the inner half.
+    assert f"index1 = '{site.id}'" in visit_sql
+    assert "INTERVAL '7' DAY" in visit_sql
+    # Neither is supported by the SQL API, and both are the shapes a reader reaches for
+    # first when a query needs two levels.
+    assert "WITH " not in visit_sql
+    assert "JOIN" not in visit_sql
+
+
+@pytest.mark.asyncio
+async def test_the_endpoint_serves_the_visit_metrics(client, monkeypatch):
+    """End to end, which is where the nested block's serialisation is enforced. The
+    service tests above would pass against a model the wire cannot render."""
+    site = await _seed_site(
+        workspace_id="ws-http", counting_since=datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
+    )
+    cf = _RawRowsCF(
+        [
+            _pv(datetime(2026, 9, 3, 14, 0, tzinfo=UTC), "reader"),
+            _pv(datetime(2026, 9, 3, 14, 30, tzinfo=UTC), "reader"),
+            _pv(datetime(2026, 9, 3, 14, 5, tzinfo=UTC), "passer-by"),
+        ]
+    )
+    monkeypatch.setattr(sites_service, "_cf_client", lambda: cf)
+
+    resp = await client.get(f"/api/v1/sites/{site.id}/analytics")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["visits"]["visits"] == 2
+    assert body["visits"]["bounce_rate"] == 0.5
+    assert body["visits"]["visit_duration_seconds"] == 1800.0
+    assert "visits" not in body["unrecorded"]
+
+
+@pytest.mark.asyncio
+async def test_the_endpoint_says_republish_rather_than_zero_bounce(client, monkeypatch):
+    """The fourth empty state on the wire, where a client will read it. A null block plus
+    a named reason is a message; a zeroed one is a claim about the site's traffic that
+    nothing recorded."""
+    site = await _seed_site(workspace_id="ws-http", counting_since=datetime(2026, 8, 1, tzinfo=UTC))
+    cf = _RawRowsCF([_pv(datetime(2026, 9, 3, 10, 0, tzinfo=UTC), "old", visit="")])
+    monkeypatch.setattr(sites_service, "_cf_client", lambda: cf)
+
+    resp = await client.get(f"/api/v1/sites/{site.id}/analytics")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["pageviews"] == 1
+    assert body["visits"] is None
+    assert "visits" in body["unrecorded"]
