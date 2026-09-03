@@ -143,6 +143,32 @@
 #     the edge of the map — and the sweep's coverage check is what makes spend
 #     outside it visible.
 
+# Updated 2026-09-04 (fix/litellm-spend-leaks): three changes, one root cause —
+# money and noise were both being lost to arithmetic applied at the wrong grain.
+#
+#   1. ``ingest_tenant_spend`` CARRIES the sub-credit remainder instead of dropping
+#      it. It converted each row on its own and skipped anything that rounded to
+#      zero, so with the default card (round(usd * 250)) every call under $0.002
+#      billed nothing — permanently, because the high-water mark advanced past the
+#      dropped row in the same pass and nothing accumulated. Per-run metering shares
+#      the conversion and never showed this, because it priced a whole RUN at once;
+#      the cutover kept the arithmetic and made the unit ~100x smaller.
+#      The already-recorded check MOVED ABOVE the conversion as part of this: a row
+#      folded into the remainder carries a zero-value ledger entry rather than a
+#      debit, and the customer read re-offers 15 minutes of settled rows every tick,
+#      so without the check first the same fraction would be folded in once per
+#      sweep. That would turn an under-bill into an over-bill.
+#   2. ``reconcile_tenant_spend`` sums the window's USD and converts ONCE. Doing it
+#      per row understated the LiteLLM side of the shadow compare by exactly the
+#      rows the live ingest was dropping, which is how the cutover looked safe.
+#   3. ``spend_attribution_coverage`` PRICES its remainder and splits it three ways.
+#      A proxy logs traffic of its own — a human trying a model in its admin
+#      dashboard, its periodic health check — that can never name a workspace and is
+#      nobody's to bill. Counting it as "served and not billed" made the check
+#      permanently red while the runbook said to treat any non-zero count as
+#      blocking. Measured on the production proxy 2026-09-03: all 8 flagged rows
+#      were exactly that, worth $0.00014545 between them.
+
 from __future__ import annotations
 
 import logging
@@ -201,6 +227,18 @@ _KEY_ALIAS_PREFIX = "ws-"
 # sweep — they cost one ``is_recorded`` lookup apiece and debit nothing — to buy
 # back rows that would otherwise be lost silently and permanently.
 _SPEND_READ_OVERLAP = timedelta(minutes=15)
+
+# Team ids LiteLLM stamps on its OWN traffic. Rows carrying one of these are the
+# proxy talking to itself and can never name a workspace: ``litellm-dashboard`` is
+# a human trying a model in the proxy's admin UI, ``litellm-internal-health-check``
+# is its periodic model probe. Neither is ours to bill, so counting them as spend
+# "being served and not billed" is what made the coverage check permanently red.
+#
+# Matched on ``team_id`` rather than on a zero cost: the dashboard's test chats DO
+# cost money (a real model answers them), just nobody's money. A cost filter would
+# also swallow a genuinely untagged production call that happened to be free, which
+# is the case worth keeping visible — free models do not stay free.
+_PROXY_INTERNAL_TEAMS = frozenset({"litellm-dashboard", "litellm-internal-health-check"})
 
 # The timestamp format /spend/logs/v2 parses. It also accepts a bare date; second
 # precision keeps the window tight enough that the overlap above is the only
@@ -911,6 +949,11 @@ async def ingest_tenant_spend(
     credits_debited = 0
     cost_usd_total = 0.0
     cached_total = 0
+    # Spend carried from earlier sweeps that was not yet worth a whole credit. It
+    # is real money the tenant owes; it just could not be expressed in the ledger's
+    # integer unit yet.
+    pending_usd = float(doc.pending_spend_usd or 0.0)
+    pending_at_start = pending_usd
 
     # Oldest first so the high-water mark advances monotonically.
     for row, honour_mark in sorted(rows, key=lambda pair: _row_start_time(pair[0]) or ""):
@@ -952,10 +995,6 @@ async def ingest_tenant_spend(
         cached_total += _cached_tokens(row)
         cost_usd_total += cost_usd
 
-        credits = card.to_credits(cost_usd)
-        if credits <= 0:
-            continue  # sub-credit / zero-cost row — nothing to debit
-
         rid = _row_id(row)
         if rid is None:
             # No stable id — we can't dedup it, so skip rather than risk a
@@ -969,12 +1008,44 @@ async def ingest_tenant_spend(
             continue
 
         ledger_key = f"litellm:{rid}"
-        # Skip a row already recorded (the high-water mark normally prevents this,
-        # but a reset / a row predating the mark could re-surface). The debit would
-        # no-op on the unique index anyway — this keeps ``rows_billed`` honest and
-        # avoids the wasted insert-then-rollback. NOT the exactly-once guard (that
-        # is BC-1's unique index); just accurate bookkeeping.
+        # Skip a row already accounted for. This gate now guards the REMAINDER as
+        # well as the debit, and that is why it moved above the conversion. A row
+        # folded into ``pending_usd`` on an earlier sweep has a zero-value ledger
+        # entry rather than a debit, and the customer read deliberately re-offers
+        # the last ``_SPEND_READ_OVERLAP`` of settled rows every tick — so without
+        # this check first, a cheap row would be added to the remainder once per
+        # sweep for fifteen minutes and the tenant would be billed several times
+        # over for it. Under-billing became over-billing, which is worse.
         if await credits_service.is_recorded(workspace, ledger_key):
+            continue
+
+        # Carry the fraction instead of discarding it. Credits are integers (1 ==
+        # $0.01) and the proxy prices ONE API call, so a single row is routinely
+        # worth less than a whole credit. Converting each row on its own and
+        # dropping anything that rounded to zero served every cheap call for free,
+        # permanently: nothing accumulated, and the high-water mark moved past the
+        # dropped row in the same pass. Per-run metering had the same arithmetic and
+        # never showed it, because it priced a whole run at once — the cutover kept
+        # the conversion and made the unit ~100x smaller.
+        pending_usd += cost_usd
+        credits = card.whole_credits(pending_usd)
+
+        if credits <= 0:
+            # Not yet worth a credit. Record it so the overlap cannot re-fold it,
+            # and leave the money in ``pending_usd`` for the row that tips it over.
+            await credits_service.record_no_movement(
+                workspace=workspace,
+                cause=_LITELLM_SPEND_CAUSE,
+                idempotency_key=ledger_key,
+                ref={
+                    "request_id": rid,
+                    "cost_usd": cost_usd,
+                    "model": row.get("model"),
+                    "cached_tokens": _cached_tokens(row),
+                    "source": "litellm_spend_log",
+                    "pending_usd": pending_usd,
+                },
+            )
             continue
 
         balance_after = await credits_service.debit(
@@ -988,9 +1059,15 @@ async def ingest_tenant_spend(
                 "model": row.get("model"),
                 "cached_tokens": _cached_tokens(row),
                 "source": "litellm_spend_log",
+                # What this debit actually settles: its own row plus every
+                # sub-credit row folded in ahead of it. Without this the ledger
+                # looks like a $0.0015 call was billed 3 credits.
+                "settles_usd": card.usd_for_credits(credits),
             },
             allow_negative=True,
         )
+        # Take the billed part back out; what is left is the unbilled fraction.
+        pending_usd -= card.usd_for_credits(credits)
         credits_debited += credits
         rows_billed += 1
         logger.debug(
@@ -1003,10 +1080,20 @@ async def ingest_tenant_spend(
             balance_after,
         )
 
-    # Advance the high-water mark so a re-sweep doesn't re-read settled rows. Only
-    # write when it actually moved (avoid a no-op save).
-    if newest_ts is not None and newest_ts != doc.last_spend_ingest_ts:
-        doc.last_spend_ingest_ts = newest_ts
+    # Advance the high-water mark so a re-sweep doesn't re-read settled rows, and
+    # persist the sub-credit remainder alongside it. Only write when something
+    # actually moved (avoid a no-op save).
+    #
+    # The two MUST be saved together. The mark says "these rows are settled" and the
+    # remainder says "and this much of them is still owed"; writing the mark without
+    # the remainder is exactly the old bug, since the rows behind the mark are the
+    # ones whose fractions are sitting in it.
+    mark_moved = newest_ts is not None and newest_ts != doc.last_spend_ingest_ts
+    pending_moved = pending_usd != pending_at_start
+    if mark_moved or pending_moved:
+        if newest_ts is not None:
+            doc.last_spend_ingest_ts = newest_ts
+        doc.pending_spend_usd = pending_usd
         doc.updatedAt = datetime.now(UTC)
         await doc.save()
 
@@ -1133,12 +1220,20 @@ async def reconcile_tenant_spend(
     if doc is not None and doc.litellm_key:
         client = admin_client if admin_client is not None else LiteLLMAdminClient()
         rows = await client.spend_logs(api_key=doc.litellm_key)
+        # Sum the USD and convert ONCE. Converting per row and adding the results
+        # up rounds each row separately, so every call worth less than half a credit
+        # contributes nothing — and this is the compare an operator reads to decide
+        # whether LiteLLM can be trusted as the only meter. It understated the
+        # LiteLLM side against BC-3's per-run figure by exactly the rows the live
+        # ingest was also dropping, which made the cutover look safer than it was.
+        litellm_usd = 0.0
         for row in rows:
             row_dt = _parse_iso(_row_start_time(row))
             if not _in_window(row_dt, since, until):
                 continue
             litellm_rows += 1
-            litellm_credits += card.to_credits(_num(row.get("spend")))
+            litellm_usd += _num(row.get("spend"))
+        litellm_credits = card.to_credits(litellm_usd)
 
     # --- BC-3 side: the metered compute_spend debits over the SAME window. ---
     # Read through the credits service (entity-isolation: it owns its ledger doc).
@@ -1305,6 +1400,48 @@ async def spend_attribution_coverage(
     # there are unattributed ones would be reporting a race as a finding.
     unswept_rows = min(unswept_rows, unattributed)
 
+    # Price and classify the untagged half, but only when there IS one. The counts
+    # above are O(1) in spend volume and run every tick; this reads rows, so it is
+    # gated on there being something to explain.
+    #
+    # It exists because the bare count cries wolf. A LiteLLM proxy logs its own
+    # traffic next to ours — an operator trying a model in the dashboard, the
+    # periodic model health check — and none of it can ever name a workspace or be
+    # billed to one. Measured on the production proxy 2026-09-03: all 8 "served and
+    # not billed" rows were exactly that, worth $0.00014545 between them, while the
+    # runbook told the operator to treat any non-zero count as blocking. The number
+    # was right and the conclusion it invited was wrong.
+    internal_rows = 0
+    untagged_rows = 0
+    unattributed_usd = 0.0
+    untagged_usd = 0.0
+    classified = False
+    if unattributed - unswept_rows > 0:
+        try:
+            window_rows, complete = await client.spend_logs_window(
+                start_date=start_date, end_date=end_date
+            )
+        except Exception:
+            logger.exception(
+                "llm_provisioning.spend_attribution_coverage: could not read the "
+                "window's rows to classify %d unattributed row(s) — reporting the "
+                "count alone, which cannot tell the proxy's own traffic from a real "
+                "billing hole",
+                unattributed,
+            )
+        else:
+            classified = complete
+            for row in window_rows:
+                if (row.get("end_user") or "").strip():
+                    continue
+                cost = _num(row.get("spend"))
+                unattributed_usd += cost
+                if (row.get("team_id") or "") in _PROXY_INTERNAL_TEAMS:
+                    internal_rows += 1
+                else:
+                    untagged_rows += 1
+                    untagged_usd += cost
+
     coverage = SpendCoverage(
         window_start=start_date,
         window_end=end_date,
@@ -1315,6 +1452,11 @@ async def spend_attribution_coverage(
         unswept_workspaces=tuple(unswept),
         workspaces_checked=len(workspaces),
         degraded=degraded,
+        internal_rows=internal_rows,
+        untagged_rows=untagged_rows,
+        unattributed_usd=unattributed_usd,
+        untagged_usd=untagged_usd,
+        classified=classified,
     )
 
     if degraded:
@@ -1329,20 +1471,40 @@ async def spend_attribution_coverage(
             len(workspaces),
             unattributed,
         )
-    elif unattributed:
+    elif unswept_rows or untagged_rows or (unattributed and not classified):
+        # Loud only for the halves that are actually ours. The proxy's own dashboard
+        # and health-check rows are reported, because an operator who sees a
+        # remainder wants to know where it went, but they do not raise the alarm.
         logger.warning(
             "llm_provisioning.spend_attribution_coverage: [%s,%s] %d of %d proxy spend "
-            "row(s) are being served and not billed — %d name a workspace the sweep "
-            "did not visit (%s), %d name no workspace at all. A tagged-but-unswept "
-            "row is OUR bug: the request said who pays and the sweep did not ask. An "
-            "untagged row is a caller reaching the proxy without a ``user`` field",
+            "row(s) claimed by no tenant ($%.6f) — %d name a workspace the sweep did "
+            "not visit (%s), %d are a real caller that named nobody ($%.6f), %d are the "
+            "proxy's own dashboard / health-check traffic and are nobody's to bill. A "
+            "tagged-but-unswept row is OUR bug: the request said who pays and the sweep "
+            "did not ask. An untagged row is a caller reaching the proxy without a "
+            "``user`` field%s",
             start_date,
             end_date,
             unattributed,
             total_rows,
+            unattributed_usd,
             unswept_rows,
             ", ".join(unswept) or "none",
-            unattributed - unswept_rows,
+            untagged_rows,
+            untagged_usd,
+            internal_rows,
+            "" if classified else " (the split is from a TRUNCATED read — treat it as a sample)",
+        )
+    elif unattributed:
+        logger.info(
+            "llm_provisioning.spend_attribution_coverage: [%s,%s] %d of %d proxy spend "
+            "row(s) claimed by no tenant ($%.6f), and every one is the proxy's own "
+            "dashboard / health-check traffic — nothing of ours is unbilled",
+            start_date,
+            end_date,
+            unattributed,
+            total_rows,
+            unattributed_usd,
         )
     else:
         logger.info(

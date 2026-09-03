@@ -62,6 +62,13 @@
 #   key was unreachable by any of them. This asks the PROXY who spent instead,
 #   which is the only source that includes those workspaces.
 
+# Updated 2026-09-04 (fix/litellm-spend-leaks): added ``spend_logs_window`` — the
+# unfiltered, row-returning sibling of ``spend_logs_by_end_user``. The coverage
+# check's counts can say how many rows no tenant claims but not WHAT they are, and
+# the proxy's own dashboard / health-check traffic needs the opposite response from
+# a caller that forgot to name a workspace. Hard-capped at ``max_rows``: a
+# diagnostic must not be able to cost more than the billing it observes.
+
 from __future__ import annotations
 
 import logging
@@ -380,6 +387,46 @@ class LiteLLMAdminClient:
                 max_pages,
             )
         return rows
+
+    async def spend_logs_window(
+        self,
+        *,
+        start_date: str,
+        end_date: str,
+        page_size: int = 100,
+        max_rows: int = 1000,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Every spend row in a window, whoever it belongs to. Returns ``(rows, complete)``.
+
+        The unfiltered sibling of ``spend_logs_by_end_user``, and the only read that
+        can answer WHAT an unattributed row was. The counts the coverage check runs
+        every tick say how many rows no tenant claims; they cannot say whether those
+        are a caller that forgot to name a workspace or the proxy's own dashboard
+        poking at a model, and those need opposite responses.
+
+        ``max_rows`` is a hard ceiling, and ``complete`` is False when it was hit.
+        This is deliberately NOT the paging-to-exhaustion loop the per-customer read
+        uses: this one is unfiltered, so on a busy proxy the window is unbounded, and
+        a diagnostic must never be able to cost more than the billing it observes. A
+        truncated read still classifies a representative prefix (rows come back
+        oldest-first) and the caller reports it as partial rather than as a finding.
+        """
+        rows: list[dict[str, Any]] = []
+        page = 1
+        total = 0
+        while len(rows) < max_rows:
+            batch, total = await self._spend_logs_v2(
+                start_date=start_date,
+                end_date=end_date,
+                end_user=None,
+                page=page,
+                page_size=min(page_size, max_rows - len(rows)),
+            )
+            rows.extend(batch)
+            if not batch or len(rows) >= total:
+                break
+            page += 1
+        return rows[:max_rows], len(rows) >= total
 
     async def spend_log_count(
         self,

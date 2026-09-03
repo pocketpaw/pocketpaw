@@ -38,6 +38,11 @@
 # tenant never wedges the whole sweep — the same isolation the BC-3 sweep uses.
 #
 # Created 2026-06-26 (feat/litellm-billing-cutover, WU-F): new entity.
+# Updated 2026-09-04 (fix/litellm-spend-leaks): the summary carries ``untagged``
+# beside ``unattributed``. A proxy logs traffic of its own (its admin dashboard, its
+# health check) that no workspace can claim, so ``unattributed`` never reaches zero
+# on a live deployment — a gate written against it can only ever be ignored, which
+# is what happened. ``untagged`` is the part that is genuinely ours and unbilled.
 # Updated 2026-09-02 (fix/bill-workspaces-the-sweep-cannot-see): the sweep now
 #   iterates ``list_sweepable_workspaces`` — provisioned tenants UNION the
 #   workspaces the proxy has customer spend for. It iterated provisioned tenants
@@ -97,6 +102,13 @@ async def run_cutover_sweep(*, mode: str | None = None) -> dict[str, int]:
         # reported apart because it is a different bug with a different fix, and
         # because the two were one number for the hours it took to tell them apart.
         "unswept": 0,
+        # The part of ``unattributed`` that is genuinely OURS and unbilled: a real
+        # caller that reached the proxy without naming a workspace. This is the
+        # number to watch, not ``unattributed`` — a proxy always logs some traffic
+        # of its own (its admin dashboard, its health check) that no workspace can
+        # claim, so ``unattributed`` never reaches zero on a live deployment and a
+        # gate written against it can only ever be ignored.
+        "untagged": 0,
     }
 
     if resolved == "off":
@@ -121,6 +133,7 @@ async def run_cutover_sweep(*, mode: str | None = None) -> dict[str, int]:
     )
     summary["unattributed"] = coverage.unattributed_rows
     summary["unswept"] = coverage.unswept_rows
+    summary["untagged"] = coverage.untagged_rows
 
     if not workspaces:
         return summary
@@ -170,14 +183,16 @@ async def run_cutover_sweep(*, mode: str | None = None) -> dict[str, int]:
                 )
         logger.info(
             "run_cutover_sweep[live]: ingested spend for %d/%d tenants -> %d credits, "
-            "%d failed, %d unattributed row(s) in the trailing window (%d of them "
-            "naming a workspace nobody swept) "
+            "%d failed, %d row(s) in the trailing window claimed by no tenant — %d of "
+            "them a real caller that named nobody and %d naming a workspace nobody "
+            "swept; the rest is the proxy's own traffic "
             "(LiteLLM is the sole meter; BC-3 gated off)",
             summary["processed"],
             summary["tenants"],
             summary["credits"],
             summary["failed"],
             summary["unattributed"],
+            summary["untagged"],
             summary["unswept"],
         )
         return summary

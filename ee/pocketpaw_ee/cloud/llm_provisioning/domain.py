@@ -41,6 +41,14 @@
 # now splits its remainder into rows that name an unswept workspace and rows that
 # name none, and carries the unswept ids. One number could not tell an operator
 # which of two unrelated bugs they had.
+# Updated 2026-09-04 (fix/litellm-spend-leaks): ``SpendCredits`` gains
+# ``whole_credits`` + ``usd_for_credits`` (the remainder carry: floor what is fully
+# covered, hand the rest back) because ``to_credits`` rounds and was being applied
+# per spend row, so every call worth under half a credit billed nothing. And
+# ``SpendCoverage`` gains the classification fields — the remainder is now priced and
+# split into the proxy's own dashboard / health-check traffic versus a real caller
+# that named nobody, because only the second is a billing hole and reporting them as
+# one number made the check permanently red.
 # Updated 2026-09-02 (feat/proxy-spend-ingest-by-customer): added ``SpendCoverage``
 # — what ``service.spend_attribution_coverage`` returns. It exists because the bug
 # that motivated this branch was invisible: chat spend was attributed to nobody, the
@@ -51,6 +59,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import floor
 
 
 @dataclass(frozen=True)
@@ -105,10 +114,43 @@ class SpendCredits:
         ``round(cost_usd * markup / credit_usd)`` — identical to
         ``metering.domain.RateCard.to_credits``. A non-positive cost yields 0
         credits (no debit).
+
+        Correct for ONE total. Do NOT call it per spend row and add the results
+        up: the rounding is applied to each row separately, and a row worth less
+        than half a credit rounds to nothing. Summing the USD first and converting
+        once is what ``whole_credits`` + ``usd_for_credits`` are for.
         """
         if cost_usd <= 0:
             return 0
         return round(cost_usd * self.markup / self.credit_usd)
+
+    def whole_credits(self, cost_usd: float) -> int:
+        """How many WHOLE credits ``cost_usd`` covers. Never rounds up.
+
+        The billing half of the remainder carry. ``to_credits`` rounds, which is
+        right for a single total and wrong for a running one: rounding up would
+        bill money the tenant has not spent yet, and the next row would be billed
+        for it a second time. Flooring bills only what is fully covered and leaves
+        the rest in the remainder, where ``usd_for_credits`` can take it back out.
+
+        The ``round(..., 9)`` is not cosmetic. The remainder is accumulated by
+        repeated float addition, so a sum that is exactly three credits arrives as
+        2.9999999999999996 and a bare ``floor`` would bill two — re-creating the
+        under-bill this method exists to end, just further down the decimal.
+        """
+        if cost_usd <= 0:
+            return 0
+        return floor(round(cost_usd * self.markup / self.credit_usd, 9))
+
+    def usd_for_credits(self, credits: int) -> float:
+        """The USD that ``credits`` whole credits accounts for.
+
+        The inverse of ``whole_credits``, used to take the billed part back out of
+        the running remainder so what is left is exactly the unbilled fraction.
+        """
+        if credits <= 0:
+            return 0.0
+        return credits * self.credit_usd / self.markup
 
 
 @dataclass(frozen=True)
@@ -173,10 +215,27 @@ class SpendCoverage:
     the window was tagged and simply unswept. A fix for one does nothing for the
     other, so an operator has to be able to tell which they are looking at.
 
-    Any non-zero remainder is a billing hole, and reading it as a ROW count rather
-    than a dollar amount is deliberate: a count needs one cheap request per tenant
-    and answers the question that matters ("is anything falling through?") without
-    pretending to be an invoice. The reconciliation compare is where amounts belong.
+    NOT every unattributed row is a billing hole, and treating them all as one is
+    what made this check cry wolf. A LiteLLM proxy generates traffic of its own that
+    no workspace can ever claim and none of it should be billed to anyone:
+
+      * ``internal_rows`` — the proxy's OWN traffic. An operator trying a model in
+        the LiteLLM dashboard, and the proxy's periodic model health check. They
+        carry a ``team_id`` the proxy assigns itself (``litellm-dashboard``,
+        ``litellm-internal-health-check``) and they are almost always $0.
+      * ``untagged_rows`` — everything else with no workspace: a real caller that
+        reached the proxy without naming who pays. THIS is the billing hole.
+
+    Measured 2026-09-03 on the production proxy: all 8 of a window's "unattributed"
+    rows were the dashboard and the health check, worth $0.00014545 between them,
+    while the runbook told the operator to treat any non-zero count as blocking. A
+    guard that is permanently red is a guard nobody reads.
+
+    ``unattributed_usd`` and ``untagged_usd`` carry what the remainder actually
+    COSTS, because a row count cannot tell $0.0001 of dashboard poking from a dollar
+    of unbilled chat and the whole question is which one you have. They are only
+    populated when ``classified`` is True — the cheap count path runs every tick and
+    the row read that prices it runs only when there is a remainder to explain.
 
     ``degraded`` marks a check that could not complete — a proxy that failed one of
     the counts. The remainder is then unreliable and must not be read as a verdict,
@@ -196,6 +255,15 @@ class SpendCoverage:
     unswept_workspaces: tuple[str, ...] = ()
     workspaces_checked: int = 0
     degraded: bool = False
+    # Set once the remainder has been read back and priced (see ``classified``).
+    # ``internal_rows`` is the proxy's own dashboard / health-check traffic;
+    # ``untagged_rows`` is the real hole. They sum to the untagged half of the
+    # remainder — the unswept half is counted separately above.
+    internal_rows: int = 0
+    untagged_rows: int = 0
+    unattributed_usd: float = 0.0
+    untagged_usd: float = 0.0
+    classified: bool = False
 
 
 @dataclass(frozen=True)

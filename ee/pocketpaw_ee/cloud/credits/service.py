@@ -177,6 +177,14 @@
 # writes, no change to anything charged. The ``(workspace, createdAt)`` compound
 # index on ``CreditLedgerEntry`` already serves the ``$match``.
 
+# Updated 2026-09-04 (fix/litellm-spend-leaks): added ``record_no_movement`` — a
+# zero-value ledger entry that records a source event as accounted for without
+# touching the wallet. ``debit`` rightly refuses a non-positive amount, but an
+# ingest that accumulates fractional external spend still needs somewhere to say "I
+# have seen this row", and this ledger's unique (workspace, idempotency_key) index
+# is the only per-row store with an exactly-once guarantee. Without it the LiteLLM
+# sweep's overlapping re-read would fold the same fraction in on every tick.
+
 from __future__ import annotations
 
 import inspect
@@ -434,6 +442,58 @@ async def debit(
 
     await _emit_movement(entry)
     return new_balance
+
+
+async def record_no_movement(
+    workspace: str,
+    cause: str,
+    idempotency_key: str,
+    *,
+    ref: dict | None = None,
+    kind: str = "spend",
+) -> bool:
+    """Record that a source event was accounted for WITHOUT moving the wallet.
+
+    Writes one ledger entry with ``amount_delta = 0``. Returns True if this call
+    wrote it, False if the key was already present. Touches no balance, emits no
+    movement event — nothing moved.
+
+    WHY A ZERO ENTRY IS A REAL THING. ``debit`` requires a positive integer, and
+    rightly: a zero debit is not a debit. But an ingest that accumulates fractional
+    external spend needs somewhere to record "I have seen this row and folded it
+    into the remainder", and the only per-row store with an exactly-once guarantee
+    is this ledger's unique ``(workspace, idempotency_key)`` index. Without an
+    entry, ``is_recorded`` says no and the next overlapping read folds the same row
+    in a second time — turning an under-bill into an over-bill, which is worse.
+
+    So the entry is the marker, and ``amount_delta = 0`` is the honest amount. It
+    is written ``applied=True`` because there is no ``$inc`` to land and a phantom
+    is precisely what it must not look like to ``reconcile``; a zero contributes
+    nothing to any ``sum(amount_delta)``, so every existing read is unchanged by it.
+    """
+    if not workspace:
+        raise ValidationError("credits.invalid_workspace", "workspace is required")
+    if not idempotency_key:
+        raise ValidationError("credits.invalid_key", "idempotency_key is required")
+
+    entry = CreditLedgerEntry(
+        workspace=workspace,
+        kind=kind,
+        amount_delta=0,
+        balance_after=await _current_balance(workspace),
+        # Nothing to land, so it is applied on arrival. An unapplied zero would
+        # read as a crash-window phantom to reconcile and be re-driven forever.
+        applied=True,
+        conditional=False,
+        cause=cause,
+        ref=dict(ref or {}),
+        idempotency_key=idempotency_key,
+    )
+    try:
+        await entry.insert()
+    except DuplicateKeyError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1045,6 +1105,7 @@ __all__ = [
     "is_recorded",
     "month_to_date_spend",
     "reconcile",
+    "record_no_movement",
     "spend_by_model",
     "sum_debits_by_cause",
 ]
