@@ -89,5 +89,33 @@
     "tests": [
       "tests/ee/sites/test_sites_analytics_counter.py"
     ]
+  },
+  {
+    "label": "the visit id drops the visitor (every visitor browsing in the same hour shares one id, so the visit count becomes an hour count and still reads as a plausible number)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "  return sha256Hex16(`${{secret}}|${{hour}}|${{visitor}}`);",
+    "replace": "  return sha256Hex16(`${{secret}}|${{hour}}`);",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "the visit id stops rotating hourly (a visit becomes a whole UTC day, so pages-per-visit collapses and a returning visitor is never a second visit)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "  return new Date(nowMs).toISOString().slice(0, 13);",
+    "replace": "  return \"static\";",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "the visit id is written first instead of last (Analytics Engine columns are positional, so every row already stored is silently re-labelled and there is no update to fix them with)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "        visitor,\n        deviceClass(ua),\n        visit,",
+    "replace": "        visit,\n        visitor,\n        deviceClass(ua),",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py",
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
   }
 ]
