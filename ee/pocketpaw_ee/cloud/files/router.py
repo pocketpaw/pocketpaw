@@ -4,10 +4,11 @@
 (the same MEMBER action the knowledge search uses). ``GET /files/{id}/links``
 returns a file's outgoing wikilink targets and backlinks;
 ``GET /files/graph?pocket_id=`` returns the library as nodes + edges with the
-same pocket-membership rule as ``GET /files``. The links route takes
-``{file_id:path}`` because editor notes store ``ws:path`` ids that can carry
-slashes. Errors are ``CloudError``
-(``file.not_found``, ``files.pocket_forbidden``), never ``HTTPException``.
+same pocket gate as ``GET /files`` and ``POST /files/search`` (the shared
+``_pocket_readable`` helper and the same ``{"detail": "files.pocket_forbidden"}``
+403 body). The links route takes ``{file_id:path}`` because editor notes store
+``ws:path`` ids that can carry slashes. A missing or cross-workspace id is a
+``CloudError`` ``file.not_found``, never ``HTTPException``.
 
 The module-level ``router`` keeps the Cluster E sub-PR 4 contract
 intact: ``GET /files`` returns a single list the paw-enterprise
@@ -41,7 +42,6 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.files.abac_config import AbacRuleSet
 from pocketpaw_ee.cloud.files.browse import browse_mount
 from pocketpaw_ee.cloud.files.content_search import CONTENT_SEARCH_ROUTE, search_file_contents
@@ -218,18 +218,14 @@ async def files_graph(
     pocket_id: str | None = Query(None),
     user_id: str = Depends(current_user_id),
     current_workspace: str = Depends(current_workspace_id),
-) -> FilesGraphResponse:
+) -> FilesGraphResponse | JSONResponse:
     """The library as a link graph. Same pocket rule as ``GET /files``: with
     ``pocket_id`` the caller must be a member; without it, workspace-only rows."""
-    if pocket_id:
-        from pocketpaw_ee.cloud.pockets import service as pockets_service
-
-        try:
-            allowed = await pockets_service.is_member(pocket_id=pocket_id, user_id=user_id)
-        except Exception:
-            allowed = False
-        if not allowed:
-            raise Forbidden("files.pocket_forbidden")
+    if pocket_id and not await _pocket_readable(pocket_id, user_id):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "files.pocket_forbidden"},
+        )
     return await _SVC.files_graph(current_workspace, pocket_id=pocket_id)
 
 

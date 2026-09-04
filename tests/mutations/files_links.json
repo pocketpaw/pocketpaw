@@ -74,8 +74,8 @@
   {
     "label": "the graph stops checking pocket membership, so a non-member can pull a pocket's file names and links",
     "file": "ee/pocketpaw_ee/cloud/files/router.py",
-    "find": "        if not allowed:\n            raise Forbidden(\"files.pocket_forbidden\")",
-    "replace": "        if False:\n            raise Forbidden(\"files.pocket_forbidden\")",
+    "find": "    if pocket_id and not await _pocket_readable(pocket_id, user_id):\n        return JSONResponse(\n            status_code=403,\n            content={\"detail\": \"files.pocket_forbidden\"},\n        )\n    return await _SVC.files_graph(",
+    "replace": "    if pocket_id and not await _pocket_readable(pocket_id, user_id) and False:\n        return JSONResponse(\n            status_code=403,\n            content={\"detail\": \"files.pocket_forbidden\"},\n        )\n    return await _SVC.files_graph(",
     "tests": [
       "tests/cloud/files/test_links.py::test_graph_pocket_membership"
     ]

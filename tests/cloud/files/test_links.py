@@ -6,7 +6,7 @@
 #   tenant's note never shows as a backlink, pocket-private notes stay out of
 #   workspace backlinks, the graph carries nodes + deduped edges + ghosts and
 #   reports truncation at the cap, and /graph applies the pocket membership
-#   rule GET /files uses.
+#   rule GET /files and POST /files/search use (same helper, same 403 body).
 """Tests for the files vault link reads."""
 
 from __future__ import annotations
@@ -174,7 +174,7 @@ async def test_graph_pocket_membership(monkeypatch, links_db):
 
     r = _client(monkeypatch, member=deny).get("/api/v1/files/graph?pocket_id=p1")
     assert r.status_code == 403, r.text
-    assert r.json()["error"]["code"] == "files.pocket_forbidden"
+    assert r.json()["detail"] == "files.pocket_forbidden"
 
     async def allow(**_kw):
         return True
