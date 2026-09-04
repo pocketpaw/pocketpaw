@@ -284,6 +284,10 @@ class MissionControlManager:
         """List tasks with optional filters."""
         return await self._store.list_tasks(status, assignee_id, tags)
 
+    async def delete_task(self, task_id: str) -> bool:
+        """Delete a task."""
+        return await self._store.delete_task(task_id)
+
     async def assign_task(self, task_id: str, agent_ids: list[str]) -> bool:
         """Assign a task to agents.
 
@@ -535,6 +539,15 @@ class MissionControlManager:
         """Save an activity (low-level)."""
         return await self._store.save_activity(activity)
 
+    async def get_activities(
+        self,
+        agent_id: str | None = None,
+        task_id: str | None = None,
+        limit: int = 50,
+    ) -> list[Activity]:
+        """Get recent activities, optionally filtered."""
+        return await self._store.get_activities(agent_id, task_id, limit)
+
     async def get_document(self, document_id: str) -> Document | None:
         """Get a document by ID."""
         return await self._store.get_document(document_id)
@@ -547,6 +560,10 @@ class MissionControlManager:
     ) -> list[Document]:
         """List documents with optional filters."""
         return await self._store.list_documents(doc_type, task_id, tags)
+
+    async def delete_document(self, document_id: str) -> bool:
+        """Delete a document."""
+        return await self._store.delete_document(document_id)
 
     async def get_task_documents(self, task_id: str) -> list[Document]:
         """Get all documents linked to a task."""
