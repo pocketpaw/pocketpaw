@@ -45,7 +45,7 @@
 # worth a tenth of a cent without rounding it away, which is how sub-credit proxy
 # spend was served free. The rename is the migration's safety net: a reader left
 # on the old name gets an AttributeError instead of a number a million times too
-# large. Requires ``scripts/migrations/2026_09_04_micro_credits.py``; see
+# large. Requires ``pocketpaw_ee.cloud.credits.migrate_micro_credits``; see
 # ``credits.domain.MICRO_PER_CREDIT``.
 # Changed 2026-06-30 (feat/billing-quota-enforcement, chunk 2): added a second
 # ``CreditLedgerEntry`` index ``ix_workspace_created_at`` on

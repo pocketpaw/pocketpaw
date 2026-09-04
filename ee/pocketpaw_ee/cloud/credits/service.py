@@ -185,6 +185,16 @@
 # is the only per-row store with an exactly-once guarantee. Without it the LiteLLM
 # sweep's overlapping re-read would fold the same fraction in on every tick.
 
+# Changed 2026-09-04 (fix/wallet-migration-guard): added ``verify_wallet_migrated``
+# — a boot-path assertion that no wallet document still carries a pre-micro field.
+# The rename to micro-credits shipped and its migration was not run, and only the
+# ledger half of that failed audibly: an unconverted BALANCE row parses cleanly,
+# because ``balance_micro`` defaults to 0, so every customer read as having an
+# empty wallet and the run-start gate refused them. Nothing logged it. The guard
+# lives here rather than in the reader because the read cannot be fixed — an
+# absent field and a genuinely empty wallet are the same document — so refusing to
+# serve is the only answer that does not guess about money.
+
 from __future__ import annotations
 
 import inspect
@@ -1186,6 +1196,64 @@ async def reconcile(workspace: str) -> int:
     return micro_to_credits(computed)
 
 
+# ---------------------------------------------------------------------------
+# Startup guard
+# ---------------------------------------------------------------------------
+
+# The field names this module replaced on 2026-09-04, and the collections that
+# still hold them on a database the micro-credit migration has not converted.
+_PRE_MICRO_FIELDS: tuple[tuple[str, str], ...] = (
+    ("credit_balances", "balance_credits"),
+    ("credit_ledger", "amount_delta"),
+    ("credit_ledger", "balance_after"),
+)
+
+_MIGRATION_COMMAND = "python -m pocketpaw_ee.cloud.credits.migrate_micro_credits"
+
+
+async def verify_wallet_migrated() -> None:
+    """Fail-fast guard: refuse to boot on a wallet still in whole credits.
+
+    Renaming ``balance_credits`` to ``balance_micro`` made the old shape
+    unreadable, but only half of it fails loudly. A ledger row missing
+    ``amount_delta_micro`` raises on parse and the history endpoint 500s. A
+    BALANCE row missing ``balance_micro`` does not: the field carries a default of
+    0, so an unconverted wallet reads as an empty one. Every customer's balance
+    shows zero, the run-start gate refuses them, and nothing anywhere logs a
+    problem.
+
+    That asymmetry is why the guard is here rather than in the reader. A document
+    holding 700 credits and a document holding nothing are indistinguishable once
+    the field is absent, so no read can be written that gets both right — the only
+    honest move is to not serve at all. This ran in production on 2026-09-04
+    because the code shipped and the migration did not; the container came up
+    happily and told paying customers they were broke.
+
+    Called from ``init_cloud_db`` after ``init_beanie``, beside the memory-backend
+    guard, and raises ``RuntimeError`` naming the collection, the field and the
+    script that fixes it.
+    """
+    db = CreditBalance.get_pymongo_collection().database
+    stale: list[str] = []
+    for collection, field in _PRE_MICRO_FIELDS:
+        # ``limit=1`` — the guard needs to know IF one exists, never how many, and
+        # this runs on the boot path of a deployment with a live ledger.
+        if await db[collection].count_documents({field: {"$exists": True}}, limit=1):
+            stale.append(f"{collection}.{field}")
+
+    if not stale:
+        return
+
+    raise RuntimeError(
+        "cloud startup: the credit wallet is still in whole credits — "
+        f"{', '.join(stale)} present. This build reads micro-credits, and an "
+        "unconverted balance row reads as an EMPTY wallet rather than failing, so "
+        "serving it would tell paying customers they have no credits. Refusing to "
+        f"start. Run `{_MIGRATION_COMMAND} --dry-run` to see what it would "
+        f"convert, then `{_MIGRATION_COMMAND}` to convert it."
+    )
+
+
 __all__ = [
     "GrantResult",
     "ModelSpendRow",
@@ -1202,4 +1270,5 @@ __all__ = [
     "record_no_movement",
     "spend_by_model",
     "sum_debits_by_cause",
+    "verify_wallet_migrated",
 ]
