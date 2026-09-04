@@ -978,16 +978,16 @@ class SiteAnalyticsVisits(BaseModel):
     bounce is a visit of exactly one pageview. None when there were no visits at all,
     because a rate over zero is undefined and 0.0 would say nobody bounced.
 
-    ``visit_duration_seconds`` is the mean over visits of MORE THAN ONE pageview. A
+    ``duration_seconds`` is the mean over visits of MORE THAN ONE pageview. A
     single-pageview visit has no measurable duration — its one row carries one timestamp
     — so averaging it in as a zero would drag the mean down in proportion to how well the
     landing page holds people, which is backwards. None when every visit was a bounce,
     for the same reason the rate is None when there were no visits.
     """
 
-    visits: int
+    count: int
     bounce_rate: float | None = None
-    visit_duration_seconds: float | None = None
+    duration_seconds: float | None = None
 
 
 class SiteAnalyticsResponse(BaseModel):
