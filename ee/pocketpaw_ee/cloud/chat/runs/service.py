@@ -263,10 +263,24 @@ async def find_active_run_scopes() -> set[tuple[str, str, str]]:
     run for the same scope, which re-protects the jail, so a retry can't race a
     GC pass into deleting a jail it's about to reuse.
     """
-    docs = await ChatRunDoc.find(
+    # Projected to the three fields the scope tuple needs. The unprojected read
+    # hydrated a full ChatRunDoc per active run, and a run document carries the
+    # model's entire answer in `partial_text` plus, on the concierge surface,
+    # the visitor's own text in `user_text`. This call is the jail GC's guard
+    # and runs every five minutes forever, so it was pulling every active run's
+    # complete answer over the wire and building a Pydantic model from it, to
+    # read three short strings.
+    #
+    # get_pymongo_collection(), not get_motor_collection() — Beanie 2.1.0
+    # renamed it, and the old name is an AttributeError at runtime.
+    cursor = ChatRunDoc.get_pymongo_collection().find(
         {"status": {"$in": list(ACTIVE_RUN_STATUSES)}},
-    ).to_list()
-    return {(d.workspace, d.context_type, d.scope_id) for d in docs}
+        {"workspace": 1, "context_type": 1, "scope_id": 1},
+    )
+    return {
+        (row.get("workspace", ""), row.get("context_type", ""), row.get("scope_id", ""))
+        async for row in cursor
+    }
 
 
 # ---------------------------------------------------------------------------
