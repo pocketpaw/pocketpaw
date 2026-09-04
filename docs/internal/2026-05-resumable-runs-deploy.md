@@ -28,10 +28,10 @@ backend image and git ref as the web service.
 | Setting | Web service (existing) | Worker service (new) |
 |---------|-----------------------|----------------------|
 | Image / build | unchanged | same as web |
-| Start command | `uv run pocketpaw` (unchanged) | `uv run arq pocketpaw_ee.cloud.chat.runs.worker.WorkerSettings` |
+| Start command | `uv run pocketpaw` (unchanged) | `python -m pocketpaw_ee.cloud.worker_supervisor` (runs both arq lanes; before 2026-09-04 this was `arq pocketpaw_ee.cloud.chat.runs.worker.WorkerSettings`, which ran the chat lane only) |
 | Replicas | unchanged | start with 1; horizontal-scale by replica count |
 | Public port | unchanged | none (worker has no HTTP) |
-| Healthcheck | unchanged | none — arq is a pull worker; healthcheck the queue depth in Redis instead |
+| Healthcheck | unchanged | `arq --check` against BOTH settings classes — each lane writes its own Redis health key, so probing one says nothing about the other |
 
 ### Required env on the worker
 
@@ -60,12 +60,26 @@ will now enqueue an `execute_run_job` instead of spawning an `asyncio.Task`.
 ## Sizing the worker
 
 `max_jobs` was unset until 2026-09-01, so every deploy before that ran on arq's
-default of **10 concurrent jobs per worker** — and that ceiling is shared by all
+default of **10 concurrent jobs per worker** — and that ceiling was shared by all
 six registered functions, not divided among them. Ten concurrent site publishes
-leave no slot for a chat message. The failure mode is invisible from the outside:
+left no slot for a chat message. The failure mode was invisible from the outside:
 job 11 is not rejected and, with `max_tries = 1`, not retried either. It waits in
 Redis behind a `job_timeout` of up to 30 minutes, so the user just sees a reply
 that never starts.
+
+**Site builds moved off that ceiling on 2026-09-04.** They now ride their own arq
+queue (`arq:queue:sites`) with their own settings class
+(`pocketpaw_ee.sites.build_worker.WorkerSettings`) and their own limit,
+`POCKETPAW_SITES_ARQ_MAX_JOBS` (default `4`). Both lanes run in ONE container:
+the compose `command` is `python -m pocketpaw_ee.cloud.worker_supervisor`, which
+starts both arq Workers on one event loop and exits non-zero if either stops. A
+separate service was not an option — Coolify base64s the Dockerfile into a single
+SSH argv per service that declares `build:`, and a third one broke every deploy.
+
+Tune the two ceilings against different limits. The chat lane is bounded by RAM
+(a Node subprocess per run on the default backend); the build lane is bounded by
+how many Daytona sandboxes you are willing to pay for at once, because the build
+itself happens remotely and what occupies a slot here is an await.
 
 Total cluster concurrency is `POCKETPAW_ARQ_MAX_JOBS x worker replicas`. Both
 levers work; they cost different things.
@@ -168,7 +182,8 @@ Env vars (all also documented in `backend/CLAUDE.md` → Key Conventions):
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `POCKETPAW_CLOUD_RUN_EXECUTOR` | `inprocess` | Set to `arq` on the web service to enable Tier 2 |
-| `POCKETPAW_ARQ_MAX_JOBS` | `10` | Concurrent jobs ONE worker runs, shared across every registered lane. Set on the **worker**; the web service ignores it. See "Sizing the worker" below |
+| `POCKETPAW_ARQ_MAX_JOBS` | `10` | Concurrent jobs ONE worker runs on arq's default queue: chat runs, workspace jobs and both `/ship` jobs. Set on the **worker**; the web service ignores it. See "Sizing the worker" below |
+| `POCKETPAW_SITES_ARQ_MAX_JOBS` | `4` | Concurrent site builds and draft previews, on their own queue. Independent of the row above on purpose: raise it with the Daytona sandbox quota, not with the container's memory limit |
 | `POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL` | `30` | How often the worker refreshes its Redis health key. `arq --check` exits 0 while that key lives (TTL = this + 1s), so this is what decides how fast a container healthcheck can notice a dead worker. arq's own default is `3600`, which is far too slow to probe against |
 | `POCKETPAW_AGENT_POOL_MAX_INSTANCES` | `20` | Per-process AgentPool ceiling. Applies to the web process AND each worker |
 | `POCKETPAW_SESSION_WARM_MAX_PER_TENANT` | `8` | Per-process warm session slots one workspace may hold. The per-tenant fairness knob |
