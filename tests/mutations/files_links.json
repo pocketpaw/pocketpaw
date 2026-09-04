@@ -1,0 +1,47 @@
+[
+  {
+    "label": "the editor's FileReady carries the bare client path, so the KB listener never finds the row and every note save silently indexes nothing",
+    "file": "ee/pocketpaw_ee/cloud/file_versions/service.py",
+    "find": "        \"file_id\": doc.file_id,\n        \"filename\": doc.filename,",
+    "replace": "        \"file_id\": doc.filename,\n        \"filename\": doc.filename,",
+    "tests": [
+      "tests/cloud/file_versions/test_file_ready_emit.py::test_write_emits_file_ready_with_resolvable_id"
+    ]
+  },
+  {
+    "label": "an update stops emitting FileReady, so a note edited in the editor keeps its stale links and article",
+    "file": "ee/pocketpaw_ee/cloud/file_versions/service.py",
+    "find": "    await emit(FileReady(data=_file_ready_payload(doc)))\n\n    logger.info(\n        \"file %s updated to version %d by %s:%s\",",
+    "replace": "    logger.info(\n        \"file %s updated to version %d by %s:%s\",",
+    "tests": [
+      "tests/cloud/file_versions/test_file_ready_emit.py::test_update_emits_file_ready_and_noop_does_not"
+    ]
+  },
+  {
+    "label": "the re-index stops purging the previously tracked article, so every note save leaves one more copy in the KB",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "        if old_id and old_scope and old_id != article_id:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/uploads/test_listener_links.py::test_reindex_under_new_article_id_removes_the_old_one"
+    ]
+  },
+  {
+    "label": "note tags are merged after the derived keywords, so the author's #tag is the one dropped at the cap",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "            base = merge_tags(base, [*note.hashtags, *note.frontmatter_tags])",
+    "replace": "            derived = [*derived, *note.hashtags, *note.frontmatter_tags]",
+    "tests": [
+      "tests/cloud/uploads/test_listener_links.py::test_note_tag_beats_derived_keywords_at_the_cap"
+    ]
+  },
+  {
+    "label": "link_names never reach the store, so links are parsed and thrown away",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "            file_id, workspace_id, tags=merged, link_names=link_names\n",
+    "replace": "            file_id, workspace_id, tags=merged\n",
+    "tests": [
+      "tests/cloud/uploads/test_listener_links.py::test_markdown_note_gets_links_and_tags_merged"
+    ]
+  }
+]
