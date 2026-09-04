@@ -310,6 +310,52 @@ def _max_jobs() -> int:
     return val
 
 
+# arq writes a health-check key to Redis every ``health_check_interval`` seconds
+# with a TTL of interval + 1, and ``arq --check <settings>`` exits 0 while that
+# key is alive. arq's own default interval is 3600, which makes the key a poor
+# liveness signal for anything that polls: a worker that died a minute ago still
+# reports healthy for the rest of the hour. That is worse than no probe, because
+# a container healthcheck built on it looks like coverage while catching nothing.
+#
+# 30 seconds costs one small Redis write every 30 seconds and makes the key mean
+# what a probe assumes it means.
+_DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS = 30
+
+
+def _health_check_interval_seconds() -> int:
+    """Resolve the arq health-key refresh period from the environment.
+
+    Same fail-soft contract as ``_max_jobs`` and ``_job_timeout_seconds``: an
+    unparseable or non-positive value falls back to the default rather than
+    reaching arq, where a non-positive interval turns the health loop into a
+    busy wait.
+
+    Raising this loosens every probe built on the key, because the key's TTL is
+    derived from it. Keep it comfortably below the healthcheck interval of
+    whatever is polling, or the probe flaps.
+    """
+    raw = os.environ.get("POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL", "").strip()
+    if not raw:
+        return _DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS
+    try:
+        val = int(raw)
+    except ValueError:
+        logger.warning(
+            "POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL=%r is not an int; using default %ds",
+            raw,
+            _DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS,
+        )
+        return _DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS
+    if val <= 0:
+        logger.warning(
+            "POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL=%d is not positive; using default %ds",
+            val,
+            _DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS,
+        )
+        return _DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS
+    return val
+
+
 # Workspace jobs (pp#1459) run on this same worker but get their OWN
 # per-function timeout via ``arq.worker.func`` so a long-running job can't be
 # clipped by the chat-run timeout and vice-versa. The dotted name the web
@@ -410,5 +456,11 @@ class WorkerSettings:
     # retried, just queued. Plain int in __dict__ for the arq-reads-__dict__
     # reason documented on `_redis_settings`.
     max_jobs = _max_jobs()
+    # How often the worker refreshes its Redis health key, and therefore how
+    # quickly ``arq --check`` notices it is gone. arq's default of an hour makes
+    # that check answer "healthy" for up to an hour after the process died,
+    # which is exactly the wrong answer to give a container healthcheck. Plain
+    # int in __dict__ for the arq-reads-__dict__ reason above.
+    health_check_interval = _health_check_interval_seconds()
     # Eager: arq reads __dict__, which bypasses descriptors. See `_redis_settings`.
     redis_settings = _redis_settings()

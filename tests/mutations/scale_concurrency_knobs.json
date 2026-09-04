@@ -1,6 +1,6 @@
 [
   {
-    "label": "max_jobs is dropped from WorkerSettings, so arq silently falls back to its own default of 10 and the whole knob is dead — the exact bug this change fixes, reintroduced",
+    "label": "max_jobs is dropped from WorkerSettings, so arq silently falls back to its own default of 10 and the whole knob is dead \u2014 the exact bug this change fixes, reintroduced",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
     "find": "    max_jobs = _max_jobs()\n",
     "replace": "",
@@ -9,7 +9,7 @@
     ]
   },
   {
-    "label": "max_jobs becomes a property, so arq's __dict__ read hands a descriptor to BoundedSemaphore(max_jobs + 1) and the worker crashes on boot — the _LazyRedisSettings deploy crash, repeated",
+    "label": "max_jobs becomes a property, so arq's __dict__ read hands a descriptor to BoundedSemaphore(max_jobs + 1) and the worker crashes on boot \u2014 the _LazyRedisSettings deploy crash, repeated",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
     "find": "    max_jobs = _max_jobs()",
     "replace": "    max_jobs = property(lambda self: _max_jobs())",
@@ -87,6 +87,33 @@
     "replace": "    session_warm_max_global: int = Field(\n        default=32,",
     "tests": [
       "tests/test_session_supervisor.py"
+    ]
+  },
+  {
+    "label": "the worker keeps arq's hour-long health interval, so arq --check reports a dead worker healthy for the rest of the hour and the container probe never fires",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
+    "find": "_DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS = 30",
+    "replace": "_DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS = 3600",
+    "tests": [
+      "tests/cloud/runs/test_worker_config_and_pool.py"
+    ]
+  },
+  {
+    "label": "health_check_interval is left off WorkerSettings, so the knob exists and reaches nothing",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
+    "find": "    health_check_interval = _health_check_interval_seconds()",
+    "replace": "    _unused_health_check_interval = _health_check_interval_seconds()",
+    "tests": [
+      "tests/cloud/runs/test_worker_config_and_pool.py"
+    ]
+  },
+  {
+    "label": "a non-positive health interval reaches arq, turning its health loop into a busy wait",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
+    "find": "    if val <= 0:\n        logger.warning(\n            \"POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL=%d is not positive; using default %ds\",",
+    "replace": "    if False:\n        logger.warning(\n            \"POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL=%d is not positive; using default %ds\",",
+    "tests": [
+      "tests/cloud/runs/test_worker_config_and_pool.py"
     ]
   }
 ]

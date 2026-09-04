@@ -210,3 +210,64 @@ async def test_max_jobs_helper_invalid_or_nonpositive_falls_back(monkeypatch):
         assert worker_mod._max_jobs() == worker_mod._DEFAULT_MAX_JOBS, (
             f"{bad!r} should fall back to the default"
         )
+
+
+# --- H7: the health key has to expire fast enough to mean anything ---------
+#
+# arq refreshes a Redis key every ``health_check_interval`` with a TTL of
+# interval + 1, and ``arq --check`` exits 0 while it is alive. The container
+# healthcheck in deploy/coolify/docker-compose.yaml is built on that command,
+# so the interval is what decides whether the probe can ever fail.
+
+
+async def test_worker_settings_health_check_interval_is_a_plain_int_in_dict():
+    """Same arq-reads-__dict__ contract as ``max_jobs`` and ``redis_settings``."""
+    raw = worker_mod.WorkerSettings.__dict__.get("health_check_interval")
+    assert isinstance(raw, int), (
+        f"WorkerSettings.health_check_interval in __dict__ is {type(raw).__name__}, "
+        "expected int. arq bypasses the descriptor protocol via __dict__ access."
+    )
+    assert raw > 0
+
+
+async def test_the_health_key_expires_far_faster_than_arq_would_leave_it():
+    """The whole point of the knob, stated as a number.
+
+    arq's own default is an hour. A container healthcheck polling every 30
+    seconds against an hour-old key reports healthy for the rest of the hour
+    after the worker dies, which is worse than having no probe: it looks like
+    coverage. Anything at or above arq's default is that bug.
+    """
+    from arq.worker import Worker
+
+    arq_default = inspect.signature(Worker.__init__).parameters["health_check_interval"].default
+
+    assert worker_mod._DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS < arq_default
+    assert worker_mod._DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS <= 60, (
+        "the compose healthcheck polls on a 30s interval; a refresh period "
+        "above a minute makes the probe flap or lie"
+    )
+
+
+async def test_health_check_interval_helper_default(monkeypatch):
+    monkeypatch.delenv("POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL", raising=False)
+    assert (
+        worker_mod._health_check_interval_seconds()
+        == worker_mod._DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS
+    )
+
+
+async def test_health_check_interval_helper_env_override(monkeypatch):
+    monkeypatch.setenv("POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL", "15")
+    assert worker_mod._health_check_interval_seconds() == 15
+
+
+async def test_health_check_interval_helper_invalid_or_nonpositive_falls_back(monkeypatch):
+    """A non-positive interval turns arq's health loop into a busy wait, so it
+    must never reach arq."""
+    for bad in ("not-a-number", "-5", "0", "", "  "):
+        monkeypatch.setenv("POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL", bad)
+        assert (
+            worker_mod._health_check_interval_seconds()
+            == worker_mod._DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS
+        ), f"{bad!r} should fall back to the default"
