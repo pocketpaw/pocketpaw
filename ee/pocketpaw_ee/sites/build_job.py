@@ -164,6 +164,18 @@
 # is served: the compiled server route is absent from the deployable artifact on the
 # svelte track, and react emits no server route at all. If lead capture comes back, the
 # key must be injected at DEPLOY (wrangler ``[vars]``) rather than restored here.
+#
+# Edited 2026-09-04 (fix/queue-lanes, backend-perf C1): BOTH LANES NOW ENQUEUE ONTO
+# THEIR OWN QUEUE, :data:`SITE_BUILD_QUEUE_NAME`, instead of arq's default. Nothing
+# about a build changed; what changed is which ``max_jobs`` ceiling it competes for.
+# Sharing the default queue meant sharing ONE cluster-wide limit of 10 with chat runs,
+# workspace jobs and both /ship jobs, so ten concurrent publishes left chat with no
+# slot at all and the eleventh request hung silently for up to half an hour.
+#
+# Three call sites move together and MUST stay together: both enqueues and the
+# :func:`_preview_job_outcome` status read. arq scopes a job id to a queue, so a read
+# left pointing at the default queue would find nothing, report ``building`` forever,
+# and the client would poll a job that finished minutes ago.
 """SL-2 — the site-build arq job and its enqueue helper."""
 
 from __future__ import annotations
@@ -205,6 +217,29 @@ ARQ_FUNCTION_NAME = "run_site_build"
 #: same reason the function is: a worker that registered one name for both would run a
 #: preview payload through the publish job's signature.
 PREVIEW_ARQ_FUNCTION_NAME = "run_site_preview_build"
+
+#: The dedicated arq queue both site-build lanes ride (backend-perf C1).
+#:
+#: Before this, every lane the cluster runs — chat runs, workspace jobs, both
+#: /ship jobs and both site builds — shared ONE queue and therefore ONE
+#: ``max_jobs`` ceiling, default 10. Ten concurrent publishes left zero slots for
+#: chat, and job 11 did not error: it sat in Redis behind a ``job_timeout`` of up
+#: to 30 minutes while the user watched an SSE stream emit nothing. Builds are the
+#: lane that bursts (a publish storm is one customer pressing Publish on ten sites)
+#: and the lane that is slowest (1020s of budget at today's defaults), so builds are
+#: what starves everything else rather than the other way round.
+#:
+#: A queue is only half a lane; the other half is a consumer. The settings live in
+#: ``pocketpaw_ee.sites.build_worker`` and the process that runs both lanes in one
+#: container is ``pocketpaw_ee.cloud.worker_supervisor``. Enqueueing here with no
+#: consumer running is WORSE than sharing a queue: the job waits forever and
+#: nothing anywhere says so.
+#:
+#: Namespaced, unlike ``GROWTH_QUEUE_NAME`` ("growth"), because arq uses this
+#: string as the Redis key verbatim and this database also holds the realtime
+#: bridge's keys. The growth name is left alone rather than made consistent —
+#: renaming a live queue strands whatever is already sitting in it.
+SITE_BUILD_QUEUE_NAME = "arq:queue:sites"
 
 #: Engines this lane can build. Every one needs a per-site Node build AND emits its
 #: output into a SUBDIRECTORY — ``artifact_tar_command`` refuses an engine whose output
@@ -900,6 +935,7 @@ async def enqueue_site_build(
             normalize_engine(engine),
             timeout,
             _job_id=job_id,
+            _queue_name=SITE_BUILD_QUEUE_NAME,
             # Rides as a kwarg so the positional payload stays exactly what slice 2
             # shipped, and a build queued for verification alone (no deploy) simply omits
             # it. arq forwards any non-underscore kwarg to the function.
@@ -985,7 +1021,7 @@ async def _preview_job_outcome(pool: Any, job_id: str) -> tuple[str, str | None]
       * gone (a result that expired between the enqueue and this read) → ``building``.
         A pure race, and the next poll enqueues cleanly because the id is free again.
     """
-    job = Job(job_id, pool)
+    job = Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME)
     status = await job.status()
     if status is not JobStatus.complete:
         return "building", None
@@ -1203,6 +1239,7 @@ async def enqueue_preview_build(
         normalize_engine(engine),
         timeout,
         _job_id=job_id,
+        _queue_name=SITE_BUILD_QUEUE_NAME,
     )
     if job is None:
         status, reason = await _preview_job_outcome(pool, job_id)

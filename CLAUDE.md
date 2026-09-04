@@ -225,11 +225,16 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   env-configurable), marking queued/running `ChatRunDoc`s older than 10 minutes as
   `interrupted` so runs abandoned by a backend restart surface a retry affordance
   instead of leaving clients subscribed forever.
-- **Concurrency / capacity config**: four ceilings that are easy to confuse. In a
-  cloud deploy only the first one bounds how many agent runs execute at once.
-  `POCKETPAW_ARQ_MAX_JOBS` (default `10`, arq's own) — **cluster-wide**: concurrent
-  jobs ONE arq worker runs, shared across every lane it registers (chat runs,
-  workspace jobs, both `/ship` jobs, both site builds). It was unset until
+- **Concurrency / capacity config**: five ceilings that are easy to confuse. In a
+  cloud deploy the first two are the ones that bound how much work executes at once.
+  `POCKETPAW_ARQ_MAX_JOBS` (default `10`, arq's own) — the **chat lane's** ceiling:
+  concurrent jobs ONE arq worker runs on arq's default queue (chat runs,
+  workspace jobs, both `/ship` jobs). Site builds shared it until 2026-09-04 and
+  now have `POCKETPAW_SITES_ARQ_MAX_JOBS` (default `4`) on their own queue,
+  consumed by the same container — `pocketpaw_ee.cloud.worker_supervisor` runs both
+  lanes in one process, so neither can consume the other's slots. Raise the sites
+  one with the Daytona sandbox quota, not with the container's memory limit: a
+  build compiles remotely and what runs here is an await. This was unset until
   2026-09-01, so every earlier deploy ran on arq's default with no way to raise
   it; ten concurrent site publishes left no slot for a chat run, and job 11 was
   neither rejected nor retried (`max_tries = 1`) — it waited in Redis behind a

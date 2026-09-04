@@ -400,15 +400,48 @@ class TestOneRenderIsOneSandbox:
         assert result["body_html"] == ""
 
 
+class TestThePreviewLaneQueue:
+    """backend-perf C1 — the preview enqueue rides the site-build queue too."""
+
+    async def test_a_preview_is_queued_on_the_site_build_lane(self) -> None:
+        """Both site lanes move together or the split only half applies.
+
+        A draft preview is the SAME build as a publish — same sandbox, same budget --
+        so leaving it on arq's default queue would keep the exact starvation the split
+        removes, and would keep it on the lane a user hits by typing, not by publishing.
+        """
+        pool = FakePool()
+
+        await bj.enqueue_preview_build(
+            pocket_id="pk1",
+            content_hash="c0ffee",
+            engine="react",
+            generator_input=_preview_input(),
+            _pool_override=pool,
+        )
+
+        assert pool.calls[0]["kwargs"]["_queue_name"] == bj.SITE_BUILD_QUEUE_NAME
+
+
 class TestReadingARefusedEnqueue:
     """``_preview_job_outcome`` against a stand-in for arq's ``Job``."""
 
-    def _patch_job(self, monkeypatch, *, status: Any, info: Any) -> None:
+    def _patch_job(self, monkeypatch, *, status: Any, info: Any) -> list[dict[str, Any]]:
+        """Swap arq's ``Job`` for a stand-in and return the ctor calls it recorded.
+
+        ``_queue_name`` is part of the signature here because it is part of arq's, and
+        because it is the argument this read cannot afford to get wrong: arq scopes a job
+        id to a queue, so a status read pointed at the wrong one finds nothing, answers
+        ``building`` forever, and the client polls a job that ended minutes ago.
+        """
         from arq.jobs import JobStatus
 
+        calls: list[dict[str, Any]] = []
+
         class _FakeJob:
-            def __init__(self, job_id: str, pool: Any) -> None:
+            def __init__(self, job_id: str, pool: Any, _queue_name: str | None = None) -> None:
                 self.job_id = job_id
+                calls.append({"job_id": job_id, "queue_name": _queue_name})
 
             async def status(self) -> Any:
                 return status
@@ -418,12 +451,31 @@ class TestReadingARefusedEnqueue:
 
         monkeypatch.setattr(bj, "Job", _FakeJob)
         assert JobStatus.complete is not None  # the enum the production code compares on
+        return calls
 
     async def test_a_running_job_reads_as_building(self, monkeypatch) -> None:
         from arq.jobs import JobStatus
 
         self._patch_job(monkeypatch, status=JobStatus.in_progress, info=None)
         assert await bj._preview_job_outcome(object(), "j1") == ("building", None)
+
+    async def test_the_status_read_looks_in_the_queue_the_enqueue_wrote_to(
+        self, monkeypatch
+    ) -> None:
+        """The read and both enqueues share one queue, or the read is blind.
+
+        backend-perf C1 moved site builds off arq's default queue. arq scopes a job id to
+        a queue, so a read left on the default would never find the job it just refused to
+        enqueue: ``status()`` returns ``not_found``, this function reports ``building``,
+        and the client polls a finished build forever. There is no error anywhere on that
+        path, which is why it is asserted rather than left to the enqueue tests.
+        """
+        from arq.jobs import JobStatus
+
+        calls = self._patch_job(monkeypatch, status=JobStatus.in_progress, info=None)
+        await bj._preview_job_outcome(object(), "j1")
+
+        assert calls == [{"job_id": "j1", "queue_name": bj.SITE_BUILD_QUEUE_NAME}]
 
     async def test_a_completed_job_reports_its_own_settlement(self, monkeypatch) -> None:
         from arq.jobs import JobStatus

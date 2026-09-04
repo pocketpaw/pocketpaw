@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -50,3 +51,24 @@ async def seed_run(mongo_db):  # noqa: ARG001 — forces Beanie init
         intent=None,
     )
     return await run_service.create_run(spec)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_worker_bootstrap():
+    """Reset the worker's lane counter around every test in this directory.
+
+    ``worker._startup`` became refcounted on 2026-09-04 (backend-perf C1): two arq
+    lanes now share one process, so the bootstrap runs for the FIRST lane and the
+    second is a no-op. That makes it PROCESS state, and a test session is one
+    process — so the second test to call ``_startup`` would otherwise be silently
+    skipped, and its assertions about what boot registers would fail for a reason
+    that has nothing to do with what it is testing.
+
+    Autouse rather than per-test because the trap is invisible: nothing about
+    calling ``_startup`` suggests a previous test could have consumed it.
+    """
+    from pocketpaw_ee.cloud.chat.runs import worker as _worker
+
+    _worker._reset_bootstrap_for_tests()
+    yield
+    _worker._reset_bootstrap_for_tests()
