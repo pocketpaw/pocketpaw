@@ -1,8 +1,7 @@
 # Converting the credit wallet to micro-credits
 
-A one-time database change that has to happen while the API and worker are
-stopped. It is not optional and it is not automatic: nothing in the image or the
-compose file runs it.
+A one-time database change. Nothing in the image or the compose file runs it, and
+the app will not start until it has been done.
 
 ## Why it exists
 
@@ -20,25 +19,38 @@ money were renamed:
 Customers see no change. Balances, top-ups, plans and prices are still whole
 credits, converted at the HTTP boundary. One credit is still one cent.
 
-## Running it
+## Running it on Coolify
+
+The migration ships inside the installed package, so it runs anywhere the app
+runs. That is deliberate: it started life in `scripts/`, which the runtime image
+does not carry. The runtime stage of `deploy/coolify/Dockerfile` copies
+`/opt/venv` and `/build/connectors` and nothing else, so the repository exists
+only in a discarded build layer, and on Coolify there is no checkout on the host
+either.
+
+Open a terminal on the `paw-backend` container from the Coolify dashboard, or SSH
+to the host and use `docker exec`:
 
 ```bash
-# 1. Stop the writers. Both of them.
-docker compose stop api worker
+docker exec -it paw-backend \
+  python -m pocketpaw_ee.cloud.credits.migrate_micro_credits --dry-run
 
-# 2. See what would change. Writes nothing.
-python scripts/migrations/2026_09_04_micro_credits.py --dry-run
-
-# 3. Convert. Exits non-zero and says so if anything is left over.
-python scripts/migrations/2026_09_04_micro_credits.py
-
-# 4. Start again.
-docker compose start api worker
+docker exec -it paw-backend \
+  python -m pocketpaw_ee.cloud.credits.migrate_micro_credits
 ```
 
-It reads the same `POCKETPAW_MONGO_URL` and `POCKETPAW_MONGO_DB` the app uses.
-Running it twice is safe: documents are selected by the old field's existence, so
-the second run matches nothing and reports zero.
+It reads `CLOUD_MONGODB_URI` from the container's own environment, which is
+already set to `mongodb://mongo:27017/paw-enterprise`, and takes the database name
+off that URI exactly as `init_cloud_db` does. There is nothing to configure.
+
+**You do not need to stop the writers.** The conversion is one atomic update per
+document and it adds to the destination field rather than replacing it, so an
+increment arriving mid-run lands correctly whether it gets there before or after.
+Nothing calls `credits.service.reconcile` automatically, which is the one routine
+that could have rewritten a balance from a half-converted ledger.
+
+Stopping is still the tidier option if you have a maintenance window, because
+reads served during the run are wrong. It is not a correctness requirement.
 
 ## What happens if you skip it
 
@@ -61,32 +73,36 @@ The boot now refuses rather than allowing any of that:
 cloud startup: the credit wallet is still in whole credits — credit_balances.balance_credits
 present. This build reads micro-credits, and an unconverted balance row reads as an EMPTY
 wallet rather than failing, so serving it would tell paying customers they have no credits.
-Refusing to start. Stop the API and worker, run `python scripts/migrations/2026_09_04_micro_credits.py`
-(--dry-run first), then start again.
+Refusing to start. Run `python -m pocketpaw_ee.cloud.credits.migrate_micro_credits --dry-run`
+to see what it would convert, then `python -m pocketpaw_ee.cloud.credits.migrate_micro_credits`
+to convert it.
 ```
 
-If you see that, the container is doing its job. Run the migration.
+A container in that state restarts in a loop, so run the migration from the `mongo`
+container's neighbour on the host rather than waiting for a terminal on a backend
+that keeps dying. If the backend is already up, run it there and redeploy after.
 
 ## Recovering a database the app already served
 
 A deployment that ran unmigrated for a while has balance documents carrying both
 fields: the old balance, plus whatever grants and metered debits were applied
 since. The migration adds the two together rather than overwriting, so those
-movements survive — run it normally, no special flag. Verify a known workspace
-afterwards:
+movements survive. Run it normally, with no special flag, then spot-check:
 
 ```bash
-python - <<'EOF'
-import asyncio, os
-from motor.motor_asyncio import AsyncIOMotorClient
-async def main():
-    db = AsyncIOMotorClient(os.environ["POCKETPAW_MONGO_URL"])[os.environ.get("POCKETPAW_MONGO_DB", "pocketpaw")]
-    async for d in db["credit_balances"].find({}, {"workspace": 1, "balance_micro": 1}):
-        print(d["workspace"], d.get("balance_micro", 0) / 1_000_000, "credits")
-asyncio.run(main())
-EOF
+docker exec -i paw-mongo mongosh --quiet paw-enterprise --eval '
+  db.credit_balances.find({}, {workspace: 1, balance_micro: 1}).forEach(d =>
+    print(d.workspace, d.balance_micro / 1000000, "credits"))'
 ```
 
-Cross-check any workspace that looks wrong against its ledger, which is the
+Any workspace that looks wrong can be settled against the ledger, which is the
 authority: `credits.service.reconcile(workspace)` recomputes the balance from the
 entries whose effect actually landed and repairs the row.
+
+## Pointing it at the wrong database
+
+The migration selects documents by the old field's existence, so a run against the
+wrong database converts nothing and prints `0 document(s) would convert` — which
+is character for character what an already-migrated database prints. It refuses to
+run at all when `credit_balances` and `credit_ledger` are absent, for that reason.
+If you see that refusal, check `CLOUD_MONGODB_URI` rather than the data.

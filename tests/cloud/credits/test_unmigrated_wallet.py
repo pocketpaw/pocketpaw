@@ -4,8 +4,8 @@
 # THE INCIDENT THIS COMES FROM. #2064 renamed the three fields that carry money
 # (``balance_credits`` -> ``balance_micro``, ``amount_delta`` ->
 # ``amount_delta_micro``, ``balance_after`` -> ``balance_after_micro``) and shipped
-# ``scripts/migrations/2026_09_04_micro_credits.py`` to convert them. Nothing in the
-# deploy runs that script, and on 2026-09-04 it was not run. The container came up on
+# a migration to convert them. Nothing in the deploy runs it, and on 2026-09-04 it
+# was not run. The container came up on
 # the new code over old documents and served real customers that way.
 #
 # Only one of the four consequences was audible:
@@ -38,6 +38,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from pocketpaw_ee.cloud.credits import migrate_micro_credits as migration
 from pocketpaw_ee.cloud.credits import service as credits
 from pocketpaw_ee.cloud.credits.domain import credits_to_micro
 
@@ -135,7 +136,7 @@ async def test_boot_refuses_on_a_balance_row_from_before_the_rename(mongo_db):
     assert "balance_credits" in message
     # The message has to carry the way out, or the operator is left guessing with
     # the deployment down.
-    assert "2026_09_04_micro_credits" in message
+    assert "migrate_micro_credits" in message
 
 
 async def test_boot_refuses_on_a_ledger_row_from_before_the_rename(mongo_db):
@@ -227,3 +228,76 @@ async def test_the_conversion_leaves_no_document_carrying_both_fields(mongo_db):
     # And a re-run finds nothing to do, so the merged balance is not counted twice.
     await run_migration(mongo_db)
     assert await credits.balance(WS) == 1700
+
+
+# ---------------------------------------------------------------------------
+# Pointing the migration at the right database. Getting this wrong is the one
+# failure that looks like success.
+# ---------------------------------------------------------------------------
+
+
+def test_the_migration_reads_the_uri_the_deployment_actually_sets():
+    """``CLOUD_MONGODB_URI`` is what docker-compose sets and what init_cloud_db
+    reads. The first version of this tool demanded POCKETPAW_MONGO_URL, which
+    nothing sets, so the operator following the runbook got "not set" and stopped."""
+    uri, db_name = migration.resolve_mongo_target(
+        {"CLOUD_MONGODB_URI": "mongodb://mongo:27017/paw-enterprise"}
+    )
+
+    assert uri == "mongodb://mongo:27017/paw-enterprise"
+    assert db_name == "paw-enterprise"
+
+
+def test_the_database_name_comes_off_the_uri_not_a_default():
+    """The old default was ``pocketpaw``. The deployment's database is
+    ``paw-enterprise``, so that default pointed at a database that does not exist —
+    where every count is legitimately zero and the run reports a clean success."""
+    _uri, db_name = migration.resolve_mongo_target(
+        {"CLOUD_MONGODB_URI": "mongodb://user:pw@host:27017/paw-enterprise?replicaSet=rs0"}
+    )
+    assert db_name == "paw-enterprise"
+
+
+def test_an_explicit_database_name_still_wins():
+    _uri, db_name = migration.resolve_mongo_target(
+        {"CLOUD_MONGODB_URI": "mongodb://mongo:27017/paw-enterprise", "POCKETPAW_MONGO_DB": "other"}
+    )
+    assert db_name == "other"
+
+
+def test_the_legacy_variable_still_works():
+    uri, db_name = migration.resolve_mongo_target(
+        {"POCKETPAW_MONGO_URL": "mongodb://localhost:27017/pocketpaw"}
+    )
+    assert uri == "mongodb://localhost:27017/pocketpaw"
+    assert db_name == "pocketpaw"
+
+
+def test_no_uri_at_all_is_an_error_not_a_guess():
+    with pytest.raises(RuntimeError, match="CLOUD_MONGODB_URI"):
+        migration.resolve_mongo_target({})
+
+
+async def test_a_database_with_no_wallet_is_refused():
+    """The most dangerous thing this tool can print is "0 documents would convert"
+    against the wrong database, because it is identical to the output of a database
+    that is already converted. Absence of the collections is the tell.
+
+    A bare client, NOT the ``mongo_db`` fixture: that fixture runs ``init_beanie``,
+    which creates every collection while building indexes, so it cannot represent a
+    database the app has never touched — which is exactly the wrong-name case.
+    """
+    from mongomock_motor import AsyncMongoMockClient
+
+    db = AsyncMongoMockClient()["pocketpaw"]
+    await db["something_else"].insert_one({"x": 1})
+
+    with pytest.raises(RuntimeError, match="credit_balances"):
+        await migration._assert_wallet_database(db)
+
+
+async def test_a_real_wallet_database_passes_the_check(mongo_db):
+    await _seed_pre_rename_balance(mongo_db, balance_credits=700)
+    await _seed_pre_rename_entry(mongo_db, delta=700)
+
+    await migration._assert_wallet_database(mongo_db)  # does not raise

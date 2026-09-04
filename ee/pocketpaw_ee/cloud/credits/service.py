@@ -1208,7 +1208,7 @@ _PRE_MICRO_FIELDS: tuple[tuple[str, str], ...] = (
     ("credit_ledger", "balance_after"),
 )
 
-_MIGRATION_SCRIPT = "scripts/migrations/2026_09_04_micro_credits.py"
+_MIGRATION_COMMAND = "python -m pocketpaw_ee.cloud.credits.migrate_micro_credits"
 
 
 async def verify_wallet_migrated() -> None:
@@ -1249,8 +1249,8 @@ async def verify_wallet_migrated() -> None:
         f"{', '.join(stale)} present. This build reads micro-credits, and an "
         "unconverted balance row reads as an EMPTY wallet rather than failing, so "
         "serving it would tell paying customers they have no credits. Refusing to "
-        f"start. Stop the API and worker, run `python {_MIGRATION_SCRIPT}` "
-        "(--dry-run first), then start again."
+        f"start. Run `{_MIGRATION_COMMAND} --dry-run` to see what it would "
+        f"convert, then `{_MIGRATION_COMMAND}` to convert it."
     )
 
 

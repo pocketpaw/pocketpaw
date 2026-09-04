@@ -1,7 +1,7 @@
 # tests/cloud/credits/test_micro_credit_migration.py — proves the wallet survives
 # the move from whole credits to micro-credits.
 #
-# THE MIGRATION. ``scripts/migrations/2026_09_04_micro_credits.py`` multiplies every
+# THE MIGRATION. ``pocketpaw_ee.cloud.credits.migrate_micro_credits`` multiplies every
 # stored amount by 1_000_000 and renames the three fields that carry one, so the
 # ledger can express what a single API call costs. A credit is a cent; the proxy
 # prices one call; a $0.0015 call is 0.375 of a credit and had no honest integer
@@ -19,17 +19,17 @@
 #   * and the ledger invariant ``balance == sum(amount_delta)`` has to still hold
 #     afterwards, because that is the only thing that says the wallet is intact.
 #
-# These drive the REAL script, loaded from its path by ``micro_migration_harness``.
-# They used to run a copy of its pipeline, pasted in because the script is an
-# operator tool with a ``__main__`` and no importable name. That copy was the
-# failure this module exists to prevent: on 2026-09-04 the conversion was found to
-# destroy live writes, and a fix applied to the script alone would have left every
-# test here green against the wrong code.
+# These drive the REAL migration module, via ``micro_migration_harness``. They used
+# to run a copy of its pipeline, pasted in because the migration was a loose script
+# under ``scripts/`` with no importable name. That copy was the failure this module
+# exists to prevent: on 2026-09-04 the conversion turned out to destroy live writes,
+# and a fix applied to the script alone would have left all seven tests here green
+# against code no operator runs.
 #
 # Created 2026-09-04 (feat/exact-credit-deduction): new test module.
-# Changed 2026-09-04 (fix/wallet-migration-guard): the copied pipeline is gone; the
-# script itself is under test. See tests/cloud/credits/test_unmigrated_wallet.py for
-# the case that copy was hiding.
+# Changed 2026-09-04 (fix/wallet-migration-guard): the copied pipeline is gone and
+# the migration itself is under test. See tests/cloud/credits/test_unmigrated_wallet.py
+# for the case that copy was hiding.
 
 from __future__ import annotations
 
