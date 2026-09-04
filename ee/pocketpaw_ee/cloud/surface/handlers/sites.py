@@ -1508,17 +1508,49 @@ def _frontend_preamble(meta: SurfaceMeta, brief: DesignBrief) -> str:
     ds = branding.design_system
     if ds is not None:
         design_block += f"Theme the page with the brief's design system (`{ds.name}`). "
+        # EMIT THE VALUES, not a description of them. This block used to say
+        # "apply its compiled tokens_css" and "use its palette scales" without
+        # printing either, so an agent handed a fully populated design system
+        # saw no colour, no family and no size — and did the only thing left,
+        # which was invent a design. Measured 2026-09-04: none of the hex
+        # values, the families, the sizes or the CSS itself appeared in the
+        # rendered preamble. A brief the model cannot read is not a brief.
         if ds.tokens_css:
             design_block += (
-                "Apply its compiled `tokens_css` (CSS custom properties) as the "
-                "single source of truth for color, type, spacing, radius, and "
-                "elevation — never hard-code ad-hoc values. "
+                "These are the design tokens, and they are the single source of "
+                "truth for color, type, spacing, radius and elevation. Declare "
+                "them and reference them; never hard-code an ad-hoc value beside "
+                "them:" + "\n\n```css\n" + ds.tokens_css + "\n```\n\n"
             )
         if ds.colors:
-            design_block += (
-                "Use its palette scales (the 50..900 steps per role color) for "
-                "every surface, text, and accent. "
+            swatches = ", ".join(
+                f"`{role}` {scale.s500}" for role, scale in ds.colors.items() if scale.s500
             )
+            if swatches:
+                design_block += (
+                    "The palette, most-used first — the first entries carry the "
+                    f"page: {swatches}. Use these exact values. "
+                )
+        if ds.typography:
+            faces = ", ".join(
+                f"{role} in {face.family}"
+                + (f" at {face.size}" if face.size else "")
+                + (f" weight {face.weight}" if face.weight else "")
+                for role, face in ds.typography.items()
+                if face.family
+            )
+            if faces:
+                design_block += (
+                    f"Typography: {faces}. If a family is not freely available, "
+                    "substitute the nearest Google font and say which. "
+                )
+        if ds.spacing or ds.rounded:
+            scale_bits = []
+            if ds.spacing:
+                scale_bits.append("spacing " + " / ".join(ds.spacing.values()))
+            if ds.rounded:
+                scale_bits.append("radii " + " / ".join(ds.rounded.values()))
+            design_block += "Scales taken from the source: " + "; ".join(scale_bits) + ". "
         if ds.rationale:
             design_block += (
                 "Honor the design rationale — its mood, do's/don'ts, and "
