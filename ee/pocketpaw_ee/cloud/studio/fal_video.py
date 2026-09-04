@@ -25,7 +25,7 @@ import logging
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -68,6 +68,61 @@ DEFAULT_I2V_PROMPT = "animate this scene with smooth, natural motion"
 # ("480p"/"720p") + ``duration`` (a STRING enum "auto"/"4".."30") + a string
 # ``aspect_ratio`` enum (incl. "auto") + ``generate_audio`` (sync audio).
 SEEDANCE_I2V_MODEL = "bytedance/seedance-2.5/image-to-video"
+
+# ByteDance Seedance 2.5 REFERENCE-to-video — the movie pipeline's terminal node.
+#
+# The only endpoint family that accepts AUDIO as an input, which is what makes
+# "character image + generated music + prompt -> one clip" a single call instead
+# of a generate-then-mux dance. Its contract is three flat arrays of URL strings
+# (``image_urls`` / ``video_urls`` / ``audio_urls``) plus a prompt that CITES them
+# by 1-indexed token — "@Image1", "@Audio1", "@Video1". A reference nobody cites
+# is dead weight the model may ignore, so the citation is part of the contract,
+# not decoration.
+#
+# 2.5 is the default. A 2.0 endpoint exists with the SAME argument shape but much
+# tighter limits (15s vs 30s, 12 files vs 50), so it stays recognised — a saved
+# project naming it still routes here rather than falling through to Kling — and
+# the caps are looked up per endpoint. Getting that backwards is a 422, not a
+# graceful degrade, which is why the limits live in a table instead of as one set
+# of constants.
+#
+# ``seed`` is NOT an input on 2.5 (it is output-only), so the reference path never
+# sends one.
+SEEDANCE_REF_TO_VIDEO_MODEL = "bytedance/seedance-2.5/reference-to-video"
+SEEDANCE_REF_TO_VIDEO_LEGACY_MODEL = "bytedance/seedance-2.0/reference-to-video"
+SEEDANCE_REF_TO_VIDEO_FAST_MODEL = "bytedance/seedance-2.0/fast/reference-to-video"
+
+
+class _RefLimits(NamedTuple):
+    images: int
+    videos: int
+    audio: int
+    files: int
+    duration_min: int
+    duration_max: int
+
+
+_REF_LIMITS_25 = _RefLimits(
+    images=30, videos=10, audio=10, files=50, duration_min=4, duration_max=30
+)
+_REF_LIMITS_20 = _RefLimits(images=9, videos=3, audio=3, files=12, duration_min=4, duration_max=15)
+
+
+def reference_limits(endpoint: str | None) -> _RefLimits:
+    """fal's documented caps for a reference endpoint.
+
+    2.0 and 2.5 take identical arguments and enforce very different limits, so
+    the caps are resolved from the endpoint rather than assumed."""
+    return _REF_LIMITS_20 if "seedance-2.0" in (endpoint or "") else _REF_LIMITS_25
+
+
+# Back-compat aliases for callers that read the 2.5 caps directly.
+REF_MAX_IMAGES = _REF_LIMITS_25.images
+REF_MAX_VIDEOS = _REF_LIMITS_25.videos
+REF_MAX_AUDIO = _REF_LIMITS_25.audio
+REF_MAX_FILES = _REF_LIMITS_25.files
+REF_DURATION_MIN = _REF_LIMITS_25.duration_min
+REF_DURATION_MAX = _REF_LIMITS_25.duration_max
 
 # Seedance 2.5 TEXT-to-video. Same family, same argument shape minus the frames.
 #
@@ -409,6 +464,125 @@ def build_seedance_i2v_arguments(
     return args
 
 
+def is_seedance_reference_endpoint(endpoint: str | None) -> bool:
+    """True when ``endpoint`` is a Seedance 2.0 reference-to-video model.
+
+    Both the standard and fast tiers share one schema, so one predicate covers
+    the dispatcher for both."""
+    e = (endpoint or "").strip()
+    return "reference-to-video" in e and ("seedance-2.5" in e or "seedance-2.0" in e)
+
+
+def reference_token(kind: str, index: int) -> str:
+    """The token that cites a reference inside the prompt: ``@Image1``.
+
+    1-indexed, matching the position in the corresponding array. Centralised
+    because an off-by-one here silently points the model at the wrong asset —
+    the call still succeeds and the video is simply built from something else.
+    """
+    return f"@{kind}{index + 1}"
+
+
+def annotate_reference_prompt(
+    prompt: str,
+    *,
+    image_count: int = 0,
+    video_count: int = 0,
+    audio_count: int = 0,
+) -> str:
+    """Append citations for any reference the prompt does not already mention.
+
+    fal's contract is that an asset is used by being CITED. A caller who attaches
+    a character still and a music bed but writes a prompt that never says
+    "@Image1" has attached them for nothing — the call succeeds and the model
+    quietly ignores the references. Rather than let that fail silently, the
+    uncited ones are appended in a short trailing clause.
+    """
+    text = (prompt or "").strip()
+    missing: list[str] = []
+    for kind, count in (("Image", image_count), ("Video", video_count), ("Audio", audio_count)):
+        for i in range(max(0, count)):
+            token = reference_token(kind, i)
+            if token not in text:
+                missing.append(token)
+    if not missing:
+        return text
+    clause = f"Use {', '.join(missing)} as reference."
+    if not text:
+        return clause
+    # Close the prompt off first, or the clause runs on: "a detective walks in
+    # Use @Image1 as reference."
+    stem = text if text.endswith((".", "!", "?", ",", ";", ":")) else f"{text}."
+    return f"{stem} {clause}"
+
+
+def build_reference_arguments(
+    *,
+    prompt: str,
+    endpoint: str | None = None,
+    image_urls: list[str] | None = None,
+    video_urls: list[str] | None = None,
+    audio_urls: list[str] | None = None,
+    resolution: str | None = None,
+    duration_sec: int | None = None,
+    aspect_ratio: str | None = None,
+    generate_audio: bool | None = None,
+    bitrate_mode: str | None = None,
+) -> dict[str, Any]:
+    """Build the fal ``arguments`` for ONE Seedance 2.0 reference-to-video call.
+
+    Pure + side-effect free so it unit-tests in isolation. Enforces fal's caps
+    HERE rather than letting the endpoint 422: over-long arrays are truncated to
+    their documented maximum and duration is clamped into the endpoint's range
+    (4..30 on 2.5, 4..15 on the tighter 2.0).
+
+    Raises ValueError for the one case that cannot be salvaged by truncating —
+    audio with no image or video to anchor it, which fal rejects outright.
+    """
+    limits = reference_limits(endpoint or SEEDANCE_REF_TO_VIDEO_MODEL)
+    images = [u.strip() for u in (image_urls or []) if u and u.strip()][: limits.images]
+    videos = [u.strip() for u in (video_urls or []) if u and u.strip()][: limits.videos]
+    audio = [u.strip() for u in (audio_urls or []) if u and u.strip()][: limits.audio]
+
+    if audio and not images and not videos:
+        raise ValueError("reference-to-video needs at least one image or video alongside audio")
+
+    # The overall 12-file cap. Trimmed from the least specific end — extra images
+    # are the most replaceable, and dropping the audio or the only video would
+    # change what the shot IS.
+    while len(images) + len(videos) + len(audio) > limits.files and images:
+        images.pop()
+
+    args: dict[str, Any] = {
+        "prompt": annotate_reference_prompt(
+            prompt,
+            image_count=len(images),
+            video_count=len(videos),
+            audio_count=len(audio),
+        )
+    }
+    if images:
+        args["image_urls"] = images
+    if videos:
+        args["video_urls"] = videos
+    if audio:
+        args["audio_urls"] = audio
+    if resolution:
+        args["resolution"] = resolution
+    if duration_sec and duration_sec > 0:
+        clamped = max(limits.duration_min, min(limits.duration_max, int(duration_sec)))
+        args["duration"] = str(clamped)
+    if aspect_ratio:
+        args["aspect_ratio"] = aspect_ratio
+    if generate_audio is not None:
+        args["generate_audio"] = bool(generate_audio)
+    if bitrate_mode:
+        args["bitrate_mode"] = bitrate_mode
+    # No ``seed``: it is an OUTPUT field on 2.5, not an input. Sending it would
+    # be an unrecognised argument on the endpoint this path defaults to.
+    return args
+
+
 # ── Clip stitching (3+ images: chain adjacent 2-frame pairs, then join) ──────
 #
 # fal's Kling image-to-video carries at most two frames per call, so N≥3 images
@@ -627,6 +801,55 @@ async def _run_image_to_video(
     return video_bytes, video_mime, poster_bytes, poster_mime
 
 
+async def _run_seedance_reference(
+    *,
+    prompt: str,
+    endpoint: str,
+    image_urls: list[str] | None = None,
+    video_urls: list[str] | None = None,
+    audio_urls: list[str] | None = None,
+    resolution: str | None = None,
+    duration_sec: int | None = None,
+    aspect_ratio: str | None = None,
+    generate_audio: bool | None = None,
+    key: str,
+) -> tuple[bytes, str, bytes | None, str | None]:
+    """Run ONE Seedance 2.0 reference-to-video call and return the result bytes.
+
+    One call, however many references: the endpoint takes the arrays whole, so
+    unlike Kling's pair-chaining there is nothing to stitch afterwards.
+    """
+    arguments = build_reference_arguments(
+        prompt=prompt,
+        endpoint=endpoint,
+        image_urls=image_urls,
+        video_urls=video_urls,
+        audio_urls=audio_urls,
+        resolution=resolution,
+        duration_sec=duration_sec,
+        aspect_ratio=aspect_ratio,
+        generate_audio=generate_audio,
+    )
+    result = await _run_fal(endpoint, arguments, key=key)
+    video_url = _extract_video_url(result)
+    if not video_url:
+        raise FalVideoError(f"fal Seedance reference '{endpoint}' returned no video data")
+    video_bytes, video_mime = await _download(video_url)
+
+    poster_bytes: bytes | None = None
+    poster_mime: str | None = None
+    poster_url = _extract_poster_url(result)
+    if poster_url:
+        try:
+            poster_bytes, poster_mime = await _download(poster_url)
+        except Exception:  # noqa: BLE001 — a poster is cosmetic; never fail the video
+            logger.warning(
+                "studio: fal Seedance reference poster download failed (non-fatal)",
+                exc_info=True,
+            )
+    return video_bytes, video_mime, poster_bytes, poster_mime
+
+
 async def _run_seedance_i2v(
     *,
     image_url: str,
@@ -721,6 +944,8 @@ async def run_fal_video(
     image_urls: list[str] | None = None,
     resolution: str | None = None,
     generate_audio: bool | None = None,
+    audio_urls: list[str] | None = None,
+    video_urls: list[str] | None = None,
 ) -> tuple[bytes, str, bytes | None, str | None]:
     """Run a fal video generation and return the result.
 
@@ -748,6 +973,27 @@ async def run_fal_video(
     api_key = key if key is not None else fal_edit.fal_api_key()
     if not api_key:
         raise FalVideoError("fal.ai API key is not configured (set FAL_AI_API_KEY)")
+
+    # Seedance 2.0 reference-to-video is the only endpoint that accepts audio, so
+    # it claims the call whenever audio is attached — even if the caller named a
+    # different model, since every other endpoint would silently drop the track
+    # and hand back a video with none of the music that was asked for.
+    audio = [u for u in (audio_urls or []) if u and u.strip()]
+    videos = [u for u in (video_urls or []) if u and u.strip()]
+    if audio or videos or is_seedance_reference_endpoint(model):
+        endpoint = model if is_seedance_reference_endpoint(model) else SEEDANCE_REF_TO_VIDEO_MODEL
+        return await _run_seedance_reference(
+            prompt=text or DEFAULT_I2V_PROMPT,
+            endpoint=endpoint,
+            image_urls=images,
+            video_urls=videos,
+            audio_urls=audio,
+            resolution=resolution,
+            duration_sec=duration_sec,
+            aspect_ratio=aspect_ratio,
+            generate_audio=generate_audio,
+            key=api_key,
+        )
 
     if images:
         # Seedance 2.5 i2v is its own single-still contract (no Kling pair
@@ -810,6 +1056,14 @@ __all__ = [
     "IMAGE_TO_VIDEO_PAIR_MODEL",
     "DEFAULT_I2V_PROMPT",
     "SEEDANCE_I2V_MODEL",
+    "SEEDANCE_REF_TO_VIDEO_MODEL",
+    "SEEDANCE_REF_TO_VIDEO_LEGACY_MODEL",
+    "SEEDANCE_REF_TO_VIDEO_FAST_MODEL",
+    "reference_limits",
+    "REF_MAX_IMAGES",
+    "REF_MAX_VIDEOS",
+    "REF_MAX_AUDIO",
+    "REF_MAX_FILES",
     "SEEDANCE_T2V_MODEL",
     "SEEDANCE_T2V_ENTERPRISE_MODEL",
     "SEEDANCE_RESOLUTIONS",
@@ -825,6 +1079,10 @@ __all__ = [
     "build_image_to_video_arguments",
     "build_seedance_i2v_arguments",
     "is_seedance_i2v_endpoint",
+    "is_seedance_reference_endpoint",
+    "build_reference_arguments",
+    "annotate_reference_prompt",
+    "reference_token",
     "supports_generate_audio",
     "run_fal_video",
 ]

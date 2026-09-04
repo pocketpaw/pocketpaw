@@ -416,6 +416,8 @@ async def test_generate_video_happy_path(monkeypatch, studio_env) -> None:
         image_urls=None,
         resolution=None,
         generate_audio=None,
+        audio_urls=None,
+        video_urls=None,
     ):
         seen.update(
             prompt=prompt,
@@ -468,6 +470,8 @@ async def test_generate_video_alias_resolves_endpoint(monkeypatch, studio_env) -
         image_urls=None,
         resolution=None,
         generate_audio=None,
+        audio_urls=None,
+        video_urls=None,
     ):
         seen["model"] = model
         return b"mp4", "video/mp4", None, None
@@ -496,6 +500,8 @@ async def test_generate_video_fal_failure_is_upstream_error(monkeypatch, studio_
         image_urls=None,
         resolution=None,
         generate_audio=None,
+        audio_urls=None,
+        video_urls=None,
     ):
         raise fal_video.FalVideoError("fal video 'x' failed: bad key")
 
@@ -524,6 +530,8 @@ async def test_generate_video_image_to_video_passes_all_images(monkeypatch, stud
         image_urls=None,
         resolution=None,
         generate_audio=None,
+        audio_urls=None,
+        video_urls=None,
     ):
         seen.update(
             prompt=prompt,
@@ -571,6 +579,8 @@ async def test_generate_video_image_to_video_forwards_typed_prompt(monkeypatch, 
         image_urls=None,
         resolution=None,
         generate_audio=None,
+        audio_urls=None,
+        video_urls=None,
     ):
         seen.update(prompt=prompt, image_urls=image_urls, duration_sec=duration_sec)
         return b"mp4", "video/mp4", None, None
@@ -621,6 +631,8 @@ async def test_generate_video_seedance_i2v_forwards_schema(monkeypatch, studio_e
         image_urls=None,
         resolution=None,
         generate_audio=None,
+        audio_urls=None,
+        video_urls=None,
     ):
         seen.update(
             model=model,

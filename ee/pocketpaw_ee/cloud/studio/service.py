@@ -1245,6 +1245,20 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
             data_url, _ = await _resolve_source_data_url(url)
             input_data_urls.append(data_url)
 
+    # Seedance 2.5 reference tracks. A generated music bed arrives here as a
+    # backend media URL and is resolved the same way the images are, so the
+    # endpoint gets data it can actually fetch.
+    reference_audio: list[str] = []
+    for url in req.referenceAudioUrls or []:
+        if url and url.strip():
+            data_url, _ = await _resolve_source_data_url(url)
+            reference_audio.append(data_url)
+    reference_video: list[str] = []
+    for url in req.referenceVideoUrls or []:
+        if url and url.strip():
+            data_url, _ = await _resolve_source_data_url(url)
+            reference_video.append(data_url)
+
     try:
         video_bytes, video_mime, poster_bytes, poster_mime = await fal_video.run_fal_video(
             prompt=final_prompt,
@@ -1254,6 +1268,8 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
             image_urls=input_data_urls,
             resolution=req.resolution,
             generate_audio=req.generateAudio,
+            audio_urls=reference_audio,
+            video_urls=reference_video,
         )
     except fal_video.FalVideoError as exc:
         raise StudioUpstreamError(str(exc)) from exc

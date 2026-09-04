@@ -297,6 +297,13 @@ class GenerateRequest(BaseModel):
     # audio. Only read when the video model resolves to Seedance i2v.
     resolution: str | None = None
     generateAudio: bool | None = None
+    # Seedance 2.5 reference-to-video: additional reference tracks alongside
+    # ``inputImageUrls``. Audio is the reason this endpoint exists in the flow —
+    # it is the only video model in the catalog that accepts a sound input, so a
+    # generated music bed can condition the clip in the SAME call rather than
+    # being muxed on afterwards. Audio requires at least one image or video.
+    referenceAudioUrls: list[str] | None = None
+    referenceVideoUrls: list[str] | None = None
     # Camera & lighting picks as catalog ids. The backend renders them to prose
     # and splices them between the subject and the style suffix; an omitted spec
     # (or one whose fields are all None) changes the prompt not at all.
