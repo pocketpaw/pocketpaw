@@ -1,5 +1,13 @@
 # Usage tracker — persistent token/cost tracking across sessions.
 # Created: 2026-03-09
+# Updated: 2026-09-04 (fix/proxy-model-prices) — ``set_price_provider`` adds a
+#   rung ABOVE genai-prices for the deployment's own price list. Every rung
+#   below is somebody else's published rates and none of them know what WE
+#   pay: a model served at a negotiated rate billed at list, and a model that
+#   exists only on our proxy is in no public list at all, so it priced None and
+#   billed ZERO. The cloud registers the LiteLLM proxy's configured costs; OSS
+#   registers nothing and prices exactly as before. The trade is dating — a
+#   proxy rate is current, not effective-dated. See set_price_provider.
 # Updated: 2026-09-02 (fix/metering-dated-pricing) — pricing is no longer a flat
 #   hand table. ``price_run`` is the front door: it asks ``genai-prices`` for an
 #   EFFECTIVE-DATED rate at the run's own moment, falls back to the same lookup
@@ -28,8 +36,29 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
+
+
+class PriceProvider(Protocol):
+    """A deployment's own price list. See ``set_price_provider``.
+
+    Returns the run's USD cost, or ``None`` for a model it does not price (which
+    falls through to the public price rungs). Must not raise.
+    """
+
+    def __call__(
+        self,
+        model: str,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int,
+        cache_write_tokens: int,
+        at: datetime,
+    ) -> Decimal | None: ...
+
 
 # ── Pricing" banner through the end of _estimate_cost.
 # Banked 2026-09-02 for fix/metering-dated-pricing.
@@ -202,6 +231,68 @@ def _model_refs(model: str) -> list[str]:
     return refs
 
 
+#: The deployment's own price list, installed by ``set_price_provider``. ``None``
+#: on OSS and anywhere nothing registered one, which is why every rung below it
+#: has to keep working.
+_PRICE_PROVIDER: PriceProvider | None = None
+
+
+def set_price_provider(provider: PriceProvider | None) -> None:
+    """Install (or clear, with ``None``) the deployment's own price list.
+
+    THE PROBLEM THIS SOLVES. Every rung below is somebody else's price list —
+    genai-prices ships a maintained public one, and ``_PRICING`` is a hand copy of
+    published rates. Neither can know what WE pay. A model served through our
+    LiteLLM proxy under a negotiated rate bills at list here, and a model that only
+    exists on our proxy — a fine-tune, an alias, a self-hosted weight — does not
+    appear in any public list at all, so it prices ``None`` and bills zero. That is
+    a bill we fail to send, and until 2026-09-02 it did not even log.
+
+    So this rung goes ABOVE the public lists rather than filling their gaps. The
+    proxy's configured cost is our actual cost basis, and where the two disagree
+    the proxy is the one that is right about us.
+
+    THE COST, stated because it is real: a proxy price is CURRENT, not
+    effective-dated. Rungs 1 and 2 price a run at the rate in force when it ran,
+    which matters because the metering sweeper drains a backlog that can span days.
+    A run priced here gets today's rate. That is the trade the deployment makes by
+    registering a provider, and it is the right one when the alternative is a
+    confidently wrong public price or no price at all.
+
+    The provider is called on the billing path and MUST NOT raise; anything it
+    throws is swallowed and treated as a miss. It returns ``Decimal | None``, where
+    ``None`` means "not my model" and falls through to the rungs below.
+    """
+    global _PRICE_PROVIDER
+    _PRICE_PROVIDER = provider
+
+
+def _price_via_provider(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    cache_write_tokens: int,
+    at: datetime,
+) -> Decimal | None:
+    """One registered-provider lookup. Returns None on any miss; never raises."""
+    provider = _PRICE_PROVIDER
+    if provider is None:
+        return None
+    try:
+        return provider(
+            model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            at=at,
+        )
+    except Exception:  # noqa: BLE001 — a run must not die over its own invoice
+        logger.debug("price_run: registered price provider failed for %r", model, exc_info=True)
+        return None
+
+
 def price_run(
     model: str | None,
     *,
@@ -261,6 +352,14 @@ def price_run(
     elif at.tzinfo is None:
         # Mongo hands back naive stamps; the whole codebase reads those as UTC.
         at = at.replace(tzinfo=UTC)
+
+    # Rung 0 — the deployment's own price list, when one has been registered.
+    # See ``set_price_provider``: on cloud this is the LiteLLM proxy's configured
+    # per-model cost, which is what we are actually charged, and it is the only
+    # rung that knows about a custom model or a negotiated rate.
+    priced = _price_via_provider(model, inp, out, read, write, at)
+    if priced is not None:
+        return priced
 
     for ref in _model_refs(model):
         priced = _price_via_library(ref, inp, out, read, write, at)

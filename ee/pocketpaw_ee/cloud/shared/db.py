@@ -9,6 +9,12 @@ to 0, so every customer read as broke and was refused runs they could pay for.
 A schema rename in a money path needs a boot-time tie to its migration, because
 half of it does not fail loudly on its own.
 
+2026-09-04 (fix/proxy-model-prices): ``init_cloud_db`` also loads the LiteLLM
+proxy's own per-model rates and registers them as the top rung of the pricing
+ladder. Runs were priced from public lists that cannot know our negotiated
+rates, and a model only our proxy serves appeared in none of them — it priced
+as None and billed nothing. Fails open: no proxy means the public lists.
+
 2026-07-22 (fix/starter-project-collision): added
 ``_drop_legacy_code_project_index`` and called it after ``init_beanie``, beside
 the invite-token reconcile and for the identical reason. ``CodeProject``'s
@@ -295,6 +301,17 @@ async def init_cloud_db(mongo_uri: str = "mongodb://localhost:27017/paw-enterpri
     from pocketpaw_ee.cloud.credits.service import verify_wallet_migrated
 
     await verify_wallet_migrated()
+
+    # Price runs from OUR proxy's rates before falling back to the public price
+    # lists. A model we serve at a negotiated rate otherwise bills at list, and a
+    # model that exists only on our proxy is in no public list at all — it prices
+    # as None and bills ZERO. Registered here so every consumer of the pricing
+    # ladder gets it; the snapshot refreshes again on each metering sweep. Both
+    # calls fail open: no proxy means the public lists, exactly as before.
+    from pocketpaw_ee.cloud.metering import proxy_prices
+
+    await proxy_prices.refresh(force=True)
+    proxy_prices.register()
 
 
 async def close_cloud_db() -> None:

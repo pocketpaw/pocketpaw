@@ -230,6 +230,16 @@ async def sweep_unbilled_runs(
     if not unbilled:
         return 0
 
+    # Refresh our own price list before pricing a batch. ``resolve_cost`` is
+    # synchronous and cannot fetch anything, so this is the async moment that keeps
+    # the proxy's rates current — including any model that exists only on our proxy
+    # and would otherwise price as None and bill zero. Inside its TTL this is a
+    # no-op, and a failed read keeps the previous snapshot, so it never blocks a
+    # sweep.
+    from pocketpaw_ee.cloud.metering import proxy_prices
+
+    await proxy_prices.refresh()
+
     card = rate_card if rate_card is not None else metering_service.load_rate_card()
 
     billed = 0
