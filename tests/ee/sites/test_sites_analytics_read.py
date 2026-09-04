@@ -3,6 +3,14 @@
 #
 # Created 2026-09-02 (feat/sites-analytics-read).
 #
+# Updated 2026-09-04 (AD-4 — the overview chart's data): section 9 covers the ``series``
+# block. Its central claim is one no amount of arithmetic proves on its own: a bucket that
+# nobody visited has to be a ZERO IN THE LIST, not an absent entry, because a chart handed
+# the shorter list draws a straight line across the gap and reports a quiet Sunday as no
+# Sunday at all. So the tests count the points as well as reading them, and the fixtures
+# are relative to now — the range is anchored on the clock, so a fixture pinned to a date
+# would drift out of its own window the week after it was written.
+#
 # Updated 2026-09-04 (AD-2 — visits, bounce rate and visit duration): section 8 covers
 # the visit block and the FOURTH empty state, a window whose rows all predate the visit
 # id and which has to read as "republish to start measuring visits" rather than as a zero
@@ -826,8 +834,9 @@ async def test_the_endpoint_distinguishes_never_counted_from_a_quiet_week(client
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failing", ["totals", "breakdown"])
 async def test_a_failure_on_ONE_query_still_fails_the_whole_read(beanie_test_db, failing):
-    """A read is FIVE queries — totals plus four breakdowns — and a swallow on ANY ONE of
-    them is the outage-as-quiet-week failure wearing a smaller hat. A panel whose totals
+    """A read is SEVEN queries — the totals, the visit aggregate, the time series and four
+    breakdowns — and a swallow on ANY ONE of them is the outage-as-quiet-week failure
+    wearing a smaller hat. A panel whose totals
     are real and whose referrer chart is silently empty is worse than an error, because
     nothing on screen says a query failed.
 
@@ -950,6 +959,11 @@ class _RawRowsCF:
         self.queries.append(sql)
         if "blob6 AS visit" in sql:
             return [self._visits(drop_unrecorded="blob6 != ''" in sql)]
+        if "AS bucket" in sql:
+            return self._series(
+                hourly="toStartOfHour(timestamp)" in sql,
+                sampled="SUM(_sample_interval) AS pageviews" in sql,
+            )
         if "GROUP BY" in sql:
             return []
         return [
@@ -977,6 +991,37 @@ class _RawRowsCF:
                 span = max(row["when"] for row in group) - min(row["when"] for row in group)
                 total_seconds += int(span.total_seconds()) * weight
         return {"visits": visits, "bounces": bounces, "total_seconds": total_seconds}
+
+    def _series(self, *, hourly: bool, sampled: bool) -> list[dict]:
+        """The bucketed rows, grouped the way the statement it was handed asks for.
+
+        ONLY THE BUCKETS THAT HAD TRAFFIC, which is what Analytics Engine returns and is
+        the point of faking it this way: the quiet buckets in the reader's answer can only
+        have come from the reader, so a test that counts them is testing the range it
+        generates rather than the fixture it was handed.
+
+        The two things it reads out of the statement are the two that change the answer —
+        which bucketing function was asked for, and whether the sampling interval is summed
+        or the rows are merely counted. A query that fixed the bucket size regardless of
+        the window, or that swapped ``COUNT()`` in for the sampled sum, therefore gets a
+        DIFFERENT answer here instead of the same one."""
+        grouped: dict[datetime, list[dict]] = {}
+        for row in self.rows:
+            when = row["when"]
+            bucket = (
+                when.replace(minute=0, second=0, microsecond=0)
+                if hourly
+                else when.replace(hour=0, minute=0, second=0, microsecond=0)
+            )
+            grouped.setdefault(bucket, []).append(row)
+        return [
+            {
+                "bucket": int(bucket.timestamp()),
+                "pageviews": sum(r["sample"] for r in rows) if sampled else len(rows),
+                "visitors": len({r["visitor"] for r in rows}),
+            }
+            for bucket, rows in sorted(grouped.items())
+        ]
 
 
 @pytest.mark.asyncio
@@ -1226,3 +1271,330 @@ async def test_the_endpoint_says_republish_rather_than_zero_bounce(client, monke
     assert body["pageviews"] == 1
     assert body["visits"] is None
     assert "visits" in body["unrecorded"]
+
+
+# ── 9. AD-4: the time series behind the overview chart ───────────────────────
+#
+# WHAT THESE ARE ABOUT IS THE BUCKETS THAT ARE NOT IN THE QUERY'S ANSWER. Analytics Engine
+# returns one row per bucket that had traffic and says nothing at all about the rest, so
+# every quiet hour in a response can only have been put there by the reader. That is why
+# these tests count the points as often as they read them, and why ``_RawRowsCF._series``
+# deliberately answers only the buckets the fixture put traffic in: a fake that helpfully
+# padded the range would test itself.
+#
+# THE FIXTURES ARE RELATIVE TO NOW, unlike section 8's. The range is anchored on the clock
+# rather than on the data, so a row pinned to a date would slide out of its own window some
+# weeks after the test was written and start being folded into the first bucket — a suite
+# still green while asserting something other than what it says.
+
+_HOUR = "hour"
+_DAY = "day"
+
+
+def _bucket_of(moment: datetime, interval: str = _HOUR) -> str:
+    """The bucket stamp the response will carry for a moment, worked out independently of
+    the code under test."""
+    floored = (
+        moment.replace(minute=0, second=0, microsecond=0)
+        if interval == _HOUR
+        else moment.replace(hour=0, minute=0, second=0, microsecond=0)
+    )
+    return floored.isoformat()
+
+
+def _points(out: Any) -> dict[str, tuple[int, int]]:
+    return {point.bucket: (point.pageviews, point.visitors) for point in out.series.points}
+
+
+def _mid_hour(moment: datetime) -> datetime:
+    """The half-hour mark of the hour a moment falls in.
+
+    Anchoring a fixture here is what lets several rows be asserted into ONE bucket: two
+    rows a minute apart around an arbitrary instant sit in the same hour almost always, and
+    a test that is right almost always is a test that fails for somebody else."""
+    return moment.replace(minute=30, second=0, microsecond=0)
+
+
+@pytest.mark.asyncio
+async def test_traffic_in_three_hours_still_returns_a_full_day_of_buckets(beanie_test_db):
+    """THE CLAIM THE WHOLE SLICE RESTS ON. Three hours had visitors and the rest had none,
+    and every silent one of them is a zero in the list.
+
+    Handed only the three, a chart draws a line from the first to the second and renders
+    the quiet hours between as a gradual decline that never happened. The list being the
+    right LENGTH is the assertion; the fake returns only the buckets it has traffic for, so
+    the other twenty-two came from the reader or they came from nowhere."""
+    now = datetime.now(UTC)
+    site = await _seed_site(counting_since=now - timedelta(days=30))
+    cf = _RawRowsCF(
+        [
+            _pv(now - timedelta(hours=8), "a"),
+            _pv(now - timedelta(hours=5), "b"),
+            _pv(now - timedelta(hours=5), "c"),
+            _pv(now - timedelta(hours=2), "d"),
+        ]
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), window="24h", _cloudflare=cf
+    )
+
+    assert out.series is not None
+    assert out.series.interval == _HOUR
+    assert len(out.series.points) == 25, "a rolling 24-hour window spans 25 hour buckets"
+    points = _points(out)
+    assert points[_bucket_of(now - timedelta(hours=8))] == (1, 1)
+    assert points[_bucket_of(now - timedelta(hours=5))] == (2, 2)
+    assert points[_bucket_of(now - timedelta(hours=2))] == (1, 1)
+    for quiet in (7, 6, 4, 3):
+        assert points[_bucket_of(now - timedelta(hours=quiet))] == (0, 0), "a quiet hour"
+    # And the chart adds up to the number printed above it, which is the property a person
+    # looking at the panel can actually check.
+    assert sum(point.pageviews for point in out.series.points) == out.pageviews == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "window,interval,count",
+    [("24h", _HOUR, 25), ("7d", _DAY, 8), ("30d", _DAY, 31), ("90d", _DAY, 91)],
+)
+async def test_the_bucket_size_is_chosen_from_the_window(beanie_test_db, window, interval, count):
+    """A bar chart stops being readable somewhere around a hundred bars, so the bucket has
+    to divide the window into fewer than that: a week of hourly buckets is 168 and a month
+    is 720. Only the shortest window gets hours, and it is the one where an hour is what
+    the reader wants anyway.
+
+    Asserted PER WINDOW rather than once, because a reader that fixed the interval would
+    still answer plausibly on whichever window its author had in mind."""
+    now = datetime.now(UTC)
+    site = await _seed_site(pocket_id=f"pk-{window}", counting_since=now - timedelta(days=200))
+    cf = _RawRowsCF([_pv(now - timedelta(hours=2), "one")])
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), window=window, _cloudflare=cf
+    )
+
+    assert out.series.interval == interval
+    assert len(out.series.points) == count
+
+
+def test_every_window_the_endpoint_accepts_has_a_bucket_size():
+    """Two tables, keyed the same, with nothing joining them. A window added to one and not
+    the other is a KeyError on a live read of a window the endpoint has already accepted —
+    a 500 rather than a lint failure, and cheap to pin here instead."""
+    assert set(sites_service._ANALYTICS_WINDOWS) == set(sites_service._ANALYTICS_SERIES_INTERVALS)
+
+
+@pytest.mark.asyncio
+async def test_a_sampled_row_contributes_its_weight_to_its_bucket(beanie_test_db):
+    """Analytics Engine downsamples a hot index and sets ``_sample_interval`` on each
+    survivor to the number of rows it stands for. A bucket that counted rows would draw a
+    bar of 1 where the truth is 40 — and it would do it on precisely the busiest sites,
+    which are the ones whose owner is watching the chart."""
+    now = datetime.now(UTC)
+    site = await _seed_site(counting_since=now - timedelta(days=30))
+    cf = _RawRowsCF([_pv(now - timedelta(hours=3), "busy", sample=40)])
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), window="24h", _cloudflare=cf
+    )
+
+    assert _points(out)[_bucket_of(now - timedelta(hours=3))] == (40, 1)
+    assert sum(point.pageviews for point in out.series.points) == 40
+
+
+@pytest.mark.asyncio
+async def test_a_window_with_no_rows_is_a_series_of_zeros_and_not_an_empty_list(beanie_test_db):
+    """Nobody visited, and there is no series, are different claims — and only the first of
+    them is true here. An empty list tells a chart there is nothing to draw; a full range of
+    zeroes tells it to draw a flat line along the baseline, which is what a quiet week
+    actually looks like."""
+    now = datetime.now(UTC)
+    site = await _seed_site(counting_since=now - timedelta(days=30))
+    cf = _RawRowsCF([])
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), window="24h", _cloudflare=cf
+    )
+
+    assert out.status == "ok"
+    assert out.series is not None, "a quiet window is not an unanswerable one"
+    assert len(out.series.points) == 25
+    assert all(point.pageviews == 0 and point.visitors == 0 for point in out.series.points)
+    assert out.pageviews == 0
+
+
+@pytest.mark.asyncio
+async def test_a_bucket_reports_its_pageviews_and_its_visitors_separately(beanie_test_db):
+    """Two people, three pageviews, one hour. A reader that filled both fields from the
+    same column would answer (3, 3) or (2, 2) and raise nothing anywhere: on a real site
+    the two numbers sit close together, so the wrong one looks entirely plausible on a
+    chart."""
+    now = datetime.now(UTC)
+    anchor = _mid_hour(now - timedelta(hours=4))
+    site = await _seed_site(counting_since=now - timedelta(days=30))
+    cf = _RawRowsCF(
+        [
+            _pv(anchor, "reader"),
+            _pv(anchor + timedelta(minutes=1), "reader"),
+            _pv(anchor + timedelta(minutes=2), "passer-by"),
+        ]
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), window="24h", _cloudflare=cf
+    )
+
+    assert _points(out)[_bucket_of(anchor)] == (3, 2)
+
+
+@pytest.mark.asyncio
+async def test_every_bucket_stamp_is_utc_and_the_points_run_forwards(beanie_test_db):
+    """The zone travels with every stamp because the stamp becomes an axis label: an hour
+    rendered as ``1PM`` that means 13:00 UTC is five and a half hours wrong for a reader in
+    Mumbai, and nothing on the screen would say so.
+
+    The ORDER is asserted for a related reason — a chart draws the list in the order it
+    arrives, so a series sorted by traffic would render a plausible-looking day whose hours
+    are in no order at all."""
+    now = datetime.now(UTC)
+    site = await _seed_site(counting_since=now - timedelta(days=30))
+    cf = _RawRowsCF([_pv(now - timedelta(hours=6), "one"), _pv(now - timedelta(hours=1), "two")])
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), window="24h", _cloudflare=cf
+    )
+
+    stamps = [point.bucket for point in out.series.points]
+    assert all(stamp.endswith("+00:00") for stamp in stamps), "an unzoned hour is a wrong hour"
+    parsed = [datetime.fromisoformat(stamp) for stamp in stamps]
+    assert parsed == sorted(parsed)
+    assert all(
+        later - earlier == timedelta(hours=1) for earlier, later in zip(parsed, parsed[1:])
+    ), "no bucket is skipped, so the gaps are all one hour"
+
+
+@pytest.mark.asyncio
+async def test_the_series_does_not_chart_time_before_counting_began(beanie_test_db):
+    """A site that has been counting for two days answering a ninety-day request with
+    eighty-eight zeroed days would be this endpoint's one forbidden move — inventing a
+    zero — drawn at chart scale, and worse there than on the panel: a long flat run along
+    the baseline does not look like missing data, it looks like a site nobody visits.
+
+    ``counting_since`` is on the response so a client can say where the short chart came
+    from."""
+    now = datetime.now(UTC)
+    began = now - timedelta(days=2)
+    site = await _seed_site(counting_since=began)
+    cf = _RawRowsCF([_pv(now - timedelta(hours=2), "one")])
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), window="90d", _cloudflare=cf
+    )
+
+    assert out.series.interval == _DAY
+    assert len(out.series.points) == 3, "the day counting began, and the two days since"
+    assert out.series.points[0].bucket == _bucket_of(began, _DAY)
+    assert out.counting_since is not None
+
+
+@pytest.mark.asyncio
+async def test_a_row_from_before_counting_began_is_folded_rather_than_dropped(beanie_test_db):
+    """A site that lapsed and re-subscribed still holds rows inside the ninety-day
+    retention that predate the ``counting_since`` its current subscription wrote. Dropping
+    them would leave the chart summing to less than the pageview total printed directly
+    above it, with nothing on the screen to explain the difference — so they land in the
+    first bucket, which is the edge of what was recorded."""
+    now = datetime.now(UTC)
+    site = await _seed_site(counting_since=now - timedelta(days=1))
+    cf = _RawRowsCF(
+        [
+            _pv(now - timedelta(days=5), "lapsed"),
+            _pv(now, "current"),
+        ]
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), window="7d", _cloudflare=cf
+    )
+
+    assert len(out.series.points) == 2
+    assert sum(point.pageviews for point in out.series.points) == out.pageviews == 2
+    assert out.series.points[0].pageviews == 1, "folded onto the edge of what was recorded"
+
+
+@pytest.mark.asyncio
+async def test_the_states_that_report_no_numbers_report_no_series(beanie_test_db):
+    """A range of zeroes for a site whose plan does not buy analytics is the panel of
+    confident zeros in chart form, and it is the more convincing of the two: an empty table
+    reads as an empty table, while a flat line reads as a measurement."""
+    now = datetime.now(UTC)
+    unentitled = await _seed_site(pocket_id="pk-s1", plan_tier="free", counting_since=now)
+    never = await _seed_site(pocket_id="pk-s2", counting_since=None)
+
+    for site in (unentitled, never):
+        out = await sites_service.site_analytics(
+            workspace_id="ws-read", site_id=str(site.id), _cloudflare=_RawRowsCF([])
+        )
+        assert out.status != "ok"
+        assert out.series is None
+
+
+@pytest.mark.asyncio
+async def test_the_series_statement_is_the_one_cloudflare_will_run(beanie_test_db):
+    """The statement is the artifact, so it is asserted as text — nothing in this suite
+    executes SQL, and a fake will happily answer a query that groups on the wrong column.
+
+    ``toStartOfHour`` and ``toStartOfDay`` are both in the SQL API's published date-and-time
+    set, checked against the reference rather than recalled, and both work in UTC with no
+    zone argument. ``toUnixTimestamp`` around them is what makes the bucket arrive as an
+    integer instead of as whatever string form the JSON renderer picks for a DateTime."""
+    now = datetime.now(UTC)
+    site = await _seed_site(counting_since=now - timedelta(days=200))
+    cf = _RawRowsCF([_pv(now - timedelta(hours=2), "one")])
+
+    await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), window="24h", _cloudflare=cf
+    )
+    await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), window="30d", _cloudflare=cf
+    )
+
+    hourly = next(sql for sql in cf.queries if "toStartOfHour" in sql)
+    assert "toUnixTimestamp(toStartOfHour(timestamp)) AS bucket" in hourly
+    assert "SUM(_sample_interval) AS pageviews" in hourly, "a plain count under-reports"
+    assert "COUNT(DISTINCT blob4) AS visitors" in hourly
+    assert "COUNT() AS pageviews" not in hourly
+    assert "GROUP BY bucket" in hourly
+    assert "ORDER BY bucket" in hourly, "a chart reads its rows by when, not by traffic"
+    # The site and the window scope it exactly as they scope every other statement here.
+    assert f"index1 = '{site.id}'" in hourly
+    assert "INTERVAL '1' DAY" in hourly
+    # Neither is supported by the SQL API, and both are what a reader reaches for first.
+    assert "WITH " not in hourly
+    assert "JOIN" not in hourly
+
+    daily = next(sql for sql in cf.queries if "toStartOfDay" in sql)
+    assert "toUnixTimestamp(toStartOfDay(timestamp)) AS bucket" in daily
+    assert "INTERVAL '30' DAY" in daily
+
+
+@pytest.mark.asyncio
+async def test_the_endpoint_serves_the_series(client, monkeypatch):
+    """End to end, which is where the nested list's serialisation is enforced. Every
+    service test above would pass against a model the wire cannot render."""
+    now = datetime.now(UTC)
+    site = await _seed_site(workspace_id="ws-http", counting_since=now - timedelta(days=30))
+    cf = _RawRowsCF([_pv(now - timedelta(hours=2), "one"), _pv(now - timedelta(hours=2), "two")])
+    monkeypatch.setattr(sites_service, "_cf_client", lambda: cf)
+
+    resp = await client.get(f"/api/v1/sites/{site.id}/analytics?window=24h")
+
+    assert resp.status_code == 200, resp.text
+    series = resp.json()["series"]
+    assert series["interval"] == "hour"
+    assert len(series["points"]) == 25, "the quiet hours are on the wire too"
+    busy = [point for point in series["points"] if point["pageviews"]]
+    assert len(busy) == 1
+    assert (busy[0]["pageviews"], busy[0]["visitors"]) == (2, 2)
+    assert busy[0]["bucket"].endswith("+00:00")

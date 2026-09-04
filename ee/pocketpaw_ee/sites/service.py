@@ -1,6 +1,23 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-04 (AD-4 — the overview chart's data): ``site_analytics`` answers a
+# ``series`` block, the same totals grouped by a time bucket. SEVEN queries per uncached
+# read now, up from six. The bucket is an HOUR for the 24-hour window and a DAY for the
+# other three, which is a readability limit rather than a preference: a bar chart stops
+# being legible somewhere around a hundred bars, and a week of hourly buckets is a hundred
+# and sixty-eight of them before the month and the quarter are even considered.
+#
+# The part worth knowing before reading the code is that the RANGE IS BUILT IN PYTHON and
+# the query only fills it. Serving the rows Cloudflare returned would silently omit every
+# bucket nobody visited, and a chart handed a shorter list joins the ends of the gap with a
+# straight line — a quiet Sunday rendered as no Sunday at all. So the buckets are generated
+# and then filled, which also makes the series sum to the pageview total above it.
+#
+# It adds NO empty state. The column it groups on is the row's own timestamp, which every
+# stored row has carried since the first one, so unlike the device class and the visit id
+# there is no row shape this cannot answer.
+#
 # Updated 2026-09-04 (AD-2 — visits, bounce rate and visit duration): ``site_analytics``
 # answers a VISIT block beside the pageview totals, read off the visit id AD-1 stamps on
 # every row. It costs one more query — SIX per uncached read, up from five — and it is the
@@ -1055,6 +1072,8 @@ from pocketpaw_ee.sites.dto import (
     DomainStatusResponse,
     SiteAnalyticsBreakdown,
     SiteAnalyticsResponse,
+    SiteAnalyticsSeries,
+    SiteAnalyticsSeriesPoint,
     SiteAnalyticsVisits,
     SiteClientResponse,
     SiteClientUpdate,
@@ -5284,6 +5303,7 @@ def _analytics_sql(
     limit: int = 0,
     where: str = "",
     outer: str = "",
+    order: str = "pageviews DESC",
 ) -> str:
     """Build ONE Analytics Engine statement over this site's pageview rows.
 
@@ -5309,6 +5329,12 @@ def _analytics_sql(
     The dataset, the site filter and the window all stay on the INNER half — the only
     half that touches a table — so a subquery form is scoped by the same two conditions
     every other statement here is.
+
+    ``order`` names the sort a grouped statement gets. It defaults to the breakdowns'
+    ``pageviews DESC``, which is what makes their LIMIT a top-N; the time series overrides
+    it with the bucket, because a chart's rows are read by WHEN and sorting a quarter of
+    days by traffic would be a sort whose result nothing looks at. Another literal written
+    in this file, for the reason the paragraph above gives.
     """
     if not re.fullmatch(r"[0-9a-f]{24}", site_id):
         # Belt and braces behind ``_load``'s ObjectId round-trip. This is the last
@@ -5330,7 +5356,7 @@ def _analytics_sql(
             # The sort is what makes a breakdown's LIMIT a top-N. An aggregate reading a
             # subquery does not care what order its rows arrive in, so the outer form does
             # not pay Cloudflare to sort a site's whole visit table and then discard it.
-            parts.append("ORDER BY pageviews DESC")
+            parts.append(f"ORDER BY {order}")
     if limit:
         parts.append(f"LIMIT {int(limit)}")
     if outer:
@@ -5406,6 +5432,58 @@ _ANALYTICS_VISIT_TOTALS = (
 )
 
 
+# ── AD-4: the time series ────────────────────────────────────────────────────
+#
+# WHICH BUCKET EACH WINDOW GETS, and the reasoning, because the two long windows are the
+# ones a reader will question. A bar chart stops being readable somewhere around a hundred
+# bars — past that the bars are thinner than the gaps between them and the axis labels
+# collide — so the bucket has to divide the window into fewer than that:
+#
+#   24h → HOUR, 25 buckets. The only window short enough for hours, and the one where
+#         hours are what the reader actually wants: "when today did the traffic come".
+#   7d  → DAY, 8 buckets. Hourly would be 168, past the limit — and a week read hour by
+#         hour is a chart of the same daily shape drawn seven times, which answers a
+#         question ("what time of day do people read") that 24h already answers better.
+#   30d → DAY, 31 buckets. Hourly would be 720.
+#   90d → DAY, 91 buckets. Just inside the limit, and the reason there is no third bucket
+#         size: a week bucket would fit a quarter into 13 bars, but it would also make the
+#         series' units change twice across four windows for one bar's worth of clutter.
+#
+# The counts are one MORE than the window's name suggests because the window is a rolling
+# one — ``timestamp > NOW() - INTERVAL 'n' DAY``, not a calendar range — so its start lands
+# inside a bucket rather than on one. That leading bucket is genuinely partial and is kept
+# rather than dropped: dropping it would delete real traffic from the chart and leave the
+# series summing to less than the pageview total printed directly above it.
+_ANALYTICS_SERIES_HOUR = "hour"
+_ANALYTICS_SERIES_DAY = "day"
+_ANALYTICS_SERIES_INTERVALS: dict[str, str] = {
+    "24h": _ANALYTICS_SERIES_HOUR,
+    "7d": _ANALYTICS_SERIES_DAY,
+    "30d": _ANALYTICS_SERIES_DAY,
+    "90d": _ANALYTICS_SERIES_DAY,
+}
+
+# The bucketing expression per interval. ``toStartOfHour`` and ``toStartOfDay`` are both in
+# the SQL API's documented date-and-time set, and both work in UTC with no zone argument —
+# which is the zone every other stamp on this response is in, so nothing here has to
+# reconcile two.
+#
+# Wrapped in ``toUnixTimestamp`` — also documented, and already used by the visit statement
+# — so the bucket arrives as an INTEGER rather than as whatever string form the JSON
+# renderer picks for a DateTime. An integer needs no parsing contract with Cloudflare, goes
+# through ``_analytics_int`` like every other cell here, and cannot be read in the wrong
+# zone on the way in.
+_ANALYTICS_SERIES_BUCKET_SQL: dict[str, str] = {
+    _ANALYTICS_SERIES_HOUR: "toStartOfHour(timestamp)",
+    _ANALYTICS_SERIES_DAY: "toStartOfDay(timestamp)",
+}
+
+_ANALYTICS_SERIES_STEP: dict[str, timedelta] = {
+    _ANALYTICS_SERIES_HOUR: timedelta(hours=1),
+    _ANALYTICS_SERIES_DAY: timedelta(days=1),
+}
+
+
 async def site_analytics(
     *,
     workspace_id: str,
@@ -5444,6 +5522,11 @@ async def site_analytics(
     the oldest rows in a window were written, so one part of an otherwise healthy
     response can be unanswerable while the rest of it is real. See
     ``_analytics_devices`` and ``_analytics_visits``.
+
+    ``series`` is NOT one of those. It groups on the row's own timestamp, which every
+    stored row has carried since the first one, so there is no row shape it cannot answer
+    and no window in which it goes unrecorded — a quiet week is a full range of zeroes.
+    See ``_analytics_series`` for why the range is generated rather than returned.
     """
     doc = await _load(workspace_id, site_id)
 
@@ -5510,6 +5593,26 @@ async def site_analytics(
         visit_rows[0] if visit_rows else {}, pageviews=pageviews
     )
 
+    # THE SERIES. One more grouped read of the same rows the totals came from, bucketed by
+    # the row's own timestamp. It is ordered by the bucket rather than by traffic because a
+    # chart reads its rows by WHEN — and the range it fills is built below, not taken from
+    # what came back, so a bucket nobody visited is a zero instead of a hole.
+    interval = _ANALYTICS_SERIES_INTERVALS[window]
+    series_rows = await cf.query_analytics_sql(
+        _analytics_sql(
+            select=(
+                f"toUnixTimestamp({_ANALYTICS_SERIES_BUCKET_SQL[interval]}) AS bucket, "
+                "SUM(_sample_interval) AS pageviews, "
+                "COUNT(DISTINCT blob4) AS visitors"
+            ),
+            site_id=site_id,
+            days=days,
+            group="bucket",
+            order="bucket",
+        )
+    )
+    series = _analytics_series(series_rows, interval=interval, days=days, since=since)
+
     breakdowns: dict[str, list[SiteAnalyticsBreakdown]] = {}
     for field, blob, empty in _ANALYTICS_DIMENSIONS:
         rows = await cf.query_analytics_sql(
@@ -5536,6 +5639,7 @@ async def site_analytics(
         pageviews=pageviews,
         visitors=_analytics_int(totals, "visitors"),
         visits=visits,
+        series=series,
         top_pages=breakdowns["top_pages"],
         referrers=breakdowns["referrers"],
         countries=breakdowns["countries"],
@@ -5617,6 +5721,89 @@ def _analytics_visits(row: dict, *, pageviews: int) -> tuple[SiteAnalyticsVisits
             duration_seconds=round(total_seconds / measured, 1) if measured else None,
         ),
         [],
+    )
+
+
+def _analytics_series_floor(moment: datetime, interval: str) -> datetime:
+    """The start of the bucket a moment falls in, in UTC.
+
+    A NAIVE value is read as UTC, for the reason ``_analytics_iso`` gives one function
+    down: Mongo hands back a stamp written as tz-aware with no zone on it, and ``since``
+    arrives here straight off the document. Without this the comparison against an aware
+    window bound raises, and floor'ing whatever the host's local zone happens to be would
+    start the chart at the machine's midnight rather than at the day's.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    moment = moment.astimezone(UTC)
+    if interval == _ANALYTICS_SERIES_HOUR:
+        return moment.replace(minute=0, second=0, microsecond=0)
+    return moment.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _analytics_series(
+    rows: list[dict], *, interval: str, days: int, since: datetime
+) -> SiteAnalyticsSeries:
+    """The chart's points for one window — every bucket in the range, oldest first.
+
+    THE RANGE IS GENERATED HERE AND THE QUERY ONLY FILLS IT, which is the whole reason
+    this is a function rather than a comprehension over ``rows``. Analytics Engine answers
+    one row per bucket that HAD traffic, and a chart drawn from that list joins the two
+    ends of every gap with a straight line: an hour nobody visited does not appear as an
+    empty hour, it stops existing, and a quiet Sunday is drawn as no Sunday at all. A zero
+    is a measurement. A missing entry is a different claim and it is not a true one.
+
+    IT STARTS AT THE LATER of the window's own start and the bucket holding
+    ``counting_since``. Eighty-eight zeroed days in front of a site that has been counting
+    for two would be this endpoint's one forbidden move — inventing a zero — drawn at
+    chart scale, and it is worse there than on the panel: a long flat run at the baseline
+    does not read as missing data, it reads as a site nobody visits.
+
+    ROWS OUTSIDE THE RANGE ARE FOLDED INTO THE NEAREST END rather than dropped, and two
+    ordinary things put them there. Our clock and Cloudflare's ``NOW()`` are not the same
+    clock, so the newest bucket can land a moment past the end; and a site that lapsed and
+    re-subscribed has rows still inside the ninety-day retention that predate the
+    ``counting_since`` its current subscription wrote. Dropping either would leave the
+    chart summing to less than the pageview total printed directly above it, with nothing
+    on screen to explain the gap. The fold moves traffic by at most one bucket at the top,
+    and at the bottom it lands in the bucket the trim has already marked as the edge of
+    what was recorded.
+    """
+    step = _ANALYTICS_SERIES_STEP[interval]
+    now = datetime.now(UTC)
+    end = _analytics_series_floor(now, interval)
+    start = max(
+        _analytics_series_floor(now - timedelta(days=days), interval),
+        _analytics_series_floor(since, interval),
+    )
+    # A ``counting_since`` in the future — a clock correction, a stamp written by a host
+    # running ahead — would otherwise make ``start`` later than ``end`` and produce an
+    # EMPTY series, which is the one answer this function must never give: a chart with no
+    # points reads as no data, and the truth is one bucket that has not finished yet.
+    start = min(start, end)
+
+    buckets: dict[datetime, list[int]] = {}
+    moment = start
+    while moment <= end:
+        buckets[moment] = [0, 0]
+        moment += step
+
+    for row in rows:
+        stamp = _analytics_series_floor(
+            datetime.fromtimestamp(_analytics_int(row, "bucket"), UTC), interval
+        )
+        cell = buckets[min(max(stamp, start), end)]
+        cell[0] += _analytics_int(row, "pageviews")
+        cell[1] += _analytics_int(row, "visitors")
+
+    return SiteAnalyticsSeries(
+        interval=interval,
+        points=[
+            SiteAnalyticsSeriesPoint(
+                bucket=_analytics_iso(moment), pageviews=pageviews, visitors=visitors
+            )
+            for moment, (pageviews, visitors) in buckets.items()
+        ],
     )
 
 

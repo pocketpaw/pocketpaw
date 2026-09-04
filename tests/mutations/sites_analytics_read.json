@@ -352,5 +352,86 @@
     "tests": [
       "tests/ee/sites/test_sites_analytics_read.py"
     ]
+  },
+  {
+    "label": "the series drops the buckets nobody visited — a chart handed only the hours that had traffic joins the ends of every gap with a straight line, so a quiet Sunday is drawn as no Sunday at all",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            for moment, (pageviews, visitors) in buckets.items()",
+    "replace": "            for moment, (pageviews, visitors) in buckets.items()\n            if pageviews or visitors",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the series counts rows instead of summing the sampling interval — every bar on a downsampled site is a fraction of its real height, and the chart stops agreeing with the pageview total printed above it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                f\"toUnixTimestamp({_ANALYTICS_SERIES_BUCKET_SQL[interval]}) AS bucket, \"\n                \"SUM(_sample_interval) AS pageviews, \"",
+    "replace": "                f\"toUnixTimestamp({_ANALYTICS_SERIES_BUCKET_SQL[interval]}) AS bucket, \"\n                \"COUNT() AS pageviews, \"",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the bucket size is fixed at an hour whatever the window — a month arrives as 720 bars, thinner than the gaps between them, and a quarter as 2160",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    interval = _ANALYTICS_SERIES_INTERVALS[window]",
+    "replace": "    interval = _ANALYTICS_SERIES_HOUR",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the bucket size is fixed at a day whatever the window — the 24-hour view collapses to two bars and answers 'when today did the traffic come' with 'today'",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "_ANALYTICS_SERIES_INTERVALS: dict[str, str] = {\n    \"24h\": _ANALYTICS_SERIES_HOUR,",
+    "replace": "_ANALYTICS_SERIES_INTERVALS: dict[str, str] = {\n    \"24h\": _ANALYTICS_SERIES_DAY,",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "a bucket's pageviews are read off the visitors column — the two sit close together on every real site, so the wrong one draws a chart that looks entirely plausible",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        cell[0] += _analytics_int(row, \"pageviews\")\n        cell[1] += _analytics_int(row, \"visitors\")",
+    "replace": "        cell[0] += _analytics_int(row, \"visitors\")\n        cell[1] += _analytics_int(row, \"visitors\")",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the series charts the whole window regardless of when counting began — a site counting for two days answers a 90-day request with 88 zeroed days, which reads as a site nobody visits rather than as a period nobody recorded",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    start = max(\n        _analytics_series_floor(now - timedelta(days=days), interval),\n        _analytics_series_floor(since, interval),\n    )",
+    "replace": "    start = _analytics_series_floor(now - timedelta(days=days), interval)",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "a row outside the generated range is dropped rather than folded onto the nearest end — the chart quietly sums to less than the total printed directly above it, with nothing on screen to explain the difference",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        cell = buckets[min(max(stamp, start), end)]",
+    "replace": "        if stamp not in buckets:\n            continue\n        cell = buckets[stamp]",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "a bucket stamp reaches the wire with no zone — the axis label '1PM' means 13:00 UTC and reads as local time, so the chart is five and a half hours wrong in Mumbai and says nothing about it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                bucket=_analytics_iso(moment), pageviews=pageviews, visitors=visitors",
+    "replace": "                bucket=moment.replace(tzinfo=None).isoformat(),\n                pageviews=pageviews,\n                visitors=visitors,",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the series statement stops asking for chronological order and inherits the breakdowns' sort by traffic — the points arrive ranked by how busy they were, which a chart draws in exactly that order",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            group=\"bucket\",\n            order=\"bucket\",",
+    "replace": "            group=\"bucket\",",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
   }
 ]
