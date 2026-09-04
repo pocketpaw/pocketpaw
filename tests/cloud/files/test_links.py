@@ -50,10 +50,11 @@ async def _note(
     *,
     pocket_id: str | None = None,
     age_minutes: int = 0,
+    file_id: str | None = None,
 ) -> str:
     store = MongoFileStore()
     rec = FileRecord(
-        id=uuid.uuid4().hex,
+        id=file_id or uuid.uuid4().hex,
         storage_key=f"editor/{uuid.uuid4().hex}",
         filename=name,
         mime="text/markdown",
@@ -180,3 +181,13 @@ async def test_graph_pocket_membership(monkeypatch, links_db):
 
     body = _client(monkeypatch, member=allow).get("/api/v1/files/graph?pocket_id=p1").json()
     assert [n["id"] for n in body["nodes"]] == [s]
+
+
+async def test_editor_id_with_slash_reaches_the_links_route(monkeypatch, links_db):
+    """write_file stores ``ws:path`` ids; a daily note's path carries a slash."""
+    daily = await _note("w1", "2026-09-05.md", "[[Plan]]", file_id="w1:Daily/2026-09-05.md")
+    plan = await _note("w1", "Plan.md")
+
+    r = _client(monkeypatch).get(f"/api/v1/files/{daily}/links")
+    assert r.status_code == 200, r.text
+    assert r.json()["outgoing"][0]["file_id"] == plan

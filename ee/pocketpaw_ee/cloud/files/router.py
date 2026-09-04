@@ -4,7 +4,9 @@
 (the same MEMBER action the knowledge search uses). ``GET /files/{id}/links``
 returns a file's outgoing wikilink targets and backlinks;
 ``GET /files/graph?pocket_id=`` returns the library as nodes + edges with the
-same pocket-membership rule as ``GET /files``. Errors are ``CloudError``
+same pocket-membership rule as ``GET /files``. The links route takes
+``{file_id:path}`` because editor notes store ``ws:path`` ids that can carry
+slashes. Errors are ``CloudError``
 (``file.not_found``, ``files.pocket_forbidden``), never ``HTTPException``.
 
 The module-level ``router`` keeps the Cluster E sub-PR 4 contract
@@ -232,7 +234,9 @@ async def files_graph(
 
 
 @router.get(
-    "/{file_id}/links",
+    # ``:path`` so an editor-written id (``ws:Daily/2026-09-05.md``, slash
+    # included) reaches the handler; Starlette backtracks past ``/links``.
+    "/{file_id:path}/links",
     response_model=FileLinksResponse,
     dependencies=[Depends(require_action_any_workspace("kb.read"))],
 )
