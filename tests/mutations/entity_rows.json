@@ -230,8 +230,8 @@
   {
     "label": "wiring: the beanie 1.x collection API comes back",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
-    "find": "_PocketDoc.get_pymongo_collection().find(",
-    "replace": "_PocketDoc.get_motor_collection().find(",
+    "find": "_PocketDoc.get_pymongo_collection().find({\"workspace\": workspace_id}, {\"_id\": 1})",
+    "replace": "_PocketDoc.get_motor_collection().find({\"workspace\": workspace_id}, {\"_id\": 1})",
     "tests": [
       "tests/cloud/pockets/test_short_id_tool_wiring.py"
     ]

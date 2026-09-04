@@ -1,17 +1,22 @@
-# Tests for the request-log write path's task handling and path skipping.
+# Tests for the request-log write path's backpressure and path skipping.
 #
-# Created 2026-09-04 alongside the fix. Two behaviours are pinned here because
-# both failed silently in production shape and neither is visible from a
-# response:
+# Created 2026-09-04 alongside the fix that made telemetry writes safe.
+# Rewritten the same day, when the write path changed shape: it no longer
+# spawns one task per request, it queues one entry per request for a single
+# consumer to batch. The properties being pinned did not change, but where
+# they live did.
 #
-#   * A telemetry write task must be strongly referenced. The old code used
+#   * The write must be strongly referenced. The original code used
 #     asyncio.ensure_future and kept no reference, so the loop's weak
 #     reference was the only one and a pending write could be collected
-#     mid-await. Nothing surfaces when that happens — the row is simply
-#     missing, sometimes.
-#   * The number of in-flight writes must be bounded. Unbounded, a Mongo stall
-#     turns into unbounded memory growth in the web process instead of
-#     backpressure.
+#     mid-await, silently. Now there is exactly one long-lived consumer, and
+#     it is the module that holds it.
+#   * The backlog must be bounded. Unbounded, a Mongo stall turns into
+#     unbounded memory growth in the web process instead of backpressure.
+#     The ceiling moved from in-flight tasks to queued entries.
+#   * The high-volume, no-audit-value paths must never reach any of this.
+#
+# The batching itself is covered in tests/cloud/test_request_log_batching.py.
 #
 # NOTE: this file lives under tests/cloud/, which the CI lanes exclude, so it
 # does not run on a pull request today. That exclusion is a known pre-existing
@@ -27,12 +32,22 @@ from pocketpaw_ee.cloud._core import request_log
 
 @pytest.fixture(autouse=True)
 def _clean_module_state():
-    """Each test starts with an empty pending set and drop counter."""
-    request_log._pending.clear()
-    request_log._dropped = 0
+    """Each test starts with no consumer, no queue and no drop count."""
+    request_log._reset_for_tests()
     yield
-    request_log._pending.clear()
-    request_log._dropped = 0
+    request_log._reset_for_tests()
+
+
+async def _stop_consumer() -> None:
+    """Reset while a loop is still running, then let the cancel land.
+
+    The autouse fixture is synchronous, so its reset happens after the loop is
+    gone and the cancelled consumer is finalized by the garbage collector
+    instead - which CPython reports as an unraisable "Event loop is closed"
+    against whichever test happens to run next.
+    """
+    request_log._reset_for_tests()
+    await asyncio.sleep(0)
 
 
 def _log_once(**overrides):
@@ -86,99 +101,100 @@ class TestSkippedPaths:
         assert request_log._is_skipped(path) is False
 
 
-class TestTaskLifetime:
+class TestConsumerLifetime:
     @pytest.mark.asyncio
-    async def test_pending_task_is_strongly_referenced_until_it_finishes(self, monkeypatch):
-        """The write task must be held, not left to the loop's weak reference."""
+    async def test_the_consumer_is_strongly_referenced(self, monkeypatch):
+        """The module holds the consumer, not the loop's weak reference."""
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def _slow_record(**_kwargs):
+        async def _slow_record_many(entries):  # noqa: ARG001
             started.set()
             await release.wait()
+            return len(entries)
 
         monkeypatch.setattr(
-            "pocketpaw_ee.cloud.request_log.service.record", _slow_record, raising=False
+            "pocketpaw_ee.cloud.request_log.service.record_many",
+            _slow_record_many,
+            raising=False,
         )
+        monkeypatch.setattr(request_log, "_LINGER_SECONDS", 0.0)
 
         _log_once()
         await started.wait()
 
-        assert len(request_log._pending) == 1, "in-flight write is not referenced"
+        assert request_log._drain_task is not None, "the consumer is not referenced"
+        assert not request_log._drain_task.done()
 
         release.set()
-        # Let the task finish and its done-callback run.
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-        assert request_log._pending == set(), "completed write was not released"
+        # Still referenced and still running: one consumer serves every
+        # request for the lifetime of the loop.
+        assert request_log._drain_task is not None
+        assert not request_log._drain_task.done()
+
+        await _stop_consumer()
 
     @pytest.mark.asyncio
-    async def test_writes_are_dropped_once_the_ceiling_is_reached(self, monkeypatch):
-        """Past the ceiling, shed telemetry rather than queue without bound."""
-        release = asyncio.Event()
+    async def test_entries_are_dropped_once_the_queue_is_full(self, monkeypatch):
+        """Past the ceiling, shed telemetry rather than queue without bound.
 
-        async def _blocked_record(**_kwargs):
-            await release.wait()
+        Nothing awaits inside the loop, so the consumer never gets a turn and
+        the queue genuinely fills - the same shape as a Mongo stall.
+        """
+        monkeypatch.setattr(request_log, "_QUEUE_MAX", 8)
+        request_log._reset_for_tests()
 
-        monkeypatch.setattr(
-            "pocketpaw_ee.cloud.request_log.service.record", _blocked_record, raising=False
-        )
-
-        for _ in range(request_log._MAX_PENDING):
+        for _ in range(request_log._QUEUE_MAX):
             _log_once()
-        await asyncio.sleep(0)
 
-        assert len(request_log._pending) == request_log._MAX_PENDING
+        assert request_log._queue is not None
+        assert request_log._queue.qsize() == request_log._QUEUE_MAX
         assert request_log._dropped == 0
 
         # One more must be shed, not queued.
         _log_once()
-        assert len(request_log._pending) == request_log._MAX_PENDING
+
+        assert request_log._queue.qsize() == request_log._QUEUE_MAX
         assert request_log._dropped == 1
 
-        release.set()
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        await _stop_consumer()
 
     @pytest.mark.asyncio
-    async def test_capacity_recovers_after_writes_drain(self, monkeypatch):
+    async def test_capacity_recovers_after_the_queue_drains(self, monkeypatch):
         """Shedding is transient: once the backlog clears, logging resumes."""
-        release = asyncio.Event()
+        written: list[int] = []
 
-        async def _blocked_record(**_kwargs):
-            await release.wait()
+        async def _record_many(entries):  # noqa: ANN001
+            written.append(len(entries))
+            return len(entries)
 
         monkeypatch.setattr(
-            "pocketpaw_ee.cloud.request_log.service.record", _blocked_record, raising=False
+            "pocketpaw_ee.cloud.request_log.service.record_many", _record_many, raising=False
         )
+        monkeypatch.setattr(request_log, "_LINGER_SECONDS", 0.0)
+        monkeypatch.setattr(request_log, "_QUEUE_MAX", 8)
+        request_log._reset_for_tests()
 
-        for _ in range(request_log._MAX_PENDING):
+        for _ in range(request_log._QUEUE_MAX + 1):
             _log_once()
-        await asyncio.sleep(0)
-        _log_once()
         assert request_log._dropped == 1
 
-        release.set()
-        for _ in range(5):
+        for _ in range(10):
             await asyncio.sleep(0)
 
-        assert request_log._pending == set()
+        assert sum(written) == request_log._QUEUE_MAX
+        assert request_log._queue is not None
+        assert request_log._queue.qsize() == 0
 
-        # A fresh write is accepted again rather than shed.
-        release_2 = asyncio.Event()
-
-        async def _record_2(**_kwargs):
-            await release_2.wait()
-
-        monkeypatch.setattr(
-            "pocketpaw_ee.cloud.request_log.service.record", _record_2, raising=False
-        )
+        # A fresh entry is accepted again rather than shed.
         _log_once()
-        await asyncio.sleep(0)
-        assert len(request_log._pending) == 1
-        assert request_log._dropped == 1, "drop counter must not rise on an accepted write"
+        assert request_log._dropped == 1, "drop counter must not rise on an accepted entry"
 
-        release_2.set()
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert sum(written) == request_log._QUEUE_MAX + 1
+
+        await _stop_consumer()

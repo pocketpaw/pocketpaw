@@ -656,6 +656,11 @@ ignore_imports = [
     # dashboard_lifecycle drains the EE InProcessExecutor on shutdown via a
     # try/except runtime import; the OSS core never imports EE statically.
     "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud.chat.runs.executor",
+    # Same seam, same reason: request-log telemetry is batched behind a queue
+    # in EE, and this is the only shutdown hook that fires under
+    # FastAPI(lifespan=...), so the queued tail is flushed from here or not at
+    # all. Guarded by try/except; an OSS-only install has nothing to flush.
+    "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud._core.request_log",
     "pocketpaw.api.v1.cloud_projects -> pocketpaw_ee.cloud.daytona.client",
     "pocketpaw.api.v1.cloud_projects -> pocketpaw_ee.cloud.daytona.store",
     # atlas resolves optional EE introspection (Fabric schema) and the
