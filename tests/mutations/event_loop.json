@@ -1,0 +1,72 @@
+[
+  {
+    "label": "bus.publish goes back to a serial per-recipient await",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/bus.py",
+    "find": "            await map_bounded(list(audience), _deliver)",
+    "replace": "            for _uid in list(audience):\n                await _deliver(_uid)",
+    "tests": ["tests/cloud/test_event_loop_blocking.py::TestBusFanOut::test_publish_fans_out_concurrently"]
+  },
+  {
+    "label": "map_bounded drops the concurrency cap",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/fanout.py",
+    "find": "    sem = asyncio.Semaphore(limit)\n\n    async def _one(item: T) -> R:\n        async with sem:\n            return await fn(item)",
+    "replace": "    async def _one(item: T) -> R:\n        return await fn(item)",
+    "tests": ["tests/cloud/test_event_loop_blocking.py::TestMapBounded::test_concurrency_is_capped"]
+  },
+  {
+    "label": "map_bounded captures exceptions as results, hiding cancellation",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/fanout.py",
+    "find": "    return list(await asyncio.gather(*(_one(item) for item in items)))",
+    "replace": "    return list(await asyncio.gather(*(_one(item) for item in items), return_exceptions=True))",
+    "tests": ["tests/cloud/test_event_loop_blocking.py::TestMapBounded::test_an_exception_propagates_instead_of_becoming_a_result"]
+  },
+  {
+    "label": "send_to_user writes one socket at a time again",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "        results = await map_bounded(fresh, lambda ws: self._send_bounded(ws, data))\n\n        delivered = 0",
+    "replace": "        results = [await self._send_bounded(_w, data) for _w in fresh]\n\n        delivered = 0",
+    "tests": ["tests/cloud/test_event_loop_blocking.py::TestConnectionManagerFanOut::test_send_to_user_sends_to_all_sockets_at_once"]
+  },
+  {
+    "label": "the SSE stream loses its maximum lifetime",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/router.py",
+    "find": "            if time.monotonic() >= deadline:",
+    "replace": "            if False:",
+    "tests": ["tests/cloud/test_event_loop_blocking.py::TestStreamLifetime::test_stream_terminates_at_the_deadline"]
+  },
+  {
+    "label": "the stream cap becomes a fixed constant instead of following the run",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/domain.py",
+    "find": "    return run_job_timeout_seconds() + STREAM_LIFETIME_GRACE_SECONDS",
+    "replace": "    return DEFAULT_RUN_JOB_TIMEOUT_SECONDS + STREAM_LIFETIME_GRACE_SECONDS",
+    "tests": ["tests/cloud/test_event_loop_blocking.py::TestStreamLifetime::test_cap_follows_the_job_timeout"]
+  },
+  {
+    "label": "the worker keeps a second private copy of the timeout parse",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
+    "find": "_job_timeout_seconds = run_job_timeout_seconds",
+    "replace": "_job_timeout_seconds = lambda: DEFAULT_RUN_JOB_TIMEOUT_SECONDS  # noqa: E731",
+    "tests": ["tests/cloud/test_event_loop_blocking.py::TestStreamLifetime::test_worker_and_stream_read_one_resolver"]
+  },
+  {
+    "label": "the dashboard broadcast loses its per-socket timeout",
+    "file": "src/pocketpaw/dashboard_lifecycle.py",
+    "find": "                await asyncio.wait_for(ws.send_json(message), timeout=WS_SEND_TIMEOUT_SECONDS)",
+    "replace": "                await ws.send_json(message)",
+    "tests": ["tests/test_dashboard_fanout.py::test_a_wedged_socket_cannot_stall_the_broadcast"]
+  },
+  {
+    "label": "the dashboard broadcast goes back to a serial loop",
+    "file": "src/pocketpaw/dashboard_lifecycle.py",
+    "find": "    for ws in await asyncio.gather(*(_send(w) for w in targets)):",
+    "replace": "    for ws in [await _send(w) for w in targets]:",
+    "tests": ["tests/test_dashboard_fanout.py::test_sends_run_concurrently"]
+  },
+  {
+    "label": "a timed-out dashboard socket is kept, so the stall recurs forever",
+    "file": "src/pocketpaw/dashboard_lifecycle.py",
+    "find": "        if ws is not None and ws in active_connections:\n            active_connections.remove(ws)",
+    "replace": "        if ws is not None and False:\n            active_connections.remove(ws)",
+    "tests": ["tests/test_dashboard_fanout.py::test_a_timed_out_socket_is_dropped"]
+  }
+]

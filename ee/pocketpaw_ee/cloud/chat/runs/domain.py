@@ -26,6 +26,21 @@ outside this entity — ``ee.cloud.agent_activity``, which answers "which of my
 agents are working right now" — reads runs as these Beanie-free value objects
 rather than importing the document class.
 
+Changes: 2026-09-04 (fix/unblock-event-loop, backend-perf M7) — this module also
+holds the per-run TIMEOUT resolver now. It used to be private to ``worker.py``,
+which meant the SSE reader in ``router.py`` could not see it: the stream loop
+had no maximum lifetime at all, so a run whose terminal event never arrived
+(worker OOM-killed after the events key existed, which defeats the
+``stream_exists`` fallback) heartbeated forever, holding a blocked Redis
+connection and a live asyncio task per abandoned client. The stream's natural
+bound is the run's own timeout, and the two must not drift apart — raising
+``POCKETPAW_CLOUD_RUN_JOB_TIMEOUT`` has to lengthen the stream cap too, or the
+cap starts killing streams of runs that are still legitimately working. So both
+read one resolver. It lives here rather than in ``worker.py`` because
+``router.py`` importing the worker would pull arq and the whole executor graph
+into the web process. Same reasoning, and the same shape, as
+``jobs/domain.py::job_timeout_seconds``.
+
 Changes: 2026-07-26 (concierge transcripts) — ``RunSpec`` grows
 ``persist_user_text``: the user's message text to WRITE DOWN on the run doc, as
 opposed to ``content``, which is what the agent is asked. Every authed surface
@@ -37,10 +52,66 @@ rest."""
 
 from __future__ import annotations
 
+import logging
+import os
 from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+logger = logging.getLogger(__name__)
+
+# arq's DEFAULT job_timeout is 300s, which CANCELS a long chat run mid-generation,
+# so a big coding task halts after ~5 minutes. 30 minutes instead; the 10-minute
+# stale-run sweeper remains the backstop against a genuinely runaway run holding
+# a worker slot.
+DEFAULT_RUN_JOB_TIMEOUT_SECONDS = 1800  # 30 minutes
+
+# How long the SSE reader keeps a stream open PAST the run's own timeout before
+# giving up. A run cancelled at the timeout boundary still has to write its
+# terminal frame and have the reader observe it, and ``read_events`` blocks in
+# 15s slices — so a cap equal to the job timeout would race the very frame it is
+# waiting for and report a spurious error on a healthy run.
+STREAM_LIFETIME_GRACE_SECONDS = 120
+
+
+def run_job_timeout_seconds() -> int:
+    """Resolve the per-run arq job_timeout from ``POCKETPAW_CLOUD_RUN_JOB_TIMEOUT``.
+
+    Defaults to 30 minutes. An unparseable or non-positive value falls back to the
+    default (rather than 0 / negative, which would disable or break the cap), so a
+    typo can't silently let runs run forever or crash the worker.
+    """
+    raw = os.environ.get("POCKETPAW_CLOUD_RUN_JOB_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_RUN_JOB_TIMEOUT_SECONDS
+    try:
+        val = int(raw)
+    except ValueError:
+        logger.warning(
+            "POCKETPAW_CLOUD_RUN_JOB_TIMEOUT=%r is not an int; using default %ds",
+            raw,
+            DEFAULT_RUN_JOB_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_RUN_JOB_TIMEOUT_SECONDS
+    if val <= 0:
+        logger.warning(
+            "POCKETPAW_CLOUD_RUN_JOB_TIMEOUT=%d is not positive; using default %ds",
+            val,
+            DEFAULT_RUN_JOB_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_RUN_JOB_TIMEOUT_SECONDS
+    return val
+
+
+def stream_max_lifetime_seconds() -> int:
+    """Hard ceiling on one SSE subscription, derived from the run's own timeout.
+
+    Derived rather than configured on purpose: an independent knob would drift,
+    and the failure mode of drift is a cap SHORTER than the run it is watching,
+    which severs healthy long runs and looks exactly like a backend bug.
+    """
+    return run_job_timeout_seconds() + STREAM_LIFETIME_GRACE_SECONDS
 
 
 class RunSpec(BaseModel):

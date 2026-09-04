@@ -7,6 +7,15 @@ Extracted from dashboard.py — contains:
 - ``shutdown_event()`` — tears down all services
 
 Changes:
+- 2026-09-04 (fix/unblock-event-loop, backend-perf H1): every broadcast helper
+  here was its own copy of "iterate ``active_connections``, ``await
+  ws.send_json`` with no timeout". Six copies, none bounded. A client that
+  stopped reading held the loop on TCP back-pressure with no deadline, and the
+  dashboard is one uvicorn process, so that await stalled every other request.
+  All six now go through ``_fanout``, which sends concurrently and gives each
+  socket its own 5s deadline. The cloud package had already learned this the
+  hard way — see ``SEND_TIMEOUT_SECONDS`` in ``ee/.../chat/ws.py`` — but the
+  OSS dashboard path never got the fix.
 - 2026-08-01: ``startup_event`` installs the asyncio accept-noise filter
   (``pocketpaw.asyncio_noise``) as its first act, so the Windows proactor
   stops logging a full traceback every time a client aborts a connection
@@ -60,6 +69,57 @@ logger = logging.getLogger(__name__)
 # Broadcast helpers
 # ---------------------------------------------------------------------------
 
+# A single send must not be able to hold the dashboard's event loop open
+# indefinitely. A client that stops reading (backgrounded tab, sleeping laptop,
+# a NAT that dropped the flow without a FIN) leaves ``send_json`` waiting on
+# TCP back-pressure with no deadline of its own, and the dashboard runs one
+# uvicorn process: that await blocks every other request on the box.
+#
+# 5.0s matches ``SEND_TIMEOUT_SECONDS`` in the cloud package's ws.py, which
+# carries the reasoning in full — far above any healthy RTT, short enough that
+# a stalled fan-out is noticed.
+WS_SEND_TIMEOUT_SECONDS = 5.0
+
+# Cap on sends in flight per broadcast. The dashboard is single-tenant and
+# rarely has more than a handful of tabs open, so this is a guard rail rather
+# than a throttle.
+WS_FANOUT_CONCURRENCY = 32
+
+
+async def _fanout(message: dict) -> None:
+    """Deliver ``message`` to every dashboard socket, concurrently and bounded.
+
+    Every broadcast helper in this module used to be its own ``for`` loop with
+    one unbounded ``await ws.send_json(...)`` per socket, so delivery cost the
+    SUM of the connected clients' latencies and a single wedged client stalled
+    the rest indefinitely. Sends now run together, each with its own deadline.
+
+    A socket that raises OR times out is dropped from ``active_connections``.
+    Dropping on timeout is the part that matters: without it a wedged client
+    would be re-attempted on every subsequent broadcast, so adding the timeout
+    alone would have made the stall recur forever instead of once.
+    """
+    targets = list(active_connections)
+    if not targets:
+        return
+
+    sem = asyncio.Semaphore(WS_FANOUT_CONCURRENCY)
+
+    async def _send(ws):
+        async with sem:
+            try:
+                await asyncio.wait_for(ws.send_json(message), timeout=WS_SEND_TIMEOUT_SECONDS)
+            except Exception:
+                # Includes TimeoutError. CancelledError is a BaseException on
+                # 3.8+, so a cancelled broadcast still propagates rather than
+                # being mistaken for a dead socket.
+                return ws
+        return None
+
+    for ws in await asyncio.gather(*(_send(w) for w in targets)):
+        if ws is not None and ws in active_connections:
+            active_connections.remove(ws)
+
 
 async def broadcast_reminder(reminder: dict):
     """Broadcast a reminder notification to all connected clients."""
@@ -68,11 +128,7 @@ async def broadcast_reminder(reminder: dict):
 
     # Legacy broadcast (backup)
     message = {"type": "reminder", "reminder": reminder}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            pass
+    await _fanout(message)
 
     # Persist reminder as an assistant message in every active WebSocket session
     # so it survives session switches and page reloads.
@@ -113,12 +169,7 @@ async def broadcast_reminder(reminder: dict):
 async def broadcast_intention(intention_id: str, chunk: dict):
     """Broadcast intention execution results to all connected clients."""
     message = {"type": "intention_event", "intention_id": intention_id, **chunk}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            if ws in active_connections:
-                active_connections.remove(ws)
+    await _fanout(message)
 
     # Push message-type intention chunks to notification channels
     if chunk.get("type") == "message":
@@ -133,23 +184,13 @@ async def broadcast_intention(intention_id: str, chunk: dict):
 async def _broadcast_audit_entry(entry: dict):
     """Broadcast a new audit log entry to all connected WebSocket clients."""
     message = {"type": "system_event", "event_type": "audit_entry", "data": entry}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            if ws in active_connections:
-                active_connections.remove(ws)
+    await _fanout(message)
 
 
 async def _broadcast_health_update(summary: dict):
     """Broadcast health status update to all connected WebSocket clients."""
     message = {"type": "health_update", "data": summary}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            if ws in active_connections:
-                active_connections.remove(ws)
+    await _fanout(message)
 
 
 async def push_open_path(path: str, action: str = "navigate"):
@@ -164,11 +205,7 @@ async def push_open_path(path: str, action: str = "navigate"):
         ``"view"`` to open a file in the viewer.
     """
     message = {"type": "open_path", "path": path, "action": action}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            pass
+    await _fanout(message)
 
 
 # ---------------------------------------------------------------------------
@@ -466,11 +503,7 @@ async def startup_event(
 
         async def _mcp_ws_broadcast(message: dict) -> None:
             """Broadcast an MCP message to all connected WebSocket clients."""
-            for ws in active_connections[:]:
-                try:
-                    await ws.send_json(message)
-                except Exception:
-                    pass
+            await _fanout(message)
 
         set_ws_broadcast(_mcp_ws_broadcast)
 

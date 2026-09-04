@@ -91,7 +91,11 @@ from arq.worker import func
 # Imported at module scope so tests can ``monkeypatch.setattr(worker, …)``.
 from pocketpaw_ee.cloud import init_realtime
 from pocketpaw_ee.cloud._core.realtime import xproc
-from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
+from pocketpaw_ee.cloud.chat.runs.domain import (
+    DEFAULT_RUN_JOB_TIMEOUT_SECONDS,
+    RunSpec,
+    run_job_timeout_seconds,
+)
 from pocketpaw_ee.cloud.chat.runs.run_core import execute_run
 from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
 from pocketpaw_ee.cloud.jobs.domain import job_timeout_seconds
@@ -236,36 +240,14 @@ def _redis_settings() -> RedisSettings:
 # env-tunable; the 10-minute stale-run sweeper remains the backstop against a
 # genuinely runaway run holding a worker slot. (Workspace jobs get their OWN
 # per-function timeout below, so the two can't clip each other.)
-_DEFAULT_RUN_JOB_TIMEOUT_SECONDS = 1800  # 30 minutes
-
-
-def _job_timeout_seconds() -> int:
-    """Resolve the per-run arq job_timeout from ``POCKETPAW_CLOUD_RUN_JOB_TIMEOUT``.
-
-    Defaults to 30 minutes. An unparseable or non-positive value falls back to the
-    default (rather than 0 / negative, which would disable or break the cap), so a
-    typo can't silently let runs run forever or crash the worker.
-    """
-    raw = os.environ.get("POCKETPAW_CLOUD_RUN_JOB_TIMEOUT", "").strip()
-    if not raw:
-        return _DEFAULT_RUN_JOB_TIMEOUT_SECONDS
-    try:
-        val = int(raw)
-    except ValueError:
-        logger.warning(
-            "POCKETPAW_CLOUD_RUN_JOB_TIMEOUT=%r is not an int; using default %ds",
-            raw,
-            _DEFAULT_RUN_JOB_TIMEOUT_SECONDS,
-        )
-        return _DEFAULT_RUN_JOB_TIMEOUT_SECONDS
-    if val <= 0:
-        logger.warning(
-            "POCKETPAW_CLOUD_RUN_JOB_TIMEOUT=%d is not positive; using default %ds",
-            val,
-            _DEFAULT_RUN_JOB_TIMEOUT_SECONDS,
-        )
-        return _DEFAULT_RUN_JOB_TIMEOUT_SECONDS
-    return val
+#
+# The resolver itself moved to ``runs/domain.py`` on 2026-09-04 so the SSE
+# reader in ``router.py`` can share it: the stream's maximum lifetime is derived
+# from this timeout, and a second copy of the parse would let the two drift.
+# Re-exported under the old private names because they are the module's
+# established surface and the worker config tests read them here.
+_DEFAULT_RUN_JOB_TIMEOUT_SECONDS = DEFAULT_RUN_JOB_TIMEOUT_SECONDS
+_job_timeout_seconds = run_job_timeout_seconds
 
 
 # arq's own default is max_jobs=10 (arq/worker.py). That ceiling is shared by
