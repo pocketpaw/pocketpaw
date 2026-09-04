@@ -1798,6 +1798,36 @@ def _is_dynamic(pattern: str | None, ripple_spec: dict[str, Any] | None) -> bool
     return bool(ripple_spec.get("sources") or ripple_spec.get("actions") or ripple_spec.get("auth"))
 
 
+def _refs_must_resolve(pattern: str | None) -> bool:
+    """Must every internal link/asset ref in an html site's index.html resolve to a
+    file that exists, on pain of refusing the whole publish?
+
+    YES for a site we GENERATED: we emitted that page, so a ref pointing at nothing
+    is our bug and the html smoke gate should stop the deploy (``generator_client
+    ._html_static_smoke``, HE-3).
+
+    NO for an IMPORT. An import is a copy of somebody else's site, where dangling
+    refs are the normal case rather than the exception — the crawl stops at 50 pages
+    and 200 assets, robots.txt can disallow a path, the origin site links to its own
+    404s (a real user's site did exactly that a dozen times), and anything referenced
+    only from JavaScript is never harvested at all. Under the always-strict rule one
+    unfetched feed file threw away an otherwise complete copy of the site and the
+    user got NOTHING rather than a 95%-correct site. The unresolved refs are logged
+    and reported instead.
+
+    THE DECISION LIVES HERE, at the publish path, not in generator_client — that
+    module is handed a ``strict_refs`` boolean and is never taught what "imported"
+    means. ``IMPORT_PATTERN`` is imported lazily because ``import_service`` imports
+    THIS module at module scope; a top-level import would close the cycle.
+
+    Only the ref check is relaxed. Structural failures (no index.html, a page that
+    will not parse, no elements, an unbalanced end tag) and the root-CONTAINMENT
+    check stay fatal for an import too."""
+    from pocketpaw_ee.sites.import_service import IMPORT_PATTERN
+
+    return pattern != IMPORT_PATTERN
+
+
 def _dynamic_objects(ripple_spec: dict[str, Any] | None) -> list[dict[str, Any]]:
     """The declared tables (the spec's top-level ``objects``) of a dynamic site.
 
@@ -2455,6 +2485,9 @@ async def publish(
     builder_origin: str | None = None,
     keeps_client_bundle: bool = False,
     preview: bool = False,
+    # Out-parameter for non-fatal build warnings — see ``_deploy_site_doc``. Only
+    # ``import_service`` passes one (it owns the import report they belong on).
+    warnings_sink: list[str] | None = None,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -2584,6 +2617,11 @@ async def publish(
             # live publish keeps it (see _deploy_site_doc). It still BUILDS fresh +
             # anchored output either way.
             smoke=False,
+            # An IMPORT's dangling internal refs are warnings, not a publish-stopper
+            # (_refs_must_resolve). Same rule on the draft as on the live deploy —
+            # arming an imported site for edit must not be the one path that refuses
+            # it. Unrelated to ``smoke``: a preview still runs every other check.
+            strict_refs=_refs_must_resolve(pattern),
         )
 
         # Serve at a STABLE per-pocket preview id (NOT the freshly-minted ObjectId)
@@ -2689,6 +2727,7 @@ async def publish(
         bundle_reader=_bundle_reader,
         local_deploy=_local_deploy,
         workers_deploy=_workers_deploy,
+        warnings_sink=warnings_sink,
     )
 
 
@@ -2722,6 +2761,12 @@ async def _deploy_site_doc(
     # growing a second copy of the deploy tail. One deploy path, two places the build
     # can have happened.
     prebuilt_project_dir: str | None = None,
+    # An out-parameter for build warnings that are worth showing the user but must
+    # not stop the publish: today, the internal refs an IMPORTED site's index.html
+    # points at that were never harvested. ``import_service`` passes the list it is
+    # about to persist as ``import_report["warnings"]``; every other caller passes
+    # nothing and the warnings survive only in the log.
+    warnings_sink: list[str] | None = None,
 ) -> _SiteDoc:
     """Generate, smoke-gate, deploy, and UPSERT the LIVE canonical Site doc.
 
@@ -2837,6 +2882,20 @@ async def _deploy_site_doc(
             # rollback in edit_svelte_component are unchanged — a broken edit never
             # reaches the live deploy.
             smoke=True,
+            # ...but an IMPORT's dangling internal refs are warnings rather than a
+            # refusal (_refs_must_resolve). A generated site is unaffected: the
+            # default is strict and every other check is unchanged either way.
+            strict_refs=_refs_must_resolve(pattern),
+        )
+
+    # The refs that resolved to nothing (only ever non-empty for an import). Report
+    # them, don't bury them: they are the user-visible list of what did not come
+    # across. ``_html_static_smoke`` also logs them, so an entry point that passes no
+    # sink still leaves a trail.
+    if warnings_sink is not None:
+        warnings_sink.extend(
+            f"unresolved reference in index.html — {ref} was not imported"
+            for ref in build.unresolved_refs
         )
 
     # Grow the concierge onto the built pages BEFORE they deploy, so the artifact

@@ -1,5 +1,16 @@
 # ee/pocketpaw_ee/sites/import_service.py — Paw Sites IMPORT control plane (SI-4).
 #
+# Edited 2026-09-04 (one missing file stopped losing the whole import): both publish
+# calls now pass ``warnings_sink=report["warnings"]``. The html smoke gate used to
+# REFUSE any site whose index.html referenced a file that wasn't in the tree, which
+# is the right rule for a site we generated and the wrong one for a copy of somebody
+# else's — a real user's import died on ``'/rss.xml'`` and they got nothing instead of
+# a 95%-correct site. ``service._refs_must_resolve`` now reads IMPORT_PATTERN and
+# relaxes exactly that check for an import; the refs it would have raised on arrive
+# through the sink and land on the report the user reads, next to the crawl's own
+# skip warnings. Nothing else about the gate moved: a page that cannot parse, or a
+# ref that escapes the site root, still fails the import.
+#
 # Edited 2026-07-23 (SI-FIX review): the zip path now persists the REWIRED source on
 # the pocket too (set_imported_source), not just the deployed artifact — a re-publish
 # from the builder was reading the raw upload and redeploying un-rewired forms.
@@ -447,6 +458,11 @@ async def import_zip_site(
         # generator writes verbatim into the static tree.
         assets=assets or None,
         pattern=IMPORT_PATTERN,
+        # The publish no longer REFUSES an imported site whose index.html points at a
+        # file that isn't in the tree (a zip can omit one just as a crawl can miss
+        # one). It reports them here instead, so the user is told what did not come
+        # across rather than losing the whole import to one missing file.
+        warnings_sink=report.setdefault("warnings", []),
         _generator=_generator,
         _cloudflare=_cloudflare,
         _local_deploy=_local_deploy,
@@ -631,6 +647,11 @@ async def crawl_site_from_url(
             source=source,
             assets=assets or None,
             pattern=IMPORT_PATTERN,
+            # Dangling internal refs are EXPECTED on a crawl (the page/asset caps,
+            # robots.txt, the origin's own 404s, JS-only refs) and no longer stop the
+            # publish. They land on the report the user reads instead — the same list
+            # the crawl's own skip warnings went into just above.
+            warnings_sink=report["warnings"],
             _generator=_generator,
             _cloudflare=_cloudflare,
             _local_deploy=_local_deploy,

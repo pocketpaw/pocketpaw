@@ -1,6 +1,12 @@
 # tests/ee/sites/test_import_crawler.py — SI-5 (feat/sites-import-crawler): the
 # same-site URL crawler behind POST /sites/import/from-url.
 #
+# Edited 2026-09-04: ``alternate`` came OFF the navigational rel denylist, so the
+# navigational-rels test pins ``prev`` in its place and
+# ``test_rss_feed_link_is_still_harvested`` pins the rel that was wrongly denied.
+# Denying it dropped the feed file, left the <link href> dangling, and the html
+# smoke gate then refused a real user's entire import over '/rss.xml'.
+#
 # Created 2026-07-23. All network is mocked (httpx.MockTransport + a fake DNS
 # resolver) — nothing here ever opens a real socket. Covers:
 #   * SSRF floors: literal loopback / RFC1918 / link-local / metadata / CGNAT /
@@ -577,11 +583,15 @@ async def test_navigational_link_rels_are_never_fetched():
     """A ``<link>`` whose rel only ever addresses a page must not be queued.
 
     ``canonical`` (which every static-site generator emits), ``prefetch``,
-    ``alternate``, and the connection hints buy a fetch whose only product is a
+    ``next``/``prev`` and the connection hints buy a fetch whose only product is a
     duplicate of a page the crawl already holds — 48 wasted fetches on one real
     site, and on a link-heavy one enough to blow the import's wall clock. The
     denylist is by rel TOKEN, so ``rel="alternate stylesheet"`` is still a
     stylesheet and a ``<link>`` with no rel at all is still an asset.
+
+    ``alternate`` is deliberately NOT on the denylist — it is how RSS/Atom feeds
+    declare themselves, and those are real assets the page depends on. That case
+    is pinned by ``test_rss_feed_link_is_still_harvested`` below.
 
     Mutation: drop the ``_NON_ASSET_LINK_RELS`` filter from
     ``_LinkScan.handle_starttag`` and the four navigational URLs get fetched.
@@ -592,7 +602,7 @@ async def test_navigational_link_rels_are_never_fetched():
             "<html><head>"
             '<link rel="canonical" href="/canon">'
             '<link rel="prefetch" href="/prefetched">'
-            '<link rel="ALTERNATE" href="/fr">'
+            '<link rel="PREV" href="/older">'
             '<link rel="dns-prefetch" href="/warm">'
             '<link rel="stylesheet" href="/site.css">'
             '<link rel="alternate stylesheet" href="/alt.css">'
@@ -612,7 +622,7 @@ async def test_navigational_link_rels_are_never_fetched():
     result = await _crawl(pages, seen=seen)
 
     fetched_paths = {r.url.path for r in seen}
-    assert fetched_paths.isdisjoint({"/canon", "/prefetched", "/fr", "/warm"})
+    assert fetched_paths.isdisjoint({"/canon", "/prefetched", "/older", "/warm"})
     assert {"site.css", "alt.css", "no-rel.css"} <= set(result.files)
 
 
@@ -669,3 +679,35 @@ async def test_html_in_the_asset_loop_still_burns_an_asset_slot(monkeypatch):
     await _crawl(pages, seen=seen)
 
     assert len([r for r in seen if r.url.path.startswith("/p")]) == 2
+
+
+@pytest.mark.asyncio
+async def test_rss_feed_link_is_still_harvested():
+    """``<link rel="alternate" type="application/rss+xml">`` is how EVERY feed is
+    declared, and the file it names is a real asset the page depends on.
+
+    The navigational-rel denylist must not swallow it. When it does, the feed is
+    never fetched, the reference in index.html dangles, and the html static smoke
+    gate refuses the whole publish with "internal link/asset does not resolve:
+    '/rss.xml'". ``alternate`` is dual-purpose — hreflang alternates DO address
+    pages — so it stays queued and the content-type guard sorts the two apart.
+    """
+    pages = {
+        ("example.com", "/"): _html(
+            "<html><head>"
+            '<link rel="alternate" type="application/rss+xml" href="/rss.xml">'
+            '<link rel="alternate" hreflang="fr" href="/fr/">'
+            "</head><body>home</body></html>"
+        ),
+        ("example.com", "/rss.xml"): httpx.Response(
+            200, headers={"content-type": "application/rss+xml"}, content=b"<rss></rss>"
+        ),
+        ("example.com", "/fr/"): _html("<html><body>bonjour</body></html>"),
+    }
+    result = await _crawl(pages)
+
+    assert "rss.xml" in result.files, "the feed the page declares was never fetched"
+    # The hreflang alternate is a PAGE, so the content-type guard routes it to the
+    # page path rather than the extension-less asset path.
+    assert "fr/index.html" in result.files
+    assert "fr" not in result.files

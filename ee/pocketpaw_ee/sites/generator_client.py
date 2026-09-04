@@ -8,6 +8,22 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Edited 2026-09-04 (an import is not a generated site): build()/_build_one() and
+# ``_html_static_smoke`` gained ``strict_refs: bool = True``. It relaxes EXACTLY ONE
+# check — "internal link/asset does not resolve" — and only when the caller asks.
+# That check is correct for a site WE generated (a dangling ref is our bug) and wrong
+# for an IMPORTED one, where dangling refs are guaranteed: the crawl caps at 50 pages
+# / 200 assets, robots.txt can disallow a path, the origin site links to its own 404s,
+# and JS-only refs are never harvested. One missing feed file (``/rss.xml`` on a real
+# user's site) therefore raised SmokeGateFailed and threw away an otherwise complete
+# copy of the site — the user got nothing instead of 95%. With ``strict_refs=False``
+# the refs are logged and returned on ``BuildResult.unresolved_refs`` so the publish
+# caller can surface them on the import report. A THIRD independent flag, deliberately
+# not folded into ``smoke`` (which means "run the SSR fail-gate" — see the 2026-06-19
+# entry below for what flag-overloading across this seam costs). Structural failures
+# and the root-CONTAINMENT check stay fatal on every path; the default is strict, so
+# a generated html site is byte-for-byte unaffected.
+#
 # Updated 2026-08-10 (SL-3 — the async publish needs the payload without the build):
 # extracted ``build_generator_input`` out of ``_build_one`` as a module-level function.
 # ``_build_one`` now calls it and passes the result straight through, so every existing
@@ -822,7 +838,9 @@ def _local_ref_path(ref: str) -> str | None:
     return unquote(path)
 
 
-def _html_static_smoke(static_dir: Path, *, entry: str = _HTML_SMOKE_ENTRY) -> None:
+def _html_static_smoke(
+    static_dir: Path, *, entry: str = _HTML_SMOKE_ENTRY, strict_refs: bool = True
+) -> tuple[str, ...]:
     """The html-path smoke check (HE-3). Fails closed with ``SmokeGateFailed``.
 
     Asserts the emitted static tree is coherent enough to serve: the entry
@@ -832,7 +850,31 @@ def _html_static_smoke(static_dir: Path, *, entry: str = _HTML_SMOKE_ENTRY) -> N
     file that exists under ``static_dir``. External refs (http/https/mailto/tel/data),
     protocol-relative URLs, and in-page anchors are ignored. Any failure raises
     ``SmokeGateFailed`` — the same class the workerd gate raises — so the caller's
-    rollback path is unchanged and a broken page never deploys."""
+    rollback path is unchanged and a broken page never deploys.
+
+    ``strict_refs`` (2026-09-04) is the ONE relaxation, and it exists because the
+    unresolved-ref rule is right for a GENERATED site and wrong for an IMPORTED one.
+    We emit a generated page ourselves, so a ref pointing at nothing is our bug and
+    the publish should stop. An import copies somebody else's site, where dangling
+    refs are the normal case rather than the exception: the crawl caps at 50 pages /
+    200 assets, robots.txt can disallow a path, the original site links to its own
+    404s, and anything referenced only from JavaScript is never harvested at all. One
+    missing file therefore threw away an otherwise complete copy of a real site
+    (``does not resolve: '/rss.xml'``) and the user got nothing. With
+    ``strict_refs=False`` the unresolved refs are logged and RETURNED instead of
+    raised, so the caller can report them.
+
+    The decision is the CALLER'S — this function is never taught what "imported"
+    means (see ``service._refs_must_resolve``). The default is ``True``, so a
+    generated html site is completely unaffected.
+
+    Everything else stays fatal on both paths: a missing/unparseable entry, a page
+    with no elements, an unbalanced end tag, and a ref that ESCAPES the site root.
+    That last one is a containment check, not a quality check, and is never
+    downgraded — an import must not be able to serve a file from outside its tree.
+
+    Returns the refs that did not resolve (always empty when ``strict_refs``, since
+    the first one raises)."""
     root = static_dir.resolve()
     entry_path = root / entry
     if not entry_path.is_file():
@@ -848,6 +890,7 @@ def _html_static_smoke(static_dir: Path, *, entry: str = _HTML_SMOKE_ENTRY) -> N
         raise SmokeGateFailed(f"html smoke: {entry} contains no HTML elements")
     if parser.stray_end_tag:
         raise SmokeGateFailed(f"html smoke: {entry} has an unbalanced/stray end tag")
+    unresolved: list[str] = []
     for ref in parser.local_refs:
         path = _local_ref_path(ref)
         if path is None:
@@ -860,7 +903,20 @@ def _html_static_smoke(static_dir: Path, *, entry: str = _HTML_SMOKE_ENTRY) -> N
                 f"html smoke: link/asset escapes the site root: {ref!r}"
             ) from None
         if not target.exists():
-            raise SmokeGateFailed(f"html smoke: internal link/asset does not resolve: {ref!r}")
+            if strict_refs:
+                raise SmokeGateFailed(f"html smoke: internal link/asset does not resolve: {ref!r}")
+            unresolved.append(ref)
+    if unresolved:
+        # Never silent: the refs are the user-visible list of what did not come
+        # across, and the caller may not have anywhere to put them.
+        logger.warning(
+            "html smoke: %d unresolved ref(s) in %s under %s (non-strict): %s",
+            len(unresolved),
+            entry,
+            root,
+            ", ".join(unresolved[:20]),
+        )
+    return tuple(unresolved)
 
 
 @dataclass(frozen=True)
@@ -872,6 +928,12 @@ class BuildResult:
     # this is ``None`` on the svelte path. Optional so reading the svelte result
     # does not KeyError.
     ripple_version: str | None = None
+    # The internal href/src refs in index.html that resolved to nothing. Only ever
+    # non-empty on the html path built with ``strict_refs=False`` (an IMPORT) — a
+    # strict build raises on the first one instead. Carried so the publish caller can
+    # put them on the import report; empty on every other engine and every default
+    # build, so nothing existing reads a new value.
+    unresolved_refs: tuple[str, ...] = ()
 
 
 def build_home() -> Path:
@@ -1590,6 +1652,7 @@ class GeneratorClient:
         pocket_id: str | None = None,
         smoke: bool = True,
         static_build: bool = True,
+        strict_refs: bool = True,
     ) -> BuildResult:
         """Generate + smoke-build a Paw Site, forking STAGE 2 on ``engine``.
 
@@ -1669,6 +1732,20 @@ class GeneratorClient:
         ``smoke=True`` so the SSR gate (and its rollback-on-SmokeGateFailed behaviour
         at the caller) is unchanged. Before this fix ``smoke`` ALSO gated the build
         itself, so a preview skipped ``bun run build`` and served the stale build.
+
+        ``strict_refs`` (2026-09-04) reaches the HTML path's ``_html_static_smoke``
+        and nothing else. ``True`` (the default) keeps a dangling internal href/src
+        in index.html FATAL, which is the right contract for a site we generated.
+        ``False`` downgrades that one check to a warning and returns the offending
+        refs on ``BuildResult.unresolved_refs`` — for an IMPORT, where the crawl's
+        page/asset caps, robots.txt, the origin site's own 404s and JS-only refs
+        guarantee some refs point at nothing, and where refusing the publish threw
+        away an otherwise complete copy of the user's site. It is a SEPARATE flag
+        from ``smoke`` on purpose: ``smoke`` means "run the SSR fail-gate", and an
+        import still wants every structural check. Deliberately NOT engine-derived
+        — the caller decides (``service._refs_must_resolve``), so this module never
+        learns what "imported" means. Structural failures and the root-containment
+        check stay fatal either way.
         """
         if pocket_id is None:
             return await self._build_one(
@@ -1687,6 +1764,7 @@ class GeneratorClient:
                 pocket_id=None,
                 smoke=smoke,
                 static_build=static_build,
+                strict_refs=strict_refs,
             )
         async with self._lock_for(pocket_id):
             return await self._build_one(
@@ -1705,6 +1783,7 @@ class GeneratorClient:
                 pocket_id=pocket_id,
                 smoke=smoke,
                 static_build=static_build,
+                strict_refs=strict_refs,
             )
 
     async def _build_one(
@@ -1724,6 +1803,7 @@ class GeneratorClient:
         pocket_id: str | None,
         smoke: bool,
         static_build: bool = True,
+        strict_refs: bool = True,
         assets: dict[str, str] | None = None,
     ) -> BuildResult:
         # PERF-3: stable per-pocket working dir (overwrite the source each build)
@@ -1774,8 +1854,12 @@ class GeneratorClient:
             # output dir is the project dir itself and has exactly one shape. The
             # resolver would return the same value. Only svelte is ambiguous.
             static_dir = Path(project_dir, static_output_rel(engine))
-            _html_static_smoke(static_dir)
-            return BuildResult(project_dir=project_dir, ripple_version=gen.get("rippleVersion"))
+            unresolved = _html_static_smoke(static_dir, strict_refs=strict_refs)
+            return BuildResult(
+                project_dir=project_dir,
+                ripple_version=gen.get("rippleVersion"),
+                unresolved_refs=unresolved,
+            )
         # Make the generated project's deps resolvable BEFORE install (and before
         # the dep-hash is computed, so the rewrite is part of the fingerprint).
         # The template pins an unpublished @ripple-ui/svelte; the rewrite swaps it

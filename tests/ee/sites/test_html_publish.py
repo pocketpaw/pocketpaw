@@ -1,4 +1,12 @@
 # tests/ee/sites/test_html_publish.py
+# Edited 2026-09-04 (strict_refs): added cover for the ONE check that is now
+# caller-controlled — a dangling internal href/src. It stays fatal for a site we
+# GENERATED and becomes a warning for an IMPORTED one, where the crawl's caps,
+# robots.txt, the origin's own 404s and JS-only refs guarantee some refs point at
+# nothing and one of them (a real user's '/rss.xml') used to throw away the whole
+# site. Both publish paths (preview and live deploy) are covered, the unresolved
+# refs are asserted to reach the caller's warnings sink, and the structural checks
+# plus the root-containment check are pinned as fatal on BOTH paths.
 # Created: 2026-07-10 (HE-3 — an html publish runs `generate` and nothing else).
 # Proves the html publish path in GeneratorClient.build()/_build_one():
 #   * html (needs_node_build == False) runs ONLY generate: `bun install`,
@@ -343,3 +351,250 @@ def test_html_smoke_site_absolute_and_query_refs_resolve(tmp_path):
     )
     (tmp_path / "style.css").write_text(":root{}", encoding="utf-8")
     _html_static_smoke(tmp_path)  # /style.css resolves at root; ?v=2 is stripped
+
+
+# --------------------------------------------------------------------------- #
+# strict_refs — a dangling internal ref is fatal for a GENERATED site and only a
+# warning for an IMPORTED one (2026-09-04).
+#
+# The unresolved-ref rule is right for a generated site: we emitted the page, so a
+# ref pointing at nothing is our bug and the publish should stop. It is wrong for an
+# import, where dangling refs are the NORMAL case rather than the exception — the
+# crawl caps at 50 pages / 200 assets, robots.txt can disallow a path, the original
+# site links to its own 404s, and anything referenced only from JavaScript is never
+# harvested at all. Under the old always-strict rule ONE missing file (a real site's
+# /rss.xml) threw away an otherwise complete copy of the site and the user got
+# nothing. ``strict_refs`` splits the two; the caller decides, and the default is
+# strict so nothing about a generated html site changes.
+#
+# Everything else the gate checks stays FATAL on both paths — a missing index.html,
+# a page that will not parse, a page with no elements, an unbalanced end tag, and a
+# ref that escapes the site root. That last one is a CONTAINMENT check, never a
+# quality check, and must never be downgraded.
+# --------------------------------------------------------------------------- #
+
+
+def test_html_smoke_unresolved_ref_is_returned_not_raised_without_strict_refs(tmp_path):
+    """The headline: with strict_refs=False a dangling ref no longer aborts the
+    publish. It comes back as data so the caller can report it."""
+    (tmp_path / "index.html").write_text(
+        "<html><head><link rel='alternate' type='application/rss+xml' href='/rss.xml'>"
+        "<link rel='stylesheet' href='style.css'></head>"
+        "<body><h1>hi</h1><img src='missing.png'></body></html>",
+        encoding="utf-8",
+    )
+    (tmp_path / "style.css").write_text(":root{}", encoding="utf-8")
+
+    unresolved = _html_static_smoke(tmp_path, strict_refs=False)
+
+    assert unresolved == ("/rss.xml", "missing.png")
+
+
+def test_html_smoke_resolved_refs_return_empty_without_strict_refs(tmp_path):
+    """A complete tree reports nothing unresolved — the return value is the refs that
+    are genuinely missing, not every local ref on the page."""
+    _write_good_tree(tmp_path)
+    assert _html_static_smoke(tmp_path, strict_refs=False) == ()
+
+
+def test_html_smoke_strict_refs_defaults_to_on(tmp_path):
+    """The default is unchanged: a caller that says nothing still fails closed.
+
+    Mutation: flip the ``strict_refs`` default to False and a generated site with a
+    broken ref deploys."""
+    (tmp_path / "index.html").write_text(
+        "<html><body><img src='nope.png'></body></html>", encoding="utf-8"
+    )
+    with pytest.raises(SmokeGateFailed) as exc:
+        _html_static_smoke(tmp_path)
+    assert "does not resolve" in str(exc.value)
+
+
+def test_html_smoke_escaping_ref_is_fatal_even_without_strict_refs(tmp_path):
+    """CONTAINMENT is not a quality check. A ref that climbs out of the site root
+    stays fatal on every path — an import must never be able to serve a file from
+    outside the tree it imported.
+
+    Mutation: move the ``relative_to`` guard inside the ``if strict_refs`` branch and
+    ``../secret.png`` is silently downgraded to a warning."""
+    (tmp_path / "index.html").write_text(
+        "<html><body><img src='../secret.png'></body></html>", encoding="utf-8"
+    )
+    with pytest.raises(SmokeGateFailed) as exc:
+        _html_static_smoke(tmp_path, strict_refs=False)
+    assert "escapes the site root" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("markup", "fragment"),
+    [
+        (None, "no index.html"),
+        ("just plain text, no tags", "no HTML elements"),
+        ("<html><body><p>hi</p></div></body></html>", "unbalanced"),
+    ],
+    ids=["missing-index", "no-elements", "stray-end-tag"],
+)
+def test_html_smoke_structural_failures_stay_fatal_without_strict_refs(tmp_path, markup, fragment):
+    """Only the unresolved-ref case is relaxed. A page that is not servable AT ALL
+    still stops the publish, import or not."""
+    if markup is not None:
+        (tmp_path / "index.html").write_text(markup, encoding="utf-8")
+    with pytest.raises(SmokeGateFailed) as exc:
+        _html_static_smoke(tmp_path, strict_refs=False)
+    assert fragment in str(exc.value)
+
+
+async def test_html_build_surfaces_unresolved_refs_on_the_build_result(tmp_path):
+    """build(strict_refs=False) completes and hands the unresolved refs back on the
+    BuildResult, so the publish caller can put them on the import report."""
+    (tmp_path / "index.html").write_text(
+        "<html><body><h1>hi</h1><img src='gone.png'></body></html>", encoding="utf-8"
+    )
+    client = GeneratorClient(_runner=_SpyRunner(str(tmp_path)))
+
+    result = await client.build(strict_refs=False, **_html_kwargs({"index.html": "x"}))
+
+    assert isinstance(result, BuildResult)
+    assert result.unresolved_refs == ("gone.png",)
+
+
+async def test_html_build_still_fails_closed_on_a_broken_ref_by_default(tmp_path):
+    """REGRESSION: a generated html site is completely unaffected — build() with no
+    strict_refs argument still refuses a page whose asset is missing."""
+    (tmp_path / "index.html").write_text(
+        "<html><body><h1>hi</h1><img src='gone.png'></body></html>", encoding="utf-8"
+    )
+    client = GeneratorClient(_runner=_SpyRunner(str(tmp_path)))
+
+    with pytest.raises(SmokeGateFailed):
+        await client.build(**_html_kwargs({"index.html": "x"}))
+
+
+# --------------------------------------------------------------------------- #
+# The publish path is what DECIDES. generator_client is told strict_refs; it is
+# never told what "imported" means.
+# --------------------------------------------------------------------------- #
+
+_DANGLING_HTML = (
+    "<!doctype html>\n"
+    "<html lang='en'><head><meta charset='utf-8'><title>Imported</title>\n"
+    "<link rel='alternate' type='application/rss+xml' href='/rss.xml'></head>\n"
+    "<body><h1>a real page</h1></body></html>\n"
+)
+
+
+class _SourceRunner:
+    """Fake runner for the html lane that materializes the generator input's own
+    ``source`` map at the project root — what the real generator's materializeHtml
+    emits — so the smoke gate runs against the page actually being published."""
+
+    async def generate(self, input_json: dict, out_dir: str) -> dict:
+        root = Path(out_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        for rel, contents in (input_json.get("source") or {}).items():
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(contents, encoding="utf-8")
+        return {"projectDir": out_dir, "engine": "html", "staticDir": out_dir}
+
+    def install_inputs_hash(self, project_dir: str) -> str:
+        return "h1"
+
+
+async def _preview_html_pocket(pattern: str, monkeypatch, tmp_path):
+    """Arm an html pocket of ``pattern`` for edit — the lightest publish path that
+    still runs the html smoke gate — and return the transient preview site."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import service as sites_service
+
+    monkeypatch.setenv("PAW_SITES_BUILD_DIR", str(tmp_path / "builds"))
+    monkeypatch.setenv("PAW_SITES_LOCAL_DIR", str(tmp_path / "sites"))
+    monkeypatch.setenv("PAW_SITES_LOCAL", "1")
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("PAW_CF_DEPLOY_MODE", raising=False)
+
+    _view, pocket_id, err = await pockets_service.agent_create(
+        workspace_id="ws1",
+        owner_id="u1",
+        name="Imported site",
+        type_="site",
+        pattern=pattern,
+        ripple_spec=None,
+        engine="html",
+        source={"index.html": _DANGLING_HTML},
+        trusted=True,
+    )
+    assert err is None, err
+    assert pocket_id is not None
+
+    return await sites_service.publish_pocket(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        preview=True,
+        builder_origin="http://localhost:8888",
+        _generator=sites_service.GeneratorClient(_runner=_SourceRunner()),
+    )
+
+
+async def test_an_imported_site_publishes_despite_a_dangling_ref(
+    beanie_test_db, tmp_path, monkeypatch
+):
+    """The real bug, end to end. A site imported from https://rohitk06.in declares
+    its feed as ``<link rel=alternate href=/rss.xml>``. Any file the crawl did not
+    bring across — a page past the 50-page cap, a robots.txt-disallowed path, one of
+    the site's own 404s — leaves a ref like this pointing at nothing, and the whole
+    publish used to die with ``SmokeGateFailed``. The user got NOTHING instead of a
+    95%-correct copy of their site.
+
+    Mutation: hard-code ``strict_refs=True`` at the publish call and this raises."""
+    site = await _preview_html_pocket("imported", monkeypatch, tmp_path)
+    assert site.url  # it published; the missing feed did not throw the site away
+
+
+async def test_a_generated_html_site_is_still_refused_for_a_dangling_ref(
+    beanie_test_db, tmp_path, monkeypatch
+):
+    """REGRESSION, and the reason the relaxation is per-pattern rather than
+    per-engine: the SAME page on a GENERATED html site still fails closed. We emitted
+    that page, so a ref pointing at nothing is our bug, not the user's site."""
+    with pytest.raises(SmokeGateFailed):
+        await _preview_html_pocket("landing", monkeypatch, tmp_path)
+
+
+async def test_an_imported_site_deploys_live_and_reports_what_is_missing(
+    beanie_test_db, tmp_path, monkeypatch
+):
+    """The LIVE publish path — the one a real import actually takes — and the other
+    half of the contract: the refs it stopped refusing come back on the caller's
+    warnings sink, so ``import_service`` can put them on the report the user reads.
+
+    Mutation: hard-code ``strict_refs=True`` in ``_deploy_site_doc`` and this raises;
+    drop the ``warnings_sink`` extend and the list comes back empty."""
+    from pocketpaw_ee.sites import service as sites_service
+
+    monkeypatch.setenv("PAW_SITES_BUILD_DIR", str(tmp_path / "builds"))
+    monkeypatch.setenv("PAW_SITES_LOCAL", "1")
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("PAW_CF_DEPLOY_MODE", raising=False)
+
+    warnings: list[str] = []
+    doc = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pocket-import-1",
+        ripple_spec=None,
+        theme={},
+        name="Imported site",
+        engine="html",
+        source={"index.html": _DANGLING_HTML},
+        pattern="imported",
+        warnings_sink=warnings,
+        _generator=sites_service.GeneratorClient(_runner=_SourceRunner()),
+        _cloudflare=None,
+        _bundle_reader=lambda d: b"x",
+        _local_deploy=lambda site_id, project_dir: "https://site-1.paw.dev",
+    )
+
+    assert doc.deployed is True
+    assert warnings == ["unresolved reference in index.html — /rss.xml was not imported"]

@@ -44,9 +44,16 @@
 # against MAX_CRAWL_PAGES, and against the asset loop's fetch ceiling (which is
 # now counted in slots, not stored files, so re-routing a fetch out of
 # assets_fetched cannot widen it). _LinkScan also stops queueing navigational
-# <link rel> values outright (canonical, prefetch, alternate & co) — the
+# <link rel> values outright (canonical, prefetch, next/prev & co) — the
 # content-type guard stays as the backstop for the ones it can't know about.
 # Scope, SSRF, robots and byte-budget behaviour are unchanged.
+# Edited 2026-09-04 (RSS regression): "alternate" is OFF that denylist again. It
+# is how every RSS/Atom feed declares itself, so denying it dropped the feed file
+# from the harvest, left the <link href="/rss.xml"> in index.html pointing at
+# nothing, and the html smoke gate then failed the ENTIRE publish of a real site
+# ("internal link/asset does not resolve: '/rss.xml'"). The rel is dual-purpose
+# (hreflang alternates are pages), which is precisely what the content-type guard
+# already sorts out. The other eight rels are unchanged.
 
 """Same-site crawler with SSRF-hardened fetching for Paw Sites URL imports."""
 
@@ -383,10 +390,18 @@ class SafeFetcher:
 # them on one real site. A DENYLIST, deliberately: an unfamiliar rel is still
 # fetched, and the asset loop's content-type guard catches it if it turns out to
 # be a page, so a site can hide a page behind any rel it likes and still import.
+#
+# ``alternate`` is NOT on this list, and must not go back on it. It is how every
+# RSS and Atom feed on the web is declared (``rel="alternate"
+# type="application/rss+xml"``), and that feed IS a real asset the page depends
+# on: deny it and the file is never fetched, the <link href> in index.html
+# dangles, and the html static smoke gate refuses the whole publish. The rel is
+# dual-purpose — an hreflang alternate genuinely addresses a page — which is
+# exactly the ambiguity the asset loop's content-type guard below resolves, so
+# both spellings queue and the RESPONSE decides which one it was.
 _NON_ASSET_LINK_RELS = frozenset(
     {
         "canonical",
-        "alternate",
         "prefetch",
         "prerender",
         "dns-prefetch",

@@ -1,6 +1,11 @@
 # tests/ee/sites/test_import.py — SI-4 (feat/sites-import-endpoint): the Paw Sites
 # IMPORT control-plane path.
 #
+# Edited 2026-09-04: added the cover for the import report carrying the internal
+# refs that were never harvested. The html smoke gate no longer refuses an
+# imported site over them, so the report is the only place a user learns that a
+# reference is dead — the publish must be handed somewhere to put them.
+#
 # Created 2026-07-22. Covers:
 #   * POST /sites/import happy path through the real router → import_service →
 #     pockets (real agent_create) → create_draft_site → publish (FAKED — a real
@@ -506,3 +511,45 @@ async def test_import_zip_control_char_entry_name_is_422(beanie_test_db, monkeyp
     assert resp.status_code == 422, resp.text
     assert "import_zip_entry_unsafe" in resp.text
     await _assert_nothing_minted()
+
+
+@pytest.mark.asyncio
+async def test_import_report_carries_the_refs_that_did_not_come_across(
+    _fake_publish, _fake_run_import, monkeypatch
+):
+    """The user is TOLD what is missing.
+
+    The html smoke gate no longer refuses an imported site whose index.html points at
+    a file that was never harvested (a page past the crawl's cap, a robots.txt-blocked
+    path, one of the origin site's own 404s, a JS-only ref). Relaxing it silently
+    would trade one bad outcome for another: the site publishes and nobody knows a
+    dozen references are dead. ``publish`` therefore takes the report's own warnings
+    list as a sink, and the unresolved refs land there next to the crawl's own skip
+    warnings, on the report the UI shows.
+
+    The generator half — that a non-strict build produces those refs at all — is
+    pinned in test_html_publish.py. This is the other half: that the import hands
+    publish somewhere to put them and then persists it.
+
+    Mutation: drop ``warnings_sink=`` from the import's publish call and this fails on
+    the assert inside the stub."""
+    _unresolved = "unresolved reference in index.html — /rss.xml was not imported"
+    stub = sites_service.publish  # the _fake_publish fixture's, already installed
+
+    async def _publish_writing_a_warning(**kw):
+        assert kw.get("warnings_sink") is not None, (
+            "the import must hand publish the report's warnings list, or every "
+            "unresolved ref is lost"
+        )
+        # Stand in for the build: this is what _deploy_site_doc writes into the sink
+        # when _html_static_smoke returns unresolved refs.
+        kw["warnings_sink"].append(_unresolved)
+        return await stub(**kw)
+
+    monkeypatch.setattr(sites_service, "publish", _publish_writing_a_warning)
+
+    app = _build_app("ws_owner", monkeypatch)
+    resp = await _post_zip(app, _good_zip())
+    assert resp.status_code == 200, resp.text
+
+    assert _unresolved in resp.json()["import_report"]["warnings"]
