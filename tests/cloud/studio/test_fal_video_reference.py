@@ -295,3 +295,33 @@ async def test_no_audio_leaves_the_existing_paths_alone(monkeypatch) -> None:
 
     await fal_video.run_fal_video(prompt="a cat", model=fal_video.SEEDANCE_T2V_MODEL, key="k")
     assert seen["endpoint"] == fal_video.SEEDANCE_T2V_MODEL
+
+
+# ── Catalog visibility ──────────────────────────────────────────────────────
+
+
+def test_the_reference_model_is_in_the_curated_catalog() -> None:
+    """It shipped routable but unlisted, so the composer's video picker never
+    offered it — the endpoint worked and nobody could select it.
+
+    Mutation that must break this: remove the seedance_2_5_ref entry.
+    """
+    ids = {cfg["id"] for cfg in fal_video.CURATED_VIDEO_MODELS.values()}
+    assert fal_video.SEEDANCE_REF_TO_VIDEO_MODEL in ids
+
+
+def test_it_advertises_thirty_seconds_and_the_wide_ratios() -> None:
+    """Its enum is wider than its siblings'. Advertising the narrower set would
+    hide options the endpoint accepts."""
+    cfg = fal_video.CURATED_VIDEO_MODELS["seedance_2_5_ref"]
+    assert 30 in cfg["durations"]
+    assert "21:9" in cfg["aspect_ratios"]
+    # Duration is a string enum on this family; sending an int is a 422.
+    assert cfg["duration_as_string"] is True
+
+
+def test_selecting_it_with_nothing_wired_says_what_is_missing() -> None:
+    """fal requires at least one image or video. Now that the model is
+    selectable, a user can reach it with an empty graph."""
+    with pytest.raises(ValueError, match="reference image or video"):
+        fal_video.build_reference_arguments(prompt="a detective", image_urls=[])

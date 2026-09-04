@@ -221,6 +221,20 @@ CURATED_VIDEO_MODELS: dict[str, dict[str, Any]] = {
         "durations": (5, 10),
         "duration_as_string": True,
     },
+    "seedance_2_5_ref": {
+        "id": SEEDANCE_REF_TO_VIDEO_MODEL,  # bytedance/seedance-2.5/reference-to-video
+        "name": "Seedance 2.5 (reference)",
+        "vendor": "ByteDance",
+        "kind": "reference-to-video",
+        # The full enum this endpoint accepts — wider than its siblings, which
+        # offer no 21:9 or 4:3.
+        "aspect_ratios": ("16:9", "9:16", "1:1", "21:9", "4:3", "3:4"),
+        # 4..30; the composer offers the three that matter. This is the only
+        # video model that takes an AUDIO input, so it is what a flow lands on
+        # when a Music node is wired into its Video node.
+        "durations": (5, 10, 30),
+        "duration_as_string": True,
+    },
     "seedance_2_5_i2v": {
         "id": SEEDANCE_I2V_MODEL,  # bytedance/seedance-2.5/image-to-video
         "name": "Seedance 2.5 (image)",
@@ -544,10 +558,17 @@ def build_reference_arguments(
     videos = [u.strip() for u in (video_urls or []) if u and u.strip()][: limits.videos]
     audio = [u.strip() for u in (audio_urls or []) if u and u.strip()][: limits.audio]
 
-    if audio and not images and not videos:
-        raise ValueError("reference-to-video needs at least one image or video alongside audio")
+    if not images and not videos:
+        # fal: "At least one reference image or video is required." Now that this
+        # model is selectable in the composer, a user can reach it with nothing
+        # wired — so name the missing piece here rather than return a 422 whose
+        # message says only that the request was invalid.
+        raise ValueError(
+            "Seedance reference-to-video needs at least one reference image or video"
+            + (" — audio alone is not enough" if audio else "")
+        )
 
-    # The overall 12-file cap. Trimmed from the least specific end — extra images
+    # The overall file cap. Trimmed from the least specific end — extra images
     # are the most replaceable, and dropping the audio or the only video would
     # change what the shot IS.
     while len(images) + len(videos) + len(audio) > limits.files and images:
