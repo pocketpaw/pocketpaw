@@ -5759,22 +5759,43 @@ def _analytics_series(
     chart scale, and it is worse there than on the panel: a long flat run at the baseline
     does not read as missing data, it reads as a site nobody visits.
 
-    ROWS OUTSIDE THE RANGE ARE FOLDED INTO THE NEAREST END rather than dropped, and two
-    ordinary things put them there. Our clock and Cloudflare's ``NOW()`` are not the same
-    clock, so the newest bucket can land a moment past the end; and a site that lapsed and
-    re-subscribed has rows still inside the ninety-day retention that predate the
-    ``counting_since`` its current subscription wrote. Dropping either would leave the
-    chart summing to less than the pageview total printed directly above it, with nothing
-    on screen to explain the gap. The fold moves traffic by at most one bucket at the top,
-    and at the bottom it lands in the bucket the trim has already marked as the edge of
-    what was recorded.
+    ROWS OUTSIDE THE RANGE ARE FOLDED INTO THE NEAREST END rather than dropped, because
+    our clock and Cloudflare's ``NOW()`` are not the same clock and the newest bucket can
+    land a moment past the end. Dropping it would leave the chart summing to less than the
+    pageview total printed directly above it, with nothing on screen to explain the gap.
+    The fold moves that traffic by at most one bucket.
+
+    THE FOLD IS NOT LOAD-BEARING AT THE BOTTOM, and it must not become so. The start is
+    taken from the earliest bucket that carries traffic rather than from
+    ``counting_since`` alone, so a lapsed-and-re-subscribed site's older rows sit in the
+    buckets they happened in instead of piling onto the first one. See the comment on
+    ``start`` below for why that case exists at all.
     """
     step = _ANALYTICS_SERIES_STEP[interval]
     now = datetime.now(UTC)
     end = _analytics_series_floor(now, interval)
+    # The ``counting_since`` trim exists to keep a NEW site's chart from opening with a
+    # long flat run at the baseline. It must not also move a LAPSED site's older traffic.
+    # ``analytics_since`` is cleared by any publish that deploys no counter and re-stamped
+    # fresh on the next paid one, so a site that lapsed and re-subscribed inside the
+    # ninety-day retention holds rows that predate its current stamp. Trimming to the
+    # stamp alone would fold every one of them onto the first bucket — a spike drawn on a
+    # day that did not have it, which is worse than the empty run the trim was avoiding.
+    # Taking the EARLIEST bucket that actually carries traffic serves both: a new site has
+    # nothing before its stamp, so the trim still bites, and a lapsed one keeps its older
+    # rows in the buckets they happened in.
+    earliest = min(
+        (
+            _analytics_series_floor(
+                datetime.fromtimestamp(_analytics_int(row, "bucket"), UTC), interval
+            )
+            for row in rows
+        ),
+        default=_analytics_series_floor(since, interval),
+    )
     start = max(
         _analytics_series_floor(now - timedelta(days=days), interval),
-        _analytics_series_floor(since, interval),
+        min(_analytics_series_floor(since, interval), earliest),
     )
     # A ``counting_since`` in the future — a clock correction, a stamp written by a host
     # running ahead — would otherwise make ``start`` later than ``end`` and produce an

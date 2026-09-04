@@ -1499,12 +1499,22 @@ async def test_the_series_does_not_chart_time_before_counting_began(beanie_test_
 
 
 @pytest.mark.asyncio
-async def test_a_row_from_before_counting_began_is_folded_rather_than_dropped(beanie_test_db):
+async def test_a_row_from_before_counting_began_stays_in_the_day_it_happened(beanie_test_db):
     """A site that lapsed and re-subscribed still holds rows inside the ninety-day
-    retention that predate the ``counting_since`` its current subscription wrote. Dropping
-    them would leave the chart summing to less than the pageview total printed directly
-    above it, with nothing on the screen to explain the difference — so they land in the
-    first bucket, which is the edge of what was recorded."""
+    retention that predate the ``counting_since`` its current subscription wrote —
+    ``analytics_since`` is cleared by any publish that deploys no counter and re-stamped
+    fresh on the next paid one.
+
+    Dropping those rows would leave the chart summing to less than the pageview total
+    printed directly above it, with nothing on screen to explain the difference. Folding
+    them onto the first bucket would keep the sum but draw a spike on a day that did not
+    have one, which is the worse of the two: a wrong number is at least visibly wrong,
+    while a wrong SHAPE is read as fact.
+
+    So the range opens at the earliest bucket that carries traffic. The row sits in the
+    day it happened, the chart still sums to the headline, and the ``counting_since`` trim
+    keeps working for the case it was written for — see the test above, where a new site
+    has nothing before its stamp and still gets three points rather than ninety."""
     now = datetime.now(UTC)
     site = await _seed_site(counting_since=now - timedelta(days=1))
     cf = _RawRowsCF(
@@ -1518,9 +1528,14 @@ async def test_a_row_from_before_counting_began_is_folded_rather_than_dropped(be
         workspace_id="ws-read", site_id=str(site.id), window="7d", _cloudflare=cf
     )
 
-    assert len(out.series.points) == 2
+    assert out.series.points[0].bucket == _bucket_of(now - timedelta(days=5), _DAY)
+    assert len(out.series.points) == 6, "the lapsed day through today, inclusive"
     assert sum(point.pageviews for point in out.series.points) == out.pageviews == 2
-    assert out.series.points[0].pageviews == 1, "folded onto the edge of what was recorded"
+    assert out.series.points[0].pageviews == 1, "in its own day, not piled onto an edge"
+    assert out.series.points[-1].pageviews == 1
+    assert all(
+        point.pageviews == 0 for point in out.series.points[1:-1]
+    ), "the quiet days between are zeros, not a gap and not a spike"
 
 
 @pytest.mark.asyncio
@@ -1598,3 +1613,34 @@ async def test_the_endpoint_serves_the_series(client, monkeypatch):
     assert len(busy) == 1
     assert (busy[0]["pageviews"], busy[0]["visitors"]) == (2, 2)
     assert busy[0]["bucket"].endswith("+00:00")
+
+
+@pytest.mark.asyncio
+async def test_a_row_stamped_past_our_clock_is_folded_onto_the_newest_bucket(beanie_test_db):
+    """Cloudflare's ``NOW()`` and ours are not the same clock, so the newest bucket the
+    query returns can sit a moment past the end of the range we generated.
+
+    Dropping that row would leave the chart summing to less than the pageview total
+    printed directly above it, with nothing on screen to explain the difference — the one
+    place a reader would go looking is the very number that disagrees. Folding moves it by
+    at most one bucket, which at the newest end is the bucket that has not finished yet.
+
+    This is the ONLY end the fold is load-bearing at. The older end is handled by opening
+    the range at the earliest bucket carrying traffic; see the lapsed-site test above."""
+    now = datetime.now(UTC)
+    site = await _seed_site(counting_since=now - timedelta(days=1))
+    cf = _RawRowsCF(
+        [
+            _pv(now, "ours"),
+            _pv(now + timedelta(hours=2), "cloudflare-ahead"),
+        ]
+    )
+
+    out = await sites_service.site_analytics(
+        workspace_id="ws-read", site_id=str(site.id), window="24h", _cloudflare=cf
+    )
+
+    assert sum(point.pageviews for point in out.series.points) == out.pageviews == 2, (
+        "the chart must sum to the headline printed above it"
+    )
+    assert out.series.points[-1].pageviews == 2, "folded onto the newest bucket"

@@ -401,7 +401,7 @@
   {
     "label": "the series charts the whole window regardless of when counting began — a site counting for two days answers a 90-day request with 88 zeroed days, which reads as a site nobody visits rather than as a period nobody recorded",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    start = max(\n        _analytics_series_floor(now - timedelta(days=days), interval),\n        _analytics_series_floor(since, interval),\n    )",
+    "find": "    start = max(\n        _analytics_series_floor(now - timedelta(days=days), interval),\n        min(_analytics_series_floor(since, interval), earliest),\n    )",
     "replace": "    start = _analytics_series_floor(now - timedelta(days=days), interval)",
     "tests": [
       "tests/ee/sites/test_sites_analytics_read.py"
@@ -430,6 +430,15 @@
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "            group=\"bucket\",\n            order=\"bucket\",",
     "replace": "            group=\"bucket\",",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the series range opens at counting_since alone — a lapsed-and-re-subscribed site's rows from before its current stamp all fold onto the first bucket, drawing a spike on a day that did not have one, and the chart still sums to the headline so nothing looks wrong",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        min(_analytics_series_floor(since, interval), earliest),",
+    "replace": "        _analytics_series_floor(since, interval),",
     "tests": [
       "tests/ee/sites/test_sites_analytics_read.py"
     ]
