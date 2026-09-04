@@ -744,6 +744,29 @@ class ImportFromUrlResponse(BaseModel):
     brief_id: str | None = None
 
 
+class ImportBriefStatusResponse(BaseModel):
+    """GET /sites/import/brief/{id} — where a rebuild capture has got to.
+
+    Four states, and they are deliberately distinguishable: ``queued`` (nothing
+    has run), ``capturing`` (the crawl is in flight), ``ready`` (there is a brief
+    to generate from) and ``failed`` (it ended, and ``error`` says why in safe,
+    user-facing words). A client that cannot tell ``queued`` from ``failed``
+    shows a spinner forever on a dead capture, which is the bug the import panel
+    already had once.
+
+    ``goal`` and ``open_questions`` are the readable half of the brief itself, so
+    the panel can show what was understood without shipping the whole baton to
+    the browser.
+    """
+
+    brief_id: str
+    status: str  # queued | capturing | ready | failed
+    source_url: str
+    error: str = ""
+    goal: str = ""
+    open_questions: list[str] = []
+
+
 class SiteInvoiceOut(BaseModel):
     """One manual receipt on the site's client record. ``amount_cents`` is integer
     MINOR units — the wire never carries a float for money, so the reading client

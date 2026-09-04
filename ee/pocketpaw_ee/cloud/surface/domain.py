@@ -186,6 +186,14 @@ class SurfaceMeta:
     # / unset refines (edits) the site. Consulted only on the refine branch (pocket_id
     # present); the sites handler reads ``meta.mode`` there. Absent on create/gallery.
     mode: str | None = None
+    # Sites import-create hint — the id of a captured ``SiteDesignBrief``. Present
+    # only on a REBUILD import: the user gave a URL, the crawl distilled it into a
+    # design brief, and the create run authors a native site FROM that brief rather
+    # than from a typed description. Paired with ``engine`` and NO ``pocket_id``,
+    # because a pocket_id would route the run to refine and the pocket is the
+    # agent's own to mint. The handler fetches the brief server-side; only the id
+    # rides the wire.
+    brief_id: str | None = None
     # Belt console hints — set by the /belt page once the user has bound a repo
     # + branch for the run. ``repo`` is the absolute repo path; ``base_branch``
     # is the branch to base the change off. The belt handler injects both into

@@ -845,9 +845,17 @@ def _seed_page_file(url: str, files: dict[str, bytes]) -> tuple[str, bytes]:
 
 
 def _brief_from_crawl(url: str, crawl: Any) -> Any:
-    """Turn a harvest into a versioned brief. IR-2a fills ``meta`` only; sections,
-    tokens, forms and assets are each a later slice and land empty."""
-    from pocketpaw_ee.sites.design_brief import BriefMeta, DesignBrief
+    """Turn a harvest into the site-authoring crew's ``DesignBrief``.
+
+    Deliberately the crew's own baton rather than a second brief type: the crew
+    threads it Designer → Branding → Frontend, and
+    ``surface/handlers/sites.py::_frontend_preamble`` already renders build
+    instructions from one and routes to ``create_svelte_site``. IR-2a fills the
+    identity layer; the sitemap, design system and asset manifest are each a
+    later slice and land empty, which the crew model already tolerates because
+    its own stages fill them one at a time too.
+    """
+    from pocketpaw_ee.sites.design_brief import build_brief_from_source
 
     warnings = list(crawl.warnings)
     path, blob = _seed_page_file(url, crawl.files)
@@ -860,17 +868,14 @@ def _brief_from_crawl(url: str, crawl: Any) -> Any:
     title = scan.title or scan.og_title
     if not title:
         warnings.append("the source page declares no title")
-    return DesignBrief(
+    return build_brief_from_source(
         source_url=url,
-        captured_at=datetime.now(UTC),
-        meta=BriefMeta(
-            title=title,
-            description=scan.description,
-            # Resolved against the SOURCE url so a stored brief carries an
-            # absolute address; the crawl's own rewrite made these site-relative.
-            favicon_url=urljoin(url, scan.favicon) if scan.favicon else None,
-            og_image_url=urljoin(url, scan.og_image) if scan.og_image else None,
-        ),
+        title=title,
+        description=scan.description,
+        # Resolved against the SOURCE url so a stored brief carries an absolute
+        # address; the crawl's own rewrite made these site-relative, and
+        # ``AssetRef`` refuses anything that is not fetchable.
+        favicon_url=urljoin(url, scan.favicon) if scan.favicon else None,
         warnings=warnings,
     )
 
@@ -936,7 +941,9 @@ async def capture_design_brief(
         await _mark_brief_failed(doc, message=_safe_crawl_failure(exc))
         return doc
 
-    doc.brief = brief.model_dump(mode="json")
+    from pocketpaw_ee.sites.design_brief import dump_brief
+
+    doc.brief = dump_brief(brief)
     doc.error = ""
     doc.status = "ready"
     await doc.save()
@@ -950,7 +957,7 @@ async def capture_design_brief(
             "kind": "rebuild",
             "url": url,
             "brief_id": brief_id,
-            "warnings": len(brief.warnings),
+            "open_questions": len(brief.open_questions),
         },
     )
     return doc
@@ -995,3 +1002,60 @@ async def regenerate_from_url(*, workspace_id: str, user_id: str, url: str) -> d
         _run_design_capture(brief_id=brief_id, workspace_id=workspace_id, url=candidate)
     )
     return {"brief_id": brief_id, "status": "queued", "mode": "rebuild"}
+
+
+async def read_design_brief(*, workspace_id: str, brief_id: str) -> Any:
+    """Read a captured brief's state for the import panel (IR-2b).
+
+    Returns the four states as themselves rather than collapsing any pair: a
+    client that cannot tell ``queued`` from ``failed`` shows a spinner forever on
+    a capture that already died, which is the same class of bug the import report
+    panel shipped with. ``error`` is already safe text (``_safe_crawl_failure``
+    wrote it), so it goes straight to a reader.
+
+    The brief BODY is not returned. Only the goal and the open questions, which
+    are the readable half — the baton itself is for the generation run, and
+    shipping it to a browser would be sending the whole design system to render
+    one status line.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
+    from pocketpaw_ee.sites.design_brief import BriefVersionError, load_brief
+    from pocketpaw_ee.sites.dto import ImportBriefStatusResponse
+
+    try:
+        oid = ObjectId(brief_id)
+    except (InvalidId, TypeError):
+        raise ValidationError("sites.brief_missing", "Unknown design brief id.") from None
+    doc = await SiteDesignBrief.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        raise ValidationError("sites.brief_missing", "Unknown design brief id.")
+
+    goal, questions = "", []
+    if doc.status == "ready" and doc.brief:
+        try:
+            brief = load_brief(doc.brief)
+            goal, questions = brief.goal, list(brief.open_questions)
+        except BriefVersionError as exc:
+            # A stored brief this build cannot read is a FAILED capture from the
+            # reader's point of view: there is nothing here to generate from, and
+            # saying "ready" would start a run against a brief the preamble will
+            # also refuse. Recapturing is the fix, so say so.
+            logger.warning("sites rebuild: brief %s is unreadable: %s", brief_id, exc)
+            return ImportBriefStatusResponse(
+                brief_id=brief_id,
+                status="failed",
+                source_url=doc.source_url,
+                error="that capture was saved by a different version — import the URL again",
+            )
+
+    return ImportBriefStatusResponse(
+        brief_id=brief_id,
+        status=doc.status,
+        source_url=doc.source_url,
+        error=doc.error,
+        goal=goal,
+        open_questions=questions,
+    )

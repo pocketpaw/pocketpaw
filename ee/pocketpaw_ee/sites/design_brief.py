@@ -1,48 +1,56 @@
-# ee/pocketpaw_ee/sites/design_brief.py — the typed, versioned description of a
-# source page that the SITE REGENERATION path hands to the generator, instead of
-# re-hosting the source's own bytes the way the html mirror does.
+# ee/pocketpaw_ee/sites/design_brief.py — build the site-authoring crew's
+# ``DesignBrief`` from a crawled URL, so a rebuild-mode import feeds the SAME
+# baton the crew's Frontend stage already knows how to build from.
 #
-# Created 2026-09-04 (IR-2a, feat/sites-import-design-brief). Only ``meta`` is
-# filled at capture time; ``tokens`` (IR-4), ``sections`` (IR-3), ``forms`` (IR-9)
-# and ``assets`` (IR-5) are each filled by a later slice and land empty here. They
-# exist now so the persisted shape does not change under a stored brief every time
-# one of those slices lands.
+# REWRITTEN 2026-09-04 (feat/sites-import-regenerate). The first version of this
+# module declared its own ``DesignBrief``, which was a duplicate: the codebase
+# already had one at ``sites_crew/models.py``, threaded Designer → Branding →
+# Frontend, and ``cloud/surface/handlers/sites.py::_frontend_preamble`` already
+# renders build instructions from it and routes to ``create_svelte_site``. That
+# preamble has been written and unwired since 2026-07-06, waiting on an
+# orchestration slice that never landed. Regenerating from a URL is that slice.
 #
-# WHY A VERSION FIELD, CHECKED ON READ: a brief outlives the capture that made it
-# — the whole point of persisting one is that a regenerate does not re-crawl. So a
-# brief written by an older build will be read by a newer one. ``load_brief``
-# refuses a mismatch loudly (recapture, or a build that is too old to read this)
-# rather than letting pydantic quietly default away fields whose meaning changed.
-# A silently misread brief regenerates a site that looks nothing like its source
-# and reports no error, which is the failure mode this file exists to prevent.
-"""Typed design brief for regenerating a site from a URL."""
+# So there is no second brief type. This module only knows how to FILL the crew's
+# brief from a harvest, and how to version the persisted copy — the crew model
+# carries no version of its own because, until now, it never outlived a request.
+#
+# Created 2026-09-04 (IR-2a).
+"""Build the crew's DesignBrief from a crawled source page."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field
+from pocketpaw_ee.sites_crew.models import (
+    AssetRef,
+    Branding,
+    DesignBrief,
+    DesignDirection,
+    DesignSystem,
+)
 
-# Bump on ANY change to the shape below that an older reader would misinterpret.
-# Adding a field with a default that reads correctly as "absent" does not need a
-# bump; renaming, re-typing, or changing what a field MEANS does.
+# Bump on any change to how a brief is PERSISTED that an older reader would
+# misinterpret. This lives here rather than on the crew model because the crew
+# model is a request-scoped baton; only the import path stores one and has to
+# read it back later.
 BRIEF_VERSION = 1
 
-# The closed section vocabulary. Deliberately the set the design-taste skill
-# already authors, so a brief never asks the generator for a section kind it has
-# no idiom for. Anything unrecognised becomes ``content`` plus a warning — see
-# IR-3 — because dropping a section silently loses a whole band of the page.
-SECTION_KINDS = (
+# The section roles the crew's ``Section.role`` already names, which are also
+# what the design-taste skill authors. IR-3 classifies into this set; anything it
+# cannot place becomes "custom" plus an open question, never a dropped band.
+SECTION_ROLES = (
+    "nav",
     "hero",
-    "features",
+    "services",
+    "proof",
     "pricing",
-    "testimonial",
-    "faq",
     "cta",
+    "lead_form",
+    "faq",
     "footer",
-    "content",
+    "custom",
 )
 
 
@@ -50,76 +58,73 @@ class BriefVersionError(ValueError):
     """A stored brief cannot be read by this build. Recapture, or upgrade."""
 
 
-class BriefMeta(BaseModel):
-    """What the source page says it is. The only family filled at capture time."""
+def build_brief_from_source(
+    *,
+    source_url: str,
+    title: str = "",
+    description: str = "",
+    favicon_url: str | None = None,
+    warnings: list[str] | None = None,
+) -> DesignBrief:
+    """Fill the crew brief from what a capture learned about a source page.
 
-    title: str = ""
-    description: str = ""
-    favicon_url: str | None = None
-    og_image_url: str | None = None
+    IR-2a fills the identity layer only. The sitemap (IR-3), the design system
+    (IR-4) and the asset manifest (IR-5) are each a later slice and land empty,
+    which the crew model already tolerates — every one of those fields has a
+    default, because the crew fills them stage by stage too.
 
-
-class BriefTokens(BaseModel):
-    """The source's design language. Filled by IR-4 from its stylesheets.
-
-    ``palette`` is ORDERED most-referenced first, which is the whole reason it is
-    a list rather than a set: a real site declares dozens to hundreds of colour
-    tokens and a brief needs a handful, so the order is the selection.
+    ``engine`` is svelte because that is the track with the native edit lane, and
+    being able to restructure the result is the entire reason a rebuild exists
+    rather than a mirror.
     """
+    host = urlparse(source_url).netloc or source_url
+    subject = title.strip() or host
+    # The TITLE leads, because it is the site's name and the host is only its
+    # address. A goal that says "rebuild rohitk06.in" tells the agent where the
+    # reference lives; one that says "rebuild Rohit Kushwaha (rohitk06.in)" tells
+    # it what it is building.
+    named = f"{subject} ({host})" if subject != host else host
+    goal = (
+        f"Rebuild {named} as a native Paw site. Match the source's structure, "
+        f"layout and design language; do not copy its markup."
+    )
+    if description.strip():
+        goal += f" The source describes itself as: {description.strip()}"
 
-    palette: list[str] = Field(default_factory=list)
-    # {"heading": <family>, "body": <family>, "mono": <family>} — resolved
-    # families, never a raw ``var(--x)`` reference and never a bare fallback stack.
-    fonts: dict[str, str] = Field(default_factory=dict)
-    type_scale: list[str] = Field(default_factory=list)
-    spacing: list[str] = Field(default_factory=list)
-    radii: list[str] = Field(default_factory=list)
-    shadows: list[str] = Field(default_factory=list)
+    # AssetRef REJECTS anything that is not an http(s) URL, which is the right
+    # rule and also why this is guarded rather than passed straight through: a
+    # page can declare a data: favicon, and a source that declares none is
+    # ordinary. Neither is worth failing a capture over.
+    favicon = None
+    if favicon_url and favicon_url.startswith(("http://", "https://")):
+        favicon = AssetRef(url=favicon_url, kind="favicon", alt=f"{subject} favicon")
+    elif favicon_url:
+        (warnings := list(warnings or [])).append(
+            "the source's favicon is not a fetchable http(s) URL and was not carried over"
+        )
+
+    brand = Branding(
+        design_system=DesignSystem(name=f"{subject} (from {host})"),
+        favicon_asset=favicon,
+    )
+    return DesignBrief(
+        goal=goal,
+        engine="svelte",
+        pattern="landing",
+        # The source URL is a visual REFERENCE, which is exactly what this field
+        # is for. It is not an asset and not a page we are hosting.
+        design_direction=DesignDirection(
+            references=[source_url],
+            layout_notes="Match the source page's section order and proportions.",
+        ),
+        branding=brand,
+        open_questions=list(warnings or []),
+    )
 
 
-class BriefSection(BaseModel):
-    """One band of the source page, in document order. Filled by IR-3."""
-
-    kind: str = "content"
-    order: int = 0
-    heading: str = ""
-    subcopy: str = ""
-    items: list[str] = Field(default_factory=list)
-    image_refs: list[str] = Field(default_factory=list)
-    # top / left / width / height as the rendered page reported them. Kept because
-    # the ORDER and relative size of bands is most of what "same layout" means.
-    geometry: dict[str, float] = Field(default_factory=dict)
-
-
-class BriefForm(BaseModel):
-    """A form the source page carried. Filled by IR-9.
-
-    ``fields`` carries the original NAMES because downstream lead handling keys on
-    them: a regenerated form with prettier field names captures leads that no
-    existing mapping recognises.
-    """
-
-    purpose: str = ""
-    fields: list[str] = Field(default_factory=list)
-    original_action: str = ""
-    method: str = "post"
-
-
-class DesignBrief(BaseModel):
-    """Everything the generator needs to author a native site that reads as the
-    source's, without ever taking ownership of the source's own tree."""
-
-    version: int = BRIEF_VERSION
-    source_url: str
-    captured_at: datetime
-    meta: BriefMeta = Field(default_factory=BriefMeta)
-    tokens: BriefTokens = Field(default_factory=BriefTokens)
-    sections: list[BriefSection] = Field(default_factory=list)
-    forms: list[BriefForm] = Field(default_factory=list)
-    # path -> the URL it was stored at in OUR blob storage, so a generated section
-    # never points at the original host. Filled by IR-5.
-    assets: dict[str, str] = Field(default_factory=dict)
-    warnings: list[str] = Field(default_factory=list)
+def dump_brief(brief: DesignBrief) -> dict[str, Any]:
+    """The persisted envelope: the crew brief plus the version that wrote it."""
+    return {"version": BRIEF_VERSION, "brief": brief.model_dump(mode="json")}
 
 
 def load_brief(payload: Mapping[str, Any]) -> DesignBrief:
@@ -136,14 +141,16 @@ def load_brief(payload: Mapping[str, Any]) -> DesignBrief:
         raise BriefVersionError(
             f"design brief has no readable version (got {stored!r}); recapture the source"
         ) from None
-    if version > BRIEF_VERSION:
-        raise BriefVersionError(
-            f"design brief is version {version}, newer than this build reads "
-            f"({BRIEF_VERSION}); upgrade rather than reading it"
+    if version != BRIEF_VERSION:
+        direction = "newer than" if version > BRIEF_VERSION else "older than"
+        remedy = (
+            "upgrade rather than reading it" if version > BRIEF_VERSION else "recapture the source"
         )
-    if version < BRIEF_VERSION:
         raise BriefVersionError(
-            f"design brief is version {version}, older than this build reads "
-            f"({BRIEF_VERSION}); recapture the source"
+            f"design brief is version {version}, {direction} this build reads "
+            f"({BRIEF_VERSION}); {remedy}"
         )
-    return DesignBrief.model_validate(dict(payload))
+    body = payload.get("brief")
+    if not isinstance(body, Mapping):
+        raise BriefVersionError("design brief envelope carries no brief")
+    return DesignBrief.model_validate(dict(body))

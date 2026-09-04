@@ -571,6 +571,30 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
                 text=refine_text,
                 cache_key=content_key("sites", refine_text),
             )
+    elif meta.brief_id:
+        # IMPORT-CREATE. The user gave a URL, the crawl distilled it into the
+        # crew's DesignBrief, and this run authors a native site FROM that brief
+        # instead of from a typed description. It reaches ``_frontend_preamble``,
+        # the brief-driven twin of ``_create_preamble`` that has existed unwired
+        # since 2026-07-06 waiting for exactly this: it walks the sitemap, injects
+        # the copy and asset manifest, threads the design-system tokens, and
+        # routes on ``brief.engine``.
+        #
+        # It reads live state, so it answers ``content_key`` for the same reason
+        # refine does. And like refine, its failure mode is a DIFFERENT preamble,
+        # never a failed turn: an unreadable or missing brief falls back to the
+        # ordinary create preamble, which asks the user what to build. That is a
+        # worse experience than the rebuild they asked for and a much better one
+        # than an error, and it is what happens if a brief is deleted between the
+        # capture and the send.
+        brief = await _import_brief(meta.brief_id, workspace_id)
+        if brief is not None:
+            brief_text = _frontend_preamble(meta, brief)
+            return SurfacePreamble(
+                text=brief_text,
+                cache_key=content_key("sites", brief_text),
+            )
+        text = _create_preamble(meta)
     else:
         text = _create_preamble(meta)
     # The five inputs the two meta-only sub-preambles read, all off ``meta``.
@@ -582,6 +606,42 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
             "sites", meta.route_path, meta.pocket_id, meta.site_id, meta.engine, meta.mode
         ),
     )
+
+
+async def _import_brief(brief_id: str, workspace_id: str) -> DesignBrief | None:
+    """Load a captured design brief for an import-create run, or ``None``.
+
+    Never raises. Every failure — an id that is not an ObjectId, a brief from
+    another workspace, a capture that has not finished or failed, a payload this
+    build's version cannot read — is the same answer here, because the caller's
+    only two options are "build from this brief" and "ask the user what to
+    build". Which particular thing went wrong belongs in the log and on the
+    import panel, not in a preamble.
+    """
+    try:
+        from bson import ObjectId
+        from bson.errors import InvalidId
+
+        from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
+        from pocketpaw_ee.sites.design_brief import load_brief
+
+        try:
+            oid = ObjectId(brief_id)
+        except (InvalidId, TypeError):
+            logger.warning("sites import-create: %r is not a brief id", brief_id)
+            return None
+        doc = await SiteDesignBrief.find_one({"_id": oid, "workspace": workspace_id})
+        if doc is None or doc.status != "ready" or not doc.brief:
+            logger.warning(
+                "sites import-create: brief %s is not ready (%s)",
+                brief_id,
+                getattr(doc, "status", "missing"),
+            )
+            return None
+        return load_brief(doc.brief)
+    except Exception:  # noqa: BLE001 — a preamble read never fails a turn
+        logger.warning("sites import-create: could not load brief %s", brief_id, exc_info=True)
+        return None
 
 
 def _create_preamble(meta: SurfaceMeta) -> str:
