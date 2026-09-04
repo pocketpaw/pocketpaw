@@ -171,6 +171,65 @@ def test_rates_are_decimal_all_the_way_through():
     assert cost == Decimal("1.5") + Decimal("7.5")
 
 
+def test_one_upstream_aliased_at_two_prices_is_not_priced_here():
+    """Aliasing one upstream model twice at different markups is an ordinary LiteLLM
+    config, and a run reporting the upstream id does not say which alias served it.
+    Registering the first row's price would bill it at whichever the proxy happened
+    to list first — arbitrary, silent, and about money. Better to fall through."""
+    _load(
+        [
+            {
+                "model_name": "house/cheap",
+                "litellm_params": {"model": "anthropic/claude-sonnet-5"},
+                "model_info": {"input_cost_per_token": 0.000001},
+            },
+            {
+                "model_name": "house/premium",
+                "litellm_params": {"model": "anthropic/claude-sonnet-5"},
+                "model_info": {"input_cost_per_token": 0.000009},
+            },
+        ]
+    )
+
+    # Both aliases price, because the proxy makes those unique.
+    assert "house/cheap" in proxy_prices._PRICES
+    assert "house/premium" in proxy_prices._PRICES
+    # The shared upstream does not, because we cannot tell which one a run used.
+    assert "anthropic/claude-sonnet-5" not in proxy_prices._PRICES
+
+
+def test_one_upstream_aliased_twice_at_the_same_price_still_works():
+    """The ambiguity is about disagreement, not about duplication. Two aliases at
+    the same rate leave the upstream id perfectly well defined."""
+    row = {
+        "litellm_params": {"model": "anthropic/claude-sonnet-5"},
+        "model_info": {"input_cost_per_token": 0.000001},
+    }
+    _load([{**row, "model_name": "house/a"}, {**row, "model_name": "house/b"}])
+
+    assert "anthropic/claude-sonnet-5" in proxy_prices._PRICES
+
+
+def test_an_alias_beats_an_upstream_id_that_spells_the_same_thing():
+    """When one row's alias equals another row's upstream string, the alias is the
+    proxy's own name for a served model and wins."""
+    _load(
+        [
+            {
+                "model_name": "anthropic/claude-sonnet-5",
+                "model_info": {"input_cost_per_token": 0.000002},
+            },
+            {
+                "model_name": "house/rebadged",
+                "litellm_params": {"model": "anthropic/claude-sonnet-5"},
+                "model_info": {"input_cost_per_token": 0.000009},
+            },
+        ]
+    )
+
+    assert proxy_prices._PRICES["anthropic/claude-sonnet-5"].input == Decimal("0.000002")
+
+
 def test_a_row_with_no_usable_rate_is_skipped():
     """A malformed or unpriced row must not register an id that then prices at
     zero — falling through to the public list is the better answer."""

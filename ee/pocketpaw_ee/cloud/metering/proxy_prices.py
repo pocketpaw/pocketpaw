@@ -60,6 +60,10 @@ _FETCH_TIMEOUT_SECONDS = 5.0
 _PRICES: dict[str, _ModelPrice] = {}
 _FETCHED_AT: float = 0.0
 
+#: Failed fetches since the last good one. Keeps ``_log_fetch_failure`` loud once
+#: and quiet after, since the sweep retries every five minutes.
+_CONSECUTIVE_FAILURES: int = 0
+
 
 class _ModelPrice:
     """Per-token USD costs for one model, as the proxy reports them.
@@ -88,6 +92,22 @@ class _ModelPrice:
     def prices_anything(self) -> bool:
         return self.input is not None or self.output is not None
 
+    def __eq__(self, other: object) -> bool:
+        """Value equality. ``_snapshot_from_rows`` compares two aliases' prices to
+        decide whether their shared upstream id is safe to register, and identity
+        would call every pair different."""
+        if not isinstance(other, _ModelPrice):
+            return NotImplemented
+        return (self.input, self.output, self.cache_read, self.cache_write) == (
+            other.input,
+            other.output,
+            other.cache_read,
+            other.cache_write,
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.input, self.output, self.cache_read, self.cache_write))
+
 
 def _decimal(value: Any) -> Decimal | None:
     """A per-token cost as a Decimal, or None for missing / junk / negative.
@@ -107,51 +127,90 @@ def _decimal(value: Any) -> Decimal | None:
     return dec
 
 
-def _ids_for(row: dict[str, Any]) -> list[str]:
-    """Every id a run might report for this proxy row.
+def _alias_of(row: dict[str, Any]) -> str:
+    """The name the proxy serves this row under. Unique across the proxy config,
+    and what our own requests name."""
+    return (row.get("model_name") or "").strip()
 
-    ``model_name`` is the alias the proxy serves it under and is what our own
-    requests name. ``litellm_params.model`` is the upstream id underneath, which is
-    what a backend going through pydantic-ai or ChatLiteLLM tends to report back in
-    its usage. Both are registered because either can be the string that reaches
-    ``resolve_cost``, and the whole point is to price the custom entry.
-    """
-    ids: list[str] = []
-    alias = (row.get("model_name") or "").strip()
-    if alias:
-        ids.append(alias)
+
+def _upstream_of(row: dict[str, Any]) -> str:
+    """The provider id underneath the alias, which is what a backend going through
+    pydantic-ai or ChatLiteLLM tends to report back in its usage. NOT unique: one
+    upstream model is routinely aliased several times, at different markups."""
     params = row.get("litellm_params")
-    if isinstance(params, dict):
-        upstream = (params.get("model") or "").strip()
-        if upstream and upstream not in ids:
-            ids.append(upstream)
-    return ids
+    if not isinstance(params, dict):
+        return ""
+    return (params.get("model") or "").strip()
+
+
+def _price_of(row: dict[str, Any]) -> _ModelPrice | None:
+    """Per-token costs from one ``/model/info`` row, or None when it prices nothing."""
+    info = row.get("model_info")
+    if not isinstance(info, dict):
+        return None
+    price = _ModelPrice(
+        input_=_decimal(info.get("input_cost_per_token")),
+        output=_decimal(info.get("output_cost_per_token")),
+        # LiteLLM names the cache rates separately, and the hand table has never had
+        # a cache-WRITE column at all — a write-heavy turn that falls through to it
+        # undercounts. Carry both when the proxy reports them.
+        cache_read=_decimal(info.get("cache_read_input_token_cost")),
+        cache_write=_decimal(info.get("cache_creation_input_token_cost")),
+    )
+    return price if price.prices_anything() else None
 
 
 def _snapshot_from_rows(rows: list[dict[str, Any]]) -> dict[str, _ModelPrice]:
-    """Map ``/model/info`` rows onto the price table. Never raises."""
+    """Map ``/model/info`` rows onto the price table. Never raises.
+
+    Aliases are registered unconditionally: the proxy makes them unique, so each one
+    has exactly one price.
+
+    Upstream ids are registered ONLY when every alias sharing them agrees on the
+    price. Aliasing one upstream model several times at different markups is an
+    ordinary LiteLLM config, and a run that reports the upstream id gives us no way
+    to tell which alias served it. Taking the first row would bill it at whichever
+    alias the proxy happened to list first — a silent, arbitrary choice on a money
+    path. Leaving the ambiguous id out sends those runs to the public price list
+    instead, which is at least a defensible number, and says so in the log.
+    """
     table: dict[str, _ModelPrice] = {}
+    upstream_seen: dict[str, _ModelPrice | None] = {}
+
     for row in rows:
         if not isinstance(row, dict):
             continue
-        info = row.get("model_info")
-        if not isinstance(info, dict):
+        price = _price_of(row)
+        if price is None:
             continue
-        price = _ModelPrice(
-            input_=_decimal(info.get("input_cost_per_token")),
-            output=_decimal(info.get("output_cost_per_token")),
-            # LiteLLM names the cache rates separately, and the hand table has
-            # never had a cache-WRITE column at all — a write-heavy turn that falls
-            # through to it undercounts. Carry both when the proxy reports them.
-            cache_read=_decimal(info.get("cache_read_input_token_cost")),
-            cache_write=_decimal(info.get("cache_creation_input_token_cost")),
-        )
-        if not price.prices_anything():
+
+        alias = _alias_of(row)
+        if alias:
+            table[alias] = price
+
+        upstream = _upstream_of(row)
+        if not upstream or upstream == alias:
             continue
-        for model_id in _ids_for(row):
-            # First row wins: the alias is registered before the upstream id, so a
-            # custom entry cannot be shadowed by a later row sharing its upstream.
-            table.setdefault(model_id, price)
+        if upstream not in upstream_seen:
+            upstream_seen[upstream] = price
+        elif upstream_seen[upstream] != price:
+            # Two aliases, one upstream, different money. Mark it unusable.
+            upstream_seen[upstream] = None
+
+    for upstream, price in upstream_seen.items():
+        if upstream in table:
+            # An alias already claims this exact string; the alias is authoritative.
+            continue
+        if price is None:
+            logger.info(
+                "metering.proxy_prices: upstream id %r is aliased at more than one "
+                "price — not pricing it here, since a run reporting it does not say "
+                "which alias served it. Those runs fall through to the public list.",
+                upstream,
+            )
+            continue
+        table[upstream] = price
+
     return table
 
 
@@ -162,7 +221,7 @@ async def refresh(*, force: bool = False) -> int:
     snapshot in place and returns its size — a proxy blip must not silently drop
     every custom price and start billing those runs at zero again.
     """
-    global _FETCHED_AT
+    global _FETCHED_AT, _CONSECUTIVE_FAILURES
 
     if not force and _PRICES and (time.monotonic() - _FETCHED_AT) < _TTL_SECONDS:
         return len(_PRICES)
@@ -176,30 +235,51 @@ async def refresh(*, force: bool = False) -> int:
         rows = await LiteLLMClient(timeout=_FETCH_TIMEOUT_SECONDS).model_info()
         table = _snapshot_from_rows(rows)
     except Exception:  # noqa: BLE001 — the proxy is optional and may be down
-        logger.warning(
-            "metering.proxy_prices: could not read /model/info — keeping the "
-            "previous snapshot of %d model(s); runs will price from the public "
-            "lists until this recovers",
-            len(_PRICES),
-            exc_info=True,
+        _log_fetch_failure(
+            "could not read /model/info (an unset POCKETPAW_LITELLM_API_KEY against "
+            "a key-protected proxy looks exactly like this)"
         )
         return len(_PRICES)
 
     if not table:
         # An empty proxy is a real answer, but so is a proxy that answered with
         # nothing useful. Neither is worth discarding a good snapshot for.
-        logger.warning(
-            "metering.proxy_prices: /model/info returned no priced model — "
-            "keeping the previous snapshot of %d model(s)",
-            len(_PRICES),
-        )
+        _log_fetch_failure("/model/info returned no priced model")
         return len(_PRICES)
 
+    if _CONSECUTIVE_FAILURES:
+        logger.info(
+            "metering.proxy_prices: /model/info readable again after %d failed attempt(s)",
+            _CONSECUTIVE_FAILURES,
+        )
+    _CONSECUTIVE_FAILURES = 0
     _PRICES.clear()
     _PRICES.update(table)
     _FETCHED_AT = time.monotonic()
     logger.info("metering.proxy_prices: %d model id(s) priced from the proxy", len(_PRICES))
     return len(_PRICES)
+
+
+def _log_fetch_failure(what: str) -> None:
+    """Loud the first time, quiet after that until it recovers.
+
+    This is retried at the top of every metering sweep, so a proxy that is simply
+    not configured — or one rejecting an unset API key — would otherwise emit the
+    same warning with the same stack trace every five minutes forever. The first
+    one is the useful one; the recovery is logged too, so the pair brackets the
+    outage instead of filling the log with it.
+    """
+    global _CONSECUTIVE_FAILURES
+
+    _CONSECUTIVE_FAILURES += 1
+    message = (
+        "metering.proxy_prices: %s — keeping the previous snapshot of %d model(s); "
+        "runs price from the public lists until this recovers"
+    )
+    if _CONSECUTIVE_FAILURES == 1:
+        logger.warning(message, what, len(_PRICES), exc_info=True)
+    else:
+        logger.debug(message, what, len(_PRICES))
 
 
 def price_from_proxy(
@@ -257,7 +337,8 @@ def unregister() -> None:
     that wants the public lists back without a restart."""
     from pocketpaw.usage_tracker import set_price_provider
 
-    global _FETCHED_AT
+    global _FETCHED_AT, _CONSECUTIVE_FAILURES
     set_price_provider(None)
     _PRICES.clear()
     _FETCHED_AT = 0.0
+    _CONSECUTIVE_FAILURES = 0
