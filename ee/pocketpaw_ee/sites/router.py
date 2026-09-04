@@ -257,6 +257,7 @@ from pocketpaw_ee.sites.dto import (
     DevPreviewResponse,
     DomainRequest,
     DomainStatusResponse,
+    ImportBriefStatusResponse,
     ImportFromUrlRequest,
     ImportFromUrlResponse,
     LeafEditsRequest,
@@ -1183,3 +1184,21 @@ async def delete_site_asset(
         await store.delete(workspace_id=ctx.workspace_id, pocket_id=pocket_id, key=body.key)
     except PublicAssetError as exc:
         raise HTTPException(403, str(exc)) from exc
+
+
+@router.get("/sites/import/brief/{brief_id}", response_model=ImportBriefStatusResponse)
+async def get_import_brief(
+    brief_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> ImportBriefStatusResponse:
+    """Where a rebuild capture has got to (IR-2b).
+
+    The rebuild 202 returns immediately with a ``brief_id`` and the crawl runs in
+    the background, so the client polls this to learn when there is a brief to
+    generate from. Four distinguishable states, because a client that cannot tell
+    ``queued`` from ``failed`` spins forever on a dead capture.
+
+    Tenant-scoped on ctx: a brief id from another workspace is not found here, not
+    readable. A read, so no ``fabric.write`` — same shape as the sibling listings.
+    """
+    return await import_service.read_design_brief(workspace_id=ctx.workspace_id, brief_id=brief_id)

@@ -78,20 +78,38 @@ def test_brief_round_trips_and_refuses_a_version_it_cannot_read():
     from pocketpaw_ee.sites.design_brief import (
         BRIEF_VERSION,
         BriefVersionError,
-        DesignBrief,
+        build_brief_from_source,
+        dump_brief,
         load_brief,
     )
 
-    brief = DesignBrief(source_url="https://example.test", captured_at=datetime.now(UTC))
-    dumped = brief.model_dump(mode="json")
-    assert load_brief(dumped).source_url == "https://example.test"
+    brief = build_brief_from_source(source_url="https://example.test/", title="Example")
+    envelope = dump_brief(brief)
+    assert load_brief(envelope).goal == brief.goal
 
-    # A brief outlives the capture that made it, so a mismatched version must fail
-    # loudly. Defaulting a renamed field away produces a plausible site that is
-    # wrong about its source and reports nothing.
+    # A brief outlives the capture that made it, so a mismatched version must
+    # fail loudly. Defaulting a renamed field away produces a plausible site that
+    # is wrong about its source and reports nothing.
     for bad in (BRIEF_VERSION + 1, BRIEF_VERSION - 1, "not-a-number", None):
         with pytest.raises(BriefVersionError):
-            load_brief({**dumped, "version": bad})
+            load_brief({**envelope, "version": bad})
+    # An envelope with a version but no brief is refused too, rather than
+    # validating into an empty brief that would generate a site about nothing.
+    with pytest.raises(BriefVersionError):
+        load_brief({"version": BRIEF_VERSION})
+
+
+def test_the_brief_is_the_crews_own_baton():
+    """Not a second brief type. The crew threads this one Designer to Frontend,
+    and _frontend_preamble already builds from it."""
+    from pocketpaw_ee.sites.design_brief import build_brief_from_source
+    from pocketpaw_ee.sites_crew.models import DesignBrief as CrewBrief
+
+    brief = build_brief_from_source(source_url="https://example.test/")
+    assert isinstance(brief, CrewBrief)
+    # svelte because that is the track with the native edit lane, which is the
+    # entire reason a rebuild exists rather than a mirror.
+    assert brief.engine == "svelte"
 
 
 def test_metadata_is_read_from_minified_markup():
@@ -123,22 +141,27 @@ def test_brief_from_crawl_carries_the_sources_own_words():
     crawl = _FakeCrawl({"index.html": _PAGE.encode()}, warnings=["one crawl warning"])
     brief = import_service._brief_from_crawl("https://rohitk06.test/", crawl)
 
-    assert brief.meta.title == "Rohit Kushwaha"
-    assert brief.meta.description == "Full-Stack Engineer"
-    # Resolved against the SOURCE url — a stored brief carries absolute addresses,
-    # because the crawl's own rewrite made these site-relative.
-    assert brief.meta.favicon_url == "https://rohitk06.test/favicon.ico"
-    assert brief.meta.og_image_url == "https://rohitk06.test/og.png"
-    assert "one crawl warning" in brief.warnings
-    # Every other family is a later slice and lands empty rather than guessed.
-    assert brief.sections == [] and brief.forms == [] and brief.assets == {}
+    # The source's own title and description reach the goal the agent builds to.
+    assert "rohitk06.test" in brief.goal
+    assert "Full-Stack Engineer" in brief.goal
+    # The URL is a visual REFERENCE, which is the field that means that. It is
+    # not an asset and not a page we are hosting.
+    assert brief.design_direction.references == ["https://rohitk06.test/"]
+    # Resolved against the SOURCE url — AssetRef refuses anything unfetchable,
+    # and the crawl's own rewrite had made this site-relative.
+    assert brief.branding.favicon_asset is not None
+    assert brief.branding.favicon_asset.url == "https://rohitk06.test/favicon.ico"
+    assert "one crawl warning" in brief.open_questions
+    # Every other layer is a later slice and lands empty rather than guessed.
+    assert brief.sitemap == [] and brief.copy == {} and brief.asset_manifest == []
 
 
 def test_a_page_with_no_title_warns_rather_than_failing():
     crawl = _FakeCrawl({"index.html": b"<html><body><p>no head</p></body></html>"})
     brief = import_service._brief_from_crawl("https://x.test/", crawl)
-    assert brief.meta.title == ""
-    assert any("no title" in w for w in brief.warnings)
+    # With no title the goal falls back to the host rather than inventing one.
+    assert "x.test" in brief.goal
+    assert any("no title" in q for q in brief.open_questions)
 
 
 # --------------------------------------------------------------------------- #
@@ -257,8 +280,9 @@ async def test_capture_persists_a_ready_brief(beanie_test_db, monkeypatch):
     assert stored.status == "ready"
     assert stored.error == ""
     brief = load_brief(stored.brief)
-    assert brief.meta.title == "Rohit Kushwaha"
-    assert brief.source_url == "https://rohitk06.test/"
+    assert "Rohit Kushwaha" in brief.goal
+    assert brief.design_direction.references == ["https://rohitk06.test/"]
+    assert brief.engine == "svelte"
 
 
 @pytest.mark.asyncio
@@ -333,3 +357,129 @@ async def test_capture_is_tenant_scoped(beanie_test_db, monkeypatch):
         )
     stored = await SiteDesignBrief.find_one({"_id": doc.id})
     assert stored is not None and stored.status == "queued"
+
+
+# --------------------------------------------------------------------------- #
+# IR-2b — the brief reaches the agent, and a missing one never fails a turn
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_a_ready_brief_routes_to_the_brief_driven_preamble(beanie_test_db, monkeypatch):
+    """The whole point of a rebuild. With a brief and no pocket, the create run
+    gets _frontend_preamble — which walks the brief and routes to the svelte
+    create tool — instead of the preamble that asks the user what to build."""
+    from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
+    from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+    from pocketpaw_ee.cloud.surface.handlers.sites import build_preamble
+
+    doc = SiteDesignBrief(workspace="ws_owner", owner="u", source_url="https://rohitk06.test/")
+    await doc.insert()
+    _patch_crawl(monkeypatch, _FakeCrawl({"index.html": _PAGE.encode()}))
+    await import_service.capture_design_brief(
+        brief_id=str(doc.id), workspace_id="ws_owner", url="https://rohitk06.test/"
+    )
+
+    pre = await build_preamble("ws_owner", "u", SurfaceMeta(engine="svelte", brief_id=str(doc.id)))
+    assert "rohitk06.test" in pre.text
+    assert "Rohit Kushwaha" in pre.text
+    assert "create_svelte_site" in pre.text
+    # It read live state, so it answers a content key, exactly as refine does.
+    assert pre.cache_key
+
+
+@pytest.mark.asyncio
+async def test_a_brief_that_is_not_ready_falls_back_rather_than_failing(
+    beanie_test_db, monkeypatch
+):
+    """A capture still running, one that failed, an id from another workspace and
+    an id that is not an id all land the same way: the ordinary create preamble.
+    The turn must never fail — the user is mid-conversation."""
+    from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
+    from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+    from pocketpaw_ee.cloud.surface.handlers.sites import build_preamble
+
+    plain = await build_preamble("ws_owner", "u", SurfaceMeta(engine="svelte"))
+
+    queued = SiteDesignBrief(workspace="ws_owner", owner="u", source_url="https://x.test/")
+    await queued.insert()
+    failed = SiteDesignBrief(
+        workspace="ws_owner", owner="u", source_url="https://y.test/", status="failed"
+    )
+    await failed.insert()
+    other = SiteDesignBrief(workspace="ws_other", owner="u", source_url="https://z.test/")
+    await other.insert()
+
+    for brief_id in (str(queued.id), str(failed.id), str(other.id), "not-an-id", ""):
+        pre = await build_preamble("ws_owner", "u", SurfaceMeta(engine="svelte", brief_id=brief_id))
+        assert pre.text == plain.text, f"{brief_id!r} did not fall back"
+
+
+# --------------------------------------------------------------------------- #
+# The status read the panel polls
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_the_status_read_tells_the_four_states_apart(beanie_test_db, monkeypatch):
+    """queued, capturing, failed and ready are each themselves. A client that
+    cannot tell queued from failed spins forever on a capture that already died."""
+    from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
+
+    doc = SiteDesignBrief(workspace="ws_owner", owner="u", source_url="https://x.test/")
+    await doc.insert()
+
+    got = await import_service.read_design_brief(workspace_id="ws_owner", brief_id=str(doc.id))
+    assert got.status == "queued"
+    assert got.source_url == "https://x.test/"
+    assert got.error == "" and got.goal == ""
+
+    doc.status = "failed"
+    doc.error = "crawl exceeded the 120s wall-clock cap"
+    await doc.save()
+    got = await import_service.read_design_brief(workspace_id="ws_owner", brief_id=str(doc.id))
+    assert got.status == "failed"
+    assert "120s" in got.error
+
+    _patch_crawl(monkeypatch, _FakeCrawl({"index.html": _PAGE.encode()}))
+    await import_service.capture_design_brief(
+        brief_id=str(doc.id), workspace_id="ws_owner", url="https://rohitk06.test/"
+    )
+    got = await import_service.read_design_brief(workspace_id="ws_owner", brief_id=str(doc.id))
+    assert got.status == "ready"
+    assert "Rohit Kushwaha" in got.goal
+    # A successful recapture clears the old failure rather than leaving it to be
+    # read alongside a ready status.
+    assert got.error == ""
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_stored_brief_reads_as_failed(beanie_test_db):
+    """A brief saved by another version is nothing to generate from. Reporting
+    ready would start a run the preamble then refuses, so it reads as failed with
+    a remedy the user can act on."""
+    from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
+
+    doc = SiteDesignBrief(
+        workspace="ws_owner",
+        owner="u",
+        source_url="https://x.test/",
+        status="ready",
+        brief={"version": 99, "brief": {"goal": "from the future"}},
+    )
+    await doc.insert()
+
+    got = await import_service.read_design_brief(workspace_id="ws_owner", brief_id=str(doc.id))
+    assert got.status == "failed"
+    assert "again" in got.error
+
+
+@pytest.mark.asyncio
+async def test_the_status_read_is_tenant_scoped(beanie_test_db):
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+    from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
+
+    doc = SiteDesignBrief(workspace="ws_other", owner="u", source_url="https://x.test/")
+    await doc.insert()
+    with pytest.raises(ValidationError):
+        await import_service.read_design_brief(workspace_id="ws_owner", brief_id=str(doc.id))
