@@ -220,7 +220,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, field_validator
 
@@ -709,19 +709,39 @@ class ImportFromUrlRequest(BaseModel):
     """Body for POST /sites/import/from-url (SI-4): the site URL to crawl-import.
     Shape validation (http(s), real host, length cap) runs in the import service so
     direct service callers are covered too; the crawler itself is the next stacked
-    slice — this endpoint only queues."""
+    slice — this endpoint only queues.
+
+    ``mode`` (IR-2a) picks what the URL is FOR. ``copy`` mirrors the source's own
+    bytes into an html site, which is what this endpoint has always done. Anything
+    else reads the URL as a DESIGN REFERENCE and captures a brief to regenerate a
+    native site from.
+
+    IT DEFAULTS TO ``copy`` ON PURPOSE, and IR-7 flips it. Today's client sends
+    only ``url`` and reads ``site_id`` out of the response to navigate; defaulting
+    to rebuild would hand that client a ``brief_id`` it does not understand and
+    break the shipped button before the picker exists. Flip the default in the
+    same PR that ships the picker, not before.
+    """
 
     url: str
+    mode: Literal["copy", "rebuild"] = "copy"
 
 
 class ImportFromUrlResponse(BaseModel):
-    """202 body of POST /sites/import/from-url (SI-4): the DRAFT site minted for the
-    queued crawl. ``status`` is "queued" — the crawler slice (SI-5) has not landed,
-    so the site's import_report carries a crawler-pending warning until it does."""
+    """202 body of POST /sites/import/from-url (SI-4).
 
-    site_id: str
-    pocket_id: str
+    ``copy`` mode answers exactly as it always has: the DRAFT site minted for the
+    queued crawl, with ``site_id`` and ``pocket_id`` set. ``rebuild`` mode mints
+    neither — the pocket is the generating agent's to create — so it answers with
+    ``brief_id`` instead and leaves those two None. ``mode`` echoes which of the
+    two happened, so a client never has to infer it from which fields are absent.
+    """
+
     status: str  # queued
+    mode: str = "copy"
+    site_id: str | None = None
+    pocket_id: str | None = None
+    brief_id: str | None = None
 
 
 class SiteInvoiceOut(BaseModel):

@@ -622,10 +622,23 @@ async def import_site_from_url(
     queued ``import_report``, schedule the background same-site crawl, and return
     202 {site_id, pocket_id, status:"queued"} immediately. The crawl runs the zip
     import pipeline and flips the report to "imported"/"failed" with crawl stats.
-    Tenant-scoped on ctx (fabric.write), like every sibling sites mutation."""
-    queued = await import_service.import_from_url(
-        workspace_id=ctx.workspace_id, user_id=ctx.user_id, url=body.url
-    )
+    Tenant-scoped on ctx (fabric.write), like every sibling sites mutation.
+
+    ``mode="rebuild"`` (IR-2a) takes the OTHER branch: the URL is read as a design
+    reference, so nothing is minted and the 202 carries a ``brief_id`` for the
+    captured design brief instead of a site. Both branches validate the URL
+    identically and 422 before any write. The default is ``copy``, so a client
+    that sends only ``url`` gets exactly the behaviour it always got.
+    """
+    if body.mode == "rebuild":
+        queued = await import_service.regenerate_from_url(
+            workspace_id=ctx.workspace_id, user_id=ctx.user_id, url=body.url
+        )
+    else:
+        queued = await import_service.import_from_url(
+            workspace_id=ctx.workspace_id, user_id=ctx.user_id, url=body.url
+        )
+        queued = {**queued, "mode": "copy"}
     return ImportFromUrlResponse(**queued)
 
 
