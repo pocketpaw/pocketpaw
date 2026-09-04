@@ -6,6 +6,7 @@ tokens to ``(user_id, workspace_id, scopes)``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 import time
@@ -152,9 +153,18 @@ async def resolve_bearer(token: str) -> tuple[str, str, list[str]] | None:
         if exp <= now:
             return None
 
-    # Why: argon2 verify is ~30ms, acceptable for API-key auth path.
+    # Argon2id at pwdlib's recommended parameters is ~30ms of CPU and a 64 MB
+    # allocation, by design. That cost is fine; running it INLINE on the event
+    # loop was not. This is one process serving every request, so a synchronous
+    # 30ms burn here freezes every other in-flight request, WebSocket frame and
+    # SSE chunk for those 30ms — not just the caller's. Sustained API-key
+    # traffic therefore caps total server throughput around 1/0.03 ≈ 33 req/s
+    # regardless of how trivial the endpoint being called is.
+    #
+    # to_thread hands it to the default executor so the loop keeps serving.
+    # The verify stays exactly as strict; only where it runs has changed.
     try:
-        result = _password_hash.verify(secret, doc.hashed_secret)
+        result = await asyncio.to_thread(_password_hash.verify, secret, doc.hashed_secret)
     except Exception:
         return None
     if isinstance(result, tuple):

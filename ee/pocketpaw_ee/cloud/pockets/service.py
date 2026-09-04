@@ -1953,7 +1953,12 @@ async def list_pockets(
         if oids:
             query["_id"] = {"$nin": oids}
     docs = await _PocketDoc.find(query).to_list()
-    return [await _resolved_wire_dict(d, user_id) for d in docs]
+    # Resolve concurrently. Each _resolved_wire_dict awaits its own spec
+    # resolution and a team-id lookup, so the old list comprehension paid
+    # every pocket's round trips end to end, one after another — N sequential
+    # awaits for a list that renders all at once. gather keeps the ordering
+    # (results come back positionally) while overlapping the waits.
+    return list(await asyncio.gather(*(_resolved_wire_dict(d, user_id) for d in docs)))
 
 
 async def patterns_for_pockets(workspace_id: str, pocket_ids: list[str]) -> dict[str, str | None]:

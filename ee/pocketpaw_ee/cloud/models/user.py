@@ -1,5 +1,15 @@
 """User and OAuth account models (fastapi-users + Beanie).
 
+Updated: 2026-09-04 — added the ``workspaces.workspace`` index. Until now the
+only index on this collection was the unique ``email`` one that
+``BeanieBaseUser`` contributes, so every membership lookup was a COLLSCAN.
+That predicate is not cold: ``list_member_ids`` backs ``AudienceResolver``,
+which resolves the recipients of every workspace-scoped realtime event behind
+a 2-second cache — so steady chat traffic scans the whole collection roughly
+every 2 seconds per active workspace, on the single event loop. Multikey on
+the ``workspaces`` array, which also serves the ``$elemMatch`` in
+``list_admin_ids`` and the ``$in`` in ``list_peer_ids``.
+
 Updated: 2026-08-01 (AM-6) — added ``OAuthAccount.linked_at`` so the
 connected-accounts panel can say WHEN an identity was attached. Nullable with
 no default rather than ``default_factory=now``: rows written before this field
@@ -19,6 +29,7 @@ from datetime import UTC, datetime
 from beanie import Document
 from fastapi_users_db_beanie import BaseOAuthAccount, BeanieBaseUser
 from pydantic import BaseModel, Field
+from pymongo import IndexModel
 
 
 class OAuthAccount(BaseOAuthAccount):
@@ -64,3 +75,15 @@ class User(BeanieBaseUser, Document):  # type: ignore[misc]
     class Settings:
         name = "users"
         email_collation = None
+        indexes = [
+            # Multikey over the ``workspaces`` array. Serves the three
+            # membership predicates in workspace/service.py:
+            #   list_member_ids  {"workspaces.workspace": wid}
+            #   list_admin_ids   {"workspaces": {"$elemMatch": {...}}}
+            #   list_peer_ids    {"workspaces.workspace": {"$in": [...]}}
+            # ``$elemMatch`` on (workspace, role) uses this too: Mongo narrows
+            # on the indexed leading field and filters ``role`` from the
+            # candidate docs, which is the whole win here — the scan goes from
+            # the collection to one workspace's members.
+            IndexModel([("workspaces.workspace", 1)], name="workspaces_workspace_1"),
+        ]
