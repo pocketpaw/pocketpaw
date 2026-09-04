@@ -51,6 +51,10 @@ logger = logging.getLogger(__name__)
 #: this mostly guards against a second caller refetching within the same tick.
 _TTL_SECONDS = 300
 
+#: Per-request timeout for the ``/model/info`` read. Deliberately shorter than the
+#: catalog client's own default, because this runs on the boot path.
+_FETCH_TIMEOUT_SECONDS = 5.0
+
 #: model id -> per-token USD costs. Empty until ``refresh`` succeeds once, which is
 #: the OSS / proxy-less state and prices nothing.
 _PRICES: dict[str, _ModelPrice] = {}
@@ -166,7 +170,10 @@ async def refresh(*, force: bool = False) -> int:
     try:
         from pocketpaw_ee.catalog.litellm_client import LiteLLMClient
 
-        rows = await LiteLLMClient().model_info()
+        # Five seconds, not the client's default fifteen. This runs on the cloud
+        # boot path, and an unreachable proxy would otherwise stall every start by
+        # a quarter of a minute for something the deployment can live without.
+        rows = await LiteLLMClient(timeout=_FETCH_TIMEOUT_SECONDS).model_info()
         table = _snapshot_from_rows(rows)
     except Exception:  # noqa: BLE001 — the proxy is optional and may be down
         logger.warning(
