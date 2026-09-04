@@ -2,6 +2,12 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-05 (feat/files-links) — new "Files — Links and Graph" section:
+GET /files/{file_id}/links and GET /files/graph, the `link_names` field the
+FileReady listener now writes for text notes, and the note that POST
+/files/write and PUT /files/{id} now emit FileReady so editor notes are
+indexed, tagged and linked like uploads.
+
 Updated: 2026-08-18 (fix/sites-html-refine-names-the-edit-tool) — documented
 `edit_html_file`, the html track's chat edit tool. It shipped in db083bfc without
 reaching this file, so the section below still said html had no edit tool and was
@@ -1334,6 +1340,61 @@ only versions in the caller's workspace:
 
 Fetch a single archived version with its full content (for revert preview /
 diff). Workspace-scoped — a version id from another workspace returns `404`.
+
+## Files — Links and Graph
+
+Text notes (`text/markdown`, `text/plain`) are parsed at ingest for
+`[[wikilinks]]`, `#hashtags` and frontmatter `tags:`. The normalized link
+targets land on the `FileUpload` row as `link_names` (`list[str]`, empty for
+anything that is not a text note); hashtags and frontmatter tags merge into
+the row's `tags` ahead of the derived keyword tags, so a tag the author typed
+is never the one dropped at the cap. Hidden-from-AI files get neither, same as
+they get no auto-tags. `POST /files/write` and `PUT /files/{file_id}` now emit
+`FileReady` (a no-op save with unchanged content emits nothing), so a note made
+or saved in the editor is extracted, tagged, linked and KB-indexed exactly like
+an upload; when a re-index lands under a new kb-go article id the previously
+tracked article is removed, so one file tracks one article.
+
+A link name is `normalize_link_name(text)`: trimmed, casefolded, one trailing
+`.md` dropped. `[[Name]]`, `[[Name|alias]]`, `[[Name#heading]]` and
+`[[Name#heading|alias]]` all resolve to `name`, and a file resolves a name when
+`normalize_link_name(filename)` matches. Two live files sharing a stem resolve
+to the newest. Both routes require `kb.read` (any workspace member) and a valid
+license.
+
+### `GET /files/{file_id}/links`
+
+What this file links to, and what links to it. Resolution runs inside the
+file's own scope (its pocket, or workspace-only rows), so a pocket-private
+note never appears as another scope's linked mention.
+
+```json
+{ "outgoing": [ { "name": "beta", "file_id": "<id>", "filename": "Beta.md" },
+                { "name": "ghost", "file_id": null, "filename": null } ],
+  "backlinks": [ { "file_id": "<id>", "filename": "A.md", "mime": "text/markdown" } ] }
+```
+
+An unresolved name comes back with a null `file_id` so the client can offer to
+create that note. `404 file.not_found` for a missing or cross-workspace id.
+
+### `GET /files/graph?pocket_id=`
+
+The library as a link graph. Same pocket rule as `GET /files`: with
+`pocket_id` the caller must be a pocket member (`403 files.pocket_forbidden`
+otherwise); without it only workspace-scoped rows are read. At most 2000 live
+files are considered, newest first; `truncated` is `true` when there were
+more.
+
+```json
+{ "nodes": [ { "id": "<file id>", "filename": "A.md", "mime": "text/markdown",
+               "tags": ["todo"], "collections": [] } ],
+  "edges": [ { "source": "<file id>", "target": "<file id>" } ],
+  "ghosts": [ "ghost" ],
+  "truncated": false }
+```
+
+Edges are deduplicated (`[[B]]` twice in one note is one edge). `ghosts` are
+the link names no file resolves.
 
 ## Agent Artifact Delivery (`deliver_artifact`)
 
