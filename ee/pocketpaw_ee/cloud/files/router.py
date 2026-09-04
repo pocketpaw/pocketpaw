@@ -1,5 +1,12 @@
 """EE /files router — unified workspace files listing + v2 tree/browse.
 
+2026-09-05 (files vault, feat/files-links): two reads guarded by ``kb.read``
+(the same MEMBER action the knowledge search uses). ``GET /files/{id}/links``
+returns a file's outgoing wikilink targets and backlinks;
+``GET /files/graph?pocket_id=`` returns the library as nodes + edges with the
+same pocket-membership rule as ``GET /files``. Errors are ``CloudError``
+(``file.not_found``, ``files.pocket_forbidden``), never ``HTTPException``.
+
 The module-level ``router`` keeps the Cluster E sub-PR 4 contract
 intact: ``GET /files`` returns a single list the paw-enterprise
 FilesPanel renders without caring which origin each row came from.
@@ -32,10 +39,16 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
+from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.files.abac_config import AbacRuleSet
 from pocketpaw_ee.cloud.files.browse import browse_mount
 from pocketpaw_ee.cloud.files.content_search import CONTENT_SEARCH_ROUTE, search_file_contents
-from pocketpaw_ee.cloud.files.dto import ContentSearchRequest, RequestContext
+from pocketpaw_ee.cloud.files.dto import (
+    ContentSearchRequest,
+    FileLinksResponse,
+    FilesGraphResponse,
+    RequestContext,
+)
 from pocketpaw_ee.cloud.files.errors import FilesError, MountNotFound
 from pocketpaw_ee.cloud.files.registry import ProviderRegistry
 from pocketpaw_ee.cloud.files.service import UnifiedFilesService
@@ -192,6 +205,44 @@ async def search_files_by_content(
             "limit": body.limit,
         }
     )
+
+
+@router.get(
+    "/graph",
+    response_model=FilesGraphResponse,
+    dependencies=[Depends(require_action_any_workspace("kb.read"))],
+)
+async def files_graph(
+    pocket_id: str | None = Query(None),
+    user_id: str = Depends(current_user_id),
+    current_workspace: str = Depends(current_workspace_id),
+) -> FilesGraphResponse:
+    """The library as a link graph. Same pocket rule as ``GET /files``: with
+    ``pocket_id`` the caller must be a member; without it, workspace-only rows."""
+    if pocket_id:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+        try:
+            allowed = await pockets_service.is_member(pocket_id=pocket_id, user_id=user_id)
+        except Exception:
+            allowed = False
+        if not allowed:
+            raise Forbidden("files.pocket_forbidden")
+    return await _SVC.files_graph(current_workspace, pocket_id=pocket_id)
+
+
+@router.get(
+    "/{file_id}/links",
+    response_model=FileLinksResponse,
+    dependencies=[Depends(require_action_any_workspace("kb.read"))],
+)
+async def file_links(
+    file_id: str,
+    current_workspace: str = Depends(current_workspace_id),
+) -> FileLinksResponse:
+    """What this file links to, and what links to it. 404 ``file.not_found``
+    for a missing or cross-workspace id."""
+    return await _SVC.file_links(current_workspace, file_id)
 
 
 def build_router(

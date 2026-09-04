@@ -1,5 +1,12 @@
 """Public schemas for the files module.
 
+2026-09-05 (files vault, feat/files-links): response models for the two link
+reads. ``FileLinksResponse`` (GET /files/{id}/links) carries the file's outgoing
+wikilink targets, resolved to a file where one exists, plus the files that
+link back to it. ``FilesGraphResponse`` (GET /files/graph) is the whole library
+as nodes + edges, with unresolved names as ``ghosts`` and ``truncated`` set
+when the 2000-file cap was hit.
+
 2026-08-29 (T3 "Files content search"): added ``ContentSearchRequest``, the body
 of ``POST /files/search``. It carries no ``scope`` field on purpose — unlike
 ``/kb/search``, which takes a client scope and binds it to the caller through an
@@ -178,3 +185,45 @@ class ContentSearchRequest(BaseModel):
     query: str
     limit: int = Field(20, ge=1, le=50)
     pocket_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Files vault: links + graph (2026-09-05)
+# ---------------------------------------------------------------------------
+
+
+class LinkTarget(BaseModel):
+    name: str
+    file_id: str | None = None
+    filename: str | None = None
+
+
+class Backlink(BaseModel):
+    file_id: str
+    filename: str
+    mime: str
+
+
+class FileLinksResponse(BaseModel):
+    outgoing: list[LinkTarget] = Field(default_factory=list)
+    backlinks: list[Backlink] = Field(default_factory=list)
+
+
+class GraphNode(BaseModel):
+    id: str
+    filename: str
+    mime: str
+    tags: list[str] = Field(default_factory=list)
+    collections: list[str] = Field(default_factory=list)
+
+
+class GraphEdge(BaseModel):
+    source: str
+    target: str
+
+
+class FilesGraphResponse(BaseModel):
+    nodes: list[GraphNode] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)
+    ghosts: list[str] = Field(default_factory=list)
+    truncated: bool = False

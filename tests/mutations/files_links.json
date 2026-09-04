@@ -43,5 +43,50 @@
     "tests": [
       "tests/cloud/uploads/test_listener_links.py::test_markdown_note_gets_links_and_tags_merged"
     ]
+  },
+  {
+    "label": "the link-rows read drops its workspace filter, so another tenant's note shows up as a backlink and in the graph",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "        query: dict = {\"workspace\": workspace, \"deleted_at\": None}\n",
+    "replace": "        query: dict = {\"deleted_at\": None}\n",
+    "tests": [
+      "tests/cloud/files/test_links.py::test_cross_workspace_id_is_404_and_never_a_backlink"
+    ]
+  },
+  {
+    "label": "filenames are matched raw instead of through the normalizer, so [[beta]] never finds Beta.MD",
+    "file": "ee/pocketpaw_ee/cloud/files/service.py",
+    "find": "        out.setdefault(normalize_link_name(r[\"filename\"]), r)",
+    "replace": "        out.setdefault(r[\"filename\"], r)",
+    "tests": [
+      "tests/cloud/files/test_links.py::test_outgoing_links_resolve_by_normalized_stem"
+    ]
+  },
+  {
+    "label": "backlinks are scanned across every pocket, so a pocket-private note leaks into a workspace file's linked mentions",
+    "file": "ee/pocketpaw_ee/cloud/files/service.py",
+    "find": "            workspace_id, pocket_id=doc.pocket_id or LIST_WORKSPACE_ONLY, limit=GRAPH_CAP\n",
+    "replace": "            workspace_id, pocket_id=None, limit=GRAPH_CAP\n",
+    "tests": [
+      "tests/cloud/files/test_links.py::test_pocket_private_note_is_not_a_workspace_backlink"
+    ]
+  },
+  {
+    "label": "the graph stops checking pocket membership, so a non-member can pull a pocket's file names and links",
+    "file": "ee/pocketpaw_ee/cloud/files/router.py",
+    "find": "        if not allowed:\n            raise Forbidden(\"files.pocket_forbidden\")",
+    "replace": "        if False:\n            raise Forbidden(\"files.pocket_forbidden\")",
+    "tests": [
+      "tests/cloud/files/test_links.py::test_graph_pocket_membership"
+    ]
+  },
+  {
+    "label": "the same-stem tie goes to the oldest file instead of the newest",
+    "file": "ee/pocketpaw_ee/cloud/files/service.py",
+    "find": "        out.setdefault(normalize_link_name(r[\"filename\"]), r)",
+    "replace": "        out[normalize_link_name(r[\"filename\"])] = r",
+    "tests": [
+      "tests/cloud/files/test_links.py::test_same_stem_newest_wins"
+    ]
   }
 ]
