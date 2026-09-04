@@ -124,6 +124,14 @@ class Message(TimestampedDocument):
         name = "messages"
         indexes = [
             [("context_type", 1), ("group", 1), ("createdAt", -1)],
+            # backend-perf M3. `get_by_type(SESSION)` filters on context_type
+            # ALONE and sorts -createdAt. The index above cannot serve it: with
+            # `group` unbounded in the middle, createdAt can supply neither a
+            # range bound nor the sort, so Mongo fetches every pocket message
+            # in the collection and sorts them in memory — which does not
+            # merely get slow, it HARD-FAILS past the 32 MB in-memory sort
+            # limit. This two-key index makes the sort an index walk.
+            [("context_type", 1), ("createdAt", -1)],
             [("workspace_id", 1), ("session_key", 1), ("createdAt", 1)],
             [("session_key", 1), ("createdAt", 1)],
             [("group", 1), ("createdAt", -1)],

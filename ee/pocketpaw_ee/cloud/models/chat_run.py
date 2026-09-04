@@ -99,4 +99,20 @@ class ChatRunDoc(Document):
             # scan per tick. This two-key index makes the window a real bound and
             # the sort an index walk.
             IndexModel([("workspace", 1), ("createdAt", -1)]),
+            # backend-perf H4. `find_active_run_scopes` — the jail GC's guard,
+            # which runs on startup and every five minutes — filters on
+            # `status` alone, with no workspace. No index above leads on
+            # status, so that query is a COLLSCAN of the whole collection.
+            #
+            # That would be tolerable against a bounded collection. `chat_runs`
+            # has NO TTL and no archival, so it grows forever, and every row
+            # carries the run's complete assistant answer in `partial_text`.
+            # At 10k runs/day it passes a million documents in three months,
+            # and the GC then walks all of them, every five minutes.
+            #
+            # The index makes it a walk of only the active runs, which is a
+            # handful. It does NOT bound the collection — see the note on the
+            # retention gap in the audit; a TTL deletes customer data and is
+            # not a call to make inside a performance change.
+            IndexModel([("status", 1), ("createdAt", -1)]),
         ]

@@ -359,7 +359,15 @@ class MemoryManager:
         page. An invalid cursor yields an empty page (defensive; the client
         only ever echoes back a cursor it received).
         """
-        entries = await self._store.get_session(session_key)
+        # limit=None on purpose. This pages BACKWARD through older messages
+        # via the `before` cursor, so a bounded read would make the transcript
+        # appear to end at the bound: everything older than the newest N would
+        # be unreachable, and the client would show an empty page rather than
+        # an error. The real fix is to push the cursor into the query as a
+        # keyset filter instead of loading the session and slicing it in
+        # Python — that is a change to three store implementations and is not
+        # folded into a perf pass. Tracked with H4 in the backend-perf audit.
+        entries = await self._store.get_session(session_key, limit=None)
         try:
             if before:
                 before_iso, before_id = before.split("|", 1)
@@ -464,7 +472,11 @@ class MemoryManager:
         Returns:
             List of {"role": "...", "content": "..."} dicts.
         """
-        entries = await self._store.get_session(session_key)
+        # limit=None on purpose: this feeds summarization, and silently
+        # changing which messages are summarized would change agent behaviour
+        # in a way no test would catch. It has its own `char_budget`, so the
+        # OUTPUT is already bounded — the read is not.
+        entries = await self._store.get_session(session_key, limit=None)
         if not entries:
             return []
 
