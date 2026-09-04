@@ -101,6 +101,7 @@ from pocketpaw.deep_work.api import router as deep_work_router
 from pocketpaw.memory import MemoryType, get_memory_manager
 from pocketpaw.mission_control.api import router as mission_control_router
 from pocketpaw.security import get_audit_logger
+from pocketpaw.security.body_limit import BodySizeLimitMiddleware
 from pocketpaw.security.redact import safe_install_error
 from pocketpaw.skills import get_skill_loader
 from pocketpaw.tunnel import get_tunnel_manager
@@ -240,6 +241,15 @@ app.include_router(auth_router)
 # Auth must be registered BEFORE CORS so CORS is outermost and handles
 # OPTIONS preflight requests before auth can reject them.
 app.add_middleware(AuthMiddleware)
+# Body-size ceiling, registered after AuthMiddleware so it sits OUTSIDE it.
+# That ordering is load-bearing twice over: the upload limits are enforced only
+# after Starlette has spooled the whole multipart body to disk, and
+# AuthMiddleware itself reads the body on the login paths. A ceiling inside
+# either of those cannot stop the buffering it exists to prevent. CORS is
+# installed below and stays outermost, so a 413 still carries its headers — a
+# header-less rejection reads to the browser as a CORS failure. See H5 in the
+# backend-perf audit.
+app.add_middleware(BodySizeLimitMiddleware)
 # Also registers the CORS-aware unhandled-error handler — a 500 is minted by
 # ServerErrorMiddleware, which sits OUTSIDE CORSMiddleware, so without it every
 # crash returns header-less and the browser blames CORS. See api/cors.py.

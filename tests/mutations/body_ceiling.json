@@ -1,0 +1,119 @@
+[
+  {
+    "label": "the Content-Length check is dropped",
+    "file": "src/pocketpaw/security/body_limit.py",
+    "find": "        if declared is not None and declared > limit:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/test_body_size_limit.py::TestDeclaredLength::test_declared_oversize_is_rejected_without_reading_the_body"
+    ]
+  },
+  {
+    "label": "the streamed byte counter is dropped, leaving chunked bodies unbounded",
+    "file": "src/pocketpaw/security/body_limit.py",
+    "find": "            if state[\"seen\"] > limit:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/test_body_size_limit.py::TestStreamedLength::test_chunked_oversize_is_rejected"
+    ]
+  },
+  {
+    "label": "the app is allowed to respond after the 413 has been sent",
+    "file": "src/pocketpaw/security/body_limit.py",
+    "find": "            if state[\"responded\"]:\n                return\n            await send(message)",
+    "replace": "            await send(message)",
+    "tests": [
+      "tests/test_body_size_limit.py::TestStreamedLength::test_no_second_response_is_sent"
+    ]
+  },
+  {
+    "label": "a bad env override disables the ceiling instead of falling back",
+    "file": "src/pocketpaw/security/body_limit.py",
+    "find": "            if val > 0:\n                return val",
+    "replace": "            return val",
+    "tests": [
+      "tests/test_body_size_limit.py::TestCeilingResolution::test_a_bad_override_falls_back_rather_than_disabling_the_ceiling"
+    ]
+  },
+  {
+    "label": "the ceiling stops being wired into the dashboard app",
+    "file": "src/pocketpaw/dashboard.py",
+    "find": "app.add_middleware(BodySizeLimitMiddleware)",
+    "replace": "pass  # app.add_middleware(BodySizeLimitMiddleware)",
+    "tests": [
+      "tests/test_body_size_limit.py::TestItIsActuallyWired::test_registered_on_the_dashboard_app"
+    ]
+  },
+  {
+    "label": "the ceiling is registered INSIDE auth, which reads the body itself",
+    "file": "src/pocketpaw/dashboard.py",
+    "find": "app.add_middleware(BodySizeLimitMiddleware)\n# Also registers the CORS-aware unhandled-error handler",
+    "replace": "app.add_middleware(BodySizeLimitMiddleware)\napp.add_middleware(AuthMiddleware)\n# Also registers the CORS-aware unhandled-error handler",
+    "tests": [
+      "tests/test_body_size_limit.py::TestItIsActuallyWired::test_registered_outside_auth_on_the_dashboard_app"
+    ]
+  },
+  {
+    "label": "Mongo kwargs are applied over the operator's URI options",
+    "file": "ee/pocketpaw_ee/cloud/shared/db.py",
+    "find": "    return {key: value for key, value in _MONGO_DEFAULTS.items() if key.lower() not in present}",
+    "replace": "    return dict(_MONGO_DEFAULTS)",
+    "tests": [
+      "tests/cloud/test_client_pool_ceilings.py::TestMongoClientOptions::test_a_uri_option_wins_over_our_default"
+    ]
+  },
+  {
+    "label": "Mongo server selection goes back to the 30s default",
+    "file": "ee/pocketpaw_ee/cloud/shared/db.py",
+    "find": "    \"serverSelectionTimeoutMS\": 5_000,",
+    "replace": "    \"serverSelectionTimeoutMS\": 30_000,",
+    "tests": [
+      "tests/cloud/test_client_pool_ceilings.py::TestMongoClientOptions::test_server_selection_fails_faster_than_the_30s_default"
+    ]
+  },
+  {
+    "label": "the URI option match becomes case-sensitive",
+    "file": "ee/pocketpaw_ee/cloud/shared/db.py",
+    "find": "    present = {pair.partition(\"=\")[0].strip().lower() for pair in query.split(\"&\") if pair.strip()}",
+    "replace": "    present = {pair.partition(\"=\")[0].strip() for pair in query.split(\"&\") if pair.strip()}",
+    "tests": [
+      "tests/cloud/test_client_pool_ceilings.py::TestMongoClientOptions::test_uri_option_matching_is_case_insensitive"
+    ]
+  },
+  {
+    "label": "the Redis pool loses its ceiling",
+    "file": "ee/pocketpaw_ee/cloud/_core/redis_client.py",
+    "find": "            max_connections=_int_env(\"POCKETPAW_REDIS_MAX_CONNECTIONS\", _DEFAULT_MAX_CONNECTIONS),",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_client_pool_ceilings.py::TestRedisClientOptions::test_the_pool_is_bounded"
+    ]
+  },
+  {
+    "label": "socket_timeout is added to Redis, severing the blocking stream read",
+    "file": "ee/pocketpaw_ee/cloud/_core/redis_client.py",
+    "find": "            socket_connect_timeout=_DEFAULT_CONNECT_TIMEOUT_SECONDS,",
+    "replace": "            socket_connect_timeout=_DEFAULT_CONNECT_TIMEOUT_SECONDS,\n            socket_timeout=5.0,",
+    "tests": [
+      "tests/cloud/test_client_pool_ceilings.py::TestRedisClientOptions::test_no_read_timeout_is_set"
+    ]
+  },
+  {
+    "label": "a bad Redis env value unbounds the pool instead of falling back",
+    "file": "ee/pocketpaw_ee/cloud/_core/redis_client.py",
+    "find": "    if val <= 0:\n        logger.warning(\"%s=%d is not positive; using default %d\", name, val, default)\n        return default\n    return val",
+    "replace": "    return val",
+    "tests": [
+      "tests/cloud/test_client_pool_ceilings.py::TestRedisClientOptions::test_a_bad_env_value_falls_back_rather_than_unbounding_the_pool"
+    ]
+  },
+  {
+    "label": "idle Redis connections stop being health-checked",
+    "file": "ee/pocketpaw_ee/cloud/_core/redis_client.py",
+    "find": "            health_check_interval=_DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS,",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_client_pool_ceilings.py::TestRedisClientOptions::test_idle_connections_are_health_checked"
+    ]
+  }
+]
