@@ -169,6 +169,7 @@ Env vars (all also documented in `backend/CLAUDE.md` → Key Conventions):
 |-----|---------|---------|
 | `POCKETPAW_CLOUD_RUN_EXECUTOR` | `inprocess` | Set to `arq` on the web service to enable Tier 2 |
 | `POCKETPAW_ARQ_MAX_JOBS` | `10` | Concurrent jobs ONE worker runs, shared across every registered lane. Set on the **worker**; the web service ignores it. See "Sizing the worker" below |
+| `POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL` | `30` | How often the worker refreshes its Redis health key. `arq --check` exits 0 while that key lives (TTL = this + 1s), so this is what decides how fast a container healthcheck can notice a dead worker. arq's own default is `3600`, which is far too slow to probe against |
 | `POCKETPAW_AGENT_POOL_MAX_INSTANCES` | `20` | Per-process AgentPool ceiling. Applies to the web process AND each worker |
 | `POCKETPAW_SESSION_WARM_MAX_PER_TENANT` | `8` | Per-process warm session slots one workspace may hold. The per-tenant fairness knob |
 | `POCKETPAW_SESSION_WARM_MAX_GLOBAL` | `64` | Per-process warm session slots across all workspaces |

@@ -236,6 +236,13 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   30-minute `job_timeout`. Total concurrency is this value x worker replicas.
   Raise it WITH the container's memory limit: the default `claude_agent_sdk`
   backend spawns a Node subprocess per run, so RAM binds before CPU.
+  `POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL` (default `30`) — **worker only**, and not
+  a capacity knob at all: it is how often the worker refreshes its Redis health
+  key, and therefore how fast `arq --check` can notice the worker is gone (the
+  key's TTL is this plus a second). arq's own default is `3600`, which answers
+  "healthy" for up to an hour after the process died — so a container
+  healthcheck built on it looks like coverage and catches nothing. The deploy
+  compose polls it every 30s; keep this comfortably under whatever polls it.
   `POCKETPAW_AGENT_POOL_MAX_INSTANCES` (default `20`) — **per-process** AgentPool
   ceiling; the web process and each worker each hold their own pool.
   `POCKETPAW_SESSION_WARM_MAX_PER_TENANT` (default `8`) /
