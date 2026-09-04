@@ -2,6 +2,16 @@
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
 #
+# Updated 2026-09-04 (AD-4 — the overview chart's data): added
+# ``SiteAnalyticsSeriesPoint`` / ``SiteAnalyticsSeries`` and ``SiteAnalyticsResponse.series``,
+# the per-bucket views and visitors the chart under the headline numbers draws. Two things
+# about it are contracts rather than implementation detail. EVERY bucket in the range is
+# present, including the ones nobody visited, because a chart handed only the buckets that
+# had traffic draws a straight line across a quiet Sunday and reports it as no Sunday at
+# all. And every ``bucket`` stamp is UTC, said out loud on the model, because an axis
+# labelled ``1PM`` that means UTC is five and a half hours wrong for a reader in Mumbai and
+# nothing on the screen would say so.
+#
 # Updated 2026-09-04 (AD-2 — the visit metrics on the wire): added
 # ``SiteAnalyticsVisits`` and ``SiteAnalyticsResponse.visits``, the visits / bounce rate /
 # visit duration block the overview leads with. It carries this model's absence rule
@@ -990,6 +1000,52 @@ class SiteAnalyticsVisits(BaseModel):
     duration_seconds: float | None = None
 
 
+class SiteAnalyticsSeriesPoint(BaseModel):
+    """One bucket of the overview chart — an hour or a day, and what happened in it.
+
+    ``bucket`` is the ISO-8601 stamp of the bucket's START, and it is UTC. That is said
+    here rather than left to be inferred because it is the field a chart turns into an
+    axis label: an hour rendered as ``1PM`` that actually means 13:00 UTC is five and a
+    half hours wrong for a reader in Mumbai, and nothing on the screen would say so. A
+    client that wants local labels has the offset it needs to shift them.
+
+    ``visitors`` is a distinct count WITHIN this bucket and does not sum down the column —
+    the same rule ``SiteAnalyticsBreakdown`` carries one field over. One person who reads
+    at nine and again at ten is one visitor on the response's total and one visitor in each
+    of two buckets, so a UI that adds this column gets a number that means nothing.
+    """
+
+    bucket: str
+    pageviews: int
+    visitors: int
+
+
+class SiteAnalyticsSeries(BaseModel):
+    """Views and visitors per time bucket, oldest first — the chart under the tiles.
+
+    ``interval`` is ``"hour"`` or ``"day"``, and a client needs it to label the axis: the
+    same list of points is a day of hours or three months of days depending on this field
+    alone. It is chosen from the window rather than requested, because a bar chart stops
+    being readable somewhere around a hundred bars and thirty days of hourly buckets is
+    seven hundred and twenty of them.
+
+    EVERY BUCKET IN THE RANGE IS HERE, including the ones nobody visited. A series that
+    listed only the buckets with traffic would be shorter, and every chart drawn from it
+    would join the two ends of a gap with a straight line — reporting a quiet Sunday as no
+    Sunday at all. A zero is a measurement; a missing entry is not.
+
+    THE RANGE ITSELF starts at the later of the window's own start and the moment counting
+    began, so a site that has been counting for two days does not answer a ninety-day
+    request with eighty-eight zeroes for a period nobody was recording. That is the one
+    rule this whole endpoint is built on, applied to a chart: those zeroes would look
+    exactly like a site nobody visits. ``counting_since`` on the response says where the
+    trim came from.
+    """
+
+    interval: str  # hour | day
+    points: list[SiteAnalyticsSeriesPoint] = []
+
+
 class SiteAnalyticsResponse(BaseModel):
     """Visitor analytics for one site over one window (GET
     /sites/{site_id}/analytics).
@@ -1030,6 +1086,12 @@ class SiteAnalyticsResponse(BaseModel):
     # stamp one. Never a zeroed block: a 0% bounce rate is not an empty panel, it is a
     # spectacular result, and this site has not measured a single visit.
     visits: SiteAnalyticsVisits | None = None
+    # AD-4: the chart's data. None unless ``status`` is ``ok``, like every other metric
+    # here — and unlike ``visits`` and ``devices`` it never lands in ``unrecorded``,
+    # because the column it is bucketed on is the row's own timestamp and every stored row
+    # has carried one since the first. A window with no traffic at all still answers a
+    # full range of zeroed points: nothing about a quiet week is unanswerable.
+    series: SiteAnalyticsSeries | None = None
     top_pages: list[SiteAnalyticsBreakdown] | None = None
     referrers: list[SiteAnalyticsBreakdown] | None = None
     countries: list[SiteAnalyticsBreakdown] | None = None
