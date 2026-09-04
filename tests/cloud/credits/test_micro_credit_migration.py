@@ -19,12 +19,17 @@
 #   * and the ledger invariant ``balance == sum(amount_delta)`` has to still hold
 #     afterwards, because that is the only thing that says the wallet is intact.
 #
-# The migration logic is duplicated here rather than imported: the script is a
-# standalone operator tool with a ``__main__`` and an argparse front door, and
-# importing it would drag its CLI into the suite. What is under test is the
-# aggregation pipeline, which is copied verbatim.
+# These drive the REAL script, loaded from its path by ``micro_migration_harness``.
+# They used to run a copy of its pipeline, pasted in because the script is an
+# operator tool with a ``__main__`` and no importable name. That copy was the
+# failure this module exists to prevent: on 2026-09-04 the conversion was found to
+# destroy live writes, and a fix applied to the script alone would have left every
+# test here green against the wrong code.
 #
 # Created 2026-09-04 (feat/exact-credit-deduction): new test module.
+# Changed 2026-09-04 (fix/wallet-migration-guard): the copied pipeline is gone; the
+# script itself is under test. See tests/cloud/credits/test_unmigrated_wallet.py for
+# the case that copy was hiding.
 
 from __future__ import annotations
 
@@ -32,34 +37,13 @@ from datetime import UTC, datetime
 
 import pytest
 from pocketpaw_ee.cloud.credits import service as credits
-from pocketpaw_ee.cloud.credits.domain import MICRO_PER_CREDIT, credits_to_micro
+from pocketpaw_ee.cloud.credits.domain import credits_to_micro
 from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
+
+from tests.cloud.credits.micro_migration_harness import run_migration as _run_migration
 
 WS = "ws_micro_migration"
 _NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
-
-# Copied verbatim from scripts/migrations/2026_09_04_micro_credits.py.
-_RENAMES = (
-    ("credit_balances", "balance_credits", "balance_micro"),
-    ("credit_ledger", "amount_delta", "amount_delta_micro"),
-    ("credit_ledger", "balance_after", "balance_after_micro"),
-)
-
-
-async def _run_migration(db) -> dict[str, int]:
-    """The script's core, against the test database. Returns per-field counts."""
-    counts: dict[str, int] = {}
-    for collection, old, new in _RENAMES:
-        coll = db[collection]
-        matched = await coll.count_documents({old: {"$exists": True}})
-        counts[old] = matched
-        if matched:
-            await coll.update_many(
-                {old: {"$exists": True}},
-                [{"$set": {new: {"$toLong": {"$multiply": [f"${old}", MICRO_PER_CREDIT]}}}}],
-            )
-            await coll.update_many({old: {"$exists": True}}, {"$unset": {old: ""}})
-    return counts
 
 
 async def _seed_old_shape(db, *, balance: int, movements: list[tuple[str, int]]) -> None:

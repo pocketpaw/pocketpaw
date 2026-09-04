@@ -1,5 +1,14 @@
 """MongoDB connection and Beanie ODM initialization.
 
+2026-09-04 (fix/wallet-migration-guard): ``init_cloud_db`` now awaits
+``credits.service.verify_wallet_migrated()`` alongside the memory and storage
+guards, and refuses the boot when any wallet document still carries a pre-micro
+field. The rename in #2064 shipped without its migration being run; the ledger
+endpoint 500d, but the balance rows failed SILENTLY — ``balance_micro`` defaults
+to 0, so every customer read as broke and was refused runs they could pay for.
+A schema rename in a money path needs a boot-time tie to its migration, because
+half of it does not fail loudly on its own.
+
 2026-07-22 (fix/starter-project-collision): added
 ``_drop_legacy_code_project_index`` and called it after ``init_beanie``, beside
 the invite-token reconcile and for the identical reason. ``CodeProject``'s
@@ -275,6 +284,17 @@ async def init_cloud_db(mongo_uri: str = "mongodb://localhost:27017/paw-enterpri
     from pocketpaw_ee.cloud.uploads.bootstrap import verify_cloud_storage_backend
 
     verify_cloud_storage_backend()
+
+    # Fail-fast: refuse to boot on a credit wallet the micro-credit migration has
+    # not converted. This build reads ``balance_micro``; a row that still holds
+    # ``balance_credits`` parses as an EMPTY wallet because the new field defaults
+    # to 0, so every customer reads as broke and the run-start gate refuses them —
+    # with nothing logged. It happened on 2026-09-04: the rename deployed, the
+    # migration did not, and the only audible symptom was a 500 on the ledger
+    # endpoint. Ties the code to its migration so the pair can only ship together.
+    from pocketpaw_ee.cloud.credits.service import verify_wallet_migrated
+
+    await verify_wallet_migrated()
 
 
 async def close_cloud_db() -> None:

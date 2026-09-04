@@ -21,13 +21,23 @@ must land together or not at all.
 
 IDEMPOTENT. Documents are selected by the OLD field's existence, so a re-run
 matches nothing and reports zero. Safe to run twice, and safe to resume after an
-interruption — a partial run leaves each document either fully converted or fully
-untouched, never half.
+interruption — each document's conversion is a single atomic update, so a partial
+run leaves every document either fully converted or fully untouched, never half.
 
-ORDER MATTERS. Run this while the API and worker are STOPPED. A process on the
-old code writing ``balance_credits`` mid-migration creates a document with both
-fields, and the new code would then read a zero balance beside a real one. There
-is no lock here that can prevent that; stopping the writers is the control.
+SAFE TO RUN AFTER THE APP HAS ALREADY BEEN UP on the new code, which is the
+situation this landed in. A grant or metered debit served while the wallet was
+unconverted ``$inc``-ed the NEW field into existence beside the old one; the
+conversion ADDS to whatever it finds there instead of overwriting it, so those
+movements survive. See ``_scale_and_rename`` for why adding is the only reading
+that is correct in both cases.
+
+ORDER MATTERS. Run this while the API and worker are STOPPED. Not because a
+concurrent write corrupts the arithmetic any more — it does not — but because
+every read served in between is wrong: an unconverted balance reads as zero, so
+customers are told they have no credits and are refused runs they can pay for.
+``credits.service.verify_wallet_migrated`` now refuses the boot for exactly that
+reason, so a deploy that skips this script fails loudly instead of serving empty
+wallets.
 
 USAGE:
     python scripts/migrations/2026_09_04_micro_credits.py --dry-run
@@ -36,6 +46,12 @@ USAGE:
 Reads the same ``POCKETPAW_MONGO_URL`` / ``POCKETPAW_MONGO_DB`` the app uses.
 
 Created 2026-09-04 (feat/exact-credit-deduction).
+Changed 2026-09-04 (fix/wallet-migration-guard): the conversion adds to the new
+field instead of overwriting it, and drops the old field in the same pipeline
+rather than a second pass. It was deployed without being run, so live traffic had
+already written new-field values that the overwriting form destroyed — proven in
+tests/cloud/credits/test_unmigrated_wallet.py. The tests now load THIS file rather
+than a copy of its pipeline.
 """
 
 from __future__ import annotations
@@ -66,11 +82,27 @@ _DROPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 
 async def _scale_and_rename(db, collection: str, old: str, new: str, *, dry_run: bool) -> int:
-    """Multiply ``old`` by a million into ``new``, then remove ``old``.
+    """Fold ``old`` x 1_000_000 into ``new``, removing ``old`` in the same write.
 
-    One ``update_many`` with an aggregation pipeline, so the read and the write are
-    a single server-side operation per document. Doing it as read-then-write from
-    here would leave a window where a crash strands a document with neither field.
+    ADDS to ``new`` rather than overwriting it, and that is the whole subtlety here.
+    A balance document is mutated in place, so if the app was ever up on the new code
+    before this ran, a grant or a metered debit will have ``$inc``-ed ``new`` into
+    existence beside the untouched ``old`` — Mongo creates a missing field at the
+    increment value. Overwriting would throw that away: a top-up the customer paid
+    for, gone, with the ledger still holding the entry that says they paid. The
+    document carries no record of which half is which, so adding is not a heuristic;
+    it is the only reading that is right in both cases. ``$ifNull`` supplies the 0
+    for the ordinary document that never had the new field.
+
+    ONE ``update_many`` per collection, both stages in the same pipeline, so each
+    document is either fully converted or fully untouched. That atomicity is what
+    licenses the addition: a document holding both fields can only mean live writes,
+    never a half-finished migration, so a re-run has nothing to double-count. Losing
+    it would make the two indistinguishable and the addition unsafe.
+
+    ``$project`` rather than ``$unset`` removes the old field. They are equivalent
+    for a single exclusion, and mongomock implements only this one, so the migration
+    tests drive this exact pipeline instead of a copy that behaves differently.
     """
     coll = db[collection]
     matched = await coll.count_documents({old: {"$exists": True}})
@@ -83,16 +115,21 @@ async def _scale_and_rename(db, collection: str, old: str, new: str, *, dry_run:
             # ``$toLong`` keeps this an integer type in Mongo. A stored double
             # would round at 2^53 and, worse, make the ledger's exact-sum
             # invariant a float comparison.
-            {"$set": {new: {"$toLong": {"$multiply": [f"${old}", MICRO_PER_CREDIT]}}}},
+            {
+                "$set": {
+                    new: {
+                        "$toLong": {
+                            "$add": [
+                                {"$multiply": [f"${old}", MICRO_PER_CREDIT]},
+                                {"$ifNull": [f"${new}", 0]},
+                            ]
+                        }
+                    }
+                }
+            },
+            {"$project": {old: 0}},
         ],
     )
-    # The unset is a SECOND pass, not a stage in the pipeline above, because
-    # pipeline ``$unset`` is unsupported by mongomock and the migration's tests run
-    # on it. Splitting costs one extra pass over a small collection and buys the
-    # tests. It is also safe to interrupt between the two: a document left with
-    # both fields is picked up by a re-run, which re-scales into ``new`` from the
-    # untouched ``old`` and gets the same answer.
-    await coll.update_many({old: {"$exists": True}}, {"$unset": {old: ""}})
     return matched
 
 
