@@ -1,5 +1,11 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-09-04 (IR-2a, feat/sites-import-design-brief) — added
+``SiteDesignBrief`` (the captured design brief a rebuild-mode site import
+generates from) to the imports, ``__all__`` and ``get_all_documents()`` so the
+``site_design_briefs`` collection is wired into ``init_beanie``. It is its own
+collection because rebuild mints neither a pocket nor a Site doc to hang it on.
+
 Updated: 2026-07-27 (integration/growth-v1) — G-6's ``WhatsAppSendLog`` is
 gone: it and G-5's ``MessageLog`` were the same send record built in parallel
 under two names, unified onto ``MessageLog`` (which gained the ``sending`` /
@@ -234,6 +240,7 @@ from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.session_transcript import SessionTranscriptDoc
 from pocketpaw_ee.cloud.models.ship import ShipApp, ShipBox, ShipDeploy
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
+from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
 from pocketpaw_ee.cloud.models.subscription import Subscription
@@ -399,6 +406,7 @@ __all__ = [
     "SessionTranscriptDoc",
     "AgentSessionRuntimeDoc",
     "Site",
+    "SiteDesignBrief",
     "SiteDomain",
     "SiteRateCounter",
     "SpendReconciliation",
@@ -526,6 +534,7 @@ def get_all_documents():
         ChatRunDoc,
         Lead,
         Site,
+        SiteDesignBrief,
         SiteRateCounter,
         # Growth prospect store (G-1) — the /growth outbound engine's
         # workspace-scoped, domain-deduped prospect record. Only
