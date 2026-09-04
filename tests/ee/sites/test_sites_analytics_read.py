@@ -1475,14 +1475,19 @@ async def test_every_bucket_stamp_is_utc_and_the_points_run_forwards(beanie_test
 
 
 @pytest.mark.asyncio
-async def test_the_series_does_not_chart_time_before_counting_began(beanie_test_db):
-    """A site that has been counting for two days answering a ninety-day request with
-    eighty-eight zeroed days would be this endpoint's one forbidden move — inventing a
-    zero — drawn at chart scale, and worse there than on the panel: a long flat run along
-    the baseline does not look like missing data, it looks like a site nobody visits.
+async def test_the_series_covers_the_whole_window_even_before_counting_began(beanie_test_db):
+    """A ninety-day request is ninety-one buckets whether or not the site was counting
+    for all of them, and the leading run of zeros is the honest answer.
 
-    ``counting_since`` is on the response so a client can say where the short chart came
-    from."""
+    Two earlier versions trimmed the start — to ``counting_since``, then to the earliest
+    bucket carrying traffic — to avoid that run. Rendered, the trim was the worse bug: a
+    two-day-old site answering a SEVEN-day request drew two bars, which fill the plot
+    edge to edge and read as a broken component rather than as a short history. It also
+    answers a question nobody asked.
+
+    Nothing is invented by the zeros. ``counting_since`` rides on the response and the
+    panel prints "counting started on <date>, part way through this period" directly
+    under the chart, which is where an explanation belongs."""
     now = datetime.now(UTC)
     began = now - timedelta(days=2)
     site = await _seed_site(counting_since=began)
@@ -1493,9 +1498,10 @@ async def test_the_series_does_not_chart_time_before_counting_began(beanie_test_
     )
 
     assert out.series.interval == _DAY
-    assert len(out.series.points) == 3, "the day counting began, and the two days since"
-    assert out.series.points[0].bucket == _bucket_of(began, _DAY)
-    assert out.counting_since is not None
+    assert len(out.series.points) == 91, "the whole window, not the part that was counted"
+    assert out.series.points[0].bucket == _bucket_of(now - timedelta(days=90), _DAY)
+    assert out.series.points[0].pageviews == 0
+    assert out.counting_since is not None, "the panel needs this to explain the empty run"
 
 
 @pytest.mark.asyncio
@@ -1511,10 +1517,8 @@ async def test_a_row_from_before_counting_began_stays_in_the_day_it_happened(bea
     have one, which is the worse of the two: a wrong number is at least visibly wrong,
     while a wrong SHAPE is read as fact.
 
-    So the range opens at the earliest bucket that carries traffic. The row sits in the
-    day it happened, the chart still sums to the headline, and the ``counting_since`` trim
-    keeps working for the case it was written for — see the test above, where a new site
-    has nothing before its stamp and still gets three points rather than ninety."""
+    So the range is simply the window that was asked for. The row sits in the day it
+    happened, and the chart still sums to the headline printed above it."""
     now = datetime.now(UTC)
     site = await _seed_site(counting_since=now - timedelta(days=1))
     cf = _RawRowsCF(
@@ -1528,13 +1532,16 @@ async def test_a_row_from_before_counting_began_stays_in_the_day_it_happened(bea
         workspace_id="ws-read", site_id=str(site.id), window="7d", _cloudflare=cf
     )
 
-    assert out.series.points[0].bucket == _bucket_of(now - timedelta(days=5), _DAY)
-    assert len(out.series.points) == 6, "the lapsed day through today, inclusive"
+    assert len(out.series.points) == 8, "the whole seven-day window, inclusive of today"
+    lapsed = next(
+        p for p in out.series.points if p.bucket == _bucket_of(now - timedelta(days=5), _DAY)
+    )
+    assert lapsed.pageviews == 1, "in its own day, not piled onto an edge"
     assert sum(point.pageviews for point in out.series.points) == out.pageviews == 2
-    assert out.series.points[0].pageviews == 1, "in its own day, not piled onto an edge"
     assert out.series.points[-1].pageviews == 1
-    assert all(point.pageviews == 0 for point in out.series.points[1:-1]), (
-        "the quiet days between are zeros, not a gap and not a spike"
+    quiet = [p for p in out.series.points if p is not lapsed and p is not out.series.points[-1]]
+    assert all(point.pageviews == 0 for point in quiet), (
+        "every other day is a zero — a measurement, not a gap and not a spike"
     )
 
 
