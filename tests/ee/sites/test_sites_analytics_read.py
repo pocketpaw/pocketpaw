@@ -1533,9 +1533,9 @@ async def test_a_row_from_before_counting_began_stays_in_the_day_it_happened(bea
     assert sum(point.pageviews for point in out.series.points) == out.pageviews == 2
     assert out.series.points[0].pageviews == 1, "in its own day, not piled onto an edge"
     assert out.series.points[-1].pageviews == 1
-    assert all(
-        point.pageviews == 0 for point in out.series.points[1:-1]
-    ), "the quiet days between are zeros, not a gap and not a spike"
+    assert all(point.pageviews == 0 for point in out.series.points[1:-1]), (
+        "the quiet days between are zeros, not a gap and not a spike"
+    )
 
 
 @pytest.mark.asyncio
