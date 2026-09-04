@@ -27,7 +27,6 @@ these assertions test the query rather than the fixture's assumptions.
 from __future__ import annotations
 
 import pytest
-
 from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeContext,
     ScopeKind,
@@ -114,7 +113,7 @@ def _conversation(turns: int) -> list[_Msg]:
 @pytest.mark.asyncio
 async def test_history_window_is_the_newest_turns(monkeypatch):
     """A long conversation must rehydrate its END, not its beginning."""
-    captured = _MessageModel.configure(_conversation(turns=60))  # 120 messages
+    _MessageModel.configure(_conversation(turns=60))  # 120 messages
     import pocketpaw_ee.cloud.models.message as message_mod
 
     monkeypatch.setattr(message_mod, "Message", _MessageModel)
