@@ -16,14 +16,67 @@ doesn't pollute the Activity feed.
 
 Failures (4xx/5xx) are flagged as ``is_error=True`` so they can be
 filtered separately.
+
+Updated 2026-09-04 — two production-shaped problems, both in the write path:
+
+  1. ``asyncio.ensure_future`` returned a task nobody held a reference to.
+     CPython's loop keeps only a WEAK reference, so a pending log write can be
+     garbage-collected mid-await; the write simply vanishes, and non-
+     deterministically. This module now holds strong references until each
+     task completes — the same guard the codebase already applies in
+     chat/ws.py and shared/agent_bridge.py.
+  2. Nothing bounded how many of those could accumulate. If Mongo slows down,
+     pending inserts pile up in the web process without limit, converting a
+     database stall into unbounded memory growth instead of backpressure.
+     There is now a ceiling; past it, telemetry is dropped and the drop is
+     counted. Losing request telemetry is the correct thing to sacrifice when
+     the database is already struggling.
+
+Also: the highest-volume paths are now skipped rather than recorded. Request
+volume and telemetry write volume were 1:1, which made ``request_logs`` a
+strong candidate for the busiest write target in the database. Health probes,
+the CSRF token fetch and static assets carry no audit value and are the bulk
+of that traffic.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 
 from fastapi import FastAPI, Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
+
+logger = logging.getLogger(__name__)
+
+#: Strong references to in-flight telemetry writes. Without this the loop's
+#: weak reference is the only one and the task may be collected mid-await.
+_pending: set[asyncio.Task] = set()
+
+#: Ceiling on concurrent telemetry writes. Past this, drop rather than queue:
+#: an unbounded pile of pending inserts is how a Mongo stall becomes an OOM.
+_MAX_PENDING = 256
+
+#: Suppressed so a dropped-telemetry incident is reported once, not per request.
+_dropped = 0
+
+#: Paths with no audit value that dominate request volume. Matched against the
+#: raw URL path, so they are skipped before any actor/workspace resolution.
+_SKIP_EXACT = frozenset(
+    {
+        "/health",
+        "/version",
+        "/api/v1/health",
+        "/api/v1/version",
+        "/api/v1/auth/csrf",
+    }
+)
+_SKIP_PREFIXES = ("/static/", "/uploads/", "/assets/")
+
+
+def _is_skipped(path: str) -> bool:
+    return path in _SKIP_EXACT or path.startswith(_SKIP_PREFIXES)
 
 
 class RequestLogMiddleware(BaseHTTPMiddleware):
@@ -33,6 +86,12 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+        # Skip the high-volume, no-audit-value paths before doing any work.
+        # Checked against the raw path because the route template is only
+        # known after the response, and this saves the actor resolution too.
+        if _is_skipped(request.url.path):
+            return await call_next(request)
+
         start = time.perf_counter()
 
         # Read auth info before the response (the user may be resolved
@@ -128,27 +187,50 @@ def _log_request(
     an empty ``workspace`` field so they still appear in the global
     request-log view on the /audit page.
 
-    Runs synchronously inside the async middleware but only does
-    a quick ``ensure_future`` — the actual MongoDB write is deferred.
-    If the write fails it's logged and swallowed.
+    Schedules the MongoDB write and returns; the write itself is deferred so
+    it never blocks the caller. The task is held in ``_pending`` until it
+    completes — see the module docstring for why a bare ``ensure_future`` was
+    not safe — and dropped once the in-flight ceiling is reached.
     """
-    import asyncio
+    global _dropped
 
     from pocketpaw_ee.cloud.request_log import service as _request_log_service
 
-    asyncio.ensure_future(
-        _request_log_service.record(
-            workspace_id=workspace_id,
-            actor_id=actor_id,
-            method=method,
-            path=path,
-            status_code=status_code,
-            duration_ms=round(duration_ms, 1),
-            is_error=is_error,
-            ip=ip,
-            user_agent=user_agent,
+    if len(_pending) >= _MAX_PENDING:
+        # The database is not keeping up. Shedding telemetry is the right
+        # thing to give up here; queueing it without bound is not.
+        _dropped += 1
+        if _dropped % 1000 == 1:
+            logger.warning(
+                "request-log telemetry dropped: %d writes shed with %d in flight "
+                "(ceiling %d). The request_logs write path is not keeping up.",
+                _dropped,
+                len(_pending),
+                _MAX_PENDING,
+            )
+        return
+
+    try:
+        task = asyncio.create_task(
+            _request_log_service.record(
+                workspace_id=workspace_id,
+                actor_id=actor_id,
+                method=method,
+                path=path,
+                status_code=status_code,
+                duration_ms=round(duration_ms, 1),
+                is_error=is_error,
+                ip=ip,
+                user_agent=user_agent,
+            )
         )
-    )
+    except RuntimeError:
+        # No running loop (sync test harness, shutdown). Telemetry is not
+        # worth raising over.
+        return
+
+    _pending.add(task)
+    task.add_done_callback(_pending.discard)
 
 
 __all__ = ["RequestLogMiddleware"]
