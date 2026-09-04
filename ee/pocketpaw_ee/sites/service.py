@@ -5753,55 +5753,41 @@ def _analytics_series(
     empty hour, it stops existing, and a quiet Sunday is drawn as no Sunday at all. A zero
     is a measurement. A missing entry is a different claim and it is not a true one.
 
-    IT STARTS AT THE LATER of the window's own start and the bucket holding
-    ``counting_since``. Eighty-eight zeroed days in front of a site that has been counting
-    for two would be this endpoint's one forbidden move — inventing a zero — drawn at
-    chart scale, and it is worse there than on the panel: a long flat run at the baseline
-    does not read as missing data, it reads as a site nobody visits.
+    IT COVERS THE WHOLE WINDOW, always: a seven-day request is seven days of buckets
+    whether or not the site was counting for all of them. Trimming the start to when
+    counting began is what the two earlier versions did, and rendered it is the worse
+    failure — a two-day-old site answering a seven-day request with two bars fills the
+    plot edge to edge and reads as a broken component. The leading empty run it was
+    avoiding is explained on the panel, in words, directly under the chart.
 
     ROWS OUTSIDE THE RANGE ARE FOLDED INTO THE NEAREST END rather than dropped, because
     our clock and Cloudflare's ``NOW()`` are not the same clock and the newest bucket can
     land a moment past the end. Dropping it would leave the chart summing to less than the
     pageview total printed directly above it, with nothing on screen to explain the gap.
     The fold moves that traffic by at most one bucket.
-
-    THE FOLD IS NOT LOAD-BEARING AT THE BOTTOM, and it must not become so. The start is
-    taken from the earliest bucket that carries traffic rather than from
-    ``counting_since`` alone, so a lapsed-and-re-subscribed site's older rows sit in the
-    buckets they happened in instead of piling onto the first one. See the comment on
-    ``start`` below for why that case exists at all.
     """
     step = _ANALYTICS_SERIES_STEP[interval]
     now = datetime.now(UTC)
     end = _analytics_series_floor(now, interval)
-    # The ``counting_since`` trim exists to keep a NEW site's chart from opening with a
-    # long flat run at the baseline. It must not also move a LAPSED site's older traffic.
-    # ``analytics_since`` is cleared by any publish that deploys no counter and re-stamped
-    # fresh on the next paid one, so a site that lapsed and re-subscribed inside the
-    # ninety-day retention holds rows that predate its current stamp. Trimming to the
-    # stamp alone would fold every one of them onto the first bucket — a spike drawn on a
-    # day that did not have it, which is worse than the empty run the trim was avoiding.
-    # Taking the EARLIEST bucket that actually carries traffic serves both: a new site has
-    # nothing before its stamp, so the trim still bites, and a lapsed one keeps its older
-    # rows in the buckets they happened in.
-    earliest = min(
-        (
-            _analytics_series_floor(
-                datetime.fromtimestamp(_analytics_int(row, "bucket"), UTC), interval
-            )
-            for row in rows
-        ),
-        default=_analytics_series_floor(since, interval),
-    )
-    start = max(
-        _analytics_series_floor(now - timedelta(days=days), interval),
-        min(_analytics_series_floor(since, interval), earliest),
-    )
-    # A ``counting_since`` in the future — a clock correction, a stamp written by a host
-    # running ahead — would otherwise make ``start`` later than ``end`` and produce an
-    # EMPTY series, which is the one answer this function must never give: a chart with no
-    # points reads as no data, and the truth is one bucket that has not finished yet.
-    start = min(start, end)
+    # THE SERIES COVERS THE WHOLE WINDOW THE CALLER ASKED FOR. Two earlier versions
+    # trimmed the start — first to ``counting_since``, then to the earliest bucket
+    # carrying traffic — to stop a new site's ninety-day chart opening with eighty-eight
+    # empty days. Seen rendered, that trim is the worse bug of the two it was choosing
+    # between: a site counting for two days answered a SEVEN-day request with two bars,
+    # which fill the plot edge to edge and read as a broken component rather than as a
+    # short history. Asking for seven days and being shown two is also simply not the
+    # question that was asked.
+    #
+    # The empty run it was avoiding is already explained, and not by this function: the
+    # response carries ``counting_since``, and the panel prints "counting started on
+    # <date>, part way through this period — the days before that were never recorded"
+    # directly under the chart. A leading flat run with that sentence beneath it is not
+    # ambiguous, and it is what every comparable product draws.
+    #
+    # Dropping the trim also removes the case the earlier fix existed for: a lapsed site's
+    # rows sit inside the window on their own days, because nothing is moving the start
+    # past them any more.
+    start = _analytics_series_floor(now - timedelta(days=days), interval)
 
     buckets: dict[datetime, list[int]] = {}
     moment = start

@@ -399,15 +399,6 @@
     ]
   },
   {
-    "label": "the series charts the whole window regardless of when counting began — a site counting for two days answers a 90-day request with 88 zeroed days, which reads as a site nobody visits rather than as a period nobody recorded",
-    "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    start = max(\n        _analytics_series_floor(now - timedelta(days=days), interval),\n        min(_analytics_series_floor(since, interval), earliest),\n    )",
-    "replace": "    start = _analytics_series_floor(now - timedelta(days=days), interval)",
-    "tests": [
-      "tests/ee/sites/test_sites_analytics_read.py"
-    ]
-  },
-  {
     "label": "a row outside the generated range is dropped rather than folded onto the nearest end — the chart quietly sums to less than the total printed directly above it, with nothing on screen to explain the difference",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "        cell = buckets[min(max(stamp, start), end)]",
@@ -435,10 +426,10 @@
     ]
   },
   {
-    "label": "the series range opens at counting_since alone — a lapsed-and-re-subscribed site's rows from before its current stamp all fold onto the first bucket, drawing a spike on a day that did not have one, and the chart still sums to the headline so nothing looks wrong",
+    "label": "the series range is trimmed to when counting began — a two-day-old site answers a seven-day request with two bars that fill the plot edge to edge, which reads as a broken component rather than as a short history, and answers a question nobody asked",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        min(_analytics_series_floor(since, interval), earliest),",
-    "replace": "        _analytics_series_floor(since, interval),",
+    "find": "    start = _analytics_series_floor(now - timedelta(days=days), interval)",
+    "replace": "    start = max(\n        _analytics_series_floor(now - timedelta(days=days), interval),\n        _analytics_series_floor(since, interval),\n    )",
     "tests": [
       "tests/ee/sites/test_sites_analytics_read.py"
     ]
