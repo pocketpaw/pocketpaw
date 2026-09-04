@@ -3,6 +3,13 @@
 #   "Files as Knowledge"). publish() now fans out to local handlers as well
 #   as WebSocket clients. Failures are isolated per-handler so one bad
 #   listener can't block the rest of the dispatch.
+# Updated: 2026-09-04 (fix/unblock-event-loop, backend-perf H1) — the WebSocket
+#   fan-out is concurrent and bounded instead of one serial await per audience
+#   member. publish() runs INLINE in the emitting HTTP request, so the old loop
+#   charged that request the SUM of every recipient's send latency. With the 5s
+#   per-socket timeout in ws.py that is up to 5s x audience size for one
+#   `message.new`. See _core/realtime/fanout.py for why the concurrency is
+#   capped rather than a bare gather.
 """EventBus protocol and in-process implementation.
 
 Services call ``emit(event)`` (see ``emit.py``) which delegates to the active
@@ -28,6 +35,7 @@ from typing import Protocol
 
 from pocketpaw_ee.cloud._core.realtime.audience import AudienceResolver
 from pocketpaw_ee.cloud._core.realtime.events import Event
+from pocketpaw_ee.cloud._core.realtime.fanout import map_bounded
 
 logger = logging.getLogger(__name__)
 
@@ -84,13 +92,25 @@ class InProcessBus:
 
         if audience:
             payload = WsOutbound(type=event.type, data=event.data)
-            for uid in audience:
+
+            async def _deliver(uid: str) -> None:
+                # Containment stays per recipient, exactly as the serial loop
+                # had it: one unreachable member must not abort delivery to the
+                # rest. Keeping the try INSIDE the coroutine (rather than
+                # reaching for gather's return_exceptions) also keeps
+                # cancellation honest — see fanout.map_bounded.
                 try:
                     await self._conn.send_to_user(uid, payload)
                 except Exception:
                     logger.warning(
                         "ws send failed; user=%s event=%s", uid, event.type, exc_info=True
                     )
+
+            # Concurrent, capped. The old serial loop charged the emitting
+            # request the sum of every member's send latency; a single
+            # back-pressured socket burning its full 5s timeout therefore
+            # delayed every member after it in the list.
+            await map_bounded(list(audience), _deliver)
 
         # Local in-process handlers — run regardless of WebSocket audience so
         # bus listeners (e.g. the upload indexer) fire even when no client is
