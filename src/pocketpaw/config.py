@@ -1900,6 +1900,18 @@ class Settings(BaseSettings):
         default="openai", description="TTS provider: 'openai', 'elevenlabs', or 'sarvam'"
     )
     elevenlabs_api_key: str | None = Field(default=None, description="ElevenLabs API key for TTS")
+    # Speech-to-text for the /studio editor's "Generate transcript" button.
+    # Env auto-derives POCKETPAW_DEEPGRAM_API_KEY; the studio service falls back
+    # to a bare DEEPGRAM_API_KEY at read time, because that is the name the
+    # variable already ships under in .env (the livekit agent and the Recall
+    # meeting providers both read it un-prefixed).
+    deepgram_api_key: str | None = Field(
+        default=None, description="Deepgram API key for speech-to-text (Prerecorded submit)"
+    )
+    deepgram_stt_model: str = Field(
+        default="nova-3",
+        description="Deepgram STT model for /studio transcription (e.g. nova-2, nova-3)",
+    )
     tts_voice: str = Field(
         default="alloy", description="TTS voice name (OpenAI: alloy/echo/fable/onyx/nova/shimmer)"
     )
