@@ -4,69 +4,152 @@
     "file": "ee/pocketpaw_ee/cloud/_core/realtime/bus.py",
     "find": "            await map_bounded(list(audience), _deliver)",
     "replace": "            for _uid in list(audience):\n                await _deliver(_uid)",
-    "tests": ["tests/cloud/test_event_loop_blocking.py::TestBusFanOut::test_publish_fans_out_concurrently"]
+    "tests": [
+      "tests/cloud/test_event_loop_blocking.py::TestBusFanOut::test_publish_fans_out_concurrently"
+    ]
   },
   {
     "label": "map_bounded drops the concurrency cap",
     "file": "ee/pocketpaw_ee/cloud/_core/realtime/fanout.py",
     "find": "    sem = asyncio.Semaphore(limit)\n\n    async def _one(item: T) -> R:\n        async with sem:\n            return await fn(item)",
     "replace": "    async def _one(item: T) -> R:\n        return await fn(item)",
-    "tests": ["tests/cloud/test_event_loop_blocking.py::TestMapBounded::test_concurrency_is_capped"]
+    "tests": [
+      "tests/cloud/test_event_loop_blocking.py::TestMapBounded::test_concurrency_is_capped"
+    ]
   },
   {
     "label": "map_bounded captures exceptions as results, hiding cancellation",
     "file": "ee/pocketpaw_ee/cloud/_core/realtime/fanout.py",
     "find": "    return list(await asyncio.gather(*(_one(item) for item in items)))",
     "replace": "    return list(await asyncio.gather(*(_one(item) for item in items), return_exceptions=True))",
-    "tests": ["tests/cloud/test_event_loop_blocking.py::TestMapBounded::test_an_exception_propagates_instead_of_becoming_a_result"]
+    "tests": [
+      "tests/cloud/test_event_loop_blocking.py::TestMapBounded::test_an_exception_propagates_instead_of_becoming_a_result"
+    ]
   },
   {
     "label": "send_to_user writes one socket at a time again",
     "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
     "find": "        results = await map_bounded(fresh, lambda ws: self._send_bounded(ws, data))\n\n        delivered = 0",
     "replace": "        results = [await self._send_bounded(_w, data) for _w in fresh]\n\n        delivered = 0",
-    "tests": ["tests/cloud/test_event_loop_blocking.py::TestConnectionManagerFanOut::test_send_to_user_sends_to_all_sockets_at_once"]
+    "tests": [
+      "tests/cloud/test_event_loop_blocking.py::TestConnectionManagerFanOut::test_send_to_user_sends_to_all_sockets_at_once"
+    ]
   },
   {
     "label": "the SSE stream loses its maximum lifetime",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/router.py",
     "find": "            if time.monotonic() >= deadline:",
     "replace": "            if False:",
-    "tests": ["tests/cloud/test_event_loop_blocking.py::TestStreamLifetime::test_stream_terminates_at_the_deadline"]
+    "tests": [
+      "tests/cloud/test_event_loop_blocking.py::TestStreamLifetime::test_stream_terminates_at_the_deadline"
+    ]
   },
   {
     "label": "the stream cap becomes a fixed constant instead of following the run",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/domain.py",
     "find": "    return run_job_timeout_seconds() + STREAM_LIFETIME_GRACE_SECONDS",
     "replace": "    return DEFAULT_RUN_JOB_TIMEOUT_SECONDS + STREAM_LIFETIME_GRACE_SECONDS",
-    "tests": ["tests/cloud/test_event_loop_blocking.py::TestStreamLifetime::test_cap_follows_the_job_timeout"]
+    "tests": [
+      "tests/cloud/test_event_loop_blocking.py::TestStreamLifetime::test_cap_follows_the_job_timeout"
+    ]
   },
   {
     "label": "the worker keeps a second private copy of the timeout parse",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
     "find": "_job_timeout_seconds = run_job_timeout_seconds",
     "replace": "_job_timeout_seconds = lambda: DEFAULT_RUN_JOB_TIMEOUT_SECONDS  # noqa: E731",
-    "tests": ["tests/cloud/test_event_loop_blocking.py::TestStreamLifetime::test_worker_and_stream_read_one_resolver"]
+    "tests": [
+      "tests/cloud/test_event_loop_blocking.py::TestStreamLifetime::test_worker_and_stream_read_one_resolver"
+    ]
   },
   {
     "label": "the dashboard broadcast loses its per-socket timeout",
     "file": "src/pocketpaw/dashboard_lifecycle.py",
     "find": "                await asyncio.wait_for(ws.send_json(message), timeout=WS_SEND_TIMEOUT_SECONDS)",
     "replace": "                await ws.send_json(message)",
-    "tests": ["tests/test_dashboard_fanout.py::test_a_wedged_socket_cannot_stall_the_broadcast"]
+    "tests": [
+      "tests/test_dashboard_fanout.py::test_a_wedged_socket_cannot_stall_the_broadcast"
+    ]
   },
   {
     "label": "the dashboard broadcast goes back to a serial loop",
     "file": "src/pocketpaw/dashboard_lifecycle.py",
     "find": "    for ws in await asyncio.gather(*(_send(w) for w in targets)):",
     "replace": "    for ws in [await _send(w) for w in targets]:",
-    "tests": ["tests/test_dashboard_fanout.py::test_sends_run_concurrently"]
+    "tests": [
+      "tests/test_dashboard_fanout.py::test_sends_run_concurrently"
+    ]
   },
   {
     "label": "a timed-out dashboard socket is kept, so the stall recurs forever",
     "file": "src/pocketpaw/dashboard_lifecycle.py",
     "find": "        if ws is not None and ws in active_connections:\n            active_connections.remove(ws)",
     "replace": "        if ws is not None and False:\n            active_connections.remove(ws)",
-    "tests": ["tests/test_dashboard_fanout.py::test_a_timed_out_socket_is_dropped"]
+    "tests": [
+      "tests/test_dashboard_fanout.py::test_a_timed_out_socket_is_dropped"
+    ]
+  },
+  {
+    "label": "git_status runs its subprocess inline again",
+    "file": "src/pocketpaw/api/v1/files.py",
+    "find": "        status_result = await asyncio.to_thread(\n            subprocess.run,\n            [\"git\", \"-C\", str(resolved), \"status\", \"--porcelain\"],",
+    "replace": "        status_result = subprocess.run(\n            [\"git\", \"-C\", str(resolved), \"status\", \"--porcelain\"],",
+    "tests": [
+      "tests/test_blocking_offload.py::test_git_status_keeps_the_loop_running"
+    ]
+  },
+  {
+    "label": "git_diff runs its subprocess inline again",
+    "file": "src/pocketpaw/api/v1/files.py",
+    "find": "        result = await asyncio.to_thread(\n            subprocess.run,\n            [\n                \"git\",",
+    "replace": "        result = subprocess.run(\n            [\n                \"git\",",
+    "tests": [
+      "tests/test_blocking_offload.py::test_git_diff_keeps_the_loop_running"
+    ]
+  },
+  {
+    "label": "the zip deflate goes back on the event loop",
+    "file": "src/pocketpaw/api/v1/files.py",
+    "find": "    zip_bytes = await asyncio.to_thread(_build_zip_bytes, resolved, jail)",
+    "replace": "    zip_bytes = _build_zip_bytes(resolved, jail)",
+    "tests": [
+      "tests/test_blocking_offload.py::test_download_zip_keeps_the_loop_running"
+    ]
+  },
+  {
+    "label": "the clone tree walk goes back on the event loop",
+    "file": "src/pocketpaw/api/v1/cloud_projects.py",
+    "find": "    for local_path in await asyncio.to_thread(_walk_repo_files, base, include_git):",
+    "replace": "    for local_path in _walk_repo_files(base, include_git):",
+    "tests": [
+      "tests/test_blocking_offload.py::test_upload_directory_walk_keeps_the_loop_running"
+    ]
+  },
+  {
+    "label": "the .git prune is lost when the walk moves to a thread",
+    "file": "src/pocketpaw/api/v1/cloud_projects.py",
+    "find": "        if not include_git:\n            dirs[:] = [d for d in dirs if d != \".git\"]",
+    "replace": "        if False:\n            dirs[:] = [d for d in dirs if d != \".git\"]",
+    "tests": [
+      "tests/test_blocking_offload.py::test_walk_repo_files_still_prunes_dot_git"
+    ]
+  },
+  {
+    "label": "the terminal lsof probe runs inline again",
+    "file": "src/pocketpaw/api/v1/terminal.py",
+    "find": "            result = await asyncio.to_thread(\n                subprocess.run,\n                [\"lsof\", \"-p\", str(self._proc.pid), \"-d\", \"cwd\", \"-Fn\"],",
+    "replace": "            result = subprocess.run(\n                [\"lsof\", \"-p\", str(self._proc.pid), \"-d\", \"cwd\", \"-Fn\"],",
+    "tests": [
+      "tests/test_blocking_offload.py::test_terminal_lsof_probe_keeps_the_loop_running"
+    ]
+  },
+  {
+    "label": "to_thread wraps the subprocess timeout instead of re-raising it",
+    "file": "src/pocketpaw/api/v1/files.py",
+    "find": "    except subprocess.TimeoutExpired:\n        return GitStatusResponse(",
+    "replace": "    except RuntimeError:\n        return GitStatusResponse(",
+    "tests": [
+      "tests/test_blocking_offload.py::test_git_status_still_reports_a_subprocess_timeout"
+    ]
   }
 ]

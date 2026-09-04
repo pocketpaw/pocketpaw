@@ -5,9 +5,16 @@
 # 2026-06-10: expanduser() in browse + _resolve_path so "~/foo" paths resolve
 # to home — the /code IDE roots its tree at "~" and addresses children that
 # way. Jail checks unchanged.
+# 2026-09-04: the git subprocess calls in /git/status and /git/diff, and the
+# deflate loop in /files/download-zip, now run through asyncio.to_thread. All
+# three are synchronous and were being executed directly inside async handlers,
+# which pins the single uvicorn event loop (we run one process, no --workers)
+# for the whole duration — a slow `git status` on a large repo, or a 500 MB
+# zip, stalled every other in-flight request on the box.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import mimetypes
@@ -385,24 +392,17 @@ async def delete_file_or_directory(
     return FileActionResponse(ok=True)
 
 
-@router.get("/files/download-zip")
-async def download_dir_as_zip(path: str):
-    """Download a directory (recursively) as a zip archive."""
-    from pocketpaw.config import get_settings
+def _build_zip_bytes(resolved: Path, jail: Path) -> bytes:
+    """Walk ``resolved`` and return the deflated archive as bytes.
+
+    Deliberately synchronous: the caller hands the whole thing to
+    ``asyncio.to_thread``. Deflating a directory tree is CPU-bound and can run
+    for seconds on a large source checkout, so running it inline in the async
+    handler froze the event loop — and therefore every other request — for its
+    full duration. The jail and size guards stay in here with the walk so the
+    archive is never assembled from paths that were not checked.
+    """
     from pocketpaw.tools.fetch import is_safe_path
-
-    settings = get_settings()
-    resolved = _resolve_path(path)
-    jail = settings.file_jail_path.resolve()
-
-    if not is_safe_path(resolved, jail):
-        raise HTTPException(status_code=403, detail="Access denied: path outside allowed directory")
-    if not resolved.exists():
-        raise HTTPException(status_code=404, detail="Path not found")
-    if not resolved.is_dir():
-        raise HTTPException(
-            status_code=400, detail="Not a directory — use /files/download for files"
-        )  # noqa: E501
 
     buf = io.BytesIO()
     file_count = 0
@@ -460,7 +460,29 @@ async def download_dir_as_zip(path: str):
                         "Skipping unreadable file during zip: %s",
                         file_path,
                     )
-    zip_bytes = buf.getvalue()
+    return buf.getvalue()
+
+
+@router.get("/files/download-zip")
+async def download_dir_as_zip(path: str):
+    """Download a directory (recursively) as a zip archive."""
+    from pocketpaw.config import get_settings
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+    resolved = _resolve_path(path)
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved, jail):
+        raise HTTPException(status_code=403, detail="Access denied: path outside allowed directory")
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="Path not found")
+    if not resolved.is_dir():
+        raise HTTPException(
+            status_code=400, detail="Not a directory — use /files/download for files"
+        )  # noqa: E501
+
+    zip_bytes = await asyncio.to_thread(_build_zip_bytes, resolved, jail)
     zip_name = f"{resolved.name}.zip"
     return Response(
         content=zip_bytes,
@@ -564,7 +586,8 @@ async def git_status(
 
     try:
         # Get the current branch name
-        branch_result = subprocess.run(
+        branch_result = await asyncio.to_thread(
+            subprocess.run,
             ["git", "-C", str(resolved), "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,
@@ -573,7 +596,8 @@ async def git_status(
         branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
 
         # Get the status in porcelain format
-        status_result = subprocess.run(
+        status_result = await asyncio.to_thread(
+            subprocess.run,
             ["git", "-C", str(resolved), "status", "--porcelain"],
             capture_output=True,
             text=True,
@@ -657,7 +681,8 @@ async def git_diff(
 
     try:
         relative_path = resolved.relative_to(git_root)
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             [
                 "git",
                 "-C",
@@ -716,7 +741,8 @@ async def git_diff(
                 current_new_line += 1
 
         # Get branch name for display
-        branch_result = subprocess.run(
+        branch_result = await asyncio.to_thread(
+            subprocess.run,
             ["git", "-C", str(git_root), "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,

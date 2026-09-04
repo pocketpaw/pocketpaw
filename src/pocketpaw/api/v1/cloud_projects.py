@@ -14,6 +14,10 @@ Updated: 2026-06-23 — added POST /cloud/projects/clone (git clone into project
 Updated: 2026-07-15 (fix/workspace-vm-map-to-db) — the workspace-VM store
     accessors are now async + Mongo-backed; ``await`` the VM lookups in
     ``_ensure_vm_project_dir`` / ``_clone_into_vm``.
+Updated: 2026-09-04 — ``_upload_directory`` no longer walks the cloned tree on
+    the event loop. The ``os.walk`` moved into ``_walk_repo_files`` and is
+    reached through ``asyncio.to_thread``; the uploads themselves stay in the
+    coroutine because each one awaits the storage adapter.
 """
 
 from __future__ import annotations
@@ -182,6 +186,25 @@ def _extract_project_name(repo_url: str) -> str:
     return parts[-1] if parts else "cloned-repo"
 
 
+def _walk_repo_files(base: Path, include_git: bool) -> list[Path]:
+    """Materialise every file under ``base``, in ``os.walk`` order.
+
+    Deliberately synchronous so ``_upload_directory`` can hand it to
+    ``asyncio.to_thread``. The ``.git`` prune has to live in here with the walk:
+    it works by mutating ``dirs`` in place, which only stops os.walk descending
+    if it happens mid-traversal.
+    """
+    found: list[Path] = []
+    for root, dirs, files in os.walk(base):
+        # Skip the .git directory by default.
+        if not include_git:
+            dirs[:] = [d for d in dirs if d != ".git"]
+
+        for file_name in files:
+            found.append(Path(root) / file_name)
+    return found
+
+
 async def _upload_directory(local_dir: str, project_key: str, include_git: bool = False) -> None:
     """Recursively upload a local directory tree into the storage adapter.
 
@@ -192,42 +215,42 @@ async def _upload_directory(local_dir: str, project_key: str, include_git: bool 
     """
     base = Path(local_dir)
 
-    for root, dirs, files in os.walk(base):
-        # Skip the .git directory by default.
-        if not include_git:
-            dirs[:] = [d for d in dirs if d != ".git"]
+    # The walk is done in a worker thread: os.walk stats every entry in the
+    # tree, and a freshly cloned repo is thousands of syscalls. We serve from a
+    # single uvicorn process with no --workers, so traversing inline held the
+    # event loop — and every other in-flight request — until it finished. Only
+    # the traversal moves; the upload loop stays in the coroutine because each
+    # iteration awaits the storage adapter.
+    for local_path in await asyncio.to_thread(_walk_repo_files, base, include_git):
+        relative = local_path.relative_to(base).as_posix()
+        full_key = f"{project_key}{relative}"
 
-        for file_name in files:
-            local_path = Path(root) / file_name
-            relative = local_path.relative_to(base).as_posix()
-            full_key = f"{project_key}{relative}"
+        mime, _ = mimetypes.guess_type(str(local_path))
 
-            mime, _ = mimetypes.guess_type(str(local_path))
+        async def _stream(path: Path = local_path) -> AsyncIterator[bytes]:
+            with open(path, "rb") as fh:
+                while True:
+                    chunk = fh.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
 
-            async def _stream(path: Path = local_path) -> AsyncIterator[bytes]:
-                with open(path, "rb") as fh:
-                    while True:
-                        chunk = fh.read(65536)
-                        if not chunk:
-                            break
-                        yield chunk
-
-            try:
-                await _ADAPTER.put(
-                    full_key,
-                    _stream(),
-                    mime or "application/octet-stream",
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to upload %s to cloud project: %s",
-                    relative,
-                    exc,
-                )
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to upload {relative}: {exc}",
-                ) from exc
+        try:
+            await _ADAPTER.put(
+                full_key,
+                _stream(),
+                mime or "application/octet-stream",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to upload %s to cloud project: %s",
+                relative,
+                exc,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to upload {relative}: {exc}",
+            ) from exc
 
 
 # ── Workspace VM project subdirectory helpers (NEW) ────────────────────────
