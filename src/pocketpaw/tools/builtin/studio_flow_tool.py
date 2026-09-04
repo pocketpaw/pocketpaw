@@ -47,6 +47,7 @@ STUDIO_FLOW_KINDS: tuple[str, ...] = (
     "picture",
     "model",
     "toolcall",
+    "music",
 )
 
 # Node kinds a text/prompt flows through vs. structural-only. Purely advisory
@@ -74,11 +75,36 @@ STUDIO_FLOW_DESCRIPTION = (
     "  toolcall — post-processing applied on run: data.toolRatio (aspect the "
     "downstream media inherits), data.toolUpscale (bool), data.toolRemoveBg "
     "(bool), data.toolLayers (int, 0 = off). Wire it after the media node.\n"
+    "  music   — generates a background track on run. data.prompt describes the "
+    "music ('slow melancholic piano, sparse, minor key'); data.musicModel is the "
+    "catalog key; data.instrumental defaults true; data.durationSec caps at 15 "
+    "when the track feeds a video node (see the movie pipeline below).\n"
     "  output  — the final terminal node.\n\n"
     "Canonical wiring for a cinematic-photo goal: model → text (with the "
     "enriched prompt) → image → [toolcall] → output. For an input-image goal: "
     "model → picture → text → image → toolcall → output. Add a video node "
     "instead of image when the goal is a clip.\n\n"
+    "THE MOVIE PIPELINE (use this whole shape when the goal is a video with a "
+    "character and a soundtrack — it is what the Flow rail's 'Video' answer "
+    "means):\n"
+    "  1. model — set data.imageModel, data.videoModel AND data.musicModel, so "
+    "every downstream node inherits its model instead of guessing.\n"
+    "  2. text (character) → image (character) — the character still. Generate "
+    "the CHARACTER first: the video node conditions on this image, so the person "
+    "on screen is decided here and stays consistent.\n"
+    "  3. text (scene) — the setting, action and camera. A scene IMAGE node is "
+    "optional; the description alone is usually enough because the video model "
+    "reads the prompt.\n"
+    "  4. text (music) → music — a short description of the background music, "
+    "then the music node that generates it.\n"
+    "  5. video — wire the character image AND the music node into it. The "
+    "backend routes this to Seedance 2.5 reference-to-video, the one endpoint "
+    "that takes audio as an input, so picture and soundtrack are decided in a "
+    "SINGLE generation. Cite the references in data.prompt as @Image1 / @Audio1.\n"
+    "  6. output.\n"
+    "Every text/prompt you write lands on the canvas for the user to EDIT before "
+    "they press Run all. Write them as finished prompts, not placeholders — they "
+    "are what will actually generate.\n\n"
     "Provide ``nodes`` as an array of {id, type, position:{x,y}, data:{}} and "
     "``edges`` as an array of {source, target} referencing node ids. Positions "
     "spread the graph left→right (x steps ~320). The tool validates the graph "
