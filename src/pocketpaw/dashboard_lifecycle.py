@@ -687,6 +687,18 @@ async def shutdown_event(*, _stop_channel_adapter_fn=None):
     except Exception as exc:
         logger.debug("Cloud run drain skipped: %s", exc)
 
+    # Flush the batched request-log queue. Telemetry writes are batched behind
+    # a queue now, so on any restart the queued tail is simply lost unless
+    # something drains it — and a restart is exactly when someone is reading
+    # /audit. Same guarded-import shape and same reason as the run drain above:
+    # this is the only shutdown hook that fires.
+    try:
+        from pocketpaw_ee.cloud._core.request_log import shutdown_request_log
+
+        await _bounded("request_log_flush", shutdown_request_log(), timeout=8.0)
+    except Exception as exc:
+        logger.debug("Request-log flush skipped: %s", exc)
+
     # Stop all channel adapters
     if _stop_channel_adapter_fn:
         for channel in list(_channel_adapters):
