@@ -1,4 +1,10 @@
 # audience.py — resolves an Event into the user_ids that should receive it.
+# Updated: 2026-09-04 — the member cache is now an LRU with single-flight.
+#   It was a plain dict whose 2-second TTL was only a freshness check on read,
+#   so nothing was ever removed and one entry per group/workspace/user ever
+#   seen was retained for the process lifetime. Concurrent misses for the same
+#   key also each issued their own query; since this resolver runs on every
+#   workspace-scoped event, that fan-out is the normal case, not the rare one.
 # Updated: 2026-08-15 (HTN-5) — agent.plan_updated joins the agent runtime
 #   stream branch, scoped to the group's members like agent.tool_use.
 # Updated: 2026-08-11 — call.participant_joined / call.participant_left now
@@ -10,12 +16,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 
 from pocketpaw_ee.cloud._core.realtime.events import Event
 
 MemberFetcher = Callable[[str], Awaitable[list[str]]]
+
+#: Cache ceiling. Sized so a large deployment's active groups and workspaces
+#: fit comfortably — eviction is a backstop against unbounded growth, not a
+#: working constraint. Entries cost a short list of ids.
+_DEFAULT_CACHE_MAX = 10_000
 
 
 class AudienceResolver:
@@ -29,13 +42,23 @@ class AudienceResolver:
         workspace_admins: MemberFetcher | None = None,
         workspace_peers: MemberFetcher | None = None,
         cache_ttl_seconds: float = 2.0,
+        cache_max_entries: int = _DEFAULT_CACHE_MAX,
     ) -> None:
         self._group_members = group_members
         self._workspace_members = workspace_members
         self._workspace_admins = workspace_admins
         self._workspace_peers = workspace_peers
         self._ttl = cache_ttl_seconds
-        self._cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
+        self._max = cache_max_entries
+        # LRU, not a plain dict. The TTL is only a freshness check on read —
+        # it never removed anything, so one entry per group/workspace/user
+        # ever seen was retained for the life of the process.
+        self._cache: OrderedDict[tuple[str, str], tuple[float, list[str]]] = OrderedDict()
+        # Single-flight. Without it, N concurrent events for the same group
+        # all miss together and issue N identical queries; this resolver runs
+        # on every workspace-scoped event, so that fan-out is the common case
+        # rather than the rare one.
+        self._inflight: dict[tuple[str, str], asyncio.Future[list[str]]] = {}
 
     def invalidate_group(self, group_id: str) -> None:
         self._cache.pop(("group", group_id), None)
@@ -53,12 +76,40 @@ class AudienceResolver:
     async def _cached(self, kind: str, key: str, fn: MemberFetcher | None) -> list[str]:
         if fn is None:
             return []
+        ck = (kind, key)
         now = time.monotonic()
-        entry = self._cache.get((kind, key))
+
+        entry = self._cache.get(ck)
         if entry and now - entry[0] < self._ttl:
+            self._cache.move_to_end(ck)
             return list(entry[1])
-        value = await fn(key)
-        self._cache[(kind, key)] = (now, value)
+
+        # Single-flight: the first caller to miss owns the fetch and everyone
+        # else awaits the same task. Nothing is awaited between the lookup and
+        # the insert, so no second caller can interleave and start a duplicate.
+        # A task rather than a bare future because a failure then propagates to
+        # every waiter by itself, and the exception is retrieved by whoever
+        # awaits — no "exception was never retrieved" warning to hand-manage.
+        pending = self._inflight.get(ck)
+        if pending is not None:
+            return list(await pending)
+
+        # ensure_future, not create_task: MemberFetcher is typed as returning
+        # an Awaitable, and a caller is free to hand back a future rather than
+        # a coroutine. create_task rejects the former.
+        task = asyncio.ensure_future(fn(key))
+        self._inflight[ck] = task
+        try:
+            value = await task
+        finally:
+            # Popped on failure too, so one transient error does not pin a
+            # permanently-failing task in front of every later caller.
+            self._inflight.pop(ck, None)
+
+        self._cache[ck] = (now, value)
+        self._cache.move_to_end(ck)
+        while len(self._cache) > self._max:
+            self._cache.popitem(last=False)
         return list(value)
 
     async def _group(self, gid: str) -> list[str]:

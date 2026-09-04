@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+import weakref
 
 __all__ = [
     "RateLimiter",
@@ -62,6 +63,21 @@ class RateLimitInfo:
         return h
 
 
+#: Every live RateLimiter, so ``cleanup_all()`` can sweep them all.
+#:
+#: This used to be a hand-written list inside ``cleanup_all``, naming the six
+#: limiters defined in this module. The three cloud limiters in
+#: ``pocketpaw_ee.cloud._core.rate_limit`` were therefore never swept, and
+#: could not have been added: the OSS core must not import ``pocketpaw_ee``
+#: (an import-linter contract enforces it), so the list was structurally
+#: incapable of naming them. One of those three keys its buckets on a
+#: caller-supplied header on an unauthenticated endpoint.
+#:
+#: A WeakSet so a limiter built in a test, or any other short-lived one, is
+#: collected normally instead of being pinned here for the process lifetime.
+_REGISTRY: weakref.WeakSet[RateLimiter] = weakref.WeakSet()
+
+
 class RateLimiter:
     """Token-bucket rate limiter keyed by client identifier (IP address or API key).
 
@@ -81,6 +97,9 @@ class RateLimiter:
         # can't both see `tokens >= 1.0` and both decrement (issue #891).
         # The operation is O(1), so the lock is near-zero cost in practice.
         self._lock = threading.Lock()
+        # Self-register so the periodic sweep finds this limiter without
+        # anyone remembering to add it anywhere. See _REGISTRY.
+        _REGISTRY.add(self)
 
     def allow(self, key: str) -> bool:
         """Return True if the request is allowed, consuming one token."""
@@ -174,15 +193,18 @@ def get_api_key_limiter() -> RateLimiter:
     return _api_key_limiter
 
 
-def cleanup_all() -> int:
-    """Run cleanup on all global limiters. Returns total entries removed."""
-    total = (
-        api_limiter.cleanup()
-        + auth_limiter.cleanup()
-        + login_limiter.cleanup()
-        + mfa_challenge_limiter.cleanup()
-        + ws_limiter.cleanup()
-    )
-    if _api_key_limiter is not None:
-        total += _api_key_limiter.cleanup()
-    return total
+def cleanup_all(max_age: float = 3600.0) -> int:
+    """Sweep every live limiter. Returns total entries removed.
+
+    Walks the registry rather than a hand-written list of the limiters defined
+    in this module. That list silently excluded the cloud limiters, which are
+    defined in a package the OSS core is forbidden to import — so the omission
+    could not have been fixed by adding a name to it. Anything that constructs
+    a RateLimiter is now swept, wherever it lives.
+    """
+    return sum(limiter.cleanup(max_age) for limiter in list(_REGISTRY))
+
+
+def registered_limiter_count() -> int:
+    """How many live limiters the sweep currently covers. For tests and /doctor."""
+    return len(_REGISTRY)
