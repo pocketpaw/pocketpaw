@@ -338,8 +338,8 @@
   {
     "label": "a genuinely quiet window invents a zero bounce rate — a ratio over zero visits is undefined, and 0.0 says nobody bounced",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        return SiteAnalyticsVisits(visits=0), []",
-    "replace": "        return SiteAnalyticsVisits(visits=0, bounce_rate=0.0, visit_duration_seconds=0.0), []",
+    "find": "        return SiteAnalyticsVisits(count=0), []",
+    "replace": "        return SiteAnalyticsVisits(count=0, bounce_rate=0.0, duration_seconds=0.0), []",
     "tests": [
       "tests/ee/sites/test_sites_analytics_read.py"
     ]
@@ -347,8 +347,8 @@
   {
     "label": "a window of nothing but bounces reports a mean duration of zero seconds — a claim that everyone left instantly, from rows that carry one timestamp each and can measure no duration at all",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "            visit_duration_seconds=round(total_seconds / measured, 1) if measured else None,",
-    "replace": "            visit_duration_seconds=round(total_seconds / measured, 1) if measured else 0.0,",
+    "find": "            duration_seconds=round(total_seconds / measured, 1) if measured else None,",
+    "replace": "            duration_seconds=round(total_seconds / measured, 1) if measured else 0.0,",
     "tests": [
       "tests/ee/sites/test_sites_analytics_read.py"
     ]

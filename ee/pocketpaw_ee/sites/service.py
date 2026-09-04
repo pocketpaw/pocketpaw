@@ -5600,7 +5600,7 @@ def _analytics_visits(row: dict, *, pageviews: int) -> tuple[SiteAnalyticsVisits
     if visits <= 0:
         if pageviews > 0:
             return None, ["visits"]
-        return SiteAnalyticsVisits(visits=0), []
+        return SiteAnalyticsVisits(count=0), []
     # Clamped because the remainder is a denominator below. More bounces than visits is
     # impossible out of the statement above, and a negative mean duration reaching a
     # customer's screen is not worth the one call it costs to make it unreachable.
@@ -5609,12 +5609,12 @@ def _analytics_visits(row: dict, *, pageviews: int) -> tuple[SiteAnalyticsVisits
     total_seconds = _analytics_int(row, "total_seconds")
     return (
         SiteAnalyticsVisits(
-            visits=visits,
+            count=visits,
             # Rounded because a ratio of two sampled estimates means nothing in its
             # fifteenth decimal place, and the wire should not carry float noise that a
             # UI then has to hide.
             bounce_rate=round(bounces / visits, 4),
-            visit_duration_seconds=round(total_seconds / measured, 1) if measured else None,
+            duration_seconds=round(total_seconds / measured, 1) if measured else None,
         ),
         [],
     )

@@ -1005,11 +1005,11 @@ async def test_a_visit_that_crosses_the_top_of_the_hour_counts_as_two(beanie_tes
 
     assert out.pageviews == 3
     assert out.visitors == 1, "one person, whatever the visit id was split into"
-    assert out.visits.visits == 2, "the hourly salt cut one reading session in two"
+    assert out.visits.count == 2, "the hourly salt cut one reading session in two"
     # The first visit ran 10:50 to 10:58. The second is a single pageview and therefore a
     # bounce, which is what the tail of a split visit always looks like.
     assert out.visits.bounce_rate == 0.5
-    assert out.visits.visit_duration_seconds == 480.0
+    assert out.visits.duration_seconds == 480.0
 
 
 @pytest.mark.asyncio
@@ -1034,9 +1034,9 @@ async def test_a_one_page_visit_is_a_bounce_and_never_dilutes_the_duration(beani
     )
 
     assert (out.pageviews, out.visitors) == (4, 2)
-    assert out.visits.visits == 2
+    assert out.visits.count == 2
     assert out.visits.bounce_rate == 0.5
-    assert out.visits.visit_duration_seconds == 300.0, "300 / 1 measurable visit, not 300 / 2"
+    assert out.visits.duration_seconds == 300.0, "300 / 1 measurable visit, not 300 / 2"
 
 
 @pytest.mark.asyncio
@@ -1058,9 +1058,9 @@ async def test_every_visit_a_bounce_leaves_the_duration_unmeasurable(beanie_test
         workspace_id="ws-read", site_id=str(site.id), _cloudflare=cf
     )
 
-    assert out.visits.visits == 3
+    assert out.visits.count == 3
     assert out.visits.bounce_rate == 1.0
-    assert out.visits.visit_duration_seconds is None
+    assert out.visits.duration_seconds is None
 
 
 @pytest.mark.asyncio
@@ -1109,9 +1109,9 @@ async def test_a_quiet_window_reports_zero_visits_rather_than_calling_them_unrec
     assert out.status == "ok"
     assert out.pageviews == 0
     assert out.visits is not None, "a quiet week is not a version skew"
-    assert out.visits.visits == 0
+    assert out.visits.count == 0
     assert out.visits.bounce_rate is None
-    assert out.visits.visit_duration_seconds is None
+    assert out.visits.duration_seconds is None
     assert "visits" not in out.unrecorded
 
 
@@ -1140,9 +1140,9 @@ async def test_a_window_spanning_the_republish_measures_the_rows_that_can_be(bea
     )
 
     assert out.pageviews == 4, "every row still counts as a pageview"
-    assert out.visits.visits == 1, "only the rows that carry a visit id can be a visit"
+    assert out.visits.count == 1, "only the rows that carry a visit id can be a visit"
     assert out.visits.bounce_rate == 0.0
-    assert out.visits.visit_duration_seconds == 240.0
+    assert out.visits.duration_seconds == 240.0
     assert "visits" not in out.unrecorded
 
 
@@ -1204,9 +1204,9 @@ async def test_the_endpoint_serves_the_visit_metrics(client, monkeypatch):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["status"] == "ok"
-    assert body["visits"]["visits"] == 2
+    assert body["visits"]["count"] == 2
     assert body["visits"]["bounce_rate"] == 0.5
-    assert body["visits"]["visit_duration_seconds"] == 1800.0
+    assert body["visits"]["duration_seconds"] == 1800.0
     assert "visits" not in body["unrecorded"]
 
 
