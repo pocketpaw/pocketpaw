@@ -60,25 +60,47 @@ class _StubTransport:
 
 
 class _StubMsg:
-    def __init__(self, *, role=None, sender_type="user", content=""):
+    def __init__(self, *, role=None, sender_type="user", content="", created_at=None):
         self.role = role
         self.sender_type = sender_type
         self.content = content
+        # Assigned by configure() in seed order when not given explicitly, so
+        # the stub can model a sort without every call site listing timestamps.
+        self.createdAt = created_at
 
 
 class _StubFindChain:
-    """Mimics Beanie's find(...).sort(...).limit(...).to_list() chain."""
+    """Mimics Beanie's find(...).sort(...).limit(...).to_list() chain.
+
+    2026-09-04: ``sort`` now applies the key and honours a leading ``-``.
+
+    It used to record ``sorted = True`` and discard the argument, which made
+    this stub return identical output for an ascending and a descending query.
+    That is precisely the difference ``load_history_for_scope`` got wrong — it
+    sorted ascending before limiting, so a long conversation rehydrated its
+    first N messages instead of its last N — and this stub could not have
+    failed on it. A fixture that cannot distinguish two queries cannot test
+    which one the code sends.
+
+    See tests/cloud/test_agent_history_window.py for the window's own tests.
+    """
 
     def __init__(self, captured: dict, docs: list[_StubMsg]):
         self._captured = captured
-        self._docs = docs
+        self._docs = list(docs)
 
-    def sort(self, *args, **kwargs):
+    def sort(self, key=None, *args, **kwargs):
         self._captured["sorted"] = True
+        self._captured["sort"] = key
+        if isinstance(key, str) and key:
+            descending = key.startswith("-")
+            field = key.lstrip("-")
+            self._docs.sort(key=lambda d: getattr(d, field, 0), reverse=descending)
         return self
 
     def limit(self, n):
         self._captured["limit"] = n
+        self._docs = self._docs[:n]
         return self
 
     async def to_list(self):
@@ -92,6 +114,11 @@ class _StubMessageModel:
     @classmethod
     def configure(cls, docs: list[_StubMsg]) -> dict:
         cls._captured = {}
+        # Stamp seed order as the write order so a sort has something honest
+        # to work with. Explicit timestamps are left alone.
+        for i, doc in enumerate(docs):
+            if getattr(doc, "createdAt", None) is None:
+                doc.createdAt = i
         cls._docs = docs
         return cls._captured
 
