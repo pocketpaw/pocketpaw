@@ -44,18 +44,20 @@ runs they can pay for. ``credits.service.verify_wallet_migrated`` refuses the bo
 for that reason, so a deploy that skips this fails loudly instead of serving empty
 wallets.
 
-USAGE. It lives in the installed package so it can be run wherever the app runs,
-including a deployed container:
+HOW IT RUNS. As a deploy step: the ``migrate`` service in
+deploy/coolify/docker-compose.yaml runs this to completion, and the backend waits
+on ``service_completed_successfully`` before starting. By hand, wherever the app
+runs, it is:
 
     python -m pocketpaw_ee.cloud.credits.migrate_micro_credits --dry-run
     python -m pocketpaw_ee.cloud.credits.migrate_micro_credits
 
-WHY IT IS NOT IN ``scripts/``. That is where it started, and the deployed image
-does not have it. The runtime stage of deploy/coolify/Dockerfile copies
-``/opt/venv`` and ``/build/connectors`` from the builder and nothing else, so the
-repository — ``scripts/`` included — exists only inside a build layer that is
-thrown away. A data migration that cannot be run against the data is not a
-migration, and on Coolify there is no checkout on the host to fall back to.
+WHY IT IS NOT IN ``scripts/``, and why the deploy step exists. The runtime stage of
+deploy/coolify/Dockerfile copies ``/opt/venv`` and ``/build/connectors`` from the
+builder and nothing else, so the repository — ``scripts/`` included — survives only
+in a build layer that is thrown away. Coolify keeps no checkout on the host either,
+and may offer no shell at all. A migration therefore has to arrive as part of a
+deploy or it cannot arrive; being in the package is what makes that possible.
 
 CONFIGURATION comes from ``CLOUD_MONGODB_URI``, which is what the deployed stack
 sets and what ``init_cloud_db`` reads. The database name is parsed off the URI
@@ -76,8 +78,11 @@ to actually run it against the deployment it was written for.
   * It reads ``CLOUD_MONGODB_URI``. It used to demand ``POCKETPAW_MONGO_URL``,
     which nothing sets, and default the database to ``pocketpaw``, which does not
     exist — so the reward for exporting the variable by hand was a clean zero
-    against an empty database. It now refuses a database with no wallet
-    collections rather than reporting success.
+    against an empty database. It now refuses a database that holds data but no
+    wallet, rather than reporting success against the wrong one.
+
+It also became a deploy step rather than something an operator runs, because the
+deployment offers no shell to run it from.
 
 Proven in tests/cloud/credits/test_unmigrated_wallet.py. The migration tests load
 THIS module rather than a copy of its pipeline.
@@ -236,23 +241,40 @@ def _host_of(uri: str) -> str:
 
 
 async def _assert_wallet_database(db) -> None:
-    """Refuse a database that holds no wallet at all.
+    """Refuse a database that holds SOME of the wallet but not all of it.
 
     A migration selects documents by the OLD field's existence, so pointing it at
     the wrong database produces "0 documents would convert" — which reads exactly
     like "already migrated" and is the most dangerous thing this tool can print.
     An empty result is only trustworthy if the collections are there to be empty.
+
+    An ENTIRELY empty database is the exception, and it has to be, because this now
+    runs as a deploy step ahead of the app (deploy/coolify/docker-compose.yaml, the
+    ``migrate`` service). A first deploy has no collections at all — Beanie creates
+    them with its indexes on first boot — so refusing that would fail the step, and
+    ``service_completed_successfully`` would then hold the backend down forever on a
+    brand new install. Nothing to convert is the correct answer there, not an error.
+
+    What stays an error is a database holding one wallet collection and not the
+    other, or holding other application data but no wallet: both mean the URI is
+    pointing somewhere unintended, and neither can be reported as success.
     """
     names = set(await db.list_collection_names())
+    if not names:
+        logger.info(
+            "database %r is empty — nothing to convert. This is a first deploy: the "
+            "app creates its collections on boot.",
+            db.name,
+        )
+        return
+
     missing = [c for c in _WALLET_COLLECTIONS if c not in names]
     if missing:
         raise RuntimeError(
-            f"database {db.name!r} has no {', '.join(missing)} collection — this is "
-            "not the wallet database, and a run against it would report zero "
-            "documents and look like a success. Check CLOUD_MONGODB_URI. (On a "
-            "deployment that has never booted this is also expected and harmless: "
-            "Beanie creates these collections with its indexes, and there is "
-            "nothing to convert until it has.)"
+            f"database {db.name!r} holds {len(names)} collection(s) but no "
+            f"{', '.join(missing)} — a run against it would report zero documents "
+            "and look like a success, so it is refused instead. Check "
+            "CLOUD_MONGODB_URI."
         )
 
 

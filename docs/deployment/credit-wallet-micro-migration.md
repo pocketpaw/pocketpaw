@@ -1,7 +1,7 @@
 # Converting the credit wallet to micro-credits
 
-A one-time database change. Nothing in the image or the compose file runs it, and
-the app will not start until it has been done.
+A one-time database change, run automatically as a deploy step. The app will not
+start until it has been done.
 
 ## Why it exists
 
@@ -19,38 +19,48 @@ money were renamed:
 Customers see no change. Balances, top-ups, plans and prices are still whole
 credits, converted at the HTTP boundary. One credit is still one cent.
 
-## Running it on Coolify
+## How it runs
 
-The migration ships inside the installed package, so it runs anywhere the app
-runs. That is deliberate: it started life in `scripts/`, which the runtime image
-does not carry. The runtime stage of `deploy/coolify/Dockerfile` copies
-`/opt/venv` and `/build/connectors` and nothing else, so the repository exists
-only in a discarded build layer, and on Coolify there is no checkout on the host
-either.
+`deploy/coolify/docker-compose.yaml` has a `migrate` service: the same image as the
+backend, `restart: "no"`, running the migration and exiting. The backend declares
+`depends_on: migrate: service_completed_successfully`, so a deploy converts the
+database and only then starts the app. A failed migration holds the backend back
+rather than letting it up against half-converted data.
 
-Open a terminal on the `paw-backend` container from the Coolify dashboard, or SSH
-to the host and use `docker exec`:
+Deploying is the whole procedure. There is nothing to run by hand, which is the
+point: the runtime image carries only `/opt/venv`, so `scripts/` does not exist in
+it, and Coolify keeps no checkout on the host and may offer no shell at all. A
+migration has to arrive as part of a deploy or it cannot arrive.
 
-```bash
-docker exec -it paw-backend \
-  python -m pocketpaw_ee.cloud.credits.migrate_micro_credits --dry-run
+Watch it in the Coolify logs for the `migrate` service:
 
-docker exec -it paw-backend \
-  python -m pocketpaw_ee.cloud.credits.migrate_micro_credits
+```
+INFO micro-credit migration — host mongo:27017, database paw-enterprise — WRITING
+INFO credit_balances: 12 document(s) converted balance_credits -> balance_micro (x1000000)
+INFO migration complete and verified — 12 credit document(s) converted
 ```
 
-It reads `CLOUD_MONGODB_URI` from the container's own environment, which is
-already set to `mongodb://mongo:27017/paw-enterprise`, and takes the database name
-off that URI exactly as `init_cloud_db` does. There is nothing to configure.
+Running on every deploy is safe. Documents are selected by the old field's
+existence, so the second deploy matches nothing and reports zero.
 
-**You do not need to stop the writers.** The conversion is one atomic update per
-document and it adds to the destination field rather than replacing it, so an
-increment arriving mid-run lands correctly whether it gets there before or after.
-Nothing calls `credits.service.reconcile` automatically, which is the one routine
-that could have rewritten a balance from a half-converted ledger.
+### Running it by hand
 
-Stopping is still the tidier option if you have a maintenance window, because
-reads served during the run are wrong. It is not a correctness requirement.
+Only if you have a shell, and only for a dry run or an out-of-band repair. The
+Coolify dashboard has a Terminal tab on the application; `docker exec` works over
+SSH.
+
+```bash
+docker exec -it paw-backend   python -m pocketpaw_ee.cloud.credits.migrate_micro_credits --dry-run
+```
+
+It reads `CLOUD_MONGODB_URI` from the container's own environment, so there is
+nothing to configure.
+
+### Adding another migration later
+
+Append it to the `migrate` service's command, oldest first, `&&`-chained so a
+failure stops the rest. Every migration on that list must be idempotent, because it
+runs on every deploy. Delete a line once no reachable deployment predates it.
 
 ## What happens if you skip it
 
@@ -78,35 +88,12 @@ to see what it would convert, then `python -m pocketpaw_ee.cloud.credits.migrate
 to convert it.
 ```
 
-### If the backend is already in the restart loop
-
-You cannot `docker exec` into a container that will not stay up, so run the same
-command in a throwaway container built from the same image, attached to the same
-network so `mongo` resolves:
-
-```bash
-# The image and network names Coolify generated for this stack.
-docker inspect paw-backend --format '{{.Config.Image}}'
-docker inspect paw-mongo --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}'
-
-docker run --rm \
-  --network <that network> \
-  -e CLOUD_MONGODB_URI=mongodb://mongo:27017/paw-enterprise \
-  <that image> \
-  python -m pocketpaw_ee.cloud.credits.migrate_micro_credits --dry-run
-```
-
-Drop `--dry-run` to convert, then let the backend's next restart succeed.
-
-The cleaner order is to migrate before deploying the build that carries the guard,
-while the old container is still up and `docker exec` works.
-
 ## Recovering a database the app already served
 
 A deployment that ran unmigrated for a while has balance documents carrying both
 fields: the old balance, plus whatever grants and metered debits were applied
 since. The migration adds the two together rather than overwriting, so those
-movements survive. Run it normally, with no special flag, then spot-check:
+movements survive. The ordinary deploy handles it; spot-check afterwards:
 
 ```bash
 docker exec -i paw-mongo mongosh --quiet paw-enterprise --eval '
@@ -126,7 +113,7 @@ is character for character what an already-migrated database prints. It refuses 
 run at all when `credit_balances` and `credit_ledger` are absent, for that reason.
 If you see that refusal, check `CLOUD_MONGODB_URI` rather than the data.
 
-A deployment that has genuinely never booted is the one honest exception: Beanie
-creates those collections while building its indexes, so a database the app has
-never touched has neither, and there is nothing to migrate anyway. Start the app
-and the guard will pass.
+A completely empty database is the exception and passes silently. That is a first
+deploy, where the app has not yet created its collections and there is nothing to
+convert. It has to pass: the backend waits on this step succeeding, so refusing an
+empty database would hold a brand new install down forever.

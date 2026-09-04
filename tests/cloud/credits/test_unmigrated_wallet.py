@@ -278,6 +278,23 @@ def test_no_uri_at_all_is_an_error_not_a_guess():
         migration.resolve_mongo_target({})
 
 
+async def test_a_first_deploy_empty_database_is_not_an_error():
+    """The migration runs as a deploy step now, ahead of the app, and the backend
+    waits on it completing successfully. A brand new install has no collections at
+    all — the app creates them on first boot — so refusing that would fail the step
+    and hold the backend down forever on a fresh deployment. Nothing to convert is
+    the right answer, not an error.
+
+    Only relevant to a first install. A deployment with data has its collections
+    and takes the checks below.
+    """
+    from mongomock_motor import AsyncMongoMockClient
+
+    db = AsyncMongoMockClient()["brand_new"]
+
+    await migration._assert_wallet_database(db)  # does not raise
+
+
 async def test_a_database_with_no_wallet_is_refused():
     """The most dangerous thing this tool can print is "0 documents would convert"
     against the wrong database, because it is identical to the output of a database
