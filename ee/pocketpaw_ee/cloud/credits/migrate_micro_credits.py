@@ -249,7 +249,10 @@ async def _assert_wallet_database(db) -> None:
         raise RuntimeError(
             f"database {db.name!r} has no {', '.join(missing)} collection — this is "
             "not the wallet database, and a run against it would report zero "
-            "documents and look like a success. Check CLOUD_MONGODB_URI."
+            "documents and look like a success. Check CLOUD_MONGODB_URI. (On a "
+            "deployment that has never booted this is also expected and harmless: "
+            "Beanie creates these collections with its indexes, and there is "
+            "nothing to convert until it has.)"
         )
 
 

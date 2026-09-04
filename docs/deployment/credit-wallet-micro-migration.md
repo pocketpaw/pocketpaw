@@ -78,9 +78,28 @@ to see what it would convert, then `python -m pocketpaw_ee.cloud.credits.migrate
 to convert it.
 ```
 
-A container in that state restarts in a loop, so run the migration from the `mongo`
-container's neighbour on the host rather than waiting for a terminal on a backend
-that keeps dying. If the backend is already up, run it there and redeploy after.
+### If the backend is already in the restart loop
+
+You cannot `docker exec` into a container that will not stay up, so run the same
+command in a throwaway container built from the same image, attached to the same
+network so `mongo` resolves:
+
+```bash
+# The image and network names Coolify generated for this stack.
+docker inspect paw-backend --format '{{.Config.Image}}'
+docker inspect paw-mongo --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}'
+
+docker run --rm \
+  --network <that network> \
+  -e CLOUD_MONGODB_URI=mongodb://mongo:27017/paw-enterprise \
+  <that image> \
+  python -m pocketpaw_ee.cloud.credits.migrate_micro_credits --dry-run
+```
+
+Drop `--dry-run` to convert, then let the backend's next restart succeed.
+
+The cleaner order is to migrate before deploying the build that carries the guard,
+while the old container is still up and `docker exec` works.
 
 ## Recovering a database the app already served
 
@@ -106,3 +125,8 @@ wrong database converts nothing and prints `0 document(s) would convert` — whi
 is character for character what an already-migrated database prints. It refuses to
 run at all when `credit_balances` and `credit_ledger` are absent, for that reason.
 If you see that refusal, check `CLOUD_MONGODB_URI` rather than the data.
+
+A deployment that has genuinely never booted is the one honest exception: Beanie
+creates those collections while building its indexes, so a database the app has
+never touched has neither, and there is nothing to migrate anyway. Start the app
+and the guard will pass.
