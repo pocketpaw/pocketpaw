@@ -241,7 +241,10 @@ async def _deliver_external(notification: Notification) -> None:
         sinks = _resolve_sinks(config, notification.kind)
         if not sinks:
             return
-        async with httpx.AsyncClient() as client:
+        # Explicit timeout, same reasoning as audit/webhooks.py: the sink URL
+        # is workspace-supplied and the sinks are delivered serially, so an
+        # unhurried endpoint holds up the ones after it.
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
             for sink_name, url in sinks:
                 try:
                     await _post_one(client, sink_name, url, notification)
