@@ -83,6 +83,85 @@ def test_a_secret_inside_a_traceback_is_scrubbed(captured_root: io.StringIO) -> 
     assert "***REDACTED***" in out
 
 
+def test_the_exception_object_itself_is_scrubbed(captured_root: io.StringIO) -> None:
+    """Renderers disagree about where they read the traceback from.
+
+    A stdlib ``Formatter`` reuses ``record.exc_text``; ``RichHandler``
+    re-renders from ``exc_info`` and ignores it; Logfire's logging handler
+    passes the raw ``exc_info`` tuple and drops ``exc_text`` as a reserved
+    attribute, and its own scrubber skips exception keys as SAFE_KEYS. So
+    scrubbing the rendered text alone protects only one of the three. The
+    exception object is the one thing all of them read.
+    """
+    install_scrubbing_filters()
+
+    log = logging.getLogger("pocketpaw.agents.provider")
+    caught: BaseException | None = None
+    try:
+        raise RuntimeError(f"upstream rejected token {_FAKE_KEY}")
+    except RuntimeError as exc:
+        caught = exc
+        log.exception("provider call failed")
+
+    assert caught is not None
+    assert _FAKE_KEY not in str(caught), "the exception still carries the key after logging"
+    assert "***REDACTED***" in str(caught)
+
+
+def test_a_second_handler_without_the_filter_still_sees_a_redacted_exception(
+    captured_root: io.StringIO,
+) -> None:
+    """This is the property the Logfire bridge depends on.
+
+    Filters are per-handler, so a handler added without one is unprotected by
+    anything attached elsewhere. Because the scrub rewrites the shared exception
+    object rather than a per-record copy, a later handler reading ``exc_info``
+    sees the redacted text regardless. That is what keeps a bridge handler safe
+    when it renders the traceback itself.
+    """
+    install_scrubbing_filters()
+
+    # A second handler, deliberately WITHOUT the filter, standing in for a
+    # bridge handler that re-renders from exc_info.
+    second = io.StringIO()
+    bridge = logging.StreamHandler(second)
+    bridge.setFormatter(logging.Formatter("%(message)s"))
+    logging.getLogger().addHandler(bridge)
+    try:
+        log = logging.getLogger("pocketpaw.agents.provider")
+        try:
+            raise RuntimeError(f"upstream rejected token {_FAKE_KEY}")
+        except RuntimeError:
+            log.exception("provider call failed")
+    finally:
+        logging.getLogger().removeHandler(bridge)
+
+    assert _FAKE_KEY not in second.getvalue(), (
+        "an unfiltered handler rendered the key; the exception object was not scrubbed"
+    )
+
+
+def test_an_exception_without_a_secret_is_left_alone(captured_root: io.StringIO) -> None:
+    """Only rewrite args when a pattern matched.
+
+    Code that inspects an exception after logging it must see exactly what it
+    raised, so the scrub must be a no-op on ordinary exceptions.
+    """
+    install_scrubbing_filters()
+
+    log = logging.getLogger("pocketpaw.agents.provider")
+    original = ("connection refused", 42)
+    caught: BaseException | None = None
+    try:
+        raise RuntimeError(*original)
+    except RuntimeError as exc:
+        caught = exc
+        log.exception("provider call failed")
+
+    assert caught is not None
+    assert caught.args == original, "an exception with no secret in it was rewritten"
+
+
 def test_a_non_tty_does_not_get_the_rich_handler() -> None:
     """Rich renders tracebacks from exc_info and ignores the scrubbed exc_text.
 

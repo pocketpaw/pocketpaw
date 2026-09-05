@@ -63,10 +63,24 @@
     "tests": "tests/test_log_scrubbing.py"
   },
   {
-    "label": "Rich is selected even off a TTY, so it renders the raw traceback in a container",
+    "label": "Rich is selected even off a TTY, so container logs lose timestamp and level",
     "file": "src/pocketpaw/logging_setup.py",
     "find": "    return bool(getattr(sys.stderr, \"isatty\", lambda: False)())",
     "replace": "    return True",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "the exception OBJECT is no longer scrubbed, so a renderer reading exc_info leaks",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "                if scrubbed != original:\n                    exc.args = scrubbed",
+    "replace": "                if False:\n                    exc.args = scrubbed",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "args are rewritten unconditionally, so a clean exception is mangled too",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "                scrubbed = tuple(_scrub(a) if isinstance(a, str) else a for a in original)",
+    "replace": "                scrubbed = tuple(\"***REDACTED***\" for a in original)",
     "tests": "tests/test_log_scrubbing.py"
   }
 ]

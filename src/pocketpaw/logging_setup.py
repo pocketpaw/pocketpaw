@@ -3,14 +3,19 @@ Beautiful logging setup using Rich.
 
 Created: 2026-02-02
 Changes:
-  - 2026-09-05: SecretFilter now scrubs the TRACEBACK too, not just the message
-    and args. A provider SDK that puts a key in an exception reached the log
-    through exc_info, which the filter ignored entirely, and logger.exception is
-    used 281 times in this codebase. Rich is now used only when stderr is a TTY:
-    RichHandler renders tracebacks from exc_info and ignores record.exc_text, so
-    it would discard the scrubbed traceback and print the raw one. The non-TTY
-    handler also carries a timestamp, level and logger name, which the
-    lastResort fallback did not.
+  - 2026-09-05: SecretFilter now scrubs the EXCEPTION and its traceback, not
+    just the message and args. A provider SDK that puts a key in an exception
+    reached the log through exc_info, which the filter ignored entirely, and
+    logger.exception is used 281 times in this codebase. It rewrites the
+    exception's args, because renderers disagree about where they read the
+    traceback from: Formatter reuses record.exc_text, RichHandler re-renders
+    from exc_info, and Logfire's logging handler passes the raw exc_info tuple
+    while dropping exc_text as a reserved attribute. The exception object is the
+    one thing all of them read. Args are only rewritten when a pattern actually
+    matched, so an exception with no secret is left exactly as raised.
+    Separately, Rich is now used only on a TTY — a log-format decision, not a
+    security one: the previous non-TTY fallback emitted no timestamp, level or
+    logger name, so a container line could not be correlated with a report.
   - 2026-09-05: Both filters are now attached to the root logger's HANDLERS
     rather than to the root logger. They were attached to the logger, which
     meant they never ran: a logger's filters apply only to records logged
@@ -56,11 +61,26 @@ class SecretFilter(logging.Filter):
         # an exception reaches the log through ``exc_info``, which this used to
         # ignore entirely — and ``logger.exception`` is used 281 times here.
         #
-        # ``Formatter.format`` renders the traceback only when ``exc_text`` is
-        # empty and reuses it when set, so filling it in with a scrubbed render
-        # is what actually reaches the handler. This is also why setup_logging
-        # only uses Rich on a TTY: RichHandler renders from ``exc_info`` itself
-        # and ignores ``exc_text``, so in a container it would print the key.
+        # Scrub the EXCEPTION OBJECT first, then the rendered text. Rewriting
+        # ``args`` is the only thing every renderer sees, because they do not
+        # agree on where to read the traceback from: ``Formatter`` reuses
+        # ``record.exc_text``, ``RichHandler`` re-renders from ``exc_info`` and
+        # ignores ``exc_text``, and Logfire's logging handler passes the raw
+        # ``exc_info`` tuple while dropping ``exc_text`` as a reserved
+        # attribute — and its own scrubber skips ``exception.message`` and
+        # ``exception.stacktrace`` as SAFE_KEYS, so nothing downstream would
+        # catch it either. Scrubbing at the source covers all three.
+        #
+        # ``args`` is only reassigned when a pattern actually matched, so an
+        # exception carrying no secret is left untouched and code that inspects
+        # it after logging sees exactly what it raised.
+        if record.exc_info and record.exc_info[1] is not None:
+            exc = record.exc_info[1]
+            original = getattr(exc, "args", ())
+            if original:
+                scrubbed = tuple(_scrub(a) if isinstance(a, str) else a for a in original)
+                if scrubbed != original:
+                    exc.args = scrubbed
         if record.exc_info:
             if not record.exc_text:
                 record.exc_text = "".join(traceback.format_exception(*record.exc_info))
@@ -149,13 +169,15 @@ def install_scrubbing_filters() -> None:
 def _use_rich() -> bool:
     """Rich only for a human at a terminal.
 
-    Two reasons, and the second is a security one. Rich's box drawing and ANSI
-    are noise in a container's log collector, and `%(asctime)s` with the logger
-    name is what makes a line correlatable with a customer report. More
-    importantly ``RichHandler`` renders tracebacks from ``exc_info`` itself and
-    ignores ``record.exc_text``, so the scrubbed traceback ``SecretFilter``
-    prepares would be discarded and the raw one printed. On a TTY that is a
-    developer's own screen; in production it is the log collector.
+    The reason is log format, not scrubbing. Rich's box drawing and ANSI are
+    noise in a container's log collector, and a line with no timestamp, level or
+    logger name cannot be correlated with a customer report — which is what the
+    previous fallback produced.
+
+    Scrubbing is handled at the source instead, by rewriting the exception's
+    ``args`` in ``SecretFilter``, because ``RichHandler`` re-renders tracebacks
+    from ``exc_info`` and ignores ``record.exc_text``. That makes Rich safe
+    either way; this function is about readability for machines.
     """
     return bool(getattr(sys.stderr, "isatty", lambda: False)())
 
