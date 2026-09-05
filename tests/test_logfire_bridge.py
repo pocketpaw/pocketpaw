@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import logging
 from collections.abc import Iterator
@@ -26,6 +27,15 @@ import pytest
 from pocketpaw.logging_setup import SecretFilter, install_scrubbing_filters
 
 _FAKE_KEY = "sk-ant-" + "A" * 40
+
+#: pydantic-ai is an EXTRA. CI runs an OSS-only install where it is absent by
+#: design, and there ``_pydantic_ai_instrumentation`` raises and the integration
+#: drops out — correctly. Tests that assert on what it passed have nothing to say
+#: on that install.
+_HAS_PYDANTIC_AI = importlib.util.find_spec("pydantic_ai") is not None
+_needs_pydantic_ai = pytest.mark.skipif(
+    not _HAS_PYDANTIC_AI, reason="pydantic-ai not installed (OSS-only install)"
+)
 
 
 class _FakeLogfireInstance:
@@ -307,6 +317,7 @@ def test_configure_passes_only_kwargs_real_logfire_accepts() -> None:
     assert not unknown, f"logfire.configure does not accept {unknown}"
 
 
+@_needs_pydantic_ai
 def test_agent_content_is_excluded_unless_it_is_asked_for(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -332,6 +343,7 @@ def test_agent_content_is_excluded_unless_it_is_asked_for(
     assert instrumented[0]["include_binary_content"] is False
 
 
+@_needs_pydantic_ai
 def test_agent_content_can_be_turned_on_deliberately(monkeypatch: pytest.MonkeyPatch) -> None:
     """Opting in is one env var, because debugging a bad run needs the prompt."""
     import sys
@@ -425,13 +437,20 @@ def test_every_integration_in_the_default_set_attaches(monkeypatch: pytest.Monke
     A registry entry naming a function logfire does not have would be a silent
     hole: ``_instrument`` swallows the AttributeError and that integration is
     just quietly absent.
+
+    ``_pydantic_ai_instrumentation`` is stubbed rather than run, because this
+    asserts what the REGISTRY covers and pydantic-ai is an extra — otherwise the
+    expected set would change with the install shape, and the OSS-only CI job
+    would read a correct absence as a coverage regression.
     """
     import sys
 
+    from pocketpaw import observability
     from pocketpaw.observability import instrument_everything
 
     calls: dict[str, Any] = {}
     monkeypatch.setitem(sys.modules, "logfire", _recording_logfire(calls))
+    monkeypatch.setattr(observability, "_pydantic_ai_instrumentation", lambda: None)
     monkeypatch.delenv("POCKETPAW_LOGFIRE_INSTRUMENT", raising=False)
 
     attached = instrument_everything()
@@ -489,8 +508,10 @@ def test_the_instrument_list_can_be_trimmed_and_emptied(
     calls: dict[str, Any] = {}
     monkeypatch.setitem(sys.modules, "logfire", _recording_logfire(calls))
 
-    monkeypatch.setenv("POCKETPAW_LOGFIRE_INSTRUMENT", "httpx, pydantic_ai")
-    assert set(instrument_everything()) == {"httpx", "pydantic_ai"}
+    # Two integrations that need no extra, so this measures the SELECTION and not
+    # which optional packages the install happens to carry.
+    monkeypatch.setenv("POCKETPAW_LOGFIRE_INSTRUMENT", "httpx, redis")
+    assert set(instrument_everything()) == {"httpx", "redis"}
 
     calls.clear()
     monkeypatch.setenv("POCKETPAW_LOGFIRE_INSTRUMENT", "none")
