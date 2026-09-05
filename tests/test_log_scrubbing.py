@@ -62,6 +62,51 @@ def test_a_child_logger_record_is_scrubbed(captured_root: io.StringIO) -> None:
     assert "***REDACTED***" in out
 
 
+def test_a_secret_inside_a_traceback_is_scrubbed(captured_root: io.StringIO) -> None:
+    """``logger.exception`` is used 281 times here and carries the traceback.
+
+    The filter used to touch only ``record.msg`` and ``record.args``, so a
+    provider SDK that put a key in an exception message wrote it to the log in
+    clear. That is the exact scenario the worker's logging setup exists for.
+    """
+    install_scrubbing_filters()
+
+    log = logging.getLogger("pocketpaw.agents.provider")
+    try:
+        raise RuntimeError(f"upstream rejected token {_FAKE_KEY}")
+    except RuntimeError:
+        log.exception("provider call failed")
+
+    out = captured_root.getvalue()
+    assert "Traceback" in out, "the traceback was not rendered at all; test proves nothing"
+    assert _FAKE_KEY not in out, "the key reached the log through exc_info"
+    assert "***REDACTED***" in out
+
+
+def test_a_non_tty_does_not_get_the_rich_handler() -> None:
+    """Rich renders tracebacks from exc_info and ignores the scrubbed exc_text.
+
+    On a TTY that is a developer's own screen. In a container it is the log
+    collector, so the plain handler is what keeps the traceback scrubbed there.
+    """
+    import sys
+    from unittest.mock import patch
+
+    from pocketpaw.logging_setup import _use_rich
+
+    class _Stream:
+        def __init__(self, tty: bool) -> None:
+            self._tty = tty
+
+        def isatty(self) -> bool:
+            return self._tty
+
+    with patch.object(sys, "stderr", _Stream(tty=False)):
+        assert _use_rich() is False, "a non-TTY must not select Rich"
+    with patch.object(sys, "stderr", _Stream(tty=True)):
+        assert _use_rich() is True, "a TTY should still get Rich for humans"
+
+
 def test_the_secret_is_scrubbed_when_it_is_in_the_message_itself(
     captured_root: io.StringIO,
 ) -> None:

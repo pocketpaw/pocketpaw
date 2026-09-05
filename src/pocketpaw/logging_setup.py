@@ -3,6 +3,14 @@ Beautiful logging setup using Rich.
 
 Created: 2026-02-02
 Changes:
+  - 2026-09-05: SecretFilter now scrubs the TRACEBACK too, not just the message
+    and args. A provider SDK that puts a key in an exception reached the log
+    through exc_info, which the filter ignored entirely, and logger.exception is
+    used 281 times in this codebase. Rich is now used only when stderr is a TTY:
+    RichHandler renders tracebacks from exc_info and ignores record.exc_text, so
+    it would discard the scrubbed traceback and print the raw one. The non-TTY
+    handler also carries a timestamp, level and logger name, which the
+    lastResort fallback did not.
   - 2026-09-05: Both filters are now attached to the root logger's HANDLERS
     rather than to the root logger. They were attached to the logger, which
     meant they never ran: a logger's filters apply only to records logged
@@ -19,6 +27,7 @@ Changes:
 import logging
 import re
 import sys
+import traceback
 
 # Patterns that match known API key / token formats
 _SECRET_PATTERNS = [
@@ -33,20 +42,37 @@ _SECRET_PATTERNS = [
 ]
 
 
+def _scrub(text: str) -> str:
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub("***REDACTED***", text)
+    return text
+
+
 class SecretFilter(logging.Filter):
     """Scrub API key patterns from log output."""
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # The traceback, not just the message. A provider SDK that puts a key in
+        # an exception reaches the log through ``exc_info``, which this used to
+        # ignore entirely — and ``logger.exception`` is used 281 times here.
+        #
+        # ``Formatter.format`` renders the traceback only when ``exc_text`` is
+        # empty and reuses it when set, so filling it in with a scrubbed render
+        # is what actually reaches the handler. This is also why setup_logging
+        # only uses Rich on a TTY: RichHandler renders from ``exc_info`` itself
+        # and ignores ``exc_text``, so in a container it would print the key.
+        if record.exc_info:
+            if not record.exc_text:
+                record.exc_text = "".join(traceback.format_exception(*record.exc_info))
+            record.exc_text = _scrub(record.exc_text)
         if isinstance(record.msg, str):
-            for pattern in _SECRET_PATTERNS:
-                record.msg = pattern.sub("***REDACTED***", record.msg)
+            record.msg = _scrub(record.msg)
         if record.args:
             args = record.args if isinstance(record.args, tuple) else (record.args,)
             new_args = []
             for arg in args:
                 if isinstance(arg, str):
-                    for pattern in _SECRET_PATTERNS:
-                        arg = pattern.sub("***REDACTED***", arg)
+                    arg = _scrub(arg)
                 new_args.append(arg)
             record.args = tuple(new_args)
         return True
@@ -120,12 +146,38 @@ def install_scrubbing_filters() -> None:
                 handler.addFilter(scrubber)
 
 
+def _use_rich() -> bool:
+    """Rich only for a human at a terminal.
+
+    Two reasons, and the second is a security one. Rich's box drawing and ANSI
+    are noise in a container's log collector, and `%(asctime)s` with the logger
+    name is what makes a line correlatable with a customer report. More
+    importantly ``RichHandler`` renders tracebacks from ``exc_info`` itself and
+    ignores ``record.exc_text``, so the scrubbed traceback ``SecretFilter``
+    prepares would be discarded and the raw one printed. On a TTY that is a
+    developer's own screen; in production it is the log collector.
+    """
+    return bool(getattr(sys.stderr, "isatty", lambda: False)())
+
+
 def setup_logging(level: str = "INFO") -> None:
-    """Configure beautiful logging with Rich.
+    """Configure logging: Rich for a terminal, a plain scrubbed handler otherwise.
 
     Args:
         level: Log level (DEBUG, INFO, WARNING, ERROR)
     """
+    if not _use_rich():
+        logging.basicConfig(
+            level=getattr(logging, level.upper(), logging.INFO),
+            format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
+            handlers=[logging.StreamHandler(sys.stderr)],
+            force=True,
+        )
+        for noisy in ("httpx", "httpcore", "urllib3", "asyncio", "websockets"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+        install_scrubbing_filters()
+        return
+
     try:
         from rich.console import Console
         from rich.logging import RichHandler

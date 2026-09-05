@@ -14,13 +14,6 @@
     "tests": "tests/test_log_scrubbing.py"
   },
   {
-    "label": "setup_logging stops installing the scrubbers",
-    "file": "src/pocketpaw/logging_setup.py",
-    "find": "    install_scrubbing_filters()",
-    "replace": "    pass  # scrubbers not installed",
-    "tests": "tests/test_log_scrubbing.py"
-  },
-  {
     "label": "the idempotence guard is dropped, so repeated installs stack duplicates",
     "file": "src/pocketpaw/logging_setup.py",
     "find": "            if type(scrubber) not in installed:\n                handler.addFilter(scrubber)",
@@ -42,6 +35,13 @@
     "tests": "tests/test_log_scrubbing.py"
   },
   {
+    "label": "_scrub stops substituting, so every path silently passes the secret through",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "def _scrub(text: str) -> str:\n    for pattern in _SECRET_PATTERNS:\n        text = pattern.sub(\"***REDACTED***\", text)\n    return text",
+    "replace": "def _scrub(text: str) -> str:\n    return text",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
     "label": "SecretFilter stops scrubbing record.args, so the %s form leaks",
     "file": "src/pocketpaw/logging_setup.py",
     "find": "        if record.args:\n            args = record.args if isinstance(record.args, tuple) else (record.args,)",
@@ -51,8 +51,22 @@
   {
     "label": "SecretFilter stops scrubbing record.msg, so the f-string form leaks",
     "file": "src/pocketpaw/logging_setup.py",
-    "find": "        if isinstance(record.msg, str):\n            for pattern in _SECRET_PATTERNS:\n                record.msg = pattern.sub(\"***REDACTED***\", record.msg)",
-    "replace": "        if False:\n            for pattern in _SECRET_PATTERNS:\n                record.msg = pattern.sub(\"***REDACTED***\", record.msg)",
+    "find": "        if isinstance(record.msg, str):\n            record.msg = _scrub(record.msg)",
+    "replace": "        if False:\n            record.msg = _scrub(record.msg)",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "SecretFilter stops scrubbing the traceback, so an exception leaks the key",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "        if record.exc_info:\n            if not record.exc_text:\n                record.exc_text = \"\".join(traceback.format_exception(*record.exc_info))\n            record.exc_text = _scrub(record.exc_text)",
+    "replace": "        if False:\n            record.exc_text = _scrub(record.exc_text or \"\")",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "Rich is selected even off a TTY, so it renders the raw traceback in a container",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "    return bool(getattr(sys.stderr, \"isatty\", lambda: False)())",
+    "replace": "    return True",
     "tests": "tests/test_log_scrubbing.py"
   }
 ]
