@@ -1,4 +1,6 @@
 # listeners.py — In-process subscribers for upload-related bus events.
+# 2026-09-05: the tag and comprehension writes now emit file.updated (workspace
+#   audience) so /files refetches the row; file.ready fires before those writes.
 # Updated: 2026-09-05 — files vault (feat/files-links). (1) For text notes (text/markdown,
 #   text/plain) the listener parses ``[[wikilinks]]``, ``#hashtags`` and frontmatter tags out of
 #   the extracted text right after ``persist_extracted_text`` (same ``ExtractionResult`` that
@@ -143,6 +145,7 @@ import logging
 from pathlib import Path
 
 from pocketpaw_ee.cloud._core.realtime.bus import get_bus
+from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import Event, FileReady
 from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
 from pocketpaw_ee.cloud.uploads.extracted_text import persist_extracted_text
@@ -669,6 +672,14 @@ async def _write_auto_tags(
             )
         else:
             logger.info("auto-tagged file_id=%s with %d tag(s)", file_id, len(merged))
+            # Tell the Library the row changed; file.ready fired before this
+            # write, so without it the tag pane is stale until a reload.
+            await emit(
+                Event(
+                    type="file.updated",
+                    data={"file_id": file_id, "workspace_id": workspace_id, "reason": "tags"},
+                )
+            )
     except Exception:
         logger.exception("auto-tagging failed for file_id=%s; KB ingest unaffected", file_id)
 
@@ -770,6 +781,16 @@ async def _write_comprehension(
             )
         else:
             logger.info("comprehended file_id=%s into %d collection(s)", file_id, len(merged))
+            await emit(
+                Event(
+                    type="file.updated",
+                    data={
+                        "file_id": file_id,
+                        "workspace_id": workspace_id,
+                        "reason": "comprehension",
+                    },
+                )
+            )
     except Exception:
         logger.exception(
             "file comprehension failed for file_id=%s; the file stays indexed, tagged and usable",

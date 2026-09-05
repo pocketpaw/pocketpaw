@@ -201,3 +201,25 @@ async def test_short_typed_hashtag_survives_the_keyword_floor(monkeypatch, store
     doc = await store.get_doc_scoped("f1", "w1")
     assert doc.link_names == ["roadmap"]
     assert "q3" in doc.tags and "ai" in doc.tags
+
+
+async def test_tag_write_announces_file_updated(monkeypatch, store, tmp_path):
+    """file.ready fires before the tag write, so the Library only learns about
+    the tags if the write announces itself."""
+    from pocketpaw_ee.cloud.uploads import listeners
+
+    emitted = []
+
+    async def fake_emit(ev):
+        emitted.append(ev)
+
+    monkeypatch.setattr(listeners, "emit", fake_emit)
+    await store.save_scoped(_record(), workspace="w1")
+    _wire(monkeypatch, tmp_path, text=NOTE, ingest=AsyncMock(return_value={"id": "art-1"}))
+
+    await listeners.index_uploaded_file(_event())
+
+    updates = [e for e in emitted if e.type == "file.updated"]
+    assert updates, "no file.updated after the tag write"
+    assert updates[0].data["file_id"] == "f1"
+    assert updates[0].data["workspace_id"] == "w1"
