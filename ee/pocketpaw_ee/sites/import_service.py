@@ -868,7 +868,7 @@ def _brief_from_crawl(url: str, crawl: Any) -> Any:
     title = scan.title or scan.og_title
     if not title:
         warnings.append("the source page declares no title")
-    return build_brief_from_source(
+    brief = build_brief_from_source(
         source_url=url,
         title=title,
         description=scan.description,
@@ -878,6 +878,25 @@ def _brief_from_crawl(url: str, crawl: Any) -> Any:
         favicon_url=urljoin(url, scan.favicon) if scan.favicon else None,
         warnings=warnings,
     )
+
+    # IR-4 — the source's own design language, read out of its stylesheets. This
+    # is the difference between a site ABOUT the source and one that looks like
+    # it: with no design system on the brief the agent has nothing to match and
+    # picks a direction of its own, which is exactly what it did.
+    from pocketpaw_ee.sites.design_extract import (
+        apply_to_brief,
+        stylesheets_from_crawl,
+    )
+
+    try:
+        sheets = stylesheets_from_crawl(crawl.files, blob.decode("utf-8", "replace"))
+        brief.open_questions.extend(apply_to_brief(brief, sheets, name=urlparse(url).netloc or url))
+    except Exception:  # noqa: BLE001 — a brief without tokens still builds a site
+        logger.warning("sites rebuild: token extraction for %s failed", url, exc_info=True)
+        brief.open_questions.append(
+            "we could not read this site's design tokens; the result will not match its colours"
+        )
+    return brief
 
 
 async def _mark_brief_failed(doc: Any, *, message: str) -> None:

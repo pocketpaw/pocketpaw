@@ -218,6 +218,36 @@ class TestTheCaptureSecretNeverLeavesThisProcess:
         payload = pool.calls[0]["args"]
         assert "site_key_realsecret" not in repr(payload)
 
+    async def test_a_publish_is_queued_on_the_site_build_lane(self, beanie_test_db) -> None:
+        """backend-perf C1 — the publish enqueue names its own queue.
+
+        On arq's default queue this job competed for one cluster-wide ``max_jobs`` of 10
+        with chat runs, workspace jobs and both /ship jobs. Ten concurrent publishes left
+        chat with no slot, and the request that lost did not fail: it sat in Redis behind
+        a 30-minute ``job_timeout`` while its SSE stream delivered heartbeats and nothing
+        else. Dropping the kwarg puts the job back on the shared ceiling silently, so the
+        queue is asserted rather than inferred from the fact that builds still run.
+        """
+        site = await _insert_site()
+        pool = FakePool()
+
+        await bj.enqueue_site_build(
+            site, engine="react", generator_input=_input(), _pool_override=pool
+        )
+
+        assert pool.calls[0]["kwargs"]["_queue_name"] == bj.SITE_BUILD_QUEUE_NAME
+
+    async def test_the_build_lane_is_not_arqs_default_queue(self) -> None:
+        """The constant has to differ from arq's default, or the split is a no-op.
+
+        Asserted on its own because every other test here would pass just as happily with
+        ``SITE_BUILD_QUEUE_NAME = "arq:queue"``: the kwarg would be present, the enqueue
+        would work, and the lane would still be sharing one ceiling with chat.
+        """
+        from arq.constants import default_queue_name
+
+        assert bj.SITE_BUILD_QUEUE_NAME != default_queue_name
+
 
 # ---------------------------------------------------------------------------
 # Reading the scaffold

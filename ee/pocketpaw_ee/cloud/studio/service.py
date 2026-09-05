@@ -54,7 +54,19 @@ from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
 from pocketpaw_ee.cloud.media import storage as media_storage
 
-from . import fal_edit, fal_elements, fal_motion, fal_video, schemas
+from . import (
+    camera_catalog,
+    deepgram_stt,
+    fal_edit,
+    fal_elements,
+    fal_image,
+    fal_motion,
+    fal_music,
+    fal_video,
+    schemas,
+    style_catalog,
+)
+from . import light_rig as light_rig_mod
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +79,24 @@ class StudioNotSupported(Exception):
 class StudioUpstreamError(Exception):
     """A LiteLLM proxy media call failed (non-2xx or malformed). Raised so the
     router can surface a typed 502 rather than a bare 500."""
+
+
+class StudioRejectedError(Exception):
+    """The provider REFUSED the request — a content-policy hit, a file out of
+    range, a value it will not accept.
+
+    Distinct from ``StudioUpstreamError`` because the two need opposite
+    handling. An upstream error means "we are broken, retry later" and belongs
+    in a 502; a rejection means "this input cannot be used" and belongs in a
+    4xx the user can act on. Reporting the second as the first told the user
+    the service was down when it was working, and told our monitoring that fal
+    was failing when it was doing its job.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None, field: str | None = None):
+        super().__init__(message)
+        self.code = code
+        self.field = field
 
 
 # ── One-tap styles (mirrors the frontend mock so the pickers match) ──────────
@@ -237,14 +267,116 @@ def _fallback_video_model() -> schemas.StudioModel:
     )
 
 
+def _curated_image_models() -> list[schemas.StudioModel]:
+    """StudioModel rows for the curated fal image registry (``fal_image``).
+
+    These are the exact endpoints the movie-maker dispatches directly against fal
+    — surfaced regardless of proxy catalog config, deduplicated against the
+    LiteLLM-derived list by id."""
+    models: list[schemas.StudioModel] = []
+    for key, cfg in fal_image.IMAGE_MODELS.items():
+        models.append(
+            schemas.StudioModel(
+                id=cfg["id"],
+                label=cfg["name"],
+                kind="image",
+                provider=cfg.get("vendor", "fal"),
+                description=cfg.get("description"),
+                aspectRatios=list(fal_image.IMAGE_SIZE_MAP.keys()),
+                maxCount=_MAX_GENERATED_ASSETS,
+                supportsNegativePrompt=False,
+                credits=1,
+                tags=[cfg.get("vendor", "fal").lower(), "image", "curated"],
+                default=(key == fal_image.DEFAULT_IMAGE_MODEL),
+                # Per-model edit knobs (what each fal model's edit endpoint
+                # actually accepts) — declared in fal_image.MODEL_PARAMS.
+                params=[
+                    schemas.StudioModelParam.model_validate(p)
+                    for p in fal_image.MODEL_PARAMS.get(key, [])
+                ],
+            )
+        )
+    return models
+
+
+def _curated_video_models() -> list[schemas.StudioModel]:
+    """StudioModel rows for the curated fal video registry (``fal_video``)."""
+    models: list[schemas.StudioModel] = []
+    for cfg in fal_video.CURATED_VIDEO_MODELS.values():
+        models.append(
+            schemas.StudioModel(
+                id=cfg["id"],
+                label=cfg["name"],
+                kind="video",
+                provider=cfg.get("vendor", "fal"),
+                description=f"{cfg.get('vendor', 'fal')} {cfg.get('kind', 'video')}",
+                aspectRatios=list(cfg.get("aspect_ratios", ("16:9", "9:16", "1:1"))),
+                maxCount=1,
+                supportsNegativePrompt=False,
+                durationsSec=list(cfg.get("durations", (5, 10))),
+                credits=1,
+                tags=[cfg.get("vendor", "fal").lower(), "video", "curated"],
+                default=(cfg["id"] == fal_video.DEFAULT_VIDEO_MODEL),
+            )
+        )
+    return models
+
+
+def _curated_video_edit_models() -> list[schemas.StudioModel]:
+    """StudioModel rows for the curated video-edit registry (``fal_elements``)."""
+    models: list[schemas.StudioModel] = []
+    for cfg in fal_elements.CURATED_VIDEO_EDIT_MODELS.values():
+        models.append(
+            schemas.StudioModel(
+                id=cfg["id"],
+                label=cfg["name"],
+                kind="video",
+                provider=cfg.get("vendor", "fal"),
+                description=f"{cfg.get('vendor', 'fal')} video edit",
+                aspectRatios=["16:9", "9:16", "1:1"],
+                maxCount=1,
+                supportsNegativePrompt=False,
+                durationsSec=list(fal_elements.SUPPORTED_DURATIONS),
+                credits=1,
+                tags=[cfg.get("vendor", "fal").lower(), "video", "edit", "curated"],
+                default=False,
+            )
+        )
+    return models
+
+
+def _curated_music_models() -> list[schemas.StudioModel]:
+    """StudioModel rows for the curated fal music registry (``fal_music``)."""
+    models: list[schemas.StudioModel] = []
+    for key, cfg in fal_music.MUSIC_MODELS.items():
+        models.append(
+            schemas.StudioModel(
+                id=cfg["id"],
+                label=cfg["name"],
+                kind="audio",
+                provider=cfg.get("vendor", "fal"),
+                description=f"{cfg.get('vendor', 'fal')} music generation",
+                aspectRatios=[],
+                maxCount=1,
+                supportsNegativePrompt=False,
+                credits=1,
+                tags=[cfg.get("vendor", "fal").lower(), "audio", "music", "curated"],
+                default=(key == fal_music.DEFAULT_MUSIC_MODEL),
+            )
+        )
+    return models
+
+
 async def list_models() -> list[schemas.StudioModel]:
     """Return the image + video models the LiteLLM proxy serves, shaped for the
-    /studio picker. The first image model is the catalog default. A proxy outage
-    propagates CatalogUpstreamError so the router can surface 502.
+    /studio picker, PLUS the curated fal image/video/video-edit/music registries
+    (the movie-maker surface). The first image model is the catalog default. A
+    proxy outage propagates CatalogUpstreamError so the router can surface 502.
 
     When the catalog serves no video entries, a fallback fal video model is
     appended so the rail's Video kind always has a picker row with the
-    2s / 5s / 10s duration set (see _fallback_video_model)."""
+    2s / 5s / 10s duration set (see _fallback_video_model). Curated models are
+    appended afterward, deduplicated by id against the LiteLLM-derived list."""
     entries = await catalog_service.list_models()
     images = [e for e in entries if e.modality == Modality.IMAGE]
     videos = [e for e in entries if e.modality == Modality.VIDEO]
@@ -255,12 +387,33 @@ async def list_models() -> list[schemas.StudioModel]:
         models.append(_map_entry(entry, default=False))
     if not videos:
         models.append(_fallback_video_model())
+
+    seen = {m.id for m in models}
+    for curated in (
+        *_curated_image_models(),
+        *_curated_video_models(),
+        *_curated_video_edit_models(),
+        *_curated_music_models(),
+    ):
+        if curated.id in seen:
+            continue
+        seen.add(curated.id)
+        models.append(curated)
     return models
 
 
 def list_styles() -> list[schemas.StudioStyle]:
-    """Return the one-tap style catalog (same set the frontend mock shipped)."""
-    return [schemas.StudioStyle.model_validate(s) for s in STYLES]
+    """Return the style catalog: the legacy one-tap quick styles first, then the
+    curated rich registry (openstory's seeded catalogue) so the movie-maker's
+    style browser and detail cards have full look/motion/references metadata."""
+    quick = [schemas.StudioStyle.model_validate(s) for s in STYLES]
+    seen = {s.id for s in quick}
+    curated: list[schemas.StudioStyle] = []
+    for s in style_catalog.CURATED_STYLES:
+        if s["id"] in seen:
+            continue
+        curated.append(schemas.StudioStyle.model_validate(s))
+    return quick + curated
 
 
 # ── Generation history (JSONL persistence) ──────────────────────────────────
@@ -591,15 +744,141 @@ async def _save_image_bytes(
     return await media_storage.save_generated(image_bytes, mime=mime, ext=ext)
 
 
-async def _apply_style(prompt: str, style_id: str | None) -> str:
-    """Compose the final prompt by appending the active style's suffix (kept
-    explicit so the user always sees what the style does — same as the mock)."""
+def _find_style(style_id: str | None) -> dict[str, Any] | None:
+    """Resolve a style id across BOTH catalogs the picker offers.
+
+    ``list_styles`` serves the 7 legacy quick styles PLUS ``CURATED_STYLES``, but
+    this lookup used to search ``STYLES`` alone. Picking any of the ~20 curated
+    styles therefore matched nothing and the generation ran with no style at all
+    — silently, with the styleId echoed back in the response as if it had worked.
+    """
     if not style_id or style_id == "none":
-        return prompt
-    style = next((s for s in STYLES if s["id"] == style_id), None)
-    if style and style.get("promptSuffix"):
-        return f"{prompt}{style['promptSuffix']}"
-    return prompt
+        return None
+    for style in STYLES:
+        if style["id"] == style_id:
+            return style
+    for style in style_catalog.CURATED_STYLES:
+        if style["id"] == style_id:
+            return style
+    return None
+
+
+def _rebuild_style_suffix(config: dict[str, Any], *, drop_lighting: bool, drop_camera: bool) -> str:
+    """Re-render a curated style's suffix from its structured config, leaving out
+    the dimensions the user has overridden.
+
+    Curated styles each prescribe their own lighting and camera prose. If the user
+    picks "Neo-Noir Thriller" (venetian-blind shadows, high contrast) and then
+    explicitly asks for soft high-key light, appending both hands the model two
+    contradictory instructions and the explicit pick tends to lose. So the explicit
+    pick wins and the style's competing sentence is dropped — possible only because
+    ``look.lighting`` and ``motion.camera`` are kept as separate fields rather than
+    being readable only from the flat pre-baked string.
+    """
+    look = config.get("look") or {}
+    motion = config.get("motion") or {}
+    sections: list[tuple[str, Any]] = [
+        ("Art style", look.get("artStyle")),
+        ("Mood", look.get("mood")),
+        ("Lighting", None if drop_lighting else look.get("lighting")),
+        ("Camera", None if drop_camera else motion.get("camera")),
+        ("Color grading", look.get("colorGrading")),
+    ]
+    parts = [f"{label}: {value}." for label, value in sections if value]
+    refs = config.get("references") or []
+    if refs:
+        parts.append(f"Inspired by: {', '.join(str(r) for r in refs)}.")
+    return f" {' '.join(parts)}" if parts else ""
+
+
+def _end_sentence(text: str) -> str:
+    """Close ``text`` off with a period unless it already ends in terminal
+    punctuation, so the next clause starts a sentence instead of running on."""
+    stripped = text.rstrip()
+    if not stripped or stripped.endswith((".", "!", "?", ":", ";")):
+        return stripped
+    return f"{stripped}."
+
+
+def compose_prompt(
+    prompt: str,
+    style_id: str | None = None,
+    camera: Any = None,
+    lighting: Any = None,
+    light_rig: Any = None,
+) -> str:
+    """Assemble the prompt that actually reaches the model.
+
+    Order is subject → camera → lighting → style suffix. The subject stays first
+    and the technical direction sits ahead of the style's long descriptive block
+    so it isn't buried a thousand characters deep.
+
+    With no camera or lighting picks this returns exactly what the old
+    ``_apply_style`` returned (the flat suffix concatenated straight onto the
+    prompt), so existing generations are unchanged apart from curated styles now
+    applying at all.
+    """
+    head = (prompt or "").strip()
+    camera_clause = camera_catalog.compose_camera_phrase(camera)
+    # A manual rig REPLACES the pick-lists rather than joining them. Both answer
+    # "how is this lit", and emitting two lighting sentences would leave the model
+    # arbitrating between them — the same contradiction the style override avoids.
+    rig_clause = light_rig_mod.compose_light_rig_phrase(light_rig)
+    lighting_clause = rig_clause or camera_catalog.compose_lighting_phrase(lighting)
+
+    style = _find_style(style_id)
+    config = (style or {}).get("config") if style else None
+    if style and config and (camera_clause or lighting_clause):
+        suffix = _rebuild_style_suffix(
+            config,
+            drop_lighting=bool(lighting_clause),
+            drop_camera=bool(camera_clause),
+        )
+    else:
+        suffix = str((style or {}).get("promptSuffix") or "")
+
+    # A quick style's suffix is a comma-continuation (", cinematic lighting, …")
+    # written to butt straight onto the prompt. With no clauses in between, keep
+    # that concatenation byte for byte so existing generations are unchanged.
+    if not camera_clause and not lighting_clause and suffix.lstrip().startswith(","):
+        return f"{head}{suffix}"
+
+    for clause in (camera_clause, lighting_clause):
+        if not clause:
+            continue
+        head = f"{_end_sentence(head)} {clause}".strip()
+
+    if not suffix.strip():
+        return head
+    tail = suffix.strip()
+    if tail.startswith(","):
+        # The comma now dangles after a full sentence — promote it to its own.
+        tail = tail.lstrip(", ")
+        tail = tail[0].upper() + tail[1:] if tail else tail
+    return f"{_end_sentence(head)} {tail}".strip() if tail else head
+
+
+async def _apply_style(prompt: str, style_id: str | None) -> str:
+    """Back-compat shim for callers that pass no camera/lighting."""
+    return compose_prompt(prompt, style_id)
+
+
+def list_camera_catalog() -> schemas.CameraCatalogResponse:
+    """Return the Camera & lighting dialog's two tabs.
+
+    Served rather than duplicated into TypeScript on purpose: the style catalog is
+    hand-mirrored TS<->Python and that mirror is what let the style lookup above
+    drift out of sync with what the picker offered.
+    """
+    return schemas.CameraCatalogResponse(
+        camera=[schemas.CameraCatalogGroup.model_validate(g) for g in camera_catalog.CAMERA_GROUPS],
+        lighting=[
+            schemas.CameraCatalogGroup.model_validate(g) for g in camera_catalog.LIGHTING_GROUPS
+        ],
+        lightRigPresets=[
+            schemas.LightRigPreset.model_validate(p) for p in light_rig_mod.LIGHT_RIG_PRESETS
+        ],
+    )
 
 
 def _new_generation(
@@ -660,7 +939,22 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
     if not model:
         raise ValueError("model is required")
 
-    final_prompt = await _apply_style(prompt, req.styleId)
+    # Reference-based generation → the curated model's EDIT endpoint (fal_image).
+    # This path carries reference images (character/location/element consistency)
+    # that the OpenAI-compatible proxy endpoint can't express.
+    if req.referenceImageUrls:
+        return await _generate_image_edit(
+            req, model=model, prompt=prompt, workspace_id=workspace_id
+        )
+
+    # Curated fal image models run DIRECTLY against fal (not the proxy) so the
+    # movie-maker's exact model set works regardless of proxy catalog config.
+    if model in fal_image.IMAGE_MODEL_IDS:
+        return await _generate_curated_image(
+            req, model=model, prompt=prompt, workspace_id=workspace_id
+        )
+
+    final_prompt = compose_prompt(prompt, req.styleId, req.camera, req.lighting, req.lightRig)
     size = _SIZE_MAP.get(req.aspectRatio)
     auth_key = await _resolve_auth_key(workspace_id)
     count = max(1, min(int(req.count or 1), _MAX_GENERATED_ASSETS))
@@ -692,6 +986,9 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
         "aspectRatio": req.aspectRatio,
         "count": count,
         "styleId": req.styleId,
+        "camera": req.camera,
+        "lighting": req.lighting,
+        "lightRig": req.lightRig,
         "negativePrompt": req.negativePrompt,
         "seed": req.seed,
         "durationSec": req.durationSec,
@@ -706,6 +1003,196 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
         status="succeeded",
     )
     # Persist with the owning workspace tag (dropped by the wire model on read).
+    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    return record
+
+
+async def _generate_curated_image(
+    req: schemas.GenerateRequest, *, model: str, prompt: str, workspace_id: str
+) -> schemas.Generation:
+    """Generate images from a curated fal image model DIRECTLY against fal.
+
+    The curated registry (``fal_image``) dispatches straight to fal — no LiteLLM
+    proxy dependency — so the movie-maker's exact model set works regardless of
+    proxy catalog config. ``count`` requests are batched into ONE fal call (the
+    endpoint returns ``num_images``), and each returned image persists through
+    media storage.
+    """
+    final_prompt = compose_prompt(prompt, req.styleId, req.camera, req.lighting, req.lightRig)
+    count = max(1, min(int(req.count or 1), _MAX_GENERATED_ASSETS))
+    try:
+        results = await fal_image.run_fal_image(
+            prompt=final_prompt,
+            model=model,
+            aspect_ratio=req.aspectRatio,
+            count=count,
+            seed=req.seed,
+        )
+    except fal_image.FalImageError as exc:
+        raise StudioUpstreamError(str(exc)) from exc
+
+    if not results:
+        raise StudioUpstreamError("fal image generation returned no data")
+
+    assets: list[dict[str, Any]] = []
+    for data, mime in results:
+        url = await _save_image_bytes(data, mime=mime, ext=fal_edit.mime_to_ext(mime))
+        assets.append({"id": _seq_id("asset"), "url": url, "mime": mime})
+
+    params: dict[str, Any] = {
+        "kind": "image",
+        "model": model,
+        "aspectRatio": req.aspectRatio,
+        "count": len(assets),
+        "styleId": req.styleId,
+        "camera": req.camera,
+        "lighting": req.lighting,
+        "lightRig": req.lightRig,
+        "negativePrompt": req.negativePrompt,
+        "seed": req.seed,
+        "durationSec": req.durationSec,
+    }
+    record = _new_generation(
+        gen_id=_seq_id("gen"),
+        prompt=final_prompt,
+        kind="image",
+        model=model,
+        params=params,
+        assets=assets,
+        status="succeeded",
+    )
+    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    return record
+
+
+async def _generate_image_edit(
+    req: schemas.GenerateRequest, *, model: str, prompt: str, workspace_id: str
+) -> schemas.Generation:
+    """Run a reference-based image edit through a curated model's EDIT endpoint.
+
+    ``referenceImageUrls`` (character/location/element consistency shots) are
+    resolved to ``data:`` URLs and dispatched to the model's edit variant via
+    ``fal_image`` (seedream resolves to its single-image edit endpoint). Returns
+    a NEW ``succeeded`` Generation persisted to history.
+    """
+    refs = [u for u in (req.referenceImageUrls or []) if u and u.strip()]
+    if not refs:
+        raise ValueError("at least one reference image is required for an image edit")
+
+    final_prompt = compose_prompt(prompt, req.styleId, req.camera, req.lighting, req.lightRig)
+    data_urls: list[str] = []
+    for url in refs:
+        data_url, _ = await _resolve_source_data_url(url)
+        data_urls.append(data_url)
+
+    count = max(1, min(int(req.count or 1), _MAX_GENERATED_ASSETS))
+    try:
+        results = await fal_image.run_fal_image_edit(
+            prompt=final_prompt,
+            image_urls=data_urls,
+            model=model,
+            aspect_ratio=req.aspectRatio,
+            count=count,
+            seed=req.seed,
+        )
+    except fal_image.FalImageError as exc:
+        raise StudioUpstreamError(str(exc)) from exc
+
+    if not results:
+        raise StudioUpstreamError("fal image edit returned no data")
+
+    assets: list[dict[str, Any]] = []
+    for data, mime in results:
+        url = await _save_image_bytes(data, mime=mime, ext=fal_edit.mime_to_ext(mime))
+        assets.append({"id": _seq_id("asset"), "url": url, "mime": mime})
+
+    params: dict[str, Any] = {
+        "kind": "image",
+        "model": model,
+        "aspectRatio": req.aspectRatio,
+        "count": len(assets),
+        "styleId": req.styleId,
+        "camera": req.camera,
+        "lighting": req.lighting,
+        "lightRig": req.lightRig,
+        "negativePrompt": req.negativePrompt,
+        "seed": req.seed,
+    }
+    record = _new_generation(
+        gen_id=_seq_id("gen"),
+        prompt=final_prompt,
+        kind="image",
+        model=model,
+        params=params,
+        assets=assets,
+        status="succeeded",
+    )
+    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    return record
+
+
+# ── Music generation (direct fal.ai dispatch) ────────────────────────────────
+# The movie-maker's soundtrack: fal music endpoints (elevenlabs / ace-step)
+# run DIRECTLY against fal — the LiteLLM gateway has no route for music
+# generation. The produced audio persists through media storage like every other
+# generated asset, and the record lands in the workspace history (kind='audio').
+
+_MUSIC_EXT_BY_MIME: dict[str, str] = {
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+}
+
+
+async def generate_music(req: schemas.MusicRequest, *, workspace_id: str) -> schemas.Generation:
+    """Generate a music/audio track DIRECTLY against fal.ai via ``fal_music``.
+
+    The produced audio persists through media storage and the record lands in the
+    workspace history (kind='audio'). A missing prompt is a ValueError (→400); an
+    upstream fal failure surfaces as StudioUpstreamError (→502).
+    """
+    prompt = (req.prompt or "").strip()
+    if not prompt:
+        raise ValueError("prompt is required for music generation")
+
+    try:
+        audio_bytes, audio_mime = await fal_music.run_fal_music(
+            prompt=prompt,
+            model=req.model,
+            lyrics=req.lyrics,
+            instrumental=req.instrumental,
+            duration_sec=req.durationSec,
+            steps=req.steps,
+        )
+    except fal_music.FalMusicError as exc:
+        raise StudioUpstreamError(str(exc)) from exc
+
+    if not audio_bytes:
+        raise StudioUpstreamError("fal music generation returned no data")
+
+    mime = audio_mime or "audio/mpeg"
+    ext = _MUSIC_EXT_BY_MIME.get(mime, "mp3")
+    url = await _save_image_bytes(audio_bytes, mime=mime, ext=ext)
+    assets: list[dict[str, Any]] = [{"id": _seq_id("asset"), "url": url, "mime": mime}]
+
+    model = (req.model or "").strip() or fal_music.MUSIC_MODELS[fal_music.DEFAULT_MUSIC_MODEL]["id"]
+    params: dict[str, Any] = {
+        "kind": "audio",
+        "model": model,
+        "aspectRatio": "1:1",
+        "count": 1,
+        "durationSec": req.durationSec,
+    }
+    record = _new_generation(
+        gen_id=_seq_id("gen"),
+        prompt=prompt,
+        kind="audio",
+        model=model,
+        params=params,
+        assets=assets,
+        status="succeeded",
+    )
     _append_history({**record.model_dump(), "_workspace": workspace_id})
     return record
 
@@ -765,7 +1252,9 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
     # Image-to-video runs without a typed prompt — fal_video applies its own
     # default motion prompt, so a user can wire images and hit Generate directly.
     effective_prompt = prompt or fal_video.DEFAULT_I2V_PROMPT
-    final_prompt = await _apply_style(effective_prompt, req.styleId)
+    final_prompt = compose_prompt(
+        effective_prompt, req.styleId, req.camera, req.lighting, req.lightRig
+    )
 
     input_data_urls: list[str] | None = None
     if image_urls:
@@ -774,6 +1263,20 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
             data_url, _ = await _resolve_source_data_url(url)
             input_data_urls.append(data_url)
 
+    # Seedance 2.5 reference tracks. A generated music bed arrives here as a
+    # backend media URL and is resolved the same way the images are, so the
+    # endpoint gets data it can actually fetch.
+    reference_audio: list[str] = []
+    for url in req.referenceAudioUrls or []:
+        if url and url.strip():
+            data_url, _ = await _resolve_source_data_url(url, default_mime="audio/mpeg")
+            reference_audio.append(data_url)
+    reference_video: list[str] = []
+    for url in req.referenceVideoUrls or []:
+        if url and url.strip():
+            data_url, _ = await _resolve_source_data_url(url, default_mime="video/mp4")
+            reference_video.append(data_url)
+
     try:
         video_bytes, video_mime, poster_bytes, poster_mime = await fal_video.run_fal_video(
             prompt=final_prompt,
@@ -781,7 +1284,13 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
             aspect_ratio=req.aspectRatio,
             model=model,
             image_urls=input_data_urls,
+            resolution=req.resolution,
+            generate_audio=req.generateAudio,
+            audio_urls=reference_audio,
+            video_urls=reference_video,
         )
+    except fal_video.FalVideoRejected as exc:
+        raise StudioRejectedError(str(exc), code=exc.code, field=exc.field) from exc
     except fal_video.FalVideoError as exc:
         raise StudioUpstreamError(str(exc)) from exc
 
@@ -804,6 +1313,9 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
         "aspectRatio": req.aspectRatio,
         "count": 1,
         "styleId": req.styleId,
+        "camera": req.camera,
+        "lighting": req.lighting,
+        "lightRig": req.lightRig,
         "negativePrompt": req.negativePrompt,
         "seed": req.seed,
         "durationSec": req.durationSec,
@@ -822,40 +1334,70 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
     return record
 
 
+# Media extensions this surface stores, mapped to the mime a data: URL must
+# declare. AUDIO AND VIDEO ARE HERE FOR A REASON: this table used to hold images
+# only, and every non-image fell through to the "image/png" default — so a
+# generated .mp3 wired into a Video node reached fal as
+# "data:image/png;base64,<mp3 bytes>". fal put it in audio_urls, tried to decode
+# a PNG as sound, and rejected a perfectly good 10-second track as being 0.04
+# seconds long. The bytes were never the problem; the label was.
 _MIME_BY_EXT: dict[str, str] = {
+    # Images
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
     ".gif": "image/gif",
+    # Audio — what generate_music writes (see _MUSIC_EXT_BY_MIME).
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".ogg": "audio/ogg",
+    # Video — what the video paths write (see _video_ext).
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".m4v": "video/x-m4v",
 }
 
 
-def _mime_for_filename(name: str) -> str:
-    """Best-effort mime from a media filename's extension (defaults to png)."""
-    return _MIME_BY_EXT.get(Path(name).suffix.lower(), "image/png")
+def _mime_for_filename(name: str, default: str = "image/png") -> str:
+    """Best-effort mime from a media filename's extension.
+
+    ``default`` is what an unknown or absent extension falls back to. Callers
+    resolving a reference they KNOW is audio or video pass their own, so an
+    extensionless file cannot be mislabelled as an image the way every non-image
+    silently was before this table grew."""
+    return _MIME_BY_EXT.get(Path(name).suffix.lower(), default)
 
 
-async def _resolve_source_data_url(source_url: str) -> tuple[str, str]:
-    """Resolve an EditRequest ``sourceUrl`` into ``(data_url, mime)`` fal accepts
-    as an ``image_url`` input.
+async def _resolve_source_data_url(
+    source_url: str, *, default_mime: str = "image/png"
+) -> tuple[str, str]:
+    """Resolve a media reference into ``(data_url, mime)`` fal accepts as input.
 
     Handles three shapes the frontend can send:
       * ``data:`` URL             — pass through as-is (mime parsed from header).
       * ``http(s)://`` URL        — fetch the bytes, encode as a data URL.
       * ``/api/v1/media/<name>``  — read the stored bytes via the media adapter
                                     and encode as a data URL (the common case:
-                                    editing a previously generated asset).
+                                    referencing a previously generated asset).
+
+    ``default_mime`` is what an unrecognised extension or a missing content-type
+    falls back to. It exists because this resolver serves audio and video
+    references as well as images now, and assuming "image/png" for all of them
+    put a PNG header on generated music — which fal then failed to decode as
+    sound. A caller that knows the KIND it is resolving should say so.
     """
     s = source_url.strip()
     if s.startswith("data:"):
-        mime = s[5:].split(";", 1)[0] or "image/png"
+        mime = s[5:].split(";", 1)[0] or default_mime
         return s, mime
     if s.startswith(("http://", "https://")):
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.get(s)
             resp.raise_for_status()
-        mime = resp.headers.get("content-type", "image/png").split(";")[0].strip() or "image/png"
+        mime = resp.headers.get("content-type", default_mime).split(";")[0].strip() or default_mime
         return fal_edit.encode_bytes(resp.content, mime), mime
     name = s.rsplit("/", 1)[-1]
     if not name or ".." in name or name != Path(name).name:
@@ -866,7 +1408,7 @@ async def _resolve_source_data_url(source_url: str) -> tuple[str, str]:
         raise ValueError(f"source media '{name}' not found")
     chunks = [c async for c in adapter.open(key)]
     data = b"".join(chunks)
-    mime = _mime_for_filename(name)
+    mime = _mime_for_filename(name, default_mime)
     return fal_edit.encode_bytes(data, mime), mime
 
 
@@ -921,6 +1463,44 @@ def _fit_character_image(data_url: str, mime: str) -> tuple[str, str]:
     )
 
 
+def _coerce_param_int(value: Any, *, default: int, lo: int, hi: int) -> int:
+    """Coerce a rail-composer param value to an int clamped to ``[lo, hi]``.
+
+    The composer may send numbers, numeric strings, or ``None`` (an untouched
+    knob). Anything unparsable falls back to ``default`` so a malformed value
+    never 500s the request."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(n, hi))
+
+
+def _coerce_param_seed(value: Any) -> int | None:
+    """Coerce a rail-composer seed param to an int, or None when unset/blank.
+
+    The composer's seed knob defaults to an empty string (meaning "unset");
+    ``False`` (a cleared toggle-like value) is treated the same. A literal 0 is a
+    valid seed and passes through."""
+    if value is None or value == "" or value is False:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_param_str(value: Any) -> str | None:
+    """Coerce a rail-composer select/text param to a non-empty string, or None.
+
+    Select knobs default to a chosen option (always a non-empty string); a
+    cleared/absent value becomes None so it is omitted from the fal arguments."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
 async def edit(req: schemas.EditRequest, *, workspace_id: str) -> schemas.Generation:
     """Run a canvas edit op (inpaint/expand/upscale/variations/remove-bg/edit/
     sketch-to-image) DIRECTLY against fal.ai — the LiteLLM gateway serves
@@ -943,19 +1523,64 @@ async def edit(req: schemas.EditRequest, *, workspace_id: str) -> schemas.Genera
         raise ValueError("sourceUrl is required for an edit")
 
     source_data_url, _ = await _resolve_source_data_url(req.sourceUrl)
+    model_id = (req.model or "").strip()
 
-    try:
-        results = await fal_edit.run_fal_edit(
-            op=op,
-            image_data_url=source_data_url,
-            mask_data_url=req.maskDataUrl,
-            prompt=req.prompt,
-            direction=req.direction,
-            factor=req.factor,
-            model=req.model,
+    # The rail edit composer sends ``op='edit'`` with a CURATED image model id
+    # (e.g. ``fal-ai/nano-banana-2`` — the text-to-image id, not its /edit
+    # endpoint) plus the model's per-model params. Route those through the
+    # model's own edit variant (fal_image), forwarding ``num_images`` / ``seed``.
+    # Canvas ops and non-curated models keep the generic fal_edit path.
+    is_curated_edit = (
+        op == "edit"
+        and model_id
+        and fal_image.model_key_for_id(model_id) in fal_image.EDIT_ENDPOINTS
+    )
+    if is_curated_edit:
+        composer_params = req.params or {}
+        count = _coerce_param_int(
+            composer_params.get("num_images"), default=1, lo=1, hi=_MAX_GENERATED_ASSETS
         )
-    except fal_edit.FalEditError as exc:
-        raise StudioUpstreamError(str(exc)) from exc
+        seed = _coerce_param_seed(composer_params.get("seed"))
+        quality = _coerce_param_str(composer_params.get("quality"))
+        size = _coerce_param_str(composer_params.get("size"))
+        background = _coerce_param_str(composer_params.get("background"))
+        output_format = _coerce_param_str(composer_params.get("output_format"))
+        resolution = _coerce_param_str(composer_params.get("resolution"))
+        raw_tolerance = composer_params.get("safety_tolerance")
+        safety_tolerance = (
+            _coerce_param_int(raw_tolerance, default=4, lo=1, hi=6)
+            if raw_tolerance is not None
+            else None
+        )
+        try:
+            results = await fal_image.run_fal_image_edit(
+                prompt=req.prompt,
+                image_urls=[source_data_url],
+                model=model_id,
+                count=count,
+                seed=seed,
+                quality=quality,
+                size=size,
+                background=background,
+                output_format=output_format,
+                resolution=resolution,
+                safety_tolerance=safety_tolerance,
+            )
+        except fal_image.FalImageError as exc:
+            raise StudioUpstreamError(str(exc)) from exc
+    else:
+        try:
+            results = await fal_edit.run_fal_edit(
+                op=op,
+                image_data_url=source_data_url,
+                mask_data_url=req.maskDataUrl,
+                prompt=req.prompt,
+                direction=req.direction,
+                factor=req.factor,
+                model=model_id,
+            )
+        except fal_edit.FalEditError as exc:
+            raise StudioUpstreamError(str(exc)) from exc
 
     if not results:
         raise StudioUpstreamError("fal edit produced no output images")
@@ -965,7 +1590,7 @@ async def edit(req: schemas.EditRequest, *, workspace_id: str) -> schemas.Genera
         url = await _save_image_bytes(data, mime=mime, ext=fal_edit.mime_to_ext(mime))
         assets.append({"id": _seq_id("asset"), "url": url, "mime": mime})
 
-    model = (req.model or "").strip() or fal_edit.DEFAULT_EDIT_MODELS[op]
+    model = model_id or fal_edit.DEFAULT_EDIT_MODELS[op]
     params: dict[str, Any] = {
         "kind": "image",
         "model": model,
@@ -1185,6 +1810,52 @@ def suggest_prompt(sentence: str) -> schemas.PromptSuggestion:
     return schemas.PromptSuggestion(prompt=enriched, kind=kind)
 
 
+# ── Transcription (speech-to-text) ─────────────────────────────────────────
+
+
+async def transcribe(
+    audio_bytes: bytes,
+    *,
+    content_type: str = "audio/wav",
+    model: str | None = None,
+    language: str | None = None,
+) -> schemas.TranscriptResponse:
+    """Transcribe an uploaded audio file DIRECTLY against Deepgram.
+
+    The /studio editor extracts a clip's audio in the browser with Mediabunny
+    and posts it here as multipart ``file``; the result is running text plus
+    word-level millisecond timings, which the frontend feeds straight into the
+    existing caption path (``captions.ts`` → ``CaptionWord``).
+
+    Empty bytes are a ValueError (router →400); a provider failure surfaces as
+    StudioUpstreamError (router →502), matching every other media route here.
+
+    Nothing is persisted: transcription is a read on the user's own media, not a
+    generated asset, so it does not enter the gallery or workspace history.
+    """
+    if not audio_bytes:
+        raise ValueError("audio file is empty")
+
+    try:
+        result = await deepgram_stt.transcribe_bytes(
+            audio_bytes=audio_bytes,
+            content_type=content_type,
+            model=model,
+            language=language,
+        )
+    except deepgram_stt.DeepgramError as exc:
+        raise StudioUpstreamError(str(exc)) from exc
+
+    words = [schemas.TranscriptWord(**word) for word in result["words"]]
+    logger.info(
+        "studio: transcribed %d bytes as %d words via Deepgram %s",
+        len(audio_bytes),
+        len(words),
+        result["model"],
+    )
+    return schemas.TranscriptResponse(text=result["text"], words=words, model=result["model"])
+
+
 __all__ = [
     "STYLES",
     "StudioNotSupported",
@@ -1195,8 +1866,10 @@ __all__ = [
     "get_generation",
     "tracked_generation_filenames",
     "generate",
+    "generate_music",
     "edit",
     "generate_video_elements",
     "generate_video_motion",
     "suggest_prompt",
+    "transcribe",
 ]

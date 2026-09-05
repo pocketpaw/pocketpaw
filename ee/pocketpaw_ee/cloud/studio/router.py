@@ -13,6 +13,8 @@
 #   POST /studio/edit            → Generation             (fal.ai edit endpoints)
 #   POST /studio/video-elements  → Generation             (fal.ai Kling Elements)
 #   POST /studio/video-motion-control → Generation        (fal.ai Kling Motion Control)
+#   POST /studio/music           → Generation             (fal.ai music, kind=audio)
+#   POST /studio/transcribe      → TranscriptResponse     (Deepgram STT, multipart audio)
 #   POST /studio/suggest-prompt  → PromptSuggestion       (heuristic, no LLM)
 #
 # The tenant is attached per-request via ``current_workspace_id`` (the frontend
@@ -24,7 +26,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from pocketpaw_ee.catalog.litellm_client import CatalogUpstreamError
 from pocketpaw_ee.cloud._core.deps import current_workspace_id
@@ -53,6 +55,15 @@ async def list_styles() -> schemas.StudioStylesResponse:
     return schemas.StudioStylesResponse(styles=service.list_styles())
 
 
+@router.get("/camera-catalog", response_model=schemas.CameraCatalogResponse)
+async def list_camera_catalog() -> schemas.CameraCatalogResponse:
+    """List the Camera & lighting dialog's pick-lists (static, backend-owned).
+
+    Served rather than mirrored into the client so there is exactly one copy of
+    the phrasing that gets injected into prompts."""
+    return service.list_camera_catalog()
+
+
 @router.get("/generations", response_model=schemas.GenerationsResponse)
 async def list_generations(
     workspace_id: str = Depends(current_workspace_id),
@@ -76,6 +87,12 @@ async def generate(
         raise HTTPException(400, str(exc)) from exc
     except service.StudioNotSupported as exc:
         raise HTTPException(501, str(exc)) from exc
+    except service.StudioRejectedError as exc:
+        # The provider refused this input. NOT a 502: the service is up and the
+        # user can fix it by changing an image, a track or a value. The detail
+        # is already a clean sentence — it carries no request payload — so the
+        # client can show it verbatim.
+        raise HTTPException(422, str(exc)) from exc
     except service.StudioUpstreamError as exc:
         raise HTTPException(502, f"Image generation failed: {exc}") from exc
     except CatalogUpstreamError as exc:
@@ -154,11 +171,58 @@ async def video_motion_control(
         raise HTTPException(502, f"Motion control failed: {exc}") from exc
 
 
+@router.post("/music", response_model=schemas.Generation)
+async def music(
+    req: schemas.MusicRequest,
+    workspace_id: str = Depends(current_workspace_id),
+) -> schemas.Generation:
+    """Generate a music/audio track directly against fal.ai (the movie-maker's
+    soundtrack). The produced audio persists as a NEW generation (kind='audio').
+    Bad input (missing prompt) returns 400; a fal upstream failure 502."""
+    try:
+        return await service.generate_music(req, workspace_id=workspace_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except service.StudioUpstreamError as exc:
+        raise HTTPException(502, f"Music generation failed: {exc}") from exc
+
+
 @router.post("/suggest-prompt", response_model=schemas.PromptSuggestion)
 async def suggest_prompt(req: schemas.SuggestPromptRequest) -> schemas.PromptSuggestion:
     """Enrich a plain sentence into a generation prompt + inferred media kind.
     Heuristic mirror of the mock (no LLM call)."""
     return service.suggest_prompt(req.sentence)
+
+
+@router.post("/transcribe", response_model=schemas.TranscriptResponse)
+async def transcribe(
+    file: UploadFile = File(..., description="Audio extracted from a clip (wav/mp3/m4a/ogg)"),
+    model: str | None = Form(default=None, description="Deepgram model override (e.g. nova-2)"),
+    language: str | None = Form(default=None, description="BCP-47 language hint (e.g. en-US)"),
+) -> schemas.TranscriptResponse:
+    """Transcribe speech in an uploaded audio file via Deepgram.
+
+    The /studio editor decodes a clip's audio track with Mediabunny and posts
+    it here as multipart; the response carries word-level millisecond timings
+    so the frontend can lay them on the caption track without a second call.
+
+    Multipart rather than JSON because the payload is raw audio bytes. An empty
+    upload returns 400; a provider failure or missing key returns 502 with
+    Deepgram's message relayed plainly, so the UI never shows a phantom
+    transcript. License-gated by the router-wide dependency like every other
+    route here."""
+    audio_bytes = await file.read()
+    try:
+        return await service.transcribe(
+            audio_bytes,
+            content_type=file.content_type or "audio/wav",
+            model=model,
+            language=language,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except service.StudioUpstreamError as exc:
+        raise HTTPException(502, f"Transcription failed: {exc}") from exc
 
 
 # ── Flow projects (persisted server-side, workspace-scoped) ─────────────────

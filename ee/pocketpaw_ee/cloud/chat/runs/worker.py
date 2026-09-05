@@ -1,5 +1,17 @@
 """arq worker entry point for Tier 2 run execution.
 
+Updated: 2026-09-04 (fix/queue-lanes, backend-perf C1) — THIS IS NO LONGER THE ONLY
+LANE. Site builds now enqueue onto their own queue and are consumed by
+``pocketpaw_ee.sites.build_worker.WorkerSettings``; both lanes run in one container
+under ``pocketpaw_ee.cloud.worker_supervisor``. The two site functions stay
+registered HERE as well, and deliberately: a deploy cuts over the enqueue side
+instantly, so anything already sitting on the default queue when the old process
+stopped still needs someone willing to claim it. That backlog drains once and is
+then permanently empty.
+
+``max_jobs`` below is therefore no longer the whole cluster's ceiling — it is this
+lane's. The sites lane carries its own, and neither can consume the other's.
+
 Updated: 2026-09-01 (feat/scale-concurrency-knobs) — ``WorkerSettings.max_jobs`` is
 now set, from ``POCKETPAW_ARQ_MAX_JOBS`` (default 10, arq's own). It was previously
 unset, so arq's default applied silently and the whole cluster ran ten concurrent
@@ -81,6 +93,7 @@ can't abort worker startup.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -143,7 +156,7 @@ async def execute_run_job(ctx: dict[str, Any], spec_dict: dict[str, Any]) -> Non
     await bill_run_now(spec.run_id)
 
 
-async def _startup(ctx: dict[str, Any]) -> None:
+async def _bootstrap(ctx: dict[str, Any]) -> None:
     """Boot the worker: pin role, init the DB + realtime bus, sweep orphans.
 
     ``xproc.set_role("worker")`` must run before any agent code emits, so
@@ -206,8 +219,62 @@ async def _startup(ctx: dict[str, Any]) -> None:
         logger.exception("worker boot: LiteLLM billing-cutover sweep failed")
 
 
+# TWO WorkerSettings classes now share this bootstrap inside ONE process: the chat
+# lane below and the sites lane in ``pocketpaw_ee.sites.build_worker``, started
+# together by ``pocketpaw_ee.cloud.worker_supervisor``. arq calls ``on_startup``
+# once per Worker, so without a guard the second lane would re-run ``init_cloud_db``
+# against a live client and re-run BOTH boot sweeps (compute-cost metering and the
+# LiteLLM billing cutover). Those two are idempotent by ledger key, so a second pass
+# would waste work rather than double-charge — but "probably harmless" is not the
+# standard for a billing path, and a second ``init_cloud_db`` is not something to
+# discover in production.
+#
+# The lock is held ACROSS the bootstrap, not just around the counter. A lane that
+# arrives while the first is still initialising has to wait for the database it is
+# about to run jobs against, and releasing the lock early would let it start empty.
+_bootstrap_lock = asyncio.Lock()
+_bootstrap_lanes = 0
+
+
+async def _startup(ctx: dict[str, Any]) -> None:
+    """Run :func:`_bootstrap` for the FIRST lane in this process only."""
+    global _bootstrap_lanes
+    async with _bootstrap_lock:
+        _bootstrap_lanes += 1
+        if _bootstrap_lanes > 1:
+            logger.info(
+                "worker boot: bootstrap already done in this process (lane %d)",
+                _bootstrap_lanes,
+            )
+            return
+        await _bootstrap(ctx)
+
+
 async def _shutdown(ctx: dict[str, Any]) -> None:
-    await close_cloud_db()
+    """Close the shared database once the LAST lane in this process has stopped."""
+    global _bootstrap_lanes
+    async with _bootstrap_lock:
+        _bootstrap_lanes -= 1
+        if _bootstrap_lanes > 0:
+            return
+        # Clamp rather than trust the count: an unbalanced shutdown (a lane whose
+        # on_startup raised still gets its on_shutdown called) would otherwise drive
+        # this negative and leave the NEXT bootstrap thinking a lane is still up.
+        _bootstrap_lanes = 0
+        await close_cloud_db()
+
+
+def _reset_bootstrap_for_tests() -> None:
+    """Drop the lane count so a test can bootstrap again from scratch."""
+    global _bootstrap_lanes
+    _bootstrap_lanes = 0
+
+
+# Public aliases so the sites lane can share this bootstrap without reaching across
+# modules for a private name. One bootstrap per process is the contract; see the
+# lane counter above for what happens without it.
+worker_startup = _startup
+worker_shutdown = _shutdown
 
 
 def _redis_settings() -> RedisSettings:
@@ -446,3 +513,15 @@ class WorkerSettings:
     health_check_interval = _health_check_interval_seconds()
     # Eager: arq reads __dict__, which bypasses descriptors. See `_redis_settings`.
     redis_settings = _redis_settings()
+
+
+# Shared with the sites lane (``pocketpaw_ee.sites.build_worker``). Aliases rather
+# than a second definition: one copy of the site-build timeout, one copy of the
+# health-key period, one Redis resolver. A duplicated build timeout is precisely the
+# drift that would let arq cancel a build before its in-sandbox ``timeout(1)`` fires,
+# and that destroys the sentinel the lane classifies its verdict from — a healthy
+# but slow build would be recorded as lost infrastructure.
+site_build_fn = _site_build_fn
+site_preview_build_fn = _site_preview_build_fn
+arq_redis_settings = _redis_settings
+arq_health_check_interval_seconds = _health_check_interval_seconds
