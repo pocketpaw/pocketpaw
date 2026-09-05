@@ -699,6 +699,23 @@ async def shutdown_event(*, _stop_channel_adapter_fn=None):
     except Exception as exc:
         logger.debug("Request-log flush skipped: %s", exc)
 
+    # Run the enterprise lifecycle shutdown hooks. The mirror of the startup
+    # loop above, which existed on its own for months: ``on_shutdown`` was
+    # declared in the protocol (src/pocketpaw/extensions.py), implemented by
+    # CloudLifecycleHook, and called by nothing. Everything that hook started --
+    # the meeting scheduler, the pocket interval refresh, the temporal sweeps,
+    # the run sweeper -- outlived the process it belonged to.
+    #
+    # Placed after the run drain and the request-log flush so cloud teardown
+    # happens before the channel adapters and the daemon go down under it.
+    try:
+        from pocketpaw._registry import providers as _ext_providers
+
+        for _hook in _ext_providers("pocketpaw.lifecycle"):
+            await _bounded("lifecycle_shutdown", _hook.on_shutdown(), timeout=10.0)
+    except Exception as exc:
+        logger.debug("Lifecycle shutdown hooks skipped: %s", exc)
+
     # Stop all channel adapters
     if _stop_channel_adapter_fn:
         for channel in list(_channel_adapters):
