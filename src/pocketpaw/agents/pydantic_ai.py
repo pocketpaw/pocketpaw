@@ -526,6 +526,10 @@ _WITHHELD_TOOLS = _LOCAL_MACHINE_TOOLS | _HOST_STATE_TOOLS
 # until someone decides which side it belongs on.
 _TENANT_SAFE_TOOLS = frozenset(
     {
+        # Otherhand's illustration tool. Tenant-scoped by construction: it draws
+        # onto the caller's own page over their own SSE stream, and its spend is
+        # bounded by a per-workspace daily budget.
+        "illustrate",
         # pockets / widgets — tenant-scoped
         "add_widget",
         "remove_widget",
@@ -1161,6 +1165,20 @@ class PydanticAIBackend:
         if self._http_client is not None:
             return self._http_client
         seconds = float(getattr(self.settings, "pydantic_ai_timeout", 0) or 0)
+        # BYOK (2026-08-28): the end user's OWN upstream key rides as x-api-key
+        # alongside the proxy's own Authorization bearer. LiteLLM forwards
+        # x-api-key upstream when ``forward_llm_provider_auth_headers`` is on, so
+        # the turn bills the user's provider account while still passing through
+        # our routing, logging and guardrails — one pipeline, two payers.
+        #
+        # It lives on the CLIENT rather than in the request because that is the
+        # only place pydantic-ai lets us reach the transport. That makes the
+        # client tenant-specific, and this client is cached for the backend
+        # INSTANCE's life — which is safe for exactly one reason: a BYOK run gets
+        # a fresh isolated backend (see AgentPool.run). Never set
+        # ``byok_provider_api_key`` on a pooled backend.
+        byok_key = (getattr(self.settings, "byok_provider_api_key", None) or "").strip()
+        headers = {"x-api-key": byok_key} if byok_key else None
         try:
             import httpx
 
@@ -1168,7 +1186,8 @@ class PydanticAIBackend:
                 timeout=httpx.Timeout(
                     None if seconds <= 0 else seconds,
                     connect=15.0,
-                )
+                ),
+                headers=headers,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not build HTTP client, using library defaults: %s", exc)
@@ -1449,6 +1468,29 @@ class PydanticAIBackend:
         self._mcp_tools = []
         self._cached_agent = None
         self._cached_agent_key = None
+
+    def _credential_fingerprint(self) -> str:
+        """A stable, non-reversible id for the provider credential in use.
+
+        Feeds the agent cache key so two tenants with different keys can never
+        share a cached agent. Hashed because the key would otherwise sit in a
+        long-lived tuple and in cache-miss log lines; the empty string is
+        reported as ``"none"`` so "no key configured" is its own bucket rather
+        than colliding with a hash.
+        """
+        import hashlib
+
+        # BOTH credential routes: the direct-provider key, and the BYOK key that
+        # rides to the proxy as a header. Either one makes two tenants' agents
+        # different, and the BYOK one is the case that actually ships.
+        raw = (
+            (self.settings.anthropic_api_key or "").strip()
+            + "|"
+            + (getattr(self.settings, "byok_provider_api_key", None) or "").strip()
+        )
+        if raw == "|":
+            return "none"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def attach_subprocess_env(self, env: dict[str, str]) -> None:  # noqa: ARG002
         """No-op — this backend spawns no subprocess.
@@ -2013,6 +2055,16 @@ class PydanticAIBackend:
             # serves every session and surface, so an agent cached under one
             # identity must not answer for another.
             system_prompt_digest,
+            # WHOSE CREDENTIAL paid for it (2026-08-28, BYOK). The model object
+            # is built with a provider key baked in, and every other component
+            # of this key can match across two tenants who bring their own keys
+            # — same model, same tools, same prompt. Without this the second
+            # tenant is served the first tenant's cached agent and their turns
+            # bill to a stranger's Anthropic account.
+            #
+            # A DIGEST, never the key: this tuple is held in memory for the
+            # process's life and lands in cache-miss logs.
+            self._credential_fingerprint(),
         )
         if self._cached_agent is not None and self._cached_agent_key == agent_key:
             return self._cached_agent

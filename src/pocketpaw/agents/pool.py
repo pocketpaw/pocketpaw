@@ -671,6 +671,7 @@ class AgentPool:
         exclusive_mcp_tools: bool = False,
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
+        byok_api_key: str | None = None,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -746,6 +747,20 @@ class AgentPool:
         signature and only the Claude SDK backend acts on it (there it CAPS the MCP
         surface to ``allow_mcp_tool_ids`` alone — no universal grant). ``False``
         (the default) = the unchanged grant-union path.
+
+        ``byok_api_key`` is the caller's OWN provider key for this one turn
+        (2026-08-28). It does NOT get forwarded to the cached backend — it
+        REPLACES it: the run is served by a fresh, uncached backend built from
+        the same settings with that key substituted.
+
+        That is the whole point. This pool hands every session and surface the
+        same cached instance, and a backend's provider credential is baked into
+        the model object it builds. Passing one tenant's key to a shared backend
+        would leave it there for the next tenant's turn, billing a stranger's
+        account. An isolated instance cannot outlive the run that made it.
+
+        None (the default) = the shared cached instance, unchanged for every
+        existing run.
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
@@ -867,7 +882,35 @@ class AgentPool:
             # False = legacy grant-union path, unchanged for every existing run.
             if exclusive_mcp_tools:
                 run_kwargs["exclusive_mcp_tools"] = exclusive_mcp_tools
-            async for event in instance.backend.run(message, **run_kwargs):
+            # BYOK: swap the SHARED backend for a private one, built for this
+            # run alone. Anything that fails here (an unregistered backend, a
+            # bad settings key) falls back to the shared instance rather than
+            # failing the turn — the user's key is then unused for this turn,
+            # which is a billing surprise for US and never for them.
+            run_backend = instance.backend
+            if byok_api_key:
+                try:
+                    from pocketpaw.agents.registry import _LEGACY_BACKENDS
+                    from pocketpaw.agents.router import AgentRouter
+
+                    run_backend = AgentRouter.create_isolated_backend(
+                        _LEGACY_BACKENDS.get(
+                            instance.backend.settings.agent_backend,
+                            instance.backend.settings.agent_backend,
+                        ),
+                        instance.backend.settings,
+                        settings_override={"byok_provider_api_key": byok_api_key},
+                    )
+                except Exception:
+                    logger.warning(
+                        "BYOK: could not build an isolated backend for agent %s; "
+                        "running on platform credentials this turn",
+                        agent_id,
+                        exc_info=True,
+                    )
+                    run_backend = instance.backend
+
+            async for event in run_backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
                 yield event
         finally:

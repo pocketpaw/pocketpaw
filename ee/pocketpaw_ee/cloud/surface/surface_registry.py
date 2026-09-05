@@ -53,6 +53,15 @@
 # for dynamic sites' D1-read). The completeness assertion forced this row the
 # moment ``SurfaceKind.CONCIERGE`` was added.
 #
+# Changes: 2026-08-25 (feat/other-hand-surface, Otherhand v1) — added the
+# OTHER_HAND row (/other-hand — the notebook page the agent writes back on). A
+# STATIC ripple-OFF profile carrying ``_OTHER_HAND_POCKET_DENY`` (the two
+# pocket-creation tool ids, the only ids an allow-list provably cannot strip) and
+# ``OTHER_HAND_SYSTEM_PROMPT`` (the page-ops output contract: op vocabulary,
+# 1240x1754 coordinate space, margins, the free_y rule). Both halves are
+# required — /code proved a closed deny plus a forbidding preamble still loses to
+# a trained-in default when nothing positive replaces it.
+#
 # Changes: 2026-07-22 (feat/code-surface-profile, CD-3) — the CODE row stopped
 # addressing the wrong machine. It used to carry
 # ``allowed_sdk_tools={"Bash","Read","Write","Edit","Glob","Grep"}``, which read
@@ -118,6 +127,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import NamedTuple
 
+from pocketpaw_ee.agent.mcp_servers.other_hand import ILLUSTRATE_TOOL_ID
 from pocketpaw_ee.cloud.surface.domain import (
     SurfaceKind,
     SurfaceMeta,
@@ -136,6 +146,7 @@ from pocketpaw_ee.cloud.surface.handlers import (
     home,
     knowledge,
     mission_control,
+    other_hand,
     pocket,
     pocket_widget,
     pockets_list,
@@ -158,7 +169,10 @@ from pocketpaw_ee.cloud.surface.handlers import (
 from pocketpaw_ee.cloud.surface.handlers import (
     foresight as foresight_handler,
 )
-from pocketpaw_ee.cloud.surface.system_prompts import CODE_SYSTEM_PROMPT
+from pocketpaw_ee.cloud.surface.system_prompts import (
+    CODE_SYSTEM_PROMPT,
+    OTHER_HAND_SYSTEM_PROMPT,
+)
 
 # The shape every handler module exports: an async preamble builder taking the
 # tenancy tuple + the validated client meta and returning the rendered block
@@ -238,6 +252,33 @@ _SITES_SVELTE_CREATE_DENY: frozenset[str] = frozenset(
     {
         "mcp__pocketpaw_sites_manager__create_landing_site",
         "mcp__pocketpaw_pocket_specialist__create",
+    }
+)
+
+# The pocket-creation tool ids the Otherhand (/other-hand) surface forbids.
+#
+# These are EXACTLY ``claude_sdk.POCKET_CREATION_GRANT``, and naming them here is
+# not redundancy — it is the only thing that removes them. The grant is UNIONED
+# into any ``allow_mcp_tool_ids`` the surface sets, and their two servers
+# (``pocketpaw_pocket_specialist`` / ``pocketpaw_pocket_planner``) are in
+# ``ALWAYS_ALLOWED_MCP_SERVERS``, so they survive every allow-list by
+# construction. The deny is subtracted from the allow-list BEFORE the grant
+# union runs (``claude_sdk._build_options``), and the grant branch only filters —
+# it never re-adds — so a denied id cannot come back.
+#
+# Why this surface needs it at all: "draw me a mitosis diagram", "make me a
+# study plan for this", "sketch the water cycle" are near-perfect lexical
+# matches for the create-pocket path, and the correct answer to every one of
+# them is ink on the page. An agent that reaches the pocket tool here produces a
+# dashboard the user cannot see, on a surface with no way to show it.
+#
+# Spelled as literals (the EE layer is the source of truth) because these cross
+# to the OSS backend as a bare ``frozenset[str]`` — import-linter forbids the
+# EE→OSS import that would let us reference the constant.
+_OTHER_HAND_POCKET_DENY: frozenset[str] = frozenset(
+    {
+        "mcp__pocketpaw_pocket_specialist__create",
+        "mcp__pocketpaw_pocket_planner__plan_pocket",
     }
 )
 
@@ -837,6 +878,45 @@ SURFACES: list[SurfaceSpec] = [
         _route_for(SurfaceKind.SHIP),
         ship.build_preamble,
         profile_resolver=_ship_profile,
+    ),
+    SurfaceSpec(
+        SurfaceKind.OTHER_HAND,
+        _route_for(SurfaceKind.OTHER_HAND),
+        other_hand.build_preamble,
+        # Otherhand: the user's notebook page. The deliverable is INK — a fenced
+        # ``page-ops`` block of vector primitives the frontend draws onto the same
+        # page the user is writing on.
+        #
+        # ``ripple_mode="off"`` because the INLINE_RIPPLE_SYSTEM_PROMPT's "default
+        # to ui-spec" LAW is actively wrong here, for the same reason the /sites
+        # svelte-create mode turns it off: the surface authors something that is
+        # not a ripple spec, so the LAW is a ~20k-char instruction to produce the
+        # wrong artifact with tools this row denies.
+        #
+        # The deny set is the load-bearing half (see ``_OTHER_HAND_POCKET_DENY``);
+        # the ``system_message_override`` is the other half, and neither works
+        # alone. The deny makes a pocket unreachable; the override supplies the
+        # thing to do instead, down to the op vocabulary and the 1240x1754
+        # coordinate space. /code is the precedent for needing both: with ripple
+        # off and a preamble forbidding pockets, it still authored a ui-spec,
+        # because a prohibition does not create a default.
+        #
+        # ``allow_mcp_tool_ids`` carries exactly one id (2026-08-28): the
+        # illustration tool. It was true that this surface had no server-side
+        # tools — the page-ops block is parsed client-side — until generated
+        # vector illustrations needed a generator call the client cannot make.
+        # The allow-list is how the tool stays reachable HERE and nowhere else:
+        # it costs money per call, and no other surface has a page to draw on.
+        # No ``allowed_sdk_tools``
+        # either — that field is ADDITIVE and ``Read`` is already in the default
+        # set, which matters a lot on this surface: ``Read`` IS the vision path.
+        # Static profile: no lazily-loaded ids, not meta-aware.
+        profile=SurfaceProfile(
+            ripple_mode="off",
+            deny_mcp_tool_ids=_OTHER_HAND_POCKET_DENY,
+            allow_mcp_tool_ids=frozenset({ILLUSTRATE_TOOL_ID}),
+            system_message_override=OTHER_HAND_SYSTEM_PROMPT,
+        ),
     ),
     SurfaceSpec(
         SurfaceKind.CONCIERGE,
