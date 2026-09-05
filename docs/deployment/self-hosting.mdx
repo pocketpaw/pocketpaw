@@ -234,7 +234,12 @@ LOGFIRE_SERVICE_NAME=pocketpaw # set this per service if you run web and worker 
 LOGFIRE_ENVIRONMENT=prod
 ```
 
-Two things are worth knowing before you turn it on.
+With it on you get a span per HTTP request labelled by route, every outbound
+call the process makes, the agent runs with their models and token counts, the
+Redis queues, the Mongo queries, and the container's own CPU, memory and disk.
+That is the point: it is meant to replace reading container logs by hand.
+
+Three things are worth knowing before you turn it on.
 
 **Nothing is exported without a destination.** With the switch on but no
 `LOGFIRE_TOKEN` and no `OTEL_EXPORTER_OTLP_ENDPOINT`, the spans are still built
@@ -247,8 +252,19 @@ default: you get the model, token counts, latency and tool names without the
 customer's text leaving your network. Set `POCKETPAW_LOGFIRE_INCLUDE_CONTENT=true`
 if you want the prompts too, and decide where your data is allowed to live first.
 
+**Spans are metered per unit.** If one integration turns out to dominate the
+bill, `POCKETPAW_LOGFIRE_INSTRUMENT` takes a comma-separated list of the ones to
+keep, or `none` to keep the logs and drop every span. No code change needed.
+
+```bash
+POCKETPAW_LOGFIRE_INSTRUMENT=pydantic_ai,httpx,system_metrics
+```
+
 Log messages and tracebacks are scrubbed for credential formats and, when PII
-scanning is on, for personal data, before any of it reaches an exporter.
+scanning is on, for personal data, before any of it reaches an exporter. Request
+and response headers, HTTP bodies and Redis statements are never captured, since
+those carry bearer tokens and customer content. The health and version routes are
+not traced, so a container probe does not bill for itself.
 
 ### Security Hardening
 

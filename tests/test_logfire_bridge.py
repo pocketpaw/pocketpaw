@@ -82,13 +82,14 @@ def _fake_logfire_module(calls: list[dict[str, Any]], instrumented: list[dict[st
     Deliberately not a bare ``SimpleNamespace(configure=...)``: a fake missing
     ``ScrubbingOptions`` would make the real call raise inside our own try/except,
     which warns and returns False — leaving Logfire silently unconfigured in
-    production while the test stayed green.
+    production while the test stayed green. Same reason it carries every
+    ``instrument_*`` name: the registry reads them all when it is built.
     """
-    return SimpleNamespace(
-        configure=lambda **kw: calls.append(kw),
-        ScrubbingOptions=lambda **kw: SimpleNamespace(**kw),
-        instrument_pydantic_ai=lambda **kw: instrumented.append(kw),
-    )
+    fake = _recording_logfire({})
+    fake.configure = lambda **kw: calls.append(kw)
+    fake.ScrubbingOptions = lambda **kw: SimpleNamespace(**kw)
+    fake.instrument_pydantic_ai = lambda **kw: instrumented.append(kw)
+    return fake
 
 
 def test_nothing_is_wired_unless_the_flag_is_set(
@@ -387,3 +388,265 @@ def test_a_broken_bridge_does_not_stop_startup(
 
     assert install_logfire_bridge("INFO") is False
     assert logging.getLogger().handlers, "the console handler was lost"
+
+
+# ---------------------------------------------------------------------------
+# Coverage: which integrations attach, and what they are allowed to capture.
+# ---------------------------------------------------------------------------
+
+
+def _recording_logfire(calls: dict[str, Any]):
+    """A logfire stand-in whose every instrument_* records the kwargs it got."""
+    names = (
+        "instrument_pydantic_ai",
+        "instrument_claude_agent_sdk",
+        "instrument_anthropic",
+        "instrument_openai",
+        "instrument_mcp",
+        "instrument_httpx",
+        "instrument_aiohttp_client",
+        "instrument_redis",
+        "instrument_pymongo",
+        "instrument_system_metrics",
+    )
+
+    def recorder(name: str):
+        def _call(**kwargs: Any) -> None:
+            calls[name] = kwargs
+
+        return _call
+
+    return SimpleNamespace(**{name: recorder(name) for name in names})
+
+
+def test_every_integration_in_the_default_set_attaches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default is everything, and every entry has to actually be callable.
+
+    A registry entry naming a function logfire does not have would be a silent
+    hole: ``_instrument`` swallows the AttributeError and that integration is
+    just quietly absent.
+    """
+    import sys
+
+    from pocketpaw.observability import instrument_everything
+
+    calls: dict[str, Any] = {}
+    monkeypatch.setitem(sys.modules, "logfire", _recording_logfire(calls))
+    monkeypatch.delenv("POCKETPAW_LOGFIRE_INSTRUMENT", raising=False)
+
+    attached = instrument_everything()
+
+    assert set(attached) == {
+        "pydantic_ai",
+        "claude_agent_sdk",
+        "anthropic",
+        "openai",
+        "mcp",
+        "httpx",
+        "aiohttp_client",
+        "redis",
+        "pymongo",
+        "system_metrics",
+    }, f"the default coverage changed: {attached}"
+
+
+def test_the_capture_flags_that_would_export_customer_data_are_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Headers carry Authorization; httpx bodies are prompts; redis holds the job.
+
+    Logfire's scrubber matches attribute NAMES against a keyword list, so a
+    bearer token under a header name it does not recognise goes through
+    untouched. These flags decide whether it ever gets the chance.
+    """
+    import sys
+
+    from pocketpaw.observability import instrument_everything
+
+    calls: dict[str, Any] = {}
+    monkeypatch.setitem(sys.modules, "logfire", _recording_logfire(calls))
+    monkeypatch.delenv("POCKETPAW_LOGFIRE_INSTRUMENT", raising=False)
+
+    instrument_everything()
+
+    assert calls["instrument_httpx"]["capture_headers"] is False
+    assert "capture_request_body" not in calls["instrument_httpx"], (
+        "leave it at logfire's own default of False rather than setting it here"
+    )
+    assert calls["instrument_redis"]["capture_statement"] is False, (
+        "the redis statement carries the arq job payload, which is the conversation"
+    )
+
+
+def test_the_instrument_list_can_be_trimmed_and_emptied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spans are metered, so dropping one integration must not need a code deploy."""
+    import sys
+
+    from pocketpaw.observability import instrument_everything
+
+    calls: dict[str, Any] = {}
+    monkeypatch.setitem(sys.modules, "logfire", _recording_logfire(calls))
+
+    monkeypatch.setenv("POCKETPAW_LOGFIRE_INSTRUMENT", "httpx, pydantic_ai")
+    assert set(instrument_everything()) == {"httpx", "pydantic_ai"}
+
+    calls.clear()
+    monkeypatch.setenv("POCKETPAW_LOGFIRE_INSTRUMENT", "none")
+    assert instrument_everything() == []
+    assert not calls
+
+
+def test_an_unknown_integration_name_is_reported_not_swallowed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A typo in the env var must not read as "that integration is off"."""
+    import sys
+
+    from pocketpaw.observability import instrument_everything
+
+    calls: dict[str, Any] = {}
+    monkeypatch.setitem(sys.modules, "logfire", _recording_logfire(calls))
+    monkeypatch.setenv("POCKETPAW_LOGFIRE_INSTRUMENT", "htpx,redis")
+
+    with caplog.at_level(logging.WARNING, logger="pocketpaw.observability"):
+        attached = instrument_everything()
+
+    assert attached == ["redis"]
+    assert any("htpx" in record.getMessage() for record in caplog.records), (
+        "a misspelled integration was skipped silently"
+    )
+
+
+def test_one_broken_integration_does_not_stop_the_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The instrumentors are optional packages, so a missing one is expected.
+
+    An install without them should lose spans, never fail to boot.
+    """
+    import sys
+
+    from pocketpaw.observability import instrument_everything
+
+    calls: dict[str, Any] = {}
+    fake = _recording_logfire(calls)
+
+    def _boom(**_: Any) -> None:
+        raise RuntimeError("requires the opentelemetry-instrumentation-httpx package")
+
+    fake.instrument_httpx = _boom
+    monkeypatch.setitem(sys.modules, "logfire", fake)
+    monkeypatch.delenv("POCKETPAW_LOGFIRE_INSTRUMENT", raising=False)
+
+    attached = instrument_everything()
+
+    assert "httpx" not in attached
+    assert "redis" in attached, "a missing optional package took the rest down with it"
+
+
+def test_fastapi_is_not_instrumented_with_the_switch_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both app builders call this unconditionally, so the gate lives here."""
+    pytest.importorskip("fastapi")
+    from fastapi import FastAPI
+
+    from pocketpaw.observability import instrument_fastapi_app
+
+    monkeypatch.delenv("POCKETPAW_LOGFIRE_ENABLED", raising=False)
+
+    assert instrument_fastapi_app(FastAPI()) is False
+
+
+def test_a_request_becomes_a_span_named_by_route_not_by_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The end-to-end one, against real logfire and a real request.
+
+    Two properties, and both fail quietly rather than loudly:
+
+    * The span is named by route TEMPLATE. Instrument before the routers are
+      mounted and there is no route table to match against, so every pocket id
+      becomes its own span name and the dashboard is unusable.
+    * ``/api/v1/version`` produces NO span. The compose healthcheck curls it
+      every 30 seconds in both containers, which is thousands of metered spans a
+      day that say nothing a container status does not.
+    """
+    logfire = pytest.importorskip("logfire")
+    pytest.importorskip("opentelemetry.instrumentation.fastapi")
+    testing = pytest.importorskip("logfire.testing")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+    from pocketpaw.observability import instrument_fastapi_app
+
+    exporter = testing.TestExporter()
+    logfire.configure(
+        send_to_logfire=False,
+        console=False,
+        additional_span_processors=[SimpleSpanProcessor(exporter)],
+    )
+    monkeypatch.setenv("POCKETPAW_LOGFIRE_ENABLED", "true")
+
+    app = FastAPI()
+
+    @app.get("/api/v1/pockets/{pocket_id}")
+    def read_pocket(pocket_id: str) -> dict[str, str]:
+        return {"id": pocket_id}
+
+    @app.get("/api/v1/version")
+    def version() -> dict[str, str]:
+        return {"version": "1.0.0"}
+
+    assert instrument_fastapi_app(app) is True
+
+    client = TestClient(app)
+    client.get("/api/v1/pockets/abc123")
+    client.get("/api/v1/version")
+
+    names = [span.name for span in exporter.exported_spans]
+    assert names, "the request produced no span at all"
+    assert all("{pocket_id}" in name for name in names), (
+        f"spans are named by path, not by route template: {names}"
+    )
+    assert not any("version" in name for name in names), (
+        f"the healthcheck route was traced: {names}"
+    )
+
+
+def test_the_api_app_is_instrumented_after_every_router_is_mounted() -> None:
+    """Ordering inside ``create_api_app``, checked structurally.
+
+    The route-template test above proves the instrumentor uses templates when it
+    has a route table. This proves it is given one: instrument before
+    ``mount_v1_routers`` and there are no routes to match, so every pocket id
+    becomes its own span name. That failure produces spans, so nothing else
+    catches it — it just makes the dashboard useless.
+
+    By AST over the function body rather than by substring, because the file
+    mentions both names in prose.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from pocketpaw.api import serve
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(serve.create_api_app)))
+    called: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name in {"instrument_fastapi_app", "mount_v1_routers", "install_cors"}:
+                called.append(name)
+
+    assert "instrument_fastapi_app" in called, (
+        "the deployed API app is never instrumented, so requests produce no spans"
+    )
+    assert called.index("instrument_fastapi_app") > called.index("mount_v1_routers"), (
+        "instrumented before the routers were mounted; spans would be named by path"
+    )
