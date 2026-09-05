@@ -33,6 +33,8 @@ import logging
 import re
 import sys
 import traceback
+from collections.abc import Callable, Mapping
+from typing import Any
 
 # Patterns that match known API key / token formats
 _SECRET_PATTERNS = [
@@ -51,6 +53,32 @@ def _scrub(text: str) -> str:
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub("***REDACTED***", text)
     return text
+
+
+def scrub_log_args(args: Any, scrub: Callable[[str], str]) -> Any:
+    """Scrub a ``LogRecord.args`` **preserving its shape**.
+
+    ``record.args`` is a tuple, or a Mapping when the caller used named
+    placeholders: ``logger.info("%(user)s", {"user": name})``. logging unwraps a
+    single mapping argument, so the attribute is the dict itself.
+
+    Rebuilding that as a tuple is not a cosmetic error. ``getMessage`` does
+    ``msg % self.args``, and ``"%(user)s" % ({...},)`` raises "format requires a
+    mapping" inside logging, which swallows it and **drops the record entirely**.
+    So a filter that mishandles this does not merely fail to scrub, it destroys
+    the log line — including records from third-party libraries, since these
+    filters sit on the root handler.
+    """
+    if not args:
+        return args
+    if isinstance(args, Mapping):
+        return {k: scrub(v) if isinstance(v, str) else v for k, v in args.items()}
+    items = args if isinstance(args, tuple) else (args,)
+    return tuple(scrub(a) if isinstance(a, str) else a for a in items)
+
+
+def _scrub_args(args: Any) -> Any:
+    return scrub_log_args(args, _scrub)
 
 
 class SecretFilter(logging.Filter):
@@ -87,14 +115,7 @@ class SecretFilter(logging.Filter):
             record.exc_text = _scrub(record.exc_text)
         if isinstance(record.msg, str):
             record.msg = _scrub(record.msg)
-        if record.args:
-            args = record.args if isinstance(record.args, tuple) else (record.args,)
-            new_args = []
-            for arg in args:
-                if isinstance(arg, str):
-                    arg = _scrub(arg)
-                new_args.append(arg)
-            record.args = tuple(new_args)
+        record.args = _scrub_args(record.args)
         return True
 
 
@@ -115,24 +136,19 @@ def _build_pii_filter() -> logging.Filter | None:
 
         scanner = PIIScanner(default_action=PIIAction.MASK)
 
+        def _mask(text: str) -> str:
+            result = scanner.scan(text)
+            return result.sanitized_text if result.has_pii else text
+
         class PIILogFilter(logging.Filter):
             """Scrub PII patterns from log output."""
 
             def filter(self, record: logging.LogRecord) -> bool:
                 if isinstance(record.msg, str):
-                    result = scanner.scan(record.msg)
-                    if result.has_pii:
-                        record.msg = result.sanitized_text
-                if record.args:
-                    args = record.args if isinstance(record.args, tuple) else (record.args,)
-                    new_args = []
-                    for arg in args:
-                        if isinstance(arg, str):
-                            r = scanner.scan(arg)
-                            if r.has_pii:
-                                arg = r.sanitized_text
-                        new_args.append(arg)
-                    record.args = tuple(new_args)
+                    record.msg = _mask(record.msg)
+                # Shape-preserving, for the same reason as SecretFilter: turning a
+                # mapping into a tuple makes logging raise and drop the record.
+                record.args = scrub_log_args(record.args, _mask)
                 return True
 
         return PIILogFilter()

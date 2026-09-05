@@ -44,8 +44,8 @@
   {
     "label": "SecretFilter stops scrubbing record.args, so the %s form leaks",
     "file": "src/pocketpaw/logging_setup.py",
-    "find": "        if record.args:\n            args = record.args if isinstance(record.args, tuple) else (record.args,)",
-    "replace": "        if False:\n            args = record.args if isinstance(record.args, tuple) else (record.args,)",
+    "find": "        record.args = _scrub_args(record.args)",
+    "replace": "        record.args = record.args",
     "tests": "tests/test_log_scrubbing.py"
   },
   {
@@ -81,6 +81,13 @@
     "file": "src/pocketpaw/logging_setup.py",
     "find": "                scrubbed = tuple(_scrub(a) if isinstance(a, str) else a for a in original)",
     "replace": "                scrubbed = tuple(\"***REDACTED***\" for a in original)",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "a mapping args record is rebuilt as a tuple, so logging drops the line",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "    if isinstance(args, Mapping):\n        return {k: scrub(v) if isinstance(v, str) else v for k, v in args.items()}",
+    "replace": "    if isinstance(args, Mapping):\n        return tuple(scrub(v) if isinstance(v, str) else v for v in args.values())",
     "tests": "tests/test_log_scrubbing.py"
   }
 ]

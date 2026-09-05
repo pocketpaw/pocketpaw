@@ -203,6 +203,28 @@ def test_the_secret_is_scrubbed_when_it_is_in_the_message_itself(
     assert "***REDACTED***" in out
 
 
+def test_a_mapping_args_record_survives_and_is_scrubbed(captured_root: io.StringIO) -> None:
+    """Named placeholders pass a Mapping, and rebuilding it as a tuple is fatal.
+
+    ``getMessage`` does ``msg % self.args``. With a mapping rebuilt as a tuple,
+    that raises "format requires a mapping" inside logging, which swallows the
+    error and DROPS the record. So the filter would not merely fail to scrub, it
+    would destroy the line — including records from third-party libraries, since
+    these filters sit on the root handler.
+    """
+    install_scrubbing_filters()
+
+    logging.getLogger("pocketpaw.some.module").info(
+        "user %(user)s presented %(key)s", {"user": "ana", "key": _FAKE_KEY}
+    )
+
+    out = captured_root.getvalue()
+    assert out.strip(), "the record was dropped instead of logged"
+    assert "user ana presented" in out, "the mapping was not applied to the template"
+    assert _FAKE_KEY not in out
+    assert "***REDACTED***" in out
+
+
 def test_installing_twice_does_not_stack_duplicate_filters(
     captured_root: io.StringIO,
 ) -> None:
