@@ -59,6 +59,22 @@
 #   chokepoint contracts stay 0-broken. (``propose.py`` itself statically imports
 #   no Beanie document class — it lazy-imports ``pocketpaw.stores`` /
 #   ``pocketpaw.instinct.models`` internally.)
+# Updated: 2026-07-16 (SR-1 catalog-wide discovery) — added a FIFTH tool,
+#   ``sense_search(query)``: catalog-WIDE discovery over all 35 connectors, not
+#   just the ones a pocket already bound. The other tools can only enumerate
+#   pre-wired connectors — the agent literally could not propose a tool the admin
+#   never bound. ``sense_search`` delegates to ``cloud.senses.catalog.search_catalog``
+#   (pure BM25 over the parsed connector defs, no ML/deps) and overlays tenant
+#   state read ONLY through the EE store: ``connectors.service.list_bound_connector_names``
+#   supplies the pocket's reachable connector set so each hit is marked BOUND or
+#   UNBOUND. Each hit also carries trust level, AVAILABILITY (connectors whose
+#   action ``execution_mode`` is ``local`` are marked UNAVAILABLE — the shared
+#   cloud has no local-runtime listener and ``service.execute`` 503s them, so the
+#   agent must not select them), and a placeholder ``cost_estimate`` (real
+#   pricing lands later; NO metering here). READ-ONLY: it searches and reports,
+#   never executes. Tool id ``mcp__pocketpaw_connectors__sense_search``. OSS-EE
+#   boundary held — the Beanie read stays in ``connectors.service``; this module
+#   still imports no WorkspaceConnector doc.
 """Agent-side MCP surface for executing a chat's reachable connectors.
 
 Tools registered:
@@ -102,12 +118,14 @@ LIST_CONNECTOR_ACTIONS_TOOL_ID = f"mcp__{SERVER_NAME}__list_connector_actions"
 CONNECTOR_EXECUTE_TOOL_ID = f"mcp__{SERVER_NAME}__connector_execute"
 LIST_SENSES_TOOL_ID = f"mcp__{SERVER_NAME}__list_senses"
 SENSE_EXECUTE_TOOL_ID = f"mcp__{SERVER_NAME}__sense_execute"
+SENSE_SEARCH_TOOL_ID = f"mcp__{SERVER_NAME}__sense_search"
 
 CONNECTOR_TOOL_IDS = (
     LIST_CONNECTOR_ACTIONS_TOOL_ID,
     CONNECTOR_EXECUTE_TOOL_ID,
     LIST_SENSES_TOOL_ID,
     SENSE_EXECUTE_TOOL_ID,
+    SENSE_SEARCH_TOOL_ID,
 )
 
 
@@ -715,6 +733,87 @@ async def _sense_execute_handler(args: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Tool handler — catalog-wide discovery (search ALL connectors, bound or not)
+# ---------------------------------------------------------------------------
+
+
+async def _sense_search_handler(args: dict) -> dict:
+    workspace_id, _user_id, pocket_id = _identity()
+    if not workspace_id:
+        return _error_response(
+            "no active workspace — sense_search can only be called from inside a cloud chat stream"
+        )
+
+    query = args.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return _error_response("query is required (a non-empty string)")
+
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+    from pocketpaw_ee.cloud.senses import catalog
+
+    # Bound status is tenant state — read it ONLY through the EE store service
+    # (the Beanie read lives there, never here). Unanchored chats (pocket_id=None)
+    # pass "" so only workspace-scoped rows count, matching the other tools.
+    try:
+        bound = await connectors_service.list_bound_connector_names(workspace_id, pocket_id or "")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sense_search bound lookup failed", exc_info=True)
+        return _error_response(f"sense_search failed: {exc}")
+
+    try:
+        hits = await catalog.search_catalog(query, bound_connectors=bound, limit=10)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sense_search failed", exc_info=True)
+        return _error_response(f"sense_search failed: {exc}")
+
+    results = [
+        {
+            "senses": list(h.senses),
+            "connector": h.connector,
+            "display_name": h.display_name,
+            "action": h.action,
+            "description": h.description,
+            "trust_level": h.trust_level,
+            "execution_mode": h.execution_mode,
+            "bound": h.bound,
+            "available": h.available,
+            "unavailable_reason": h.unavailable_reason,
+            "cost_estimate": h.cost_estimate,
+        }
+        for h in hits
+    ]
+
+    if not results:
+        return _success_response(
+            {
+                "query": query,
+                "pocket_id": pocket_id,
+                "results": [],
+                "message": (
+                    f"No catalog actions matched {query!r}. Try different words, or a "
+                    "capability like 'email', 'calendar', 'issues', or 'payments'."
+                ),
+            }
+        )
+
+    return _success_response(
+        {
+            "query": query,
+            "pocket_id": pocket_id,
+            "results": results,
+            "note": (
+                "Catalog-wide results — includes connectors NOT yet bound to this "
+                "pocket. 'bound'=true means it's reachable here now (use it via "
+                "connector_execute / sense_execute); 'bound'=false means an admin must "
+                "enable that connector first — tell the user which one. 'available'=false "
+                "(e.g. local-runtime actions) means it can't run in the cloud — do NOT "
+                "select it. 'cost_estimate' is a placeholder until pricing ships."
+            ),
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
 # Server factory
 # ---------------------------------------------------------------------------
 
@@ -863,10 +962,52 @@ def build_connectors_context_server() -> tuple[str, Any] | None:
     async def sense_execute(args):  # type: ignore[no-untyped-def]
         return await _sense_execute_handler(args)
 
+    @tool(
+        "sense_search",
+        (
+            "Search the FULL connector catalog (every integration Paw OS supports, "
+            "not just the ones this pocket already connected) for actions that match "
+            "a natural-language `query`. Use this when the user asks for a capability "
+            "and you are NOT sure a connector for it is bound here — e.g. 'can you "
+            "create a GitHub issue?', 'do we have anything for Stripe payments?', "
+            "'find me a way to search Slack'. Unlike list_connector_actions / "
+            "list_senses (which only show what's already wired up), this proposes "
+            "tools nobody bound yet. Each result carries: `connector` + `action` + "
+            "`description`, its `senses` (capabilities), `trust_level`, `bound` (true "
+            "= reachable here now, run it via connector_execute/sense_execute; false "
+            "= an admin must enable that connector first — tell the user which one), "
+            "`available` (false means it can't run in the cloud, e.g. a local-runtime "
+            "action — do NOT select it), and a placeholder `cost_estimate`. This tool "
+            "only SEARCHES and reports; it never runs anything."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "What the user wants to do, in plain words, e.g. 'create a "
+                        "github issue', 'search email for an invoice', 'list stripe "
+                        "charges'. Connector, action, and capability names all match."
+                    ),
+                },
+            },
+            "required": ["query"],
+        },
+    )
+    async def sense_search(args):  # type: ignore[no-untyped-def]
+        return await _sense_search_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
-        version="1.1.0",
-        tools=[list_connector_actions, connector_execute, list_senses, sense_execute],
+        version="1.2.0",
+        tools=[
+            list_connector_actions,
+            connector_execute,
+            list_senses,
+            sense_execute,
+            sense_search,
+        ],
     )
     return SERVER_NAME, server
 
@@ -877,6 +1018,7 @@ __all__ = [
     "LIST_CONNECTOR_ACTIONS_TOOL_ID",
     "LIST_SENSES_TOOL_ID",
     "SENSE_EXECUTE_TOOL_ID",
+    "SENSE_SEARCH_TOOL_ID",
     "SERVER_NAME",
     "build_connectors_context_server",
 ]
