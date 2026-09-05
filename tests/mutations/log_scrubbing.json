@@ -1,0 +1,58 @@
+[
+  {
+    "label": "the filters go back on the root LOGGER instead of its handlers (the original bug)",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "    for handler in logging.getLogger().handlers:\n        installed = {type(existing) for existing in handler.filters}\n        for scrubber in filters:\n            if type(scrubber) not in installed:\n                handler.addFilter(scrubber)",
+    "replace": "    for scrubber in filters:\n        logging.getLogger().addFilter(scrubber)",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "install_scrubbing_filters becomes a no-op",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "    filters: list[logging.Filter] = [SecretFilter()]\n    pii = _build_pii_filter()",
+    "replace": "    filters: list[logging.Filter] = []\n    pii = _build_pii_filter()",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "setup_logging stops installing the scrubbers",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "    install_scrubbing_filters()",
+    "replace": "    pass  # scrubbers not installed",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "the idempotence guard is dropped, so repeated installs stack duplicates",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "            if type(scrubber) not in installed:\n                handler.addFilter(scrubber)",
+    "replace": "            handler.addFilter(scrubber)",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "the worker supervisor reverts to basicConfig, which installs no filters",
+    "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
+    "find": "    setup_logging(level=os.environ.get(\"POCKETPAW_LOG_LEVEL\", \"INFO\"))",
+    "replace": "    logging.basicConfig(level=logging.INFO)",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "the secret pattern list is emptied, so nothing matches",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "    re.compile(r\"sk-ant-[a-zA-Z0-9_-]+\"),  # Anthropic",
+    "replace": "    re.compile(r\"MATCHES-NOTHING-AT-ALL-XYZ\"),  # Anthropic",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "SecretFilter stops scrubbing record.args, so the %s form leaks",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "        if record.args:\n            args = record.args if isinstance(record.args, tuple) else (record.args,)",
+    "replace": "        if False:\n            args = record.args if isinstance(record.args, tuple) else (record.args,)",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "SecretFilter stops scrubbing record.msg, so the f-string form leaks",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "        if isinstance(record.msg, str):\n            for pattern in _SECRET_PATTERNS:\n                record.msg = pattern.sub(\"***REDACTED***\", record.msg)",
+    "replace": "        if False:\n            for pattern in _SECRET_PATTERNS:\n                record.msg = pattern.sub(\"***REDACTED***\", record.msg)",
+    "tests": "tests/test_log_scrubbing.py"
+  }
+]

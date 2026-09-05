@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 from typing import Any
@@ -157,7 +158,14 @@ async def run_lanes(settings_classes: list[type] | None = None) -> int:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO)
+    # setup_logging, not basicConfig: the worker is where money is spent and
+    # where provider SDKs surface credentials in exception text, and only
+    # setup_logging installs the secret / PII scrubbing filters. basicConfig
+    # gives the root logger a handler and nothing else, so the worker was
+    # logging unredacted to stdout where the platform's collector keeps it.
+    from pocketpaw.logging_setup import setup_logging
+
+    setup_logging(level=os.environ.get("POCKETPAW_LOG_LEVEL", "INFO"))
     return asyncio.run(run_lanes())
 
 
