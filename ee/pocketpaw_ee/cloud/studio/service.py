@@ -1251,12 +1251,12 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
     reference_audio: list[str] = []
     for url in req.referenceAudioUrls or []:
         if url and url.strip():
-            data_url, _ = await _resolve_source_data_url(url)
+            data_url, _ = await _resolve_source_data_url(url, default_mime="audio/mpeg")
             reference_audio.append(data_url)
     reference_video: list[str] = []
     for url in req.referenceVideoUrls or []:
         if url and url.strip():
-            data_url, _ = await _resolve_source_data_url(url)
+            data_url, _ = await _resolve_source_data_url(url, default_mime="video/mp4")
             reference_video.append(data_url)
 
     try:
@@ -1314,40 +1314,70 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
     return record
 
 
+# Media extensions this surface stores, mapped to the mime a data: URL must
+# declare. AUDIO AND VIDEO ARE HERE FOR A REASON: this table used to hold images
+# only, and every non-image fell through to the "image/png" default — so a
+# generated .mp3 wired into a Video node reached fal as
+# "data:image/png;base64,<mp3 bytes>". fal put it in audio_urls, tried to decode
+# a PNG as sound, and rejected a perfectly good 10-second track as being 0.04
+# seconds long. The bytes were never the problem; the label was.
 _MIME_BY_EXT: dict[str, str] = {
+    # Images
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
     ".gif": "image/gif",
+    # Audio — what generate_music writes (see _MUSIC_EXT_BY_MIME).
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".ogg": "audio/ogg",
+    # Video — what the video paths write (see _video_ext).
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".m4v": "video/x-m4v",
 }
 
 
-def _mime_for_filename(name: str) -> str:
-    """Best-effort mime from a media filename's extension (defaults to png)."""
-    return _MIME_BY_EXT.get(Path(name).suffix.lower(), "image/png")
+def _mime_for_filename(name: str, default: str = "image/png") -> str:
+    """Best-effort mime from a media filename's extension.
+
+    ``default`` is what an unknown or absent extension falls back to. Callers
+    resolving a reference they KNOW is audio or video pass their own, so an
+    extensionless file cannot be mislabelled as an image the way every non-image
+    silently was before this table grew."""
+    return _MIME_BY_EXT.get(Path(name).suffix.lower(), default)
 
 
-async def _resolve_source_data_url(source_url: str) -> tuple[str, str]:
-    """Resolve an EditRequest ``sourceUrl`` into ``(data_url, mime)`` fal accepts
-    as an ``image_url`` input.
+async def _resolve_source_data_url(
+    source_url: str, *, default_mime: str = "image/png"
+) -> tuple[str, str]:
+    """Resolve a media reference into ``(data_url, mime)`` fal accepts as input.
 
     Handles three shapes the frontend can send:
       * ``data:`` URL             — pass through as-is (mime parsed from header).
       * ``http(s)://`` URL        — fetch the bytes, encode as a data URL.
       * ``/api/v1/media/<name>``  — read the stored bytes via the media adapter
                                     and encode as a data URL (the common case:
-                                    editing a previously generated asset).
+                                    referencing a previously generated asset).
+
+    ``default_mime`` is what an unrecognised extension or a missing content-type
+    falls back to. It exists because this resolver serves audio and video
+    references as well as images now, and assuming "image/png" for all of them
+    put a PNG header on generated music — which fal then failed to decode as
+    sound. A caller that knows the KIND it is resolving should say so.
     """
     s = source_url.strip()
     if s.startswith("data:"):
-        mime = s[5:].split(";", 1)[0] or "image/png"
+        mime = s[5:].split(";", 1)[0] or default_mime
         return s, mime
     if s.startswith(("http://", "https://")):
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.get(s)
             resp.raise_for_status()
-        mime = resp.headers.get("content-type", "image/png").split(";")[0].strip() or "image/png"
+        mime = resp.headers.get("content-type", default_mime).split(";")[0].strip() or default_mime
         return fal_edit.encode_bytes(resp.content, mime), mime
     name = s.rsplit("/", 1)[-1]
     if not name or ".." in name or name != Path(name).name:
@@ -1358,7 +1388,7 @@ async def _resolve_source_data_url(source_url: str) -> tuple[str, str]:
         raise ValueError(f"source media '{name}' not found")
     chunks = [c async for c in adapter.open(key)]
     data = b"".join(chunks)
-    mime = _mime_for_filename(name)
+    mime = _mime_for_filename(name, default_mime)
     return fal_edit.encode_bytes(data, mime), mime
 
 
