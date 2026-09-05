@@ -87,6 +87,12 @@ async def generate(
         raise HTTPException(400, str(exc)) from exc
     except service.StudioNotSupported as exc:
         raise HTTPException(501, str(exc)) from exc
+    except service.StudioRejectedError as exc:
+        # The provider refused this input. NOT a 502: the service is up and the
+        # user can fix it by changing an image, a track or a value. The detail
+        # is already a clean sentence — it carries no request payload — so the
+        # client can show it verbatim.
+        raise HTTPException(422, str(exc)) from exc
     except service.StudioUpstreamError as exc:
         raise HTTPException(502, f"Image generation failed: {exc}") from exc
     except CatalogUpstreamError as exc:

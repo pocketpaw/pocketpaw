@@ -29,7 +29,7 @@ from typing import Any, NamedTuple
 
 import httpx
 
-from . import fal_edit
+from . import fal_edit, fal_errors
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +280,18 @@ def _duration_value(endpoint: str, duration_sec: int) -> int | str:
 _CLIENT_TIMEOUT = 600.0
 _START_TIMEOUT = 180.0
 _DOWNLOAD_TIMEOUT = 300.0
+
+
+class FalVideoRejected(Exception):
+    """fal REFUSED the request — a content-policy hit, a file too long, a value
+    out of range. The user can fix these by changing an input, so they must not
+    be reported as an upstream outage: the router maps this to a 4xx and shows
+    the message, while ``FalVideoError`` stays a 502."""
+
+    def __init__(self, message: str, *, code: str | None = None, field: str | None = None):
+        super().__init__(message)
+        self.code = code
+        self.field = field
 
 
 class FalVideoError(Exception):
@@ -945,8 +957,17 @@ async def _run_fal(
             start_timeout=start_timeout,
         )
     except Exception as exc:  # noqa: BLE001 — surface the upstream reason to the user
+        failure = fal_errors.parse_fal_error(exc, action="video generation")
+        if failure.client_fault:
+            # A request fal refused. One log line, NO traceback and NO payload:
+            # the rejected body carries the base64 images and audio, and dumping
+            # it taught nobody anything while making the logs unreadable. The
+            # reason travels to the user instead, which is where it is useful.
+            logger.info("studio: fal video '%s' rejected — %s", endpoint, failure.log_line)
+            raise FalVideoRejected(failure.message, code=failure.code, field=failure.field) from exc
+        # A genuine failure — keep the traceback, that one is ours to debug.
         logger.warning("studio: fal video '%s' failed", endpoint, exc_info=True)
-        raise FalVideoError(f"fal video '{endpoint}' failed: {exc}") from exc
+        raise FalVideoError(failure.message) from exc
     if not isinstance(result, dict):
         raise FalVideoError(f"fal video '{endpoint}' returned an unexpected result")
     return result
@@ -1094,6 +1115,7 @@ __all__ = [
     "SUPPORTED_DURATIONS",
     "CURATED_VIDEO_MODELS",
     "FalVideoError",
+    "FalVideoRejected",
     "resolve_endpoint",
     "resolve_image_to_video_endpoint",
     "build_arguments",
