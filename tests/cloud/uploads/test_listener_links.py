@@ -181,3 +181,23 @@ async def test_reindex_under_new_article_id_removes_the_old_one(monkeypatch, sto
     assert doc.kb_article_id == "art-2"
     assert doc.kb_scope == "workspace:w1"
     assert doc.link_names == ["alpha", "beta"]
+
+
+async def test_short_typed_hashtag_survives_the_keyword_floor(monkeypatch, store, tmp_path):
+    """#q3 is two characters. The 3-char floor is for keyword noise, not for a
+    tag a person typed; seen live 2026-09-05 when #q3 vanished from a note."""
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    await store.save_scoped(_record(), workspace="w1")
+    _wire(
+        monkeypatch,
+        tmp_path,
+        text="Pricing notes, see [[Roadmap]] and #q3 #ai",
+        ingest=AsyncMock(return_value={"id": "art-1"}),
+    )
+
+    await index_uploaded_file(_event())
+
+    doc = await store.get_doc_scoped("f1", "w1")
+    assert doc.link_names == ["roadmap"]
+    assert "q3" in doc.tags and "ai" in doc.tags

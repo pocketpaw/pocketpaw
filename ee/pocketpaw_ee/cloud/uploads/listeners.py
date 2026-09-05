@@ -645,7 +645,8 @@ async def _write_auto_tags(
         base = list(existing_tags)
         link_names: list[str] | None = None
         if note is not None:
-            base = merge_tags(base, [*note.hashtags, *note.frontmatter_tags])
+            # A typed #tag skips the keyword noise floor: #q3 and #ai are real tags.
+            base = merge_tags(base, [*note.hashtags, *note.frontmatter_tags], min_len=2)
             link_names = list(note.link_names)
         merged = merge_tags(base, derived)
         # Nothing new to write (derivation empty and no existing tags to
