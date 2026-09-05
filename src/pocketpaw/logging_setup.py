@@ -189,11 +189,16 @@ def setup_logging(level: str = "INFO") -> None:
         level: Log level (DEBUG, INFO, WARNING, ERROR)
     """
     if not _use_rich():
+        # No force=True. It removes and CLOSES every handler already on the root
+        # logger, which under pytest is the capture handler other tests assert
+        # against — it changed what unrelated suites recorded. Without it this is
+        # a no-op when logging is already configured, and install_scrubbing_filters
+        # below then attaches the scrubbers to whatever handlers are actually
+        # there, which is the behaviour we want either way.
         logging.basicConfig(
             level=getattr(logging, level.upper(), logging.INFO),
             format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
             handlers=[logging.StreamHandler(sys.stderr)],
-            force=True,
         )
         for noisy in ("httpx", "httpcore", "urllib3", "asyncio", "websockets"):
             logging.getLogger(noisy).setLevel(logging.WARNING)

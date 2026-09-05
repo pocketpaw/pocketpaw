@@ -249,7 +249,13 @@ def test_the_worker_supervisor_calls_setup_logging_not_basicconfig() -> None:
     import inspect
     import textwrap
 
-    from pocketpaw_ee.cloud import worker_supervisor
+    # The worker supervisor is enterprise code. CI runs an OSS-only install
+    # where pocketpaw_ee is absent by design, and this assertion has nothing to
+    # say there.
+    worker_supervisor = pytest.importorskip(
+        "pocketpaw_ee.cloud.worker_supervisor",
+        reason="enterprise package not installed (OSS-only install)",
+    )
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(worker_supervisor.main)))
     called = {
