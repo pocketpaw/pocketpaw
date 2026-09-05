@@ -671,3 +671,60 @@ def test_the_api_app_is_instrumented_after_every_router_is_mounted() -> None:
     assert called.index("instrument_fastapi_app") > called.index("mount_v1_routers"), (
         "instrumented before the routers were mounted; spans would be named by path"
     )
+
+
+# ---------------------------------------------------------------------------
+# The test process must not inherit a real Logfire configuration.
+# ---------------------------------------------------------------------------
+
+
+def test_a_developers_own_logfire_config_never_reaches_a_test_run() -> None:
+    """A real project token must not be live while the suite runs.
+
+    ``security/url_validators.py`` calls ``load_dotenv()`` at import, and
+    python-dotenv walks UP from the calling file, so from a git worktree it
+    reaches the PARENT checkout's ``.env``. That is how an operator's real token
+    arrives in a process that never asked for one. Measured, not theorised: it
+    reproduced on this machine the moment a token was put in that file.
+
+    ``logfire.configure`` is process-global with no un-configure, so a single
+    test that reached ``setup_logging`` before any fixture ran would arm
+    exporting for the entire session, and with content capture on what ships is
+    fixture text. ``tests/conftest.py`` pops these at import for that reason.
+    """
+    import os
+
+    from pocketpaw.observability import logfire_enabled, logfire_include_content
+
+    assert not logfire_enabled(), (
+        "the master switch is on during the test run, so this suite can "
+        "configure Logfire and export to a real project. See tests/conftest.py."
+    )
+    assert not logfire_include_content(), "content capture is on during the test run"
+    assert not os.environ.get("LOGFIRE_TOKEN"), (
+        "a Logfire token is live during the test run, so anything that does "
+        "configure will export to a real project"
+    )
+
+
+def test_setup_logging_is_inert_when_the_environment_is_clean() -> None:
+    """The consequence of the guard above, asserted end to end.
+
+    Not a restatement: this drives the real ``setup_logging`` and checks that no
+    bridge handler appears. It is what would actually have shipped test noise.
+    """
+    import logging
+
+    from pocketpaw.logging_setup import setup_logging
+
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    try:
+        setup_logging(level="INFO")
+        assert not any(
+            type(h).__name__ == "LogfireLoggingHandler" for h in logging.getLogger().handlers
+        ), "a test run installed the Logfire bridge on the root logger"
+    finally:
+        root.handlers = saved_handlers
+        root.level = saved_level

@@ -159,5 +159,19 @@
     "find": "    instrument_everything()\n    return True",
     "replace": "    return True",
     "tests": "tests/test_logfire_bridge.py"
+  },
+  {
+    "label": "the test run inherits the operator's real Logfire config and exports to it",
+    "file": "tests/conftest.py",
+    "find": "for _var, _safe in (\n    (\"POCKETPAW_LOGFIRE_ENABLED\", \"false\"),\n    (\"POCKETPAW_LOGFIRE_INCLUDE_CONTENT\", \"false\"),\n    (\"LOGFIRE_TOKEN\", \"\"),\n):\n    os.environ[_var] = _safe",
+    "replace": "for _var, _safe in ():\n    os.environ[_var] = _safe",
+    "tests": "tests/test_logfire_bridge.py"
+  },
+  {
+    "label": "the safe values are POPPED instead of set, so a later load_dotenv puts them back",
+    "file": "tests/conftest.py",
+    "find": "    os.environ[_var] = _safe",
+    "replace": "    os.environ.pop(_var, None)",
+    "tests": "tests/test_logfire_bridge.py"
   }
 ]
