@@ -1,0 +1,86 @@
+[
+  {
+    "label": "the scrubbers are installed BEFORE the bridge, so the bridge carries none (the order gate)",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "    if logfire_enabled():\n        configure_observability()\n        install_logfire_bridge(level)\n    install_scrubbing_filters()",
+    "replace": "    install_scrubbing_filters()\n    if logfire_enabled():\n        configure_observability()\n        install_logfire_bridge(level)",
+    "tests": "tests/test_logfire_bridge.py"
+  },
+  {
+    "label": "the master switch is ignored, so telemetry leaves the box with the flag off",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "    if logfire_enabled():\n        configure_observability()",
+    "replace": "    if True:\n        configure_observability()",
+    "tests": "tests/test_logfire_bridge.py"
+  },
+  {
+    "label": "the off switch is a decoration: the string \"false\" turns Logfire on",
+    "file": "src/pocketpaw/observability.py",
+    "find": "    return _env_flag(\"POCKETPAW_LOGFIRE_ENABLED\")",
+    "replace": "    return bool(os.environ.get(\"POCKETPAW_LOGFIRE_ENABLED\"))",
+    "tests": "tests/test_logfire_bridge.py"
+  },
+  {
+    "label": "the bridge REPLACES the root's handlers, as Logfire's own docs show",
+    "file": "src/pocketpaw/observability.py",
+    "find": "    if any(isinstance(handler, LogfireLoggingHandler) for handler in root.handlers):\n        return True\n    try:",
+    "replace": "    if any(isinstance(handler, LogfireLoggingHandler) for handler in root.handlers):\n        return True\n    root.handlers = []\n    try:",
+    "tests": "tests/test_logfire_bridge.py"
+  },
+  {
+    "label": "compiled patterns are handed to ScrubbingOptions, which wants strings",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "    return [pattern.pattern for pattern in _SECRET_PATTERNS]",
+    "replace": "    return list(_SECRET_PATTERNS)",
+    "tests": "tests/test_logfire_bridge.py"
+  },
+  {
+    "label": "agent prompts and completions are sent, which is Logfire's default and not ours",
+    "file": "src/pocketpaw/observability.py",
+    "find": "        logfire.instrument_pydantic_ai(\n            include_content=include_content,\n            include_binary_content=include_content,\n        )",
+    "replace": "        logfire.instrument_pydantic_ai(\n            include_content=True,\n            include_binary_content=True,\n        )",
+    "tests": "tests/test_logfire_bridge.py"
+  },
+  {
+    "label": "pydantic-ai is never instrumented, so there are logs but no agent spans",
+    "file": "src/pocketpaw/observability.py",
+    "find": "    instrument_pydantic_ai()\n    return True",
+    "replace": "    return True",
+    "tests": "tests/test_logfire_bridge.py"
+  },
+  {
+    "label": "the once-per-process guard is dropped, so every caller reconfigures the process",
+    "file": "src/pocketpaw/observability.py",
+    "find": "    global _CONFIGURED\n    if _CONFIGURED:\n        return True",
+    "replace": "    global _CONFIGURED",
+    "tests": "tests/test_logfire_bridge.py"
+  },
+  {
+    "label": "distributed tracing is left at its default, so a caller can graft spans onto our traces",
+    "file": "src/pocketpaw/observability.py",
+    "find": "            distributed_tracing=False,",
+    "replace": "            distributed_tracing=True,",
+    "tests": "tests/test_logfire_bridge.py"
+  },
+  {
+    "label": "Logfire's own console exporter is left on, so every line prints twice",
+    "file": "src/pocketpaw/observability.py",
+    "find": "            console=False,",
+    "replace": "            console=True,",
+    "tests": "tests/test_logfire_bridge.py"
+  },
+  {
+    "label": "the service name goes back to a literal, so backend and worker are one service",
+    "file": "src/pocketpaw/observability.py",
+    "find": "            service_name=os.environ.get(\"LOGFIRE_SERVICE_NAME\", \"pocketpaw\"),",
+    "replace": "            service_name=\"pocketpaw-pydantic-ai\",",
+    "tests": "tests/test_logfire_bridge.py"
+  },
+  {
+    "label": "the backend stops configuring at all, so a process that never ran setup_logging has no exporter",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        from pocketpaw.observability import configure_observability\n\n        configure_observability()\n        return Instrumentation()",
+    "replace": "        return Instrumentation()",
+    "tests": "tests/test_pydantic_ai_backend.py::test_instrumentation_is_off_by_default_and_configures_logfire_once"
+  }
+]

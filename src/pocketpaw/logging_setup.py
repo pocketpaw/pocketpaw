@@ -3,6 +3,18 @@ Beautiful logging setup using Rich.
 
 Created: 2026-02-02
 Changes:
+  - 2026-09-05: setup_logging can now also send the same records to Pydantic
+    Logfire, behind POCKETPAW_LOGFIRE_ENABLED and off by default. The bridge
+    handler is ADDED to the root's handler list, never installed via
+    basicConfig(handlers=[...]) as Logfire's own docs suggest — that replaces the
+    list and deletes the console handler the scrubbers are attached to. The order
+    is load-bearing and is the reason _install_observability exists: the bridge
+    goes on first, then install_scrubbing_filters() walks the handlers, so the
+    bridge carries the scrubbers too. It is the handler where an unscrubbed line
+    stops being a local stdout leak and becomes an exfiltrated one, because
+    Logfire never scrubs a log message itself (``logfire.msg`` is the first entry
+    in its SAFE_KEYS allowlist) and its default patterns match credential
+    KEYWORDS, not credential formats.
   - 2026-09-05: SecretFilter now scrubs the EXCEPTION and its traceback, not
     just the message and args. A provider SDK that puts a key in an exception
     reached the log through exc_info, which the filter ignored entirely, and
@@ -53,6 +65,17 @@ def _scrub(text: str) -> str:
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub("***REDACTED***", text)
     return text
+
+
+def secret_pattern_strings() -> list[str]:
+    """The credential regexes as plain strings.
+
+    ``logfire.ScrubbingOptions(extra_patterns=...)`` takes a ``Sequence[str]``,
+    not compiled patterns, and passing the compiled objects raises inside
+    logfire — where our own try/except would swallow it and leave Logfire
+    silently unconfigured in production while every mocked test stayed green.
+    """
+    return [pattern.pattern for pattern in _SECRET_PATTERNS]
 
 
 def scrub_log_args(args: Any, scrub: Callable[[str], str]) -> Any:
@@ -182,6 +205,31 @@ def install_scrubbing_filters() -> None:
                 handler.addFilter(scrubber)
 
 
+def _install_observability(level: str) -> None:
+    """Wire Logfire (when enabled), then the scrubbers. THE ORDER IS THE POINT.
+
+    ``install_scrubbing_filters()`` walks the root logger's handler list, so any
+    handler added after it runs carries no scrubbers. The Logfire bridge is
+    precisely the handler that must not be missed: Logfire's own scrubber never
+    looks at a log message (``logfire.msg`` is a SAFE_KEY) and never looks at an
+    exception (``exception.message`` / ``exception.stacktrace`` are SAFE_KEYS
+    too), so our filters are the only thing standing in front of it.
+
+    Imported lazily so this module keeps no import-time dependency on logfire,
+    which lives in the ``pydantic-ai`` extra rather than the base requirements.
+    """
+    from pocketpaw.observability import (
+        configure_observability,
+        install_logfire_bridge,
+        logfire_enabled,
+    )
+
+    if logfire_enabled():
+        configure_observability()
+        install_logfire_bridge(level)
+    install_scrubbing_filters()
+
+
 def _use_rich() -> bool:
     """Rich only for a human at a terminal.
 
@@ -218,7 +266,7 @@ def setup_logging(level: str = "INFO") -> None:
         )
         for noisy in ("httpx", "httpcore", "urllib3", "asyncio", "websockets"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
-        install_scrubbing_filters()
+        _install_observability(level)
         return
 
     try:
@@ -261,4 +309,4 @@ def setup_logging(level: str = "INFO") -> None:
         )
         logging.warning("Rich not installed, using basic logging")
 
-    install_scrubbing_filters()
+    _install_observability(level)

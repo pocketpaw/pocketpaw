@@ -222,6 +222,34 @@ POCKETPAW_WEB_PORT=8888
 POCKETPAW_TOOL_PROFILE=coding
 ```
 
+### Observability (optional)
+
+PocketPaw can send its logs and its agent traces to [Pydantic Logfire](https://pydantic.dev/docs/logfire/),
+or to any OpenTelemetry collector you already run. It is off unless you turn it on.
+
+```bash
+POCKETPAW_LOGFIRE_ENABLED=true
+LOGFIRE_TOKEN=...              # or OTEL_EXPORTER_OTLP_ENDPOINT for your own collector
+LOGFIRE_SERVICE_NAME=pocketpaw # set this per service if you run web and worker separately
+LOGFIRE_ENVIRONMENT=prod
+```
+
+Two things are worth knowing before you turn it on.
+
+**Nothing is exported without a destination.** With the switch on but no
+`LOGFIRE_TOKEN` and no `OTEL_EXPORTER_OTLP_ENDPOINT`, the spans are still built
+and then dropped. That costs a little and buys nothing, so set one or leave the
+switch off.
+
+**Agent prompts and completions are excluded by default.** Logfire's own default
+is to include them, and it does not scrub message content. PocketPaw inverts that
+default: you get the model, token counts, latency and tool names without the
+customer's text leaving your network. Set `POCKETPAW_LOGFIRE_INCLUDE_CONTENT=true`
+if you want the prompts too, and decide where your data is allowed to live first.
+
+Log messages and tracebacks are scrubbed for credential formats and, when PII
+scanning is on, for personal data, before any of it reaches an exporter.
+
 ### Security Hardening
 
 1. **Run as a dedicated user** -- Don't run as root
