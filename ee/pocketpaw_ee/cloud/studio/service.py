@@ -81,6 +81,24 @@ class StudioUpstreamError(Exception):
     router can surface a typed 502 rather than a bare 500."""
 
 
+class StudioRejectedError(Exception):
+    """The provider REFUSED the request — a content-policy hit, a file out of
+    range, a value it will not accept.
+
+    Distinct from ``StudioUpstreamError`` because the two need opposite
+    handling. An upstream error means "we are broken, retry later" and belongs
+    in a 502; a rejection means "this input cannot be used" and belongs in a
+    4xx the user can act on. Reporting the second as the first told the user
+    the service was down when it was working, and told our monitoring that fal
+    was failing when it was doing its job.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None, field: str | None = None):
+        super().__init__(message)
+        self.code = code
+        self.field = field
+
+
 # ── One-tap styles (mirrors the frontend mock so the pickers match) ──────────
 
 STYLES: list[dict[str, Any]] = [
@@ -1271,6 +1289,8 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
             audio_urls=reference_audio,
             video_urls=reference_video,
         )
+    except fal_video.FalVideoRejected as exc:
+        raise StudioRejectedError(str(exc), code=exc.code, field=exc.field) from exc
     except fal_video.FalVideoError as exc:
         raise StudioUpstreamError(str(exc)) from exc
 
