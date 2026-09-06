@@ -1,5 +1,11 @@
 """Mongo-backed metadata store, workspace-scoped.
 
+2026-09-05 (files vault): ``set_library_metadata`` takes an optional
+``link_names`` so the FileReady listener persists a note's wikilink targets in
+the same write as its tags. Added ``iter_link_rows`` — the one workspace-scoped
+read the /files links + graph endpoints use (tri-state ``pocket_id`` like
+``list_by_workspace``); yields the few fields link resolution needs.
+
 2026-08-29 (T0 "Persist the extracted text"): added ``set_extracted_text`` —
 the workspace-scoped setter ``uploads.extracted_text`` uses to point a row at
 the derived blob holding its ``ExtractionResult``, shaped exactly like
@@ -161,6 +167,7 @@ class MongoFileStore:
         collections: list[str] | None = None,
         hide_from_ai: bool | None = None,
         summary: str | None = None,
+        link_names: list[str] | None = None,
     ) -> FileUpload | None:
         """Set library metadata on one live row, workspace-scoped (FL-1, FC-1).
 
@@ -186,6 +193,8 @@ class MongoFileStore:
             doc.hide_from_ai = bool(hide_from_ai)
         if summary is not None:
             doc.summary = str(summary)
+        if link_names is not None:
+            doc.link_names = [str(n) for n in link_names]
         await doc.save()
         return doc
 
@@ -559,6 +568,38 @@ class MongoFileStore:
                 )
             )
         return out
+
+    async def iter_link_rows(
+        self,
+        workspace: str,
+        *,
+        pocket_id: str | None | _Sentinel = None,
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]:
+        """Live rows with the fields link resolution needs, newest first.
+
+        Same tri-state ``pocket_id`` as :meth:`list_by_workspace`. The
+        workspace filter always applies. Fetches ``limit + 1`` so a caller
+        can tell whether the library was truncated.
+        """
+        query: dict = {"workspace": workspace, "deleted_at": None}
+        if pocket_id is LIST_WORKSPACE_ONLY:
+            query["pocket_id"] = None
+        elif isinstance(pocket_id, str):
+            query["pocket_id"] = pocket_id
+        docs = await FileUpload.find(query).sort([("createdAt", -1)]).limit(limit + 1).to_list()
+        return [
+            {
+                "file_id": d.file_id,
+                "filename": d.filename,
+                "mime": d.mime,
+                "tags": list(d.tags or []),
+                "collections": list(d.collections or []),
+                "link_names": list(getattr(d, "link_names", None) or []),
+                "created_at": d.createdAt,
+            }
+            for d in docs
+        ]
 
     async def count_by_workspace(
         self,

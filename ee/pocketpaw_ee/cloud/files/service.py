@@ -8,6 +8,12 @@ pockets have a connected Drive account. Once that lands we can fan a
 Drive listing in here without changing the response shape the FE already
 consumes. See ``docs/plans/cluster-E-reality.md`` for the handshake.
 
+2026-09-05 (files vault, feat/files-links): ``file_links`` and ``files_graph``
+resolve the ``[[wikilinks]]`` the FileReady listener stored in
+``FileUpload.link_names``. Resolution is by ``normalize_link_name(filename)``
+over the live rows of the file's own scope (its pocket, or workspace-only),
+so pocket-private filenames never surface as another scope's backlinks.
+
 2026-05-03 (Stage 3.E "Files as Knowledge"): ``list_unified`` accepts an
 optional ``pocket_id``. When set, the chat-uploads slice is filtered to
 that pocket only. When ``None`` (the default), the listing returns
@@ -34,17 +40,31 @@ only need the flat list keep working via ``page.files``.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
 from pocketpaw.uploads.file_store import FileRecord
+from pocketpaw_ee.cloud._core.errors import NotFound
+from pocketpaw_ee.cloud.files.dto import (
+    Backlink,
+    FileLinksResponse,
+    FilesGraphResponse,
+    GraphEdge,
+    GraphNode,
+    LinkTarget,
+)
+from pocketpaw_ee.cloud.uploads.links import normalize_link_name
 from pocketpaw_ee.cloud.uploads.mongo_store import LIST_WORKSPACE_ONLY, MongoFileStore
 
 logger = logging.getLogger(__name__)
 
 
 FileSource = Literal["chat", "local", "drive"]
+
+# Files vault: how many live files one links/graph read considers.
+GRAPH_CAP = 2000
 
 
 @dataclass
@@ -163,6 +183,18 @@ def _dedupe(files: list[UnifiedFile]) -> list[UnifiedFile]:
     return out
 
 
+def _stem_map(rows: list[dict]) -> dict[str, dict]:
+    """``normalize_link_name(filename)`` -> row. Rows arrive newest first, so
+    the first occurrence wins.
+    # ponytail: two files sharing a stem resolve to the newest; a per-folder
+    # or path-qualified resolver is the upgrade if that ever bites.
+    """
+    out: dict[str, dict] = {}
+    for r in rows:
+        out.setdefault(normalize_link_name(r["filename"]), r)
+    return out
+
+
 class UnifiedFilesService:
     """Stateless façade that pulls each source and merges the results."""
 
@@ -209,6 +241,88 @@ class UnifiedFilesService:
         if pocket_id:
             return await self._uploads.count_by_workspace(workspace_id, pocket_id=pocket_id)
         return await self._uploads.count_by_workspace(workspace_id, pocket_id=LIST_WORKSPACE_ONLY)
+
+    async def file_links(
+        self,
+        workspace_id: str,
+        file_id: str,
+        *,
+        can_read_pocket: Callable[[str], Awaitable[bool]] | None = None,
+    ) -> FileLinksResponse:
+        """Outgoing wikilink targets + backlinks for one file (files vault).
+
+        Tenant-filtered on the row lookup and on the scan; a missing or
+        cross-workspace id is ``file.not_found``.
+
+        ``can_read_pocket`` is the caller's pocket-membership check. It is
+        REQUIRED in practice even though the signature allows ``None``: the
+        scan below runs in the file's own pocket scope, so without it a
+        workspace member outside a private pocket reads that pocket's
+        filenames out of the links and backlinks. A pocket the caller cannot
+        read answers ``file.not_found``, same as a row in another workspace —
+        the caller asked for a file, and a file they may not read is not there.
+        """
+        doc = await self._uploads.get_doc_scoped(file_id, workspace_id)
+        if doc is None:
+            raise NotFound("file", file_id)
+        if doc.pocket_id and (can_read_pocket is None or not await can_read_pocket(doc.pocket_id)):
+            raise NotFound("file", file_id)
+        rows = await self._uploads.iter_link_rows(
+            workspace_id, pocket_id=doc.pocket_id or LIST_WORKSPACE_ONLY, limit=GRAPH_CAP
+        )
+        by_stem = _stem_map(rows)
+        outgoing = []
+        for name in doc.link_names or []:
+            hit = by_stem.get(name)
+            outgoing.append(
+                LinkTarget(
+                    name=name,
+                    file_id=hit["file_id"] if hit else None,
+                    filename=hit["filename"] if hit else None,
+                )
+            )
+        my_stem = normalize_link_name(doc.filename)
+        backlinks = [
+            Backlink(file_id=r["file_id"], filename=r["filename"], mime=r["mime"])
+            for r in rows
+            if r["file_id"] != doc.file_id and my_stem in r["link_names"]
+        ]
+        return FileLinksResponse(outgoing=outgoing, backlinks=backlinks)
+
+    async def files_graph(
+        self, workspace_id: str, *, pocket_id: str | None = None
+    ) -> FilesGraphResponse:
+        """The library as nodes + link edges, same scope rules as ``GET /files``."""
+        rows = await self._uploads.iter_link_rows(
+            workspace_id, pocket_id=pocket_id or LIST_WORKSPACE_ONLY, limit=GRAPH_CAP
+        )
+        truncated = len(rows) > GRAPH_CAP
+        rows = rows[:GRAPH_CAP]
+        by_stem = _stem_map(rows)
+        edges: dict[tuple[str, str], None] = {}
+        ghosts: dict[str, None] = {}
+        for r in rows:
+            for name in r["link_names"]:
+                hit = by_stem.get(name)
+                if hit is None:
+                    ghosts[name] = None
+                else:
+                    edges[(r["file_id"], hit["file_id"])] = None
+        return FilesGraphResponse(
+            nodes=[
+                GraphNode(
+                    id=r["file_id"],
+                    filename=r["filename"],
+                    mime=r["mime"] or "application/octet-stream",
+                    tags=r["tags"],
+                    collections=r["collections"],
+                )
+                for r in rows
+            ],
+            edges=[GraphEdge(source=s, target=t) for s, t in edges],
+            ghosts=list(ghosts),
+            truncated=truncated,
+        )
 
     async def list_unified(
         self,

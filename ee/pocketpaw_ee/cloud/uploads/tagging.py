@@ -141,15 +141,19 @@ def _normalize(raw: str) -> str:
     return s
 
 
-def _clean_tags(candidates: Iterable[str]) -> list[str]:
-    """Normalize, filter, and dedup a candidate tag stream (order-preserving)."""
+def _clean_tags(candidates: Iterable[str], *, min_len: int = _MIN_TOKEN_LEN) -> list[str]:
+    """Normalize, filter, and dedup a candidate tag stream (order-preserving).
+
+    ``min_len`` is the noise floor for derived keywords; a tag a person typed
+    (``#q3``, ``#ai``) passes a lower one, see :func:`merge_tags`.
+    """
     seen: set[str] = set()
     out: list[str] = []
     for cand in candidates:
         if not isinstance(cand, str):
             continue
         tag = _normalize(cand)
-        if not tag or len(tag) < _MIN_TOKEN_LEN or len(tag) > _MAX_TAG_LEN:
+        if not tag or len(tag) < min_len or len(tag) > _MAX_TAG_LEN:
             continue
         if tag in seen:
             continue
@@ -240,8 +244,14 @@ def derive_tags(
     return _clean_tags(ordered)[:limit]
 
 
-def merge_tags(existing: Iterable[str] | None, derived: Iterable[str]) -> list[str]:
+def merge_tags(
+    existing: Iterable[str] | None, derived: Iterable[str], *, min_len: int = _MIN_TOKEN_LEN
+) -> list[str]:
     """Union existing (user) tags with newly derived ones — existing first.
+
+    ``min_len`` applies to ``derived`` only: the 3-char floor exists to keep
+    frequency-keyword noise out, and a ``#q3`` a person wrote in a note is not
+    noise. Existing tags are never re-filtered harder than they were stored.
 
     Re-indexing a file must never drop a tag a user typed. Existing tags keep
     their original order and win on collision; derived tags are appended in
@@ -250,11 +260,11 @@ def merge_tags(existing: Iterable[str] | None, derived: Iterable[str]) -> list[s
     """
     seen: set[str] = set()
     out: list[str] = []
-    for tag in _clean_tags(existing or []):
+    for tag in _clean_tags(existing or [], min_len=1):
         if tag not in seen:
             seen.add(tag)
             out.append(tag)
-    for tag in _clean_tags(derived):
+    for tag in _clean_tags(derived, min_len=min_len):
         if tag not in seen:
             seen.add(tag)
             out.append(tag)

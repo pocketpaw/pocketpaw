@@ -1,4 +1,12 @@
 # service.py — FileVersions service: versioned cloud file-write storage spine.
+# Updated: 2026-09-05 (files vault, feat/files-links) — ``write_file`` (create /
+#   revive path) and ``update_file_content`` now ALSO emit ``FileReady`` with the
+#   payload shape ``uploads/service.py`` uses, so a note made or saved in the
+#   editor is extracted, tagged, linked and KB-indexed exactly like an upload.
+#   The payload's ``file_id`` is the STORED ``FileUpload.file_id`` (namespaced
+#   ``ws:path`` for editor files, the bare uuid for Library rows), never the
+#   client path — the listener resolves the row by that id and would otherwise
+#   silently do nothing. A no-op update (same content hash) emits nothing.
 # Created: 2026-06-26 (ART-1) — ported from dewani12's origin/feature/files,
 #   imports migrated ee.cloud.* -> pocketpaw_ee.cloud.*. Storage core only
 #   (write_file, update_file_content, list_versions, get_version); Slice-D
@@ -105,7 +113,7 @@ from pocketpaw.uploads.factory import build_adapter
 from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, PreconditionFailed
 from pocketpaw_ee.cloud._core.realtime.emit import emit
-from pocketpaw_ee.cloud._core.realtime.events import Event
+from pocketpaw_ee.cloud._core.realtime.events import Event, FileReady
 from pocketpaw_ee.cloud.file_versions.domain import FileVersion
 from pocketpaw_ee.cloud.file_versions.dto import (
     DiffResponse,
@@ -211,6 +219,27 @@ def _storage_id(workspace_id: str, path: str) -> str:
     stays injective even when ``path`` itself contains a colon.
     """
     return f"{workspace_id}:{path}"
+
+
+def _file_ready_payload(doc: FileUpload) -> dict:
+    """The ``FileReady`` payload the uploads pipeline emits, built from the row.
+
+    Keys mirror ``uploads/service.py`` so the KB listener needs no second code
+    path. ``file_id`` MUST be the stored id (``doc.file_id``): the listener
+    loads the row by it.
+    """
+    data: dict = {
+        "workspace_id": doc.workspace,
+        "file_id": doc.file_id,
+        "filename": doc.filename,
+        "mime": doc.mime,
+        "size": doc.size,
+        "storage_key": doc.storage_key,
+        "url": f"/api/v1/uploads/{doc.file_id}",
+    }
+    if doc.pocket_id:
+        data["pocket_id"] = doc.pocket_id
+    return data
 
 
 def _guess_mime(filename: str) -> str:
@@ -468,6 +497,8 @@ async def write_file(
         )
     )
 
+    await emit(FileReady(data=_file_ready_payload(doc)))
+
     logger.info("file %s created via write (version 1)", path)
 
     return WriteFileResponse(
@@ -604,6 +635,8 @@ async def update_file_content(
             },
         )
     )
+
+    await emit(FileReady(data=_file_ready_payload(doc)))
 
     logger.info(
         "file %s updated to version %d by %s:%s",

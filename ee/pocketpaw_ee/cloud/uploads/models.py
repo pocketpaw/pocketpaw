@@ -1,5 +1,12 @@
 """EE FileUpload document — Mongo metadata for blobs stored via StorageAdapter.
 
+2026-09-05 — files vault (feat/files-links). Added ``link_names`` (list[str],
+default empty): the normalized ``[[wikilink]]`` targets the FileReady listener
+parses out of a markdown / plain-text note. Resolved to files at read time by
+``normalize_link_name(filename)``, so link order and renames never need a
+rewrite here. Indexed ``(workspace, link_names)`` for the backlinks read. Beanie
+field-add with a default, legacy rows read back ``[]``.
+
 2026-08-29 — T0 "Persist the extracted text". Added ``extracted_text_key``
 (``str | None``) and ``extracted_text_version`` (``int | None``), both default
 ``None``. Together they point at ONE derived blob holding the serialized
@@ -178,6 +185,9 @@ class FileUpload(TimestampedDocument):
     # ingest — see the module docstring for why a half-provisioned agent
     # deliberately leaves this ``None``.
     agent_id: str | None = None
+    # Normalized wikilink targets parsed from note text (files vault). Empty for
+    # anything that is not a text note.
+    link_names: list[str] = Field(default_factory=list)
 
     class Settings:
         name = "file_uploads"
@@ -191,6 +201,8 @@ class FileUpload(TimestampedDocument):
             # FL-1: library filtering by tag / collection within a workspace.
             [("workspace", 1), ("tags", 1)],
             [("workspace", 1), ("collections", 1)],
+            # Files vault: backlinks ("which notes link to this name").
+            [("workspace", 1), ("link_names", 1)],
         ]
 
 

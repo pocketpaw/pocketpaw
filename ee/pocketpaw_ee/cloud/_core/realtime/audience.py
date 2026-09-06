@@ -235,6 +235,14 @@ class AudienceResolver:
             return []
 
         # --- Files --------------------------------------------------------------
+        # A file's metadata changed after the fact (tags, links, summary from
+        # the ingest listener; content from the versioned editor). The Library
+        # is per-workspace, so every member's /files refetches the row.
+        if t == "file.updated":
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
         if t in {"file.ready", "file.deleted"}:
             # Chat-scoped uploads broadcast to the chat group's members so the
             # timeline updates live. Workspace-only uploads (no chat_id) don't
