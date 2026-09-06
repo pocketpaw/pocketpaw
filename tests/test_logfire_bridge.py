@@ -463,10 +463,19 @@ def test_every_integration_in_the_default_set_attaches(monkeypatch: pytest.Monke
         "mcp",
         "httpx",
         "aiohttp_client",
-        "redis",
         "pymongo",
         "system_metrics",
     }, f"the default coverage changed: {attached}"
+
+    assert "redis" not in attached, (
+        "redis is known but off by default: two arq lanes poll their queues on "
+        "arq's timer, so an idle deployment emits roughly six command spans a "
+        "second forever and buries the traces Logfire was turned on to read"
+    )
+    assert "redis" in observability._instrumentations(), (
+        "it must stay SELECTABLE — POCKETPAW_LOGFIRE_INSTRUMENT is how someone "
+        "debugging the queue reaches it for a session"
+    )
 
 
 def test_the_capture_flags_that_would_export_customer_data_are_off(
@@ -484,7 +493,9 @@ def test_the_capture_flags_that_would_export_customer_data_are_off(
 
     calls: dict[str, Any] = {}
     monkeypatch.setitem(sys.modules, "logfire", _recording_logfire(calls))
-    monkeypatch.delenv("POCKETPAW_LOGFIRE_INSTRUMENT", raising=False)
+    # redis is off by default, and its capture flag still has to be right for
+    # the session someone turns it on for.
+    monkeypatch.setenv("POCKETPAW_LOGFIRE_INSTRUMENT", "httpx,redis")
 
     instrument_everything()
 
@@ -564,7 +575,9 @@ def test_one_broken_integration_does_not_stop_the_others(
     attached = instrument_everything()
 
     assert "httpx" not in attached
-    assert "redis" in attached, "a missing optional package took the rest down with it"
+    # A witness that comes AFTER httpx in the registry, so it can only be here
+    # if the loop carried on past the failure rather than stopping at it.
+    assert "pymongo" in attached, "a missing optional package took the rest down with it"
 
 
 def test_fastapi_is_not_instrumented_with_the_switch_off(

@@ -165,6 +165,9 @@ def _instrumentations() -> dict[str, Any]:
     ledger all run on SQLite and would emit a span per statement, which adds little
     over the operation span already wrapping them and would dominate the bill.
     ``POCKETPAW_LOGFIRE_INSTRUMENT`` can name them back in.
+
+    Known but off by default: redis, for the same reason measured rather than
+    predicted. See _DEFAULT_OFF.
     """
     import logfire
 
@@ -183,7 +186,8 @@ def _instrumentations() -> dict[str, Any]:
         # identically in a log line and are one attribute apart in a span.
         "httpx": lambda: logfire.instrument_httpx(capture_headers=False),
         "aiohttp_client": logfire.instrument_aiohttp_client,
-        # The arq queues and the run stream transport.
+        # The arq queues and the run stream transport. OFF BY DEFAULT — see
+        # _DEFAULT_OFF. Name it in POCKETPAW_LOGFIRE_INSTRUMENT to debug the queue.
         "redis": lambda: logfire.instrument_redis(capture_statement=False),
         # Mongo, under both motor and beanie.
         "pymongo": logfire.instrument_pymongo,
@@ -192,6 +196,29 @@ def _instrumentations() -> dict[str, Any]:
         # "was it the code or was it the box" without an SSH session.
         "system_metrics": logfire.instrument_system_metrics,
     }
+
+
+#: Known integrations that are NOT attached unless named explicitly. Same
+#: argument as sqlite3 and sqlalchemy above, but this one was measured in
+#: production rather than predicted.
+#:
+#: Redis here is dominated by polling that no one is debugging. The worker
+#: supervisor runs two arq lanes in one process and each polls its queue on
+#: arq's own timer, so an IDLE deployment emits a steady ZRANGEBYSCORE, ZCARD
+#: and PSETEX per lane per tick — roughly six spans a second, forever, per
+#: replica, whether or not a single job exists. The run-stream consumer's
+#: blocking XREADGROUP adds a multi-second span per block on top.
+#:
+#: Two costs, and the second is the one that matters. Logfire meters per span,
+#: so idle polling is a standing bill. And the poll spans bury the traces the
+#: tool was turned on to read: a chat run's trace is a handful of spans in a
+#: minute-wide window holding several hundred ZRANGEBYSCOREs.
+#:
+#: Nothing is lost by default. A slow enqueue or a slow stream write already
+#: sits inside the application span that wraps it; this only drops the command
+#: span underneath. Turn it back on for a session when the QUEUE ITSELF is the
+#: suspect: POCKETPAW_LOGFIRE_INSTRUMENT=<the others>,redis
+_DEFAULT_OFF = frozenset({"redis"})
 
 
 def _instrument(name: str, call: Any) -> bool:
@@ -212,17 +239,22 @@ def _instrument(name: str, call: Any) -> bool:
 
 
 def _selected_instrumentations() -> list[str]:
-    """Which integrations to attach. Everything, unless told otherwise.
+    """Which integrations to attach: everything except _DEFAULT_OFF.
 
     ``POCKETPAW_LOGFIRE_INSTRUMENT`` replaces the default set with an explicit
     comma-separated list, and ``none`` disables all of them. It exists because
     spans are metered per unit: if one integration turns out to dominate the bill,
     dropping it should not need a deploy of new code.
+
+    An explicit list is checked against everything KNOWN, not against the default
+    set, so it can name a _DEFAULT_OFF integration back on. That asymmetry is the
+    point: the default is what a deployment should run with, and the env var is
+    how someone debugging reaches past it for a session.
     """
     raw = os.environ.get("POCKETPAW_LOGFIRE_INSTRUMENT", "").strip()
     known = _instrumentations()
     if not raw:
-        return list(known)
+        return [name for name in known if name not in _DEFAULT_OFF]
     if raw.lower() == "none":
         return []
     wanted = [part.strip() for part in raw.split(",") if part.strip()]
