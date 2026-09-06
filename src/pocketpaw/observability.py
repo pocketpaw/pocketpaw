@@ -265,6 +265,18 @@ def instrument_fastapi_app(app: Any) -> bool:
     configure time. Call it once the routers are mounted — the instrumentor reads
     the route table to label spans by route TEMPLATE rather than by path, which is
     what keeps ``/api/v1/pockets/{id}`` one row instead of one row per pocket.
+
+    THE TRY/EXCEPT BELOW IS NOT A SAFETY NET FOR THE REQUEST PATH. It catches a
+    failure to *install* the instrumentation. What this call installs is ASGI
+    middleware that then runs on every request, outside this function and outside
+    any guard here, so a bug in it takes the whole API down while this function
+    reports success. That is not theoretical: reading the route table is exactly
+    where it broke. Under fastapi>=0.137 ``app.routes`` holds ``_IncludedRouter``
+    objects with no ``.path``, the instrumentor read it anyway on every CORS
+    preflight, and production served 163 preflight 500s that the browser reported
+    as CORS failures. Held off by the fastapi ceiling in pyproject; see
+    tests/test_fastapi_version_cap.py. Treat anything this installs as
+    load-bearing, whatever the docstring on observability says about it not being.
     """
     if not logfire_enabled():
         return False

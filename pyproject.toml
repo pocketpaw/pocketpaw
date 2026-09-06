@@ -60,7 +60,22 @@ dependencies = [
     # Dashboard (default mode — must be in core so `pip install pocketpaw` just works)
     "uvicorn[standard]>=0.31.1",
     "jinja2>=3.1.0",
-    "fastapi>=0.134.0",   # fastapi 0.134.0 first allowed starlette 1.0.0 (dropped upper bound)
+    # Lower bound: 0.134.0 first allowed starlette 1.0.0 (dropped its upper bound).
+    # Upper bound: 0.137 stopped flattening include_router()'s routes into
+    # app.routes and appends an _IncludedRouter with no `.path` instead.
+    # opentelemetry-instrumentation-fastapi's _get_route_details reads `.path`
+    # unconditionally on a partial match (path matches, method does not), which
+    # is every CORS preflight. The OTel ASGI middleware runs on every request,
+    # so under fastapi>=0.137 each OPTIONS returns 500 and the browser reports
+    # it as a CORS failure. Seen in production 2026-09-06: 163 preflight 500s
+    # on /chat/groups, /auth/ws/ticket, /agents and /auth/me.
+    #
+    # The real fix is opentelemetry-instrumentation-fastapi>=0.64b0, which
+    # handles both match shapes. We cannot take it: logfire pins
+    # opentelemetry-sdk<1.43.0 and 0.64b0 needs >=1.43 (pydantic/logfire#2041).
+    # LIFT THIS BOUND when that ceiling moves, not before. Gated by
+    # tests/test_fastapi_version_cap.py.
+    "fastapi>=0.134.0,<0.137",
     "qrcode[pil]>=7.4",
     "python-multipart>=0.0.22",
     # Logging & CLI
@@ -174,9 +189,10 @@ pydantic-ai = [
     #
     # The ``mcp`` extra pulls fastmcp, which moves ``starlette`` to the 1.x
     # line. That is INSIDE this project's declared range, not a violation of it:
-    # the core ``fastapi>=0.134.0`` pin exists precisely because 0.134.0 dropped
-    # starlette's upper bound, and fastapi 0.135.x requires only
-    # ``starlette>=0.46.0``.
+    # the core ``fastapi>=0.134.0,<0.137`` pin has 0.134.0 as its floor precisely
+    # because 0.134.0 dropped starlette's upper bound, and fastapi 0.135.x
+    # requires only ``starlette>=0.46.0``. The ceiling is unrelated to starlette
+    # — see the fastapi entry above.
     "pydantic-ai-slim[openai,mcp]==2.18.0",
     # Harness capabilities (compaction, subagents, skills, planning, tool
     # output limits, step persistence). 0.11.0 is likewise the newest release
