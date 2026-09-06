@@ -24,6 +24,17 @@ description: |
 
 # Build a Paw Site — the marketing landing brain
 
+<!--
+  Updated: 2026-09-06 (feat/fx-skill-amendments): added the "Sections from
+  paw-fx" loop to the raw-HTML track (search_effects / list_effect_categories →
+  get_effect → write `files` verbatim into `source`, place `snippet`, follow
+  `usage`), plus the two things an agent gets wrong: the snippet is a finished
+  section that is tuned through `--fx-*` and `options` rather than re-styled,
+  and its `./_fx/...` paths are page-relative so a nested page needs a different
+  prefix. The Related tools entry for the fx server already existed; this is the
+  working loop behind it. Nothing on the copy-only path changed.
+-->
+
 You're building a **Paw Site**: a real, standalone marketing website that
 gets rendered **statically** (server-side, `csr=false`) and deployed to
 the edge.
@@ -65,6 +76,34 @@ the page must be complete on its own (inline or linked CSS/JS, real copy —
 never "TBD"/"Lorem ipsum"). It returns `{ ok, pocket_id, pocket }`; hand
 `pocket_id` to `publish` exactly like the copy path (STEP 3). If `ok` is
 false, relay the error.
+
+### Sections from paw-fx
+
+Before you hand-write a hero, an animated background or a scroll effect, check
+the registry. It serves finished sections: WebGL and shader backgrounds,
+three.js heroes, particle fields, scroll reveals, kinetic text, cursor effects,
+page transitions. On this engine every one of them is available, vendored
+dependency and all.
+
+1. `mcp__pocketpaw_fx__search_effects("<what you want>")`, or
+   `list_effect_categories()` to browse what exists.
+2. `mcp__pocketpaw_fx__get_effect(name)` returns `files`, `snippet` and `usage`.
+3. Write **every** entry of `files` into the `source` map at its given `path`,
+   verbatim. The paths already carry their `_fx/` prefix. Do not rename them, do
+   not reformat the code, do not "improve" it.
+4. Place `snippet` where that section goes in the page markup.
+5. Follow `usage` for the stylesheet `<link>` and the `<script type="module">`
+   mount call.
+
+**The snippet already carries its own resting state.** It is a finished section,
+not a fragment. Do not wrap it in your own hero markup, and do not restyle it
+into your palette by editing the effect's CSS. Tune it through the documented
+`--fx-*` custom properties and the effect's `options` instead.
+
+**The `_fx/` paths in `snippet` and `usage` are written page-relative
+(`./_fx/...`), which assumes the page sits at the site root.** Put the section on
+a nested page such as `/blog/post.html` and you have to adjust the prefix too, or
+the stylesheet and the module both 404.
 
 ### The lead form on this track
 
