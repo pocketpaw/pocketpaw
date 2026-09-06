@@ -1,0 +1,44 @@
+[
+  {
+    "label": "take the workspace from a header again on the write route",
+    "file": "ee/pocketpaw_ee/cloud/daytona/router.py",
+    "find": "    req: WriteFileRequest,\n    workspace_id: str = Depends(current_workspace_id),\n) -> FileActionResponse:\n    \"\"\"Create or overwrite a file in a project subdirectory in the workspace VM.\"\"\"",
+    "replace": "    req: WriteFileRequest,\n    http_request: Request = None,\n) -> FileActionResponse:\n    \"\"\"Create or overwrite a file in a project subdirectory in the workspace VM.\"\"\"\n    workspace_id = http_request.headers.get(\"X-Workspace-Id\", \"default\")",
+    "tests": ["tests/cloud/test_daytona_router_auth.py"]
+  },
+  {
+    "label": "drop the session dependency from the destroy route",
+    "file": "ee/pocketpaw_ee/cloud/daytona/router.py",
+    "find": "async def delete_workspace_vm(\n    workspace_id: str = Depends(current_workspace_id),\n) -> dict:",
+    "replace": "async def delete_workspace_vm(\n    workspace_id: str = \"default\",\n) -> dict:",
+    "tests": ["tests/cloud/test_daytona_router_auth.py"]
+  },
+  {
+    "label": "return the joined path without the containment check",
+    "file": "ee/pocketpaw_ee/cloud/daytona/router.py",
+    "find": "    prefix = root if root.endswith(\"/\") else root + \"/\"\n    if joined != root and not joined.startswith(prefix):\n        raise HTTPException(status_code=403, detail=\"Path traversal denied\")\n    return joined",
+    "replace": "    return joined",
+    "tests": ["tests/cloud/test_daytona_vm_path_containment.py"]
+  },
+  {
+    "label": "compare the prefix without the trailing separator",
+    "file": "ee/pocketpaw_ee/cloud/daytona/router.py",
+    "find": "    prefix = root if root.endswith(\"/\") else root + \"/\"\n    if joined != root and not joined.startswith(prefix):",
+    "replace": "    prefix = root\n    if joined != root and not joined.startswith(prefix):",
+    "tests": ["tests/cloud/test_daytona_vm_path_containment.py"]
+  },
+  {
+    "label": "strip slashes instead of normalising, the original bug",
+    "file": "ee/pocketpaw_ee/cloud/daytona/router.py",
+    "find": "    joined = posixpath.normpath(posixpath.join(root, clean))",
+    "replace": "    joined = f\"{root}/{clean}\"",
+    "tests": ["tests/cloud/test_daytona_vm_path_containment.py"]
+  },
+  {
+    "label": "let the project name walk the root",
+    "file": "ee/pocketpaw_ee/cloud/daytona/router.py",
+    "find": "    if project_name in {\"\", \".\", \"..\"} or \"/\" in project_name or \"\\\\\" in project_name:\n        raise HTTPException(status_code=403, detail=\"Invalid project name\")",
+    "replace": "    pass",
+    "tests": ["tests/cloud/test_daytona_vm_path_containment.py"]
+  }
+]
