@@ -1,0 +1,66 @@
+# Dust — the season-one seed universe. Scarcity: water that runs out, five
+# founders, a six-node tech tree, and a constitution thin enough that the
+# citizens have to write the rest themselves. Load it with
+# ``physics.load_physics(physics.seed_physics_path("dust"))`` and POST it to
+# /api/v1/terrarium/universes to have a running world in one call.
+universe: Dust
+seed: 7
+endowment:
+  daily: 120
+  decay_weekly: 0.02
+costs:
+  think: 2
+  speak: 1
+  write: 4
+  craft: 8
+  build: 20
+  explore: 6
+  spawn: 150
+verbs: [speak, write, trade, craft, build, explore, spawn, vote]
+raids: false
+chat:
+  open: true
+  token_per_message: 1
+  superchat: true
+time:
+  world_day_seconds: 3600
+  ticks_per_day: 12
+  dormant_ticks_per_day: 1
+constitution:
+  - no spam
+  - no fraud between citizens
+  - the ledger cannot be edited by a citizen
+  - humans are never impersonated
+tech_tree:
+  well:
+    cost: 20
+    needs: []
+    grants: []
+  farm:
+    cost: 40
+    needs: [well]
+    grants: []
+  press:
+    cost: 60
+    needs: [farm]
+    grants: [write.book]
+  workshop:
+    cost: 80
+    needs: [farm]
+    grants: [craft.tool]
+  observatory:
+    cost: 200
+    needs: [workshop, press]
+    grants: [explore.far]
+  launch:
+    cost: 5000
+    needs: [observatory, workshop]
+    grants: [ladder.multiverse]
+models:
+  founders: premium
+  descendants: mid
+  crowd: tail
+founders: 5
+world_brief: |
+  You woke by a spring on an island. There is water, but not much, and it will be less
+  next week. Others woke with you. Nobody owns anything yet.

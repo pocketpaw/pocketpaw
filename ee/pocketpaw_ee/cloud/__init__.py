@@ -575,6 +575,21 @@ def mount_cloud(app: FastAPI) -> None:
 
     app.include_router(belt_mandates_router, prefix="/api/v1")
 
+    # TERRARIUM — the agent-civilization runtime (/api/v1/terrarium). TWO
+    # routers with different auth boundaries, mounted separately on purpose so
+    # no ambient dependency can leak between them:
+    #   * ``terrarium_router`` — the workspace surface: license + RBAC
+    #     (terrarium.read / terrarium.manage), create / tick / read / speak /
+    #     pledge.
+    #   * ``terrarium_public_router`` — ANONYMOUS, READ-ONLY, and dark unless
+    #     BOTH ``TERRARIUM_PUBLIC_ENABLED`` is set AND the universe itself is
+    #     flagged public. Default OFF, fail-closed, no write route ever.
+    from pocketpaw_ee.terrarium.router import public_router as terrarium_public_router
+    from pocketpaw_ee.terrarium.router import router as terrarium_router
+
+    app.include_router(terrarium_router, prefix="/api/v1")
+    app.include_router(terrarium_public_router, prefix="/api/v1")
+
     # /ship managed deploys (SHIP-3, feat/ship-3-cloud-entity). The
     # workspace-scoped /api/v1/ship surface: provision a box, register + deploy
     # an app, route a domain, create a database, read logs + box health. The two
