@@ -123,3 +123,18 @@ async def test_a_public_citizen_from_another_universe_is_a_404(client, monkeypat
 async def test_an_unknown_universe_id_is_a_404_with_the_flag_on(client, monkeypatch):
     monkeypatch.setenv("TERRARIUM_PUBLIC_ENABLED", "1")
     assert client.get("/terrarium/public/universes/000000000000000000000000").status_code == 404
+
+
+async def test_a_malformed_id_404s_rather_than_500s_on_the_public_surface(client, monkeypatch):
+    """Beanie's ``get`` raises InvalidId on a non-ObjectId string, which is not a
+    CloudError. A 500 here is both a bad response and a fingerprint, so every
+    lookup funnels through a guard that turns a malformed id into a 404."""
+    monkeypatch.setenv("TERRARIUM_PUBLIC_ENABLED", "1")
+    uni = create_universe(client, public=True, founders=1)
+    for path in PUBLIC_PATHS[1:]:
+        res = client.get(path.format(id="../../etc/passwd"))
+        assert res.status_code == 404, (path, res.status_code)
+        res = client.get(path.format(id="not-an-object-id"))
+        assert res.status_code == 404, (path, res.status_code)
+    res = client.get(f"/terrarium/public/universes/{uni['id']}/citizens/not-an-object-id")
+    assert res.status_code == 404, res.text

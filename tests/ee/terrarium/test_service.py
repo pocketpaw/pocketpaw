@@ -18,7 +18,7 @@ pytest.importorskip("pocketpaw_ee")
 pytest.importorskip("mongomock_motor")
 
 from pocketpaw_ee.terrarium import llm as citizen_llm  # noqa: E402
-from pocketpaw_ee.terrarium import weather  # noqa: E402
+from pocketpaw_ee.terrarium import service, weather  # noqa: E402
 
 from .conftest import create_universe  # noqa: E402
 
@@ -58,13 +58,22 @@ async def test_create_seeds_founders_with_souls_and_no_charter(client):
         assert set(c["ocean"]) == {"O", "C", "E", "A", "N"}
 
 
-async def test_create_returns_an_instinct_action_id(client):
-    res = client.post(
-        "/terrarium/universes",
-        json={"physics": __import__("tests.ee.terrarium.conftest", fromlist=["x"]).dust_physics()},
-    )
+async def test_create_files_a_real_world_create_action(client, instinct_store):
+    """The gate is read back from the store — ``_propose`` swallows failures and
+    returns None, so asserting the key exists would pass on a silent failure."""
+    from .conftest import dust_physics
+
+    res = client.post("/terrarium/universes", json={"physics": dust_physics()})
     assert res.status_code == 200, res.text
-    assert "action_id" in res.json()
+    action_id = res.json()["action_id"]
+    assert action_id, "world_create was never filed"
+
+    action = await instinct_store.get_action(action_id)
+    assert action is not None
+    blob = action.parameters[service.WORLD_CREATE_PARAM_KEY]
+    assert blob["kind"] == "world_create"
+    assert blob["universe_id"] == res.json()["universe"]["id"]
+    assert blob["founders"] == 5
 
 
 async def test_arrival_events_are_journalled_with_monotonic_seq(client):
@@ -323,3 +332,92 @@ async def test_another_workspaces_universe_is_a_404_not_a_403(client, monkeypatc
         assert res.status_code == 404, (path, res.status_code)
     assert other.post(f"/terrarium/universes/{uni['id']}/tick").status_code == 404
     assert other.get("/terrarium/universes").json()["universes"] == []
+
+
+# --- citizens hear each other -------------------------------------------
+
+
+async def test_a_citizen_hears_what_another_said_last_tick(client):
+    """A ``say`` is stamped with the tick it happened in, so it is audible on the
+    NEXT one. If the sense digest only read the current tick, nobody would ever
+    hear anybody — the world would be a room of people talking to themselves.
+
+    Each citizen says a sentinel keyed to its OWN name and we look for the OTHER
+    citizen's sentinel. A citizen's own line comes back through its soul memory
+    too, so asserting on a shared phrase would pass with the digest broken.
+    """
+    prompts: list[tuple[str, str]] = []
+
+    class Spy:
+        async def decide(self, *, prompt, physics, citizen, digest):
+            prompts.append((citizen.name, prompt))
+            return (
+                '{"thought": "listening", "acts": [{"verb": "speak", '
+                f'"text": "SENTINEL-{citizen.name}-the-well-is-dry"}}]}}'
+            )
+
+    uni = create_universe(client, founders=2)
+    import pocketpaw_ee.terrarium.service as svc
+
+    original = citizen_llm.resolve_llm
+    svc.citizen_llm.resolve_llm = lambda: Spy()  # type: ignore[attr-defined]
+    try:
+        client.post(f"/terrarium/universes/{uni['id']}/tick?n=2")
+    finally:
+        svc.citizen_llm.resolve_llm = original  # type: ignore[attr-defined]
+
+    assert len(prompts) == 4, "two citizens x two ticks"
+    names = [n for n, _ in prompts[:2]]
+    assert len(set(names)) == 2
+
+    # Tick 1: nobody has spoken yet.
+    for _, prompt in prompts[:2]:
+        assert "SENTINEL-" not in prompt
+
+    # Tick 2: each citizen hears the OTHER one's line from tick 1.
+    for name, prompt in prompts[2:]:
+        other = next(n for n in names if n != name)
+        assert f"SENTINEL-{other}-the-well-is-dry" in prompt, (
+            f"{name} never heard {other} — the sense digest is not reading the previous tick"
+        )
+
+
+async def test_a_viewer_line_is_heard_once_not_on_every_tick(client):
+    prompts: list[str] = []
+
+    class Spy:
+        async def decide(self, *, prompt, physics, citizen, digest):
+            prompts.append(prompt)
+            return '{"thought": "hm", "acts": []}'
+
+    uni = create_universe(client, founders=1)
+    client.post(f"/terrarium/universes/{uni['id']}/speak", json={"text": "beware the crow"})
+    import pocketpaw_ee.terrarium.service as svc
+
+    original = citizen_llm.resolve_llm
+    svc.citizen_llm.resolve_llm = lambda: Spy()  # type: ignore[attr-defined]
+    try:
+        client.post(f"/terrarium/universes/{uni['id']}/tick?n=3")
+    finally:
+        svc.citizen_llm.resolve_llm = original  # type: ignore[attr-defined]
+
+    heard = [p for p in prompts if "beware the crow" in p]
+    assert len(heard) == 1, "a viewer line must land in exactly one tick's digest"
+
+
+# --- malformed ids -------------------------------------------------------
+
+
+async def test_a_malformed_universe_id_is_a_404_not_a_500(client):
+    """Beanie's ``get`` raises InvalidId on a non-ObjectId string, which is not a
+    CloudError. Every lookup funnels through a guard so it 404s instead."""
+    for path in ("", "/citizens", "/events", "/artifacts", "/weather"):
+        res = client.get(f"/terrarium/universes/not-an-object-id{path}")
+        assert res.status_code == 404, (path, res.status_code, res.text)
+    assert client.post("/terrarium/universes/not-an-object-id/tick").status_code == 404
+
+
+async def test_a_malformed_citizen_id_is_a_404(client):
+    uni = create_universe(client, founders=1)
+    res = client.get(f"/terrarium/universes/{uni['id']}/citizens/not-an-object-id")
+    assert res.status_code == 404, res.text

@@ -37,6 +37,23 @@ WS = "ws-terra"
 USER = "u-terra"
 
 
+@pytest.fixture
+def instinct_store(tmp_path, monkeypatch):
+    """An isolated InstinctStore wired everywhere terrarium resolves the gate.
+
+    Without this the ``world_create`` / ``world_spawn`` filing either fails
+    silently (``service._propose`` swallows and returns None) or writes to the
+    developer's real store — either way the gate would be untested. Copied from
+    ``tests/cloud/test_belt_mandates.py``.
+    """
+    from pocketpaw.instinct.store import InstinctStore
+
+    store = InstinctStore(tmp_path / "instinct_terrarium.db")
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
+    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda *a, **k: store)
+    return store
+
+
 @pytest.fixture(autouse=True)
 def mock_citizen_llm(monkeypatch, tmp_path):
     """Deterministic citizens + a throwaway soul root for every test here."""

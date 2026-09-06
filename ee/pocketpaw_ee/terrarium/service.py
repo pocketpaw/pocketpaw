@@ -194,8 +194,22 @@ def public_citizen_wire(doc: CitizenDoc) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+async def _get_universe_doc(universe_id: str) -> UniverseDoc | None:
+    """Load by id, treating a MALFORMED id exactly like a missing one.
+
+    ``Document.get`` raises ``bson.errors.InvalidId`` on a non-ObjectId string,
+    which is not a CloudError — it would 500. On the ANONYMOUS surface a 500 on
+    a garbage id is both a bad response and a fingerprint, so every lookup
+    funnels through here.
+    """
+    try:
+        return await UniverseDoc.get(universe_id)
+    except Exception:  # noqa: BLE001 — a malformed id is a 404, not a 500
+        return None
+
+
 async def _universe(workspace_id: str, universe_id: str) -> UniverseDoc:
-    doc = await UniverseDoc.get(universe_id)
+    doc = await _get_universe_doc(universe_id)
     if doc is None or doc.workspace != workspace_id:
         raise NotFound("universe")
     return doc
@@ -204,7 +218,7 @@ async def _universe(workspace_id: str, universe_id: str) -> UniverseDoc:
 async def _public_universe(universe_id: str) -> UniverseDoc:
     """A universe on the anonymous surface. Fail-closed: the ``public`` flag is
     checked HERE, at the lookup, so no caller can forget it."""
-    doc = await UniverseDoc.get(universe_id)
+    doc = await _get_universe_doc(universe_id)
     if doc is None or not doc.public:
         raise NotFound("universe")
     return doc
@@ -482,12 +496,16 @@ async def tick(workspace_id: str, user_id: str, universe_id: str, n: int = 1) ->
     acts, pays, and remembers."""
     if n < 1 or n > 24:
         raise BadRequest("terrarium.bad_tick_count", "n must be between 1 and 24")
-    uni = await _universe(workspace_id, universe_id)
-    if uni.status == "archived":
-        raise BadRequest("terrarium.archived", "an archived universe does not tick")
 
     produced: list[dict[str, Any]] = []
+    # The universe is LOADED INSIDE the lock, not before it. A tick can hold the
+    # lock for minutes on the real transport; a concurrent /speak that loaded the
+    # doc first would write back a stale ``seq`` and duplicate a sequence number,
+    # which breaks ``?since=`` paging (contract invariant 1).
     async with _lock(universe_id):
+        uni = await _universe(workspace_id, universe_id)
+        if uni.status == "archived":
+            raise BadRequest("terrarium.archived", "an archived universe does not tick")
         llm = citizen_llm.resolve_llm()
         physics = physics_of(uni)
         for _ in range(n):
@@ -505,15 +523,19 @@ async def _one_tick(
     ).to_list()
     ledger = await _ledger(universe_id)
 
-    # What the world saw since the last tick advanced — including any viewer
-    # lines spoken into THIS tick. They stay tagged all the way through.
+    # Two windows, on purpose. A citizen's own ``say`` is stamped with the tick
+    # it was spoken in, so it is only audible on the NEXT one — read tick-1 as
+    # well or nobody ever hears anybody. Viewer lines and weather are stamped
+    # into the CURRENT tick (they land between ticks), so they stay filtered to
+    # ``== uni.tick``; widening them would make a viewer heard twice.
     recent = await EventDoc.find(
-        EventDoc.universe_id == universe_id, EventDoc.tick == uni.tick
+        EventDoc.universe_id == universe_id, EventDoc.tick >= uni.tick - 1
     ).to_list()
     speech = [f"{e.actor}: {e.body}" for e in recent if e.kind == "say" and not e.viewer_origin]
-    weather_lines = [e.body for e in recent if e.kind == "weather"]
+    current = [e for e in recent if e.tick == uni.tick]
+    weather_lines = [e.body for e in current if e.kind == "weather"]
     viewer_msgs = [
-        world.ViewerMessage(voice=e.actor, text=e.body) for e in recent if e.viewer_origin
+        world.ViewerMessage(voice=e.actor, text=e.body) for e in current if e.viewer_origin
     ]
     new_art = [
         f"{a.kind} '{a.name}' by {a.author}"
@@ -767,9 +789,17 @@ async def list_citizens(workspace_id: str, universe_id: str) -> dict[str, Any]:
     return {"citizens": [citizen_wire(c) for c in docs]}
 
 
+async def _get_citizen_doc(cid: str) -> CitizenDoc | None:
+    """Same malformed-id-is-a-404 rule as ``_get_universe_doc``."""
+    try:
+        return await CitizenDoc.get(cid)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def get_citizen(workspace_id: str, universe_id: str, cid: str) -> dict[str, Any]:
     await _universe(workspace_id, universe_id)
-    doc = await CitizenDoc.get(cid)
+    doc = await _get_citizen_doc(cid)
     if doc is None or doc.universe_id != universe_id or doc.workspace != workspace_id:
         raise NotFound("citizen")
     return {
@@ -802,14 +832,15 @@ async def speak(workspace_id: str, user_id: str, universe_id: str, text: str) ->
     """A human speaks into the world. The line lands as an Event tagged
     ``viewer_origin: true`` and reaches citizens ONLY through the write-policy
     label — it is never stored in a soul as fact."""
-    uni = await _universe(workspace_id, universe_id)
-    physics = physics_of(uni)
-    if not physics.chat.open:
-        raise BadRequest("terrarium.chat_closed", "this universe's physics closes chat")
     body = " ".join(str(text or "").split())[:500]
     if not body:
         raise BadRequest("terrarium.empty_message", "a message is required")
+    # Loaded inside the lock — see the note in ``tick``.
     async with _lock(universe_id):
+        uni = await _universe(workspace_id, universe_id)
+        physics = physics_of(uni)
+        if not physics.chat.open:
+            raise BadRequest("terrarium.chat_closed", "this universe's physics closes chat")
         # The token the viewer paid enters the world pool — that is the inflow
         # attention buys. ponytail: no billing charge in v0; wire the credit
         # ledger when viewer tokens become real money.
@@ -843,15 +874,16 @@ async def pledge_weather(
     extent of a god's reach — it carries a pool delta, a storm duration, one
     unsigned line and a debt-clear list, and nothing that could reach a soul.
     """
-    uni = await _universe(workspace_id, universe_id)
     kind = str(body.get("kind") or "").strip().lower()
     tokens = int(body.get("tokens") or 0)
     line = body.get("line")
-    physics = physics_of(uni)
-    if kind == "omen" and not physics.chat.open:
-        raise BadRequest("terrarium.omen_forbidden", "this universe's physics forbids omens")
 
+    # Loaded inside the lock — see the note in ``tick``.
     async with _lock(universe_id):
+        uni = await _universe(workspace_id, universe_id)
+        physics = physics_of(uni)
+        if kind == "omen" and not physics.chat.open:
+            raise BadRequest("terrarium.omen_forbidden", "this universe's physics forbids omens")
         try:
             pledges, fired = weather.pledge(uni.weather_pledges, kind, tokens, user_id)
         except weather.WeatherError as exc:
@@ -891,7 +923,9 @@ async def _fire_weather(uni: UniverseDoc, kind: str, line: Any) -> None:
     await _publish(uni, row)
     if fx.broadcast_line:
         # An omen enters the world as an outside voice — tagged viewer_origin
-        # so the write-policy quarantines it exactly like paid chat.
+        # so the write-policy quarantines it exactly like paid chat. Its token
+        # goes to the pool like any other spoken line, so the ledger adds up.
+        uni.pool += 1
         omen = await _append_event(
             uni,
             kind="say",
@@ -939,7 +973,7 @@ async def public_list_citizens(universe_id: str) -> dict[str, Any]:
 
 async def public_get_citizen(universe_id: str, cid: str) -> dict[str, Any]:
     await _public_universe(universe_id)
-    doc = await CitizenDoc.get(cid)
+    doc = await _get_citizen_doc(cid)
     if doc is None or doc.universe_id != universe_id:
         raise NotFound("citizen")
     return {

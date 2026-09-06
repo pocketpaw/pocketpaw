@@ -45,7 +45,7 @@ async def _spawn_blob(client, uni_id: str) -> dict:
 RICH = {"daily": 400, "decay_weekly": 0.0}
 
 
-async def test_the_spawn_verb_gates_and_creates_no_child(client):
+async def test_the_spawn_verb_gates_and_creates_no_child(client, instinct_store):
     uni = create_universe(client, founders=1, endowment=RICH)
     citizen_llm.set_mock_decision(
         {"thought": "the world needs more of us", "acts": [{"verb": "spawn", "name": "Ilo"}]}
@@ -61,6 +61,19 @@ async def test_the_spawn_verb_gates_and_creates_no_child(client):
     # And no credits moved beyond the think charge — the spawn cost is only
     # taken when a human approves.
     assert citizens[0]["balance"] == RICH["daily"] - 2
+
+    # The gate is real: a pending world_spawn Action is readable from the store.
+    pending = await instinct_store.list_actions()
+    spawns = [
+        a
+        for a in pending
+        if isinstance(a.parameters, dict) and service.WORLD_SPAWN_PARAM_KEY in a.parameters
+    ]
+    assert len(spawns) == 1, "the spawn verb filed no Instinct Action"
+    blob = spawns[0].parameters[service.WORLD_SPAWN_PARAM_KEY]
+    assert blob["kind"] == "world_spawn"
+    assert blob["child_name"] == "Ilo"
+    assert blob["parent_id"] == citizens[0]["id"]
 
 
 async def test_an_approved_spawn_mints_the_child(client):
