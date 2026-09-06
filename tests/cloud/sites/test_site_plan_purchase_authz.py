@@ -315,7 +315,6 @@ async def test_an_unauthorized_upgrade_is_refused(mongo_db, monkeypatch):  # noq
     assert await _balance(ws) == before, "a refused upgrade must not charge"
 
 
-
 async def test_a_member_cannot_cancel_a_paid_plan_by_applying_free(mongo_db, monkeypatch):  # noqa: ARG001
     """THE OTHER DIRECTION, and it opened the day the free path started closing
     the subscription. Publishing ``free`` costs nothing, so a gate that asks only
@@ -403,6 +402,7 @@ async def test_an_admin_may_still_cancel_a_paid_plan(mongo_db, monkeypatch):  # 
     assert doc.plan_cancels_at_period_end is True
     # Cancelling is not a purchase. A charge here would bill somebody for leaving.
     assert await _balance(ws) == after_purchase
+
 
 def test_buying_sits_above_publishing_in_the_role_ladder():
     """The two questions must not collapse back into one. Publishing is MEMBER;

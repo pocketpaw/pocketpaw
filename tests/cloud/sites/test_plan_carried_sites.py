@@ -77,9 +77,7 @@ async def _make_workspace(plan: str) -> str:
 async def _make_pocket(workspace_id: str, name: str = "Landing") -> str:
     from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
 
-    doc = _PocketDoc(
-        workspace=workspace_id, name=name, owner="u1", type="site", pattern="landing"
-    )
+    doc = _PocketDoc(workspace=workspace_id, name=name, owner="u1", type="site", pattern="landing")
     await doc.insert()
     return str(doc.id)
 

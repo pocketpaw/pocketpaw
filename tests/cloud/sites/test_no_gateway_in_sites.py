@@ -111,8 +111,7 @@ def test_the_sites_package_names_no_payment_gateway():
     assert not offences, (
         "Paw Sites reached a payment gateway. A paid site is charged to the "
         "workspace credit balance and the Dodo rails were deleted on 2026-09-05; "
-        "see docs/runbooks/2026-09-05-site-plans-on-credits.md.\n  "
-        + "\n  ".join(offences)
+        "see docs/runbooks/2026-09-05-site-plans-on-credits.md.\n  " + "\n  ".join(offences)
     )
 
 

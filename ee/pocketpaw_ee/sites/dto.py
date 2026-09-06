@@ -347,37 +347,6 @@ class SiteResponse(BaseModel):
     # "renews on the 14th" to somebody who cancelled is how a cancellation gets
     # made twice, or gets escalated as one that did not take.
     plan_cancels_at_period_end: bool = False
-    # WHICH RAIL IS PAYING: "plan" (the workspace subscription carries this site),
-    # "credits" (the wallet bought it), "addon"/"subscription" (sold before the
-    # 2026-09-05 cutover), or "" (free floor).
-    #
-    # On the wire because the Billing tab cannot otherwise tell the two paid
-    # states apart: a carried site and a bought site both read tier ``staff``,
-    # status ``active``. Only the rail says whether the number beside it is a
-    # price the customer pays or an inclusion they already have, and showing
-    # "$19/month" against a site their plan carries is the kind of wrong that
-    # generates a support ticket about a charge that never happened.
-    billing_rail: str = ""
-    # THE WORKSPACE'S SITE SLOTS: how many the plan carries and how many are taken.
-    # ``plan_sites_included`` is None for an uncapped plan (Enterprise) and 0 for
-    # one that carries none.
-    #
-    # Here rather than on ``/entitlements`` because the storefront needs BOTH
-    # halves to price the next publish, and the used count is a question about
-    # sites — it belongs with the read that already owns them. Costs one indexed
-    # count on a read that already does several.
-    plan_sites_used: int = 0
-    plan_sites_included: int | None = None
-    # "Paw Pro" — the WORKSPACE plan's display name, so the Billing tab can say
-    # "included in Paw Pro" rather than "included in your plan".
-    #
-    # Sent from here rather than looked up on the client: the client would have to
-    # fetch the plan catalog on a page that needs nothing else from it, and the
-    # obvious shortcut — title-casing the key — turns "pro_max" into "Pro Max"
-    # while the product is called "Paw Pro Max". The catalog is the only place
-    # that mapping is right. "" when it cannot be resolved, and every consumer
-    # falls back to a generic phrase rather than rendering an empty name.
-    workspace_plan_name: str = ""
     # (none | provisioning | provisioned | failed). A DYNAMIC-site publish does NOT
     # deploy inline — it enqueues the ``provision_site`` job and returns immediately
     # with ``provision_status="provisioning"`` (``deployed=False``); the site goes
@@ -589,6 +558,37 @@ class SiteStatusResponse(BaseModel):
     renewal_date: str | None = None
     period_paid_usd: int = 0
     plan_cancels_at_period_end: bool = False
+    # WHICH RAIL IS PAYING: "plan" (the workspace subscription carries this site),
+    # "credits" (the wallet bought it), "addon"/"subscription" (sold before the
+    # 2026-09-05 cutover), or "" (free floor).
+    #
+    # On the wire because the Billing tab cannot otherwise tell the two paid
+    # states apart: a carried site and a bought site both read tier ``staff``,
+    # status ``active``. Only the rail says whether the number beside it is a
+    # price the customer pays or an inclusion they already have, and showing
+    # "$19/month" against a site their plan carries is the kind of wrong that
+    # generates a support ticket about a charge that never happened.
+    billing_rail: str = ""
+    # THE WORKSPACE'S SITE SLOTS: how many the plan carries and how many are taken.
+    # ``plan_sites_included`` is None for an uncapped plan (Enterprise) and 0 for
+    # one that carries none.
+    #
+    # Here rather than on ``/entitlements`` because the storefront needs BOTH
+    # halves to price the next publish, and the used count is a question about
+    # sites — it belongs with the read that already owns them. Costs one indexed
+    # count on a read that already does several.
+    plan_sites_used: int = 0
+    plan_sites_included: int | None = None
+    # "Paw Pro" — the WORKSPACE plan's display name, so the Billing tab can say
+    # "included in Paw Pro" rather than "included in your plan".
+    #
+    # Sent from here rather than looked up on the client: the client would have to
+    # fetch the plan catalog on a page that needs nothing else from it, and the
+    # obvious shortcut — title-casing the key — turns "pro_max" into "Pro Max"
+    # while the product is called "Paw Pro Max". The catalog is the only place
+    # that mapping is right. "" when it cannot be resolved, and every consumer
+    # falls back to a generic phrase rather than rendering an empty name.
+    workspace_plan_name: str = ""
 
 
 class SiteVersionResponse(BaseModel):

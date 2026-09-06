@@ -484,3 +484,85 @@ def test_the_response_defaults_refuse_rather_than_grant():
     assert bare.concierge_entitled is False
     assert bare.subscription_active is False
     assert bare.badge_required is True, "the badge default is a requirement, not a grant"
+
+
+# ---------------------------------------------------------------------------
+# The BY-POCKET status read — the one the Billing tab actually polls
+# ---------------------------------------------------------------------------
+#
+# The original defect in this module was a UI branching on fields the wire never
+# sent. It happened again on 2026-09-06, in a way worth recording: four new fields
+# (billing_rail, plan_sites_used, plan_sites_included, workspace_plan_name) were
+# added to ``SiteResponse`` while the service passed them to
+# ``SiteStatusResponse``. Pydantic ignores unknown keyword arguments, so nothing
+# raised, every test passed, and all four arrived at the browser as ``undefined``
+# — which the frontend reads as "the plan carries nothing" and quotes a price for.
+#
+# mypy caught it; no test did. These are that test.
+
+
+async def test_the_status_read_carries_the_rail_that_decides_the_price(mongo_db):
+    """A carried site and a bought one are identical on every other field.
+
+    Tier ``staff``, status ``active``, both. ``billing_rail`` is the only thing
+    that says whether the number beside the plan is a price the customer pays or
+    an inclusion they already have."""
+    ws = await _make_workspace()
+    pocket_id = await _make_pocket(workspace_id=ws)
+    doc = await _seed_site(workspace_id=ws, pocket_id=pocket_id)
+    doc.billing_rail = "plan"
+    await doc.save()
+
+    resp = await sites_service.pocket_status(workspace_id=ws, pocket_id=pocket_id)
+
+    assert resp.billing_rail == "plan"
+
+
+async def test_the_status_read_carries_the_workspace_slot_arithmetic(mongo_db):
+    """Both halves, or the storefront cannot price the next publish.
+
+    The workspace here is on ``pro`` (three carried sites) with one taken, so a
+    client can say "two more included" without re-deriving which rail counts as a
+    slot — the rule that decides whether somebody is charged."""
+    ws = await _make_workspace()
+    pocket_id = await _make_pocket(workspace_id=ws)
+    doc = await _seed_site(workspace_id=ws, pocket_id=pocket_id)
+    doc.billing_rail = "plan"
+    await doc.save()
+
+    resp = await sites_service.pocket_status(workspace_id=ws, pocket_id=pocket_id)
+
+    assert resp.plan_sites_included == 3
+    assert resp.plan_sites_used == 1
+    # And the plan's own name, so the copy can say WHICH plan includes it.
+    # Title-casing the key on the client turns "pro_max" into "Pro Max" while the
+    # product is "Paw Pro Max"; the catalog is the only place that mapping is right.
+    assert resp.workspace_plan_name == "Paw Pro"
+
+
+def test_every_field_the_service_sets_exists_on_the_dto():
+    """THE SHAPE OF THE BUG, asserted directly.
+
+    Pydantic drops unknown keyword arguments in silence, so a field added to the
+    wrong response class fails no test and reaches the browser as ``undefined``.
+    Comparing the constructor's keywords against the model's fields is the only
+    check that catches it without a test per field."""
+    import ast
+    import inspect
+
+    from pocketpaw_ee.sites.dto import SiteStatusResponse
+
+    src = inspect.getsource(sites_service.pocket_status)
+    tree = ast.parse(src.lstrip())
+    calls = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "SiteStatusResponse"
+    ]
+    assert len(calls) == 1, "expected exactly one SiteStatusResponse construction"
+
+    passed = {kw.arg for kw in calls[0].keywords if kw.arg}
+    unknown = passed - set(SiteStatusResponse.model_fields)
+    assert not unknown, f"pocket_status passes fields SiteStatusResponse does not have: {unknown}"

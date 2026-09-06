@@ -489,9 +489,7 @@ async def test_buying_again_after_going_free_pays_in_full(mongo_db, monkeypatch)
     assert doc.renewal_date is not None
 
 
-async def test_rebuying_the_same_tier_the_same_day_is_not_charged_twice(
-    mongo_db, monkeypatch
-):  # noqa: ARG001
+async def test_rebuying_the_same_tier_the_same_day_is_not_charged_twice(mongo_db, monkeypatch):  # noqa: ARG001
     """WRITTEN DOWN BECAUSE IT LOOKS LIKE A LEAK AND IS NOT.
 
     Cancelling to the free floor and immediately re-buying the SAME tier on the
@@ -526,7 +524,7 @@ async def test_rebuying_the_same_tier_the_same_day_is_not_charged_twice(
 
 
 async def test_a_republish_without_a_plan_key_never_downgrades(mongo_db, monkeypatch):  # noqa: ARG001
-    """"Leave the plan alone" and "put me on the free floor" are different
+    """ "Leave the plan alone" and "put me on the free floor" are different
     requests, and only one of them is a downgrade.
 
     An ordinary content republish omits ``site_plan_key``. Reading that as a
@@ -669,9 +667,7 @@ async def test_a_stuck_pending_legacy_site_publishes_on_credits(mongo_db, monkey
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_failed_deploy_is_recovered_by_republishing_for_free(
-    mongo_db, monkeypatch
-):  # noqa: ARG001
+async def test_a_failed_deploy_is_recovered_by_republishing_for_free(mongo_db, monkeypatch):  # noqa: ARG001
     """CHARGED, AND NOTHING WENT LIVE. What happens next has to be free.
 
     ``activate_site`` marks the subscription active before running the deploy, so

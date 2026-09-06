@@ -142,5 +142,14 @@
     "tests": [
       "tests/cloud/sites/test_plan_carried_sites.py::test_the_plan_grants_staff_even_when_a_cheaper_rung_is_asked_for"
     ]
+  },
+  {
+    "label": "the status read's new fields move to the wrong response class and reach the browser as undefined",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        plan_sites_used=_plan_slots_used,",
+    "replace": "        plan_sites_usedd=_plan_slots_used,",
+    "tests": [
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_every_field_the_service_sets_exists_on_the_dto"
+    ]
   }
 ]

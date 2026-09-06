@@ -2169,9 +2169,7 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # price a plan CHANGE correctly. Sent for every site, including free ones
         # (where it is 0), because the client subtracts against it unconditionally.
         period_paid_usd=int(getattr(doc, "period_paid_usd", 0) or 0),
-        plan_cancels_at_period_end=bool(
-            getattr(doc, "plan_cancels_at_period_end", False)
-        ),
+        plan_cancels_at_period_end=bool(getattr(doc, "plan_cancels_at_period_end", False)),
         # DP0-4: the dynamic-site provision state (persisted) + the id of the job a
         # dynamic publish just enqueued (transient ``_provision_job_id`` PrivateAttr,
         # None for a static publish / any DB-loaded doc / a single-flight no-op).
@@ -6292,9 +6290,7 @@ async def publish_pocket(
     # tier it is an alias of, and gated on ``requested_tier`` so a republish that
     # simply omits the key is never mistaken for one.
     tier_change_requested = (
-        already_paying
-        and requested_tier is not None
-        and _held_tier_key != requested_tier.key
+        already_paying and requested_tier is not None and _held_tier_key != requested_tier.key
     )
 
     # A PAYING SITE STILL ON A LEGACY DODO RAIL CANNOT CHANGE TIER HERE.
@@ -9036,6 +9032,14 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     # is charged.
     _plan_slots_used, _plan_slots_allowance = await plan_site_slots(workspace_id)
 
+    # Bound to a local so the None-narrowing is visible to the type checker.
+    # Inlined as a conditional on ``getattr(doc, "renewal_date", None)`` it read
+    # fine and mypy could not follow it, because narrowing does not survive a
+    # getattr — the same reason the paid-grant branch further up is written out
+    # rather than short-circuited.
+    _status_renewal = doc.renewal_date if doc is not None else None
+    _status_renewal_iso = _status_renewal.isoformat() if _status_renewal is not None else None
+
     # The plan's DISPLAY name for the same copy. Best-effort: a name that will not
     # resolve is a phrasing problem on one line, not a reason to fail a status read
     # the whole builder polls.
@@ -9100,11 +9104,7 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         subscription_status=(
             (getattr(doc, "subscription_status", "none") or "none") if doc is not None else "none"
         ),
-        renewal_date=(
-            doc.renewal_date.isoformat()
-            if doc is not None and getattr(doc, "renewal_date", None) is not None
-            else None
-        ),
+        renewal_date=_status_renewal_iso,
         period_paid_usd=int(getattr(doc, "period_paid_usd", 0) or 0) if doc is not None else 0,
         plan_cancels_at_period_end=(
             bool(getattr(doc, "plan_cancels_at_period_end", False)) if doc is not None else False
