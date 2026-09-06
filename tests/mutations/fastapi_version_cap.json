@@ -1,0 +1,9 @@
+[
+  {
+    "label": "the fastapi ceiling is lifted, so the deploy resolves fastapi>=0.137 again and every CORS preflight 500s in production",
+    "file": "pyproject.toml",
+    "find": "\"fastapi>=0.134.0,<0.137\",",
+    "replace": "\"fastapi>=0.134.0\",",
+    "tests": ["tests/test_fastapi_version_cap.py"]
+  }
+]
