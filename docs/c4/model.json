@@ -30,7 +30,8 @@
               {"id": "pockets", "name": "Pockets + rippleSpec", "description": "Pocket workspace containers (agents+data+tools+KB+rules). The rippleSpec merge endpoint; data sources (read GETs) and write actions gated through Instinct. ee/cloud/pockets.", "technology": "Python", "kb_article": ""},
               {"id": "sites", "name": "Paw Sites", "description": "Publish pockets as edge sites. Two engines x two modes: {ripple,svelte} x {static,dynamic}; dynamic = per-tenant Cloudflare D1. ee/pocketpaw_ee/sites + the paw-sites generator.", "technology": "Python, Bun, SvelteKit", "kb_article": ""},
               {"id": "foresight", "name": "Foresight", "description": "Scenario simulation / rehearsal: soul-seeded personas run per-tick cognition loops with calibration and backtest gating. ee/pocketpaw_ee/foresight.", "technology": "Python", "kb_article": ""},
-              {"id": "enterprise-ops", "name": "Enterprise Ops", "description": "Fleet install, Calendar (external sync + conflict detection), Guards (RBAC/ABAC), Audit (placeholder), and the Paw Bar customer decision loop. ee/pocketpaw_ee/{fleet,calendar,guards,audit,paw_bar}.", "technology": "Python", "kb_article": ""}
+              {"id": "enterprise-ops", "name": "Enterprise Ops", "description": "Fleet install, Calendar (external sync + conflict detection), Guards (RBAC/ABAC), Audit (placeholder), and the Paw Bar customer decision loop. ee/pocketpaw_ee/{fleet,calendar,guards,audit,paw_bar}.", "technology": "Python", "kb_article": ""},
+              {"id": "terrarium", "name": "Terrarium (world sim)", "description": "Watchable agent civilization. A physics file defines a universe; citizens are Souls acting through a fixed verb set against a tech tree; the Journal is truth and citizens/ledger/artifacts are projections rebuilt from it. Weather is the viewer-facing name for outside input and has no path to a soul write. A separate anonymous read router is gated by TERRARIUM_PUBLIC_ENABLED plus a per-universe flag, dark by default. ee/pocketpaw_ee/terrarium.", "technology": "Python, FastAPI, Beanie", "kb_article": ""}
             ]
           },
           {"id": "mongo", "name": "MongoDB", "description": "Primary cloud datastore: pockets, sessions, messages, agents, sites, Instinct approvals, connectors.", "technology": "MongoDB (Beanie ODM)", "tags": ["database"], "kb_article": "", "components": []},
@@ -62,7 +63,9 @@
       {"source": "runtime", "target": "soul-protocol", "description": "loads / saves memory", "technology": "", "style": "sync"},
       {"source": "fabric", "target": "soul-protocol", "description": "writes the object journal", "technology": "", "style": "async"},
       {"source": "instinct", "target": "soul-protocol", "description": "emits Decision-Graph events", "technology": "", "style": "async"},
-      {"source": "pockets", "target": "mongo", "description": "persists pocket + spec", "technology": "", "style": "sync"}
+      {"source": "pockets", "target": "mongo", "description": "persists pocket + spec", "technology": "", "style": "sync"},
+      {"source": "terrarium", "target": "instinct", "description": "files world_create and world_spawn for human approval", "technology": "", "style": "sync"},
+      {"source": "terrarium", "target": "pockets", "description": "a universe is a Pocket of type world", "technology": "", "style": "sync"}
     ]
   }
 }
