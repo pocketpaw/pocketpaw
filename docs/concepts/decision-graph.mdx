@@ -64,6 +64,19 @@ The terminal-action set is pinned by `_TERMINAL_ACTIONS = frozenset({"decision.g
 
 Precedent supply order (A3): the agent's own payload first, then a projection fallback (same-pocket / same-action / nearest-ts) if the proposer didn't supply any. Out-of-band reconciler is deferred.
 
+## Joining a Decision Back to Its Instinct Action
+
+A gated proposal that opens a chain is also a row in the Instinct decision pipeline — the item a human sees in The Tray. That row carries the chain ids as **first-class, nullable columns** on `instinct_actions`:
+
+| Column | Meaning |
+|---|---|
+| `correlation_id` | The chain key, written at INSERT by the proposer that minted it |
+| `proposed_event_id` | The id of the chain-opening `agent.proposed` event, filled in once that event is durable |
+
+Both are exposed on the `Action` model and on every action view the Instinct router returns (`GET /instinct/actions`, `GET /instinct/actions/pending`), so a Tray row joins to its Decision chain without parsing the per-kind `parameters` blob.
+
+The per-kind blobs (`_external_action`, `_pocket_write`, `_code_change`) still carry their own copies of these ids for blob-schema compatibility, but the **columns are the source of truth**: they land with the INSERT, so the join survives a failed best-effort back-write. `NULL` is legal and permanent — an OSS proposal opens no chain, and rows written before the columns existed were never backfilled (a guessed correlation in an evidence table is worse than an honest blank).
+
 ## The Python API
 
 `pocketpaw_ee.cloud.decisions.service.DecisionGraph` is the in-process surface. One instance per process (per org), accessed via `get_decision_graph()`. All methods are `async`:

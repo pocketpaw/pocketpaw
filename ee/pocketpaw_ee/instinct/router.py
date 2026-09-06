@@ -1,5 +1,14 @@
 # ee/instinct/router.py — FastAPI router for the Instinct decision pipeline API.
 # Created: 2026-03-28 — Propose, approve/reject, list pending, query audit.
+# Updated: 2026-08-05 (T-3, coupling-gap wave) — the action views returned by
+#   this router (``GET /instinct/actions``, ``GET /instinct/actions/pending``,
+#   and every endpoint whose response_model is ``Action``) now carry the
+#   Decision-Graph chain ids ``correlation_id`` + ``proposed_event_id`` as
+#   first-class, additive, nullable fields. No router code changed: the fields
+#   ride on the OSS ``Action`` model this router already serializes, so the FE
+#   can join a Tray row to its Decision chain without parsing the per-kind
+#   untyped ``parameters`` blob. Pinned by
+#   ``tests/instinct/test_correlation_columns.py::test_router_action_view_exposes_chain_ids``.
 # Updated: 2026-07-15 (B0 H2 — _customer_reply tenancy gate) — closed a gap in the
 #   FOUR-path dispatch: the paw-bar ``_customer_reply`` blob (carried by
 #   ``decision_loop.propose_customer_decision``) had a delivery hook on the
