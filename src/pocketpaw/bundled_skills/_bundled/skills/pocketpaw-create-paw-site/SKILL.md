@@ -30,8 +30,8 @@ description: |
   get_effect → write `files` verbatim into `source`, place `snippet`, follow
   `usage`), plus the two things an agent gets wrong: the snippet is a finished
   section that is tuned through `--fx-*` and `options` rather than re-styled,
-  and its `./_fx/...` paths are page-relative so a nested page needs a different
-  prefix. The Related tools entry for the fx server already existed; this is the
+  and its `/_fx/...` paths are root-absolute so they must be copied as given.
+  The Related tools entry for the fx server already existed; this is the
   working loop behind it. Nothing on the copy-only path changed.
 -->
 
@@ -100,10 +100,10 @@ not a fragment. Do not wrap it in your own hero markup, and do not restyle it
 into your palette by editing the effect's CSS. Tune it through the documented
 `--fx-*` custom properties and the effect's `options` instead.
 
-**The `_fx/` paths in `snippet` and `usage` are written page-relative
-(`./_fx/...`), which assumes the page sits at the site root.** Put the section on
-a nested page such as `/blog/post.html` and you have to adjust the prefix too, or
-the stylesheet and the module both 404.
+**The `_fx/` paths are root-absolute (`/_fx/...`) on purpose. Copy them as
+given.** An html site is served from the origin root, so the same section works
+on `/index.html` and on `/blog/post.html` without changing anything. Rewriting
+them to `./_fx/...` is what breaks the nested page.
 
 ### The lead form on this track
 
