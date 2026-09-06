@@ -65,3 +65,5 @@ temp
 !deploy/paw-sites/**
 !deploy/ripple
 !deploy/ripple/**
+!deploy/paw-fx
+!deploy/paw-fx/**

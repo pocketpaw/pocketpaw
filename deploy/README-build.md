@@ -1,6 +1,7 @@
 <!--
   deploy/README-build.md -- how to build the PocketPaw Enterprise image with the
   Paw Sites publish toolchain bundled.
+  Updated 2026-09-06 (feat/fx-mcp-server): paw-fx registry vendoring section.
   Created 2026-06-25 (feat/paw-sites-prod-deploy, DEP-4): documents the
   vendor/clone source switch for the paw-sites generator + the @ripple-ui/svelte
   tarball that Dockerfile.enterprise needs so a live `POST /sites/publish` works in
@@ -106,3 +107,10 @@ The image bakes these so a publish resolves with no extra config (see
 A LIVE Cloudflare deploy additionally needs the `PAW_CF_*` group (account id, API
 token, zone, dispatch namespace) — see `.env.enterprise.example`. Without them the
 publish degrades to the local static-serve path (dev only).
+
+## paw-fx effects registry (optional)
+
+`scripts/vendor-paw-fx.sh` copies `../paw-fx/dist/registry` into `deploy/paw-fx/registry`;
+the Dockerfile COPYs it to `/opt/paw-fx/registry`, the default `PAW_FX_REGISTRY_DIR` the
+`pocketpaw_fx` MCP server reads. Pass `--build-arg PAW_FX=1` to fail the build when the
+registry is missing; without it the build proceeds and the server serves an empty registry.

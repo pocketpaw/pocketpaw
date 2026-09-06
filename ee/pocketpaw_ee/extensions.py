@@ -1,5 +1,7 @@
 """Entry-point provider classes for the OSS-EE extension surfaces.
 
+Updated: 2026-09-06 (feat/fx-mcp-server) — added ``CloudFxMcpProvider`` (``pocketpaw_fx``).
+
 Core (`pocketpaw`) defines the Protocols in `pocketpaw.extensions` and
 discovers implementations via `importlib.metadata.entry_points`. This module
 collects every `pocketpaw_ee` provider in one place; the entry-points that
@@ -947,6 +949,27 @@ class CloudIconsMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS
 
         return list(ICON_TOOL_IDS)
+
+
+class CloudFxMcpProvider:
+    """`pocketpaw.mcp_servers` — the paw-fx effects-registry in-process server
+    (``pocketpaw_fx``). Hosts ``search_effects`` / ``get_effect`` /
+    ``list_effect_categories``. Ambient (NOT in ``OPT_IN_MCP_SERVERS``), same
+    regime as icons: pure read over a local registry dir, no identity.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.fx import build_fx_server
+
+            return build_fx_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.fx import FX_TOOL_IDS
+
+        return list(FX_TOOL_IDS)
 
 
 class CloudPaletteMcpProvider:

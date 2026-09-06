@@ -423,4 +423,7 @@ Never fall back to another engine's tool, and never fall back to
 - `mcp__pocketpaw_sites_manager__list_site_assets` — the owner's own uploaded images
 - `mcp__pocketpaw_stock__search_stock_images` — real photography for a new section
 - `mcp__pocketpaw_icons__search_icons` — feature icons
+- `mcp__pocketpaw_fx__search_effects` / `get_effect` — drop-in visual effects.
+  On this engine only dependency-free effects (empty `needs`) are served; pass
+  `needs_js=false` to `search_effects`.
 - `mcp__pocketpaw_palette__scale_from_color` / `extract_palette` — brand colour

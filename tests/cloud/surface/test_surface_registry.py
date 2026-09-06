@@ -1,4 +1,5 @@
 # tests/cloud/surface/test_surface_registry.py — SR-2 registry guarantees.
+# Updated: 2026-09-06 (feat/fx-mcp-server) — the /sites toolbelt pins FX_TOOL_IDS too.
 #
 # Created: 2026-06-22 (feat/surface-registry-backend-profiles, SR-2) — guards the
 # two SR-2 additions to the declarative SURFACES registry:
@@ -197,12 +198,18 @@ def test_sites_all_modes_drop_file_and_shell_builtins():
 # the real SDK filter predicate.
 # ---------------------------------------------------------------------------
 
+from pocketpaw_ee.agent.mcp_servers.fx import FX_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.palette import PALETTE_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.stock_images import STOCK_TOOL_IDS  # noqa: E402
 
-_TOOLBELT_IDS = frozenset(STOCK_TOOL_IDS) | frozenset(ICON_TOOL_IDS) | frozenset(PALETTE_TOOL_IDS)
+_TOOLBELT_IDS = (
+    frozenset(STOCK_TOOL_IDS)
+    | frozenset(ICON_TOOL_IDS)
+    | frozenset(PALETTE_TOOL_IDS)
+    | frozenset(FX_TOOL_IDS)
+)
 
 
 def _sites_create_metas():

@@ -332,3 +332,8 @@ your copy is the only variable. Write it well.
   (draft-first — STEP 3); a plain "create a site" stops at the draft.
 - `mcp__pocketpaw_pocket__list_pockets` — find an existing pocket if the
   user named one rather than describing a new site.
+- `mcp__pocketpaw_fx__search_effects` / `get_effect` / `list_effect_categories` —
+  drop-in visual effects (animated backgrounds, particles, 3D heroes, scroll /
+  text / cursor effects, transitions). `get_effect` returns `files` to write
+  verbatim under `_fx/` plus a `snippet` to place; never hand-roll an effect
+  the registry already has.
