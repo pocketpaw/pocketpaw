@@ -712,6 +712,14 @@ ignore_imports = [
     "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud._core.realtime.events",
     "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.file_versions.service",
     "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.agents.knowledge",
+    # C4-a builtin Fabric/Instinct tenancy: the shared _tenancy helper resolves
+    # the caller's workspace from the cloud chat stream's identity ContextVars
+    # and reads the per-run fail-closed marker (current_cloud_chat_run). Both
+    # reaches are lazy try/except runtime imports INSIDE functions — the module
+    # top level imports only OSS (logging), and on a community install both
+    # resolve to None/False so the Fabric + Instinct tools keep their legacy
+    # unscoped single-tenant behavior. Same pattern as library_verbs above.
+    "pocketpaw.tools.builtin._tenancy -> pocketpaw_ee.cloud.chat.agent_service",
     # FL-5 structural edit tools (port of dewani12's #1193): the edit_document /
     # edit_slides / edit_spreadsheet tools live in the OSS builtin tools package
     # (registered via _EE_TOOLS, guarded by ee/ availability) but edit a cloud

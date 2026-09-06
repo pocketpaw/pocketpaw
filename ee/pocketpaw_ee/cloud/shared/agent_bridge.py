@@ -506,6 +506,7 @@ async def _run_agent_response(
         attach_delivered_artifacts_collector,
         detach_agent_identity,
         detach_delivered_artifacts_collector,
+        mark_cloud_chat_run,
     )
 
     pool = get_agent_pool()
@@ -590,6 +591,17 @@ async def _run_agent_response(
     # it, so every ContextVar-scoped tool returned "requires workspace context
     # (call from a cloud chat session)". ``user_id`` is the agent itself — it is
     # the actor on this path, matching the cloud MCP tests' setup.
+    # C4-a: mark this as a live cloud run BEFORE identity is bound, exactly as
+    # ``run_core.execute_run`` does on the SSE path. The marker is what the
+    # builtin Fabric/Instinct tools key their fail-closed on, so without it this
+    # whole cloud path read False and a run that somehow reached here without a
+    # workspace would fall back to unscoped access instead of refusing. Today
+    # ``attach_agent_identity`` raises on an empty workspace, so the invariant
+    # already held — but by a separate accident, not by the guard. Entered
+    # manually (not via ``with``) to pair with the explicit attach/detach tokens
+    # around it; released in the same ``finally``.
+    cloud_run_marker = mark_cloud_chat_run()
+    cloud_run_marker.__enter__()
     identity_tokens = attach_agent_identity(workspace_id=workspace_id, user_id=agent_id)
     # ART-1: bind a per-run collector so a ``deliver_artifact`` call on THIS
     # (group/DM) path lands a ``{type:"artifact", meta}`` attachment on the agent
@@ -702,6 +714,7 @@ async def _run_agent_response(
     finally:
         detach_agent_identity(identity_tokens)
         detach_delivered_artifacts_collector(delivered_token)
+        cloud_run_marker.__exit__(None, None, None)
 
     if saw_error_event and not full_text.strip():
         details = f": {error_summary}" if error_summary else ""

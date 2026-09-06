@@ -1,9 +1,38 @@
 # Instinct tools — agent tools for the decision pipeline.
 # Created: 2026-03-28 — Lets the agent propose actions, check pending, read audit.
+# Updated: 2026-08-06 (C4-a — stop cross-tenant leakage) — all three tools are
+#   now WORKSPACE-SCOPED, matching the in-process MCP sibling
+#   (ee/pocketpaw_ee/agent/mcp_servers/instinct.py) which already resolved
+#   tenancy from the per-stream agent identity and passed workspace_id into
+#   every store call. The builtin path — the ONLY Instinct surface the non-SDK
+#   backends (deep_agents, google_adk, openai_agents) see — passed none, so:
+#     * ``instinct_propose`` wrote Actions with workspace_id = NULL. Because
+#       ``_workspace_scope()`` renders a scoped read as
+#       ``(workspace_id = ? OR workspace_id IS NULL)`` for W4a legacy
+#       compatibility, a NULL Action was ACTIVELY RETURNED to every tenant's
+#       scoped pending query on that file — it showed up in other tenants'
+#       approval queues. Now the resolved workspace is stamped on the row, so
+#       the proposal is visible only to its own tenant. (Assignee is left
+#       untouched: it drives Mission Control's per-human filter, and defaulting
+#       it to the calling user would silently narrow queues that today show the
+#       whole tenant's unassigned work.)
+#     * ``instinct_pending`` / ``instinct_audit`` read unfiltered. Both now
+#       pass workspace_id, so a tenant's queue and decision trail never
+#       include another tenant's rows.
+#   Fail-closed: when the POSITIVE per-run marker ``is_tenant_scoped_run()``
+#   says this is a cloud chat dispatch and no workspace resolves, the tool
+#   REFUSES instead of falling back to NULL/global scope. The marker is
+#   deliberately not a process-global (see _tenancy.py for the #1570 rationale)
+#   so workspace-less OSS / CLI / background runs keep working unchanged.
 
 import logging
 from typing import Any
 
+from pocketpaw.tools.builtin._tenancy import (
+    current_workspace,
+    is_tenant_scoped_run,
+    workspace_required_message,
+)
 from pocketpaw.tools.protocol import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -17,6 +46,21 @@ def _get_instinct_store():
         return get_instinct_store()
     except ImportError:
         return None
+
+
+def _resolve_scope(tool_name: str) -> tuple[str | None, str | None]:
+    """Resolve ``(workspace_id, refusal)`` for one tool invocation.
+
+    ``refusal`` is non-None when the run is tenant-scoped but no workspace
+    resolved — the caller returns it verbatim and performs NO store access.
+    """
+    workspace = current_workspace()
+    if workspace is None and is_tenant_scoped_run():
+        logger.warning(
+            "%s refused: tenant-scoped run with no resolvable workspace identity", tool_name
+        )
+        return None, workspace_required_message(tool_name)
+    return workspace, None
 
 
 class InstinctProposeTool(BaseTool):
@@ -90,6 +134,10 @@ class InstinctProposeTool(BaseTool):
         category: str = "workflow",
         reason: str = "",
     ) -> str:
+        workspace, refusal = _resolve_scope(self.name)
+        if refusal:
+            return refusal
+
         store = _get_instinct_store()
         if not store:
             return "Instinct is not available (enterprise feature)."
@@ -97,6 +145,9 @@ class InstinctProposeTool(BaseTool):
         try:
             from pocketpaw.instinct.models import ActionCategory, ActionPriority, ActionTrigger
 
+            # C4-a: stamp the resolved tenant on the row. Without this the
+            # Action lands NULL and every tenant's scoped pending query
+            # returns it (the NULL leg of _workspace_scope's W4a filter).
             action = await store.propose(
                 pocket_id=pocket_id,
                 title=title,
@@ -105,6 +156,7 @@ class InstinctProposeTool(BaseTool):
                 trigger=ActionTrigger(type="agent", source="pocketpaw", reason=reason or title),
                 category=ActionCategory(category),
                 priority=ActionPriority(priority),
+                workspace_id=workspace,
             )
             return (
                 f"Action proposed: '{title}' (ID: {action.id})\n"
@@ -148,12 +200,17 @@ class InstinctPendingTool(BaseTool):
         }
 
     async def execute(self, pocket_id: str | None = None) -> str:
+        workspace, refusal = _resolve_scope(self.name)
+        if refusal:
+            return refusal
+
         store = _get_instinct_store()
         if not store:
             return "Instinct is not available (enterprise feature)."
 
         try:
-            pending = await store.pending(pocket_id)
+            # C4-a: workspace-filtered read — never another tenant's queue.
+            pending = await store.pending(pocket_id, workspace_id=workspace)
             if not pending:
                 return "No pending actions — all clear."
 
@@ -205,12 +262,19 @@ class InstinctAuditTool(BaseTool):
         }
 
     async def execute(self, pocket_id: str | None = None, limit: int = 10) -> str:
+        workspace, refusal = _resolve_scope(self.name)
+        if refusal:
+            return refusal
+
         store = _get_instinct_store()
         if not store:
             return "Instinct is not available (enterprise feature)."
 
         try:
-            entries = await store.query_audit(pocket_id=pocket_id, limit=min(limit, 50))
+            # C4-a: workspace-filtered read — never another tenant's trail.
+            entries = await store.query_audit(
+                pocket_id=pocket_id, limit=min(limit, 50), workspace_id=workspace
+            )
             if not entries:
                 return "No audit entries found."
 
