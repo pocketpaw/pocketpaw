@@ -20,6 +20,13 @@ import pytest
 
 from pocketpaw.browser import BrowserDriver
 
+# Several tests here exercise the EE browser MCP server (credential refusal,
+# surface scoping, _safe_url). The OSS-only CI lane installs no ``pocketpaw_ee``,
+# so skip the whole module there rather than erroring at collection/setup — the
+# full (EE) lane still runs it. The pure-driver SSRF tests need a real browser
+# and skip on their own when Chromium is absent.
+pytest.importorskip("pocketpaw_ee")
+
 pytestmark = pytest.mark.asyncio
 
 # 169.254.169.254 is the cloud metadata endpoint — the single highest-value SSRF
