@@ -1,19 +1,22 @@
 # Browser automation module for PocketPaw
-# Changes: Added exports for snapshot, driver, and session components
+# Changes: 2026-09-06 (BR-1, feat/browser-surface-server) — dropped the
+#   ``AccessibilityNode`` / ``SnapshotGenerator`` exports. Playwright removed
+#   ``page.accessibility``, so both were dead code; snapshots now come from a
+#   DOM walk (``SNAPSHOT_JS`` + ``render_snapshot``). ``RefMap`` is unchanged.
 #
 # This module provides Playwright-based browser automation with semantic
-# accessibility tree snapshots for AI agent control.
+# DOM snapshots for AI agent control.
 """Browser automation module for PocketPaw."""
 
 from .driver import BrowserDriver, NavigationResult
 from .session import BrowserSession, BrowserSessionManager, get_browser_session_manager
-from .snapshot import AccessibilityNode, RefMap, SnapshotGenerator
+from .snapshot import SNAPSHOT_JS, RefMap, render_snapshot
 
 __all__ = [
     # Snapshot
     "RefMap",
-    "AccessibilityNode",
-    "SnapshotGenerator",
+    "SNAPSHOT_JS",
+    "render_snapshot",
     # Driver
     "BrowserDriver",
     "NavigationResult",

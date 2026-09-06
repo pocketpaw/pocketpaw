@@ -394,6 +394,13 @@ class _McpToolIds(NamedTuple):
     # break when a NEW surface adds an allow-list. ``None`` is the degrade value
     # (no MCP restriction), which is the safe direction to default toward.
     ship_allow: frozenset[str] | None = None
+    # /browser — the agentic-browser tools. UNLIKE every sibling here this set is
+    # ALSO used as a DENY on every other surface (see ``service.resolve_profile``),
+    # so a failed import must not silently unlock the browser everywhere: the
+    # degrade path leaves it ``None`` and the deny becomes a no-op — which is why
+    # the import lives in the same try/except as the rest, and why the BROWSER
+    # profile's allow degrades in lockstep.
+    browser_allow: frozenset[str] | None = None
 
 
 # Built lazily + memoized: pulling the EE mcp-server tool-id constants at module
@@ -414,6 +421,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
     logger = logging.getLogger(__name__)
     try:
         from pocketpaw_ee.agent.mcp_servers.ask import ASK_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
@@ -461,6 +469,9 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             # service. Unlike belt's gate id, SHIP_TOOL_IDS IS importable here, so
             # it rides the same try/except None-degrade path as the others.
             ship_allow=frozenset(SHIP_TOOL_IDS),
+            # /browser scopes to the agentic-browser verbs. Crossed over as a
+            # plain frozenset[str] — no pocketpaw_ee symbol leaks into OSS.
+            browser_allow=frozenset(BROWSER_TOOL_IDS),
         )
     except Exception:  # noqa: BLE001 — degrade to no restriction, never break chat
         logger.warning(
@@ -474,6 +485,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             studio_allow=None,
             belt_allow=None,
             ship_allow=None,
+            browser_allow=None,
         )
 
 
@@ -482,6 +494,16 @@ def _mcp_tool_ids() -> _McpToolIds:
     if _MCP_TOOL_IDS_CACHE is None:
         _MCP_TOOL_IDS_CACHE = _load_mcp_tool_ids()
     return _MCP_TOOL_IDS_CACHE
+
+
+def browser_tool_ids() -> frozenset[str]:
+    """The agentic-browser MCP tool ids, or an empty set if the import degraded.
+
+    Read by ``service.resolve_profile`` to DENY these ids on every non-browser
+    surface. Empty on the degrade path, which makes the deny a no-op — matching
+    the BROWSER profile's allow, which is ``None`` on that same path.
+    """
+    return _mcp_tool_ids().browser_allow or frozenset()
 
 
 # --- Per-row profile resolvers -------------------------------------------------
@@ -516,6 +538,19 @@ def _studio_profile(_meta: SurfaceMeta) -> SurfaceProfile:
         ripple_mode="off",
         allow_mcp_tool_ids=_mcp_tool_ids().studio_allow,
         skill_names=frozenset({"studio"}),
+    )
+
+
+def _browser_profile(_meta: SurfaceMeta) -> SurfaceProfile:
+    # Browser: drive a real browser from chat. Ripple TRIMMED — the deliverable
+    # is what the agent found on the page, wrapped in a Ripple view, not a
+    # ui-spec dashboard. The MCP allow-list is the browser verbs; every OTHER
+    # surface gets these same ids as a DENY (applied centrally in
+    # ``service.resolve_profile``), which is the half that makes the scoping a
+    # boundary rather than a preference.
+    return SurfaceProfile(
+        ripple_mode="trim",
+        allow_mcp_tool_ids=_mcp_tool_ids().browser_allow,
     )
 
 
@@ -843,6 +878,15 @@ SURFACES: list[SurfaceSpec] = [
         _route_for(SurfaceKind.CONCIERGE),
         concierge.build_preamble,
         profile_resolver=_concierge_profile,
+    ),
+    SurfaceSpec(
+        SurfaceKind.BROWSER,
+        _route_for(SurfaceKind.BROWSER),
+        # PLACEHOLDER handler — the /browser preamble is BR-2. The registry is
+        # asserted 1:1 with SurfaceKind, so the row must exist now; generic's
+        # preamble is a usable stand-in until BR-2 lands the real one.
+        generic.build_preamble,
+        profile_resolver=_browser_profile,
     ),
     SurfaceSpec(SurfaceKind.GENERIC, _route_for(SurfaceKind.GENERIC), generic.build_preamble),
 ]

@@ -35,6 +35,18 @@ _SITES_SVELTE_CREATE_DENY = frozenset(
 _SITES_BUILTIN_DENY = frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"})
 
 
+# Every non-BROWSER surface now carries the agentic-browser tool ids in its deny
+# set (BR-1, ``service._deny_browser_off_surface``). The assertions below are
+# about each SURFACE'S OWN denies, so strip that always-on floor rather than
+# restating it in every expected set — and rather than narrowing the deny, which
+# is the boundary /chat depends on. ``test_browser_surface.py`` asserts the floor
+# itself, for every kind.
+def _own_deny(profile) -> frozenset[str]:
+    from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
+
+    return profile.deny_mcp_tool_ids - frozenset(BROWSER_TOOL_IDS)
+
+
 # ---------------------------------------------------------------------------
 # Completeness assertion (the SR design's "keep the enum + assert" answer).
 # ---------------------------------------------------------------------------
@@ -84,7 +96,7 @@ def test_sites_svelte_create_drops_ripple_and_denies():
     assert isinstance(profile, SurfaceProfile)
     assert profile.ripple_mode == "off"
     # svelte-create denies the two ripple-create tools AND the file/shell built-ins.
-    assert profile.deny_mcp_tool_ids == _SITES_SVELTE_CREATE_DENY | _SITES_BUILTIN_DENY
+    assert _own_deny(profile) == _SITES_SVELTE_CREATE_DENY | _SITES_BUILTIN_DENY
     # The BUNDLED name. This asserted "create-svelte-site" until 2026-07-31 —
     # a literal never checked against a real skill, so the test passed for a
     # year while the surface loaded no skills at all.
@@ -106,7 +118,7 @@ def test_sites_react_create_drops_ripple_and_denies():
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="react"))
     assert isinstance(profile, SurfaceProfile)
     assert profile.ripple_mode == "off"
-    assert profile.deny_mcp_tool_ids == _SITES_SVELTE_CREATE_DENY | _SITES_BUILTIN_DENY
+    assert _own_deny(profile) == _SITES_SVELTE_CREATE_DENY | _SITES_BUILTIN_DENY
     assert "pocketpaw-create-react-site" in profile.skill_names
     # It must NOT hand the react agent the svelte brain.
     assert "pocketpaw-create-svelte-site" not in profile.skill_names
@@ -134,7 +146,7 @@ def test_sites_refine_wins_over_react_engine():
     through the ripple/pocket tools, so ripple must stay ON."""
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(pocket_id="pkt_1", engine="react"))
     assert profile.ripple_mode == "on"
-    assert profile.deny_mcp_tool_ids == _SITES_BUILTIN_DENY
+    assert _own_deny(profile) == _SITES_BUILTIN_DENY
     assert profile.skill_names == frozenset()
 
 
@@ -145,7 +157,7 @@ def test_sites_html_create_keeps_ripple():
     for html would silently flip its ask mechanism."""
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="html"))
     assert profile.ripple_mode == "on"
-    assert profile.deny_mcp_tool_ids == _SITES_BUILTIN_DENY
+    assert _own_deny(profile) == _SITES_BUILTIN_DENY
     assert profile.skill_names == frozenset()
 
 
@@ -155,7 +167,7 @@ def test_sites_ripple_create_keeps_ripple():
     for meta in (SurfaceMeta(), SurfaceMeta(engine="ripple")):
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert profile.ripple_mode == "on", f"{meta!r} must keep ripple"
-        assert profile.deny_mcp_tool_ids == _SITES_BUILTIN_DENY, f"{meta!r}"
+        assert _own_deny(profile) == _SITES_BUILTIN_DENY, f"{meta!r}"
 
 
 def test_sites_refine_keeps_ripple_and_wins_over_engine():
@@ -169,7 +181,7 @@ def test_sites_refine_keeps_ripple_and_wins_over_engine():
     ):
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert profile.ripple_mode == "on", f"refine {meta!r} must keep ripple"
-        assert profile.deny_mcp_tool_ids == _SITES_BUILTIN_DENY, f"refine {meta!r}"
+        assert _own_deny(profile) == _SITES_BUILTIN_DENY, f"refine {meta!r}"
 
 
 def test_sites_all_modes_drop_file_and_shell_builtins():
@@ -183,7 +195,7 @@ def test_sites_all_modes_drop_file_and_shell_builtins():
     )
     kept = {"WebSearch", "WebFetch", "Skill"}
     for meta in metas:
-        deny = resolve_profile(SurfaceKind.SITES, meta).deny_mcp_tool_ids
+        deny = _own_deny(resolve_profile(SurfaceKind.SITES, meta))
         assert _SITES_BUILTIN_DENY <= deny, f"{meta!r}: file/shell built-ins must be denied"
         assert kept.isdisjoint(deny), f"{meta!r}: must NOT deny {kept & deny}"
 

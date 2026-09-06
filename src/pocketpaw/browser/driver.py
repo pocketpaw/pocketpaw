@@ -1,5 +1,27 @@
 # Playwright browser driver wrapper
-# Changes: Added auto-install and system Chrome support
+# Changes: 2026-09-06 (BR-1, feat/browser-surface-server) — three changes:
+#   1. ``_take_snapshot`` runs ``page.evaluate(SNAPSHOT_JS)`` instead of
+#      ``page.accessibility.snapshot()``. Playwright REMOVED ``page.accessibility``
+#      (1.58 raises ``AttributeError``), so every snapshot call was failing; the
+#      DOM-walk replacement lives in ``snapshot.py``. click/type now resolve
+#      through the ``[data-paw-ref="N"]`` selectors that walk stamps.
+#   2. REQUEST-LEVEL SSRF. ``context.route("**/*", ...)`` aborts any request whose
+#      host does not resolve to a public address, reusing
+#      ``pocketpaw.security.safe_fetch.assert_public_url`` (one IP-rule
+#      implementation for the whole codebase). This catches clicks, redirects,
+#      subresources and JS fetches — not just the top-level navigate.
+#   3. ``--no-sandbox`` is passed ONLY inside a container (``/.dockerenv`` or
+#      ``POCKETPAW_IN_CONTAINER``); never on a dev machine.
+#   ``navigate`` raises ``BlockedURLError`` (not a raw Chromium net::ERR_FAILED)
+#   when OUR guard is what aborted the request, so the agent is told the address
+#   is unreachable instead of being handed a transient-looking error to retry.
+#   ``navigate`` also waits for the page to SETTLE when a goto fails: the call
+#   raises while its navigation is still in flight, Chromium lands its own
+#   ``chrome-error://chromewebdata/`` page, and that interrupts the NEXT goto —
+#   so one blocked URL used to brick the session for every URL after it.
+#   Also added ``screenshot_png()`` (bytes, no disk) and ``field_info()`` (live
+#   attributes of a ref'd element) for the EE browser MCP server's credential
+#   refusal — the driver reports, the tool decides.
 #
 # Wraps Playwright browser automation with methods for navigate, click,
 # type, scroll, snapshot, and screenshot.
@@ -10,16 +32,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .snapshot import AccessibilityNode, RefMap, SnapshotGenerator
+from .snapshot import SNAPSHOT_JS, RefMap, render_snapshot
 
 if TYPE_CHECKING:
-    from playwright.async_api import Browser, Page, Playwright
+    from playwright.async_api import Browser, Page, Playwright, Route
+
+
+def _in_container() -> bool:
+    """True when this process is running inside a container.
+
+    Chromium needs ``--no-sandbox`` there (no user namespaces); passing it on a
+    dev machine would needlessly drop the sandbox, so it is container-only.
+    """
+    return (
+        os.environ.get("POCKETPAW_IN_CONTAINER", "").lower() in {"1", "true", "yes"}
+        or Path("/.dockerenv").exists()
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +98,11 @@ class BrowserDriver:
         self._browser: Browser | None = None
         self._page: Page | None = None
         self._refmap: RefMap = RefMap()
-        self._snapshot_generator = SnapshotGenerator()
+        # host -> allowed? Memoized per driver so a page with dozens of
+        # subresources does not re-run getaddrinfo per request.
+        self._host_verdicts: dict[str, bool] = {}
+        # Hosts this driver actually blocked, for the caller's audit trail.
+        self.blocked_hosts: list[str] = []
 
         # Verify playwright is installed early (fail fast with helpful message)
         try:
@@ -104,18 +144,25 @@ class BrowserDriver:
 
         self._playwright = await async_playwright().start()
 
+        # Containers have no user namespaces, so Chromium's sandbox cannot
+        # start there. Dev machines keep the sandbox.
+        launch_args = ["--no-sandbox"] if _in_container() else []
+
         # Try system Chrome first (no download needed for users)
         try:
             self._browser = await self._playwright.chromium.launch(
                 headless=self.headless,
                 channel="chrome",  # Use system Chrome
+                args=launch_args,
             )
             logger.info("Using system Chrome")
         except Exception as e:
             logger.debug(f"System Chrome not available: {e}")
             # Fall back to Playwright's Chromium
             try:
-                self._browser = await self._playwright.chromium.launch(headless=self.headless)
+                self._browser = await self._playwright.chromium.launch(
+                    headless=self.headless, args=launch_args
+                )
                 logger.info("Using Playwright Chromium")
             except Exception as install_error:
                 # Chromium not installed - auto-install it
@@ -123,13 +170,61 @@ class BrowserDriver:
                     logger.info("Installing Chromium browser (one-time download)...")
                     await self._install_chromium()
                     # Try again after install
-                    self._browser = await self._playwright.chromium.launch(headless=self.headless)
+                    self._browser = await self._playwright.chromium.launch(
+                        headless=self.headless, args=launch_args
+                    )
                     logger.info("Using Playwright Chromium (freshly installed)")
                 else:
                     raise
 
-        context = await self._browser.new_context(viewport=self.DEFAULT_VIEWPORT)
+        context = await self._browser.new_context(
+            viewport=self.DEFAULT_VIEWPORT,
+            # ``context.route`` does NOT intercept requests made from inside a
+            # Service Worker, so a page that registers one could fetch a private
+            # address straight past the guard below. Blocking workers closes that
+            # bypass. (WebSocket traffic is still uncovered — that needs
+            # ``route_web_socket``; named as a known gap, not fixed here.)
+            service_workers="block",
+        )
+        # SSRF at the REQUEST level: every request Chromium makes — top-level
+        # navigation, redirect hop, subresource, JS fetch — is checked before it
+        # leaves. A URL that resolves to a private / loopback / link-local /
+        # metadata address is aborted.
+        await context.route("**/*", self._ssrf_route)
         self._page = await context.new_page()
+
+    async def _ssrf_route(self, route: Route) -> None:
+        """Abort any request whose host does not resolve to a public address."""
+        from pocketpaw.security.safe_fetch import SafeFetchError, assert_public_url
+
+        url = route.request.url
+        host = ""
+        try:
+            from urllib.parse import urlparse
+
+            host = urlparse(url).netloc
+        except Exception:  # noqa: BLE001
+            host = url
+
+        verdict = self._host_verdicts.get(host)
+        if verdict is None:
+            try:
+                await assert_public_url(url)
+                verdict = True
+            except SafeFetchError:
+                verdict = False
+            except Exception:  # noqa: BLE001 — never let the guard crash the page
+                logger.warning("SSRF check errored for %s; blocking", host, exc_info=True)
+                verdict = False
+            self._host_verdicts[host] = verdict
+
+        if not verdict:
+            if host not in self.blocked_hosts:
+                self.blocked_hosts.append(host)
+            logger.info("browser SSRF: blocked request to %s", host)
+            await route.abort()
+            return
+        await route.continue_()
 
     async def _install_chromium(self) -> None:
         """Auto-install Playwright's Chromium browser."""
@@ -163,6 +258,7 @@ class BrowserDriver:
             self._playwright = None
         self._page = None
         self._refmap = RefMap()
+        self._host_verdicts.clear()
 
     def _require_page(self) -> Page:
         """Get page or raise if not launched."""
@@ -171,29 +267,39 @@ class BrowserDriver:
         return self._page
 
     async def _take_snapshot(self) -> NavigationResult:
-        """Take accessibility snapshot of current page state."""
+        """Snapshot the current page by walking the visible DOM.
+
+        ``page.accessibility`` no longer exists in Playwright, so this evaluates
+        ``SNAPSHOT_JS`` instead: it stamps ``data-paw-ref="N"`` on interactive
+        elements and returns the semantic text alongside the ref count.
+        """
         page = self._require_page()
 
-        title = await page.title()
-        url = page.url
-
-        # Get accessibility tree from Playwright
-        tree_dict = await page.accessibility.snapshot()
-
-        if tree_dict is None:
-            # Empty page or error - create minimal tree
-            tree_dict = {"role": "WebArea", "name": "", "children": []}
-
-        # Convert to our AccessibilityNode format
-        tree = AccessibilityNode.from_playwright_dict(tree_dict)
-
-        # Generate semantic snapshot
-        snapshot_text, refmap = self._snapshot_generator.generate(tree, title=title, url=url)
+        result = await page.evaluate(SNAPSHOT_JS)
+        snapshot_text, refmap = render_snapshot(result or {})
 
         # Store refmap for future interactions
         self._refmap = refmap
 
         return NavigationResult(snapshot=snapshot_text, refmap=refmap)
+
+    async def field_info(self, ref: int) -> dict[str, str]:
+        """Report the live attributes of a ref'd element.
+
+        Read at ACTION time, not snapshot time — the DOM can change between the
+        two, and a credential check on stale attributes is not a check. Callers
+        (the EE browser MCP server) decide policy; the driver only reports.
+        """
+        page = self._require_page()
+        selector = self._refmap.get_selector(ref)
+        if selector is None:
+            raise ValueError(f"Invalid ref: {ref}. Element not found in current snapshot.")
+        info = await page.locator(selector).evaluate(
+            "el => ({tag: el.tagName || '', type: el.type || '', "
+            "autocomplete: el.getAttribute('autocomplete') || '', "
+            "name: el.getAttribute('name') || '', id: el.id || ''})"
+        )
+        return {k: str(v) for k, v in (info or {}).items()}
 
     async def navigate(self, url: str) -> NavigationResult:
         """Navigate to a URL and return page snapshot.
@@ -206,7 +312,35 @@ class BrowserDriver:
         """
         page = self._require_page()
 
-        await page.goto(url, wait_until="domcontentloaded")
+        # An aborted navigation (the SSRF guard, a dead host) leaves Chromium
+        # loading its own ``chrome-error://`` page, and that in-flight navigation
+        # INTERRUPTS the next goto — so without a retry one blocked URL bricked
+        # the session for every URL after it. One retry is enough: by then the
+        # error page has landed and nothing else is in flight.
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+        except Exception:
+            # A failed goto RAISES while its navigation is still in flight —
+            # aborted by the SSRF guard, Chromium then loads its own
+            # ``chrome-error://`` page. That in-flight navigation interrupts
+            # whatever goto comes next, so one blocked URL bricked the session
+            # for every URL after it. Let the error page land before re-raising.
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:  # noqa: BLE001 — best-effort settle
+                logger.debug("page did not settle after a failed navigation", exc_info=True)
+            # Chromium reports an aborted request as a generic net::ERR_FAILED,
+            # which reads to an agent like a transient error worth retrying. If
+            # OUR guard is what aborted it, say so — and say so on the SECOND
+            # attempt at the same host too, which is why this reads the verdict
+            # cache rather than watching ``blocked_hosts`` grow.
+            from urllib.parse import urlparse
+
+            from pocketpaw.security.safe_fetch import BlockedURLError
+
+            if self._host_verdicts.get(urlparse(url).netloc) is False:
+                raise BlockedURLError("Blocked URL: resolved to non-public IP address.") from None
+            raise
 
         return await self._take_snapshot()
 
@@ -305,6 +439,14 @@ class BrowserDriver:
         await page.screenshot(path=str(path_obj))
 
         return str(path_obj)
+
+    async def screenshot_png(self) -> bytes:
+        """Screenshot the current page and return the PNG bytes.
+
+        No disk write — the cloud surface hands the image straight back to the
+        agent, and writing into a shared server's cwd is not a thing to do.
+        """
+        return await self._require_page().screenshot()
 
 
 __all__ = ["BrowserDriver", "NavigationResult"]
