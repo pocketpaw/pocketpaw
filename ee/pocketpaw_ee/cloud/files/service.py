@@ -40,6 +40,7 @@ only need the flat list keep working via ``page.files``.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
@@ -241,14 +242,30 @@ class UnifiedFilesService:
             return await self._uploads.count_by_workspace(workspace_id, pocket_id=pocket_id)
         return await self._uploads.count_by_workspace(workspace_id, pocket_id=LIST_WORKSPACE_ONLY)
 
-    async def file_links(self, workspace_id: str, file_id: str) -> FileLinksResponse:
+    async def file_links(
+        self,
+        workspace_id: str,
+        file_id: str,
+        *,
+        can_read_pocket: Callable[[str], Awaitable[bool]] | None = None,
+    ) -> FileLinksResponse:
         """Outgoing wikilink targets + backlinks for one file (files vault).
 
         Tenant-filtered on the row lookup and on the scan; a missing or
         cross-workspace id is ``file.not_found``.
+
+        ``can_read_pocket`` is the caller's pocket-membership check. It is
+        REQUIRED in practice even though the signature allows ``None``: the
+        scan below runs in the file's own pocket scope, so without it a
+        workspace member outside a private pocket reads that pocket's
+        filenames out of the links and backlinks. A pocket the caller cannot
+        read answers ``file.not_found``, same as a row in another workspace —
+        the caller asked for a file, and a file they may not read is not there.
         """
         doc = await self._uploads.get_doc_scoped(file_id, workspace_id)
         if doc is None:
+            raise NotFound("file", file_id)
+        if doc.pocket_id and (can_read_pocket is None or not await can_read_pocket(doc.pocket_id)):
             raise NotFound("file", file_id)
         rows = await self._uploads.iter_link_rows(
             workspace_id, pocket_id=doc.pocket_id or LIST_WORKSPACE_ONLY, limit=GRAPH_CAP

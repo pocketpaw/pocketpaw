@@ -191,3 +191,43 @@ async def test_editor_id_with_slash_reaches_the_links_route(monkeypatch, links_d
     r = _client(monkeypatch).get(f"/api/v1/files/{daily}/links")
     assert r.status_code == 200, r.text
     assert r.json()["outgoing"][0]["file_id"] == plan
+
+
+async def test_links_applies_the_pocket_membership_rule(monkeypatch, links_db):
+    """A workspace member outside a private pocket cannot read its files' links.
+
+    The read resolves links in the FILE's own pocket scope, so without this gate
+    ``outgoing[].filename`` and every backlink name a row the caller cannot
+    list. Mutation: drop the ``can_read_pocket`` check in
+    ``UnifiedFilesService.file_links`` and the deny case returns 200 with
+    "Secret Plan.md" in the body.
+    """
+    budget = await _note("w1", "Budget.md", "[[Secret Plan]]", pocket_id="p1")
+    await _note("w1", "Secret Plan.md", "[[Budget]]", pocket_id="p1")
+
+    async def deny(**_kw):
+        return False
+
+    r = _client(monkeypatch, member=deny).get(f"/api/v1/files/{budget}/links")
+    assert r.status_code == 404, r.text
+    assert "Secret Plan" not in r.text
+
+    async def allow(**_kw):
+        return True
+
+    body = _client(monkeypatch, member=allow).get(f"/api/v1/files/{budget}/links").json()
+    assert body["outgoing"][0]["filename"] == "Secret Plan.md"
+    assert [b["filename"] for b in body["backlinks"]] == ["Secret Plan.md"]
+
+
+async def test_links_on_a_workspace_file_needs_no_pocket_membership(monkeypatch, links_db):
+    """The gate keys on the ROW's pocket, so workspace-only files are unaffected."""
+    a = await _note("w1", "A.md", "[[B]]")
+    await _note("w1", "B.md")
+
+    async def deny(**_kw):
+        return False
+
+    r = _client(monkeypatch, member=deny).get(f"/api/v1/files/{a}/links")
+    assert r.status_code == 200, r.text
+    assert r.json()["outgoing"][0]["filename"] == "B.md"

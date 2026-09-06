@@ -29,7 +29,7 @@
   {
     "label": "note tags are merged after the derived keywords, so the author's #tag is the one dropped at the cap",
     "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
-    "find": "            base = merge_tags(base, [*note.hashtags, *note.frontmatter_tags])",
+    "find": "            base = merge_tags(base, [*note.hashtags, *note.frontmatter_tags], min_len=2)",
     "replace": "            derived = [*derived, *note.hashtags, *note.frontmatter_tags]",
     "tests": [
       "tests/cloud/uploads/test_listener_links.py::test_note_tag_beats_derived_keywords_at_the_cap"
@@ -87,6 +87,24 @@
     "replace": "        out[normalize_link_name(r[\"filename\"])] = r",
     "tests": [
       "tests/cloud/files/test_links.py::test_same_stem_newest_wins"
+    ]
+  },
+  {
+    "label": "links: pocket gate removed",
+    "file": "ee/pocketpaw_ee/cloud/files/service.py",
+    "find": "        if doc.pocket_id and (can_read_pocket is None or not await can_read_pocket(doc.pocket_id)):\n            raise NotFound(\"file\", file_id)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/files/test_links.py::test_links_applies_the_pocket_membership_rule"
+    ]
+  },
+  {
+    "label": "links: gate keys on the query instead of the row",
+    "file": "ee/pocketpaw_ee/cloud/files/router.py",
+    "find": "    return await _SVC.file_links(\n        current_workspace, file_id, can_read_pocket=partial(_pocket_readable, user_id=user_id)\n    )",
+    "replace": "    return await _SVC.file_links(current_workspace, file_id)",
+    "tests": [
+      "tests/cloud/files/test_links.py::test_links_applies_the_pocket_membership_rule"
     ]
   }
 ]

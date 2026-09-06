@@ -11,7 +11,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+# Both fence styles. The preview renderer (core/markdown/wikilinks.ts) skips
+# ``` and ~~~ alike; parsing only ``` here made a [[link]] inside a ~~~ block
+# a real edge and a phantom backlink that the preview never rendered.
+_FENCE_RE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 _WIKILINK_RE = re.compile(r"\[\[([^\[\]]+?)\]\]")
 # ``#word`` at line start or after whitespace. ``# Heading`` fails because the

@@ -572,7 +572,20 @@ async def _record_kb_article(
         if old_id and old_scope and old_id != article_id:
             from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
 
-            await KnowledgeService.remove_article(old_scope, old_id)
+            # remove_article swallows its own subprocess errors and answers
+            # False. Ignoring that answer strands the old article: nothing
+            # tracks it any more, it keeps answering searches, and a later
+            # hide-from-AI purge only ever targets the new id. Say so loudly
+            # instead — the ingest still stands, but the leftover is named.
+            if not await KnowledgeService.remove_article(old_scope, old_id):
+                logger.error(
+                    "kb article %s in scope %s could not be removed while "
+                    "re-indexing file_id=%s; it is now orphaned and will not "
+                    "be purged by a later hide_from_ai toggle",
+                    old_id,
+                    old_scope,
+                    file_id,
+                )
 
         from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 
@@ -807,7 +820,11 @@ def _parse_note(mime: str, text: str | None, *, file_id: str):
     Fail-open: a parser error logs and returns ``None`` so the file is still
     tagged and indexed like any other upload.
     """
-    if mime not in _NOTE_MIMES or not text:
+    # Split the parameters off: an upload can arrive as
+    # "text/markdown; charset=utf-8" and an exact match would silently give it
+    # no links and no #tags, while the same file made in the editor (bare mime
+    # from _guess_mime) worked — a difference invisible in local testing.
+    if mime.split(";", 1)[0].strip().lower() not in _NOTE_MIMES or not text:
         return None
     try:
         from pocketpaw_ee.cloud.uploads.links import parse_note_links

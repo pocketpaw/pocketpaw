@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from functools import partial
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -238,11 +239,24 @@ async def files_graph(
 )
 async def file_links(
     file_id: str,
+    user_id: str = Depends(current_user_id),
     current_workspace: str = Depends(current_workspace_id),
 ) -> FileLinksResponse:
     """What this file links to, and what links to it. 404 ``file.not_found``
-    for a missing or cross-workspace id."""
-    return await _SVC.file_links(current_workspace, file_id)
+    for a missing or cross-workspace id, and for a pocket the caller is not in.
+
+    The pocket gate is the same membership rule ``GET /files`` and
+    ``/files/graph`` apply. Without it a workspace member outside a private
+    pocket could name that pocket's files: the read resolves links against the
+    file's OWN pocket scope, so ``outgoing[].filename`` and every backlink
+    would hand back rows the caller cannot list. The scope here is chosen by
+    the row, not by a query parameter, so a refusal is ``file.not_found``
+    rather than the graph's ``pocket_forbidden`` — the caller named a file, and
+    a file they may not read is a file that is not there.
+    """
+    return await _SVC.file_links(
+        current_workspace, file_id, can_read_pocket=partial(_pocket_readable, user_id=user_id)
+    )
 
 
 def build_router(
