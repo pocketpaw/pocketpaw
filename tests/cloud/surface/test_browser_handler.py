@@ -136,3 +136,16 @@ async def test_preamble_names_the_pocket_tool_and_bans_the_inline_fence():
     rendered = (await browser.build_preamble("w1", "u1", SurfaceMeta(route_path="/browser"))).text
     assert "mcp__pocketpaw_pocket_specialist__create" in rendered
     assert "Do NOT write a ```ui-spec```" in rendered
+
+
+async def test_preamble_tells_the_agent_to_make_result_rows_clickable():
+    """Captain, live smoke 2026-09-06: "those top 5 should also contain links". The
+    Ripple table gained a column `href` option; the preamble must tell the agent
+    to use it, or every result table stays read-only text.
+    """
+    from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+    from pocketpaw_ee.cloud.surface.handlers import browser
+
+    rendered = (await browser.build_preamble("w1", "u1", SurfaceMeta(route_path="/browser"))).text
+    assert 'href: "url"' in rendered
+    assert "never as visible text" in rendered

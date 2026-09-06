@@ -1,5 +1,8 @@
 # browser.py — /browser surface preamble.
 #
+# Updated: 2026-09-06 (links) — rows that came from links carry a `url` field and
+# the title column sets `href: "url"`, so a result table is something the user can
+# open, not just read. Pairs with the Ripple table column `href` option.
 # Updated: 2026-09-06 (landing fix) — the answer section now names the ONE tool
 # that puts a result on the canvas (``mcp__pocketpaw_pocket_specialist__create``)
 # and forbids the inline ```ui-spec``` fence, which rendered in the rail and left
@@ -86,7 +89,12 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "table, or a comparison, put it on the CANVAS by calling "
         "`mcp__pocketpaw_pocket_specialist__create` with a short brief that "
         "names the widget you want (a table, cards) and the actual data — "
-        "that is what creates a pocket the canvas shows. Do NOT write a "
+        "that is what creates a pocket the canvas shows. When the rows came "
+        "from links (stories, products, listings), give every row a `url` "
+        'field and set the title column to `href: "url"` so the user can '
+        'open one — e.g. columns `[{header:"Title", accessorKey:"title", '
+        'href:"url"}]`. Keep the URL in that field, never as visible text. '
+        "Do NOT write a "
         "```ui-spec``` fenced block in your reply on this surface: that "
         "renders inline in the chat rail and never reaches the canvas. Say "
         "in one line that the result is on the canvas. Use only widget types "
