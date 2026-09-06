@@ -53,7 +53,9 @@ async def birth_soul(
             role=role,
             values=list(values or []),
             ocean={_OCEAN_FIELDS.get(k, k): float(v) for k, v in (ocean or {}).items()},
+            **_EVOLUTION_KWARG,
         )
+        _unfreeze_personality(soul)
         if world_brief.strip():
             await soul.remember(world_brief.strip(), importance=9)
         await soul.save_local(path)
@@ -61,6 +63,32 @@ async def birth_soul(
     except Exception:  # noqa: BLE001 — a soul failure must never wedge creation
         logger.warning("terrarium soul: birth failed for %s", path, exc_info=True)
         return None
+
+
+# Citizens must be able to have children who differ from them.
+#
+# ``EvolutionConfig.immutable_traits`` defaults to ``["personality",
+# "core_values"]`` and the "personality" category gates all five OCEAN traits,
+# so a default-born soul FORKS INTO AN EXACT CLONE however much drift is asked
+# for — silently, with nothing in the logs. A universe seeded that way looks
+# fine and evolves never.
+#
+# Newer soul-protocol takes the config at birth. Older published versions
+# accept the keyword and merely WARN that they ignored it, which would leave
+# the traits frozen without failing, so passing it is not enough on its own:
+# ``_unfreeze_personality`` checks the soul we actually got and repairs it.
+# Drop the repair (and this note) once the floor version supports the kwarg.
+_EVOLUTION_KWARG = {"evolution": {"immutable_traits": ["core_values"]}}
+
+
+def _unfreeze_personality(soul: object) -> None:
+    """Ensure this soul's OCEAN traits can drift when it forks a child."""
+    try:
+        config = soul._evolution.config  # type: ignore[attr-defined]  # noqa: SLF001
+        if "personality" in config.immutable_traits:
+            config.immutable_traits = [t for t in config.immutable_traits if t != "personality"]
+    except Exception:  # noqa: BLE001 — best-effort, like everything in this module
+        logger.warning("terrarium soul: could not unfreeze personality traits", exc_info=True)
 
 
 # OCEAN letters (the contract's citizen shape) -> soul-protocol trait names.
