@@ -18,6 +18,14 @@
 # create_database(): a successful create returns the uuid at ``result.uuid``, and
 # a Cloudflare error envelope (success:false or non-2xx) fails closed by raising
 # ValidationError with code ``sites.cloudflare_error``.
+# Updated 2026-09-02 (SA-4 — the visitor-analytics read): added coverage for
+# query_analytics_sql(), which breaks two of this module's conventions on purpose —
+# the body is raw SQL rather than JSON, and a SUCCESSFUL query answers
+# ``{meta, data, rows}`` with no ``success`` key, so ``_unwrap`` would raise on every
+# good response. Both are pinned here because either is one line of house-style
+# tidying away from breaking every read. It is fail-closed on a non-2xx, a non-JSON
+# body, and a 2xx with no data array: returning [] would render a Cloudflare outage
+# as a customer's quiet week.
 from __future__ import annotations
 
 import json
@@ -562,3 +570,129 @@ async def test_deletes_still_fail_closed_on_a_real_error(method: str, arg: str):
     with pytest.raises(ValidationError) as exc:
         await getattr(client, method)(arg)
     assert exc.value.code == "sites.cloudflare_error"
+
+
+# ── SA-4: the Analytics Engine SQL API ──────────────────────────────────────
+#
+# The one method on this client whose request body is RAW SQL and whose SUCCESS
+# response is NOT the Cloudflare envelope. Both are asserted here because both are easy
+# to "fix" back into the house style, and either fix breaks every query: sending JSON
+# gets a 400, and running the good response through ``_unwrap`` raises on the missing
+# ``success`` key so every successful read would surface as a Cloudflare error.
+
+
+@pytest.mark.asyncio
+async def test_analytics_sql_posts_the_raw_statement():
+    """The endpoint takes the statement as the body, not as a JSON field. Also pins the
+    URL — the account-scoped ``analytics_engine/sql`` path, which is a different surface
+    from the Workers ones above and needs a token scope they do not."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["method"] = request.method
+        seen["body"] = request.content
+        return httpx.Response(200, json={"meta": [], "data": [{"pageviews": 3}], "rows": 1})
+
+    client = _client(handler)
+    rows = await client.query_analytics_sql("SELECT 1 FROM ds FORMAT JSON")
+
+    assert rows == [{"pageviews": 3}]
+    assert seen["method"] == "POST"
+    assert seen["url"].endswith("/accounts/acct_1/analytics_engine/sql")
+    assert seen["body"] == b"SELECT 1 FROM ds FORMAT JSON"
+
+
+@pytest.mark.asyncio
+async def test_analytics_sql_reads_a_body_with_no_success_key():
+    """A successful query answers ``{meta, data, rows}`` and no ``success``. Running it
+    through this module's ``_unwrap`` would raise on every good response — the failure
+    would look like a Cloudflare outage and be one line of "consistency" away."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "meta": [{"name": "pageviews", "type": "UInt64"}],
+                "data": [{"pageviews": "12"}, {"pageviews": "7"}],
+                "rows": 2,
+            },
+        )
+
+    client = _client(handler)
+    assert await client.query_analytics_sql("SELECT 1") == [{"pageviews": "12"}, {"pageviews": "7"}]
+
+
+@pytest.mark.asyncio
+async def test_analytics_sql_returns_an_empty_result_as_empty():
+    """``data: []`` is a REAL answer — the query matched nothing — and is the only shape
+    that may come back as no rows. Everything else that produces no rows raises."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"meta": [], "data": [], "rows": 0})
+
+    client = _client(handler)
+    assert await client.query_analytics_sql("SELECT 1") == []
+
+
+@pytest.mark.asyncio
+async def test_analytics_sql_fails_closed_on_a_missing_scope():
+    """FAIL-CLOSED IS THE WHOLE REQUIREMENT HERE, not a habit. Returning ``[]`` on a
+    failure would render a customer's dashboard as "0 visitors" when the truth is "the
+    read failed", and a panel reporting an outage as a quiet week is worse than one
+    reporting nothing.
+
+    403 specifically, because the token scope this needs (``Account Analytics Read``) is
+    NOT one the deploy paths carry — so this is the first thing that goes wrong in a new
+    environment, and Cloudflare's own sentence has to survive into the message."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={
+                "success": False,
+                "errors": [{"code": 9109, "message": "Unauthorized to access"}],
+            },
+        )
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.query_analytics_sql("SELECT 1")
+
+    assert exc.value.code == "sites.cloudflare_error"
+    assert "403" in exc.value.message
+    assert "Unauthorized to access" in exc.value.message
+
+
+@pytest.mark.asyncio
+async def test_analytics_sql_fails_closed_on_a_non_json_body():
+    """The SQL endpoint answers text/plain for some errors, and a body that will not
+    parse is not an empty result."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="Code: 62. DB::Exception: Syntax error")
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.query_analytics_sql("SELECT nonsense")
+    assert exc.value.code == "sites.cloudflare_error"
+
+
+@pytest.mark.asyncio
+async def test_analytics_sql_fails_closed_on_a_2xx_with_no_data_array():
+    """A 200 whose body has no ``data`` list is a contract break, not an empty result —
+    an empty result IS a ``data`` of ``[]``. Reporting it as no rows would manufacture
+    exactly the zeros this method exists never to manufacture."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    for body in ({"meta": [], "rows": 0}, {"data": None}, {"data": {"pageviews": 1}}, []):
+
+        def handler(request: httpx.Request, _body=body) -> httpx.Response:
+            return httpx.Response(200, json=_body)
+
+        client = _client(handler)
+        with pytest.raises(ValidationError) as exc:
+            await client.query_analytics_sql("SELECT 1")
+        assert exc.value.code == "sites.cloudflare_error", body

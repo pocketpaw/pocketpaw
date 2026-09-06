@@ -912,7 +912,12 @@ async def test_frontend_preamble_renders_sitemap_and_copy_from_brief() -> None:
 
     # Design system tokens + voice are threaded through.
     assert "BrightSmile" in preamble
-    assert "tokens_css" in preamble
+    # The token VALUES, not the field's name. This assertion used to read
+    # `"tokens_css" in preamble`, which passed on a preamble that named the
+    # field and printed none of its contents — so a brief carrying a full
+    # design system reached the model as nothing and the agent invented one.
+    assert ":root{--color-primary:#0ea5e9;}" in preamble
+    assert "#0ea5e9" in preamble
     assert "avoid loud reds and clutter" in preamble
     assert "no dental jargon" in preamble
 

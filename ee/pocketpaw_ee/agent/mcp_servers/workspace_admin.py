@@ -53,11 +53,15 @@
 #       permission filtering inside the service; workspace.view is the MEMBER read
 #       gate that mirrors that membership requirement fail-closed. Service passes
 #       user_id so the service applies the same permission filter the route does.
-#     * billing_usage_read(start?, end?) — READ usage/spend. Gate ``workspace.view``
-#       (MEMBER) — the REST GET /billing/usage route is membership-only (any role
-#       may read its own workspace's usage; it does NOT gate on billing.manage), so
-#       we match it and do NOT over-gate to OWNER. Service:
-#       billing.usage.get_workspace_usage (start/end → start_date/end_date).
+#     * billing_usage_read(start?, end?) — READ usage/spend. Gate ``billing.view``
+#       (ADMIN) — EXACTLY what the REST GET /billing/usage route gates on. This
+#       said ``workspace.view`` (MEMBER) until 2026-09-02, and the reason given was
+#       that the REST route was membership-only. That was true, and it was the bug:
+#       the billing router carried no action gate at all, so "mirroring" it meant
+#       inheriting a hole. Now that the route gates at ``billing.view``, so does
+#       this — the mirror is the point, and it has to move in the same direction.
+#       Still NOT ``billing.manage`` (OWNER): reading the bill is not managing it.
+#       Service: billing.usage.get_workspace_usage (start/end → start_date/end_date).
 #     * audit_read(limit?) — READ recent audit rows. Gate ``audit.read`` (ADMIN —
 #       EXACTLY what the REST GET /{id}/audit route gates on). Service:
 #       audit.service.list_events_response (limit → AuditQueryRequest.limit).
@@ -122,6 +126,16 @@
 #       ``seats`` field). With no safe, honest execution path, wiring it would mean
 #       either a silent seat DB write (bypassing billing) or a fabricated flow —
 #       both refused. Skipped; escalated as NEEDS_CONTEXT.
+#
+# Updated: 2026-09-02 (fix/billing-router-authorization) — billing_usage_read now
+#   gates at ``billing.view`` (ADMIN), not ``workspace.view`` (MEMBER). The gate
+#   did not change independently: the REST GET /billing/usage route moved to
+#   ``billing.view`` in the same change (it had been running on ``require_license``
+#   alone, as had every other route on that router), and this tool's contract has
+#   always been to MIRROR that route. Leaving it at MEMBER would have left a member
+#   who is refused the usage read over HTTP able to ask the agent for the same
+#   numbers — a documented bypass of a gate added in the same commit. The other
+#   four READ tools are unchanged and stay on ``_READ_ACTION`` / ``workspace.view``.
 """Agent-side MCP surface for workspace administration.
 
 Tools registered:
@@ -215,13 +229,17 @@ ADMIN_TOOL_IDS = (
 
 # The RBAC action keys these tools gate on (canonical entries in
 # ``guards.actions.ACTIONS``). ``workspace.view`` = MEMBER (read the roster /
-# settings / connectors / usage), ``workspace.member.role_change`` = ADMIN
+# settings / connectors), ``workspace.member.role_change`` = ADMIN
 # (change a member's role), ``invite.create`` = ADMIN (read/manage invites —
-# the REST invites route's action), ``audit.read`` = ADMIN (read the audit log).
+# the REST invites route's action), ``audit.read`` = ADMIN (read the audit log),
+# ``billing.view`` = ADMIN (read the workspace's spend — its own key rather than
+# the shared read action, because the REST GET /billing/usage route gates on
+# exactly this one and the two must not drift apart again).
 _READ_ACTION = "workspace.view"
 _ROLE_CHANGE_ACTION = "workspace.member.role_change"
 _INVITE_ACTION = "invite.create"
 _AUDIT_ACTION = "audit.read"
+_BILLING_READ_ACTION = "billing.view"
 # WA-5 ADMIN WRITE actions (all ADMIN in guards.actions.ACTIONS). The tool RBAC-
 # gates on these; the executor whitelists + re-checks the SAME keys.
 _MEMBER_REMOVE_ACTION = "workspace.member.remove"
@@ -776,10 +794,11 @@ async def _connectors_list_handler(args: dict) -> dict:  # noqa: ARG001 — no a
 
 async def _billing_usage_read_handler(args: dict) -> dict:
     """READ the workspace's daily usage/spend over an optional date window. Gated
-    at ``workspace.view`` (MEMBER — the REST GET /billing/usage route is
-    membership-only; it does NOT gate on billing.manage, so we match it and do NOT
-    over-gate to OWNER). EXECUTES directly on a gate pass. ``start`` / ``end`` are
-    optional ``YYYY-MM-DD`` strings (default: the trailing 30 days)."""
+    at ``billing.view`` (ADMIN — EXACTLY what the REST GET /billing/usage route
+    gates on; the two are deliberately the same key so they cannot drift). NOT
+    ``billing.manage`` (OWNER): reading the bill is not managing it. EXECUTES
+    directly on a gate pass. ``start`` / ``end`` are optional ``YYYY-MM-DD``
+    strings (default: the trailing 30 days)."""
     start = args.get("start")
     end = args.get("end")
     if start is not None and not isinstance(start, str):
@@ -789,7 +808,7 @@ async def _billing_usage_read_handler(args: dict) -> dict:
 
     gate = await _gate_read(
         "billing_usage_read",
-        _READ_ACTION,
+        _BILLING_READ_ACTION,
         "You don't have permission to view this workspace's usage",
     )
     if isinstance(gate, dict):

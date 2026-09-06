@@ -14,14 +14,31 @@
 #     (reported total_cost_usd vs. the pricing-table estimate vs. none).
 #
 # Created 2026-06-24 (integration/billing-credits, BC-3): new entity.
+# Updated 2026-09-02 (fix/metering-dated-pricing): two changes, both about money
+#   arriving as a Decimal now that ``usage_tracker.price_run`` returns one.
+#   ``ComputeCost`` carries ``cost_usd_exact`` beside the float, and
+#   ``to_credits`` does its arithmetic in Decimal rather than taking a float and
+#   hoping. The float stays because it is what gets serialised onto the ledger
+#   ref and ``BillResult``; the Decimal is what the conversion reads. Also a new
+#   ``CostSource`` member, ``unpriced`` — see below.
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Literal
 
+from pocketpaw_ee.cloud.credits.domain import MICRO_PER_CREDIT
+
 # Where a run's resolved cost came from — for the bill ref + debug logging.
-CostSource = Literal["reported", "estimated", "none"]
+#
+# ``unpriced`` was split out of ``none`` on 2026-09-02. They used to be the same
+# value, which is why an unpriced model was invisible: a run with real tokens on
+# a model nothing could price looked identical to a run with no usage at all, and
+# both logged at DEBUG. They are different failures. ``none`` is nothing to bill;
+# ``unpriced`` is something to bill that we could not put a number on, and it is
+# the one an operator has to see.
+CostSource = Literal["reported", "estimated", "unpriced", "none"]
 
 
 @dataclass(frozen=True)
@@ -40,28 +57,71 @@ class RateCard:
     markup: float
     credit_usd: float
 
-    def to_credits(self, cost_usd: float) -> int:
+    def to_credits(self, cost_usd: Decimal | float) -> int:
         """Convert a USD compute cost into integer credits via the rate card.
 
-        ``round`` (banker's rounding) is fine here — the amounts are tiny and the
-        markup absorbs sub-credit drift. A non-positive cost yields 0 credits (no
-        debit; the run is still marked billed so it isn't re-swept).
+        Accepts a ``Decimal`` since 2026-09-02 — that is what
+        ``usage_tracker.price_run`` returns, and routing it through a float first
+        would round the money twice on the way to a number we then round again.
+        A float is still accepted (the backend-reported cost arrives as one) and
+        is converted via ``str`` so it takes its printed value rather than its
+        binary one.
+
+        Banker's rounding, unchanged: ``ROUND_HALF_EVEN`` is what ``round()`` was
+        already doing, so no existing bill moves by a credit. A non-positive cost
+        yields 0 credits (no debit; the run is still marked billed so it isn't
+        re-swept).
         """
         if cost_usd <= 0:
             return 0
-        return round(cost_usd * self.markup / self.credit_usd)
+        exact = cost_usd if isinstance(cost_usd, Decimal) else Decimal(str(cost_usd))
+        credits = exact * Decimal(str(self.markup)) / Decimal(str(self.credit_usd))
+        return int(credits.quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
+
+    def to_micro_credits(self, cost_usd: Decimal | float) -> int:
+        """Convert a USD compute cost into MICRO-credits (1_000_000 == 1 credit).
+
+        The conversion the per-run debit uses. ``to_credits`` rounds a whole run to
+        the nearest cent, which was defensible when a run was the billing unit and
+        cost several cents — but the same run priced at $0.0015 rounds to nothing,
+        and a workload of cheap runs is billed zero however many of them there are.
+        The finer unit removes the rounding decision rather than choosing a
+        direction for it.
+
+        Kept in ``Decimal`` end to end for the same reason ``to_credits`` is: the
+        price arrives exact from ``usage_tracker.price_run`` and converting through
+        a float would round it on the way into a rounding function.
+        """
+        if cost_usd <= 0:
+            return 0
+        exact = cost_usd if isinstance(cost_usd, Decimal) else Decimal(str(cost_usd))
+        micro = (
+            exact
+            * Decimal(str(self.markup))
+            / Decimal(str(self.credit_usd))
+            * Decimal(MICRO_PER_CREDIT)
+        )
+        return int(micro.quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
 
 
 @dataclass(frozen=True)
 class ComputeCost:
     """A run's resolved compute cost (the Meter primitive's output).
 
-    ``cost_usd`` is the authoritative USD cost; ``source`` records how it was
-    resolved (the backend's reported ``total_cost_usd``, the pricing-table
-    estimate, or none for an unknown model / empty usage). ``model`` is the model
-    the cost was attributed to (``None`` when usage carried no model).
+    ``cost_usd`` is the authoritative USD cost as a float, which is the shape
+    that gets serialised onto the ledger ref and ``BillResult``. ``source``
+    records how it was resolved (the backend's reported ``total_cost_usd``, the
+    dated price lookup, ``unpriced`` for a real run nothing could price, or
+    ``none`` for empty usage). ``model`` is the model the cost was attributed to
+    (``None`` when usage carried no model).
+
+    ``cost_usd_exact`` is the SAME number before it met a float, and it is what
+    ``RateCard.to_credits`` should be handed. ``None`` when the cost never was a
+    Decimal (an unpriced or empty run), in which case there is nothing to bill
+    anyway.
     """
 
     cost_usd: float
     source: CostSource
     model: str | None
+    cost_usd_exact: Decimal | None = None

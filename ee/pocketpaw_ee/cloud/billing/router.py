@@ -46,6 +46,61 @@
 #   Thin adapter over ``billing_service.cancel``; the plan revert lands reactively on
 #   the ``subscription.cancelled`` webhook, and a workspace with no active
 #   subscription gets 402 ``billing.no_active_subscription``.
+# Updated 2026-09-02 (fix/billing-router-authorization): the routes that SPEND,
+#   and the route that reads what has been spent, are now gated on the workspace
+#   ACTION table. Until now the router's ONLY dependency was ``require_license``.
+#   Every route then resolved ``current_workspace_id`` / ``current_user_id`` —
+#   which answer WHICH workspace the caller is acting in, and say nothing about
+#   WHETHER they may act on it. So the most junior member of a workspace could
+#   cancel the organisation's subscription, switch its plan, or open a checkout
+#   for up to 1,000,000 credits ($10,000) against the company card.
+#
+#   THE GATE ALREADY EXISTED; it was never attached here. ``guards/actions.py``
+#   has carried billing-specific rules the whole time — ``billing.view`` (ADMIN,
+#   deny code ``billing.admin_only``) and ``billing.manage`` (OWNER, deny code
+#   ``billing.owner_only``) — ``audit/listeners.py`` has carried their denial copy
+#   ("only admins can view billing info" / "only the workspace owner can manage
+#   billing"), and every OTHER surface enforces them: the MCP workspace-admin
+#   server, the admin-proposals executor (which RE-CHECKS ``billing.manage``
+#   against the proposer's CURRENT role at approve time), and ``sites.buy_plan``,
+#   whose rationale states as settled fact that a member is "too junior to so much
+#   as VIEW the billing page". The upshot was that the AGENT path was STRICTER
+#   than the human one: an agent proposing a plan change was re-checked at OWNER,
+#   while the same person could simply POST /billing/subscribe and skip the gate.
+#
+#   The mapping, and why each route sits where it does:
+#     * POST /topup, POST /subscribe, POST /cancel -> ``billing.manage`` (OWNER).
+#       These three move money or the recurring commitment, and OWNER is the tier
+#       actions.py reserves for "the tier that governs money".
+#       On /topup specifically, against the ``sites.buy_plan`` precedent (which
+#       deliberately chose ADMIN over OWNER): that trade was argued from a $7-19
+#       monthly add-on line bought as part of the ordinary publish workflow, at
+#       per-site frequency, where "requiring the owner personally for every site a
+#       company publishes makes the feature unusable at any real size". A raw
+#       wallet top-up is a different shape — up to $10,000 in a SINGLE call, and
+#       nothing bounds how many calls — so it is the thing OWNER exists for, not
+#       an exception to it. There is also no ADMIN-tier billing SPEND action to
+#       put it on: ``billing.view`` is a read verb, and gating a $10,000 purchase
+#       on it would fire the "only admins can VIEW billing info" denial copy on a
+#       refused purchase. Minting a new action is a policy change, not this fix.
+#       If OWNER proves too blunt in practice, the escalation pattern already
+#       exists — ``cloud/site_plan_requests/`` turns a refusal into a proposal an
+#       owner approves. Widening this gate is not the answer.
+#     * GET /usage -> ``billing.view`` (ADMIN). Per-model spend for the whole
+#       workspace IS the "billing info" the audit denial copy names.
+#     * GET /plans, GET /site-plans -> DELIBERATELY UNGATED. Both are
+#       tenant-independent catalogues holding no workspace data (they sit on the
+#       ALLOWED_WITHOUT_ROUTE_GUARD list in tests/cloud/auth/test_route_auth_audit
+#       .py as "public price list"). Gating them would break the pricing UI for
+#       ordinary members, who are exactly the people meant to read a price list
+#       before asking an owner to buy.
+#
+#   The action guard is ADDITIVE — it goes in ``dependencies=[...]`` and the
+#   existing ``current_workspace_id`` / ``current_user_id`` handler params are
+#   untouched, because the guard answers "may they" and those still answer
+#   "where". The PUBLIC Dodo webhook router (``billing.webhooks``) is NOT touched:
+#   it is mounted separately with no auth ON PURPOSE — Dodo is the caller and the
+#   Standard-Webhooks signature is its trust boundary.
 
 from __future__ import annotations
 
@@ -70,9 +125,27 @@ from pocketpaw_ee.cloud.entitlements.dto import (
     site_plan_tier_to_dto,
 )
 from pocketpaw_ee.cloud.license import require_license
-from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
+from pocketpaw_ee.cloud.shared.deps import (
+    current_user_id,
+    current_workspace_id,
+    require_action_any_workspace,
+)
 
 router = APIRouter(prefix="/billing", tags=["Billing"], dependencies=[Depends(require_license)])
+
+# WHO MAY SPEND, AND WHO MAY LOOK.
+#
+# ``require_license`` on the router answers "is this deployment entitled to
+# billing at all". It does not answer "may THIS caller charge the company card",
+# and neither do the handlers' ``current_workspace_id`` / ``current_user_id``:
+# those establish WHICH workspace, never whether the caller may act on it. These
+# two dependencies are the part that decides.
+#
+# ``require_action_any_workspace`` rather than plain ``require_action`` because no
+# route here has a ``{workspace_id}`` path param — the workspace resolves from the
+# caller's ``active_workspace``.
+_require_billing_owner = Depends(require_action_any_workspace("billing.manage"))
+_require_billing_admin = Depends(require_action_any_workspace("billing.view"))
 
 
 @router.get("/plans", response_model=PlanCatalogResponse)
@@ -104,7 +177,11 @@ async def list_billing_site_plans() -> SitePlanCatalogResponse:
 _DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
 
 
-@router.get("/usage", response_model=WorkspaceUsageResponse)
+@router.get(
+    "/usage",
+    response_model=WorkspaceUsageResponse,
+    dependencies=[_require_billing_admin],
+)
 async def get_usage(
     workspace_id: str = Depends(current_workspace_id),
     start_date: str | None = Query(
@@ -138,7 +215,11 @@ async def get_usage(
     )
 
 
-@router.post("/topup", response_model=CreateTopupResponse)
+@router.post(
+    "/topup",
+    response_model=CreateTopupResponse,
+    dependencies=[_require_billing_owner],
+)
 async def create_topup(
     body: CreateTopupRequest,
     workspace_id: str = Depends(current_workspace_id),
@@ -179,7 +260,11 @@ def _request_origin(request: Request) -> str:
     return ""
 
 
-@router.post("/subscribe", response_model=CreateSubscriptionResponse)
+@router.post(
+    "/subscribe",
+    response_model=CreateSubscriptionResponse,
+    dependencies=[_require_billing_owner],
+)
 async def create_subscription(
     body: CreateSubscriptionRequest,
     request: Request,
@@ -206,7 +291,11 @@ async def create_subscription(
     return CreateSubscriptionResponse(checkout_url=result["checkout_url"])
 
 
-@router.post("/cancel", response_model=CancelSubscriptionResponse)
+@router.post(
+    "/cancel",
+    response_model=CancelSubscriptionResponse,
+    dependencies=[_require_billing_owner],
+)
 async def cancel_subscription(
     workspace_id: str = Depends(current_workspace_id),
 ) -> CancelSubscriptionResponse:

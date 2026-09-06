@@ -104,6 +104,38 @@ async def record(
         logger.warning("request_log.record failed for %s %s", method, path, exc_info=True)
 
 
+async def record_many(entries: list[dict[str, Any]]) -> int:
+    """Persist a batch of request log entries in ONE round trip.
+
+    Returns how many were written. Fire-and-forget like ``record``: a write
+    failure is logged and swallowed, because losing telemetry is always
+    preferable to failing or delaying the traffic it describes.
+
+    ``ordered=False`` so a single malformed document does not discard the rest
+    of the batch - Mongo attempts every insert and reports the failures rather
+    than stopping at the first. That is the same tradeoff the whole write path
+    already makes, applied to the batch instead of the request.
+    """
+    if not entries:
+        return 0
+    docs: list[_RequestLogDoc] = []
+    for entry in entries:
+        try:
+            docs.append(_RequestLogDoc(**entry))
+        except Exception:
+            # One unbuildable entry must not cost the batch. This is telemetry
+            # about a request that has already been served.
+            logger.warning("request_log.record_many skipped a bad entry", exc_info=True)
+    if not docs:
+        return 0
+    try:
+        await _RequestLogDoc.insert_many(docs, ordered=False)
+    except Exception:
+        logger.warning("request_log.record_many failed for %d entries", len(docs), exc_info=True)
+        return 0
+    return len(docs)
+
+
 # ---------------------------------------------------------------------------
 # Read
 # ---------------------------------------------------------------------------

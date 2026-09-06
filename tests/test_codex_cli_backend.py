@@ -1,5 +1,11 @@
 """Tests for Codex CLI backend — SDK-driven, mocked.
 
+Updated 2026-09-02 (fix/metering-partial-usage-capture) —
+``test_multi_turn_usage_is_run_cumulative`` pins that ``token_usage`` reports the
+RUN total rather than the last turn's, and
+``test_the_usage_accumulator_does_not_leak_between_runs`` pins that the counters
+are per-run locals (one backend instance serves every run on its agent).
+
 We mock ``Codex.start_thread`` to return a fake Thread whose
 ``run_streamed`` yields typed SDK events
 (``ItemStartedEvent``/``ItemCompletedEvent``/``TurnCompletedEvent`` with
@@ -556,6 +562,71 @@ class TestCodexCLIRun:
         assert usage_evts[0].metadata["output_tokens"] == 25
         assert usage_evts[0].metadata["cached_input_tokens"] == 50
         assert usage_evts[0].metadata["backend"] == "codex_cli"
+
+    @pytest.mark.asyncio
+    async def test_multi_turn_usage_is_run_cumulative(self):
+        """Codex reports usage PER TURN and a run can complete several.
+
+        Every other backend reports a RUN total, and the cloud run loop keeps
+        the LATEST payload rather than summing — right for the others, and it
+        billed a multi-turn Codex run for its final turn alone. Summing in the
+        run loop instead would have over-billed the other backends by the length
+        of the conversation, so the accumulator belongs here.
+        """
+        from openai_codex_sdk import TurnCompletedEvent
+        from openai_codex_sdk.types import Usage
+
+        from pocketpaw.agents.codex_cli import CodexCLIBackend
+
+        backend = CodexCLIBackend(Settings())
+        events = [
+            TurnCompletedEvent(
+                type="turn.completed",
+                usage=Usage(input_tokens=100, output_tokens=25, cached_input_tokens=50),
+            ),
+            TurnCompletedEvent(
+                type="turn.completed",
+                usage=Usage(input_tokens=300, output_tokens=40, cached_input_tokens=10),
+            ),
+        ]
+        ctx, _ = _patch_codex(events)
+        with ctx:
+            out = [e async for e in backend.run("test")]
+
+        usage_evts = [e for e in out if e.type == "token_usage"]
+        assert len(usage_evts) == 2
+        # Turn 1 alone...
+        assert usage_evts[0].metadata["input_tokens"] == 100
+        # ...then the RUN total, not turn 2's 300.
+        assert usage_evts[-1].metadata["input_tokens"] == 400
+        assert usage_evts[-1].metadata["output_tokens"] == 65
+        assert usage_evts[-1].metadata["cached_input_tokens"] == 60
+
+    @pytest.mark.asyncio
+    async def test_the_usage_accumulator_does_not_leak_between_runs(self):
+        """``AgentPool`` caches ONE backend instance per agent and drives every
+        run through it, so per-run state kept on ``self`` bills one run for
+        another's tokens. The counters are locals in ``run`` for the same reason
+        this backend's siblings hold per-run cancellation in a private handle."""
+        from openai_codex_sdk import TurnCompletedEvent
+        from openai_codex_sdk.types import Usage
+
+        from pocketpaw.agents.codex_cli import CodexCLIBackend
+
+        backend = CodexCLIBackend(Settings())
+        event = TurnCompletedEvent(
+            type="turn.completed",
+            usage=Usage(input_tokens=100, output_tokens=25, cached_input_tokens=50),
+        )
+
+        for _ in range(2):
+            ctx, _ = _patch_codex([event])
+            with ctx:
+                out = [e async for e in backend.run("test")]
+            usage_evts = [e for e in out if e.type == "token_usage"]
+            assert usage_evts[-1].metadata["input_tokens"] == 100, (
+                "the second run inherited the first run's tokens"
+            )
 
     @pytest.mark.asyncio
     async def test_handles_error_item(self):

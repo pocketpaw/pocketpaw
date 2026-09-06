@@ -1,8 +1,12 @@
 # Browser automation tool for AI agent control
+# Changes: 2026-09-06 (BR-1) — description strings only. Snapshots no longer come
+#   from Playwright's accessibility tree (that API was removed); they come from a
+#   DOM walk. The tool's own behavior is unchanged — the strings said something
+#   that had stopped being true.
 # Changes: Initial creation with BrowserTool class
 #
 # Provides browser automation capabilities through Playwright with semantic
-# accessibility tree snapshots for LLM-based browser control.
+# DOM snapshots for LLM-based browser control.
 """Browser automation tool for agent use."""
 
 from __future__ import annotations
@@ -17,15 +21,15 @@ class BrowserTool(BaseTool):
     """Browser automation tool using Playwright.
 
     Provides actions for navigating, clicking, typing, scrolling,
-    and capturing screenshots. Uses semantic accessibility tree
-    snapshots for element identification.
+    and capturing screenshots. Uses semantic DOM snapshots for
+    element identification.
 
     Actions:
         navigate: Go to a URL
         click: Click an element by reference number
         type: Type text into an element
         scroll: Scroll the page up or down
-        snapshot: Get current page accessibility snapshot
+        snapshot: Get current page snapshot
         screenshot: Take a screenshot
         close: Close the browser session
     """
@@ -40,7 +44,7 @@ class BrowserTool(BaseTool):
     def description(self) -> str:
         return (
             "Control a web browser to navigate pages, click elements, fill forms, "
-            "and capture screenshots. Uses semantic accessibility snapshots with "
+            "and capture screenshots. Uses semantic page snapshots with "
             "[ref=N] markers for element identification."
         )
 

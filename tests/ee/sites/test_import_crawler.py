@@ -528,3 +528,144 @@ async def test_seed_apex_to_www_redirect_reseeds_and_crawls_whole_site():
     assert "index.html" in result.files
     assert any("about" in p for p in result.files), result.files.keys()
     assert result.stats.pages_fetched == 2
+
+
+# --------------------------------------------------------------------------- #
+# A <link href> pointing at a PAGE (regression)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_link_rel_to_a_page_does_not_collide_with_its_directory():
+    """A ``<link rel="canonical|prefetch">`` whose href is a PAGE must not land at
+    the extension-less asset path.
+
+    The asset loop had no content-type guard (the page loop has the mirror of it),
+    so ``/about`` fetched as an asset was stored at ``about`` — while the same page
+    reached through ``<a href>`` was stored at ``about/index.html``. A FileMap
+    holding both is unrepresentable on a filesystem, and the generator's
+    ``materializeHtml`` dies with EEXIST when it mkdirs ``about/`` over the file.
+    Every static-site generator emits canonical links, so this fires on ordinary
+    sites, and the whole import ends as ``status:"failed"``.
+    """
+    body = (
+        "<html><head>"
+        '<link rel="canonical" href="/about">'
+        "</head><body>"
+        '<a href="/about/">About</a>'
+        "</body></html>"
+    )
+    pages = {
+        ("example.com", "/"): _html(body),
+        ("example.com", "/about"): _html("<html><body>about</body></html>"),
+        ("example.com", "/about/"): _html("<html><body>about</body></html>"),
+    }
+    result = await _crawl(pages)
+
+    directories = {
+        "/".join(path.split("/")[:i])
+        for path in result.files
+        for i in range(1, len(path.split("/")))
+    }
+    collisions = sorted(set(result.files) & directories)
+    assert collisions == [], f"path is both a file and a directory: {collisions}"
+    assert "about/index.html" in result.files
+
+
+@pytest.mark.asyncio
+async def test_navigational_link_rels_are_never_fetched():
+    """A ``<link>`` whose rel only ever addresses a page must not be queued.
+
+    ``canonical`` (which every static-site generator emits), ``prefetch``,
+    ``alternate``, and the connection hints buy a fetch whose only product is a
+    duplicate of a page the crawl already holds — 48 wasted fetches on one real
+    site, and on a link-heavy one enough to blow the import's wall clock. The
+    denylist is by rel TOKEN, so ``rel="alternate stylesheet"`` is still a
+    stylesheet and a ``<link>`` with no rel at all is still an asset.
+
+    Mutation: drop the ``_NON_ASSET_LINK_RELS`` filter from
+    ``_LinkScan.handle_starttag`` and the four navigational URLs get fetched.
+    """
+    seen: list[httpx.Request] = []
+    pages = {
+        ("example.com", "/"): _html(
+            "<html><head>"
+            '<link rel="canonical" href="/canon">'
+            '<link rel="prefetch" href="/prefetched">'
+            '<link rel="ALTERNATE" href="/fr">'
+            '<link rel="dns-prefetch" href="/warm">'
+            '<link rel="stylesheet" href="/site.css">'
+            '<link rel="alternate stylesheet" href="/alt.css">'
+            '<link href="/no-rel.css">'
+            "</head><body>hi</body></html>"
+        ),
+        ("example.com", "/site.css"): httpx.Response(
+            200, headers={"content-type": "text/css"}, content=b"a{}"
+        ),
+        ("example.com", "/alt.css"): httpx.Response(
+            200, headers={"content-type": "text/css"}, content=b"b{}"
+        ),
+        ("example.com", "/no-rel.css"): httpx.Response(
+            200, headers={"content-type": "text/css"}, content=b"c{}"
+        ),
+    }
+    result = await _crawl(pages, seen=seen)
+
+    fetched_paths = {r.url.path for r in seen}
+    assert fetched_paths.isdisjoint({"/canon", "/prefetched", "/fr", "/warm"})
+    assert {"site.css", "alt.css", "no-rel.css"} <= set(result.files)
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_link_rel_serving_html_claims_the_page_path():
+    """The content-type guard is the backstop the rel denylist can't be.
+
+    A site may hang a page off any rel it likes (here ``rel="me"``), so the
+    asset loop must classify on what the response IS, not on the tag it came
+    from. Without the guard ``/about`` lands at the file ``about`` beside the
+    directory ``about/`` the same page claims through ``<a href="/about/">``,
+    and that FileMap kills the generator's mkdir with EEXIST.
+
+    Mutation: change the asset loop's ``_rel_path_for_page`` back to
+    ``_rel_path_for_asset`` and the collision returns.
+    """
+    pages = {
+        ("example.com", "/"): _html(
+            '<html><head><link rel="me" href="/about"></head>'
+            '<body><a href="/about/">About</a></body></html>'
+        ),
+        ("example.com", "/about"): _html("<html><body>about</body></html>"),
+        ("example.com", "/about/"): _html("<html><body>about</body></html>"),
+    }
+    result = await _crawl(pages)
+
+    directories = {
+        "/".join(path.split("/")[:i])
+        for path in result.files
+        for i in range(1, len(path.split("/")))
+    }
+    assert sorted(set(result.files) & directories) == []
+    assert "about/index.html" in result.files
+
+
+@pytest.mark.asyncio
+async def test_html_in_the_asset_loop_still_burns_an_asset_slot(monkeypatch):
+    """MAX_CRAWL_ASSETS bounds FETCHES, not stored files.
+
+    An asset-queue entry that answers HTML is stored as a page, so counting the
+    ceiling on ``assets_fetched`` alone would exempt it — and a page full of
+    page-pointing links would drain the whole queue (bounded only by
+    MAX_TRACKED_URLS at 2000) where 200 fetches was the ceiling.
+
+    Mutation: gate the loop on ``result.stats.assets_fetched`` again and all
+    five targets get fetched.
+    """
+    monkeypatch.setattr(url_crawler, "MAX_CRAWL_ASSETS", 2)
+    seen: list[httpx.Request] = []
+    links = "".join(f'<link rel="me" href="/p{n}">' for n in range(5))
+    pages = {("example.com", "/"): _html(f"<html><head>{links}</head><body>hi</body></html>")}
+    for n in range(5):
+        pages[("example.com", f"/p{n}")] = _html(f"<html><body>page {n}</body></html>")
+    await _crawl(pages, seen=seen)
+
+    assert len([r for r in seen if r.url.path.startswith("/p")]) == 2

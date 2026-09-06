@@ -79,9 +79,20 @@ class OpenCodeBackend(BaseAgentBackend):
         )
         self._policy = policy
 
+    # `timeout=None` used to apply to every phase, including CONNECT. An
+    # OpenCode server that was down or unreachable therefore hung the caller
+    # forever rather than failing — including `_check_health`, whose whole job
+    # is to answer that question quickly.
+    #
+    # READ stays unbounded on purpose: an agent generation legitimately runs
+    # for minutes, and a read deadline here would truncate long answers, which
+    # is a worse bug than the one being fixed. Only the phases that cannot
+    # legitimately take minutes are bounded.
+    _TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)
+
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(base_url=self._base_url, timeout=None)
+            self._client = httpx.AsyncClient(base_url=self._base_url, timeout=self._TIMEOUT)
         return self._client
 
     async def _check_health(self) -> bool:

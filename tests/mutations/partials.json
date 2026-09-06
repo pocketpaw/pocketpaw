@@ -1,0 +1,228 @@
+[
+  {
+    "label": "resolve_bearer never consults the cache",
+    "file": "ee/pocketpaw_ee/cloud/auth/api_keys.py",
+    "find": "    cached = _cached_verification(_token_digest(token), now_monotonic, now)",
+    "replace": "    cached = None",
+    "tests": [
+      "tests/cloud/auth/test_api_key_verify_cache.py::test_a_repeat_resolve_does_not_re_derive_argon2"
+    ]
+  },
+  {
+    "label": "a cached verification never expires",
+    "file": "ee/pocketpaw_ee/cloud/auth/api_keys.py",
+    "find": "    if now_monotonic - entry.verified_at >= ttl:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/auth/test_api_key_verify_cache.py::test_the_cache_expires_and_the_hash_is_derived_again"
+    ]
+  },
+  {
+    "label": "store entries even when the TTL says the cache is off",
+    "file": "ee/pocketpaw_ee/cloud/auth/api_keys.py",
+    "find": "    \"\"\"Store a successful verification, evicting the least recently used.\"\"\"\n    if _verify_ttl_seconds() <= 0:\n        return\n",
+    "replace": "    \"\"\"Store a successful verification, evicting the least recently used.\"\"\"\n",
+    "tests": [
+      "tests/cloud/auth/test_api_key_verify_cache.py::test_a_zero_ttl_turns_the_cache_off"
+    ]
+  },
+  {
+    "label": "revoking a key leaves its cached verification in place",
+    "file": "ee/pocketpaw_ee/cloud/auth/api_keys.py",
+    "find": "    _invalidate_cached_key(str(doc.id))\n    return doc",
+    "replace": "    return doc",
+    "tests": [
+      "tests/cloud/auth/test_api_key_verify_cache.py::test_revoking_a_key_stops_it_working_immediately"
+    ]
+  },
+  {
+    "label": "the member-removal cascade leaves cached verifications in place",
+    "file": "ee/pocketpaw_ee/cloud/auth/api_keys.py",
+    "find": "        _invalidate_cached_key(str(doc.id))\n        count += 1",
+    "replace": "        count += 1",
+    "tests": [
+      "tests/cloud/auth/test_api_key_verify_cache.py::test_the_member_removal_cascade_also_evicts"
+    ]
+  },
+  {
+    "label": "expiry is checked at insert but not on a hit",
+    "file": "ee/pocketpaw_ee/cloud/auth/api_keys.py",
+    "find": "    if entry.expires_at is not None:\n        exp = entry.expires_at if entry.expires_at.tzinfo else entry.expires_at.replace(tzinfo=UTC)\n        if exp <= now:\n            _verify_cache.pop(digest, None)\n            return None\n",
+    "replace": "    if entry.expires_at is not None:\n        pass\n",
+    "tests": [
+      "tests/cloud/auth/test_api_key_verify_cache.py::test_expiry_is_re_checked_on_every_hit_not_just_at_insert"
+    ]
+  },
+  {
+    "label": "a naive stored expiry is compared without normalizing to UTC",
+    "file": "ee/pocketpaw_ee/cloud/auth/api_keys.py",
+    "find": "        exp = entry.expires_at if entry.expires_at.tzinfo else entry.expires_at.replace(tzinfo=UTC)",
+    "replace": "        exp = entry.expires_at",
+    "tests": [
+      "tests/cloud/auth/test_api_key_verify_cache.py::test_a_naive_expiry_is_still_compared_in_utc"
+    ]
+  },
+  {
+    "label": "the verification cache grows without bound",
+    "file": "ee/pocketpaw_ee/cloud/auth/api_keys.py",
+    "find": "    while len(_verify_cache) > _VERIFY_CACHE_MAX:\n        _verify_cache.popitem(last=False)",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/auth/test_api_key_verify_cache.py::test_the_cache_is_bounded"
+    ]
+  },
+  {
+    "label": "hand callers the cached scopes themselves",
+    "file": "ee/pocketpaw_ee/cloud/auth/api_keys.py",
+    "find": "        return cached.owner_user_id, cached.workspace, list(cached.scopes)",
+    "replace": "        return cached.owner_user_id, cached.workspace, cached.scopes",
+    "tests": [
+      "tests/cloud/auth/test_api_key_verify_cache.py::test_scopes_handed_out_cannot_be_mutated_through_the_cache"
+    ]
+  },
+  {
+    "label": "mint the key hash inline on the event loop",
+    "file": "ee/pocketpaw_ee/cloud/auth/api_keys.py",
+    "find": "    full_key, prefix, hashed = await generate_key_async()",
+    "replace": "    full_key, prefix, hashed = generate_key()",
+    "tests": [
+      "tests/cloud/auth/test_api_key_verify_cache.py::test_minting_a_key_hashes_off_the_event_loop"
+    ]
+  },
+  {
+    "label": "the gallery read hydrates whole pocket documents again",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    cursor = _PocketDoc.get_pymongo_collection().find(query, {\"source\": 0})\n    docs = [_PocketDoc.model_validate(row) async for row in cursor]",
+    "replace": "    docs = await _PocketDoc.find(query).to_list()",
+    "tests": [
+      "tests/cloud/pockets/test_list_projection.py::test_the_gallery_does_not_carry_the_site_source",
+      "tests/cloud/pockets/test_list_projection.py::test_the_gallery_read_asks_mongo_to_exclude_source"
+    ]
+  },
+  {
+    "label": "the gallery projection stops excluding source",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": ".find(query, {\"source\": 0})",
+    "replace": ".find(query, {})",
+    "tests": [
+      "tests/cloud/pockets/test_list_projection.py::test_the_gallery_does_not_carry_the_site_source"
+    ]
+  },
+  {
+    "label": "agent_list reads every field again",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        {\"_id\": 1, \"name\": 1, \"description\": 1, \"type\": 1, \"icon\": 1, \"color\": 1, \"owner\": 1},",
+    "replace": "        {},",
+    "tests": [
+      "tests/cloud/pockets/test_list_projection.py::test_the_agent_list_read_is_projected_to_what_it_returns"
+    ]
+  },
+  {
+    "label": "agent_list drops the model-default fallbacks raw BSON needs",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "            \"description\": row.get(\"description\") or \"\",",
+    "replace": "            \"description\": row.get(\"description\"),",
+    "tests": [
+      "tests/cloud/pockets/test_list_projection.py::test_agent_list_substitutes_a_default_for_a_missing_field"
+    ]
+  },
+  {
+    "label": "telemetry goes back to one write per request",
+    "file": "ee/pocketpaw_ee/cloud/_core/request_log.py",
+    "find": "    batch = [await queue.get()]\n    while len(batch) < _BATCH_MAX:\n        try:\n            batch.append(queue.get_nowait())\n        except asyncio.QueueEmpty:\n            break\n",
+    "replace": "    batch = [await queue.get()]\n",
+    "tests": [
+      "tests/cloud/test_request_log_batching.py::test_a_burst_of_requests_becomes_one_write"
+    ]
+  },
+  {
+    "label": "one batch can be the whole backlog",
+    "file": "ee/pocketpaw_ee/cloud/_core/request_log.py",
+    "find": "    batch = [await queue.get()]\n    while len(batch) < _BATCH_MAX:",
+    "replace": "    batch = [await queue.get()]\n    while True:",
+    "tests": [
+      "tests/cloud/test_request_log_batching.py::test_a_batch_is_bounded"
+    ]
+  },
+  {
+    "label": "the telemetry queue grows without bound",
+    "file": "ee/pocketpaw_ee/cloud/_core/request_log.py",
+    "find": "        _queue = asyncio.Queue(maxsize=_QUEUE_MAX)",
+    "replace": "        _queue = asyncio.Queue()",
+    "tests": [
+      "tests/cloud/test_request_log_batching.py::test_a_full_queue_sheds_telemetry_instead_of_growing"
+    ]
+  },
+  {
+    "label": "a full queue raises into the request that was already served",
+    "file": "ee/pocketpaw_ee/cloud/_core/request_log.py",
+    "find": "    except asyncio.QueueFull:",
+    "replace": "    except asyncio.CancelledError:",
+    "tests": [
+      "tests/cloud/test_request_log_batching.py::test_shedding_telemetry_never_raises_into_the_request"
+    ]
+  },
+  {
+    "label": "a failed batch kills the consumer",
+    "file": "ee/pocketpaw_ee/cloud/_core/request_log.py",
+    "find": "        except Exception:\n            logger.warning(\"request-log batch of %d failed to write\", len(batch), exc_info=True)",
+    "replace": "        except Exception:\n            raise",
+    "tests": [
+      "tests/cloud/test_request_log_batching.py::test_the_consumer_survives_a_failed_batch"
+    ]
+  },
+  {
+    "label": "shutdown drops the queued tail instead of flushing it",
+    "file": "ee/pocketpaw_ee/cloud/_core/request_log.py",
+    "find": "    if queue is None or queue.empty():\n        return 0",
+    "replace": "    if True:\n        return 0",
+    "tests": [
+      "tests/cloud/test_request_log_batching.py::test_shutdown_flushes_the_queued_tail"
+    ]
+  },
+  {
+    "label": "logging with no running loop raises",
+    "file": "ee/pocketpaw_ee/cloud/_core/request_log.py",
+    "find": "    try:\n        loop = asyncio.get_running_loop()\n    except RuntimeError:\n        return None",
+    "replace": "    loop = asyncio.get_running_loop()",
+    "tests": [
+      "tests/cloud/test_request_log_batching.py::test_logging_with_no_running_loop_is_a_no_op"
+    ]
+  },
+  {
+    "label": "the consumer is kept across a change of event loop",
+    "file": "ee/pocketpaw_ee/cloud/_core/request_log.py",
+    "find": "    if _queue is None or _queue_loop is not loop or _drain_task is None or _drain_task.done():",
+    "replace": "    if _queue is None or _drain_task is None or _drain_task.done():",
+    "tests": [
+      "tests/cloud/test_request_log_batching.py::test_the_consumer_is_rebuilt_when_the_loop_changes"
+    ]
+  },
+  {
+    "label": "a finished consumer is kept instead of rebuilt",
+    "file": "ee/pocketpaw_ee/cloud/_core/request_log.py",
+    "find": "    if _queue is None or _queue_loop is not loop or _drain_task is None or _drain_task.done():",
+    "replace": "    if _queue is None or _queue_loop is not loop or _drain_task is None:",
+    "tests": [
+      "tests/cloud/test_request_log_batching.py::test_a_consumer_that_does_die_is_replaced"
+    ]
+  },
+  {
+    "label": "the queued entry keeps the middleware's field name",
+    "file": "ee/pocketpaw_ee/cloud/_core/request_log.py",
+    "find": "                \"workspace\": workspace_id,",
+    "replace": "                \"workspace_id\": workspace_id,",
+    "tests": [
+      "tests/cloud/test_request_log_batching.py::test_the_entry_carries_the_fields_the_document_needs"
+    ]
+  },
+  {
+    "label": "one unbuildable entry discards the whole batch",
+    "file": "ee/pocketpaw_ee/cloud/request_log/service.py",
+    "find": "    docs: list[_RequestLogDoc] = []\n    for entry in entries:\n        try:\n            docs.append(_RequestLogDoc(**entry))\n        except Exception:\n            # One unbuildable entry must not cost the batch. This is telemetry\n            # about a request that has already been served.\n            logger.warning(\"request_log.record_many skipped a bad entry\", exc_info=True)",
+    "replace": "    docs = [_RequestLogDoc(**entry) for entry in entries]",
+    "tests": [
+      "tests/cloud/test_request_log_batching.py::test_one_bad_entry_does_not_cost_the_batch"
+    ]
+  }
+]

@@ -36,7 +36,11 @@ from datetime import UTC, datetime
 from beanie import PydanticObjectId
 from bson.errors import InvalidId
 
-from pocketpaw.memory.protocol import MemoryEntry, MemoryType  # type: ignore[import-untyped]
+from pocketpaw.memory.protocol import (  # type: ignore[import-untyped]
+    DEFAULT_SESSION_HISTORY_LIMIT,
+    MemoryEntry,
+    MemoryType,
+)
 from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
 from pocketpaw_ee.cloud.models.message import Message
 from pocketpaw_ee.cloud.models.session import Session
@@ -282,13 +286,20 @@ class MongoMemoryStore:
         facts = await MemoryFactDoc.find(filters).sort("-createdAt").limit(limit).to_list()
         return [_fact_to_entry(f) for f in facts]
 
-    async def get_session(self, session_key: str) -> list[MemoryEntry]:
+    async def get_session(
+        self, session_key: str, limit: int | None = DEFAULT_SESSION_HISTORY_LIMIT
+    ) -> list[MemoryEntry]:
         key = _normalize_session_key(session_key)
-        messages = (
-            await Message.find({"context_type": "pocket", "session_key": key})
-            .sort("createdAt")
-            .to_list()
-        )
+        query = Message.find({"context_type": "pocket", "session_key": key})
+        if limit is None:
+            messages = await query.sort("createdAt").to_list()
+        else:
+            # NEWEST `limit`, then reversed back to ascending. Sorting ascending
+            # and limiting would return the OLDEST `limit` — the exact defect
+            # #2075 fixed in the chat history window, where the agent was
+            # rehydrated with the first fifty messages a scope ever had.
+            recent = await query.sort("-createdAt").limit(limit).to_list()
+            messages = list(reversed(recent))
         return [_message_to_entry(m) for m in messages]
 
     async def clear_session(self, session_key: str) -> int:

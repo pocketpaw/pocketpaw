@@ -30,6 +30,7 @@ Changes:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
@@ -40,6 +41,8 @@ from pymongo.errors import DuplicateKeyError
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.chat.runs.domain import RunActivityRow, RunSpec
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+logger = logging.getLogger(__name__)
 
 # A run is ACTIVE while it has been accepted but has not reached a terminal
 # state. One definition, one place: the scope lookup, the jail guard, and the
@@ -128,6 +131,27 @@ async def get_run(run_id: str) -> ChatRunDoc:
     return doc
 
 
+def _trigger_spend_ingest(doc: ChatRunDoc) -> None:
+    """Ask for this workspace's proxy spend to be billed shortly (live mode only).
+
+    Called from every terminal transition. In ``live`` the LiteLLM sweep is the
+    only meter and it runs every five minutes, so without this a customer's
+    balance lags their usage by up to that long — and the run-start balance gate
+    can admit a run the previous one had already spent the credits for.
+
+    Fire and forget, and deliberately last: it must never delay or fail a
+    transition that has already happened. The trigger schedules the SAME ingest
+    the sweep runs, keyed on the same ledger id, so the two racing is harmless
+    and the sweep remains the backstop for anything this misses.
+    """
+    try:
+        from pocketpaw_ee.cloud.llm_provisioning import run_end_trigger
+
+        run_end_trigger.schedule_spend_ingest(doc.workspace)
+    except Exception:  # noqa: BLE001 — a billing hint must not break the lifecycle
+        logger.debug("run spend-ingest trigger failed for %s", doc.run_id, exc_info=True)
+
+
 async def mark_running(run_id: str) -> None:
     doc = await get_run(run_id)
     doc.status = "running"
@@ -152,6 +176,7 @@ async def mark_completed(
         doc.usage = usage
     doc.ended_at = _utcnow()
     await doc.save()
+    _trigger_spend_ingest(doc)
 
 
 async def mark_terminal(
@@ -175,6 +200,10 @@ async def mark_terminal(
         doc.usage = usage
     doc.ended_at = _utcnow()
     await doc.save()
+    # A cancelled or failed run consumed tokens before it stopped, and the proxy
+    # priced them. Billing only completed runs would serve every interrupted one
+    # free — which is why the metering sweeper bills all four terminal states too.
+    _trigger_spend_ingest(doc)
 
 
 async def mark_billed(run_id: str) -> None:
@@ -234,10 +263,24 @@ async def find_active_run_scopes() -> set[tuple[str, str, str]]:
     run for the same scope, which re-protects the jail, so a retry can't race a
     GC pass into deleting a jail it's about to reuse.
     """
-    docs = await ChatRunDoc.find(
+    # Projected to the three fields the scope tuple needs. The unprojected read
+    # hydrated a full ChatRunDoc per active run, and a run document carries the
+    # model's entire answer in `partial_text` plus, on the concierge surface,
+    # the visitor's own text in `user_text`. This call is the jail GC's guard
+    # and runs every five minutes forever, so it was pulling every active run's
+    # complete answer over the wire and building a Pydantic model from it, to
+    # read three short strings.
+    #
+    # get_pymongo_collection(), not get_motor_collection() — Beanie 2.1.0
+    # renamed it, and the old name is an AttributeError at runtime.
+    cursor = ChatRunDoc.get_pymongo_collection().find(
         {"status": {"$in": list(ACTIVE_RUN_STATUSES)}},
-    ).to_list()
-    return {(d.workspace, d.context_type, d.scope_id) for d in docs}
+        {"workspace": 1, "context_type": 1, "scope_id": 1},
+    )
+    return {
+        (row.get("workspace", ""), row.get("context_type", ""), row.get("scope_id", ""))
+        async for row in cursor
+    }
 
 
 # ---------------------------------------------------------------------------

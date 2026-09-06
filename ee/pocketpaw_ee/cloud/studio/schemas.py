@@ -7,6 +7,11 @@
 # below), matching the TS interfaces.
 #
 # Created 2026-08-17 (studio-real-backend): new DTO module.
+# 2026-09-03 (studio-camera-lighting): added ``CameraSpec`` / ``LightingSpec``
+#   and the camera-catalog envelope. Both specs ride on ``GenerateRequest`` as
+#   STRUCTURED ids, never as text the client baked into ``prompt`` — the backend
+#   renders them to prose (``camera_catalog``) so the phrasing stays tunable
+#   without a client release and one-tap remix can restore the dialog's state.
 
 from __future__ import annotations
 
@@ -15,6 +20,26 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 # ── Model / style catalog ───────────────────────────────────────────────────
+
+
+class StudioModelParam(BaseModel):
+    """One declarative per-model parameter knob (the edit composer renders a
+    control for each). Mirrors paw-enterprise ``core/studio/types.ts``
+    ``StudioModelParam`` — ``key``/``label``/``type``/``default`` plus the
+    optional ``min``/``max``/``step``/``options``/``hint``/``advanced`` fields.
+    ``type`` is one of ``stepper`` | ``text`` | ``select`` | ``slider`` |
+    ``toggle``; ``default`` is the value the knob resets to."""
+
+    key: str
+    label: str
+    type: str
+    default: Any = None
+    hint: str | None = None
+    min: int | float | None = None
+    max: int | float | None = None
+    step: int | float | None = None
+    options: list[str] | None = None
+    advanced: bool = False
 
 
 class StudioModel(BaseModel):
@@ -33,17 +58,163 @@ class StudioModel(BaseModel):
     credits: int | None = None
     tags: list[str] = Field(default_factory=list)
     default: bool | None = None
+    # Per-model declarative knobs the edit composer surfaces (empty for models
+    # that expose no extra edit controls).
+    params: list[StudioModelParam] = Field(default_factory=list)
+
+
+class StudioStyleLook(BaseModel):
+    """The still-side signature of a style (mood / art / light / palette / grade)."""
+
+    mood: str | None = None
+    artStyle: str | None = None
+    lighting: str | None = None
+    colorPalette: list[str] = Field(default_factory=list)
+    colorGrading: str | None = None
+    medium: str | None = None
+
+
+class StudioStyleMotion(BaseModel):
+    """The camera-and-cutting signature of a style (cannot derive from a still)."""
+
+    camera: str | None = None
+    shots: str | None = None
+    pace: str | None = None
+    energy: int | None = None
+
+
+class StudioStyleConfig(BaseModel):
+    """The full visual treatment a curated style prescribes (look + motion +
+    reference works). Mirrors openstory's style-config v2 schema."""
+
+    version: int = 2
+    look: StudioStyleLook = Field(default_factory=StudioStyleLook)
+    motion: StudioStyleMotion = Field(default_factory=StudioStyleMotion)
+    references: list[str] = Field(default_factory=list)
 
 
 class StudioStyle(BaseModel):
     """A one-tap style/template. ``promptSuffix`` is appended to the user's
-    prompt so the effect stays transparent (same convention as the mock)."""
+    prompt so the effect stays transparent (same convention as the mock).
+    Curated styles additionally carry ``category`` / ``tags`` / ``config`` so the
+    movie-maker can render a full detail card (palette, mood, lighting, camera,
+    color grading, reference films) and a "Use this style" CTA."""
 
     id: str
     label: str
     description: str | None = None
     thumbnailUrl: str | None = None
     promptSuffix: str = ""
+    category: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    config: StudioStyleConfig | None = None
+
+
+# ── Camera & lighting ───────────────────────────────────────────────────────
+
+
+class CameraSpec(BaseModel):
+    """The user's camera picks, as catalog ids. EVERY field is optional and an
+    absent field means "Auto" — which renders to no words at all, not to the word
+    "auto". See ``camera_catalog`` for the phrasing each id maps to."""
+
+    body: str | None = None
+    lens: str | None = None
+    focalLengthMm: int | None = None
+    customFocalLength: str | None = None
+    aperture: str | None = None
+    angle: str | None = None
+    shotSize: str | None = None
+
+
+class LightingSpec(BaseModel):
+    """The user's lighting picks, as catalog ids. Same Auto-means-silence rule as
+    ``CameraSpec``."""
+
+    setup: str | None = None
+    source: str | None = None
+    quality: str | None = None
+    direction: str | None = None
+
+
+class RigLamp(BaseModel):
+    """One lamp on the light-rig stage. ``x``/``y`` are normalised to [-1, 1] with
+    the subject at the origin and **+y UP** — the client flips its screen-space y
+    before sending, so the stored geometry reads the way a person describes it."""
+
+    enabled: bool = False
+    x: float = 0.0
+    y: float = 0.0
+    strength: int = 70
+    warmth: int = 50
+    quality: str = "soft"
+    colour: str | None = None
+
+
+class RigEnvironment(BaseModel):
+    """An optional HDRI the user loaded. ``dominantTone`` is a colour NAME sampled
+    from the image on the client — the panorama itself never reaches the model, so
+    what it contributes is the ambient colour it implies, described in words."""
+
+    name: str | None = None
+    dominantTone: str | None = None
+
+
+class LightRig(BaseModel):
+    """A manual three-point setup. Takes precedence over ``LightingSpec`` when
+    enabled: both describe the same thing, and sending both would put two
+    lighting sentences in the prompt arguing with each other."""
+
+    enabled: bool = False
+    ambience: str = "day"
+    key: RigLamp = Field(default_factory=RigLamp)
+    fill: RigLamp = Field(default_factory=RigLamp)
+    rim: RigLamp = Field(default_factory=RigLamp)
+    presetId: str | None = None
+    environment: RigEnvironment | None = None
+
+
+class LightRigPreset(BaseModel):
+    """A named rig snapshot. ``swatch`` is the dot colour the picker renders."""
+
+    id: str
+    label: str
+    swatch: str = "#FFFFFF"
+    rig: LightRig
+
+
+class CameraCatalogOption(BaseModel):
+    """One selectable chip. ``phrase`` is the model-facing copy the backend
+    injects; it ships to the client so the dialog can show exactly what a pick
+    adds to the prompt instead of leaving it a black box."""
+
+    id: str
+    label: str
+    hint: str | None = None
+    phrase: str = ""
+    mm: int | None = None
+    custom: bool = False
+
+
+class CameraCatalogGroup(BaseModel):
+    """One slot card in the dialog. ``field`` names the ``CameraSpec`` /
+    ``LightingSpec`` attribute this group writes, so the client renders all of
+    them through a single generic component."""
+
+    id: str
+    field: str
+    label: str
+    options: list[CameraCatalogOption] = Field(default_factory=list)
+
+
+class CameraCatalogResponse(BaseModel):
+    """Body of ``GET /studio/camera-catalog`` — the two tabs of the dialog."""
+
+    camera: list[CameraCatalogGroup] = Field(default_factory=list)
+    lighting: list[CameraCatalogGroup] = Field(default_factory=list)
+    # Rig presets ride along on the same fetch — a preset IS a rig snapshot, and
+    # a client copy of them is how this drifts from what the renderer expects.
+    lightRigPresets: list[LightRigPreset] = Field(default_factory=list)
 
 
 # ── Generation domain ───────────────────────────────────────────────────────
@@ -74,6 +245,12 @@ class GenerationParams(BaseModel):
     seed: int | None = None
     durationSec: int | None = None
     inputImageCount: int | None = None
+    # Echoed back so the gallery can label a result and one-tap remix can reopen
+    # the Camera & lighting dialog with the same chips lit. Storing the structured
+    # picks rather than the rendered sentence is what makes that possible.
+    camera: CameraSpec | None = None
+    lighting: LightingSpec | None = None
+    lightRig: LightRig | None = None
 
 
 class Generation(BaseModel):
@@ -111,6 +288,46 @@ class GenerateRequest(BaseModel):
     durationSec: int | None = None
     referenceAssetUrl: str | None = None
     inputImageUrls: list[str] | None = None
+    # Reference images for the curated image models' edit path (character /
+    # location / element consistency) — the backend resolves these to ``data:``
+    # URLs and dispatches the model's EDIT endpoint via fal.
+    referenceImageUrls: list[str] | None = None
+    # Seedance 2.5 image-to-video extras (the rail's video composer). ``resolution``
+    # is "480p" | "720p"; ``generateAudio`` toggles the endpoint's synchronized
+    # audio. Only read when the video model resolves to Seedance i2v.
+    resolution: str | None = None
+    generateAudio: bool | None = None
+    # Seedance 2.5 reference-to-video: additional reference tracks alongside
+    # ``inputImageUrls``. Audio is the reason this endpoint exists in the flow —
+    # it is the only video model in the catalog that accepts a sound input, so a
+    # generated music bed can condition the clip in the SAME call rather than
+    # being muxed on afterwards. Audio requires at least one image or video.
+    referenceAudioUrls: list[str] | None = None
+    referenceVideoUrls: list[str] | None = None
+    # Camera & lighting picks as catalog ids. The backend renders them to prose
+    # and splices them between the subject and the style suffix; an omitted spec
+    # (or one whose fields are all None) changes the prompt not at all.
+    camera: CameraSpec | None = None
+    lighting: LightingSpec | None = None
+    # A manual lamp placement. When enabled it REPLACES `lighting` rather than
+    # adding to it — see LightRig.
+    lightRig: LightRig | None = None
+
+
+class MusicRequest(BaseModel):
+    """Body of ``POST /studio/music`` — generate a music/audio track.
+
+    ``model`` may be a catalog key (``elevenlabs_music``) or a ``fal-ai/...``
+    endpoint id; ``lyrics``/``instrumental``/``durationSec``/``steps`` map onto
+    each music endpoint's own contract (see ``fal_music``)."""
+
+    prompt: str
+    model: str | None = None
+    lyrics: str | None = None
+    instrumental: bool = True
+    durationSec: int | None = None
+    steps: int | None = None
+    tags: list[str] = Field(default_factory=list)
 
 
 class EditRequest(BaseModel):
@@ -125,6 +342,43 @@ class EditRequest(BaseModel):
     direction: str | None = None
     factor: float | None = None
     model: str | None = None
+    # The rail edit composer's per-model parameter values (keyed by the model's
+    # ``params`` keys — e.g. ``num_images`` / ``seed``). Only the ``edit`` op
+    # reads them today.
+    params: dict[str, Any] | None = None
+
+
+# ── Transcription (speech-to-text) ─────────────────────────────────────────
+
+
+class TranscriptWord(BaseModel):
+    """One recognised word with its timing, in MILLISECONDS — the same domain
+    the editor's ``CaptionWord`` uses, so the frontend can drop these straight
+    onto a cue without converting anything.
+
+    ``confidence`` is Deepgram's per-word score (0..1), passed through so the
+    UI can flag low-confidence words for review instead of silently shipping a
+    wrong caption. It stays optional because a model that does not report it
+    must not break the response shape."""
+
+    text: str
+    startMs: int
+    endMs: int
+    confidence: float | None = None
+
+
+class TranscriptResponse(BaseModel):
+    """Body of ``POST /studio/transcribe`` — the transcript of uploaded audio.
+
+    Deliberately NOT a ``Generation``: transcription is an INPUT operation, not
+    a produced asset, so it never enters the gallery or the workspace history
+    (the same reasoning as the ``audio_transcribe`` MCP tool). ``words`` may be
+    empty for a model that returns only running text; ``text`` is always
+    non-empty on a 200."""
+
+    text: str
+    words: list[TranscriptWord] = Field(default_factory=list)
+    model: str
 
 
 class VideoElementsRequest(BaseModel):
@@ -261,11 +515,16 @@ class MediaListResponse(BaseModel):
 
 __all__ = [
     "StudioModel",
+    "StudioModelParam",
     "StudioStyle",
+    "StudioStyleLook",
+    "StudioStyleMotion",
+    "StudioStyleConfig",
     "GeneratedAsset",
     "GenerationParams",
     "Generation",
     "GenerateRequest",
+    "MusicRequest",
     "EditRequest",
     "VideoElementsRequest",
     "VideoMotionRequest",
@@ -273,6 +532,15 @@ __all__ = [
     "SuggestPromptRequest",
     "StudioModelsResponse",
     "StudioStylesResponse",
+    "CameraSpec",
+    "LightingSpec",
+    "RigLamp",
+    "RigEnvironment",
+    "LightRig",
+    "LightRigPreset",
+    "CameraCatalogOption",
+    "CameraCatalogGroup",
+    "CameraCatalogResponse",
     "GenerationsResponse",
     "FlowNode",
     "FlowEdge",

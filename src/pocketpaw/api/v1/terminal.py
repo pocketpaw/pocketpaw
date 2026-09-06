@@ -11,6 +11,11 @@ output is read from its PTY and broadcast to all connected SSE clients via
 an in-memory publish/subscribe pattern.
 
 Created: 2026-06-16
+Updated: 2026-09-04 — the lsof probe that seeds the shell's initial CWD now runs
+    through asyncio.to_thread. It is a blocking subprocess.run with a 5s
+    timeout, and ensure_running() is awaited from the SSE, input and resize
+    endpoints, so on a host where lsof is missing or slow the first terminal
+    connect stalled the whole single-process event loop.
 """
 
 from __future__ import annotations
@@ -129,7 +134,8 @@ class ShellProcess:
         # Seed the initial CWD by reading /proc/<pid>/cwd (Linux) or
         # using lsof (macOS). Fall back to $HOME.
         try:
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["lsof", "-p", str(self._proc.pid), "-d", "cwd", "-Fn"],
                 capture_output=True,
                 text=True,

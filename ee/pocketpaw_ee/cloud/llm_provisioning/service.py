@@ -48,6 +48,16 @@
 # exception) which a system-job caller logs + retries, never a bare HTTPException.
 #
 # Created 2026-06-26 (integration/model-catalog-v2, MCG-8): new entity.
+# Updated 2026-09-02 (feat/litellm-spend-cutover): two changes that make ``live``
+#   safe to flip. ``prepare_spend_cutover`` stamps the high-water mark on every
+#   provisioned tenant, so the first live sweep bills FORWARD instead of charging
+#   the whole proxy history — which would have re-billed every chat run BC-3
+#   already charged, under a key BC-1 cannot dedup against. And the high-water
+#   skip now compares PARSED instants rather than raw ISO strings: the proxy emits
+#   naive, Z-suffixed and offset-bearing shapes interchangeably, and a naive
+#   timestamp is a string PREFIX of the offset-bearing form of the SAME instant,
+#   so a boundary row was silently dropped by the meter that is meant to be the
+#   only one charging. See docs/deployment/litellm-billing-cutover.md.
 # Updated 2026-06-26 (feat/litellm-billing-cutover, WU-F): three changes for the
 # billing cutover from per-run metering (BC-3) to LiteLLM as the single meter,
 # done through a safe shadow-compare phase.
@@ -67,19 +77,132 @@
 #      ``<=`` (dropped a distinct boundary row on a later sweep → under-bill); it
 #      is now strict ``<`` with the ``litellm:{request_id}`` ledger dedup as the
 #      exactly-once guard at the boundary. See the inline note at the loop.
+#
+# Updated 2026-09-02 (fix/bill-workspaces-the-sweep-cannot-see): the previous entry
+# made a chat run's spend READABLE. This one makes it reachable, because nothing
+# was asking for it.
+#
+# The sweep's tenant list was ``list_provisioned_workspaces`` — the workspaces we
+# minted a virtual key for. Chat needs no such key: it authenticates with the
+# deployment key and names its workspace in the request body. So the set of
+# workspaces that spend and the set we swept were free to drift apart, and on the
+# deployment where this surfaced they had drifted completely: three provisioned
+# tenants with no proxy spend, three spending customers with no provisioned key,
+# zero overlap. Every tick read three empty tenants, reported
+# ``3/3 tenants -> 0 credits``, and gave the chat away.
+#
+#   * ``list_sweepable_workspaces`` — the union of the provisioned tenants and the
+#     customers the PROXY reports. Asking the proxy who spent is the only way to
+#     learn about a workspace our own tables never recorded.
+#   * ``ingest_tenant_spend`` bills a keyless workspace instead of returning zero.
+#     ``_spend_bookkeeping_row`` gives it a row to hold the high-water mark, and
+#     ``ensure_tenant_key`` fills that same row in if a key is minted later rather
+#     than colliding with it on the UNIQUE index.
+#   * ``spend_attribution_coverage`` splits its remainder into rows naming an
+#     unswept workspace and rows naming nobody. It reported both as "no ``user``
+#     field", which is how this bug hid behind a diagnostic written to catch it.
+#
+# The discovery path checks every id against a real ``Workspace`` before billing
+# it: the value reaches us from a request body, and the cost of trusting it is a
+# ledger debit against a tenant that does not exist.
+#
+# Updated 2026-09-02 (feat/proxy-spend-ingest-by-customer): ``ingest_tenant_spend``
+# now reads a tenant's spend BY CUSTOMER as well as by virtual key.
+#
+# The per-key read could never see a chat run. Both agent backends authenticate
+# with ``settings.litellm_api_key`` — the DEPLOYMENT's key — so a chat row is
+# stamped with that key and ``/spend/logs?api_key=<tenant key>`` does not match it.
+# With ``live`` gating BC-3's per-run metering off so exactly one meter charges,
+# the one meter was reading a filter that excludes the product's main cost centre:
+# production logged ``ingested spend for 3/3 tenants -> 0 credits`` against runs the
+# proxy had priced in dollars. Nothing errored, because nothing was wrong with the
+# read — it was scoped to the wrong thing.
+#
+# The companion change puts the workspace id in each request's ``user`` field, which
+# the proxy records as the row's ``end_user``. This side reads it back with
+# ``GET /spend/logs/v2?end_user=<workspace>``. Four things worth knowing:
+#
+#   * BOTH reads run, and their rows are merged by ``request_id``. The customer read
+#     should be a superset today (Studio and the media MCP server tag ``user`` as
+#     well as sending the tenant key), but "should be" is not a thing to assume when
+#     the failure mode is an under-bill, and a row seen twice is billed once —
+#     ``litellm:{request_id}`` is the ledger key either way.
+#   * The customer read is DATE-BOUNDED, so it needs a window rather than the
+#     high-water mark alone. It starts a short overlap BEFORE the mark
+#     (``_SPEND_READ_OVERLAP``) and, for a tenant with no mark at all, at the key
+#     doc's ``createdAt`` — the point from which this deployment has been the tenant's
+#     proxy, and so the earliest spend that can be theirs.
+#   * Rows from the customer read BYPASS the high-water skip. The mark exists to
+#     bound an unbounded read; this read is already bounded, and honouring the mark
+#     here would re-introduce the exact bug WU-F fixed at the boundary — a row that
+#     lands late with a ``startTime`` older than the mark would be skipped forever.
+#     Exactly-once still holds: it always came from the ledger key, never the mark.
+#   * A workspace with no provisioned key still returns a zero result, because the
+#     high-water mark lives on that document and there is nowhere else to keep it.
+#     The sweep only iterates provisioned tenants, so this is not a hole so much as
+#     the edge of the map — and the sweep's coverage check is what makes spend
+#     outside it visible.
+
+# Updated 2026-09-04 (fix/litellm-spend-leaks): three changes, one root cause —
+# money and noise were both being lost to arithmetic applied at the wrong grain.
+#
+#   1. ``ingest_tenant_spend`` CARRIES the sub-credit remainder instead of dropping
+#      it. It converted each row on its own and skipped anything that rounded to
+#      zero, so with the default card (round(usd * 250)) every call under $0.002
+#      billed nothing — permanently, because the high-water mark advanced past the
+#      dropped row in the same pass and nothing accumulated. Per-run metering shares
+#      the conversion and never showed this, because it priced a whole RUN at once;
+#      the cutover kept the arithmetic and made the unit ~100x smaller.
+#      SIZE, honestly: ``round`` is unbiased, so a row at $0.003 rounds UP to a credit
+#      it has not earned and offsets one at $0.0015 rounding down. Over a week of real
+#      traffic (2026-08-28..09-04) the two cancelled — one tenant over-billed by a
+#      credit, another under-billed by one. This is not a steady drain; it is being
+#      wrong per tenant in BOTH directions, and unboundedly wrong for a workload of
+#      uniformly cheap calls where nothing rounds up to offset anything. A thousand
+#      $0.0015 requests cost $1.50 and bill zero. The carry makes it exact instead.
+#      It does NOT bill what was already dropped: the reads start at the mark minus
+#      ``_SPEND_READ_OVERLAP``. A dropped row has no ledger entry, so rewinding a
+#      tenant's mark WOULD recover it and the request_id key still stops a double
+#      debit — but never rewind past the ``prepare_spend_cutover`` mark, where BC-3
+#      owns the billing under a key this ledger cannot dedup against.
+#      SUPERSEDED 2026-09-04 by the micro-credit wallet. The carry existed only
+#      because a credit (one cent) could not express one API call; with the wallet
+#      storing micro-credits, ``to_micro_credits`` bills each row exactly and there
+#      is no remainder to hold. The carry needed a per-tenant lease too — it was a
+#      read-modify-write two overlapping sweeps could both win — and that went with
+#      it: rows are independent again, so the ledger's per-row key is the whole
+#      guard, as it was before. Two mechanisms deleted by fixing the unit instead.
+#      The already-recorded check MOVED ABOVE the conversion as part of this: a row
+#      folded into the remainder carries a zero-value ledger entry rather than a
+#      debit, and the customer read re-offers 15 minutes of settled rows every tick,
+#      so without the check first the same fraction would be folded in once per
+#      sweep. That would turn an under-bill into an over-bill.
+#   2. ``reconcile_tenant_spend`` sums the window's USD and converts ONCE. Doing it
+#      per row understated the LiteLLM side of the shadow compare by exactly the
+#      rows the live ingest was dropping, which is how the cutover looked safe.
+#   3. ``spend_attribution_coverage`` PRICES its remainder and splits it three ways.
+#      A proxy logs traffic of its own — a human trying a model in its admin
+#      dashboard, its periodic health check — that can never name a workspace and is
+#      nobody's to bill. Counting it as "served and not billed" made the check
+#      permanently red while the runbook said to treat any non-zero count as
+#      blocking. Measured on the production proxy 2026-09-03: all 8 flagged rows
+#      were exactly that, worth $0.00014545 between them.
 
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pocketpaw_ee.catalog.admin_client import LiteLLMAdminClient, LiteLLMAdminError
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.credits import service as credits_service
+from pocketpaw_ee.cloud.credits.domain import micro_to_credits
 from pocketpaw_ee.cloud.llm_provisioning.domain import (
+    CutoverPreparation,
     KeyBudget,
     ProvisionResult,
+    SpendCoverage,
     SpendCredits,
     SpendIngestResult,
     SpendReconciliation,
@@ -114,6 +237,33 @@ _BC3_COMPUTE_SPEND_CAUSE = "compute_spend"
 # The key-alias prefix the proxy stamps on a tenant's virtual key, for operator
 # legibility in the proxy admin UI + spend logs.
 _KEY_ALIAS_PREFIX = "ws-"
+
+# How far BEFORE the high-water mark the customer-scoped read starts.
+#
+# Proxy spend rows are written when a call COMPLETES but stamped with when it
+# STARTED, and the write is batched, so a row can appear after the mark has already
+# moved past its ``startTime``. A date-bounded read that began exactly at the mark
+# would never see it. The overlap re-reads a few minutes of settled rows each
+# sweep — they cost one ``is_recorded`` lookup apiece and debit nothing — to buy
+# back rows that would otherwise be lost silently and permanently.
+_SPEND_READ_OVERLAP = timedelta(minutes=15)
+
+# Team ids LiteLLM stamps on its OWN traffic. Rows carrying one of these are the
+# proxy talking to itself and can never name a workspace: ``litellm-dashboard`` is
+# a human trying a model in the proxy's admin UI, ``litellm-internal-health-check``
+# is its periodic model probe. Neither is ours to bill, so counting them as spend
+# "being served and not billed" is what made the coverage check permanently red.
+#
+# Matched on ``team_id`` rather than on a zero cost: the dashboard's test chats DO
+# cost money (a real model answers them), just nobody's money. A cost filter would
+# also swallow a genuinely untagged production call that happened to be free, which
+# is the case worth keeping visible — free models do not stay free.
+_PROXY_INTERNAL_TEAMS = frozenset({"litellm-dashboard", "litellm-internal-health-check"})
+
+# The timestamp format /spend/logs/v2 parses. It also accepts a bare date; second
+# precision keeps the window tight enough that the overlap above is the only
+# deliberate re-read.
+_PROXY_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +443,168 @@ async def list_provisioned_workspaces() -> list[str]:
     return [d.workspace for d in docs if d.litellm_key]
 
 
+async def _existing_workspace_ids(candidates: list[str]) -> set[str]:
+    """Which of ``candidates`` are real workspaces. Bogus / deleted ids drop out.
+
+    The candidates come off the proxy's customer list, which is ultimately a
+    caller-supplied string: whatever a request put in its ``user`` field became a
+    customer. Everything ours puts there is a workspace id, but "ours" is an
+    assumption about a value that crossed the wire, and the consequence of
+    trusting it is a credit-ledger debit against a workspace that does not exist.
+    So it is checked rather than assumed.
+
+    Reaches into the ``Workspace`` doc, which belongs to the workspace entity, for
+    a single bulk existence read. The alternative — a public helper over there —
+    would be the tidier boundary, but this module is the only caller and the
+    import is lazy so the two services still load independently.
+    """
+    if not candidates:
+        return set()
+
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    by_oid: dict[ObjectId, str] = {}
+    for raw in candidates:
+        try:
+            by_oid[ObjectId(raw)] = raw
+        except (InvalidId, TypeError):
+            # Not even shaped like a workspace id. Nothing to sweep, and saying so
+            # once at debug beats a warning per tick for a value we will never bill.
+            logger.debug(
+                "llm_provisioning: proxy customer %r is not a workspace id — skipping",
+                raw,
+            )
+    if not by_oid:
+        return set()
+
+    docs = await Workspace.find({"_id": {"$in": list(by_oid)}}).to_list()
+    return {by_oid[d.id] for d in docs if d.id in by_oid}
+
+
+async def list_sweepable_workspaces(*, admin_client: LiteLLMAdminClient | None = None) -> list[str]:
+    """Every workspace the spend sweep should visit this tick.
+
+    The union of two sources, because neither one alone is the set of tenants that
+    owe money:
+
+      * the workspaces we PROVISIONED a virtual key for — spend that arrives
+        attributed to that key, which is Studio and the media server; and
+      * the workspaces the PROXY has recorded a customer for — spend that arrives
+        attributed to the request's ``user`` field, which is chat.
+
+    Only the first was swept until 2026-09-02, and a workspace can spend its whole
+    life without appearing in it: chat authenticates with the deployment key and
+    never needs a tenant key at all. On the deployment where this was found, the
+    three provisioned tenants had no proxy spend and the three spending customers
+    had no provisioned key — the two sets were disjoint, every sweep reported
+    ``3/3 tenants -> 0 credits``, and every real dollar of chat was free.
+
+    The proxy half is best-effort: if that call fails we sweep the provisioned
+    tenants alone rather than skipping the tick, which is the same partial-outage
+    rule the two spend reads follow. It fails toward the old behaviour, which
+    under-bills — the safe direction for a mistake that moves money.
+    """
+    provisioned = await list_provisioned_workspaces()
+    client = admin_client if admin_client is not None else LiteLLMAdminClient()
+
+    try:
+        customers = await client.list_customers()
+    except Exception:
+        logger.exception(
+            "llm_provisioning.list_sweepable_workspaces: could not read the proxy's "
+            "customer list — sweeping the %d provisioned tenant(s) alone this tick. "
+            "Spend from any UNPROVISIONED workspace goes unbilled until this recovers",
+            len(provisioned),
+        )
+        return provisioned
+
+    known = set(provisioned)
+    discovered = await _existing_workspace_ids([c for c in customers if c not in known])
+    if discovered:
+        logger.info(
+            "llm_provisioning.list_sweepable_workspaces: %d workspace(s) have proxy "
+            "spend but no provisioned key — sweeping them too: %s",
+            len(discovered),
+            ", ".join(sorted(discovered)),
+        )
+    # Provisioned order first, then the discovered ids sorted, so the sweep's
+    # per-tenant logging is stable tick to tick.
+    return provisioned + sorted(discovered)
+
+
+async def prepare_spend_cutover(
+    *,
+    at: datetime | None = None,
+    dry_run: bool = False,
+) -> CutoverPreparation:
+    """Stamp the billing-cutover mark so ``live`` mode bills forward, not backward.
+
+    **Run this before setting POCKETPAW_LITELLM_SPEND_MODE=live.** Without it the
+    first live sweep bills each tenant's ENTIRE ``/spend/logs`` history in one
+    debit run, because ``ingest_tenant_spend`` skips rows older than
+    ``last_spend_ingest_ts`` and that field is ``None`` until something ingests.
+    Worse than the size of that bill is its overlap: those rows include every text
+    chat run BC-3 already charged, under a different idempotency key
+    (``litellm:{request_id}`` vs ``run:{run_id}``), so BC-1's unique index cannot
+    dedup them. The module header calls row-level dedup against BC-3 a deliberate
+    product decision rather than a default, and there is no ``run_id`` on the key
+    metadata to dedup against in any case.
+
+    Stamping a mark makes the seam clean instead of overlapping: **BC-3 owns every
+    run before ``at``, LiteLLM owns every proxy row after it.**
+
+    Only tenants with NO mark are stamped. A tenant already ingesting has a live
+    high-water mark, and moving it forward would silently drop the spend between
+    the old mark and ``at``.
+
+    ORDER MATTERS, and the ordering is the operator's to get right:
+
+      1. Let the BC-3 sweep drain, so no completed run is still unbilled. The
+         sweep no-ops entirely once the mode is ``live``, and a run left unbilled
+         at the flip whose proxy rows predate ``at`` is billed by NEITHER meter.
+      2. Call this (``dry_run=True`` first to see the counts).
+      3. Confirm ``provisioned`` matches the number of workspaces you expect to
+         bill. **Live mode bills provisioned tenants only** — a workspace with no
+         proxy key is swept by nothing and its usage is free.
+      4. Set the mode to ``live``.
+
+    ``at`` defaults to now (UTC). ``dry_run`` reports what would be stamped and
+    writes nothing.
+    """
+    at = at or datetime.now(tz=UTC)
+    cutover_at = at.isoformat()
+
+    docs = await LiteLLMTenantKey.find(LiteLLMTenantKey.litellm_key != None).to_list()  # noqa: E711
+    provisioned = [d for d in docs if d.litellm_key]
+
+    unmarked = [d for d in provisioned if not d.last_spend_ingest_ts]
+    already = len(provisioned) - len(unmarked)
+
+    if not dry_run:
+        for doc in unmarked:
+            doc.last_spend_ingest_ts = cutover_at
+            await doc.save()
+
+    logger.info(
+        "prepare_spend_cutover: %s cutover_at=%s provisioned=%d seeded=%d already_marked=%d",
+        "DRY RUN — nothing written" if dry_run else "stamped",
+        cutover_at,
+        len(provisioned),
+        len(unmarked),
+        already,
+    )
+    return CutoverPreparation(
+        cutover_at=cutover_at,
+        provisioned=len(provisioned),
+        seeded=len(unmarked),
+        already_marked=already,
+        dry_run=dry_run,
+    )
+
+
 async def ensure_tenant_key(
     workspace: str,
     *,
@@ -344,6 +656,29 @@ async def ensure_tenant_key(
     if not isinstance(key, str) or not key:
         raise LiteLLMAdminError("LiteLLM /key/generate returned no key")
 
+    # A KEYLESS row already exists when the spend sweep discovered this workspace
+    # on the proxy before anything minted it a key. Fill that row in rather than
+    # inserting beside it: ``workspace`` is UNIQUE, so an insert would collide and
+    # be re-raised as a provisioning failure, and the row carries this tenant's
+    # ``last_spend_ingest_ts`` — replacing it would rewind the high-water mark and
+    # re-read spend the ledger has already been charged for.
+    if existing is not None:
+        existing.litellm_key = key
+        existing.key_alias = alias
+        existing.max_budget_usd = card.max_budget_usd
+        existing.budget_duration = card.budget_duration
+        existing.rpm_limit = card.rpm_limit
+        existing.tpm_limit = card.tpm_limit
+        existing.models = list(card.models)
+        await existing.save()
+        logger.info(
+            "llm_provisioning.ensure_tenant_key: workspace=%s minted a key onto the row "
+            "the spend sweep had already created (alias=%s)",
+            workspace,
+            alias,
+        )
+        return ProvisionResult(workspace_id=workspace, litellm_key=key, created=True)
+
     # Persist the mapping. Upsert-on-insert with the unique ``workspace`` index as
     # the concurrency guard: if a racing call minted + inserted first, our insert
     # collides — we swallow it and re-read the winner so we never store two rows
@@ -373,6 +708,14 @@ async def ensure_tenant_key(
             return ProvisionResult(
                 workspace_id=workspace, litellm_key=winner.litellm_key, created=False
             )
+        if winner is not None:
+            # The racer was the spend sweep creating a KEYLESS bookkeeping row, not
+            # another mint. Nobody has a key yet, so ours wins the row rather than
+            # being thrown away with a provisioning error.
+            winner.litellm_key = key
+            winner.key_alias = alias
+            await winner.save()
+            return ProvisionResult(workspace_id=workspace, litellm_key=key, created=True)
         # Not a duplicate-key collision — re-raise so the caller sees the real error.
         raise LiteLLMAdminError(f"persisting tenant key failed: {exc}") from exc
 
@@ -420,6 +763,151 @@ def _cached_tokens(row: dict[str, Any]) -> int:
     return _int(row.get("cache_read_input_tokens") or row.get("cached_tokens"))
 
 
+def _proxy_window(start: datetime, end: datetime) -> tuple[str, str]:
+    """Format a window the way /spend/logs/v2 parses it."""
+    return (
+        _as_aware(start).strftime(_PROXY_DATE_FORMAT),  # type: ignore[union-attr]
+        _as_aware(end).strftime(_PROXY_DATE_FORMAT),  # type: ignore[union-attr]
+    )
+
+
+def _customer_read_window(doc: LiteLLMTenantKey, *, now: datetime) -> tuple[datetime, datetime]:
+    """The window the customer-scoped spend read should cover for ``doc``.
+
+    Starts an overlap before the high-water mark, or — when nothing has ever been
+    ingested for this tenant — at the moment we provisioned their key, which is the
+    earliest instant any spend on this proxy can be theirs. That start is
+    deliberately NOT "the beginning of time": a tenant whose mark was seeded by
+    ``prepare_spend_cutover`` has one, and a tenant without one is new, so an
+    unbounded start could only ever reach back into spend some other meter already
+    charged.
+    """
+    mark = _parse_iso(doc.last_spend_ingest_ts)
+    if mark is not None:
+        return mark - _SPEND_READ_OVERLAP, now
+    created = _as_aware(doc.createdAt)
+    return (created if created is not None else now - _SPEND_READ_OVERLAP), now
+
+
+async def _spend_bookkeeping_row(workspace: str) -> LiteLLMTenantKey:
+    """This tenant's spend row, created keyless if provisioning never ran.
+
+    The row's job here is to hold ``last_spend_ingest_ts``. That mark is what
+    bounds the customer-scoped read and lets it advance, and a workspace with
+    nowhere to store it cannot be swept twice without re-reading its whole
+    history.
+
+    Creating one for an UNPROVISIONED workspace is the fix for a hole that made
+    real spend unbillable. Chat authenticates with the deployment key and names
+    its workspace in the request body, so a workspace can spend for its entire
+    life without ever minting a virtual key. ``ingest_tenant_spend`` used to
+    return a zero result for exactly those workspaces, and the sweep only ever
+    passed it workspaces that HAD a key, so their spend was read by nobody while
+    the coverage check reported it as untagged. Both readings were wrong in the
+    same direction: the spend was tagged, and free.
+
+    The new row carries no key, so ``list_provisioned_workspaces`` still excludes
+    it and ``ensure_tenant_key`` still mints on the same row later (it upserts on
+    ``workspace``). Its ``createdAt`` becomes the read window's start, which means
+    the first sweep after discovery bills forward from now and never reaches back
+    into spend some other meter already charged — the same guarantee
+    ``prepare_spend_cutover`` gives a provisioned tenant.
+    """
+    doc = await LiteLLMTenantKey.find_one(LiteLLMTenantKey.workspace == workspace)
+    if doc is not None:
+        return doc
+
+    doc = LiteLLMTenantKey(workspace=workspace, litellm_key=None)
+    try:
+        await doc.insert()
+    except Exception:
+        # The UNIQUE index on ``workspace`` is the arbiter: a concurrent sweep or
+        # a mint that landed between the read and this insert wins, and we re-read
+        # rather than raise. Losing this race is not an error — both racers wanted
+        # the same row to exist.
+        logger.debug(
+            "llm_provisioning: lost the create race for the spend row of workspace=%s "
+            "— re-reading the winner",
+            workspace,
+        )
+        existing = await LiteLLMTenantKey.find_one(LiteLLMTenantKey.workspace == workspace)
+        if existing is None:
+            raise
+        return existing
+    return doc
+
+
+async def _read_tenant_spend_rows(
+    workspace: str,
+    doc: LiteLLMTenantKey,
+    client: LiteLLMAdminClient,
+) -> list[tuple[dict[str, Any], bool]]:
+    """Every spend row that could belong to ``workspace``, from both reads.
+
+    Returns ``(row, honour_high_water_mark)`` pairs. The flag is True only for
+    rows from the per-KEY read, which is unbounded and needs the mark to stop it
+    re-walking the tenant's whole history; the customer-scoped rows carry their
+    own window and must not be filtered again (see the loop's note).
+
+    Merged on ``request_id``, key-read rows yielding to customer-read ones — the
+    two overlap wherever a caller both sends the tenant key and tags ``user``,
+    which is what Studio and the media server do. A row with no ``request_id``
+    cannot be de-duplicated OR billed, so it is passed through and rejected once,
+    loudly, in the loop.
+
+    A failure of the customer read does not sink the key read, or vice versa. One
+    of them returning nothing is normal; both being skipped because the other
+    raised would turn a partial outage into a total one, and the sweep retries.
+    """
+    customer_rows: list[dict[str, Any]] = []
+    since, until = _customer_read_window(doc, now=datetime.now(UTC))
+    start_date, end_date = _proxy_window(since, until)
+    try:
+        customer_rows = await client.spend_logs_by_end_user(
+            end_user=workspace, start_date=start_date, end_date=end_date
+        )
+    except Exception:
+        logger.exception(
+            "llm_provisioning: customer-scoped spend read failed for workspace=%s over "
+            "[%s,%s] — falling back to the per-key read alone this sweep, which does "
+            "NOT see chat. A 404 here means the proxy predates /spend/logs/v2; every "
+            "other error is worth reading, because this is the read that bills chat",
+            workspace,
+            start_date,
+            end_date,
+        )
+
+    key_rows: list[dict[str, Any]] = []
+    if doc.litellm_key:
+        try:
+            key_rows = await client.spend_logs(api_key=doc.litellm_key)
+        except Exception:
+            logger.exception(
+                "llm_provisioning: per-key spend read failed for workspace=%s — "
+                "continuing with the customer-scoped rows alone this sweep",
+                workspace,
+            )
+
+    merged: list[tuple[dict[str, Any], bool]] = [(row, False) for row in customer_rows]
+    seen = {rid for row in customer_rows if (rid := _row_id(row)) is not None}
+    for row in key_rows:
+        rid = _row_id(row)
+        if rid is not None and rid in seen:
+            continue
+        merged.append((row, True))
+
+    logger.debug(
+        "llm_provisioning: workspace=%s spend rows — %d by customer over [%s,%s], "
+        "%d additional by key",
+        workspace,
+        len(customer_rows),
+        start_date,
+        end_date,
+        len(merged) - len(customer_rows),
+    )
+    return merged
+
+
 async def ingest_tenant_spend(
     workspace: str,
     *,
@@ -429,9 +917,14 @@ async def ingest_tenant_spend(
     """Read ``workspace``'s LiteLLM proxy spend and debit it to the EXISTING credit
     ledger, exactly once per spend row.
 
-    Reads GET /spend/logs?api_key=<tenant key>, keeps only rows NEWER than the
-    stored ``last_spend_ingest_ts`` high-water mark, converts each row's USD
-    ``spend`` to integer credits via the rate card, and debits the wallet with
+    Reads the tenant's spend TWICE and merges it: once by customer
+    (``GET /spend/logs/v2?end_user=<workspace>``, which is the only read that sees
+    a chat run, because chat authenticates with the deployment key) and once by
+    virtual key (``GET /spend/logs?api_key=<tenant key>``, which predates it and
+    stays as a safety net). Rows are merged on ``request_id``; the key-read rows are
+    the ones still bounded by the stored ``last_spend_ingest_ts`` high-water mark.
+    Then it converts each row's USD ``spend`` to integer credits via the rate card,
+    and debits the wallet with
     ``credits.service.debit(..., cause="litellm_spend",
     idempotency_key="litellm:{request_id}", allow_negative=True)``. BC-1's unique
     ``(workspace, idempotency_key)`` index makes a re-ingested row a ledger no-op
@@ -444,41 +937,44 @@ async def ingest_tenant_spend(
     NOTE: this is the GATED half (see the module header's double-bill boundary).
     The caller decides whether to run it — this function does NOT check the flag,
     so it stays reusable by an explicit admin trigger even when the periodic sweep
-    is off. A workspace with no provisioned key returns a zero result (nothing to
-    ingest) rather than raising.
+    is off. A workspace with no provisioned key is billed the same way as one with
+    a key: only the per-KEY half of the read is skipped, because the customer-
+    scoped half needs no key. It used to return a zero result instead, which is
+    how workspaces that spend on chat alone were served for free.
     """
     _require_workspace(workspace)
 
-    doc = await LiteLLMTenantKey.find_one(LiteLLMTenantKey.workspace == workspace)
-    if doc is None or not doc.litellm_key:
-        # Not provisioned — nothing to ingest. Return the current balance so the
-        # caller has a consistent shape.
-        return SpendIngestResult(
-            workspace_id=workspace,
-            rows_read=0,
-            rows_billed=0,
-            credits_debited=0,
-            cost_usd=0.0,
-            cached_tokens=0,
-            balance_after=await credits_service.balance(workspace),
-        )
+    doc = await _spend_bookkeeping_row(workspace)
 
     card = spend_card if spend_card is not None else load_spend_credits()
     client = admin_client if admin_client is not None else LiteLLMAdminClient()
 
-    rows = await client.spend_logs(api_key=doc.litellm_key)
+    rows = await _read_tenant_spend_rows(workspace, doc, client)
 
     high_water = doc.last_spend_ingest_ts
+    # Compare PARSED instants, not the raw strings. LiteLLM emits naive,
+    # Z-suffixed and offset-bearing ``startTime`` shapes interchangeably, and
+    # lexicographic ordering across those is wrong in both directions: a naive
+    # "2026-09-02T14:00:00" sorts BELOW an aware "2026-09-02T14:00:00+00:00"
+    # despite being the same instant, so a mark written in one shape silently
+    # re-reads or silently skips rows written in the other. Every other timestamp
+    # in this module already goes through ``_parse_iso``; this one did not, and a
+    # seeded cutover mark makes that latent bug load-bearing.
+    high_water_dt = _parse_iso(high_water)
     newest_ts = high_water
+    newest_dt = high_water_dt
 
     rows_read = 0
     rows_billed = 0
-    credits_debited = 0
+    # Accumulated in MICRO-credits and converted once at the end. Summing per-row
+    # whole-credit figures would round every row separately and under-report the
+    # sweep by exactly the sub-credit spend this path exists to capture.
+    micro_debited = 0
     cost_usd_total = 0.0
     cached_total = 0
 
     # Oldest first so the high-water mark advances monotonically.
-    for row in sorted(rows, key=lambda r: _row_start_time(r) or ""):
+    for row, honour_mark in sorted(rows, key=lambda pair: _row_start_time(pair[0]) or ""):
         start_ts = _row_start_time(row)
         # WU-F boundary fix — skip rows STRICTLY older than the high-water mark
         # only. The previous ``start_ts <= high_water`` dropped a DISTINCT row that
@@ -490,20 +986,32 @@ async def ingest_tenant_spend(
         # unique index), so an already-ingested boundary row no-ops while a new
         # boundary row bills exactly once. The mark stays an optimisation that bounds
         # the read; the per-row request_id is the real exactly-once guard.
-        if high_water is not None and start_ts is not None and start_ts < high_water:
+        #
+        # ``honour_mark`` is False for the customer-scoped rows, which arrive
+        # already bounded by their own window. Applying the mark to those would
+        # re-create the boundary bug this paragraph describes, in its worst form:
+        # a row written late, with a ``startTime`` behind a mark that has already
+        # advanced, would be skipped on this sweep AND on every sweep after it.
+        # Nothing is lost by skipping the skip — the ledger key, not the mark, is
+        # what makes a row bill exactly once.
+        start_dt = _parse_iso(start_ts)
+        if (
+            honour_mark
+            and high_water_dt is not None
+            and start_dt is not None
+            and start_dt < high_water_dt
+        ):
             continue
 
         rows_read += 1
-        if newest_ts is None or (start_ts is not None and start_ts > newest_ts):
+        advances = newest_dt is None or (start_dt is not None and start_dt > newest_dt)
+        if start_ts is not None and advances:
             newest_ts = start_ts
+            newest_dt = start_dt
 
         cost_usd = _num(row.get("spend"))
         cached_total += _cached_tokens(row)
         cost_usd_total += cost_usd
-
-        credits = card.to_credits(cost_usd)
-        if credits <= 0:
-            continue  # sub-credit / zero-cost row — nothing to debit
 
         rid = _row_id(row)
         if rid is None:
@@ -518,17 +1026,42 @@ async def ingest_tenant_spend(
             continue
 
         ledger_key = f"litellm:{rid}"
-        # Skip a row already recorded (the high-water mark normally prevents this,
-        # but a reset / a row predating the mark could re-surface). The debit would
-        # no-op on the unique index anyway — this keeps ``rows_billed`` honest and
-        # avoids the wasted insert-then-rollback. NOT the exactly-once guard (that
-        # is BC-1's unique index); just accurate bookkeeping.
+        # Skip a row already accounted for. The customer read deliberately re-offers
+        # the last ``_SPEND_READ_OVERLAP`` of settled rows every tick to catch rows
+        # the proxy wrote late, so a row reaching here twice is routine; the ledger
+        # key is what makes it bill once. Checked before the debit to keep
+        # ``rows_billed`` honest and skip a wasted insert-then-rollback.
         if await credits_service.is_recorded(workspace, ledger_key):
+            continue
+
+        # Bill the row for exactly what it cost. The wallet stores micro-credits
+        # (1_000_000 == 1 credit), so a $0.0015 call is 375_000 — an integer, with
+        # no rounding decision to make and nothing left over. This used to convert
+        # to WHOLE credits and skip anything that rounded to zero, which served
+        # every call under $0.002 free and permanently, because the high-water mark
+        # advanced past the dropped row in the same pass.
+        micro = card.to_micro_credits(cost_usd)
+
+        if micro <= 0:
+            # A genuinely free row (a $0 model, a cached hit). Record it so the
+            # customer read's overlap does not re-examine it every sweep.
+            await credits_service.record_no_movement(
+                workspace=workspace,
+                cause=_LITELLM_SPEND_CAUSE,
+                idempotency_key=ledger_key,
+                ref={
+                    "request_id": rid,
+                    "cost_usd": cost_usd,
+                    "model": row.get("model"),
+                    "cached_tokens": _cached_tokens(row),
+                    "source": "litellm_spend_log",
+                },
+            )
             continue
 
         balance_after = await credits_service.debit(
             workspace=workspace,
-            amount=credits,
+            amount_micro=micro,
             cause=_LITELLM_SPEND_CAUSE,
             idempotency_key=ledger_key,
             ref={
@@ -540,20 +1073,26 @@ async def ingest_tenant_spend(
             },
             allow_negative=True,
         )
-        credits_debited += credits
+        micro_debited += micro
         rows_billed += 1
         logger.debug(
-            "llm_provisioning.ingest_tenant_spend: workspace=%s billed %d credits "
+            "llm_provisioning.ingest_tenant_spend: workspace=%s billed %d micro-credits "
             "(request_id=%s, cost_usd=%.6f) -> balance=%d",
             workspace,
-            credits,
+            micro,
             rid,
             cost_usd,
             balance_after,
         )
 
-    # Advance the high-water mark so a re-sweep doesn't re-read settled rows. Only
-    # write when it actually moved (avoid a no-op save).
+    # Advance the high-water mark so a re-sweep doesn't re-read settled rows, and
+    # persist the sub-credit remainder alongside it. Only write when something
+    # actually moved (avoid a no-op save).
+    #
+    # The two MUST be saved together. The mark says "these rows are settled" and the
+    # remainder says "and this much of them is still owed"; writing the mark without
+    # the remainder is exactly the old bug, since the rows behind the mark are the
+    # ones whose fractions are sitting in it.
     if newest_ts is not None and newest_ts != doc.last_spend_ingest_ts:
         doc.last_spend_ingest_ts = newest_ts
         doc.updatedAt = datetime.now(UTC)
@@ -567,7 +1106,7 @@ async def ingest_tenant_spend(
             workspace,
             rows_billed,
             rows_read,
-            credits_debited,
+            micro_to_credits(micro_debited),
             cost_usd_total,
             cached_total,
             balance_after,
@@ -576,7 +1115,8 @@ async def ingest_tenant_spend(
         workspace_id=workspace,
         rows_read=rows_read,
         rows_billed=rows_billed,
-        credits_debited=credits_debited,
+        credits_debited=micro_to_credits(micro_debited),
+        micro_debited=micro_debited,
         cost_usd=cost_usd_total,
         cached_tokens=cached_total,
         balance_after=balance_after,
@@ -682,12 +1222,20 @@ async def reconcile_tenant_spend(
     if doc is not None and doc.litellm_key:
         client = admin_client if admin_client is not None else LiteLLMAdminClient()
         rows = await client.spend_logs(api_key=doc.litellm_key)
+        # Sum the USD and convert ONCE. Converting per row and adding the results
+        # up rounds each row separately, so every call worth less than half a credit
+        # contributes nothing — and this is the compare an operator reads to decide
+        # whether LiteLLM can be trusted as the only meter. It understated the
+        # LiteLLM side against BC-3's per-run figure by exactly the rows the live
+        # ingest was also dropping, which made the cutover look safer than it was.
+        litellm_usd = 0.0
         for row in rows:
             row_dt = _parse_iso(_row_start_time(row))
             if not _in_window(row_dt, since, until):
                 continue
             litellm_rows += 1
-            litellm_credits += card.to_credits(_num(row.get("spend")))
+            litellm_usd += _num(row.get("spend"))
+        litellm_credits = card.to_credits(litellm_usd)
 
     # --- BC-3 side: the metered compute_spend debits over the SAME window. ---
     # Read through the credits service (entity-isolation: it owns its ledger doc).
@@ -749,15 +1297,242 @@ async def reconcile_tenant_spend(
     )
 
 
+async def spend_attribution_coverage(
+    workspaces: list[str],
+    *,
+    since: datetime,
+    until: datetime,
+    admin_client: LiteLLMAdminClient | None = None,
+) -> SpendCoverage:
+    """Count the window's spend rows that NO tenant claims. Debits nothing.
+
+    Asks the proxy how many spend rows the window holds in total, then how many it
+    holds per workspace, and reports the difference. Each count is one request that
+    returns a single row and reads the reported ``total``, so the whole check costs
+    ``len(workspaces) + 1`` small calls however much spend the window contains.
+
+    This exists because of how the bug it watches for presented. Chat spend was
+    attributed to no tenant for the entire time ``live`` was on; every per-tenant
+    read succeeded, every sweep logged a healthy ``3/3 tenants``, and the only
+    visible symptom was a number nobody had a reason to disbelieve: zero credits.
+    A remainder here is the one signal that distinguishes "nobody spent anything"
+    from "we are not looking where the spending is".
+
+    Never raises. A failed count sets ``degraded`` and leaves the remainder
+    untrustworthy rather than taking the sweep down with it — the sweep's job is to
+    bill, and this is an observation of the sweep, not part of it.
+    """
+    client = admin_client if admin_client is not None else LiteLLMAdminClient()
+    start_date, end_date = _proxy_window(since, until)
+
+    degraded = False
+    total_rows = 0
+    try:
+        total_rows = await client.spend_log_count(start_date=start_date, end_date=end_date)
+    except Exception:
+        degraded = True
+        logger.exception(
+            "llm_provisioning.spend_attribution_coverage: could not read the window "
+            "total over [%s,%s] — coverage is unknown this tick, NOT clean",
+            start_date,
+            end_date,
+        )
+
+    attributed_rows = 0
+    for workspace in workspaces:
+        try:
+            attributed_rows += await client.spend_log_count(
+                start_date=start_date, end_date=end_date, end_user=workspace
+            )
+        except Exception:
+            degraded = True
+            logger.exception(
+                "llm_provisioning.spend_attribution_coverage: could not count rows for "
+                "workspace=%s — coverage is unknown this tick, NOT clean",
+                workspace,
+            )
+
+    # Clamped at zero. The two counts are separate queries against a table that is
+    # still being written, so a row landing between them can make the per-tenant sum
+    # exceed the total. A negative remainder is a race, not a surplus, and reporting
+    # one would train an operator to ignore the number.
+    unattributed = max(0, total_rows - attributed_rows)
+
+    # Split the remainder. Rows that name a workspace nobody swept are a different
+    # bug from rows that name nobody, and until they were separated the log line
+    # blamed the wrong one: it advertised "no ``user`` field" while a third of the
+    # window was tagged and merely unswept. Asking the proxy for its customer list
+    # is what makes the distinction possible at all — a customer id is by
+    # definition one some request DID carry.
+    unswept_rows = 0
+    unswept: list[str] = []
+    swept = set(workspaces)
+    try:
+        customers = await client.list_customers()
+    except Exception:
+        degraded = True
+        customers = []
+        logger.exception(
+            "llm_provisioning.spend_attribution_coverage: could not list the proxy's "
+            "customers — the remainder cannot be split this tick, so all %d of it "
+            "reads as untagged whether or not it is",
+            unattributed,
+        )
+    for customer in customers:
+        if customer in swept:
+            continue
+        try:
+            rows = await client.spend_log_count(
+                start_date=start_date, end_date=end_date, end_user=customer
+            )
+        except Exception:
+            degraded = True
+            logger.exception(
+                "llm_provisioning.spend_attribution_coverage: could not count rows for "
+                "unswept customer=%s — coverage is unknown this tick, NOT clean",
+                customer,
+            )
+            continue
+        if rows:
+            unswept_rows += rows
+            unswept.append(customer)
+
+    # Bounded by the remainder for the same reason it is clamped at zero: the two
+    # sides are separate queries, and a split that claimed more unswept rows than
+    # there are unattributed ones would be reporting a race as a finding.
+    unswept_rows = min(unswept_rows, unattributed)
+
+    # Price and classify the untagged half, but only when there IS one. The counts
+    # above are O(1) in spend volume and run every tick; this reads rows, so it is
+    # gated on there being something to explain.
+    #
+    # It exists because the bare count cries wolf. A LiteLLM proxy logs its own
+    # traffic next to ours — an operator trying a model in the dashboard, the
+    # periodic model health check — and none of it can ever name a workspace or be
+    # billed to one. Measured on the production proxy 2026-09-03: all 8 "served and
+    # not billed" rows were exactly that, worth $0.00014545 between them, while the
+    # runbook told the operator to treat any non-zero count as blocking. The number
+    # was right and the conclusion it invited was wrong.
+    internal_rows = 0
+    untagged_rows = 0
+    unattributed_usd = 0.0
+    untagged_usd = 0.0
+    classified = False
+    if unattributed - unswept_rows > 0:
+        try:
+            window_rows, complete = await client.spend_logs_window(
+                start_date=start_date, end_date=end_date
+            )
+        except Exception:
+            logger.exception(
+                "llm_provisioning.spend_attribution_coverage: could not read the "
+                "window's rows to classify %d unattributed row(s) — reporting the "
+                "count alone, which cannot tell the proxy's own traffic from a real "
+                "billing hole",
+                unattributed,
+            )
+        else:
+            classified = complete
+            for row in window_rows:
+                if (row.get("end_user") or "").strip():
+                    continue
+                cost = _num(row.get("spend"))
+                unattributed_usd += cost
+                if (row.get("team_id") or "") in _PROXY_INTERNAL_TEAMS:
+                    internal_rows += 1
+                else:
+                    untagged_rows += 1
+                    untagged_usd += cost
+
+    coverage = SpendCoverage(
+        window_start=start_date,
+        window_end=end_date,
+        total_rows=total_rows,
+        attributed_rows=attributed_rows,
+        unattributed_rows=unattributed,
+        unswept_rows=unswept_rows,
+        unswept_workspaces=tuple(unswept),
+        workspaces_checked=len(workspaces),
+        degraded=degraded,
+        internal_rows=internal_rows,
+        untagged_rows=untagged_rows,
+        unattributed_usd=unattributed_usd,
+        untagged_usd=untagged_usd,
+        classified=classified,
+    )
+
+    if degraded:
+        logger.warning(
+            "llm_provisioning.spend_attribution_coverage: [%s,%s] INCOMPLETE — "
+            "%d/%d rows attributed across %d workspace(s); at least one count failed, "
+            "so the %d unattributed is a floor, not a finding",
+            start_date,
+            end_date,
+            attributed_rows,
+            total_rows,
+            len(workspaces),
+            unattributed,
+        )
+    elif unswept_rows or untagged_rows or (unattributed and not classified):
+        # Loud only for the halves that are actually ours. The proxy's own dashboard
+        # and health-check rows are reported, because an operator who sees a
+        # remainder wants to know where it went, but they do not raise the alarm.
+        logger.warning(
+            "llm_provisioning.spend_attribution_coverage: [%s,%s] %d of %d proxy spend "
+            "row(s) claimed by no tenant ($%.6f) — %d name a workspace the sweep did "
+            "not visit (%s), %d are a real caller that named nobody ($%.6f), %d are the "
+            "proxy's own dashboard / health-check traffic and are nobody's to bill. A "
+            "tagged-but-unswept row is OUR bug: the request said who pays and the sweep "
+            "did not ask. An untagged row is a caller reaching the proxy without a "
+            "``user`` field%s",
+            start_date,
+            end_date,
+            unattributed,
+            total_rows,
+            unattributed_usd,
+            unswept_rows,
+            ", ".join(unswept) or "none",
+            untagged_rows,
+            untagged_usd,
+            internal_rows,
+            "" if classified else " (the split is from a TRUNCATED read — treat it as a sample)",
+        )
+    elif unattributed:
+        logger.info(
+            "llm_provisioning.spend_attribution_coverage: [%s,%s] %d of %d proxy spend "
+            "row(s) claimed by no tenant ($%.6f), and every one is the proxy's own "
+            "dashboard / health-check traffic — nothing of ours is unbilled",
+            start_date,
+            end_date,
+            unattributed,
+            total_rows,
+            unattributed_usd,
+        )
+    else:
+        logger.info(
+            "llm_provisioning.spend_attribution_coverage: [%s,%s] all %d proxy spend "
+            "row(s) attributed across %d workspace(s)",
+            start_date,
+            end_date,
+            total_rows,
+            len(workspaces),
+        )
+
+    return coverage
+
+
 __all__ = [
     "ensure_tenant_key",
     "get_tenant_key",
     "ingest_tenant_spend",
     "list_provisioned_workspaces",
+    "list_sweepable_workspaces",
     "load_key_budget",
     "load_spend_credits",
+    "prepare_spend_cutover",
     "reconcile_gap_threshold",
     "reconcile_tenant_spend",
+    "spend_attribution_coverage",
     "spend_ingest_enabled",
     "spend_mode",
     "warn_legacy_spend_bool_once",

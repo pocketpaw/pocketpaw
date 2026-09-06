@@ -2,6 +2,26 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-02 (SA-7) — finished the Visitor Analytics section with the two
+things a reader could not get from the endpoint's own fields. First, what the
+`analytics` grant actually buys: which tiers carry it, that it needs an active
+subscription and not only a tier, and that UPGRADING DOES NOT BACKFILL — the
+consequence customers hit, and one the `never_counted` row alone does not explain,
+since it reads as a temporary state rather than as a permanent hole in the history.
+Also recorded how a site counts and the one case that still cannot, which is
+otherwise indistinguishable from a site nobody has republished. WRITTEN FOR THE STATE
+AFTER #2049, which merges first: every engine counts, in one of two shapes chosen by
+the BUILD rather than the engine name, and the row carries a device class. The
+`devices: null` example this section used to show was retired for the same reason —
+it is a real response, but only for a site that has not republished since, so leading
+with it taught clients that the field is always null.
+Second, `GET /sites/{site_id}/entitlements`, which was undocumented in this file
+entirely — it is the pre-check that lets a panel disable itself before the call, and
+the section says plainly that it does NOT supersede the analytics `status`, because
+entitlement cannot tell "your plan excludes this" from "you have not republished".
+The `retention_days` bullet stopped naming the number, which invited clients to copy
+it; the field is the source of truth and the note now says so.
+
 Updated: 2026-08-18 (fix/sites-html-refine-names-the-edit-tool) — documented
 `edit_html_file`, the html track's chat edit tool. It shipped in db083bfc without
 reaching this file, so the section below still said html had no edit tool and was
@@ -97,6 +117,13 @@ rebuild — dynamic-source split + input-keyspace confinement) and GET
 /sites/by-pocket/{id}/native-artifact (serve the armed build's body_html + css
 for shadow render — per-GET arm-build cost, path-traversal-guarded CSS reader).
 
+Updated: 2026-09-02 (SA-4) — documented the Sites — Visitor Analytics section:
+GET /sites/{site_id}/analytics, the read half of the pageview counter SA-1/SA-2
+deploy. The response leads with a status because three different customer
+situations otherwise render as the same panel of zeros (not on a plan that buys
+analytics, on one but not republished since, and genuinely no traffic), and a
+FAILED read is an error response rather than a fourth status so an outage cannot
+arrive looking like a quiet week. Every metric is null unless the status is ok.
 Updated: 2026-08-24 (SP-2) — GET /sites/by-pocket/{id}/native-artifact has two
 response shapes now. A cold miss no longer builds in the API container (there is
 no bun there, so it 5xx'd as sites.generator_failed on every cold preview); it
@@ -1654,6 +1681,191 @@ Errors:
 | 404 | `pocket.not_found` | Unknown pocket id. |
 | 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
 | 503 | `sites.preview_build_unavailable` | The armed build could not be QUEUED (the job queue is unreachable). Retryable. A failed enqueue is deliberately an error rather than a pending response — a job id for a job nobody will run makes a client poll forever. A build that queues and then FAILS is not an error here: it comes back `200` with `build_status: "failed"` and a rung in `build_reason`. |
+
+## Sites — Visitor Analytics
+
+SA-4. `GET /sites/{site_id}/analytics` serves a published site's visitor numbers
+for the builder's Analytics panel. The rows come from Cloudflare Workers Analytics
+Engine, written by the pageview counter a paid site's publish deploys in front of
+it (SA-1/SA-2). Source: `ee/pocketpaw_ee/sites/router.py`.
+
+Authenticated, workspace-scoped, `fabric.read`, and behind the same `sites` plan
+feature as the rest of the router. Tenant-scoped on the request context, so a site
+in another workspace is a `404` — the same as every sibling per-site read.
+
+### `GET /sites/{site_id}/analytics`
+
+| Query | Type | Default | Notes |
+|-------|------|---------|-------|
+| `window` | string | `7d` | One of `24h`, `7d`, `30d`, `90d`. Anything else is a `422`. The set is closed because the Analytics Engine SQL endpoint has no parameter binding, so this is a query-safety control rather than only input validation. `90d` is the longest window that can return anything: Cloudflare retains the rows for three months. |
+
+**Read `status` first.** Three different customer situations produce an empty
+panel, and they are three different sentences:
+
+| `status` | Means | What fixes it |
+|----------|-------|---------------|
+| `ok` | A counter is up and the numbers are real. **They may legitimately be zero.** | Nothing — this is a report about the site's traffic. |
+| `not_entitled` | The site's plan does not include analytics, so nothing was ever recorded. | Upgrading the site's plan, then republishing. |
+| `never_counted` | The plan includes it, but no publish has yet deployed a counter. Nothing is recording. | Republishing the site. Upgrading alone does **not** backfill — history begins at the publish that first carried a counter, because no rows exist before it. |
+
+**A failed read is not a status.** If the Analytics Engine query fails, the
+endpoint returns an **error response**, never a `200` carrying zeros. A client that
+maps an unknown status to "no data" would otherwise render a Cloudflare outage as a
+quiet week, which is the one failure this shape exists to prevent.
+
+**Every metric is `null` unless `status` is `ok`.** Not `0` — a client that renders
+the numbers without reading the status shows blanks rather than a confident zero.
+
+Response `200`:
+
+```json
+{
+  "site_id": "68b6f2c1a4d3e50012ab34cd",
+  "window": "7d",
+  "status": "ok",
+  "counting_since": "2026-08-14T10:22:41+00:00",
+  "retention_days": 90,
+  "pageviews": 1280,
+  "visitors": 431,
+  "top_pages":  [{"label": "/",         "pageviews": 800, "visitors": 300}],
+  "referrers":  [{"label": "(direct)",  "pageviews": 700, "visitors": 190}],
+  "countries":  [{"label": "US",        "pageviews": 900, "visitors": 320}],
+  "devices":    [{"label": "desktop",   "pageviews": 760, "visitors": 250}],
+  "unrecorded": []
+}
+```
+
+- `counting_since` is when this site's visitors started being counted, ISO-8601 in
+  UTC, and `null` when nothing is counting. It is what makes an honest chart
+  possible: the series begins here, not at the site's creation, and a window
+  reaching further back is reaching into time nobody recorded.
+- `retention_days` is how far back the data goes, and it is on the wire so a UI can
+  explain why the earliest date it offers is the one it offers, rather than looking
+  like it lost the data. **Read the field; do not copy the number into a client.**
+  Cloudflare keeps a row for three months and there is no rollup store behind it, so
+  anything older is gone rather than summarised — and a client holding its own `90`
+  will keep displaying it after the day that stops being true.
+- Each breakdown is a **top-10** list ordered by pageviews. Its `visitors` is a
+  distinct count **within that row** and does **not** sum to the response total: one
+  visitor who reads three pages is one visitor overall and one visitor on each of
+  three rows. Summing the column gives a number that means nothing.
+- A blank dimension is **named, never dropped** — `(direct)` for a referrer (a direct
+  visit or a same-site link), `(unknown)` for a country Cloudflare could not
+  geolocate. Dropping those rows would inflate every remaining share.
+- `unrecorded` names the dimensions the stored row cannot answer **at all**, as
+  opposed to answered-and-empty. A dimension listed here is `null` rather than `[]`,
+  because an empty list reads as "none of these exist" and an omitted field is
+  indistinguishable from a version skew. In practice the only dimension that can
+  appear here is `devices`, and it means **this site has not published a counter that
+  records devices yet** rather than a permanent gap. It clears once the site is
+  republished and takes traffic. Render the name, not a chart of one bar called
+  unknown.
+
+**A visitor is per-day.** The counter identifies a visitor by a salted one-way hash
+that rotates at UTC midnight and never leaves a cookie, so somebody who returns
+tomorrow counts as two visitors. That is the privacy design rather than a rounding
+error, and no join across days is possible even in principle.
+
+**Sampling is accounted for.** Analytics Engine downsamples a hot index and reports
+the rate per row, so the aggregates weight by it. A plain row count would
+under-report precisely the busiest sites.
+
+**Cached for 60 seconds per site and window.** Analytics Engine bills read queries
+against a small daily account-wide allowance, and this panel's usage pattern is
+somebody reloading it. The cache is in-process, so a second API replica keeps its
+own; only successful reads are cached, so an outage is not extended past its end.
+
+Errors:
+
+| HTTP | Code | When |
+|------|------|------|
+| 404 | `site.not_found` | Unknown, malformed, or cross-tenant site id. |
+| 422 | `sites.invalid_analytics_window` | `window` is not one of the four accepted values. |
+| 422 | `sites.cloudflare_error` | The Analytics Engine query failed — a non-2xx, an unparseable body, or a `200` with no data array. Includes Cloudflare's own message. A `403` here usually means the API token is missing the **Account Analytics Read** permission, which is a different scope from the ones the deploy paths use. |
+| 422 | `sites.cloudflare_unconfigured` | `PAW_CF_ACCOUNT_ID` / `PAW_CF_API_TOKEN` / `PAW_CF_ZONE_ID` are not all set. |
+
+### What the `analytics` grant buys
+
+Visitor counting is a **paid grant on the site's own plan**, not a floor one. It rides
+the `analytics` member of the plan's Cloudflare feature set, and it needs the tier
+**and** an active subscription — a cancelled site keeps its `plan_tier` string, so
+reading the tier alone would keep counting for a site that stopped paying.
+
+| Per-site tier | Monthly | Buys analytics |
+|---------------|---------|----------------|
+| `free` | $0 | no |
+| `site` | $7 | yes |
+| `staff` | $19 | yes |
+
+The legacy keys resolve to what they always paid for: `basic` reads as `free`, `pro`
+as `site`, `business` as `staff`. The org-scoped tiers (`studio`, `agency`) are not
+legal values for a site's own `plan_tier`, and one appearing there resolves to the
+free floor rather than to its own capabilities.
+
+**Upgrading does not backfill, and this is the thing customers hit.** A site's history
+begins at the publish that first deployed a counter, because nothing existed to record
+before it. Buying the plan changes what the next publish deploys; it cannot create
+rows for the weeks that went uncounted. The sequence that works is upgrade, then
+republish — and until that republish the endpoint answers `never_counted`, which is
+the panel's cue to ask for a republish rather than to draw a flat line at zero.
+
+The same applies in reverse. A publish that deploys no counter clears
+`counting_since`, so a site that lapsed to free and later re-upgraded reports
+`never_counted` until it is republished, rather than claiming a start date from an era
+that stopped recording months ago.
+
+**Every engine counts, in one of two shapes.** A build with no server entry (`html`,
+`react`, a *static* `svelte` site) gets a counter that serves the page through the
+`ASSETS` binding. A build that emits its own `_worker.js` (`ripple`, a *dynamic*
+`svelte` site) gets a shim that imports that worker, counts, and returns its response
+untouched. Which shape a site gets is decided by its **build output**, not by its
+engine name, which is why `svelte` appears on both sides.
+
+One case still does not count, and it is not an engine: a dynamic site provisioned
+through the durable provision job, which cannot resolve a plan from what it holds. Such
+a site is entitled and still answers `never_counted` however often it is republished.
+The [engineering note](design/2026-09-02-sites-visitor-analytics.md) has the table and
+the tracking issue.
+
+### `GET /sites/{site_id}/entitlements` — the pre-check
+
+Same auth, same tenant scoping, same `404` on a cross-tenant site. It answers what the
+site may do, so a surface can disable a control and name the reason instead of
+offering a button that 402s.
+
+Response `200`:
+
+```json
+{
+  "site_id": "68b6f2c1a4d3e50012ab34cd",
+  "plan_tier": "site",
+  "subscription_active": true,
+  "badge_required": false,
+  "custom_domain": true,
+  "max_domained_sites": null,
+  "domained_sites_used": 2,
+  "domain_slots_available": true,
+  "analytics": true,
+  "concierge_entitled": false,
+  "concierge_enabled": false
+}
+```
+
+- `analytics` says whether this site's plan buys visitor counting. It is resolved by
+  the same predicate the publish path gates the counter on, so a site whose publish
+  counted cannot be a site whose read refuses.
+- `subscription_active` separates a lapsed paid site from one that never had the
+  capability. The tier stays recorded; only the payment stopped, and the UI should say
+  which.
+- `max_domained_sites` is `null` for uncapped. It reports what the plan grants, while
+  `domain_slots_available` reports what the gate will actually do — they differ when
+  enforcement is off.
+
+**`analytics` is a pre-check, not the answer.** The analytics endpoint's `status` stays
+authoritative, because entitlement alone cannot separate "your plan does not include
+this" from "it does, and you have not republished since you upgraded". Those are two
+different sentences and two different buttons. Use this field to disable the panel
+before the call; use `status` to decide what the panel says.
 
 ## Ship — Managed Deploys
 

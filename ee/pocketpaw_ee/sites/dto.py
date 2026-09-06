@@ -2,6 +2,42 @@
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
 #
+# Updated 2026-09-04 (AD-4 — the overview chart's data): added
+# ``SiteAnalyticsSeriesPoint`` / ``SiteAnalyticsSeries`` and ``SiteAnalyticsResponse.series``,
+# the per-bucket views and visitors the chart under the headline numbers draws. Two things
+# about it are contracts rather than implementation detail. EVERY bucket in the range is
+# present, including the ones nobody visited, because a chart handed only the buckets that
+# had traffic draws a straight line across a quiet Sunday and reports it as no Sunday at
+# all. And every ``bucket`` stamp is UTC, said out loud on the model, because an axis
+# labelled ``1PM`` that means UTC is five and a half hours wrong for a reader in Mumbai and
+# nothing on the screen would say so.
+#
+# Updated 2026-09-04 (AD-2 — the visit metrics on the wire): added
+# ``SiteAnalyticsVisits`` and ``SiteAnalyticsResponse.visits``, the visits / bounce rate /
+# visit duration block the overview leads with. It carries this model's absence rule
+# further than the metrics above it needed to: a bounce rate over zero visits and a mean
+# duration over zero measurable visits are both None rather than 0.0, because a ratio of
+# nothing is not a result of nothing. And the block ITSELF is None, with ``"visits"`` named
+# in ``unrecorded``, when every row in the window was written before the counter learned to
+# stamp a visit id — the FOURTH empty state, which is the device class's problem one metric
+# over.
+#
+# Updated 2026-09-02 (SA-4 — the visitor-analytics read): added
+# ``SiteAnalyticsResponse`` / ``SiteAnalyticsBreakdown`` and the three
+# ``ANALYTICS_STATUS_*`` constants, backing GET /sites/{site_id}/analytics. The
+# shape is a discriminated one because the alternative renders three different
+# customer situations as the same panel of zeros: not on a plan that buys
+# analytics, on one but never republished since, and genuinely no traffic. Every
+# metric is None unless the status says the numbers are real, and a FAILED read is
+# not a status value at all — it is an error response, so an outage can never arrive
+# looking like a quiet week.
+#
+# Updated 2026-09-02 (SA-5 — the entitlement on the wire): added
+# ``SiteEntitlementsResponse.analytics``, resolved by the same predicate the publish
+# seam and the read endpoint use. Without it the dashboard's only way to learn that
+# a site's plan excludes analytics was to request the numbers and read the refusal,
+# which is the exact shape this response type was created to stop.
+#
 # Updated 2026-08-24 (SP-2 — draft preview joins the ephemeral build lane):
 # ``NativeArtifactResponse`` gained ``build_status`` / ``build_reason`` /
 # ``build_job_id`` and defaulted ``body_html`` / ``css`` to empty strings. A cold
@@ -171,11 +207,20 @@
 # rather than a reused ``SiteResponse``: the call answers one question ("what is
 # the new picture"), and unlike every deploy-triggered capture it REPORTS failure
 # — a person asked for it and is waiting on the answer.
+# Updated 2026-09-02 (the card's MARK): both DTOs gain ``favicon_url`` — the site's
+# own icon, for the chip that had been a hard-coded globe on every card alike. It sits
+# beside ``preview_image_url`` and answers a different question ("whose site is this"
+# rather than "what does it look like"), and it differs from it in one way worth
+# knowing before reading either field: this one carries a data: URI INLINE rather than
+# an uploads link. An icon is a few KB, so paying for a blob row and a per-card auth
+# grant to serve it would cost more than the bytes; ``sites.favicon`` holds the cap
+# that keeps a list response bounded and drops anything over it. None whenever the
+# site declares no icon we can use, so the card falls back to the globe.
 
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, field_validator
 
@@ -356,6 +401,23 @@ class SiteResponse(BaseModel):
     # uuid-keyed row), so a client may treat a changed value as new art and a
     # cached one as unchanged — nothing ever overwrites bytes behind a stable URL.
     preview_image_url: str | None = None
+    # 2026-09-02: the site's own icon, as a data: URI, for the gallery card's mark
+    # chip. Until now that chip was a hard-coded globe tinted by a hash of the site
+    # id, so every card in a gallery wore the same glyph.
+    #
+    # A data: URI and not an uploads link, which is the one way this field differs
+    # from ``preview_image_url`` directly above. A screenshot is a 1280x800 PNG and
+    # needs blob storage behind the auth-gated ``/api/v1/uploads/{id}``, which is
+    # why the card resolves that one through a per-card grant. An icon is a few KB,
+    # so it rides on the wire and the card can paint it with no second request —
+    # see ``sites.favicon`` for the cap that keeps a list response bounded.
+    #
+    # WHEN IT CHANGES: looked up on every successful deploy (a republish included,
+    # for the reason the screenshot policy above gives) and from the tail of a draft
+    # capture. None whenever the site declares no icon we can use, the page could
+    # not be read, or the icon was over the cap; the card falls back to the globe,
+    # which is exactly the pre-existing card, so this is never a gate on anything.
+    favicon_url: str | None = None
 
 
 class SitePreviewRefreshResponse(BaseModel):
@@ -439,6 +501,12 @@ class SiteStatusResponse(BaseModel):
     # republish updates it), plus POST /sites/{site_id}/preview-refresh on demand,
     # and the value is a different uploads link every capture.
     preview_image_url: str | None = None
+    # 2026-09-02: the site's own icon as a data: URI — the same field the list
+    # response carries (see ``SiteResponse.favicon_url`` above for the full
+    # write-up), duplicated onto the by-pocket read for the same reason
+    # ``preview_image_url`` already is: a builder polling by pocket has nowhere else
+    # to look. None until a lookup lands, and whenever the site declares no icon.
+    favicon_url: str | None = None
     # ── SL-3: the build lane's state on the BY-POCKET read too ──────────────────
     # The same three fields ``SiteResponse`` carries (see there for the full write-up
     # of each). They are duplicated onto this DTO for the same reason ``deployed_at`` /
@@ -641,19 +709,62 @@ class ImportFromUrlRequest(BaseModel):
     """Body for POST /sites/import/from-url (SI-4): the site URL to crawl-import.
     Shape validation (http(s), real host, length cap) runs in the import service so
     direct service callers are covered too; the crawler itself is the next stacked
-    slice — this endpoint only queues."""
+    slice — this endpoint only queues.
+
+    ``mode`` (IR-2a) picks what the URL is FOR. ``copy`` mirrors the source's own
+    bytes into an html site, which is what this endpoint has always done. Anything
+    else reads the URL as a DESIGN REFERENCE and captures a brief to regenerate a
+    native site from.
+
+    IT DEFAULTS TO ``copy`` ON PURPOSE, and IR-7 flips it. Today's client sends
+    only ``url`` and reads ``site_id`` out of the response to navigate; defaulting
+    to rebuild would hand that client a ``brief_id`` it does not understand and
+    break the shipped button before the picker exists. Flip the default in the
+    same PR that ships the picker, not before.
+    """
 
     url: str
+    mode: Literal["copy", "rebuild"] = "copy"
 
 
 class ImportFromUrlResponse(BaseModel):
-    """202 body of POST /sites/import/from-url (SI-4): the DRAFT site minted for the
-    queued crawl. ``status`` is "queued" — the crawler slice (SI-5) has not landed,
-    so the site's import_report carries a crawler-pending warning until it does."""
+    """202 body of POST /sites/import/from-url (SI-4).
 
-    site_id: str
-    pocket_id: str
+    ``copy`` mode answers exactly as it always has: the DRAFT site minted for the
+    queued crawl, with ``site_id`` and ``pocket_id`` set. ``rebuild`` mode mints
+    neither — the pocket is the generating agent's to create — so it answers with
+    ``brief_id`` instead and leaves those two None. ``mode`` echoes which of the
+    two happened, so a client never has to infer it from which fields are absent.
+    """
+
     status: str  # queued
+    mode: str = "copy"
+    site_id: str | None = None
+    pocket_id: str | None = None
+    brief_id: str | None = None
+
+
+class ImportBriefStatusResponse(BaseModel):
+    """GET /sites/import/brief/{id} — where a rebuild capture has got to.
+
+    Four states, and they are deliberately distinguishable: ``queued`` (nothing
+    has run), ``capturing`` (the crawl is in flight), ``ready`` (there is a brief
+    to generate from) and ``failed`` (it ended, and ``error`` says why in safe,
+    user-facing words). A client that cannot tell ``queued`` from ``failed``
+    shows a spinner forever on a dead capture, which is the bug the import panel
+    already had once.
+
+    ``goal`` and ``open_questions`` are the readable half of the brief itself, so
+    the panel can show what was understood without shipping the whole baton to
+    the browser.
+    """
+
+    brief_id: str
+    status: str  # queued | capturing | ready | failed
+    source_url: str
+    error: str = ""
+    goal: str = ""
+    open_questions: list[str] = []
 
 
 class SiteInvoiceOut(BaseModel):
@@ -693,6 +804,14 @@ class SiteEntitlementsResponse(BaseModel):
     catalog. ``subscription_active`` distinguishes a lapsed paid site from a site
     that never had the capability — the tier stays recorded, only the payment
     stopped, and the UI should say so.
+
+    ``analytics`` says whether this site's plan buys visitor counting. It is what
+    lets the panel disable itself with a reason BEFORE the call, and it is
+    deliberately not the last word: the analytics endpoint's own ``status`` is
+    authoritative, because entitlement alone cannot distinguish "your plan does not
+    include this" from "it does, and you have not republished since you upgraded".
+    Those need different sentences and different buttons. This field is the cheap
+    pre-check; the endpoint is the answer.
     """
 
     site_id: str
@@ -703,6 +822,7 @@ class SiteEntitlementsResponse(BaseModel):
     max_domained_sites: int | None = 0
     domained_sites_used: int = 0
     domain_slots_available: bool = False
+    analytics: bool = False
     concierge_entitled: bool = False
     concierge_enabled: bool = False
 
@@ -855,3 +975,168 @@ class SiteAssetDeleteRequest(BaseModel):
     """The storage key to remove. Validated against the site's own prefix."""
 
     key: str
+
+
+# ── SA-4: the visitor-analytics read ────────────────────────────────────────
+#
+# ``status`` is a CLOSED vocabulary and the most important field on the response.
+# Four outcomes are possible and three of them would otherwise render identically
+# as a panel full of zeros, which is the specific failure this slice exists to
+# prevent: "your plan does not include this", "you have not published since you
+# upgraded", and "nobody visited" are three different sentences to a customer, and
+# only one of them is about their traffic.
+#
+#   ``ok``            — counted, and the numbers below are real. They may be zero.
+#   ``not_entitled``  — this site's plan does not buy analytics. Nothing was ever
+#                       recorded, and nothing can be until the plan changes.
+#   ``never_counted`` — entitled, but no publish has yet deployed a counter, so
+#                       there is nothing to read. Republishing starts it. Upgrading
+#                       does NOT backfill: history begins at that publish.
+#
+# The FOURTH outcome — the read itself failed — is deliberately NOT a status value.
+# It surfaces as an error response, because a failed read is not a report about the
+# site's traffic and must not arrive on the same shape as one. A client that
+# defaults an unknown status to "no data" would otherwise turn a Cloudflare outage
+# into a quiet week.
+ANALYTICS_STATUS_OK = "ok"
+ANALYTICS_STATUS_NOT_ENTITLED = "not_entitled"
+ANALYTICS_STATUS_NEVER_COUNTED = "never_counted"
+
+
+class SiteAnalyticsBreakdown(BaseModel):
+    """One row of a breakdown — a page, a referrer host, a country, a device class.
+
+    ``visitors`` is a distinct count within this row and does NOT sum to the
+    response's total: one visitor who reads three pages is one visitor overall and
+    one visitor on each of three rows. A UI that adds a column here gets a number
+    that means nothing, so the field is named for the row rather than for the total.
+    """
+
+    label: str
+    pageviews: int
+    visitors: int
+
+
+class SiteAnalyticsVisits(BaseModel):
+    """Visits, bounce rate and visit duration for one site over one window.
+
+    A VISIT is the run of pageviews sharing the visit id the counting Worker stamps on
+    every row, under a salt that rotates on the hour. So a visit that crosses the top of
+    an hour is counted as TWO. That is accepted rather than fixed, and it is stated here
+    because it is part of what these numbers mean: the error over-splits and never
+    over-merges, the direction the daily visitor salt already accepts, and it leaves
+    visits slightly generous and duration slightly pessimistic.
+
+    ``bounce_rate`` is a FRACTION and not a percentage — bounces over visits, where a
+    bounce is a visit of exactly one pageview. None when there were no visits at all,
+    because a rate over zero is undefined and 0.0 would say nobody bounced.
+
+    ``duration_seconds`` is the mean over visits of MORE THAN ONE pageview. A
+    single-pageview visit has no measurable duration — its one row carries one timestamp
+    — so averaging it in as a zero would drag the mean down in proportion to how well the
+    landing page holds people, which is backwards. None when every visit was a bounce,
+    for the same reason the rate is None when there were no visits.
+    """
+
+    count: int
+    bounce_rate: float | None = None
+    duration_seconds: float | None = None
+
+
+class SiteAnalyticsSeriesPoint(BaseModel):
+    """One bucket of the overview chart — an hour or a day, and what happened in it.
+
+    ``bucket`` is the ISO-8601 stamp of the bucket's START, and it is UTC. That is said
+    here rather than left to be inferred because it is the field a chart turns into an
+    axis label: an hour rendered as ``1PM`` that actually means 13:00 UTC is five and a
+    half hours wrong for a reader in Mumbai, and nothing on the screen would say so. A
+    client that wants local labels has the offset it needs to shift them.
+
+    ``visitors`` is a distinct count WITHIN this bucket and does not sum down the column —
+    the same rule ``SiteAnalyticsBreakdown`` carries one field over. One person who reads
+    at nine and again at ten is one visitor on the response's total and one visitor in each
+    of two buckets, so a UI that adds this column gets a number that means nothing.
+    """
+
+    bucket: str
+    pageviews: int
+    visitors: int
+
+
+class SiteAnalyticsSeries(BaseModel):
+    """Views and visitors per time bucket, oldest first — the chart under the tiles.
+
+    ``interval`` is ``"hour"`` or ``"day"``, and a client needs it to label the axis: the
+    same list of points is a day of hours or three months of days depending on this field
+    alone. It is chosen from the window rather than requested, because a bar chart stops
+    being readable somewhere around a hundred bars and thirty days of hourly buckets is
+    seven hundred and twenty of them.
+
+    EVERY BUCKET IN THE RANGE IS HERE, including the ones nobody visited. A series that
+    listed only the buckets with traffic would be shorter, and every chart drawn from it
+    would join the two ends of a gap with a straight line — reporting a quiet Sunday as no
+    Sunday at all. A zero is a measurement; a missing entry is not.
+
+    THE RANGE ITSELF starts at the later of the window's own start and the moment counting
+    began, so a site that has been counting for two days does not answer a ninety-day
+    request with eighty-eight zeroes for a period nobody was recording. That is the one
+    rule this whole endpoint is built on, applied to a chart: those zeroes would look
+    exactly like a site nobody visits. ``counting_since`` on the response says where the
+    trim came from.
+    """
+
+    interval: str  # hour | day
+    points: list[SiteAnalyticsSeriesPoint] = []
+
+
+class SiteAnalyticsResponse(BaseModel):
+    """Visitor analytics for one site over one window (GET
+    /sites/{site_id}/analytics).
+
+    Shaped after ``cloud.mission_control.dto.AnalyticsResponse`` and it inherits that
+    model's one rule about absence: a metric that is not known is None, never 0. Here
+    that rule is load-bearing rather than cosmetic — see ``status`` above. Every
+    metric field is None unless ``status`` is ``ok``, so a client that renders the
+    numbers without reading the status shows blanks rather than a confident zero.
+
+    ``counting_since`` is the ISO stamp of the publish that first deployed a counter,
+    and it is what makes an honest chart possible: the series does not begin at the
+    site's creation, it begins here, and a window that reaches further back is
+    reaching into time nobody recorded. None when nothing has ever counted.
+
+    ``unrecorded`` names the parts of this response the stored rows cannot answer AT
+    ALL, as opposed to answered-and-empty. WHICH parts is not fixed, because the row has
+    grown twice since this model was written and a window ninety days long can span the
+    change: it carries ``"devices"`` while every row in the window predates the device
+    class, and ``"visits"`` while every row predates the visit id, and it empties on its
+    own once real rows exist. Naming a part beats returning an empty list, which a chart
+    renders as "no devices", and beats omitting the field, which a client cannot tell
+    from a version skew.
+    """
+
+    site_id: str
+    window: str
+    status: str
+    counting_since: str | None = None
+    # Retention is three months at Cloudflare, so a window is capped there and a
+    # series older than this is gone rather than empty. On the wire so a UI can say
+    # why the earliest date it can offer is the one it offers.
+    retention_days: int = 90
+    pageviews: int | None = None
+    visitors: int | None = None
+    # None with ``"visits"`` in ``unrecorded`` when no row in the window carries a
+    # visit id, which means the site has not republished since the counter learned to
+    # stamp one. Never a zeroed block: a 0% bounce rate is not an empty panel, it is a
+    # spectacular result, and this site has not measured a single visit.
+    visits: SiteAnalyticsVisits | None = None
+    # AD-4: the chart's data. None unless ``status`` is ``ok``, like every other metric
+    # here — and unlike ``visits`` and ``devices`` it never lands in ``unrecorded``,
+    # because the column it is bucketed on is the row's own timestamp and every stored row
+    # has carried one since the first. A window with no traffic at all still answers a
+    # full range of zeroed points: nothing about a quiet week is unanswerable.
+    series: SiteAnalyticsSeries | None = None
+    top_pages: list[SiteAnalyticsBreakdown] | None = None
+    referrers: list[SiteAnalyticsBreakdown] | None = None
+    countries: list[SiteAnalyticsBreakdown] | None = None
+    devices: list[SiteAnalyticsBreakdown] | None = None
+    unrecorded: list[str] = []

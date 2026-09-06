@@ -15,6 +15,23 @@ Changes:
   ``_reject_if_guest_over_limit`` beside the jail/credit gates — the single
   atomic spend against the guest daily-turn budget (fail-closed; the HTTP
   route fast-rejects check-only in ``agent_router``).
+
+- 2026-09-02 (fix/metering-partial-usage-capture) — the terminal states that
+  could never carry usage now do, and latest-wins grew a floor.
+
+  ``mark_terminal`` was called WITHOUT ``usage=`` on the ``failed`` path, and
+  ``_handle_interrupted_cleanup`` did not take the parameter at all. So a run
+  that crashed, or that the host killed mid-flight, persisted no token counts —
+  and ``metering/sweeper.py`` bills all four terminal states on purpose ("a
+  partial run consumed tokens too"), so it faithfully billed them zero. Only
+  ``cancelled`` ever passed usage; all three are pinned together now.
+
+  The captured usage is also FLOORED rather than blindly overwritten. Every
+  backend reports a RUN-CUMULATIVE payload, so keeping the LATEST is right and
+  summing would bill the conversation once per turn; the floor
+  (``_usage_total``, deliberately the same definition the meter bills on) means
+  a payload that shrank — a backend regressed to per-turn reporting — cannot
+  silently halve a bill.
 - 2026-08-15 (HTN-11) — the ``tool_start`` frame carries an additive
   ``narration``: the tool's plain-language phrase, from the SAME
   ``shared/tool_narration.py`` the group/DM bridge calls.
@@ -426,6 +443,44 @@ def _looks_like_legacy_ripple_spec(candidate: Any) -> bool:
 
 def _stream_ttl() -> int:
     return int(os.environ.get("POCKETPAW_CLOUD_RUN_STREAM_TTL", "3600"))
+
+
+def _usage_int(value: Any) -> int:
+    """Coerce one usage count to a non-negative int, tolerating None / strings."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
+
+
+def _usage_total(usage: dict[str, Any] | None) -> int:
+    """Total tokens a ``token_usage`` payload represents.
+
+    Deliberately the SAME definition as ``metering.service._total_tokens``:
+    prefer an explicit ``total_tokens`` the backend supplied, otherwise sum
+    input + output + cached_input. This function decides which payload gets
+    KEPT and that one gets BILLED, so it has to rank payloads the way the biller
+    measures them — two definitions that drifted would let a payload the meter
+    considers larger lose to one it considers smaller.
+
+    Spelled out here rather than imported so this hot streaming path stays
+    decoupled from the metering package; ``test_run_core_token_usage.py`` pins
+    the two against each other so the copy cannot drift.
+
+    A payload carrying none of those keys totals 0 — which is the honest answer
+    for a payload that reports no volume, and it makes the floor a no-op for
+    metadata-only payloads rather than a trap.
+    """
+    usage = usage or {}
+    explicit = _usage_int(usage.get("total_tokens"))
+    if explicit > 0:
+        return explicit
+    return (
+        _usage_int(usage.get("input_tokens"))
+        + _usage_int(usage.get("output_tokens"))
+        + _usage_int(usage.get("cached_input_tokens"))
+    )
 
 
 # Default-OFF flag (feat/session-supervisor SS-5). When truthy, the live executor
@@ -1988,6 +2043,7 @@ async def _handle_interrupted_cleanup(
     ctx: ScopeContext,
     full_text: str,
     transport: Any,
+    usage: dict[str, Any] | None = None,
 ) -> None:
     """Best-effort finalisation when ``execute_run`` is cancelled by the host.
 
@@ -1995,6 +2051,11 @@ async def _handle_interrupted_cleanup(
     block the others — every action is independently best-effort. The
     caller wraps THIS in ``asyncio.shield`` so a second cancel arriving
     during the cleanup can't abort it mid-flight.
+
+    ``usage`` carries whatever the backend had reported by the time the host
+    cancelled. It used not to be a parameter at all, so a worker shutdown wrote
+    a terminal doc with no counts and the sweeper billed the run zero — the
+    third of the three terminal states that could never carry usage.
     """
     try:
         await _broadcast_agent_typing(ctx, active=False)
@@ -2005,6 +2066,7 @@ async def _handle_interrupted_cleanup(
             spec.run_id,
             status="interrupted",
             partial_text=full_text,
+            usage=usage or None,
         )
     except Exception:
         logger.exception("mark_terminal(interrupted) failed for %s", spec.run_id)
@@ -2275,7 +2337,25 @@ async def execute_run(spec: RunSpec) -> None:
                         full_text += content
                 elif event_name == "token_usage":
                     if isinstance(event_data, dict) and event_data:
-                        usage = event_data
+                        # LATEST-WINS, FLOORED. Every backend reports a
+                        # RUN-CUMULATIVE payload — ``pydantic_ai`` accumulates
+                        # into one ``RunUsage``, ``deep_agents`` and
+                        # ``claude_sdk`` each report a run total, and
+                        # ``codex_cli`` accumulates its per-turn events — so
+                        # taking the latest is right and SUMMING would bill the
+                        # conversation once per turn.
+                        #
+                        # The floor is what makes latest-wins safe: a payload
+                        # smaller than the one already held can only be a
+                        # regression (a backend that went back to per-turn
+                        # reporting), and a regression must not be able to
+                        # silently halve a bill. ``>=`` and not ``>`` so an
+                        # equal-volume payload still replaces — that keeps a
+                        # later payload's better metadata (a resolved model
+                        # name) and means two zero-token payloads behave as
+                        # plain latest-wins rather than pinning the first.
+                        if _usage_total(event_data) >= _usage_total(usage):
+                            usage = event_data
                 await transport.append_event(spec.run_id, event_name, event_data)
                 if event_name == "error":
                     # ``_drive_agent_loop`` already broke out after yielding this.
@@ -2294,7 +2374,9 @@ async def execute_run(spec: RunSpec) -> None:
             # and strand the doc in ``running`` with no terminal stream frame.
             logger.info("execute_run %s cancelled by host", spec.run_id)
             try:
-                await asyncio.shield(_handle_interrupted_cleanup(spec, ctx, full_text, transport))
+                await asyncio.shield(
+                    _handle_interrupted_cleanup(spec, ctx, full_text, transport, usage)
+                )
             except asyncio.CancelledError:
                 # The outer await is cancelled but the shielded inner task
                 # continues running to completion in the background. That's
@@ -2335,11 +2417,18 @@ async def execute_run(spec: RunSpec) -> None:
     if error is not None or backend_error_message is not None:
         err_msg = str(error) if error is not None else (backend_error_message or "")
         try:
+            # ``usage=`` was omitted here, so a run that crashed after the model
+            # had already answered persisted no counts and swept through
+            # ``bill_run`` at $0 however much context it had paid for.
+            # ``metering/sweeper.py`` bills all four terminal states on purpose
+            # ("a partial run consumed tokens too") — three of them simply had
+            # nothing to bill.
             await run_service.mark_terminal(
                 spec.run_id,
                 status="failed",
                 partial_text=full_text,
                 error=err_msg,
+                usage=usage or None,
             )
         except Exception:
             logger.exception("mark_terminal(failed) failed for %s", spec.run_id)

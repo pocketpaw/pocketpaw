@@ -329,7 +329,11 @@ async def deliver(event: AuditEvent) -> None:
         payload = _event_payload(event)
         body = json.dumps(payload, default=str)
         timestamp = str(int(time.time()))
-        async with httpx.AsyncClient() as client:
+        # Explicit timeout. httpx's 5s default already bounded this, but the
+        # URL here is SUPPLIED BY THE WORKSPACE, and the loop below delivers
+        # to each hook in turn — so a deliberately slow endpoint delays every
+        # later hook's delivery. Stating the deadline keeps that visible.
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
             for hook in hooks:
                 try:
                     await _deliver_one(hook, body, timestamp, client)

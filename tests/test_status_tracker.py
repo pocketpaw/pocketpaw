@@ -1,4 +1,12 @@
-"""Tests for StatusTracker."""
+"""Tests for StatusTracker.
+
+Updated 2026-09-02 (fix/metering-partial-usage-capture) —
+``test_token_usage_accumulates`` became
+``test_token_usage_folds_in_a_run_total_without_double_counting``. It asserted
+that two payloads SUM, which encoded the old contract: payloads are
+RUN-CUMULATIVE, so the second already contains the first and summing them showed
+300 input tokens for a run that used 200.
+"""
 
 import pytest
 
@@ -85,7 +93,16 @@ class TestStatusTracker:
         snap = tracker.snapshot()
         assert snap["sessions"][0]["state"] == "waiting_for_user"
 
-    async def test_token_usage_accumulates(self, tracker):
+    async def test_token_usage_folds_in_a_run_total_without_double_counting(self, tracker):
+        """``token_usage`` payloads are RUN-CUMULATIVE, so the tracker folds in
+        the DIFFERENCE between them rather than each payload whole.
+
+        It used to add each payload whole, and that was right only while every
+        backend reported exactly once per run. It does not survive a backend
+        that reports as the run goes: the second payload below already contains
+        the first, so summing them showed 300 input tokens for a run that
+        actually used 200.
+        """
         await tracker._on_event(SystemEvent(event_type="agent_start", data={"session_key": "ws:1"}))
         await tracker._on_event(
             SystemEvent(
@@ -100,7 +117,26 @@ class TestStatusTracker:
             )
         )
         snap = tracker.snapshot()
-        assert snap["sessions"][0]["token_usage"] == {"input": 300, "output": 130}
+        assert snap["sessions"][0]["token_usage"] == {"input": 200, "output": 80}
+
+    async def test_a_shrinking_token_payload_is_not_a_refund(self, tracker):
+        """A payload smaller than the one before it can only be a backend
+        regression. It must not walk the counters backwards."""
+        await tracker._on_event(SystemEvent(event_type="agent_start", data={"session_key": "ws:1"}))
+        await tracker._on_event(
+            SystemEvent(
+                event_type="token_usage",
+                data={"session_key": "ws:1", "input": 900, "output": 80},
+            )
+        )
+        await tracker._on_event(
+            SystemEvent(
+                event_type="token_usage",
+                data={"session_key": "ws:1", "input": 10, "output": 1},
+            )
+        )
+        snap = tracker.snapshot()
+        assert snap["sessions"][0]["token_usage"] == {"input": 900, "output": 80}
 
     async def test_max_concurrent_in_snapshot(self, tracker):
         snap = tracker.snapshot()

@@ -49,6 +49,12 @@
 #   Deliberately a separate frozen class rather than fields bolted onto
 #   ``Entitlements``: they resolve from different sources, on different cadences,
 #   and a caller that wants one almost never wants the other.
+# Updated 2026-09-02 (feat/sites-analytics-entitlement-field, SA-5): added
+#   ``SiteEntitlements.analytics`` (bool) — may this site's visitors be counted.
+#   A PAID grant, resolved by ``site_analytics_entitled`` rather than re-derived,
+#   because the publish seam and the read endpoint already share that predicate and
+#   a third copy is how the two drift. Exposing it lets the dashboard disable the
+#   panel and name the reason instead of rendering a refusal.
 
 from __future__ import annotations
 
@@ -134,6 +140,14 @@ class SiteEntitlements:
     the third on an org entity that does not exist. A field that always returns
     0/False reads as implemented, which is worse than its absence.
 
+    ``analytics`` is a PAID grant and deliberately not derived here: it is read
+    off ``site_analytics_entitled``, the one predicate the publish seam and the read
+    endpoint already share. A fourth expression of the same rule is how a site ends
+    up counting visitors it may not be shown, or being shown a blank chart it is
+    paying for. It has no default for the same reason nothing else here does —
+    every construction must state the answer, so a capability cannot be granted by
+    forgetting it.
+
     ``concierge_enabled`` and ``concierge_entitled`` are two different questions
     and are deliberately NOT folded into one boolean. The first is the owner's own
     kill switch, echoed unchanged; the second is whether the site's plan sells the
@@ -151,6 +165,7 @@ class SiteEntitlements:
     badge_required: bool
     custom_domain: bool
     max_domained_sites: int | None
+    analytics: bool
     concierge_enabled: bool
     concierge_entitled: bool
 

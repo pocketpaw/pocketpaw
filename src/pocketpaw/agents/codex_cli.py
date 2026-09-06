@@ -39,6 +39,15 @@ project-level context. We avoided the ``-c experimental_instructions_file``
 config flag because it's not a documented kwarg on ``ThreadOptions`` and
 the path-quoting on Windows TOML is fiddly. ``AGENTS.md`` is the
 documented, stable extension point.
+
+Updated 2026-09-02 (fix/metering-partial-usage-capture) — the ``token_usage``
+event reports the RUN total instead of the last turn's. Codex emits usage per
+``TurnCompletedEvent`` and a run completes several, which made this the only
+backend whose payloads were not run-cumulative; every consumer reads a payload
+as the run's running total (the cloud run loop keeps the LATEST one), so a
+multi-turn run was billed for its final turn alone. The counters are locals in
+``run`` — ``AgentPool`` caches ONE instance per agent, so per-run state on
+``self`` would bill one run for another's tokens.
 """
 
 from __future__ import annotations
@@ -481,6 +490,18 @@ class CodexCLIBackend(BaseAgentBackend):
                 TurnOptions(signal=self._abort_controller.signal),
             )
 
+            # Run-cumulative token counters (N1). Codex reports usage PER TURN
+            # and a run can complete several, so these turn the per-turn numbers
+            # into the run total every other backend already reports. LOCALS,
+            # not instance state: ``AgentPool`` caches one backend instance per
+            # agent and drives concurrent runs through it, so a counter on
+            # ``self`` would bill one run for another run's tokens — the same
+            # shape as the shared-stop-flag bug this backend's siblings were
+            # reshaped around.
+            run_input = 0
+            run_output = 0
+            run_cached = 0
+
             async for event in streamed.events:
                 if self._stop_flag:
                     break
@@ -626,13 +647,24 @@ class CodexCLIBackend(BaseAgentBackend):
 
                 elif isinstance(event, TurnCompletedEvent):
                     usage = event.usage
+                    # Accumulate, then report the RUN total. This used to emit
+                    # the raw per-turn counts, which made Codex the only backend
+                    # whose ``token_usage`` payloads were not run-cumulative —
+                    # and the cloud run loop keeps the LATEST payload rather than
+                    # summing, so a multi-turn Codex run was billed for its final
+                    # turn alone. Summing in the run loop instead would have
+                    # over-billed the other three backends by the length of the
+                    # conversation, so the accumulator belongs here.
+                    run_input += int(getattr(usage, "input_tokens", 0) or 0)
+                    run_output += int(getattr(usage, "output_tokens", 0) or 0)
+                    run_cached += int(getattr(usage, "cached_input_tokens", 0) or 0)
                     yield AgentEvent(
                         type="token_usage",
                         content="",
                         metadata={
-                            "input_tokens": getattr(usage, "input_tokens", 0),
-                            "output_tokens": getattr(usage, "output_tokens", 0),
-                            "cached_input_tokens": getattr(usage, "cached_input_tokens", 0),
+                            "input_tokens": run_input,
+                            "output_tokens": run_output,
+                            "cached_input_tokens": run_cached,
                             "model": model or "(codex-config)",
                             "backend": "codex_cli",
                         },

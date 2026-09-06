@@ -11,6 +11,15 @@ Endpoints:
   POST /api/v1/media          — upload a generated file (canvas "save edited image")
   GET  /api/v1/media/{name}   — serve a single media file
 
+Updated: 2026-09-06 (BR-4, feat/browser-surface-extract): /browser screenshots
+are saved through this same storage so they have a URL an image widget can
+render. They are NOT gallery items, so both listings skip them — and because
+they belong to one tenant, ``serve_media`` refuses a capture whose owner token
+(baked into the filename by ``storage.capture_name_prefix``) does not match the
+caller's active workspace. The workspace comes from an OPTIONAL user dependency:
+every non-capture name keeps serving exactly as before, with or without a
+session, so the studio gallery is untouched.
+
 Updated: 2026-08-17 (studio-media-s3): list/serve/upload now go through the
 storage adapter (local → on-disk mtime listing; S3 → browse + timestamp-from-key
 listing, streaming reads). Direct /studio generation outputs are still excluded
@@ -26,8 +35,9 @@ import re
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
+from pocketpaw_ee.cloud.auth.core import fastapi_users
 from pocketpaw_ee.cloud.media import storage
 from pocketpaw_ee.cloud.studio.service import tracked_generation_filenames
 
@@ -36,6 +46,16 @@ from pocketpaw.uploads.errors import NotFound
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/media", tags=["Media"])
+
+# Optional, so an unauthenticated read of an ordinary gallery file behaves
+# exactly as it did before this route learned about captures.
+_optional_user = fastapi_users.current_user(active=True, optional=True)
+
+
+async def optional_workspace_id(user=Depends(_optional_user)) -> str | None:
+    """The caller's active workspace, or None when there is no session."""
+    return getattr(user, "active_workspace", None) if user is not None else None
+
 
 _MEDIA_TYPE_MAP = {
     ".png": "image/png",
@@ -75,7 +95,7 @@ def _local_entries(generated: Path, sort: str, tracked: set[str]) -> list[dict]:
         mime = _MEDIA_TYPE_MAP.get(suffix)
         if mime is None:
             continue
-        if f.name in tracked:
+        if f.name in tracked or storage.capture_owner_of(f.name):
             continue
         entries.append(
             {
@@ -103,7 +123,7 @@ async def _remote_entries(sort: str, tracked: set[str]) -> list[dict]:
         mime = _MEDIA_TYPE_MAP.get(suffix)
         if mime is None:
             continue
-        if item.name in tracked:
+        if item.name in tracked or storage.capture_owner_of(item.name):
             continue
         entries.append(
             {
@@ -191,7 +211,10 @@ async def upload_media(file: UploadFile = File(...)) -> Response:
 
 
 @router.get("/{name:path}")
-async def serve_media(name: str) -> Response:
+async def serve_media(
+    name: str,
+    workspace_id: str | None = Depends(optional_workspace_id),
+) -> Response:
     """Serve a generated media file by name.
 
     Local adapter → FileResponse off disk (preserves Range requests for video).
@@ -201,6 +224,13 @@ async def serve_media(name: str) -> Response:
     """
     if not name or name != Path(name).name or ".." in name:
         raise HTTPException(status_code=403, detail="Path traversal denied")
+
+    # A /browser capture belongs to the workspace whose token is in its name.
+    owner = storage.capture_owner_of(name)
+    if owner is not None and (
+        workspace_id is None or owner != storage.capture_owner_token(workspace_id)
+    ):
+        raise HTTPException(status_code=404, detail="Media file not found")
 
     adapter = storage.get_adapter()
     key = storage.media_key(name)

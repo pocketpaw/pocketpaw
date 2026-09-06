@@ -1,5 +1,40 @@
 """MongoDB connection and Beanie ODM initialization.
 
+2026-09-04 (fix/pool-and-body-ceilings, backend-perf H6): the client is built
+with explicit timeouts. It had none, so it ran on PyMongo's defaults, and two of
+those are the wrong shape for a request-serving process. ``serverSelectionTimeoutMS``
+defaults to 30s, which turns a brief Mongo blip into 30-second request hangs
+instead of fast failures — and every hung request holds a worker slot for the
+duration. ``socketTimeoutMS`` defaults to None, so a socket that stops
+responding without closing hangs its operation forever. ``waitQueueTimeoutMS``
+is also None, meaning a saturated pool queues callers indefinitely rather than
+telling them.
+
+Note for anyone reading the audit alongside this: the finding says the client
+has "no pool tuning", which is true, but the pool is NOT unbounded — PyMongo
+already defaults ``maxPoolSize`` to 100. It is set explicitly below at that same
+100 so the number is visible and tunable, which changes nothing on any existing
+deploy. The unbounded pool in that finding is the Redis one, fixed separately in
+``_core/redis_client.py``.
+
+Options already present in the connection URI WIN over these defaults, which is
+the opposite of PyMongo's own precedence — see ``_client_options``.
+
+2026-09-04 (fix/wallet-migration-guard): ``init_cloud_db`` now awaits
+``credits.service.verify_wallet_migrated()`` alongside the memory and storage
+guards, and refuses the boot when any wallet document still carries a pre-micro
+field. The rename in #2064 shipped without its migration being run; the ledger
+endpoint 500d, but the balance rows failed SILENTLY — ``balance_micro`` defaults
+to 0, so every customer read as broke and was refused runs they could pay for.
+A schema rename in a money path needs a boot-time tie to its migration, because
+half of it does not fail loudly on its own.
+
+2026-09-04 (fix/proxy-model-prices): ``init_cloud_db`` also loads the LiteLLM
+proxy's own per-model rates and registers them as the top rung of the pricing
+ladder. Runs were priced from public lists that cannot know our negotiated
+rates, and a model only our proxy serves appeared in none of them — it priced
+as None and billed nothing. Fails open: no proxy means the public lists.
+
 2026-07-22 (fix/starter-project-collision): added
 ``_drop_legacy_code_project_index`` and called it after ``init_beanie``, beside
 the invite-token reconcile and for the identical reason. ``CodeProject``'s
@@ -223,6 +258,49 @@ async def migrate_workspace_vm_map_to_db() -> None:
         logger.exception("Workspace VM map migration failed; continuing boot")
 
 
+# Defaults applied to the Mongo client when the connection URI does not already
+# say otherwise. Each exists to convert an unbounded wait into a fast, visible
+# failure — a request that hangs holds a worker slot, and a single-process
+# deploy has very few of them.
+_MONGO_DEFAULTS: dict[str, int] = {
+    # How long to hunt for a reachable server before giving up. PyMongo's 30s
+    # default is tuned for a batch job that would rather wait than fail; a
+    # request path would rather fail in five and let the client retry.
+    "serverSelectionTimeoutMS": 5_000,
+    "connectTimeoutMS": 5_000,
+    # Ceiling on a single operation's socket read. PyMongo's default is None,
+    # i.e. wait forever. 30s is generous for every query this app issues — it
+    # opens no change streams and no tailable cursors, both of which would be
+    # severed by a socket timeout, so the only thing this can cut short is a
+    # query that has already gone very wrong.
+    "socketTimeoutMS": 30_000,
+    # How long a caller waits for a free pooled connection. Also None by
+    # default, which means a saturated pool queues callers silently instead of
+    # telling anyone it is saturated.
+    "waitQueueTimeoutMS": 10_000,
+    # PyMongo's own default, set explicitly so the number is visible and
+    # tunable from the URI. Changes nothing on any existing deploy.
+    "maxPoolSize": 100,
+}
+
+
+def _client_options(mongo_uri: str) -> dict[str, int]:
+    """Client kwargs, minus anything the URI already configures.
+
+    PyMongo's own precedence is the other way round: a keyword argument beats
+    the same option in the URI. Applying these blind would therefore let a
+    library default silently overrule an operator who deliberately tuned the
+    connection string — and they would have no way to win the argument, because
+    the URI is the only knob a deploy actually exposes. So the URI wins here.
+
+    Option names in a MongoDB URI are case-insensitive, so the comparison is
+    lowered on both sides.
+    """
+    query = mongo_uri.partition("?")[2]
+    present = {pair.partition("=")[0].strip().lower() for pair in query.split("&") if pair.strip()}
+    return {key: value for key, value in _MONGO_DEFAULTS.items() if key.lower() not in present}
+
+
 async def init_cloud_db(mongo_uri: str = "mongodb://localhost:27017/paw-enterprise") -> None:
     """Initialize Beanie ODM with all document models."""
     global _client
@@ -234,7 +312,7 @@ async def init_cloud_db(mongo_uri: str = "mongodb://localhost:27017/paw-enterpri
     from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
     from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
-    _client = AsyncMongoClient(mongo_uri)
+    _client = AsyncMongoClient(mongo_uri, **_client_options(mongo_uri))
     db_name = mongo_uri.rsplit("/", 1)[-1].split("?")[0] or "paw-enterprise"
     db = _client[db_name]
 
@@ -275,6 +353,28 @@ async def init_cloud_db(mongo_uri: str = "mongodb://localhost:27017/paw-enterpri
     from pocketpaw_ee.cloud.uploads.bootstrap import verify_cloud_storage_backend
 
     verify_cloud_storage_backend()
+
+    # Fail-fast: refuse to boot on a credit wallet the micro-credit migration has
+    # not converted. This build reads ``balance_micro``; a row that still holds
+    # ``balance_credits`` parses as an EMPTY wallet because the new field defaults
+    # to 0, so every customer reads as broke and the run-start gate refuses them —
+    # with nothing logged. It happened on 2026-09-04: the rename deployed, the
+    # migration did not, and the only audible symptom was a 500 on the ledger
+    # endpoint. Ties the code to its migration so the pair can only ship together.
+    from pocketpaw_ee.cloud.credits.service import verify_wallet_migrated
+
+    await verify_wallet_migrated()
+
+    # Price runs from OUR proxy's rates before falling back to the public price
+    # lists. A model we serve at a negotiated rate otherwise bills at list, and a
+    # model that exists only on our proxy is in no public list at all — it prices
+    # as None and bills ZERO. Registered here so every consumer of the pricing
+    # ladder gets it; the snapshot refreshes again on each metering sweep. Both
+    # calls fail open: no proxy means the public lists, exactly as before.
+    from pocketpaw_ee.cloud.metering import proxy_prices
+
+    await proxy_prices.refresh(force=True)
+    proxy_prices.register()
 
 
 async def close_cloud_db() -> None:

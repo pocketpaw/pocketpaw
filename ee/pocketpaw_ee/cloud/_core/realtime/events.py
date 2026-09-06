@@ -515,8 +515,14 @@ class WorkspaceJobUpdated(Event):
 # Payload (carried under ``Event.data``):
 #   workspace_id      — tenancy.
 #   kind              — genesis | grant | spend | transfer.
-#   amount_delta      — signed credits this movement applied (+grant / -spend).
-#   balance_after     — the wallet balance once this movement landed.
+#   amount_delta      — signed WHOLE credits this movement applied (+grant /
+#                       -spend), truncated for display.
+#   balance_after     — the wallet balance in whole credits once it landed.
+#   amount_delta_micro / balance_after_micro — the same two exactly, in
+#                       micro-credits (1_000_000 == 1 credit). A metered spend is
+#                       routinely a fraction of a credit, so the whole-credit pair
+#                       above can both read 0 on a real charge; anything doing
+#                       arithmetic must use these.
 #   cause             — business reason (top_up | compute_spend | promo | ...).
 #   idempotency_key   — the caller's exactly-once key for this movement.
 @dataclass

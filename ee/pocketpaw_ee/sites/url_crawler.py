@@ -34,6 +34,19 @@
 # Cross-origin refs are left as-is and counted for the import report.
 # Edited 2026-07-23 (SSRF review): redirect scope guard (off-host 30x rejected
 # for non-seed fetches) + seed apex->www re-seed; opposite-scheme origin rewrite.
+# Edited 2026-09-04 (page/dir collision): the asset loop gained the page loop's
+# content-type guard, the other way round. A <link href> that answers text/html
+# (rel="canonical" above all) now claims the PAGE path, so /about stops landing at
+# the file "about" beside the directory "about/" the same page claims through
+# <a href="/about/">. That FileMap cannot exist on a filesystem: the generator
+# mkdirs over the file, EEXIST, and the whole URL import reports "failed". On one
+# real site 48 of 112 harvested files collided this way. Such a page counts
+# against MAX_CRAWL_PAGES, and against the asset loop's fetch ceiling (which is
+# now counted in slots, not stored files, so re-routing a fetch out of
+# assets_fetched cannot widen it). _LinkScan also stops queueing navigational
+# <link rel> values outright (canonical, prefetch, alternate & co) — the
+# content-type guard stays as the backstop for the ones it can't know about.
+# Scope, SSRF, robots and byte-budget behaviour are unchanged.
 
 """Same-site crawler with SSRF-hardened fetching for Paw Sites URL imports."""
 
@@ -364,10 +377,32 @@ class SafeFetcher:
 # --------------------------------------------------------------------------- #
 
 
+# <link rel> values that are NAVIGATIONAL, not asset refs: they address pages
+# (or, for the connection hints, a bare host). Queueing them buys a fetch whose
+# only possible product is a duplicate of a page the crawl already holds — 48 of
+# them on one real site. A DENYLIST, deliberately: an unfamiliar rel is still
+# fetched, and the asset loop's content-type guard catches it if it turns out to
+# be a page, so a site can hide a page behind any rel it likes and still import.
+_NON_ASSET_LINK_RELS = frozenset(
+    {
+        "canonical",
+        "alternate",
+        "prefetch",
+        "prerender",
+        "dns-prefetch",
+        "preconnect",
+        "next",
+        "prev",
+        "pingback",
+    }
+)
+
+
 class _LinkScan(HTMLParser):
     """One-pass scan of a fetched page: same-site page links (<a href>) and asset
-    refs (<link href>, <script src>, <img src/srcset>, <source src/srcset>,
-    <video/audio src>) — classification against the seed host happens later."""
+    refs (<link href> minus the navigational rels, <script src>, <img src/srcset>,
+    <source src/srcset>, <video/audio src>) — classification against the seed host
+    happens later."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -379,7 +414,11 @@ class _LinkScan(HTMLParser):
         if tag == "a" and attr_map.get("href"):
             self.page_links.append(attr_map["href"])
         elif tag == "link" and attr_map.get("href"):
-            self.asset_refs.append(attr_map["href"])
+            # Navigational only when EVERY token is: rel="alternate stylesheet"
+            # is a stylesheet, and a <link> with no rel at all stays an asset.
+            rels = attr_map.get("rel", "").lower().split()
+            if not (rels and all(r in _NON_ASSET_LINK_RELS for r in rels)):
+                self.asset_refs.append(attr_map["href"])
         elif tag == "script" and attr_map.get("src"):
             self.asset_refs.append(attr_map["src"])
         elif tag in ("img", "source", "video", "audio", "embed"):
@@ -572,16 +611,20 @@ async def crawl_site(
     def _same_site(candidate: Any) -> bool:
         return candidate.scheme in ("http", "https") and candidate.netloc.lower() == scope["netloc"]
 
-    def _claim_path(rel: str, source_url: str) -> str | None:
+    def _claim_path(rel: str, source_url: str, *, quiet_duplicate: bool = False) -> str | None:
         """Sanitize + reserve a FileMap path; None (with a warning) when unsafe
-        or already taken (first fetch wins)."""
+        or already taken (first fetch wins). ``quiet_duplicate`` drops the
+        already-taken warning for the one collision that is EXPECTED rather than
+        lossy: the same page claimed twice, once as a page and once through a
+        <link rel> that points at it."""
         try:
             safe = _safe_entry_path(rel)
         except ValidationError:
             result.warnings.append(f"skipped {source_url} — its path is not importable")
             return None
         if safe in result.files:
-            result.warnings.append(f"skipped {source_url} — path {safe!r} already imported")
+            if not quiet_duplicate:
+                result.warnings.append(f"skipped {source_url} — path {safe!r} already imported")
             return None
         return safe
 
@@ -706,7 +749,13 @@ async def crawl_site(
         # ------------------------------------------------------------------- #
         # Assets (CSS refs chase same-origin, so the queue can grow here).
         # ------------------------------------------------------------------- #
-        while asset_queue and result.stats.assets_fetched < MAX_CRAWL_ASSETS:
+        # MAX_CRAWL_ASSETS bounds FETCHES, not files: an entry that answers
+        # text/html is stored as a page below, and it burns a slot exactly as it
+        # did when it was (mis)stored as an asset. Gating on assets_fetched alone
+        # would let this loop drain the whole 2000-entry queue on a link-heavy
+        # site — several hundred page fetches where 200 was the ceiling.
+        asset_slots = 0
+        while asset_queue and asset_slots < MAX_CRAWL_ASSETS:
             asset_url = asset_queue.popleft()
             if not _allowed_by_robots(robots, asset_url):
                 result.stats.skipped_by_robots += 1
@@ -722,6 +771,38 @@ async def crawl_site(
                 result.warnings.append(f"skipped asset {asset_url} — HTTP {fetched.status}")
                 continue
             parsed_final = urlparse(fetched.url)
+            if fetched.content_type == "text/html":
+                # The page loop's content-type guard, mirrored: there a "page"
+                # serving a non-HTML body imports as an asset; here an "asset"
+                # serving HTML imports as a page. _NON_ASSET_LINK_RELS drops the
+                # rels we KNOW are navigational, but a site can hang a page off
+                # any other rel, so this is the guard that actually holds. Claimed
+                # by the asset rule, /about landed at the file "about" while the
+                # same page reached through <a href="/about/"> landed at
+                # "about/index.html"; a FileMap holding a file AND a directory of
+                # one name is unrepresentable, so the generator mkdirs over the
+                # file, dies EEXIST, and the whole import reports "failed". Both
+                # spellings now claim ONE page path and first-fetch-wins dedupes
+                # them. The body gets the page loop's exact treatment (same-origin
+                # rewrite, utf-8 text) — raw bytes would leave this one page
+                # pointing back at the site we imported FROM. Links are NOT
+                # re-scanned: the page loop has ended, so nothing found here could
+                # be fetched. Storing counts against MAX_CRAWL_PAGES, so a site
+                # cannot smuggle extra pages past the page cap through <link>.
+                asset_slots += 1
+                rel = _claim_path(
+                    _rel_path_for_page(parsed_final.path), asset_url, quiet_duplicate=True
+                )
+                if rel is None:
+                    continue
+                if result.stats.pages_fetched >= MAX_CRAWL_PAGES:
+                    pages_truncated = True
+                    continue
+                html_text = fetched.body.decode("utf-8", errors="replace")
+                rewritten = _rewrite_same_origin(html_text, scope["origins"])
+                result.files[rel] = rewritten.encode("utf-8")
+                result.stats.pages_fetched += 1
+                continue
             rel = _claim_path(_rel_path_for_asset(parsed_final.path), asset_url)
             if rel is None:
                 continue
@@ -743,6 +824,7 @@ async def crawl_site(
             else:
                 result.files[rel] = fetched.body
             result.stats.assets_fetched += 1
+            asset_slots += 1
 
         if asset_queue:
             result.warnings.append(

@@ -25,6 +25,15 @@
 # place that question can be answered.
 #
 # Created 2026-08-22 (feat/site-entitlement-ui-state): new test module.
+#
+# Updated 2026-09-02 (feat/sites-analytics-entitlement-field, SA-5): covers
+# ``SiteEntitlementsResponse.analytics``. The headline case is the same shape as the
+# original defect above — a capability the UI branches on that the wire never sent —
+# so it is asserted on the DTO the router returns rather than on the resolver. The
+# load-bearing test is the agreement one: three seams now answer "may this site's
+# visitors be counted", and it asserts the wire EQUALS the shared predicate rather
+# than restating the expected booleans, so a second copy of the rule fails here even
+# while it still happens to agree with the catalog.
 
 from __future__ import annotations
 
@@ -315,6 +324,7 @@ async def test_no_capability_means_no_slot_however_empty_the_workspace(mongo_db,
             badge_required=True,
             custom_domain=False,
             max_domained_sites=0,
+            analytics=False,
             concierge_enabled=False,
             concierge_entitled=False,
         ),
@@ -327,3 +337,143 @@ async def test_no_capability_means_no_slot_however_empty_the_workspace(mongo_db,
         "an empty workspace made a slot look available on a tier that cannot hold "
         "a domain — the button would enable and then 402"
     )
+
+
+# ---------------------------------------------------------------------------
+# The analytics grant (SA-5) — the pre-check that keeps the panel from
+# discovering a refusal by rendering it
+# ---------------------------------------------------------------------------
+
+
+async def test_a_paid_site_reports_that_its_visitors_may_be_counted(mongo_db, monkeypatch):
+    """The whole point of the field: the panel can enable itself without calling
+    the analytics endpoint first."""
+    _enforce(monkeypatch)
+    ws = await _make_workspace()
+    pocket_id = await _make_pocket(workspace_id=ws)
+    doc = await _seed_site(
+        workspace_id=ws, pocket_id=pocket_id, plan_tier="site", subscription_status="active"
+    )
+
+    ent = await sites_service.site_entitlements(workspace_id=ws, site_id=str(doc.id))
+
+    assert ent.analytics is True
+
+
+async def test_a_free_site_reports_no_analytics(mongo_db, monkeypatch):
+    """A free site's traffic is never counted — a Worker invocation is billed and
+    a static asset is not, so the grant has to track the plan."""
+    _enforce(monkeypatch)
+    ws = await _make_workspace()
+    pocket_id = await _make_pocket(workspace_id=ws)
+    doc = await _seed_site(
+        workspace_id=ws, pocket_id=pocket_id, plan_tier="free", subscription_status="none"
+    )
+
+    ent = await sites_service.site_entitlements(workspace_id=ws, site_id=str(doc.id))
+
+    assert ent.analytics is False
+
+
+async def test_a_lapsed_paid_site_loses_analytics_though_it_keeps_the_tier(mongo_db, monkeypatch):
+    """The bug this whole module exists to prevent, on the newest field. Cancelling
+    leaves ``plan_tier`` on the paid key — nothing resets it — so a field that read
+    the tier alone would grant analytics to a cancelled site forever."""
+    _enforce(monkeypatch)
+    ws = await _make_workspace()
+    pocket_id = await _make_pocket(workspace_id=ws)
+    doc = await _seed_site(
+        workspace_id=ws, pocket_id=pocket_id, plan_tier="site", subscription_status="cancelled"
+    )
+
+    ent = await sites_service.site_entitlements(workspace_id=ws, site_id=str(doc.id))
+
+    assert ent.plan_tier == "site", "the tier is still recorded; only the payment stopped"
+    assert ent.analytics is False
+
+
+async def test_the_wire_field_agrees_with_the_predicate_the_publish_seam_reads(
+    mongo_db, monkeypatch
+):
+    """The anti-drift assertion, and the reason this field calls
+    ``site_analytics_entitled`` instead of re-deriving the rule.
+
+    Three seams now answer "may this site's visitors be counted": the publish path
+    (which decides whether the deployed config carries a counter at all), the read
+    endpoint (which decides whether numbers may be served), and this field (which
+    decides what the dashboard offers). They must never disagree. A site whose
+    publish counted but whose panel is greyed out is a customer paying for a chart
+    they cannot open; the reverse offers a chart that 402s.
+
+    So this drives the endpoint across the states that separate them and asserts the
+    wire value EQUALS the predicate, rather than restating the expected booleans. A
+    future edit that reintroduces a second copy of the rule fails here even if it
+    happens to agree with the catalog today.
+    """
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    _enforce(monkeypatch)
+    ws = await _make_workspace()
+
+    cases = [
+        ("site", "active"),
+        ("staff", "active"),
+        ("free", "none"),
+        ("free", "active"),
+        ("site", "cancelled"),
+        ("site", "pending"),
+        (None, "active"),
+        ("not-a-tier", "active"),
+    ]
+
+    for plan_tier, subscription_status in cases:
+        pocket_id = await _make_pocket(workspace_id=ws)
+        doc = await _seed_site(
+            workspace_id=ws,
+            pocket_id=pocket_id,
+            plan_tier=plan_tier,
+            subscription_status=subscription_status,
+        )
+
+        ent = await sites_service.site_entitlements(workspace_id=ws, site_id=str(doc.id))
+        expected = entitlements_service.site_analytics_entitled(
+            plan_tier=plan_tier, subscription_status=subscription_status
+        )
+
+        assert ent.analytics is expected, (
+            f"the wire disagreed with the predicate for {plan_tier!r}/"
+            f"{subscription_status!r}: wire={ent.analytics}, predicate={expected}"
+        )
+
+
+async def test_the_cases_are_not_all_the_same_answer(mongo_db, monkeypatch):
+    """Guards the test above from decaying into a tautology. If the catalog ever
+    stopped granting analytics to any tier, every case would agree at False and the
+    agreement test would still pass while proving nothing."""
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    assert (
+        entitlements_service.site_analytics_entitled(plan_tier="site", subscription_status="active")
+        is True
+    )
+    assert (
+        entitlements_service.site_analytics_entitled(plan_tier="free", subscription_status="active")
+        is False
+    )
+
+
+def test_the_response_defaults_refuse_rather_than_grant():
+    """Every capability on ``SiteEntitlementsResponse`` defaults to the REFUSING
+    direction, so a partially-populated response can never hand out a capability by
+    omission. This is the only thing standing behind ``analytics``'s default: the
+    single construction site sets it explicitly, so a flipped default would ship
+    unnoticed until the second caller appeared."""
+    from pocketpaw_ee.sites.dto import SiteEntitlementsResponse
+
+    bare = SiteEntitlementsResponse(site_id="s1")
+
+    assert bare.analytics is False
+    assert bare.custom_domain is False
+    assert bare.concierge_entitled is False
+    assert bare.subscription_active is False
+    assert bare.badge_required is True, "the badge default is a requirement, not a grant"

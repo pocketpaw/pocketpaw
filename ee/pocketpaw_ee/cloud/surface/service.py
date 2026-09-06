@@ -91,8 +91,16 @@
 # the ripple-OFF, MCP-scoped surfaces resolved off the registry — no code change
 # in this module (the registry is the single source of truth).
 
+# Changes: 2026-09-06 (BR-1, feat/browser-surface-server) — ``resolve_profile``
+# now folds the agentic-browser MCP tool ids into ``deny_mcp_tool_ids`` for every
+# surface EXCEPT ``SurfaceKind.BROWSER`` (``_deny_browser_off_surface``). Done at
+# this chokepoint, not per registry row, so the default/unmapped chat case — the
+# one that matters, since it is otherwise unrestricted — is covered along with
+# every future row.
+
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import Any
 
@@ -189,12 +197,41 @@ def resolve_profile(surface_kind: SurfaceKind, meta: SurfaceMeta) -> SurfaceProf
     """
     spec = _spec_by_kind().get(surface_kind)
     if spec is None:
-        return _DEFAULT_PROFILE
-    if spec.profile_resolver is not None:
-        return spec.profile_resolver(meta)
-    if spec.profile is not None:
-        return spec.profile
-    return _DEFAULT_PROFILE
+        profile = _DEFAULT_PROFILE
+    elif spec.profile_resolver is not None:
+        profile = spec.profile_resolver(meta)
+    elif spec.profile is not None:
+        profile = spec.profile
+    else:
+        profile = _DEFAULT_PROFILE
+    return _deny_browser_off_surface(surface_kind, profile)
+
+
+def _deny_browser_off_surface(surface_kind: SurfaceKind, profile: SurfaceProfile) -> SurfaceProfile:
+    """Add the agentic-browser tool ids to the deny set of every NON-browser surface.
+
+    The browser drives a real Chromium as the tenant. It belongs on /browser and
+    nowhere else — least of all /chat, which is otherwise unrestricted
+    (``allow_mcp_tool_ids=None``) and carries the send-capable connector tools.
+    An allow-list alone cannot express that: the surfaces that need blocking are
+    exactly the ones that declare no allow-list.
+
+    Applied HERE rather than row-by-row deliberately. This is the one chokepoint
+    every ``(kind, meta)`` passes through, so it also covers ``_DEFAULT_PROFILE``,
+    an unmapped/future kind, and any row added later without a thought for the
+    browser. Deny is subtracted from ``allowed_tools`` before the SDK launches
+    (``claude_sdk``), so the tools are physically unreachable, not discouraged.
+    """
+    if surface_kind is SurfaceKind.BROWSER:
+        return profile
+    from pocketpaw_ee.cloud.surface.surface_registry import browser_tool_ids
+
+    ids = browser_tool_ids()
+    if not ids:
+        # The tool-id import degraded; there is nothing to deny (and nothing to
+        # allow either — the BROWSER profile's allow is None on the same path).
+        return profile
+    return dataclasses.replace(profile, deny_mcp_tool_ids=profile.deny_mcp_tool_ids | ids)
 
 
 def compose_entity_profile(base: SurfaceProfile, override: dict[str, Any] | None) -> SurfaceProfile:
@@ -326,6 +363,7 @@ def _meta_from_request(req: SurfaceMetaRequest) -> SurfaceMeta:
         site_id=req.site_id,
         engine=req.engine,
         mode=req.mode,
+        brief_id=req.brief_id,
         repo=req.repo,
         base_branch=req.base_branch,
         current_dir=req.current_dir,

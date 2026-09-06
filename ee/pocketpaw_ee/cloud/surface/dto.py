@@ -63,6 +63,7 @@ class SurfaceMetaRequest(BaseModel):
     # "Use Svelte pages" toggle: "ripple" (default) | "svelte". Selects which
     # create-site authoring skill the preamble prefers. Optional.
     engine: str | None = None
+    brief_id: str | None = None
     # Sites refine hint — mirror SurfaceMeta. The Build/Chat toggle in the
     # /sites/[siteId] refine chat: "chat" answers with no mutation, "build" (the
     # default, preserving today's behavior) refines the site. Optional.

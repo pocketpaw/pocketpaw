@@ -1,5 +1,8 @@
 # domain.py — Surface context value objects.
 #
+# Changes: 2026-09-06 (BR-1, feat/browser-surface-server) — added
+# ``SurfaceKind.BROWSER`` (the /browser agentic-browser surface).
+#
 # Created: 2026-05-24 — Surface-aware chat preamble entity. The cloud
 # chat agent today only sees scope / participants / current-pocket-id
 # (three lines of dynamic context). Paw-enterprise is chat-first and
@@ -149,6 +152,12 @@ class SurfaceKind(StrEnum):
     # Its profile is ripple-OFF and denies the pocket create/plan tool ids — the
     # deliverable is ink on the page, never a pocket or a ui-spec.
     OTHER_HAND = "other_hand"  # /other-hand — the page the agent writes back on
+
+    # /browser — a chat-driven agentic browser. The ONLY surface whose profile
+    # allows the ``pocketpaw_browser`` MCP tools; every other surface (the
+    # unmapped default included) denies them, so the browser is unreachable from
+    # /chat where send-capable connector tools live.
+    BROWSER = "browser"
     # A PUBLIC, anonymous Paw Bar concierge chat (T2) — a foreign site's embedded
     # widget, answering visitors grounded in the Site's pocket ONLY. Its profile
     # (``surface_registry._concierge_profile``) is ripple-OFF and PUBLIC-SAFE: it
@@ -204,6 +213,14 @@ class SurfaceMeta:
     # / unset refines (edits) the site. Consulted only on the refine branch (pocket_id
     # present); the sites handler reads ``meta.mode`` there. Absent on create/gallery.
     mode: str | None = None
+    # Sites import-create hint — the id of a captured ``SiteDesignBrief``. Present
+    # only on a REBUILD import: the user gave a URL, the crawl distilled it into a
+    # design brief, and the create run authors a native site FROM that brief rather
+    # than from a typed description. Paired with ``engine`` and NO ``pocket_id``,
+    # because a pocket_id would route the run to refine and the pocket is the
+    # agent's own to mint. The handler fetches the brief server-side; only the id
+    # rides the wire.
+    brief_id: str | None = None
     # Belt console hints — set by the /belt page once the user has bound a repo
     # + branch for the run. ``repo`` is the absolute repo path; ``base_branch``
     # is the branch to base the change off. The belt handler injects both into

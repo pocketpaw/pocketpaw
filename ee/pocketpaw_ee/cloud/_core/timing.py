@@ -10,6 +10,15 @@ keeps the slice small.
 Capacity defaults to 10k samples per endpoint. With the default
 capacity the buffer uses ~80 KB per distinct endpoint at steady state
 (two `float` per sample is conservative).
+
+That "per distinct endpoint" sizing only holds if the key space is bounded,
+which it was not until 2026-09-04. A MATCHED request keys on the route
+template, and the route table is fixed at startup — bounded. An UNMATCHED
+request has no ``route`` in its ASGI scope, so the key fell back to the raw
+URL path and every distinct 404 minted a permanent buffer. This middleware
+wraps everything and runs before authentication, so one scanner walking a
+million URLs was a million retained entries in a 6 GB container whose only
+recovery is a restart. Unmatched requests now share a single bucket.
 """
 
 from __future__ import annotations
@@ -22,6 +31,11 @@ from fastapi import FastAPI, Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 _DEFAULT_CAPACITY: Final = 10_000
+
+#: Key for every request that matched no route. Collapsing them is the whole
+#: bound: a 404's path is attacker-chosen, a route template is not.
+UNMATCHED_PATH: Final = "<unmatched>"
+
 _buffers: dict[tuple[str, str], deque[float]] = {}
 
 
@@ -36,13 +50,17 @@ class TimingMiddleware(BaseHTTPMiddleware):
         start = time.perf_counter()
         response: Response = await call_next(request)
         duration_ms = (time.perf_counter() - start) * 1000.0
-        # Prefer the matched route template (e.g. /workspaces/{id}) so we
-        # don't get one buffer per id; fall back to the raw URL path.
+        # Use the matched route template (e.g. /workspaces/{id}) so we don't
+        # get one buffer per id. When nothing matched there is no template to
+        # use, and the raw path is caller-controlled, so those all share one
+        # bucket rather than minting an entry each. The aggregate is still
+        # useful — it says how much time is going into 404s — and it cannot
+        # grow.
         scope_route = request.scope.get("route")
         path = (
             scope_route.path
             if scope_route is not None and hasattr(scope_route, "path")
-            else request.url.path
+            else UNMATCHED_PATH
         )
         key = (request.method, path)
         buf = _buffers.get(key)

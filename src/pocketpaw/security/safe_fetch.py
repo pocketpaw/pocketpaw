@@ -6,6 +6,11 @@
 #   resolving once, pinning the IP, and preserving Host/SNI; the SSRF check
 #   re-runs on every redirect hop). Added safe_get_streamed() for callers
 #   that need a body-size cap + final-URL tracking (link unfurl).
+# 2026-09-06 (BR-1, feat/browser-surface-server) — added ``assert_public_url``:
+#   the scheme+DNS+public-IP check on its own, with no fetch. The browser
+#   surface's Playwright request interceptor needs the VERDICT for a URL it is
+#   not going to fetch itself (Chromium does the fetch), so it composes the same
+#   private helpers every safe_get hop already runs.
 
 from __future__ import annotations
 
@@ -130,6 +135,27 @@ async def _resolve_public_ip(hostname: str, port: int) -> str:
         raise FetchFailedError("Could not resolve URL hostname.")
 
     return candidate_ips[0]
+
+
+async def assert_public_url(url: str) -> None:
+    """Raise if ``url`` is not a fetchable public http(s) URL.
+
+    The scheme + DNS + public-IP half of :func:`safe_get`, exposed for callers
+    that need the VERDICT without doing the fetch — the browser surface's
+    Playwright ``context.route`` interceptor decides abort/continue per request
+    while Chromium owns the socket. Raises :class:`UnsupportedSchemeError`,
+    :class:`BlockedURLError` or :class:`FetchFailedError` (all
+    :class:`SafeFetchError`).
+
+    ponytail: verdict-only, so it cannot pin the IP the way
+    ``IPPinningTransport`` does — a DNS-rebind between this check and
+    Chromium's own resolve is still theoretically open. Pin via CDP
+    ``Network.setHostResolverRules`` if that threat ever matters.
+    """
+    parsed = httpx.URL(url)
+    _ensure_supported_url(parsed)
+    assert parsed.host is not None  # narrowed by _ensure_supported_url
+    await _resolve_public_ip(parsed.host, _port_for_url(parsed))
 
 
 def _next_redirect_url(current_url: httpx.URL, location: str) -> httpx.URL:
@@ -300,6 +326,7 @@ async def safe_get_streamed(
 
 __all__ = [
     "BlockedURLError",
+    "assert_public_url",
     "FetchFailedError",
     "FetchResult",
     "IPPinningTransport",
