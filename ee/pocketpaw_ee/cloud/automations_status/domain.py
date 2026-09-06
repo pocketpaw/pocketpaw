@@ -28,6 +28,18 @@ class SweepDescriptor:
     sweep's loop-spawn at app boot; ``env_flag_on`` is that flag's current value
     in THIS process (resolved at read time). ``interval_env`` names the optional
     override for the sweep's cadence, when it has one.
+
+    ``running`` is the field that was missing, and its absence is most of why the
+    dropped-hook bug survived: this row used to carry ``env_flag_on`` alone, so
+    the endpoint that exists to answer "are the sweeps on" answered from a
+    variable that had never been connected to anything. It reported all of them
+    on for the whole period none of them existed. ``running`` is set from a
+    record written only when the start hook completes, so it cannot say yes for a
+    sweep that never started.
+
+    The two are not redundant. ``env_flag_on and not running`` is the exact
+    signature of "configured but broken", which is the state this codebase was
+    in, and which no single field can express.
     """
 
     key: str
@@ -35,6 +47,7 @@ class SweepDescriptor:
     kind: SweepKind
     env_flag: str
     env_flag_on: bool
+    running: bool = False
     interval_env: str | None = None
     description: str = ""
 

@@ -339,7 +339,16 @@ class AgentPool:
         self._build_lock = asyncio.Lock()
 
     async def start(self) -> None:
-        """Start the GC background task."""
+        """Start the GC background task. Idempotent.
+
+        Two callers reach this on a cloud boot: ``dashboard_lifecycle``'s
+        startup and the cloud lifespan hook, which only began running again when
+        the dropped-``on_event`` bug was fixed. Without this guard the second
+        call overwrites ``_gc_task`` and orphans the first loop, which then runs
+        forever with nothing holding a handle to cancel it.
+        """
+        if self._gc_task is not None and not self._gc_task.done():
+            return
         self._gc_task = asyncio.create_task(self._gc_loop())
         logger.info(
             "AgentPool started (max_idle=%ds, max_instances=%d)",

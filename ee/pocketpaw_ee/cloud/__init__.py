@@ -153,7 +153,82 @@ Each has router.py (thin), service.py (logic), schemas.py (validation).
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI
+
+_logger = logging.getLogger(__name__)
+
+
+def _install_cloud_lifespan(
+    app: FastAPI,
+    startup_hooks: list[Callable[[], Awaitable[None]]],
+    shutdown_hooks: list[Callable[[], Awaitable[None]]],
+) -> None:
+    """Run the cloud's startup/shutdown hooks from the app's lifespan.
+
+    These used to be ``@app.on_event(...)`` handlers, and none of them ever ran.
+    ``Router.startup()`` / ``Router.shutdown()`` are the only readers of
+    ``on_startup`` / ``on_shutdown``, and only ``_DefaultLifespan`` calls them --
+    which Starlette installs only when the app was built with no ``lifespan=``.
+    Both host factories DO pass one (``src/pocketpaw/dashboard.py`` and
+    ``src/pocketpaw/api/serve.py``), so every handler registered that way was
+    collected into a list nothing reads. Sixteen background loops sat in that
+    list, including the Daytona sandbox reaper, which is why the bug cost money
+    for as long as it lasted.
+
+    ``app.router.lifespan_context`` is whatever the host passed, or Starlette's
+    ``_DefaultLifespan`` when it passed nothing. Wrapping it composes with either
+    shape, so the OSS core needs no change and no knowledge of the cloud.
+
+    ORDERING IS LOAD-BEARING. The cloud hooks run INSIDE the host's lifespan:
+    after host startup, before host shutdown. Every one of these loops reads
+    Mongo, and Mongo is opened by ``CloudLifecycleHook.on_startup``, which the
+    host lifespan runs. Starting them first would give each loop a first tick
+    against an uninitialised Beanie.
+
+    A hook that raises is logged and skipped. A background sweep that cannot
+    start must not take the web process down with it -- that is the difference
+    between a degraded box and a restart loop.
+    """
+    if getattr(app.state, "_cloud_lifespan_installed", False):
+        return
+    app.state._cloud_lifespan_installed = True
+
+    host_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def _cloud_lifespan(scoped_app: FastAPI):
+        from pocketpaw_ee.cloud._core import sweep_runtime
+
+        async with host_lifespan(scoped_app) as maybe_state:
+            for hook in startup_hooks:
+                name = getattr(hook, "__name__", repr(hook))
+                try:
+                    await hook()
+                except Exception:
+                    _logger.exception("Cloud startup hook %s failed", name)
+                else:
+                    # Marked only on success, and only here. That is what makes
+                    # /api/v1/automations/status unable to report a sweep as
+                    # running when its hook was dropped, raised, or never
+                    # existed -- the failure mode that let this bug survive.
+                    sweep_runtime.mark_started(name)
+            try:
+                yield maybe_state
+            finally:
+                for hook in reversed(shutdown_hooks):
+                    name = getattr(hook, "__name__", repr(hook))
+                    try:
+                        await hook()
+                    except Exception:
+                        _logger.exception("Cloud shutdown hook %s failed", name)
+                    finally:
+                        sweep_runtime.mark_stopped(name.replace("_stop_", "_start_", 1))
+
+    app.router.lifespan_context = _cloud_lifespan
 
 
 def init_realtime() -> None:
@@ -851,15 +926,16 @@ def mount_cloud(app: FastAPI) -> None:
     # path to fetch Composio tools using the official provider package for
     # that SDK. No cloud-bootstrap registration is needed.
 
-    # Initialise the realtime EventBus eagerly.
+    # Initialise the realtime EventBus eagerly, at MOUNT time rather than at
+    # startup. It only sets module-level singletons (bus + resolver) with no
+    # async work, and doing it here means a service that calls ``emit(...)``
+    # between mount and startup does not fail with "EventBus not initialized".
     #
-    # The host app (src/pocketpaw/dashboard.py) uses a FastAPI ``lifespan``
-    # context manager, which supersedes ``@app.on_event("startup")`` —
-    # startup handlers registered here never fire. ``init_realtime()`` only
-    # sets module-level singletons (bus + resolver) with no async work, so
-    # it's safe to call synchronously at mount time. Without this, the
-    # first service that calls ``emit(...)`` fails with "EventBus not
-    # initialized".
+    # This used to be the workaround for the bug ``_install_cloud_lifespan`` now
+    # fixes: startup handlers registered here never fired, so anything that had
+    # to happen at boot had to happen at mount instead. The hooks below DO run
+    # now, but this stays eager because "before any request" is a stronger
+    # guarantee than "at startup" and costs nothing.
     init_realtime()
 
     # Register built-in workspace jobs (pp#1459) into the process-wide job
@@ -922,6 +998,22 @@ def mount_cloud(app: FastAPI) -> None:
 
     init_decisions_projection(rebuild_from_journal=True)
 
+    # ---- Lifespan hooks -------------------------------------------------
+    # Collected here and run from the composed lifespan installed at the end of
+    # this function. They used to be ``@app.on_event("startup"/"shutdown")``,
+    # which Starlette drops on the floor for any app built with ``lifespan=`` --
+    # which is both of ours. See ``_install_cloud_lifespan``.
+    _startup_hooks: list[Callable[[], Awaitable[None]]] = []
+    _shutdown_hooks: list[Callable[[], Awaitable[None]]] = []
+
+    def on_startup(fn: Callable[[], Awaitable[None]]) -> Callable[[], Awaitable[None]]:
+        _startup_hooks.append(fn)
+        return fn
+
+    def on_shutdown(fn: Callable[[], Awaitable[None]]) -> Callable[[], Awaitable[None]]:
+        _shutdown_hooks.append(fn)
+        return fn
+
     # Decision-graph reconciler + abandon-path sweeper (RFC 09 Slice 4).
     #
     # The reconciler is a 60s background loop that drains the journal
@@ -945,19 +1037,19 @@ def mount_cloud(app: FastAPI) -> None:
             stop_reconciler,
         )
 
-        @app.on_event("startup")
+        @on_startup
         async def _start_decisions_reconciler() -> None:
             await start_reconciler(app)
 
-        @app.on_event("shutdown")
+        @on_shutdown
         async def _stop_decisions_reconciler() -> None:
             await stop_reconciler(app)
 
-        @app.on_event("startup")
+        @on_startup
         async def _start_decisions_sweeper() -> None:
             await start_action_sweeper(app)
 
-        @app.on_event("shutdown")
+        @on_shutdown
         async def _stop_decisions_sweeper() -> None:
             await stop_action_sweeper(app)
 
@@ -1039,11 +1131,11 @@ def mount_cloud(app: FastAPI) -> None:
     if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
         from pocketpaw_ee.cloud.cycles.scheduler import start_in_process_scheduler
 
-        @app.on_event("startup")
+        @on_startup
         async def _start_cycle_scheduler() -> None:
             await start_in_process_scheduler(app)
 
-        @app.on_event("shutdown")
+        @on_shutdown
         async def _stop_cycle_scheduler() -> None:
             from pocketpaw_ee.cloud.cycles.scheduler import stop_in_process_scheduler
 
@@ -1061,11 +1153,11 @@ def mount_cloud(app: FastAPI) -> None:
             stop_member_ingest,
         )
 
-        @app.on_event("startup")
+        @on_startup
         async def _start_member_ingest() -> None:
             await start_member_ingest(app)
 
-        @app.on_event("shutdown")
+        @on_shutdown
         async def _stop_member_ingest() -> None:
             await stop_member_ingest(app)
 
@@ -1083,11 +1175,11 @@ def mount_cloud(app: FastAPI) -> None:
             stop_fabric_ingest,
         )
 
-        @app.on_event("startup")
+        @on_startup
         async def _start_fabric_ingest() -> None:
             await start_fabric_ingest(app)
 
-        @app.on_event("shutdown")
+        @on_shutdown
         async def _stop_fabric_ingest() -> None:
             await stop_fabric_ingest(app)
 
@@ -1107,11 +1199,11 @@ def mount_cloud(app: FastAPI) -> None:
             stop_websandbox_reaper,
         )
 
-        @app.on_event("startup")
+        @on_startup
         async def _start_websandbox_reaper() -> None:
             await start_websandbox_reaper(app)
 
-        @app.on_event("shutdown")
+        @on_shutdown
         async def _stop_websandbox_reaper() -> None:
             await stop_websandbox_reaper(app)
 
@@ -1130,11 +1222,11 @@ def mount_cloud(app: FastAPI) -> None:
             shutdown_all_autopilot_tasks,
         )
 
-        @app.on_event("startup")
+        @on_startup
         async def _start_mandate_autopilot() -> None:
             await reconcile_autopilot_tasks()
 
-        @app.on_event("shutdown")
+        @on_shutdown
         async def _stop_mandate_autopilot() -> None:
             await shutdown_all_autopilot_tasks()
 
@@ -1154,11 +1246,11 @@ def mount_cloud(app: FastAPI) -> None:
             shutdown_scheduler,
         )
 
-        @app.on_event("startup")
+        @on_startup
         async def _start_mandate_scheduler() -> None:
             await reconcile_scheduler()
 
-        @app.on_event("shutdown")
+        @on_shutdown
         async def _stop_mandate_scheduler() -> None:
             await shutdown_scheduler()
 
@@ -1179,26 +1271,30 @@ def mount_cloud(app: FastAPI) -> None:
     # ``InboundMessage.metadata["attachments"]``. The old
     # ``ee.cloud.shared.chat_persistence`` bus subscriber was removed because
     # it dual-wrote every turn.
-    @app.on_event("startup")
+    @on_startup
     async def _start_agent_pool():
         from pocketpaw.agents.pool import get_agent_pool
 
         await get_agent_pool().start()
 
-    @app.on_event("shutdown")
+    @on_shutdown
     async def _stop_agent_pool():
         from pocketpaw.agents.pool import get_agent_pool
 
         await get_agent_pool().stop()
 
-    # Defence-in-depth drain. Under ``FastAPI(lifespan=...)`` (the host's
-    # default in ``src/pocketpaw/dashboard.py``) this hook is silently dropped
-    # — the real drain runs in ``dashboard_lifecycle.shutdown_event``. Kept
-    # here so a host that doesn't pass ``lifespan=`` still drains in-flight runs.
-    @app.on_event("shutdown")
+    # Defence-in-depth drain. ``dashboard_lifecycle.shutdown_event`` also
+    # drains, with a bound; this one covers a host that mounts the cloud without
+    # going through that lifecycle. ``drain()`` is idempotent, so a second call
+    # on an already-drained executor returns immediately.
+    @on_shutdown
     async def _drain_chat_runs() -> None:
         from pocketpaw_ee.cloud.chat.runs.executor import InProcessExecutor, get_executor
 
         executor = get_executor()
         if isinstance(executor, InProcessExecutor):
             await executor.drain()
+
+    # Install LAST: the closure captures the lists, so every hook above has to
+    # be in them before this runs.
+    _install_cloud_lifespan(app, _startup_hooks, _shutdown_hooks)
