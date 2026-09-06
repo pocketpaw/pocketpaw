@@ -1,0 +1,43 @@
+{
+  "id": "dep-appears",
+  "asserts": "Providing a missing service activates every waiting plugin.",
+  "semantics": "\u00a72",
+  "plugins": {
+    "b": {
+      "inject": {
+        "required": [
+          "svcX"
+        ]
+      }
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "b"
+    },
+    {
+      "expect_state": {
+        "b": "PENDING"
+      }
+    },
+    {
+      "op": "provide",
+      "service": "svcX"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "b": "ACTIVE"
+      }
+    }
+  ],
+  "expect_trace": [
+    "b:PENDING",
+    "root:provide:svcX",
+    "b:LOADING",
+    "b:ACTIVE"
+  ]
+}

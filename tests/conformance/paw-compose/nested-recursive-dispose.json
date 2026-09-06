@@ -1,0 +1,62 @@
+{
+  "id": "nested-recursive-dispose",
+  "asserts": "Child plugins are disposed BEFORE the parent's own effects, because a parent effect may own what the child still uses.",
+  "semantics": "\u00a74",
+  "plugins": {
+    "p": {
+      "effects": [
+        "pe1"
+      ],
+      "children": [
+        "c"
+      ]
+    },
+    "c": {
+      "effects": [
+        "ce1"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "p"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "p": "ACTIVE",
+        "c": "ACTIVE"
+      }
+    },
+    {
+      "op": "dispose",
+      "plugin": "p"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "p": "DISPOSED",
+        "c": "DISPOSED"
+      }
+    }
+  ],
+  "expect_trace": [
+    "p:LOADING",
+    "p:effect:pe1:setup",
+    "c:LOADING",
+    "c:effect:ce1:setup",
+    "c:ACTIVE",
+    "p:ACTIVE",
+    "p:UNLOADING",
+    "c:UNLOADING",
+    "c:effect:ce1:dispose",
+    "c:DISPOSED",
+    "p:effect:pe1:dispose",
+    "p:DISPOSED"
+  ]
+}

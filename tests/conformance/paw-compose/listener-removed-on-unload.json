@@ -1,0 +1,56 @@
+{
+  "id": "listener-removed-on-unload",
+  "asserts": "Listener registration is an effect: the listener is gone after its owning plugin unloads.",
+  "semantics": "\u00a73, \u00a75",
+  "plugins": {
+    "a": {
+      "listeners": [
+        {
+          "event": "wf",
+          "mode": "waterfall",
+          "id": "L1",
+          "action": "wrap",
+          "wrap": "A"
+        }
+      ]
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "a"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "op": "dispatch",
+      "event": "wf",
+      "mode": "waterfall",
+      "value": "base",
+      "expect_result": "A(base)"
+    },
+    {
+      "op": "dispose",
+      "plugin": "a"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "op": "dispatch",
+      "event": "wf",
+      "mode": "waterfall",
+      "value": "base",
+      "expect_result": "base"
+    }
+  ],
+  "expect_trace": [
+    "a:LOADING",
+    "a:ACTIVE",
+    "a:listener:L1:enter",
+    "a:listener:L1:exit",
+    "a:UNLOADING",
+    "a:DISPOSED"
+  ]
+}

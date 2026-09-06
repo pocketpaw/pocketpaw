@@ -1,0 +1,39 @@
+{
+  "id": "async-disposer-awaited",
+  "asserts": "Unload is not complete until async disposers settle; DISPOSED is emitted only after the awaited cleanup finishes.",
+  "semantics": "\u00a73, \u00a74",
+  "plugins": {
+    "a": {
+      "effects": [
+        "e1"
+      ],
+      "dispose_delay_ms": 20
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "a"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "op": "dispose",
+      "plugin": "a"
+    },
+    {
+      "expect_state": {
+        "a": "DISPOSED"
+      }
+    }
+  ],
+  "expect_trace": [
+    "a:LOADING",
+    "a:effect:e1:setup",
+    "a:ACTIVE",
+    "a:UNLOADING",
+    "a:effect:e1:dispose",
+    "a:DISPOSED"
+  ]
+}
