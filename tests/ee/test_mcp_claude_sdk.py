@@ -93,6 +93,7 @@ from unittest.mock import patch
 
 from pocketpaw_ee.agent.mcp_servers.ask import SERVER_NAME as _ASK_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.belt import SERVER_NAME as _BELT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.browser import SERVER_NAME as _BROWSER_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.code import SERVER_NAME as _CODE_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.connectors import SERVER_NAME as _CONNECTORS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.daytona import SERVER_NAME as _DAYTONA_MCP_SERVER_NAME
@@ -233,6 +234,12 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``claude_sdk._get_mcp_servers`` so the default agent backend can scaffold
     # flow graphs. In-process, no external config.
     out.pop(_STUDIO_MCP_SERVER_NAME, None)
+    # ``pocketpaw_browser`` is always-on too — the /browser surface's agentic
+    # browser is registered unconditionally; every OTHER surface DENIES its tool
+    # ids via ``resolve_profile`` (deny is the boundary, not registration), the
+    # same regime as code / ship / studio. Stripped so this file measures
+    # EXTERNAL config only.
+    out.pop(_BROWSER_MCP_SERVER_NAME, None)
     return out
 
 

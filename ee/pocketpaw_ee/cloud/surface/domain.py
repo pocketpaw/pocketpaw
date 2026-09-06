@@ -1,5 +1,8 @@
 # domain.py — Surface context value objects.
 #
+# Changes: 2026-09-06 (BR-1, feat/browser-surface-server) — added
+# ``SurfaceKind.BROWSER`` (the /browser agentic-browser surface).
+#
 # Created: 2026-05-24 — Surface-aware chat preamble entity. The cloud
 # chat agent today only sees scope / participants / current-pocket-id
 # (three lines of dynamic context). Paw-enterprise is chat-first and
@@ -131,6 +134,11 @@ class SurfaceKind(StrEnum):
     CODE = "code"  # /code — agent edits + runs code in the workspace
     BELT = "belt"  # /belt — the develop station (orient→develop→propose via gate)
     SHIP = "ship"  # /ship — the managed-deploy control plane (drive deploys via ship MCP verbs)
+    # /browser — a chat-driven agentic browser. The ONLY surface whose profile
+    # allows the ``pocketpaw_browser`` MCP tools; every other surface (the
+    # unmapped default included) denies them, so the browser is unreachable from
+    # /chat where send-capable connector tools live.
+    BROWSER = "browser"
     # A PUBLIC, anonymous Paw Bar concierge chat (T2) — a foreign site's embedded
     # widget, answering visitors grounded in the Site's pocket ONLY. Its profile
     # (``surface_registry._concierge_profile``) is ripple-OFF and PUBLIC-SAFE: it

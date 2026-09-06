@@ -25,6 +25,14 @@ also starts the RFC 03 v2 temporal trigger sweep scheduler in
 multi-replica deployments don't double-fire. Cadence is configurable via
 ``POCKETPAW_TEMPORAL_SWEEP_INTERVAL_SECONDS`` (default 3600, floor 60).
 
+Updated: 2026-09-06 (BR-1, feat/browser-surface-server) — added
+``CloudBrowserMcpProvider`` (``pocketpaw.mcp_servers`` entry ``browser``)
+exposing the /browser surface's agentic browser in-process server
+(``pocketpaw_browser``; navigate / snapshot / click / type / scroll /
+screenshot / close) to the claude_agent_sdk cloud chat backend, mirroring
+``CloudMediaMcpProvider``. Ambient — scoping is per-SURFACE (the BROWSER
+profile allows the ids; every other surface denies them), not per-agent.
+
 Updated: 2026-06-10 (feat/studio-code-migration) — added ``CloudMediaMcpProvider``
 (``pocketpaw.mcp_servers`` entry ``media``) exposing the STUDIO image +
 video generation in-process server (``pocketpaw_media``) to the
@@ -891,6 +899,33 @@ class CloudMediaMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.media import MEDIA_TOOL_IDS
 
         return list(MEDIA_TOOL_IDS)
+
+
+class CloudBrowserMcpProvider:
+    """`pocketpaw.mcp_servers` — the /browser surface's agentic browser
+    (``pocketpaw_browser``). Hosts navigate / snapshot / click / type / scroll /
+    screenshot / close.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) like every sibling in-process server
+    — ``OPT_IN_MCP_SERVERS`` is a per-AGENT lever, and the browser is scoped per
+    SURFACE: the BROWSER ``SurfaceProfile`` allows these ids and every other
+    surface DENIES them, so /chat (where send-capable connector tools live)
+    cannot reach the browser at all.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.browser import build_browser_server
+
+            return build_browser_server()
+        except ImportError:
+            # claude_agent_sdk not installed — same degrade as the siblings.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
+
+        return list(BROWSER_TOOL_IDS)
 
 
 class CloudStockImagesMcpProvider:

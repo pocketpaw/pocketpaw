@@ -1,5 +1,10 @@
 """In-process MCP servers exposed to agent backends for cloud features.
 
+Updated: 2026-09-06 (BR-1, feat/browser-surface-server) — added ``browser.py``
+(``pocketpaw_browser``) to the listing below: the /browser surface's agentic
+browser. Unlike its siblings it is scoped by DENY as well as allow — every
+non-BROWSER surface profile forbids its ids.
+
 Updated: 2026-07-28 (feat/growth-mcp) — added ``growth.py`` (``pocketpaw_growth``)
 to the listing below: the agent-facing /growth surface, read-and-propose only.
 
@@ -18,6 +23,10 @@ boundary.
 Server surfaces (module → server name → tools):
 
 * ``belt.py`` → ``pocketpaw_belt`` → ``belt_propose_change`` (gated code change)
+* ``browser.py`` → ``pocketpaw_browser`` → ``navigate`` / ``snapshot`` /
+  ``click`` / ``type`` / ``scroll`` / ``screenshot`` / ``close`` (one real
+  browser per workspace; request-level SSRF in the OSS driver, credential
+  fields refused in code, one audit row per action)
 * ``connectors.py`` → ``pocketpaw_connectors`` → connector listing + execution
 * ``decisions.py`` → ``pocketpaw_decisions`` → Decision-Graph queries
 * ``deliver.py`` → ``pocketpaw_deliver`` → ``deliver_artifact`` (land a built

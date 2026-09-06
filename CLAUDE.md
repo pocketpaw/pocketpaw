@@ -181,7 +181,7 @@ The processing pipeline lives in `agents/loop.py` and `agents/router.py`:
 ### Key Subsystems
 
 - **Memory** (`memory/`) — Session history + long-term facts, file-based storage in `~/.pocketpaw/memory/`. Protocol-based (`MemoryStoreProtocol`) for future backend swaps
-- **Browser** (`browser/`) — Playwright-based automation using accessibility tree snapshots (not screenshots). `BrowserDriver` returns `NavigationResult` with a `refmap` mapping ref numbers to CSS selectors
+- **Browser** (`browser/`) — Playwright-based automation using semantic DOM snapshots (not screenshots). One `page.evaluate` walks the visible DOM and stamps `data-paw-ref="N"` on interactive elements; `BrowserDriver` returns `NavigationResult` with a `refmap` mapping ref numbers to those CSS selectors. Playwright's `page.accessibility` API — which this used until 2026-09-06 — no longer exists
 - **Security** (`security/`) — Guardian AI (secondary LLM safety check) + append-only audit log (`~/.pocketpaw/audit.jsonl`)
 - **Tools** (`tools/`) — `ToolProtocol` with `ToolDefinition` supporting both Anthropic and OpenAI schema export. Built-in tools in `tools/builtin/`
 - **Bootstrap** (`bootstrap/`) — `AgentContextBuilder` assembles the system prompt from identity, memory, and current state

@@ -111,6 +111,11 @@
 # SURFACE profile denies only the BUILT-IN tools the MCP cap cannot reach —
 # ``_CODE_BUILTIN_DENY`` (backend-disk tools + ``Agent``) and ``_CODE_SKILL_DENY``
 # (``Skill``), both KEPT unchanged.
+#
+# Changes: 2026-09-06 (BR-2, feat/browser-surface-preamble) — the BROWSER row
+# points at its own ``handlers/browser.build_preamble`` instead of the GENERIC
+# placeholder BR-1 parked there. The profile (``_browser_profile``, ripple
+# "trim" + the browser tool allow-list) is unchanged.
 
 from __future__ import annotations
 
@@ -128,6 +133,7 @@ from pocketpaw_ee.cloud.surface.handlers import (
     activity,
     audit,
     belt,
+    browser,
     calendar,
     code,
     concierge,
@@ -394,6 +400,11 @@ class _McpToolIds(NamedTuple):
     # break when a NEW surface adds an allow-list. ``None`` is the degrade value
     # (no MCP restriction), which is the safe direction to default toward.
     ship_allow: frozenset[str] | None = None
+    # /browser — the agentic-browser tools, used as the BROWSER surface's ALLOW.
+    # The matching DENY on every other surface does NOT read this field; it goes
+    # through ``browser_tool_ids()``, which loads the ids on its own. See that
+    # function for why the two must not share an import fate.
+    browser_allow: frozenset[str] | None = None
 
 
 # Built lazily + memoized: pulling the EE mcp-server tool-id constants at module
@@ -414,6 +425,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
     logger = logging.getLogger(__name__)
     try:
         from pocketpaw_ee.agent.mcp_servers.ask import ASK_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
@@ -461,6 +473,9 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             # service. Unlike belt's gate id, SHIP_TOOL_IDS IS importable here, so
             # it rides the same try/except None-degrade path as the others.
             ship_allow=frozenset(SHIP_TOOL_IDS),
+            # /browser scopes to the agentic-browser verbs. Crossed over as a
+            # plain frozenset[str] — no pocketpaw_ee symbol leaks into OSS.
+            browser_allow=frozenset(BROWSER_TOOL_IDS),
         )
     except Exception:  # noqa: BLE001 — degrade to no restriction, never break chat
         logger.warning(
@@ -474,6 +489,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             studio_allow=None,
             belt_allow=None,
             ship_allow=None,
+            browser_allow=None,
         )
 
 
@@ -482,6 +498,52 @@ def _mcp_tool_ids() -> _McpToolIds:
     if _MCP_TOOL_IDS_CACHE is None:
         _MCP_TOOL_IDS_CACHE = _load_mcp_tool_ids()
     return _MCP_TOOL_IDS_CACHE
+
+
+# Loaded and memoized SEPARATELY from ``_mcp_tool_ids()`` — see
+# ``browser_tool_ids``. ``False`` is not a valid cached value, so a plain
+# ``None``-means-unset sentinel is enough.
+_BROWSER_TOOL_IDS_CACHE: frozenset[str] | None = None
+
+
+def browser_tool_ids() -> frozenset[str]:
+    """The agentic-browser MCP tool ids, or an empty set if THEIR import failed.
+
+    Read by ``service.resolve_profile`` to DENY these ids on every non-browser
+    surface, which makes this the one tool-id loader whose degrade path opens a
+    hole instead of closing one. It therefore imports on its OWN, and is NOT
+    served from ``_mcp_tool_ids()``.
+
+    Why that matters: ``_load_mcp_tool_ids`` wraps ten sibling imports in a
+    single ``try/except Exception``. Sharing it would mean an unrelated module
+    (palette, stock_images, icons, ...) failing to import empties this set and
+    silently turns the deny into a no-op — while ``CloudBrowserMcpProvider``,
+    which imports ``mcp_servers.browser`` on its own independent path, still
+    registers the server. Net effect: the browser becomes reachable from /chat,
+    beside the send-capable connector tools, behind nothing but a warning log.
+    That was a real fail-open (verified by simulating a palette ImportError),
+    not a theoretical one.
+
+    Loading here means the ONLY failure that empties this set is a failure of
+    ``mcp_servers.browser`` itself — which also breaks ``build_browser_server``,
+    so no browser tools exist to reach and the empty deny is genuinely safe.
+    """
+    global _BROWSER_TOOL_IDS_CACHE
+    if _BROWSER_TOOL_IDS_CACHE is None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
+
+            _BROWSER_TOOL_IDS_CACHE = frozenset(BROWSER_TOOL_IDS)
+        except Exception:  # noqa: BLE001 — the server cannot have loaded either
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "surface: could not load browser tool ids; browser deny disabled "
+                "(the browser MCP server cannot have loaded either)",
+                exc_info=True,
+            )
+            _BROWSER_TOOL_IDS_CACHE = frozenset()
+    return _BROWSER_TOOL_IDS_CACHE
 
 
 # --- Per-row profile resolvers -------------------------------------------------
@@ -516,6 +578,28 @@ def _studio_profile(_meta: SurfaceMeta) -> SurfaceProfile:
         ripple_mode="off",
         allow_mcp_tool_ids=_mcp_tool_ids().studio_allow,
         skill_names=frozenset({"studio"}),
+    )
+
+
+def _browser_profile(_meta: SurfaceMeta) -> SurfaceProfile:
+    # Browser: drive a real browser from chat. Ripple OFF, same as /studio.
+    # It shipped as "trim", but "trim" is declared and never consumed
+    # (``agent_service`` only checks ``== "off"``), so the agent received the
+    # FULL inline ripple LAW — whose first rule is "default to ui-spec" — and
+    # answered a comparison as an inline ```ui-spec``` block in the chat rail.
+    # No pocket was created, no ``pocket_created`` fired, and the canvas stayed
+    # on its empty state (live smoke, 2026-09-06). With the LAW off, the
+    # /browser preamble owns the output shape: prose in chat, and a REAL pocket
+    # via ``mcp__pocketpaw_pocket_specialist__create`` (still granted — the
+    # pocket-creation grant is a tool grant, independent of the prompt) whose
+    # persist path pushes ``pocket_created``, which is what the route listens
+    # for. The MCP allow-list is the browser verbs; every OTHER surface gets
+    # these same ids as a DENY (applied centrally in ``service.resolve_profile``),
+    # which is the half that makes the scoping a boundary rather than a
+    # preference.
+    return SurfaceProfile(
+        ripple_mode="off",
+        allow_mcp_tool_ids=_mcp_tool_ids().browser_allow,
     )
 
 
@@ -843,6 +927,12 @@ SURFACES: list[SurfaceSpec] = [
         _route_for(SurfaceKind.CONCIERGE),
         concierge.build_preamble,
         profile_resolver=_concierge_profile,
+    ),
+    SurfaceSpec(
+        SurfaceKind.BROWSER,
+        _route_for(SurfaceKind.BROWSER),
+        browser.build_preamble,
+        profile_resolver=_browser_profile,
     ),
     SurfaceSpec(SurfaceKind.GENERIC, _route_for(SurfaceKind.GENERIC), generic.build_preamble),
 ]
