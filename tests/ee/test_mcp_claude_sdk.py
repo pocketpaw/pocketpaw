@@ -93,6 +93,7 @@ from unittest.mock import patch
 
 from pocketpaw_ee.agent.mcp_servers.ask import SERVER_NAME as _ASK_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.belt import SERVER_NAME as _BELT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.browser import SERVER_NAME as _BROWSER_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.code import SERVER_NAME as _CODE_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.connectors import SERVER_NAME as _CONNECTORS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.daytona import SERVER_NAME as _DAYTONA_MCP_SERVER_NAME
@@ -102,7 +103,6 @@ from pocketpaw_ee.agent.mcp_servers.external_actions import (
 )
 from pocketpaw_ee.agent.mcp_servers.fabric import SERVER_NAME as _FABRIC_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
-from pocketpaw_ee.agent.mcp_servers.browser import SERVER_NAME as _BROWSER_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.growth import SERVER_NAME as _GROWTH_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.icons import SERVER_NAME as _ICONS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.instinct import SERVER_NAME as _INSTINCT_MCP_SERVER_NAME
