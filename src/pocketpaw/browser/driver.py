@@ -1,4 +1,7 @@
 # Playwright browser driver wrapper
+# Changes: 2026-09-06 (BR-4, feat/browser-surface-extract) — added
+#   ``content_html()``: the page's rendered HTML, which the EE ``extract`` tool
+#   converts to markdown for READING. Snapshots stay the acting surface.
 # Changes: 2026-09-06 (BR-1, feat/browser-surface-server) — three changes:
 #   1. ``_take_snapshot`` runs ``page.evaluate(SNAPSHOT_JS)`` instead of
 #      ``page.accessibility.snapshot()``. Playwright REMOVED ``page.accessibility``
@@ -478,6 +481,15 @@ class BrowserDriver:
         agent, and writing into a shared server's cwd is not a thing to do.
         """
         return await self._require_page().screenshot()
+
+    async def content_html(self) -> str:
+        """The current page's rendered HTML (post-JS), for READING.
+
+        A snapshot is for clicking — it carries ``[ref=N]`` markers and the
+        structural noise that goes with them. The EE ``extract`` tool converts
+        this HTML to markdown instead, which is far cheaper per page of prose.
+        """
+        return await self._require_page().content()
 
 
 __all__ = ["BrowserDriver", "NavigationResult"]

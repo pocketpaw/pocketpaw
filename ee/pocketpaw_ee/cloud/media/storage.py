@@ -17,9 +17,17 @@
 # report a meaningful ``modified``.
 #
 # Created 2026-08-17 (studio-media-s3): new storage module.
+# Updated 2026-09-06 (BR-4, feat/browser-surface-extract): ``save_generated``
+# takes a ``name_prefix`` so a /browser screenshot lands as
+# "browser-<owner-token>-<ms>-<uuid>.png". The token is the ONLY place a
+# capture carries its tenant (the serve route rejects slashes, so a
+# per-workspace subdirectory would have no URL); ``router.serve_media``
+# enforces it and the gallery listings skip captures entirely.
 
 from __future__ import annotations
 
+import hashlib
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -60,15 +68,52 @@ async def bytes_stream(data: bytes) -> AsyncIterator[bytes]:
     yield data
 
 
-async def save_generated(data: bytes, *, mime: str, ext: str = "png") -> str:
+# --- Browser captures (BR-4) --------------------------------------------------
+# A /browser screenshot is stored through the SAME adapter and served by the
+# SAME ``/api/v1/media/<name>`` route as a studio generation — but it belongs to
+# ONE workspace, and the route refuses any name containing a slash
+# (``serve_media``'s traversal guard), so a ``generated/<workspace>/<file>`` key
+# would have no URL at all. The owner therefore travels in the FILENAME as an
+# opaque digest, and ``router.serve_media`` refuses a capture whose token does
+# not match the caller's workspace. The digest — not the raw id — keeps the
+# tenant id out of a URL that ends up in an image widget.
+CAPTURE_PREFIX = "browser-"
+# The token shape is checked, not just the prefix: an upload named
+# "browser-screenshot.png" is a user's file, not a capture, and treating it as
+# one would hide it from the gallery AND 404 it for everybody.
+_CAPTURE_TOKEN_RE = re.compile(r"[0-9a-f]{16}\Z")
+
+
+def capture_owner_token(workspace_id: str) -> str:
+    """Opaque, stable per-workspace token baked into a capture's filename."""
+    return hashlib.sha256(f"pawbrowser:{workspace_id}".encode()).hexdigest()[:16]
+
+
+def capture_name_prefix(workspace_id: str) -> str:
+    """Filename prefix marking a capture as owned by ``workspace_id``."""
+    return f"{CAPTURE_PREFIX}{capture_owner_token(workspace_id)}-"
+
+
+def capture_owner_of(name: str) -> str | None:
+    """The owner token in a capture filename, or None when it is not a capture."""
+    if not name.startswith(CAPTURE_PREFIX):
+        return None
+    token = name[len(CAPTURE_PREFIX) :].split("-", 1)[0]
+    return token if _CAPTURE_TOKEN_RE.match(token) else None
+
+
+async def save_generated(data: bytes, *, mime: str, ext: str = "png", name_prefix: str = "") -> str:
     """Persist a freshly generated blob (image / audio / …) through the media
     adapter and return its backend-relative ``/api/v1/media/<name>`` URL.
 
     The name carries a unix-ms prefix so a remote listing can sort newest-first
     and report ``modified``. Used by BOTH the direct /studio path and the
     agent-side media MCP so every generated asset lands on the configured
-    storage (local disk in dev, S3 in a POCKETPAW_UPLOAD_ADAPTER=s3 deploy)."""
-    name = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}.{ext.lstrip('.')}"
+    storage (local disk in dev, S3 in a POCKETPAW_UPLOAD_ADAPTER=s3 deploy).
+
+    ``name_prefix`` prepends to that name — /browser captures use
+    ``capture_name_prefix(workspace_id)`` so the file carries its owner."""
+    name = f"{name_prefix}{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}.{ext.lstrip('.')}"
     await get_adapter().put(media_key(name), bytes_stream(data), mime)
     return f"/api/v1/media/{name}"
 
@@ -91,12 +136,16 @@ def local_generated_dir() -> Path | None:
 
 
 __all__ = [
+    "CAPTURE_PREFIX",
     "MEDIA_ROOT",
     "MEDIA_KEY_PREFIX",
     "media_key",
     "name_from_key",
     "modified_from_name",
     "bytes_stream",
+    "capture_name_prefix",
+    "capture_owner_of",
+    "capture_owner_token",
     "save_generated",
     "get_adapter",
     "local_generated_dir",
