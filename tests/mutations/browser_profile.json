@@ -1,0 +1,76 @@
+[
+  {
+    "label": "persistent context stops blocking service workers",
+    "file": "src/pocketpaw/browser/driver.py",
+    "find": "        \"service_workers\": \"block\",",
+    "replace": "",
+    "tests": [
+      "tests/test_browser/test_profile.py::test_persistent_launch_keeps_the_ssrf_guard_and_blocks_service_workers"
+    ]
+  },
+  {
+    "label": "persistent context stops installing the SSRF route guard",
+    "file": "src/pocketpaw/browser/driver.py",
+    "find": "        await self._context.route(\"**/*\", self._ssrf_route)",
+    "replace": "        pass",
+    "tests": [
+      "tests/test_browser/test_profile.py::test_persistent_launch_keeps_the_ssrf_guard_and_blocks_service_workers"
+    ]
+  },
+  {
+    "label": "the summary starts carrying a cookie value",
+    "file": "src/pocketpaw/browser/profile.py",
+    "find": "        \"cookie_count\": len(state[\"cookies\"]),",
+    "replace": "        \"cookie_count\": len(state[\"cookies\"]),\n        \"first_value\": state[\"cookies\"][0][\"value\"],",
+    "tests": [
+      "tests/test_browser/test_profile.py::test_summary_carries_counts_and_never_a_cookie_value",
+      "tests/cloud/test_browser_storage_state_router.py::test_import_then_read_back_counts_only"
+    ]
+  },
+  {
+    "label": "GET drops its admin guard",
+    "file": "ee/pocketpaw_ee/cloud/browser/router.py",
+    "find": "    workspace_id: str,\n    _admin=Depends(require_action(\"workspace.update\")),\n) -> dict:\n    \"\"\"Counts, domains and an import timestamp. NEVER a cookie value.\"\"\"",
+    "replace": "    workspace_id: str,\n) -> dict:\n    \"\"\"Counts, domains and an import timestamp. NEVER a cookie value.\"\"\"",
+    "tests": [
+      "tests/cloud/test_browser_storage_state_router.py::test_one_workspace_cannot_touch_anothers_state"
+    ]
+  },
+  {
+    "label": "a bare TLD cookie domain is accepted",
+    "file": "src/pocketpaw/browser/profile.py",
+    "find": "    if len(domain.split(\".\")) < 2 or domain.startswith(\".\") or domain.endswith(\".\"):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/test_browser/test_profile.py::test_a_hostile_import_is_refused",
+      "tests/cloud/test_browser_storage_state_router.py::test_a_hostile_import_is_refused_and_writes_nothing"
+    ]
+  },
+  {
+    "label": "the state file loses BOTH its private-mode create and its chmod",
+    "file": "src/pocketpaw/browser/profile.py",
+    "find": "    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)\n    try:\n        os.write(fd, payload)\n    finally:\n        os.close(fd)\n    os.replace(tmp, path)\n    _chmod(path, 0o600)",
+    "replace": "    path.write_bytes(payload)",
+    "tests": [
+      "tests/test_browser/test_profile.py::test_state_file_is_owner_only"
+    ]
+  },
+  {
+    "label": "a traversal-shaped workspace id reaches the filesystem",
+    "file": "src/pocketpaw/browser/profile.py",
+    "find": "    if not isinstance(workspace_id, str) or not _WORKSPACE_ID_RE.match(workspace_id):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/test_browser/test_profile.py::test_a_traversal_shaped_workspace_id_is_refused"
+    ]
+  },
+  {
+    "label": "the session stops re-applying the imported state",
+    "file": "src/pocketpaw/browser/session.py",
+    "find": "                if state is not None:\n                    await driver.apply_storage_state(state)",
+    "replace": "                if state is None:\n                    await driver.apply_storage_state(state)",
+    "tests": [
+      "tests/test_browser/test_profile.py::test_a_session_launches_on_its_profile_and_reapplies_the_import"
+    ]
+  }
+]

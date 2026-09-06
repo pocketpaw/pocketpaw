@@ -1,4 +1,14 @@
 # Browser session management
+# Changes: 2026-09-06 (BR-5, feat/browser-surface-profile) — a session now gets a
+#   PERSISTENT Chromium profile at ``~/.pocketpaw/browser-profiles/<session_id>``
+#   (0700), and any storage state the user imported for that workspace is
+#   re-applied on every launch.
+#   Why BOTH: the persistent profile keeps long-lived cookies across an idle
+#   close and a container restart, but Chromium DROPS session cookies (no
+#   expiry) when the browser exits — so re-applying the imported snapshot is
+#   what actually makes a logged-in portal work on the next launch.
+#   The imported state is a credential: it is read here, handed straight to the
+#   driver, and never logged, audited, or returned anywhere.
 # Changes: Initial creation with BrowserSession and BrowserSessionManager
 #
 # Manages browser sessions with lifecycle handling, idle cleanup,
@@ -11,6 +21,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from . import profile
 from .driver import BrowserDriver
 
 
@@ -92,9 +103,24 @@ class BrowserSessionManager:
                     await session.driver.close()
                     del self._sessions[session_id]
 
-            # Create new session
+            # Create new session, on this session's own persistent profile.
+            # An unusable session id (not a safe directory name) falls back to a
+            # throwaway non-persistent browser rather than failing the run.
             driver = BrowserDriver(headless=headless)
-            await driver.launch()
+            try:
+                user_data_dir = profile.profile_dir(session_id)
+            except (profile.InvalidStorageState, OSError):
+                user_data_dir = None
+            await driver.launch(user_data_dir=user_data_dir)
+
+            if user_data_dir is not None:
+                # ponytail: re-applies the whole imported snapshot on every
+                # launch, so a session cookie the site has since rotated is
+                # overwritten with the stale imported one. Per-cookie freshness
+                # tracking if that ever bites.
+                state = profile.read_state(session_id)
+                if state is not None:
+                    await driver.apply_storage_state(state)
 
             session = BrowserSession(session_id=session_id, driver=driver)
             self._sessions[session_id] = session

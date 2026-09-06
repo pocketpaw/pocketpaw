@@ -402,6 +402,12 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(media_router, prefix="/api/v1")
     # Direct describe-to-media surface (paw-enterprise /studio): the composer +
     # gallery drive their typed StudioBackend client over these endpoints.
+    # /browser storage-state import — admin-only, per workspace. Lets a user
+    # hand the agent an already-authenticated session so logged-in portals work
+    # without the agent ever seeing a password.
+    from pocketpaw_ee.cloud.browser.router import router as browser_profile_router
+
+    app.include_router(browser_profile_router, prefix="/api/v1")
     from pocketpaw_ee.cloud.studio.router import router as studio_router
 
     app.include_router(studio_router, prefix="/api/v1")

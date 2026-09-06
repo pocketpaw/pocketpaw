@@ -1,4 +1,16 @@
 # Playwright browser driver wrapper
+# Changes: 2026-09-06 (BR-5, feat/browser-surface-profile) — ``launch()`` takes an
+#   optional ``user_data_dir``. With it set, the browser starts via
+#   ``chromium.launch_persistent_context(...)``, which returns a BrowserContext
+#   and NO Browser — so ``self._context`` is now the object the driver keys on
+#   (``is_launched``, ``close``), and ``self._browser`` stays None on that path.
+#   The SSRF ``context.route`` guard and ``service_workers="block"`` are applied
+#   to the context in ONE place for both paths: losing either on the persistent
+#   path would silently delete a security control. Default stays None, so every
+#   existing caller and test behaves exactly as before.
+#   Also ``apply_storage_state()``: installs an imported (user-exported) session
+#   — cookies via ``add_cookies``, localStorage via an init script. The driver
+#   never reads that state from disk; ``session.py`` hands it in.
 # Changes: 2026-09-06 (BR-4, feat/browser-surface-extract) — added
 #   ``content_html()``: the page's rendered HTML, which the EE ``extract`` tool
 #   converts to markdown for READING. Snapshots stay the acting surface.
@@ -34,6 +46,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -48,7 +61,7 @@ from pocketpaw.security.safe_fetch import assert_public_url
 from .snapshot import SNAPSHOT_JS, RefMap, render_snapshot
 
 if TYPE_CHECKING:
-    from playwright.async_api import Browser, Page, Playwright, Route
+    from playwright.async_api import Browser, BrowserContext, Page, Playwright, Route
 
 
 def _in_container() -> bool:
@@ -102,6 +115,9 @@ class BrowserDriver:
         self.headless = headless
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
+        # The context is the object BOTH launch paths produce; a persistent
+        # profile yields a context with no Browser behind it at all.
+        self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._refmap: RefMap = RefMap()
         # host -> allowed? Memoized per driver so a page with dozens of
@@ -130,7 +146,7 @@ class BrowserDriver:
     @property
     def is_launched(self) -> bool:
         """Check if browser is launched and ready."""
-        return self._browser is not None and self._page is not None
+        return self._context is not None and self._page is not None
 
     @property
     def current_url(self) -> str | None:
@@ -139,12 +155,29 @@ class BrowserDriver:
             return None
         return self._page.url
 
-    async def launch(self) -> None:
+    # Options every context gets, whichever way it was launched. Kept in one
+    # place so the persistent path cannot quietly lose the worker block:
+    # ``context.route`` does NOT intercept requests made from inside a Service
+    # Worker, so a page that registers one could fetch a private address
+    # straight past the SSRF guard. (WebSocket traffic is still uncovered —
+    # that needs ``route_web_socket``; a known gap, not fixed here.)
+    CONTEXT_OPTIONS = {
+        "viewport": DEFAULT_VIEWPORT,
+        "service_workers": "block",
+    }
+
+    async def launch(self, user_data_dir: Path | None = None) -> None:
         """Launch the browser.
 
         Tries in order:
         1. System Chrome (no download needed)
         2. Playwright's bundled Chromium (auto-installs if missing)
+
+        Args:
+            user_data_dir: When set, launch a PERSISTENT context rooted at this
+                directory, so cookies and localStorage survive an idle close and
+                a container restart. That call returns a BrowserContext and no
+                Browser, which is why the driver keys on ``self._context``.
         """
         from playwright.async_api import async_playwright
 
@@ -154,50 +187,85 @@ class BrowserDriver:
         # start there. Dev machines keep the sandbox.
         launch_args = ["--no-sandbox"] if _in_container() else []
 
-        # Try system Chrome first (no download needed for users)
-        try:
-            self._browser = await self._playwright.chromium.launch(
-                headless=self.headless,
-                channel="chrome",  # Use system Chrome
-                args=launch_args,
-            )
-            logger.info("Using system Chrome")
-        except Exception as e:
-            logger.debug(f"System Chrome not available: {e}")
-            # Fall back to Playwright's Chromium
-            try:
-                self._browser = await self._playwright.chromium.launch(
-                    headless=self.headless, args=launch_args
-                )
-                logger.info("Using Playwright Chromium")
-            except Exception as install_error:
-                # Chromium not installed - auto-install it
-                if "Executable doesn't exist" in str(install_error):
-                    logger.info("Installing Chromium browser (one-time download)...")
-                    await self._install_chromium()
-                    # Try again after install
-                    self._browser = await self._playwright.chromium.launch(
-                        headless=self.headless, args=launch_args
-                    )
-                    logger.info("Using Playwright Chromium (freshly installed)")
-                else:
-                    raise
+        if user_data_dir is not None:
+            # A container killed mid-run leaves Chromium's singleton locks
+            # behind and the next launch refuses with "profile in use". They are
+            # stale by definition here — one browser per profile.
+            for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+                Path(user_data_dir, lock).unlink(missing_ok=True)
 
-        context = await self._browser.new_context(
-            viewport=self.DEFAULT_VIEWPORT,
-            # ``context.route`` does NOT intercept requests made from inside a
-            # Service Worker, so a page that registers one could fetch a private
-            # address straight past the guard below. Blocking workers closes that
-            # bypass. (WebSocket traffic is still uncovered — that needs
-            # ``route_web_socket``; named as a known gap, not fixed here.)
-            service_workers="block",
-        )
+            def _launch(**kw):
+                return self._playwright.chromium.launch_persistent_context(
+                    str(user_data_dir), **kw, **self.CONTEXT_OPTIONS
+                )
+
+            self._context = await self._launch_with_fallback(_launch, launch_args)
+        else:
+
+            def _launch(**kw):
+                return self._playwright.chromium.launch(**kw)
+
+            self._browser = await self._launch_with_fallback(_launch, launch_args)
+            self._context = await self._browser.new_context(**self.CONTEXT_OPTIONS)
+
         # SSRF at the REQUEST level: every request Chromium makes — top-level
         # navigation, redirect hop, subresource, JS fetch — is checked before it
         # leaves. A URL that resolves to a private / loopback / link-local /
         # metadata address is aborted.
-        await context.route("**/*", self._ssrf_route)
-        self._page = await context.new_page()
+        await self._context.route("**/*", self._ssrf_route)
+        # A persistent context opens with a blank page already; reuse it rather
+        # than leaving an orphan tab behind.
+        pages = self._context.pages
+        self._page = pages[0] if pages else await self._context.new_page()
+
+    async def _launch_with_fallback(self, launch, launch_args: list[str]):
+        """Run ``launch`` against system Chrome, then bundled Chromium, then a
+        freshly installed Chromium. One ladder, both launch modes."""
+        try:
+            result = await launch(headless=self.headless, channel="chrome", args=launch_args)
+            logger.info("Using system Chrome")
+            return result
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"System Chrome not available: {e}")
+
+        try:
+            result = await launch(headless=self.headless, args=launch_args)
+            logger.info("Using Playwright Chromium")
+            return result
+        except Exception as install_error:
+            if "Executable doesn't exist" not in str(install_error):
+                raise
+        logger.info("Installing Chromium browser (one-time download)...")
+        await self._install_chromium()
+        result = await launch(headless=self.headless, args=launch_args)
+        logger.info("Using Playwright Chromium (freshly installed)")
+        return result
+
+    async def apply_storage_state(self, state: dict) -> None:
+        """Install an imported, already-authenticated session on this context.
+
+        Cookies go in directly. localStorage cannot be written without a page on
+        the origin, so it is replayed by an init script that runs before any
+        page script on a matching origin.
+
+        The argument is a CREDENTIAL. It is never logged here and never leaves
+        this call.
+        """
+        if self._context is None:
+            raise RuntimeError("Browser not launched. Call launch() first.")
+        cookies = state.get("cookies") or []
+        if cookies:
+            await self._context.add_cookies(cookies)
+        origins = state.get("origins") or []
+        if origins:
+            by_origin = json.dumps({o["origin"]: o["localStorage"] for o in origins})
+            script = (
+                f"(() => {{ const byOrigin = {by_origin};"
+                " const items = byOrigin[window.location.origin]; if (!items) return;"
+                " try { for (const it of items) window.localStorage.setItem(it.name, it.value); }"
+                " catch (e) {} })()"
+            )
+            await self._context.add_init_script(script)
 
     async def _ssrf_route(self, route: Route) -> None:
         """Abort any request whose host does not resolve to a public address."""
@@ -256,6 +324,14 @@ class BrowserDriver:
 
     async def close(self) -> None:
         """Close the browser and cleanup resources."""
+        # Persistent path: the context IS the browser, and closing it is what
+        # flushes cookies to the profile directory.
+        if self._context is not None:
+            try:
+                await self._context.close()
+            except Exception:  # noqa: BLE001 — already gone is fine
+                logger.debug("browser context close failed", exc_info=True)
+            self._context = None
         if self._browser is not None:
             await self._browser.close()
             self._browser = None

@@ -378,7 +378,9 @@ class TestBrowserDriverProperties:
         driver = BrowserDriver()
         assert driver.is_launched is False
 
-        driver._browser = MagicMock()
+        # BR-5: keyed on the CONTEXT, not the Browser — a persistent profile
+        # launches a context with no Browser object behind it at all.
+        driver._context = MagicMock()
         driver._page = MagicMock()
         assert driver.is_launched is True
 

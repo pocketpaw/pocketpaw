@@ -63,6 +63,11 @@ services:
     volumes:
       # App state (config, the persisted auth_secret, access token). The
       # entrypoint writes the generated AUTH_SECRET here so it survives restarts.
+      # Also holds browser-profiles/<workspace_id>/ — the /browser surface's
+      # per-workspace Chromium profile and the session a user imported for it.
+      # That import is what makes a logged-in portal reachable, so it must
+      # survive a container replace: this volume is why it does. Do NOT mount a
+      # second volume inside this path for it.
       - pocketpaw-data:/home/pocketpaw/.pocketpaw
       # Agent-created files — accessible at ./workspace/ on the host.
       - ./workspace:/home/pocketpaw/workspace

@@ -3597,3 +3597,69 @@ not compiled.
   "scope": "workspace:w1"
 }
 ```
+
+---
+
+## Browser — Import a Signed-In Session (`/browser` surface)
+
+The `/browser` agent is forbidden from typing passwords — the `type` tool
+refuses password, one-time-code and payment-card fields in code — and the user
+cannot see the server-side browser to sign in by hand. So a logged-in portal is
+reached the only safe way left: the user exports their **own** already
+authenticated session from the browser they are signed in on, and imports it
+here once. The agent never sees a password, only a session that is already
+authenticated.
+
+The imported state is a **credential**. It is stored `0600` inside the
+workspace's own `0700` profile directory (`~/.pocketpaw/browser-profiles/
+<workspace_id>/storage_state.json`), it is never returned by any endpoint, never
+logged, and never reachable through an MCP tool.
+
+All three verbs are admin-only and scoped to the path workspace
+(`require_action("workspace.update")`).
+
+### `PUT /api/v1/workspaces/{workspace_id}/browser/storage-state`
+
+Body is either a Playwright `storage_state` object or a plain cookie-export
+array (Cookie-Editor / EditThisCookie style — `expirationDate` and lowercase
+`sameSite` values are normalized):
+
+```json
+{
+  "cookies": [
+    {"name": "session", "value": "…", "domain": "portal.example.com", "path": "/"}
+  ],
+  "origins": [
+    {"origin": "https://portal.example.com",
+     "localStorage": [{"name": "token", "value": "…"}]}
+  ]
+}
+```
+
+Validated before anything is written, so a malformed or hostile file leaves no
+trace: max 512 KB, 500 cookies, 100 origins; a cookie domain must be
+registrable (`.com` is refused); unknown keys are dropped rather than passed to
+the browser. A failure returns `422` with a message naming the offending field
+and index — never its value.
+
+Returns the same body as `GET`. Any live browser for the workspace is closed
+first so the next run picks the new session up.
+
+### `GET /api/v1/workspaces/{workspace_id}/browser/storage-state`
+
+Counts only. `404` when nothing has been imported.
+
+```json
+{
+  "cookie_count": 42,
+  "domains": ["portal.example.com"],
+  "origin_count": 1,
+  "imported_at": "2026-09-06T10:00:00+00:00"
+}
+```
+
+### `DELETE /api/v1/workspaces/{workspace_id}/browser/storage-state`
+
+`204`. Closes the live browser, then removes the whole profile directory —
+deleting only the JSON would leave the cookies Chromium has already persisted
+inside the profile.
