@@ -760,11 +760,14 @@ class Settings(BaseSettings):
         default=False,
         description=(
             "Emit OpenTelemetry spans for Pydantic AI agent runs (model "
-            "requests, tool calls, token usage, time to first chunk). Calls "
-            "``logfire.configure`` once per process with "
-            "``send_to_logfire='if-token-present'``, so without a LOGFIRE_TOKEN "
-            "the spans stay local and reach whatever OTel exporter is already "
-            "configured. Off by default. Cheap since pydantic-ai 2.17.0, which "
+            "requests, tool calls, token usage, time to first chunk). Logfire "
+            "is configured at startup with ``send_to_logfire='if-token-present'``, "
+            "so this is safe to enable on a deployment with no Logfire account. "
+            "Be clear about where the spans then go: NOWHERE. Without a "
+            "LOGFIRE_TOKEN or an OTEL_EXPORTER_OTLP_ENDPOINT the span processor "
+            "list is empty, and the spans are still built and serialized before "
+            "being dropped, so this is not free. Off by default. Cheap since "
+            "pydantic-ai 2.17.0, which "
             "caches per-message span serialization — before that it was O(n^2) "
             "over a run's history and a long tool loop paid for it."
         ),

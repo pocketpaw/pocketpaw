@@ -191,11 +191,32 @@ pydantic-ai = [
     "pydantic-ai-skills==1.3.0",
     # Observability. Pydantic's own OpenTelemetry platform, and the thing that
     # turns "the model feels slow" into a span with a number on it. Optional at
-    # runtime: the Instrumentation capability is only wired when a token is
-    # configured, so an install that never sets one pays nothing. Ranged rather
-    # than pinned because it is a 4.x line on a normal cadence, unlike the
-    # pre-1.0-shaped packages above.
-    "logfire>=4.39.0,<5",
+    # runtime: nothing is configured unless POCKETPAW_LOGFIRE_ENABLED is set, so
+    # an install that never sets it pays nothing. Ranged rather than pinned
+    # because it is a 4.x line on a normal cadence, unlike the pre-1.0-shaped
+    # packages above.
+    #
+    # THE EXTRAS ARE THE INSTRUMENTORS. Each one is a thin
+    # `opentelemetry-instrumentation-*` package that logfire dispatches to;
+    # without it `logfire.instrument_fastapi()` raises at runtime telling you to
+    # install exactly this. They are declared HERE rather than in an extra of
+    # their own so there is one logfire version spec in this file: `[all]`
+    # already self-references `pocketpaw[pydantic-ai]` for the same reason, and
+    # the deployed image builds from `[all]`.
+    #
+    # Which ones and why: fastapi is a span per request with its route and
+    # status; httpx is the whole outbound surface, so a slow model call and a
+    # slow sandbox stop reading identically; redis is the arq queues and the run
+    # stream; pymongo covers Mongo under motor and beanie; system-metrics is the
+    # container's own CPU, memory and disk, which is what answers "was it the
+    # code or the box". Every instrumentor is inert until something calls it, so
+    # an install that never enables Logfire carries a few hundred KB of unused
+    # pure Python and nothing else.
+    #
+    # NOT included: sqlite3 and sqlalchemy. Fabric, Instinct, the audit log and
+    # the ledger all run on SQLite, and a span per statement would dominate the
+    # bill for little over the operation span already wrapping them.
+    "logfire[fastapi,httpx,redis,pymongo,system-metrics]>=4.39.0,<5",
 ]
 pydantic-ai-evals = [
     # Evaluation harness, kept OUT of the runtime extra on purpose: it is a
