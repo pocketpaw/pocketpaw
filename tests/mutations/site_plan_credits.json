@@ -166,7 +166,7 @@
   {
     "label": "a republish carrying no plan key is read as a downgrade to free",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    tier_change_requested = (\n        already_paying\n        and requested_tier is not None\n        and _held_tier_key != requested_tier.key\n    )",
+    "find": "    tier_change_requested = (\n        already_paying and requested_tier is not None and _held_tier_key != requested_tier.key\n    )",
     "replace": "    tier_change_requested = (\n        already_paying and tier is not None and _held_tier_key != tier.key\n    )",
     "tests": [
       "tests/cloud/sites/test_credits_tier_changes.py::test_a_republish_without_a_plan_key_never_downgrades"
