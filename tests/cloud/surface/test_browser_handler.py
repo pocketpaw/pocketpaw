@@ -149,3 +149,26 @@ async def test_preamble_tells_the_agent_to_make_result_rows_clickable():
     rendered = (await browser.build_preamble("w1", "u1", SurfaceMeta(route_path="/browser"))).text
     assert 'href: "url"' in rendered
     assert "never as visible text" in rendered
+
+
+async def test_preamble_routes_cheap_queries_to_search_before_the_browser():
+    """Hybrid routing (captain, 2026-09-06): the browser is powerful but slow, so
+    the preamble must send public facts to WebSearch and static pages to WebFetch,
+    and reserve the real browser for JS-rendered / logged-in / interactive pages.
+    Without this the agent spins up Chromium for a question search answers in
+    seconds — the "silly and slow" demo the captain hit.
+
+    THE MUTATION THAT BREAKS THIS: drop the ladder and go straight to the browser
+    tools.
+    """
+    from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+    from pocketpaw_ee.cloud.surface.handlers import browser
+
+    rendered = (await browser.build_preamble("w1", "u1", SurfaceMeta(route_path="/browser"))).text
+    assert "WebSearch" in rendered
+    assert "WebFetch" in rendered
+    # The browser is explicitly the last resort, gated on a real need.
+    assert "last resort" in rendered
+    assert "behind a login" in rendered
+    # And the agent reports which path it took.
+    assert "which path you took" in rendered

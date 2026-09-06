@@ -24,6 +24,12 @@
 # rule is doubled — ``type`` refuses password / card / OTP fields in code, and
 # the preamble tells the agent so, so it never burns a turn discovering it.
 #
+# 2026-09-06 (hybrid routing): the procedure now opens with a cheapest-tool-first
+# ladder — WebSearch for public facts, WebFetch for a static page's content, and
+# the real (slow) browser only when JS-rendering, a login, interaction, or a
+# screenshot actually requires it. WebSearch/WebFetch are SDK builtins the surface
+# never denied (see surface_registry), so this is prompt-only; it stops the agent
+# spinning up Chromium for a question a search answers in seconds.
 # 2026-09-06 (BR-4, feat/browser-surface-extract): two corrections the tools
 # earned. ``extract`` exists now, so the procedure says READ with extract and ACT
 # with snapshot — the token win only lands if the agent knows which is which. And
@@ -58,6 +64,28 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "'have a look'. Report what you FOUND, not what you clicked.\n"
         "</browser-orientation>\n"
         "<browser-procedure>\n"
+        "CHOOSE THE CHEAPEST TOOL THAT ANSWERS THE REQUEST — the real "
+        "browser is powerful and SLOW (a Chromium session, many round "
+        "trips), so it is the last resort, not the reflex:\n"
+        "1. A public fact, a definition, a comparison of well-known "
+        "things, anything you would normally look up — use `WebSearch`. "
+        "One call, seconds.\n"
+        "2. A specific page whose CONTENT you need and that serves plain "
+        "HTML (an article, docs, a blog post) — use `WebFetch` with its "
+        "URL. Still one call, no browser.\n"
+        "3. Drive the real browser (the `mcp__pocketpaw_browser__*` "
+        "tools below) ONLY when the task actually needs it: the page "
+        "renders its content with JavaScript so a fetch comes back "
+        "empty, it sits behind a login the workspace holds, you must "
+        "click / type / scroll to reach what was asked, or the user "
+        "wants a screenshot of the page. Logged-in portals, dashboards, "
+        "and anything with no API are exactly this case — the reason "
+        "this surface exists.\n"
+        "Say in one line which path you took ('searched the web', "
+        "'fetched the page', 'drove the browser') so the user knows why "
+        "an answer was instant or took a moment. When search or fetch "
+        "answers it, you are DONE — do not open the browser to "
+        "double-check.\n"
         "Read a page with `mcp__pocketpaw_browser__snapshot` — it returns the "
         "page's semantic structure with `[ref=N]` markers — and act on it with "
         "`click` / `type`, passing those refs. Refs belong to the LATEST "
