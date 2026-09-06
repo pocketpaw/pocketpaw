@@ -1,5 +1,10 @@
 # browser.py — /browser surface preamble.
 #
+# Updated: 2026-09-06 (landing fix) — the answer section now names the ONE tool
+# that puts a result on the canvas (``mcp__pocketpaw_pocket_specialist__create``)
+# and forbids the inline ```ui-spec``` fence, which rendered in the rail and left
+# the canvas empty in live smoke. Paired with the BROWSER profile going
+# ripple_mode="off" in surface_registry (trim was never consumed).
 # Created: 2026-09-06 (BR-2, feat/browser-surface-preamble) — Orients the chat
 # agent when the user is on the /browser surface, where it drives a real
 # server-side browser through the ``pocketpaw_browser`` MCP tools shipped by
@@ -77,9 +82,16 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "or internal). Do not retry it and do not hunt for a way around it — "
         "tell the user it is blocked. Same for a CAPTCHA or a hard bot-block: "
         "report it and stop. Never attempt to solve or evade one.\n"
-        "Answer in PROSE by default. Emit a Ripple pocket when the result is a "
-        "list, a table, or a comparison. Use only widget types that already "
-        "exist (table, cards, timeline, text, image). A screenshot comes back "
+        "Answer in PROSE by default, in chat. When the result is a list, a "
+        "table, or a comparison, put it on the CANVAS by calling "
+        "`mcp__pocketpaw_pocket_specialist__create` with a short brief that "
+        "names the widget you want (a table, cards) and the actual data — "
+        "that is what creates a pocket the canvas shows. Do NOT write a "
+        "```ui-spec``` fenced block in your reply on this surface: that "
+        "renders inline in the chat rail and never reaches the canvas. Say "
+        "in one line that the result is on the canvas. Use only widget types "
+        "that already exist (table, cards, timeline, text, image). A "
+        "screenshot comes back "
         "to YOU as an image to read AND with a saved image URL in its text "
         "block — put THAT url, verbatim, in an image widget when the look of "
         "the page is the point. Never invent a src. "

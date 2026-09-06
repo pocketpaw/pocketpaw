@@ -73,7 +73,9 @@ async def test_browser_profile_scoping_is_unchanged_by_the_wiring():
     from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
 
     profile = resolve_profile(SurfaceKind.BROWSER, SurfaceMeta())
-    assert profile.ripple_mode == "trim"
+    assert (
+        profile.ripple_mode == "off"
+    )  # trim is declared, never consumed; off is what /studio uses
     assert profile.allow_mcp_tool_ids == frozenset(BROWSER_TOOL_IDS)
     assert not (frozenset(BROWSER_TOOL_IDS) & profile.deny_mcp_tool_ids)
 
@@ -116,3 +118,21 @@ async def test_preamble_routes_reading_to_extract():
     text = await _render()
     assert "mcp__pocketpaw_browser__extract" in text
     assert "truncated" in text
+
+
+async def test_preamble_names_the_pocket_tool_and_bans_the_inline_fence():
+    """Live smoke 2026-09-06: the agent answered a comparison as an inline
+    ```ui-spec``` block in the chat rail. No pocket was created, so the
+    ``pocket_created`` event the /browser route listens for never fired and
+    the canvas stayed on its empty state. The preamble must name the ONE tool
+    whose persist path pushes that event, and forbid the inline fence.
+
+    THE MUTATION THAT BREAKS THIS: replace the tool name with "emit a Ripple
+    pocket", or drop the ui-spec ban.
+    """
+    from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+    from pocketpaw_ee.cloud.surface.handlers import browser
+
+    rendered = (await browser.build_preamble("w1", "u1", SurfaceMeta(route_path="/browser"))).text
+    assert "mcp__pocketpaw_pocket_specialist__create" in rendered
+    assert "Do NOT write a ```ui-spec```" in rendered

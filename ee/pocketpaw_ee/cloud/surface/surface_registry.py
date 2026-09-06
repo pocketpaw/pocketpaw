@@ -582,14 +582,23 @@ def _studio_profile(_meta: SurfaceMeta) -> SurfaceProfile:
 
 
 def _browser_profile(_meta: SurfaceMeta) -> SurfaceProfile:
-    # Browser: drive a real browser from chat. Ripple TRIMMED — the deliverable
-    # is what the agent found on the page, wrapped in a Ripple view, not a
-    # ui-spec dashboard. The MCP allow-list is the browser verbs; every OTHER
-    # surface gets these same ids as a DENY (applied centrally in
-    # ``service.resolve_profile``), which is the half that makes the scoping a
-    # boundary rather than a preference.
+    # Browser: drive a real browser from chat. Ripple OFF, same as /studio.
+    # It shipped as "trim", but "trim" is declared and never consumed
+    # (``agent_service`` only checks ``== "off"``), so the agent received the
+    # FULL inline ripple LAW — whose first rule is "default to ui-spec" — and
+    # answered a comparison as an inline ```ui-spec``` block in the chat rail.
+    # No pocket was created, no ``pocket_created`` fired, and the canvas stayed
+    # on its empty state (live smoke, 2026-09-06). With the LAW off, the
+    # /browser preamble owns the output shape: prose in chat, and a REAL pocket
+    # via ``mcp__pocketpaw_pocket_specialist__create`` (still granted — the
+    # pocket-creation grant is a tool grant, independent of the prompt) whose
+    # persist path pushes ``pocket_created``, which is what the route listens
+    # for. The MCP allow-list is the browser verbs; every OTHER surface gets
+    # these same ids as a DENY (applied centrally in ``service.resolve_profile``),
+    # which is the half that makes the scoping a boundary rather than a
+    # preference.
     return SurfaceProfile(
-        ripple_mode="trim",
+        ripple_mode="off",
         allow_mcp_tool_ids=_mcp_tool_ids().browser_allow,
     )
 
