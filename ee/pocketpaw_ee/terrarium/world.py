@@ -384,8 +384,7 @@ def apply_acts(
                     kind="gate",
                     actor=citizen.name,
                     body=(
-                        f"asked to bring {act.name or 'a child'} into the world "
-                        "— awaiting approval"
+                        f"asked to bring {act.name or 'a child'} into the world — awaiting approval"
                     ),
                     cost=0,
                 )
@@ -406,10 +405,9 @@ def apply_acts(
         )
         balance -= cost
         outcome.balance_delta -= cost
-        if verb == "trade":
-            # Traded credits move citizen→citizen, they do not enter the pool.
-            outcome.pool_delta -= 0
-        else:
+        if verb != "trade":
+            # Spent credits return to the world pool. Traded credits are the
+            # exception: they move citizen → citizen and never touch it.
             outcome.pool_delta += cost
 
     return outcome
