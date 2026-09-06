@@ -391,6 +391,29 @@ class AudienceResolver:
                 return await self._workspace(wid)
             return []
 
+        # --- Terrarium (a universe's journal) ------------------------------------
+        # Workspace-scoped, same rationale as belt_plan: a tick lands
+        # asynchronously and must reach every member watching the universe.
+        # Payload: {workspace_id, universe_id, public, event}.
+        #
+        # TODO(public branch): the contract also wants an ANONYMOUS audience for
+        # a universe with ``public: true`` while ``TERRARIUM_PUBLIC_ENABLED`` is
+        # on. That is NOT added here on purpose. This resolver's entire contract
+        # is "return the user_ids that should receive it", and the websocket
+        # transport authenticates every subscriber — there is no anonymous
+        # subscriber concept to return. A public branch therefore needs a new
+        # broadcast channel (or a pseudo-audience the socket layer understands)
+        # plus an unauthenticated subscribe path, which is a security-boundary
+        # change of its own and wants its own review. The seam is exactly here:
+        # this branch would return that broadcast handle when
+        # ``d.get("public")`` is true. Until then public viewers poll
+        # ``GET /terrarium/public/universes/{id}/events?since=``, which is
+        # already fail-closed on both gates.
+        if t.startswith("world."):
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
         # --- Composio (per-user OAuth identity probes) --------------------------
         if t in {"composio.connection.verified", "composio.connection.mismatch"}:
             if uid := d.get("user_id"):
