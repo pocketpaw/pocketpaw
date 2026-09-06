@@ -65,6 +65,7 @@ def registry(tmp_path, monkeypatch) -> Path:
         _item("aurora-css", "backgrounds", ["gradient", "hero"], "Soft aurora gradient", []),
         _item("paper-waves", "backgrounds", ["waves"], "Flowing waves via paper.js", ["paper"]),
         _item("confetti", "particles", ["celebration", "hero"], "Confetti burst", ["tsparticles"]),
+        _item("popper", "particles", ["burst"], "Pops confetti", ["tsparticles"]),
     ]
     _write_registry(tmp_path, items)
     monkeypatch.setenv("PAW_FX_REGISTRY_DIR", str(tmp_path))
@@ -116,7 +117,8 @@ class TestSearch:
         # both carry the "hero" tag; ties break alphabetically
         assert names == ["aurora-css", "confetti"]
         body = _decode(await fx_mcp._search_handler({"query": "confetti"}))
-        assert body["items"][0]["name"] == "confetti"
+        # exact name beats a summary hit
+        assert [i["name"] for i in body["items"]] == ["confetti", "popper"]
         assert body["items"][0]["preview_url"] is None
         body = _decode(await fx_mcp._search_handler({"query": "nothing-here"}))
         assert body["items"] == []
@@ -132,7 +134,7 @@ class TestSearch:
         assert [i["name"] for i in body["items"]] == ["aurora-css"]
         assert body["items"][0]["preview_url"] == "https://fx.example/gallery#aurora-css"
         body = _decode(await fx_mcp._search_handler({"query": "a", "needs_js": True}))
-        assert {i["name"] for i in body["items"]} == {"paper-waves", "confetti"}
+        assert {i["name"] for i in body["items"]} == {"paper-waves", "confetti", "popper"}
 
     @pytest.mark.asyncio
     async def test_missing_dir_is_empty_not_error(self, tmp_path, monkeypatch, caplog) -> None:
@@ -224,5 +226,5 @@ class TestCategories:
         body = _decode(await fx_mcp._categories_handler({}))
         assert body["categories"] == [
             {"category": "backgrounds", "count": 2},
-            {"category": "particles", "count": 1},
+            {"category": "particles", "count": 2},
         ]

@@ -9,7 +9,7 @@
 # ``html_path_is_referenced``, the first question in this module about REACHABILITY
 # rather than policy: does anything in the site point at that file. It lives here
 # because the answer is html's alone. The react peer resolves import specifiers; an
-# html site imports nothing, so this resolves URL references (href / src / srcset /
+# html site has no module graph to walk, so this resolves URL references (href / src / srcset /
 # poster, CSS url() and @import) against the referring file's directory, and honours
 # the directory-index rule the preview resolver uses. See the section comment above
 # the function for the incident and the three rules that follow from it.

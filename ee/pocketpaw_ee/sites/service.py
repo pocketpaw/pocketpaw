@@ -1,6 +1,9 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-06 (feat/fx-mcp-server): comment only. The html reachability scan
+# now also walks ES module imports, so the "imports nothing" wording below was corrected.
+#
 # Updated 2026-09-04 (AD-4 — the overview chart's data): ``site_analytics`` answers a
 # ``series`` block, the same totals grouped by a time bucket. SEVEN queries per uncached
 # read now, up from six. The bucket is an HOUR for the 24-hour window and a DAY for the
@@ -82,7 +85,7 @@
 # more. An unimported react component is invisible; an unlinked html page is written
 # AND DEPLOYED and simply cannot be navigated to, which is a state an agent can
 # reasonably describe as finished. The QUESTION is shared and the ANSWER is not — an
-# html site imports nothing, so ``html_path_is_referenced`` resolves URL references
+# html site has no module graph to walk, so ``html_path_is_referenced`` resolves URL references
 # instead of module specifiers (see that module's header).
 #
 # Updated 2026-09-01 (fix/sites-react-orphan-create): ``edit_react_component`` now
