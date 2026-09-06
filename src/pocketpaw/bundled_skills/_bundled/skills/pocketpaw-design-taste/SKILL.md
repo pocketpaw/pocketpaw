@@ -1,4 +1,7 @@
 ---
+# Updated 2026-09-06 (feat/fx-skill-amendments): 2.C searches paw-fx before
+# hand-writing a canvas, plus the per-engine rule. Note kept out of the body:
+# sites.py inlines the body into the /sites preamble, so bytes cost tokens.
 name: pocketpaw-design-taste
 description: |
   The SINGLE engine-agnostic 2026 Creative Director system for authoring
@@ -97,10 +100,11 @@ Plain `#fff` or `#000` pages are forbidden. Every page must map a distinct backg
 | **Radial Spotlight** | A massive viewport gradient keeping readable areas lit while the edges darken. |
 
 ### 2.C WebGL & Interactive Canvas
-For "Immersive" richness targets, deploy a canvas background — hand-written, **no library**. A Paw Site's `package.json` is generator-owned and your source map supplies FILES ONLY, so `three`, `ogl`, `threlte`, `gsap` and every other npm import NEVER resolve.
+For "Immersive" richness targets, deploy a canvas background. **Search paw-fx first.** `mcp__pocketpaw_fx__search_effects("<what you want>")` then `get_effect(name)` returns `files` to write verbatim under `_fx/` plus a `snippet` to place: shader backgrounds, 3D heroes, particle fields, scroll, kinetic-text and cursor effects are already built. Hand-written GLSL is the fallback for when nothing fits, not the opening move.
 
+*   **Per engine.** On **html** every effect is available, vendored dependency and all: it serves your source map as assets with no build step, so nothing prunes the script. On **svelte** and **react** the `package.json` is generator-owned, so only dependency-free effects (empty `needs`) are served; pass `needs_js=false` to `search_effects` and keep hand-written GLSL as the fallback there.
 *   **Raw WebGL, ~40 lines.** `canvas.getContext('webgl')`, a pass-through vertex shader and one fragment shader over a full-screen quad (`gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)`), animated from `u_time` / `u_resolution` in a `requestAnimationFrame` loop, buffer capped at 2x DPR and the loop stopped off-screen. That buys what sells: fluid color mixing, noise fields, gradient flow, aurora warping. Scene graphs and particle swarms are what the library bought you; skip them.
-*   *THE CANVAS GUARDRAIL:* Because JS may be disabled, pruned, or slow, the `<canvas>` element MUST sit on top of a highly polished CSS fallback (e.g., a static CSS mesh gradient). The page must look premium *before* the WebGL context ever initializes. A canvas also needs a site that keeps its client bundle (3.E); without that, ship the CSS background alone.
+*   *THE CANVAS GUARDRAIL:* Because JS may be disabled, pruned, or slow, the `<canvas>` element MUST sit on top of a highly polished CSS fallback (e.g., a static CSS mesh gradient). The page must look premium *before* the WebGL context ever initializes. A canvas also needs a site that keeps its client bundle (3.E); without that, ship the CSS background alone. paw-fx effects satisfy it by construction (each ships a CSS-only resting state); a hand-written canvas still owes the fallback.
 
 ### 2.D Typography Pairings 2.0
 Never isolate a single font family. Cycle through distinct display-to-body pairings:

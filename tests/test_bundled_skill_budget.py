@@ -3,6 +3,10 @@
 # size of the one bundled skill that is embedded WHOLE into a system prompt.
 # Nothing else in the repo measures it, so every edit to that file silently
 # changed a per-turn runtime cost.
+# Updated: 2026-09-06 (feat/fx-skill-amendments): ceiling raised 34,000 ->
+# 34,500 so §2.C could teach the paw-fx effects registry instead of claiming
+# libraries never resolve. The argument is in the module docstring; the
+# mutations in tests/mutations/skill_budget.json still trip the new ceiling.
 """``pocketpaw-design-taste/SKILL.md`` stays under a stated byte ceiling.
 
 WHY A SIZE TEST EXISTS FOR ONE MARKDOWN FILE. This skill is not merely
@@ -19,12 +23,23 @@ in this exact class answered a lookup miss with 58,765 chars that did not
 contain the answer. Growth here is not free and it is not visible in review —
 a diff showing "+40 lines of guidance" looks like an improvement.
 
-WHY 34,000 AND NOT THE CURRENT SIZE. The file measured 32,599 before MT-3 and
-32,578 after. A ceiling pinned to the current size fails on the next honest
+WHY A CEILING AND NOT THE CURRENT SIZE. The file measured 32,599 before MT-3
+and 32,578 after. A ceiling pinned to the current size fails on the next honest
 one-line fix, which trains people to bump the constant reflexively and turns
-the gate into a formality. 34,000 leaves roughly 4% of headroom: enough for
-ordinary maintenance, far too little to absorb a new module. Raising it is
-allowed and should be argued for in the commit body, not done in passing.
+the gate into a formality. The original 34,000 left roughly 4% of headroom:
+enough for ordinary maintenance, far too little to absorb a new module. Raising
+it is allowed and should be argued for in the commit body, not done in passing.
+
+RAISED TO 34,500 ON 2026-09-06 (feat/fx-skill-amendments). The file went
+33,050 -> 33,978: the paw-fx effects registry shipped, and §2.C had to stop
+telling the agent that libraries are impossible on every engine. It now sends
+the agent to ``search_effects`` / ``get_effect`` before hand-writing a canvas
+and states the per-engine rule (html serves any effect, vendored dependency and
+all; svelte and react get the dependency-free ones only). That is roughly 930
+bytes of new RULE, not new prose, and it landed 22 bytes under the old ceiling,
+which is the pinned-to-current-size state this docstring warns about. 34,500
+restores about 520 bytes of maintenance headroom while keeping the gate tight
+enough to bite: it is still far too little to absorb another module.
 
 WHAT IT DOES NOT COVER. Only this one skill. The other bundled skills are
 invoked on demand rather than inlined, so their bytes are paid only when used;
@@ -48,7 +63,7 @@ from pocketpaw.bundled_skills.installer import bundled_skills_plugin_dir
 
 # The ceiling, in bytes, for the design-taste skill. See the module docstring
 # for why this number and not the file's current size.
-DESIGN_TASTE_MAX_BYTES = 34_000
+DESIGN_TASTE_MAX_BYTES = 34_500
 
 # A read that returns far less than this is a broken path, not a lean skill.
 # Without it, renaming the skill directory would make every assertion below
