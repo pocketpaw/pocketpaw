@@ -104,6 +104,31 @@ class TestRequestLevelSsrf:
         result = await driver.navigate("https://example.com")
         assert "Example Domain" in result.snapshot
 
+    async def test_session_survives_a_block_from_a_loaded_page(self, driver, egress):
+        """The REAL sequence: land on a page, hit a block, keep browsing.
+
+        ``test_session_survives_a_block`` above starts from the fixture's blank
+        page and passes even when navigate is broken, so it is a false negative.
+        An agent is never on about:blank when it hits a blocked address — it is
+        mid-task on a real page, and that is the case that bricked: Chromium
+        commits its own ``chrome-error://`` page over the LOADED one and that
+        commit interrupts the next goto.
+
+        THE MUTATION THAT BREAKS THIS: drop the pre-check at the top of
+        ``BrowserDriver.navigate`` and let ``context.route`` abort the top-level
+        navigation instead. Verified against the pre-fix driver: this fails with
+        ``interrupted by another navigation to "chrome-error://chromewebdata/"``
+        while the blank-page version above still passes.
+        """
+        first = await driver.navigate("https://example.com")
+        assert "Example Domain" in first.snapshot
+
+        with pytest.raises(Exception):  # noqa: B017
+            await driver.navigate(METADATA_URL)
+
+        again = await driver.navigate("https://example.com")
+        assert "Example Domain" in again.snapshot
+
     async def test_public_host_is_allowed(self, driver, egress):
         """The guard must not block the ordinary case."""
         result = await driver.navigate("https://example.com")
@@ -295,3 +320,62 @@ class TestSurfaceScoping:
                 continue
             profile = resolve_profile(kind, SurfaceMeta())
             assert set(BROWSER_TOOL_IDS) <= profile.deny_mcp_tool_ids, kind
+
+
+# --- Browser deny must not share an import fate with its siblings -------------
+#
+# Regression for a fail-open found in BR-1 spec review (2026-09-06):
+# ``_load_mcp_tool_ids`` wraps ten sibling imports in one try/except, so an
+# unrelated module failing to import emptied the browser id set and silently
+# turned the per-surface DENY into a no-op — while ``CloudBrowserMcpProvider``,
+# which imports the browser module on its own path, still registered the server.
+# The browser became reachable from /chat beside the send-capable connector
+# tools. ``browser_tool_ids()`` now loads independently.
+
+
+# The module sets ``pytestmark = pytest.mark.asyncio``; these two are sync.
+@pytest.fixture
+def _clear_tool_id_caches():
+    """Reset both memo caches around a test that fakes an import failure."""
+    from pocketpaw_ee.cloud.surface import surface_registry as reg
+
+    reg._MCP_TOOL_IDS_CACHE = None
+    reg._BROWSER_TOOL_IDS_CACHE = None
+    yield
+    reg._MCP_TOOL_IDS_CACHE = None
+    reg._BROWSER_TOOL_IDS_CACHE = None
+
+
+def test_unrelated_import_failure_still_denies_browser_off_surface(_clear_tool_id_caches):
+    """An unrelated sibling module breaking must NOT unlock the browser on /chat."""
+    import builtins
+
+    from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
+    from pocketpaw_ee.cloud.surface import surface_registry as reg
+    from pocketpaw_ee.cloud.surface.domain import SurfaceKind, SurfaceMeta
+    from pocketpaw_ee.cloud.surface.service import resolve_profile
+
+    real_import = builtins.__import__
+
+    def _fake_import(name, *args, **kwargs):
+        # A module the browser has nothing to do with.
+        if name == "pocketpaw_ee.agent.mcp_servers.palette":
+            raise ImportError("simulated unrelated breakage")
+        return real_import(name, *args, **kwargs)
+
+    builtins.__import__ = _fake_import
+    try:
+        ids = reg.browser_tool_ids()
+        chat_profile = resolve_profile(SurfaceKind.CHAT, SurfaceMeta())
+        # Sampled INSIDE the patch: the shared block really did degrade, so the
+        # test is exercising the fail-open path and not a healthy one. Read it
+        # after restoring the real import and it just reloads successfully.
+        shared_block_degraded = reg._mcp_tool_ids().loaded is False
+    finally:
+        builtins.__import__ = real_import
+
+    assert shared_block_degraded, "shared import block did not degrade; test proves nothing"
+
+    # ...but the browser ids loaded anyway, and /chat still denies every one.
+    assert ids == frozenset(BROWSER_TOOL_IDS)
+    assert frozenset(BROWSER_TOOL_IDS) <= chat_profile.deny_mcp_tool_ids

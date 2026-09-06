@@ -38,6 +38,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
+
+from pocketpaw.security.safe_fetch import assert_public_url
 
 from .snapshot import SNAPSHOT_JS, RefMap, render_snapshot
 
@@ -312,11 +315,34 @@ class BrowserDriver:
         """
         page = self._require_page()
 
-        # An aborted navigation (the SSRF guard, a dead host) leaves Chromium
-        # loading its own ``chrome-error://`` page, and that in-flight navigation
-        # INTERRUPTS the next goto — so without a retry one blocked URL bricked
-        # the session for every URL after it. One retry is enough: by then the
-        # error page has landed and nothing else is in flight.
+        # Check BEFORE handing the URL to Chromium. The ``context.route`` guard
+        # is still the real boundary — it is the only thing that sees redirect
+        # hops, subresources and JS fetches — but letting it abort a top-level
+        # navigation is self-harm: the abort makes Chromium load its own
+        # ``chrome-error://chromewebdata/`` page, and that navigation is still
+        # committing when the NEXT goto starts, which Playwright reports as
+        # "interrupted by another navigation". One blocked address then bricked
+        # the session for every URL after it. Settling with
+        # ``wait_for_load_state`` does NOT fix it (the error page has already
+        # reached domcontentloaded, so the wait returns while the commit is
+        # in flight) — verified by live smoke, one block was enough.
+        # Refusing here means the common case never reaches the browser at all.
+        from pocketpaw.security.safe_fetch import BlockedURLError, SafeFetchError
+
+        try:
+            await assert_public_url(url)
+        except SafeFetchError as exc:
+            # Record it exactly as ``_ssrf_route`` would have. The pre-check
+            # short-circuits that handler, so without this a caller-visible
+            # block would be missing from ``blocked_hosts`` and the verdict
+            # cache — the same block reported two different ways depending on
+            # which layer caught it.
+            host = urlparse(url).netloc
+            self._host_verdicts[host] = False
+            if host not in self.blocked_hosts:
+                self.blocked_hosts.append(host)
+            raise BlockedURLError(f"Blocked URL: {exc}") from None
+
         try:
             await page.goto(url, wait_until="domcontentloaded")
         except Exception:
@@ -334,9 +360,14 @@ class BrowserDriver:
             # OUR guard is what aborted it, say so — and say so on the SECOND
             # attempt at the same host too, which is why this reads the verdict
             # cache rather than watching ``blocked_hosts`` grow.
-            from urllib.parse import urlparse
-
-            from pocketpaw.security.safe_fetch import BlockedURLError
+            # Still reachable when a PUBLIC url redirects to a private one: the
+            # pre-check above passed, the route guard aborted the redirect hop.
+            # Park on about:blank so the dead error page is not left in flight
+            # to interrupt the next call, then report our own verdict.
+            try:
+                await page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
+            except Exception:  # noqa: BLE001 — best-effort reset
+                logger.debug("could not reset page after a failed navigation", exc_info=True)
 
             if self._host_verdicts.get(urlparse(url).netloc) is False:
                 raise BlockedURLError("Blocked URL: resolved to non-public IP address.") from None

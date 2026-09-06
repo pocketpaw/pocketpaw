@@ -394,12 +394,10 @@ class _McpToolIds(NamedTuple):
     # break when a NEW surface adds an allow-list. ``None`` is the degrade value
     # (no MCP restriction), which is the safe direction to default toward.
     ship_allow: frozenset[str] | None = None
-    # /browser — the agentic-browser tools. UNLIKE every sibling here this set is
-    # ALSO used as a DENY on every other surface (see ``service.resolve_profile``),
-    # so a failed import must not silently unlock the browser everywhere: the
-    # degrade path leaves it ``None`` and the deny becomes a no-op — which is why
-    # the import lives in the same try/except as the rest, and why the BROWSER
-    # profile's allow degrades in lockstep.
+    # /browser — the agentic-browser tools, used as the BROWSER surface's ALLOW.
+    # The matching DENY on every other surface does NOT read this field; it goes
+    # through ``browser_tool_ids()``, which loads the ids on its own. See that
+    # function for why the two must not share an import fate.
     browser_allow: frozenset[str] | None = None
 
 
@@ -496,14 +494,50 @@ def _mcp_tool_ids() -> _McpToolIds:
     return _MCP_TOOL_IDS_CACHE
 
 
+# Loaded and memoized SEPARATELY from ``_mcp_tool_ids()`` — see
+# ``browser_tool_ids``. ``False`` is not a valid cached value, so a plain
+# ``None``-means-unset sentinel is enough.
+_BROWSER_TOOL_IDS_CACHE: frozenset[str] | None = None
+
+
 def browser_tool_ids() -> frozenset[str]:
-    """The agentic-browser MCP tool ids, or an empty set if the import degraded.
+    """The agentic-browser MCP tool ids, or an empty set if THEIR import failed.
 
     Read by ``service.resolve_profile`` to DENY these ids on every non-browser
-    surface. Empty on the degrade path, which makes the deny a no-op — matching
-    the BROWSER profile's allow, which is ``None`` on that same path.
+    surface, which makes this the one tool-id loader whose degrade path opens a
+    hole instead of closing one. It therefore imports on its OWN, and is NOT
+    served from ``_mcp_tool_ids()``.
+
+    Why that matters: ``_load_mcp_tool_ids`` wraps ten sibling imports in a
+    single ``try/except Exception``. Sharing it would mean an unrelated module
+    (palette, stock_images, icons, ...) failing to import empties this set and
+    silently turns the deny into a no-op — while ``CloudBrowserMcpProvider``,
+    which imports ``mcp_servers.browser`` on its own independent path, still
+    registers the server. Net effect: the browser becomes reachable from /chat,
+    beside the send-capable connector tools, behind nothing but a warning log.
+    That was a real fail-open (verified by simulating a palette ImportError),
+    not a theoretical one.
+
+    Loading here means the ONLY failure that empties this set is a failure of
+    ``mcp_servers.browser`` itself — which also breaks ``build_browser_server``,
+    so no browser tools exist to reach and the empty deny is genuinely safe.
     """
-    return _mcp_tool_ids().browser_allow or frozenset()
+    global _BROWSER_TOOL_IDS_CACHE
+    if _BROWSER_TOOL_IDS_CACHE is None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
+
+            _BROWSER_TOOL_IDS_CACHE = frozenset(BROWSER_TOOL_IDS)
+        except Exception:  # noqa: BLE001 — the server cannot have loaded either
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "surface: could not load browser tool ids; browser deny disabled "
+                "(the browser MCP server cannot have loaded either)",
+                exc_info=True,
+            )
+            _BROWSER_TOOL_IDS_CACHE = frozenset()
+    return _BROWSER_TOOL_IDS_CACHE
 
 
 # --- Per-row profile resolvers -------------------------------------------------
