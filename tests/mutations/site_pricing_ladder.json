@@ -1,6 +1,6 @@
 [
   {
-    "label": "the legacy alias table is emptied — every pre-rename site drops to the free floor",
+    "label": "the legacy alias table is emptied \u2014 every pre-rename site drops to the free floor",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
     "find": "_LEGACY_SITE_TIER_ALIASES: dict[str, str] = {\n    \"basic\": \"free\",\n    \"pro\": \"site\",\n    \"business\": \"staff\",\n}",
     "replace": "_LEGACY_SITE_TIER_ALIASES: dict[str, str] = {}",
@@ -11,7 +11,7 @@
     ]
   },
   {
-    "label": "the aliases are mapped by ladder POSITION — business lands on studio, an org flat",
+    "label": "the aliases are mapped by ladder POSITION \u2014 business lands on studio, an org flat",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
     "find": "    \"pro\": \"site\",\n    \"business\": \"staff\",",
     "replace": "    \"pro\": \"staff\",\n    \"business\": \"studio\",",
@@ -21,25 +21,7 @@
     ]
   },
   {
-    "label": "_dodo_product_for stops looking through the alias — the deployed product map goes dead",
-    "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "        mapping = getattr(get_settings(), \"dodo_site_products\", None)\n    except Exception:\n        return None\n    if not isinstance(mapping, dict):\n        return None\n    candidates = [key] + [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key]",
-    "replace": "        mapping = getattr(get_settings(), \"dodo_site_products\", None)\n    except Exception:\n        return None\n    if not isinstance(mapping, dict):\n        return None\n    candidates = [key]",
-    "tests": [
-      "tests/cloud/billing/test_site_pricing_ladder.py::test_the_deployed_legacy_product_map_still_opens_a_checkout"
-    ]
-  },
-  {
-    "label": "the legacy key wins over the canonical one — re-keying the env var does nothing",
-    "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "        mapping = getattr(get_settings(), \"dodo_site_products\", None)\n    except Exception:\n        return None\n    if not isinstance(mapping, dict):\n        return None\n    candidates = [key] + [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key]",
-    "replace": "        mapping = getattr(get_settings(), \"dodo_site_products\", None)\n    except Exception:\n        return None\n    if not isinstance(mapping, dict):\n        return None\n    candidates = [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key] + [key]",
-    "tests": [
-      "tests/cloud/billing/test_site_pricing_ladder.py::test_the_new_key_wins_over_a_legacy_one_for_the_same_tier"
-    ]
-  },
-  {
-    "label": "site_scoped_tier stops refusing org flats — one site gets the whole org's allowance",
+    "label": "site_scoped_tier stops refusing org flats \u2014 one site gets the whole org's allowance",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
     "find": "    tier = get_site_plan(key)\n    if tier is None or tier.is_org_scoped:\n        return None\n    return tier",
     "replace": "    return get_site_plan(key)",
@@ -49,16 +31,16 @@
     ]
   },
   {
-    "label": "purchasable stops excluding org flats — the per-site checkout can charge $149",
+    "label": "purchasable stops excluding org flats \u2014 the per-site checkout can charge $149",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "        if self.is_org_scoped:\n            return False\n        if self.monthly_price_usd == 0:",
-    "replace": "        if False:\n            return False\n        if self.monthly_price_usd == 0:",
+    "find": "        if self.is_org_scoped:\n            return False",
+    "replace": "        if False:  # noqa: SIM223\n            return False",
     "tests": [
-      "tests/cloud/billing/test_site_pricing_ladder.py::test_an_org_flat_is_never_purchasable_however_config_is_set"
+      "tests/cloud/billing/test_site_pricing_ladder.py::test_an_org_flat_is_never_purchasable"
     ]
   },
   {
-    "label": "is_org_scoped compares against the wrong literal — every scope check silently passes",
+    "label": "is_org_scoped compares against the wrong literal \u2014 every scope check silently passes",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
     "find": "        return self.scope == ORG_SCOPE\n\n    @property\n    def sells_concierge",
     "replace": "        return self.scope == \"orgs\"\n\n    @property\n    def sells_concierge",
@@ -68,7 +50,7 @@
     ]
   },
   {
-    "label": "an unknown tier defaults to SITE scope — a typo becomes a publishable tier",
+    "label": "an unknown tier defaults to SITE scope \u2014 a typo becomes a publishable tier",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
     "find": "        scope=_SITE_PLAN_SCOPE.get(key, ORG_SCOPE),",
     "replace": "        scope=_SITE_PLAN_SCOPE.get(key, SITE_SCOPE),",
@@ -78,7 +60,7 @@
     ]
   },
   {
-    "label": "the $7 rung is given the concierge — the $19 rung's only differentiator",
+    "label": "the $7 rung is given the concierge \u2014 the $19 rung's only differentiator",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
     "find": "    \"site\": False,\n    \"staff\": True,\n    \"studio\": False,\n    \"agency\": True,\n}",
     "replace": "    \"site\": True,\n    \"staff\": True,\n    \"studio\": False,\n    \"agency\": True,\n}",
@@ -88,7 +70,7 @@
     ]
   },
   {
-    "label": "the free floor loses its one domained site — the acquisition hook goes quietly",
+    "label": "the free floor loses its one domained site \u2014 the acquisition hook goes quietly",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
     "find": "_SITE_PLAN_MAX_DOMAINED_SITES: dict[str, int | None] = {\n    \"free\": 1,",
     "replace": "_SITE_PLAN_MAX_DOMAINED_SITES: dict[str, int | None] = {\n    \"free\": 0,",
@@ -98,7 +80,7 @@
     ]
   },
   {
-    "label": "the ladder is repriced off spec — $7 becomes $5 again",
+    "label": "the ladder is repriced off spec \u2014 $7 becomes $5 again",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
     "find": "    \"site\": 7,\n    \"staff\": 19,",
     "replace": "    \"site\": 5,\n    \"staff\": 19,",
@@ -107,7 +89,7 @@
     ]
   },
   {
-    "label": "agency loses its half-price conversation rate — the reason the tier costs $149",
+    "label": "agency loses its half-price conversation rate \u2014 the reason the tier costs $149",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
     "find": "    \"studio\": _LIST_CONVERSATION_RATE_CENTS,\n    \"agency\": 5,",
     "replace": "    \"studio\": _LIST_CONVERSATION_RATE_CENTS,\n    \"agency\": _LIST_CONVERSATION_RATE_CENTS,",
@@ -116,7 +98,7 @@
     ]
   },
   {
-    "label": "staff loses its 200 included conversations — the tier bills from the first one",
+    "label": "staff loses its 200 included conversations \u2014 the tier bills from the first one",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
     "find": "    \"staff\": 200,\n    \"studio\": 0,",
     "replace": "    \"staff\": 0,\n    \"studio\": 0,",
@@ -125,7 +107,7 @@
     ]
   },
   {
-    "label": "the org flats lose their included-site counts — the flats price nothing",
+    "label": "the org flats lose their included-site counts \u2014 the flats price nothing",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
     "find": "    \"studio\": 5,\n    \"agency\": 25,\n}\n\n# Concierge conversations included per month",
     "replace": "    \"studio\": None,\n    \"agency\": None,\n}\n\n# Concierge conversations included per month",
@@ -134,7 +116,7 @@
     ]
   },
   {
-    "label": "the resolver reads the unguarded lookup — an org key on a site grants everything",
+    "label": "the resolver reads the unguarded lookup \u2014 an org key on a site grants everything",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
     "find": "    tier = site_plan_catalog.site_scoped_tier(plan_tier)\n    # It deliberately does not substitute a floor",
     "replace": "    tier = site_plan_catalog.get_site_plan(plan_tier)\n    # It deliberately does not substitute a floor",
@@ -143,7 +125,7 @@
     ]
   },
   {
-    "label": "the domain allowance reads the unguarded lookup — an org key uncaps one site",
+    "label": "the domain allowance reads the unguarded lookup \u2014 an org key uncaps one site",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
     "find": "    tier = site_plan_catalog.site_scoped_tier(plan_tier)\n    if tier is not None and _subscription_is_active(subscription_status):",
     "replace": "    tier = site_plan_catalog.get_site_plan(plan_tier)\n    if tier is not None and _subscription_is_active(subscription_status):",
@@ -152,7 +134,7 @@
     ]
   },
   {
-    "label": "the publish path stops refusing org flats — studio gets stamped on one site",
+    "label": "the publish path stops refusing org flats \u2014 studio gets stamped on one site",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    if tier is not None and tier.is_org_scoped:",
     "replace": "    if False:",
@@ -170,7 +152,7 @@
     ]
   },
   {
-    "label": "the wire echoes the raw stored tier — the response and entitlements disagree",
+    "label": "the wire echoes the raw stored tier \u2014 the response and entitlements disagree",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "        plan_tier=_canonical_plan_tier(getattr(doc, \"plan_tier\", None)),",
     "replace": "        plan_tier=getattr(doc, \"plan_tier\", None) or \"\",",
@@ -198,7 +180,7 @@
     ]
   },
   {
-    "label": "activation steps 30 days instead of a month — the date walks back through the year",
+    "label": "activation steps 30 days instead of a month \u2014 the date walks back through the year",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    deployed.renewal_date = datetime.now(UTC) + relativedelta(months=1)",
     "replace": "    deployed.renewal_date = datetime.now(UTC) + timedelta(days=90)",
@@ -207,7 +189,7 @@
     ]
   },
   {
-    "label": "the catalog endpoint stops shipping scope — the client cannot tell the ladders apart",
+    "label": "the catalog endpoint stops shipping scope \u2014 the client cannot tell the ladders apart",
     "file": "ee/pocketpaw_ee/cloud/entitlements/dto.py",
     "find": "        scope=tier.scope,",
     "replace": "",

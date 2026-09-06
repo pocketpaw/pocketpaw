@@ -1,33 +1,39 @@
-# tests/cloud/billing/test_site_plan_purchasable.py — a per-site plan nobody can
-# buy, and the setting that was read but never declared.
+# tests/cloud/billing/test_site_plan_purchasable.py — what a site plan RECORDS,
+# and what ``purchasable`` means now that no site plan touches a gateway.
 #
-# Created 2026-08-21 (feat/site-plan-purchasable). Found while checking what a
-# free workspace does after the custom-domain cap refuses it and the 402 says
-# "upgrade a site's plan to connect another".
-#
-# It could not. ``site_plans._dodo_product_for`` resolves a tier's Dodo product
-# with ``getattr(get_settings(), "dodo_site_products", None)`` and has done since
-# per-site plans shipped — but ``dodo_site_products`` was never declared as a
-# field on ``Settings``. So the getattr found nothing on every deployment,
-# ``dodo_product_id`` was None for every tier, and setting
-# POCKETPAW_DODO_SITE_PRODUCTS did precisely nothing. Not "unconfigured":
+# Created 2026-08-21 (feat/site-plan-purchasable) around a defect that no longer
+# exists, and worth keeping the history because the shape recurs. A per-site tier
+# was only purchasable when a Dodo product was configured for it; the setting
+# that carried those ids was READ but never DECLARED, so the read found nothing
+# on every deployment however the environment was set. Not "unconfigured":
 # unconfigurable.
 #
-# What that produced downstream, silently, is the part worth pinning. A paid tier
-# with no product cannot open a checkout, so ``publish_pocket`` deliberately
-# skips charge-first and publishes live rather than strand the user — recording
-# ``plan_tier="pro"`` with ``subscription_status="none"``. Every entitlement then
-# resolves that site as the free floor. The buyer picked a paid plan, paid
-# nothing, received nothing, and the only trace was a server-side log line.
+# What that produced downstream was silent all the way. A paid tier with no
+# product could not open a checkout, so the publish went live and recorded the
+# FLOOR — deliberately, since a tier the site cannot back is worse than no tier.
+# The buyer selected a paid plan, was charged nothing, received nothing, and the
+# card afterwards said the tier below. No error was raised anywhere in that
+# sequence, and only a server-side log line mentioned it.
 #
-# ``purchasable`` gives that state a name the wire can carry, so a card can mark a
-# tier unavailable instead of offering a button that quietly does nothing. It
-# deliberately does NOT change what publish does — that fallback is a product
-# decision, and this is the honest reporting of it.
+# REWRITTEN 2026-09-05 (fix/sites-plan-credits). Paw Sites left Dodo: a paid site
+# is charged to the WORKSPACE CREDIT BALANCE, the two site product/add-on maps
+# are deleted from Settings, and the ids are gone from the catalog. So the entire
+# "unbuyable because unconfigured" state — and every case that measured it — is
+# gone with them.
+#
+# TWO THINGS SURVIVE, and this module is now about those:
+#
+#   * ``purchasable`` still exists and still refuses something: an ORG FLAT,
+#     which covers a whole workspace and cannot be bought one site at a time. It
+#     answers a question about SCOPE now rather than about configuration.
+#   * ``_apply_site_plan``'s FALLBACK LADDER, which is the part that was actually
+#     protecting customers. A tier key it cannot record falls back to the site's
+#     EXISTING tier first and only then to the floor, so one bad key can never
+#     silently downgrade a paying customer. Its trigger changed from "priced but
+#     unconfigured" to "not in the catalog"; the rule did not.
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -37,83 +43,64 @@ pytest.importorskip("pocketpaw_ee")
 from pocketpaw_ee.cloud.billing import site_plans  # noqa: E402
 from pocketpaw_ee.cloud.entitlements.dto import site_plan_tier_to_dto  # noqa: E402
 
-import pocketpaw.config as ppconfig  # noqa: E402
-
-
-def _products(monkeypatch, mapping: dict[str, str] | None) -> None:
-    """Point the lazily-imported ``get_settings`` at a products stub.
-
-    ``_dodo_product_for`` imports ``get_settings`` inside the call, so patching
-    the module attribute reaches it — the same shape every other billing-posture
-    stub in this tree uses.
-    """
-    monkeypatch.setattr(
-        ppconfig,
-        "get_settings",
-        lambda: SimpleNamespace(dodo_site_products=mapping),
-    )
-
 
 def _a_priced_tier() -> str:
     for tier in site_plans.list_site_plans():
-        if tier.monthly_price_usd > 0:
+        if tier.monthly_price_usd > 0 and not tier.is_org_scoped:
             return tier.key
-    raise AssertionError("no priced site tier in the catalog — ladder changed")
+    raise AssertionError("no priced per-site tier in the catalog — ladder changed")
 
 
 # --------------------------------------------------------------------------- #
-# The setting exists at all. This is the whole bug.
+# The site product maps are GONE, not merely unread.
 # --------------------------------------------------------------------------- #
 
 
-def test_the_setting_is_a_real_field():
-    """``getattr(settings, "dodo_site_products", None)`` returned None on every
-    deployment because the attribute did not exist. A test that only checked the
-    getattr's default would have passed throughout."""
+@pytest.mark.parametrize("name", ["dodo_site_products", "dodo_site_addons"])
+def test_the_site_gateway_maps_are_gone_from_settings(name):
+    """Deleted rather than left in place returning ``{}``.
+
+    A setting nothing consumes is one a future change quietly depends on again,
+    and these two in particular carried a rule — "this tier can be bought" — that
+    has moved somewhere else entirely. Leaving them declared would let an operator
+    set POCKETPAW_DODO_SITE_PRODUCTS, see it accepted, and reasonably conclude
+    that site plans bill through Dodo.
+
+    ``dodo_plan_products`` is deliberately NOT in this list: workspace plans still
+    bill through the gateway, and that map is still live.
+    """
     from pocketpaw.config import Settings
 
-    assert hasattr(Settings(), "dodo_site_products")
+    assert not hasattr(Settings(), name)
 
 
-def test_the_env_var_now_reaches_the_catalog(monkeypatch):
-    """End to end, through the real Settings rather than a stub: set the
-    environment, and a tier acquires a product id. This is the assertion that was
-    impossible to make yesterday."""
+def test_the_workspace_plan_map_is_untouched():
+    """The other half of the assertion above. Removing the SITE maps must not take
+    the workspace-plan one with it — a test that only checked for absence would
+    pass just as happily if every Dodo setting had been deleted."""
     from pocketpaw.config import Settings
 
-    monkeypatch.setenv("POCKETPAW_DODO_SITE_PRODUCTS", json.dumps({"pro": "prod_site_pro"}))
-
-    assert Settings().dodo_site_products == {"pro": "prod_site_pro"}
+    assert hasattr(Settings(), "dodo_plan_products")
 
 
-def test_it_defaults_to_nothing_purchasable():
-    """Empty is the correct default and the current state of every deployment."""
-    from pocketpaw.config import Settings
+def test_the_catalog_carries_no_gateway_ids():
+    """The field, not just the value. ``dodo_product_id = None`` on every tier
+    would read identically to "unconfigured" — the exact ambiguity that hid the
+    original bug for months — so what is asserted is that the attribute does not
+    exist at all."""
+    tier = site_plans.get_site_plan(_a_priced_tier())
 
-    assert Settings().dodo_site_products == {}
-
-
-@pytest.mark.parametrize("bad", ["not json", "[1,2,3]", '"a string"', ""])
-def test_a_malformed_value_degrades_instead_of_failing_boot(monkeypatch, bad):
-    """Mirrors ``dodo_plan_products``. A typo in an env var must not stop the
-    server starting; it costs purchasability, which fails visibly at the card."""
-    from pocketpaw.config import Settings
-
-    monkeypatch.setenv("POCKETPAW_DODO_SITE_PRODUCTS", bad)
-
-    assert Settings().dodo_site_products == {}
+    assert not hasattr(tier, "dodo_product_id")
+    assert not hasattr(tier, "dodo_addon_id")
 
 
 # --------------------------------------------------------------------------- #
-# purchasable — the name for a state that already existed and had none.
+# purchasable — the rule that survived, meaning something else.
 # --------------------------------------------------------------------------- #
 
 
-def test_the_free_tier_is_always_purchasable(monkeypatch):
-    """Nothing to buy, so selecting it always works. It must not read as
-    unavailable just because it has no Dodo product."""
-    _products(monkeypatch, None)
-
+def test_the_free_tier_is_purchasable():
+    """Nothing to buy, so selecting it always works."""
     floor = site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)
 
     assert floor is not None
@@ -121,73 +108,44 @@ def test_the_free_tier_is_always_purchasable(monkeypatch):
     assert floor.purchasable is True
 
 
-def test_a_priced_tier_with_no_product_is_not_purchasable(monkeypatch):
-    """The live state of every deployment. Selecting this tier publishes live,
-    charges nothing and grants nothing."""
-    _products(monkeypatch, None)
-
-    assert site_plans.get_site_plan(_a_priced_tier()).purchasable is False
-
-
-def test_a_priced_tier_becomes_purchasable_once_its_product_is_configured(monkeypatch):
-    priced = _a_priced_tier()
-    _products(monkeypatch, {priced: "prod_site_x"})
-
-    tier = site_plans.get_site_plan(priced)
-
-    assert tier.dodo_product_id == "prod_site_x"
-    assert tier.purchasable is True
+def test_every_priced_per_site_rung_is_purchasable():
+    """THE INVERSION. This used to be the headline failure — a priced tier with no
+    product was unbuyable, on every deployment, forever. The credit balance can
+    pay for any rung and needs no configuration, so being priced is now the whole
+    of being buyable."""
+    for tier in site_plans.list_site_scoped_plans():
+        assert tier.purchasable is True, f"{tier.key} is not on sale"
 
 
-def test_configuring_one_tier_does_not_make_its_siblings_purchasable(monkeypatch):
-    """Partial configuration is the likely real state during a rollout, and the
-    card has to be right about each tier independently."""
-    priced = [t.key for t in site_plans.list_site_plans() if t.monthly_price_usd > 0]
-    if len(priced) < 2:
-        pytest.skip("catalog has fewer than two priced tiers")
-    _products(monkeypatch, {priced[0]: "prod_only_the_first"})
+@pytest.mark.parametrize("key", ["studio", "agency"])
+def test_an_org_flat_is_not_purchasable(key):
+    """The one row that still refuses, and the reason ``purchasable`` survives
+    rather than being deleted with the rule that motivated it.
 
-    assert site_plans.get_site_plan(priced[0]).purchasable is True
-    assert site_plans.get_site_plan(priced[1]).purchasable is False
-
-
-def test_a_junk_mapping_leaves_everything_unpurchasable(monkeypatch):
-    """``_dodo_product_for`` guards a non-dict and a non-string value. Neither may
-    resolve to a truthy product id, because a truthy junk id would send the
-    publish down charge-first and fail against Dodo instead of degrading."""
-    _products(monkeypatch, "not a mapping")  # type: ignore[arg-type]
-
-    assert site_plans.get_site_plan(_a_priced_tier()).purchasable is False
+    An org flat covers a whole workspace. The per-site purchase buys one site and
+    debits one site's price, so letting one through would take the price of a site
+    and hand over an org plan's worth of claims."""
+    assert site_plans.get_site_plan(key).purchasable is False
 
 
-# --------------------------------------------------------------------------- #
-# On the wire, which is the point — the card cannot know otherwise.
-# --------------------------------------------------------------------------- #
-
-
-def test_the_dto_carries_purchasable(monkeypatch):
-    _products(monkeypatch, None)
-
+def test_the_dto_carries_purchasable():
+    """The card cannot know otherwise. Both sides asserted, so this measures the
+    scope rule rather than a blanket answer in either direction."""
     rows = {t.key: site_plan_tier_to_dto(t) for t in site_plans.list_site_plans()}
 
     assert rows[site_plans.BASE_SITE_PLAN_KEY].purchasable is True
-    assert rows[_a_priced_tier()].purchasable is False
+    assert rows[_a_priced_tier()].purchasable is True
+    org = [t.key for t in site_plans.list_site_plans() if t.is_org_scoped]
+    assert org, "the catalog lost its org flats — the assertion below is vacuous"
+    assert all(rows[k].purchasable is False for k in org)
 
 
-def test_the_dto_follows_configuration(monkeypatch):
-    priced = _a_priced_tier()
-    _products(monkeypatch, {priced: "prod_site_x"})
-
-    assert site_plan_tier_to_dto(site_plans.get_site_plan(priced)).purchasable is True
-
-
-def test_purchasable_is_not_a_per_site_entitlement(monkeypatch):
+def test_purchasable_is_not_a_per_site_entitlement():
     """Same caution the DTO's docstring gives ``badge_removal`` and
-    ``sells_concierge``: this says what the CATALOG can sell, never what a
-    particular site has. A purchasable tier still grants a given site nothing
-    until that site's own subscription is active."""
+    ``sells_concierge``: this says what the CATALOG sells, never what a particular
+    site has. A purchasable tier still grants a given site nothing until that
+    site's own subscription is active."""
     priced = _a_priced_tier()
-    _products(monkeypatch, {priced: "prod_site_x"})
 
     from pocketpaw_ee.cloud.entitlements.service import resolve_site_entitlements
 
@@ -205,46 +163,46 @@ def test_purchasable_is_not_a_per_site_entitlement(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# The sibling setting had the same hole, and its docstring denied it.
+# The setting that IS still a gateway map must not take the server down.
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    "var",
-    ["POCKETPAW_DODO_SITE_PRODUCTS", "POCKETPAW_DODO_PLAN_PRODUCTS"],
-)
-def test_neither_product_map_can_take_the_server_down_at_boot(monkeypatch, var):
+def test_the_plan_product_map_cannot_take_the_server_down_at_boot(monkeypatch):
     """``dodo_plan_products`` carried a before-validator and a docstring promising
     "a typo can't crash settings load" since 2026-06-24. It could.
 
     ``EnvSettingsSource`` JSON-decodes a complex field's raw value at SOURCE time
     and raises ``SettingsError`` on failure, before any field validator runs — so
-    the validator was unreachable for exactly the input it existed to absorb. Both
-    fields carry ``NoDecode`` now, which is what hands the raw string to the
-    validator instead. Parametrised across both because the new field inherited
-    the bug by copying the pattern, and fixing only the copy would leave the
-    original armed.
+    the validator was unreachable for exactly the input it existed to absorb.
+    ``NoDecode`` on the field is what hands the raw string to the validator
+    instead.
+
+    This used to be parametrised across the site map too. That map is gone; the
+    trap it inherited by copying this pattern is worth remembering the next time
+    somebody adds a JSON setting.
     """
     from pocketpaw.config import Settings
 
-    monkeypatch.setenv(var, "{not json at all")
+    monkeypatch.setenv("POCKETPAW_DODO_PLAN_PRODUCTS", "{not json at all")
 
     Settings()  # must not raise
 
 
 # --------------------------------------------------------------------------- #
-# The publish stops recording a tier the site does not hold.
+# The publish records what is true — the fallback ladder, which is unchanged.
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.usefixtures("mongo_db")
 class TestThePublishRecordsWhatIsTrue:
-    """``_apply_site_plan`` used to stamp whatever tier was asked for, purchasable
-    or not, and every entitlement then read that site as the free floor anyway.
+    """``_apply_site_plan`` used to stamp whatever tier was asked for and every
+    entitlement then read that site as the free floor anyway.
 
-    The site still publishes and still goes live — that fallback exists so a buyer
-    is never stranded by unconfigured billing, and it stays. What changes is that
-    ``plan_tier`` stops claiming a plan nobody was charged for.
+    The RULE is unchanged: never record a tier the site does not hold, and when
+    refusing one, fall back to the site's EXISTING tier before the floor — so a
+    bad key can never silently downgrade a paying customer. Only the trigger
+    changed, from "priced but unconfigured" (a state that no longer exists) to
+    "not a key the catalog resolves".
     """
 
     @staticmethod
@@ -263,13 +221,12 @@ class TestThePublishRecordsWhatIsTrue:
         await doc.insert()
         return doc
 
-    async def test_an_unpurchasable_paid_tier_is_not_recorded(self, monkeypatch):
-        """The headline. Picking a paid tier nobody can buy leaves the site on the
-        floor rather than on a paid key with nothing behind it."""
+    async def test_an_unrecordable_tier_is_not_recorded(self):
+        """A tier key the catalog cannot resolve leaves the site on the floor
+        rather than on a key with nothing behind it."""
         from pocketpaw_ee.cloud.models.site import Site
         from pocketpaw_ee.sites import service as svc
 
-        _products(monkeypatch, None)
         doc = await self._seed("ws_unbuyable")
 
         await svc._apply_site_plan(
@@ -277,76 +234,64 @@ class TestThePublishRecordsWhatIsTrue:
             workspace_id="ws_unbuyable",
             user_id="u1",
             pocket_id="pk_1",
-            site_plan_key=_a_priced_tier(),
-            provider=None,
+            site_plan_key="a-tier-that-was-never-in-the-catalog",
         )
 
         refreshed = await Site.get(str(doc.id))
         assert refreshed.plan_tier == site_plans.BASE_SITE_PLAN_KEY
         assert refreshed.subscription_status == "none"
 
-    async def test_a_purchasable_tier_is_recorded_as_before(self, monkeypatch):
-        """The guard must not become the bug: configure the product and the tier
-        lands exactly as it always did."""
+    async def test_a_priced_tier_is_recorded(self):
+        """The direct inversion of the case this module was created for, pinned so
+        the change of rule is explicit rather than implied by a deleted test. The
+        wallet bought this tier; refusing to record it would take the money and
+        hand back the free floor."""
         from pocketpaw_ee.cloud.models.site import Site
         from pocketpaw_ee.sites import service as svc
 
         priced = _a_priced_tier()
-        _products(monkeypatch, {priced: "prod_site_x"})
-        doc = await self._seed("ws_buyable")
-
-        class _Prov:
-            async def create_subscription(self, **kw):
-                return SimpleNamespace(subscription_id="sub_1", checkout_url=None)
+        doc = await self._seed("ws_credits_paid")
 
         await svc._apply_site_plan(
             doc=doc,
-            workspace_id="ws_buyable",
+            workspace_id="ws_credits_paid",
             user_id="u1",
             pocket_id="pk_1",
             site_plan_key=priced,
-            provider=_Prov(),
         )
 
         refreshed = await Site.get(str(doc.id))
         assert refreshed.plan_tier == priced
-        assert refreshed.subscription_status == "pending"
 
-    async def test_it_never_downgrades_a_site_that_already_has_a_tier(self, monkeypatch):
+    async def test_it_never_downgrades_a_site_that_already_has_a_tier(self):
         """Falls back to the site's EXISTING tier, not blindly to the floor.
 
         A site already holding a tier must not lose it because someone asked for a
-        different, unbuyable one — that would turn a misconfigured product id into
-        a silent downgrade of a paying customer.
-        """
+        key the catalog cannot resolve — that would turn one bad string into a
+        silent downgrade of a paying customer, and nothing restores a tier."""
         from pocketpaw_ee.cloud.models.site import Site
         from pocketpaw_ee.sites import service as svc
 
-        priced = [t.key for t in site_plans.list_site_plans() if t.monthly_price_usd > 0]
-        if len(priced) < 2:
-            pytest.skip("catalog has fewer than two priced tiers")
-        _products(monkeypatch, {priced[0]: "prod_site_x"})
-        doc = await self._seed("ws_no_downgrade", plan_tier=priced[0])
+        held = _a_priced_tier()
+        doc = await self._seed("ws_no_downgrade", plan_tier=held)
 
         await svc._apply_site_plan(
             doc=doc,
             workspace_id="ws_no_downgrade",
             user_id="u1",
             pocket_id="pk_1",
-            site_plan_key=priced[1],  # unbuyable
-            provider=None,
+            site_plan_key="a-tier-that-was-never-in-the-catalog",
         )
 
         refreshed = await Site.get(str(doc.id))
-        assert refreshed.plan_tier == priced[0]
+        assert refreshed.plan_tier == held
 
-    async def test_an_explicit_move_to_free_still_works(self, monkeypatch):
+    async def test_an_explicit_move_to_free_still_works(self):
         """$0 is purchasable by definition, so the guard must not block a
-        downgrade."""
+        downgrade the customer actually asked for."""
         from pocketpaw_ee.cloud.models.site import Site
         from pocketpaw_ee.sites import service as svc
 
-        _products(monkeypatch, None)
         doc = await self._seed("ws_to_free", plan_tier=_a_priced_tier())
 
         await svc._apply_site_plan(
@@ -355,8 +300,45 @@ class TestThePublishRecordsWhatIsTrue:
             user_id="u1",
             pocket_id="pk_1",
             site_plan_key=site_plans.BASE_SITE_PLAN_KEY,
-            provider=None,
         )
 
         refreshed = await Site.get(str(doc.id))
         assert refreshed.plan_tier == site_plans.BASE_SITE_PLAN_KEY
+
+    async def test_a_paying_site_keeps_its_status_through_a_republish(self):
+        """The carve-out that stops a content edit stripping paid capabilities.
+
+        Writing "none" over "active" during an unrelated republish would revoke
+        badge removal, the custom domain and the concierge from a customer who is
+        still being billed — and nothing restores it, because only a purchase or a
+        renewal writes "active"."""
+        from pocketpaw_ee.cloud.models.site import Site
+        from pocketpaw_ee.sites import service as svc
+
+        priced = _a_priced_tier()
+        doc = await self._seed("ws_paying", plan_tier=priced)
+        doc.subscription_status = "active"
+        await doc.save()
+
+        await svc._apply_site_plan(
+            doc=doc,
+            workspace_id="ws_paying",
+            user_id="u1",
+            pocket_id="pk_1",
+            site_plan_key=priced,
+        )
+
+        refreshed = await Site.get(str(doc.id))
+        assert refreshed.subscription_status == "active"
+        assert refreshed.plan_tier == priced
+
+
+def test_the_dto_still_reports_the_catalog_claims():
+    """A smoke check that stripping the gateway ids did not take the buyer-facing
+    fields with them — the card is built from these."""
+    row = site_plan_tier_to_dto(site_plans.get_site_plan(_a_priced_tier()))
+
+    assert row.display_name
+    assert row.monthly_price_usd > 0
+    assert isinstance(row.cloudflare_features, list)
+    assert isinstance(SimpleNamespace(**row.model_dump()).badge_removal, bool)

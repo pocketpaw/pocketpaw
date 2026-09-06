@@ -564,7 +564,6 @@ async def test_a_republish_without_a_plan_key_keeps_the_paid_tier(monkeypatch):
         pocket_id="pk_1",
         user_id="u1",
         site_plan_key=None,  # the republish says nothing about the plan
-        provider=None,
     )
 
     refreshed = await Site.get(site_id)
@@ -588,7 +587,6 @@ async def test_a_republish_leaves_a_paying_site_able_to_attach_a_domain(monkeypa
         pocket_id="pk_1",
         user_id="u1",
         site_plan_key=None,
-        provider=None,
     )
     cf = _RecordingCF()
 
@@ -622,7 +620,6 @@ async def test_an_explicit_tier_still_wins(monkeypatch):
         pocket_id="pk_1",
         user_id="u1",
         site_plan_key=_the_free_tier(),  # an explicit move to the floor
-        provider=None,
     )
 
     refreshed = await Site.get(site_id)

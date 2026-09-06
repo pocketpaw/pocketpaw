@@ -231,7 +231,6 @@ async def test_publishing_a_site_on_an_org_flat_records_the_floor_instead(
 
     Breaks on: ``_apply_site_plan`` losing its ``is_org_scoped`` guard.
     """
-    monkeypatch.setattr(site_plans, "_dodo_product_for", lambda key: f"prod_{key}")
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
 
@@ -258,7 +257,6 @@ async def test_an_org_flat_cannot_downgrade_a_site_that_is_already_paying(mongo_
     removal — turns a rejected upgrade into a silent downgrade. Same rule the
     unknown-key and unpurchasable-tier paths already follow.
     """
-    monkeypatch.setattr(site_plans, "_dodo_product_for", lambda key: f"prod_{key}")
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
 

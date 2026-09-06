@@ -143,5 +143,14 @@
     "tests": [
       "tests/cloud/sites/test_site_plan_request_gate.py::test_every_gated_kind_guard_runs_on_the_shared_chokepoint"
     ]
+  },
+  {
+    "label": "a cancellation request is filed on the purchase copy, so the admin approves 'Put X on the Free plan ($0/month)'",
+    "file": "ee/pocketpaw_ee/cloud/site_plan_requests/propose.py",
+    "find": "    is_cancellation = monthly_price_usd <= 0",
+    "replace": "    is_cancellation = False",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_a_request_for_the_free_floor_reads_as_a_CANCELLATION"
+    ]
   }
 ]

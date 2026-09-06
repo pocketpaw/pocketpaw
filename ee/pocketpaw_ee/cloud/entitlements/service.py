@@ -135,6 +135,13 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
                 max_connectors=50,
                 max_call_seconds_per_day=0,
                 max_storage_bytes=5_000_000_000,
+                # 0 included sites. Failing closed
+                # matters more here than on the ceilings above: those cap spend a
+                # workspace is being billed for, where an over-generous default
+                # is an overspend somebody can see and correct. This one decides
+                # whether a site is billed AT ALL, so a generous default is free
+                # hosting that nothing later reclaims.
+                included_sites=0,
                 features=frozenset(),
             )
 
@@ -148,6 +155,7 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
         max_connectors=tier.max_connectors,
         max_call_seconds_per_day=tier.max_call_seconds_per_day,
         max_storage_bytes=tier.max_storage_bytes,
+        included_sites=tier.included_sites,
         features=tier.features,
     )
 

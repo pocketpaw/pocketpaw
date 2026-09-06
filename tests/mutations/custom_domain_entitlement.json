@@ -20,7 +20,7 @@
     ]
   },
   {
-    "label": "the entitled path is broken too — the capability gate refuses everyone",
+    "label": "the entitled path is broken too \u2014 the capability gate refuses everyone",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    if ent.custom_domain:\n        return",
     "replace": "    if False:\n        return",
@@ -30,7 +30,7 @@
     ]
   },
   {
-    "label": "the floor allowance leaks uncapped — every free workspace gets unlimited domained sites",
+    "label": "the floor allowance leaks uncapped \u2014 every free workspace gets unlimited domained sites",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
     "find": "    allowance = floor.max_domained_sites if floor is not None else 0",
     "replace": "    allowance = None",
@@ -40,7 +40,7 @@
     ]
   },
   {
-    "label": "the allowance ignores whether the subscription pays — a cancelled site keeps uncapped domains",
+    "label": "the allowance ignores whether the subscription pays \u2014 a cancelled site keeps uncapped domains",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
     "find": "    if tier is not None and _subscription_is_active(subscription_status):\n        allowance = tier.max_domained_sites",
     "replace": "    if tier is not None:\n        allowance = tier.max_domained_sites",
@@ -69,7 +69,7 @@
     ]
   },
   {
-    "label": "the count includes the site being attached to — apex plus www is refused",
+    "label": "the count includes the site being attached to \u2014 apex plus www is refused",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "            \"_id\": {\"$ne\": site.id},\n",
     "replace": "",
@@ -78,7 +78,7 @@
     ]
   },
   {
-    "label": "the count counts PAID sites too — buying a plan takes the free domain away",
+    "label": "the count counts PAID sites too \u2014 buying a plan takes the free domain away",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "        if (\n            entitlements_service.site_domain_allowance(\n                plan_tier=row.plan_tier, subscription_status=row.subscription_status\n            )\n            is not None\n        ):\n            count += 1",
     "replace": "        if row is not None:\n            count += 1",
@@ -96,7 +96,7 @@
     ]
   },
   {
-    "label": "the count is scoped to no workspace — a neighbour spends your allowance",
+    "label": "the count is scoped to no workspace \u2014 a neighbour spends your allowance",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "            \"workspace\": workspace_id,\n            \"archived\": {\"$ne\": True},",
     "replace": "            \"archived\": {\"$ne\": True},",
@@ -105,7 +105,7 @@
     ]
   },
   {
-    "label": "the count comparison is off by one — free gets two domained sites",
+    "label": "the count comparison is off by one \u2014 free gets two domained sites",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    return (count >= limit, count, limit)\n\n\ndef _hostname_cap_exceeded",
     "replace": "    return (count > limit, count, limit)\n\n\ndef _hostname_cap_exceeded",
@@ -114,7 +114,7 @@
     ]
   },
   {
-    "label": "an uncapped tier is treated as capped at zero — a paying site is refused",
+    "label": "an uncapped tier is treated as capped at zero \u2014 a paying site is refused",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    if limit is None:\n        return (False, 0, None)\n\n    cursor = _SiteDoc.find(",
     "replace": "    if limit is None:\n        limit = 0\n\n    cursor = _SiteDoc.find(",
@@ -161,7 +161,7 @@
     ]
   },
   {
-    "label": "the count gate becomes retroactive — it runs before the already-connected repair",
+    "label": "the count gate becomes retroactive \u2014 it runs before the already-connected repair",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    hostname = _normalize_hostname(hostname)\n    existing = next(",
     "replace": "    if (await _domain_cap_exceeded(workspace_id, site))[0]:\n        raise CustomDomainLimitError(limit=1)\n    hostname = _normalize_hostname(hostname)\n    existing = next(",
@@ -171,7 +171,7 @@
     ]
   },
   {
-    "label": "the billing_enforced guard is dropped from the count — OSS/self-host inherits the cap",
+    "label": "the billing_enforced guard is dropped from the count \u2014 OSS/self-host inherits the cap",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    if not sites_enforced():\n        return (False, 0, None)\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    limit = entitlements_service.site_domain_allowance(",
     "replace": "    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    limit = entitlements_service.site_domain_allowance(",
@@ -191,7 +191,7 @@
     ]
   },
   {
-    "label": "the capability guard inverts — the gate fires ONLY when billing is off",
+    "label": "the capability guard inverts \u2014 the gate fires ONLY when billing is off",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    if not sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(",
     "replace": "    if sites_enforced():\n        return\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    ent = entitlements_service.resolve_site_entitlements(",
@@ -232,8 +232,8 @@
   {
     "label": "a republish writes 'none' over an ACTIVE subscription",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    elif doc.subscription_status != \"active\":",
-    "replace": "    else:",
+    "find": "    if doc.subscription_status != \"active\":\n        doc.subscription_status = \"none\"",
+    "replace": "    doc.subscription_status = \"none\"",
     "tests": [
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_republish_without_a_plan_key_keeps_the_paid_tier",
       "tests/cloud/sites/test_custom_domain_entitlement.py::test_a_republish_leaves_a_paying_site_able_to_attach_a_domain"

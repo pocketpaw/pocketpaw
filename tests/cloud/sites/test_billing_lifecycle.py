@@ -5,10 +5,14 @@
 #   (A) deploy-input cap — a pending publish whose serialized deploy inputs exceed
 #       _MAX_PENDING_DEPLOY_INPUT_BYTES raises ValidationError and persists NO Site
 #       doc (a pathological ripple_spec/source map can't bloat the Site doc).
-#   (B) checkout-before-persist — the per-site checkout is opened BEFORE the pending
-#       Site doc is persisted, and the doc lands with subscription_id already set; a
-#       checkout FAILURE creates NO pending doc (no orphan row) and surfaces the
-#       error so the user can retry. The free/normal-paid publish path is unchanged.
+#   (B) checkout-before-persist — RETIRED 2026-09-05 (fix/sites-plan-credits).
+#       It guaranteed an ordering between opening a hosted Dodo checkout and
+#       writing the pending Site doc, so a checkout failure could not leave an
+#       orphan row. Paw Sites left Dodo: no checkout is opened, so there is no
+#       ordering to guarantee and nothing to orphan. A refused CREDIT debit leaves
+#       the row pending and undeployed with nothing billed, which is the same
+#       recovery the ordering was protecting and needs no ordering at all. The
+#       remaining cases here are (A) and (C).
 #   (C) pending-reconciliation sweeper — sweep_pending_sites() finds PAID sites stuck
 #       in subscription_status == "pending" (not deployed) older than the threshold
 #       and returns / logs them at WARNING for operator visibility (a lost/delayed
@@ -29,7 +33,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from pocketpaw_ee.cloud._core.errors import ValidationError
-from pocketpaw_ee.cloud.billing import site_plans
 from pocketpaw_ee.cloud.billing.domain import SubscriptionCheckout
 from pocketpaw_ee.cloud.models.site import Site
 from pocketpaw_ee.sites import service as sites_service
@@ -90,17 +93,6 @@ class _RecordingBillingProvider:
         )
 
 
-class _FailingBillingProvider:
-    """Provider whose checkout open raises — proves (B) creates no orphan doc."""
-
-    def __init__(self):
-        self.calls: list[dict] = []
-
-    async def create_subscription(self, **kw) -> SubscriptionCheckout:
-        self.calls.append(dict(kw))
-        raise RuntimeError("dodo checkout open failed")
-
-
 async def _make_workspace(plan: str = "pro") -> str:
     from pocketpaw_ee.cloud.models.workspace import Workspace
 
@@ -126,20 +118,12 @@ async def _make_pocket(*, workspace_id: str, owner: str = "u1", ripple_spec=None
     return str(doc.id)
 
 
-def _enable_paid_site_product(monkeypatch) -> None:
-    """Make the 'pro' site tier a chargeable PAID tier (price + a Dodo product)."""
-    monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"site": "prod_site_pro"}.get(key)
-    )
-
-
 # ---------------------------------------------------------------------------
 # (A) deploy-input cap — oversized pending inputs raise + persist nothing.
 # ---------------------------------------------------------------------------
 
 
 async def test_oversized_deploy_inputs_raise_and_persist_nothing(mongo_db, monkeypatch):
-    _enable_paid_site_product(monkeypatch)
     # A rippleSpec that serializes well past the 4MB cap.
     big_blob = "x" * (sites_service._MAX_PENDING_DEPLOY_INPUT_BYTES + 1)
     ripple_spec = {"bloat": big_blob}
@@ -147,7 +131,6 @@ async def test_oversized_deploy_inputs_raise_and_persist_nothing(mongo_db, monke
     ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws, ripple_spec=ripple_spec)
 
-    provider = _RecordingBillingProvider()
     with pytest.raises(ValidationError) as ei:
         await sites_service.publish_pocket(
             workspace_id=ws,
@@ -158,75 +141,22 @@ async def test_oversized_deploy_inputs_raise_and_persist_nothing(mongo_db, monke
             _generator=_RecordingGenerator(),
             _cloudflare=_RecordingCF(),
             _bundle_reader=lambda d: b"x",
-            _billing_provider=provider,
         )
     assert ei.value.code == "sites.deploy_inputs_too_large"
 
     # NO Site doc was persisted for the pocket (the cap fires before any write).
     assert await Site.find(Site.pocket_id == pocket_id).to_list() == []
-    # The checkout was never opened (the cap fires before billing).
-    assert provider.calls == []
+    # And nothing was billed: the cap fires before any charge, so a wallet that
+    # was never funded still reads zero rather than negative.
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    assert await credits_service.balance(ws) == 0
 
 
 # ---------------------------------------------------------------------------
 # (B) checkout-before-persist — doc lands with subscription_id; a checkout
 #     failure leaves NO orphan pending doc; free/paid happy paths still work.
 # ---------------------------------------------------------------------------
-
-
-async def test_pending_publish_persists_doc_with_subscription_id(mongo_db, monkeypatch):
-    _enable_paid_site_product(monkeypatch)
-    ws = await _make_workspace(plan="pro")
-    pocket_id = await _make_pocket(workspace_id=ws)
-
-    provider = _RecordingBillingProvider()
-    doc = await sites_service.publish_pocket(
-        workspace_id=ws,
-        user_id="u1",
-        pocket_id=pocket_id,
-        site_plan_key="site",
-        purchase_authorized=True,
-        _generator=_RecordingGenerator(),
-        _cloudflare=_RecordingCF(),
-        _bundle_reader=lambda d: b"x",
-        _billing_provider=provider,
-    )
-
-    # Pending, with the subscription_id already set on the persisted doc.
-    persisted = await Site.find_one(Site.id == doc.id)
-    assert persisted is not None
-    assert persisted.deployed is False
-    assert persisted.subscription_status == "pending"
-    assert persisted.subscription_id == SITE_SUB_ID
-    assert persisted.pending_deploy_inputs  # captured inputs present
-    assert doc._checkout_url == CHECKOUT_URL
-    # The checkout was opened with the deterministic site_id on its metadata.
-    assert provider.calls[0]["metadata"]["site_id"] == str(doc.id)
-
-
-async def test_checkout_failure_leaves_no_orphan_doc(mongo_db, monkeypatch):
-    _enable_paid_site_product(monkeypatch)
-    ws = await _make_workspace(plan="pro")
-    pocket_id = await _make_pocket(workspace_id=ws)
-
-    provider = _FailingBillingProvider()
-    with pytest.raises(Exception) as ei:  # noqa: PT011 — any propagated error proves no swallow
-        await sites_service.publish_pocket(
-            workspace_id=ws,
-            user_id="u1",
-            pocket_id=pocket_id,
-            site_plan_key="site",
-            purchase_authorized=True,
-            _generator=_RecordingGenerator(),
-            _cloudflare=_RecordingCF(),
-            _bundle_reader=lambda d: b"x",
-            _billing_provider=provider,
-        )
-    # The error surfaced (not swallowed) so the user can retry.
-    assert ei.value is not None
-
-    # NO orphan pending Site doc was left behind.
-    assert await Site.find(Site.pocket_id == pocket_id).to_list() == []
 
 
 async def test_free_publish_still_works(mongo_db):

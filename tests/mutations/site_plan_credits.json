@@ -1,0 +1,274 @@
+[
+  {
+    "label": "the purchase debit becomes overdraftable (an empty wallet buys a paid site)",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        allow_negative=False,\n    )\n\n\nasync def subscribe(",
+    "replace": "        allow_negative=True,\n    )\n\n\nasync def subscribe(",
+    "tests": [
+      "tests/cloud/sites/test_credits_publish.py::test_an_empty_wallet_leaves_the_site_unpaid_and_undeployed"
+    ]
+  },
+  {
+    "label": "the debit key drops the period (every month charges as month one)",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    return f\"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}\"",
+    "replace": "    return f\"site_plan:{site_id}:{tier_key}\"",
+    "tests": [
+      "tests/cloud/sites/test_credits_renewal.py::test_month_two_is_a_separate_charge_from_month_one"
+    ]
+  },
+  {
+    "label": "the debit key uses now instead of the period (a replay charges twice)",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    return f\"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}\"",
+    "replace": "    import uuid as _uuid\n\n    return f\"site_plan:{site_id}:{tier_key}:{_uuid.uuid4().hex}\"",
+    "tests": [
+      "tests/cloud/sites/test_credits_renewal.py::test_a_replayed_sweep_does_not_charge_the_month_twice"
+    ]
+  },
+  {
+    "label": "a site-carrying webhook falls through to the workspace credit-grant path",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    if event.site_id:\n        return await _handle_site_subscription_event(event)",
+    "replace": "    if False:  # noqa: SIM223\n        return await _handle_site_subscription_event(event)",
+    "tests": [
+      "tests/cloud/billing/test_dodo_webhook.py::test_a_site_carrying_delivery_never_grants_workspace_credits"
+    ]
+  },
+  {
+    "label": "the renewal sweep charges every rail, not only credits",
+    "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
+    "find": "                \"billing_rail\": billing_service.CREDITS_BILLING_RAIL,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/sites/test_credits_renewal.py::test_a_site_on_another_rail_is_never_charged_here"
+    ]
+  },
+  {
+    "label": "a lapsed renewal takes the site down instead of dropping it to the floor",
+    "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
+    "find": "            doc.subscription_status = \"cancelled\"\n            doc.renewal_date = None\n",
+    "replace": "            doc.subscription_status = \"cancelled\"\n            doc.deployed = False\n            doc.renewal_date = None\n",
+    "tests": [
+      "tests/cloud/sites/test_credits_renewal.py::test_a_short_wallet_lapses_the_plan_but_leaves_the_site_up"
+    ]
+  },
+  {
+    "label": "the renewal steps from now, walking the billing day forward",
+    "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
+    "find": "        doc.renewal_date = period + relativedelta(months=1)",
+    "replace": "        doc.renewal_date = datetime.now(UTC) + relativedelta(months=1)",
+    "tests": [
+      "tests/cloud/sites/test_credits_renewal.py::test_renewals_do_not_walk_the_billing_day_forward"
+    ]
+  },
+  {
+    "label": "a paid publish stops charging at all (the site goes live for free)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if is_paid and not already_paying:\n        # PAID + not yet paying → the plan carries it, or the wallet buys it.",
+    "replace": "    if False:\n        # PAID + not yet paying → the plan carries it, or the wallet buys it.",
+    "tests": [
+      "tests/cloud/sites/test_credits_publish.py::test_a_paid_publish_debits_the_workspace_wallet"
+    ]
+  },
+  {
+    "label": "the pending doc stops recording which rail is buying it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            billing_rail=rail,\n",
+    "replace": "            billing_rail=\"\",\n",
+    "tests": [
+      "tests/cloud/sites/test_credits_publish.py::test_a_paid_publish_debits_the_workspace_wallet"
+    ]
+  },
+  {
+    "label": "a tier change on a paying site stamps the tier without charging for it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            await _billing_service.charge_site_plan_credits(\n                workspace_id=workspace_id,\n                site_id=str(existing_doc.id),",
+    "replace": "            _skip = _billing_service.charge_site_plan_credits  # noqa: F841\n            await _noop_charge(\n                workspace_id=workspace_id,\n                site_id=str(existing_doc.id),",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_an_upgrade_charges_only_the_difference"
+    ]
+  },
+  {
+    "label": "a republish is treated as a fresh purchase (a content edit bills a month)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    already_paying = (\n        existing_doc is not None\n        and existing_doc.subscription_status == \"active\"\n        and _existing_tier is not None\n        and _existing_tier.monthly_price_usd > 0\n    )",
+    "replace": "    already_paying = False",
+    "tests": [
+      "tests/cloud/sites/test_credits_publish.py::test_a_republish_does_not_charge_a_second_month"
+    ]
+  },
+  {
+    "label": "the deploy runs before the subscription reads active (a paid site is branded free)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    doc.subscription_status = \"active\"\n    await doc.save()\n\n    deployed = await _deploy_site_doc(",
+    "replace": "    await doc.save()\n\n    deployed = await _deploy_site_doc(",
+    "tests": [
+      "tests/cloud/sites/test_credits_publish.py::test_the_subscription_reads_active_before_the_deploy_runs"
+    ]
+  },
+  {
+    "label": "a tier change is priced at the new tier's full month again",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        delta_usd = int(tier.monthly_price_usd) - already_paid_usd",
+    "replace": "        delta_usd = int(tier.monthly_price_usd)",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_a_downgrade_costs_nothing",
+      "tests/cloud/sites/test_credits_tier_changes.py::test_an_upgrade_charges_only_the_difference"
+    ]
+  },
+  {
+    "label": "a legacy Dodo-rail site is allowed to change tier (billed on both rails)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if tier_change_requested and existing_doc.billing_rail not in (_CREDITS_RAIL, _PLAN_RAIL):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_a_legacy_rail_site_cannot_change_tier_here"
+    ]
+  },
+  {
+    "label": "an upgrade restarts the paid period (a free month per upgrade)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        _previous_tier = existing_doc.plan_tier\n        existing_doc.plan_tier = tier.key\n",
+    "replace": "        _previous_tier = existing_doc.plan_tier\n        existing_doc.plan_tier = tier.key\n        existing_doc.renewal_date = datetime.now(UTC) + relativedelta(months=1)\n",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_an_upgrade_does_not_extend_the_paid_period"
+    ]
+  },
+  {
+    "label": "a purchase records nothing as paid for the period",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    doc.period_paid_usd = int(tier.monthly_price_usd)",
+    "replace": "    doc.period_paid_usd = 0",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_an_upgrade_charges_only_the_difference"
+    ]
+  },
+  {
+    "label": "the paid high-water mark falls on a downgrade",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            existing_doc.period_paid_usd = int(tier.monthly_price_usd)\n        _previous_tier = existing_doc.plan_tier",
+    "replace": "        existing_doc.period_paid_usd = int(tier.monthly_price_usd)\n        _previous_tier = existing_doc.plan_tier",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_returning_to_a_tier_already_bought_this_period_is_free",
+      "tests/cloud/sites/test_credits_tier_changes.py::test_a_downgrade_costs_nothing"
+    ]
+  },
+  {
+    "label": "dropping to the free floor does nothing at all — the site keeps an active subscription on a $0 tier",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if tier_change_requested and not is_paid and not _on_plan_rail:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_downgrading_to_free_schedules_the_close_for_the_period_end"
+    ]
+  },
+  {
+    "label": "a republish carrying no plan key is read as a downgrade to free",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    tier_change_requested = (\n        already_paying and requested_tier is not None and _held_tier_key != requested_tier.key\n    )",
+    "replace": "    tier_change_requested = (\n        already_paying and tier is not None and _held_tier_key != tier.key\n    )",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_a_republish_without_a_plan_key_never_downgrades"
+    ]
+  },
+  {
+    "label": "an org-wide flat resolves as a per-site tier request",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    requested_tier = site_plans.site_scoped_tier(site_plan_key)",
+    "replace": "    requested_tier = site_plans.get_site_plan(site_plan_key)",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_an_org_flat_is_not_read_as_a_downgrade"
+    ]
+  },
+  {
+    "label": "a renewal does not record the month it just bought",
+    "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
+    "find": "        doc.period_paid_usd = int(tier.monthly_price_usd)",
+    "replace": "        doc.period_paid_usd = 0",
+    "tests": [
+      "tests/cloud/sites/test_credits_renewal.py::test_a_renewed_month_is_recorded_as_paid_for"
+    ]
+  },
+  {
+    "label": "the renewal charges a site that never deployed (a monthly bill for a 404)",
+    "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
+    "find": "        if not getattr(doc, \"deployed\", False):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/sites/test_credits_renewal.py::test_a_site_that_never_deployed_is_not_charged"
+    ]
+  },
+  {
+    "label": "the authorization gate narrows back to purchases, so a member can cancel a paid plan",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        and (is_paid or already_paying)\n",
+    "replace": "        and is_paid\n",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_purchase_authz.py::test_a_member_cannot_cancel_a_paid_plan_by_applying_free"
+    ]
+  },
+  {
+    "label": "cancelling closes the plan on the spot, forfeiting the month already paid for",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        _period_end = getattr(existing_doc, \"renewal_date\", None)\n        if _period_end is not None:",
+    "replace": "        _period_end = getattr(existing_doc, \"renewal_date\", None)\n        if False:",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_downgrading_to_free_schedules_the_close_for_the_period_end"
+    ]
+  },
+  {
+    "label": "a pending close drops the paid tier immediately, stripping capabilities mid-month",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if getattr(doc, \"plan_cancels_at_period_end\", False) and (\n        tier is None or tier.monthly_price_usd <= 0\n    ):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_downgrading_to_free_schedules_the_close_for_the_period_end"
+    ]
+  },
+  {
+    "label": "the renewal sweep charges a plan the customer already cancelled",
+    "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
+    "find": "        if getattr(doc, \"plan_cancels_at_period_end\", False):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/sites/test_credits_renewal.py::test_a_scheduled_close_ends_the_plan_instead_of_charging"
+    ]
+  },
+  {
+    "label": "resuming a cancelled plan does not call off the close (it closes anyway, mid-month)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        and getattr(existing_doc, \"plan_cancels_at_period_end\", False)\n    ):\n        existing_doc.plan_cancels_at_period_end = False",
+    "replace": "        and getattr(existing_doc, \"plan_cancels_at_period_end\", False)\n    ):\n        existing_doc.plan_cancels_at_period_end = True",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_a_scheduled_close_costs_nothing_and_can_be_resumed"
+    ]
+  },
+  {
+    "label": "an unauthorized member republishing resumes a plan an admin cancelled",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        and _held_tier_key == requested_tier.key\n        and purchase_authorized",
+    "replace": "        and _held_tier_key == requested_tier.key\n        and True",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_an_unauthorized_republish_does_not_resume_a_cancelled_plan"
+    ]
+  },
+  {
+    "label": "a paid tier change leaves the scheduled close standing, so the sweep ends it anyway",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        existing_doc.plan_cancels_at_period_end = False\n        await existing_doc.save()\n        logger.info(\n            \"sites.publish: site %s moved %s -> %s",
+    "replace": "        existing_doc.plan_cancels_at_period_end = True\n        await existing_doc.save()\n        logger.info(\n            \"sites.publish: site %s moved %s -> %s",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_an_upgrade_calls_off_a_scheduled_close"
+    ]
+  },
+  {
+    "label": "a cancel with no period to run to schedules instead of closing, leaving a paid tier nothing ever ends",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        _period_end = getattr(existing_doc, \"renewal_date\", None)\n        if _period_end is not None:",
+    "replace": "        _period_end = getattr(existing_doc, \"renewal_date\", None)\n        if True:",
+    "tests": [
+      "tests/cloud/sites/test_credits_tier_changes.py::test_cancelling_a_site_with_no_renewal_date_closes_it_immediately"
+    ]
+  }
+]
