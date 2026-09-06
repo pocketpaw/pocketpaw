@@ -499,6 +499,35 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.temporal_sweep_state"]
 
 [[tool.importlinter.contracts]]
+name = "Terrarium — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.terrarium.router",
+    "pocketpaw_ee.terrarium.dto",
+    "pocketpaw_ee.terrarium.physics",
+    # The PURE engine + the god powers: no DB, no soul, no bus. Keeping them
+    # off the documents is what makes the world rules testable without Mongo.
+    "pocketpaw_ee.terrarium.world",
+    "pocketpaw_ee.terrarium.weather",
+    "pocketpaw_ee.terrarium.llm",
+]
+forbidden_modules = ["pocketpaw_ee.terrarium.domain"]
+
+[[tool.importlinter.contracts]]
+name = "Terrarium weather — a god power can never reach a soul"
+type = "forbidden"
+source_modules = ["pocketpaw_ee.terrarium.weather"]
+forbidden_modules = [
+    "pocketpaw_ee.terrarium.soul_link",
+    "pocketpaw_ee.terrarium.service",
+]
+# ``soul_protocol`` itself is deliberately NOT listed: an external forbidden
+# module would force include_external_packages=True on the whole config (a
+# global change for one contract). The runnable half of the rule
+# (tests/ee/terrarium/test_weather.py) greps weather.py's source for it.
+
+[[tool.importlinter.contracts]]
 name = "InstinctApprovals — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"

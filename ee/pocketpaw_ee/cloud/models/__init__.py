@@ -276,6 +276,14 @@ _SightingDoc: type = None  # type: ignore[assignment]
 # init_beanie registers it without ee.cloud.models taking a hard import on the
 # versions package (same out-of-models discipline as belt/mandates).
 _ArtifactVersionDoc: type = None  # type: ignore[assignment]
+# The TERRARIUM docs live in ee.terrarium.domain (4-file entity, sole importer
+# = its own service). Lazy-loaded here so init_beanie registers them without
+# ee.cloud.models taking a hard import on the terrarium package (same
+# out-of-models discipline as calendar / mandates / versions).
+_UniverseDoc: type = None  # type: ignore[assignment]
+_CitizenDoc: type = None  # type: ignore[assignment]
+_WorldEventDoc: type = None  # type: ignore[assignment]
+_WorldArtifactDoc: type = None  # type: ignore[assignment]
 
 
 def _ensure_file_upload():
@@ -331,6 +339,24 @@ def _ensure_version_docs():
 
         _ArtifactVersionDoc = _AV
     return _ArtifactVersionDoc
+
+
+def _ensure_terrarium_docs():
+    # Why: the terrarium package's modules pull the router (→ deps → auth) when
+    # imported through the package, so import the doc module directly +
+    # deferred — the same reason the mandates docs are loaded this way.
+    global _UniverseDoc, _CitizenDoc, _WorldEventDoc, _WorldArtifactDoc
+    if _UniverseDoc is None:
+        from pocketpaw_ee.terrarium.domain import ArtifactDoc as _WA
+        from pocketpaw_ee.terrarium.domain import CitizenDoc as _CD
+        from pocketpaw_ee.terrarium.domain import EventDoc as _WE
+        from pocketpaw_ee.terrarium.domain import UniverseDoc as _UD
+
+        _UniverseDoc = _UD
+        _CitizenDoc = _CD
+        _WorldEventDoc = _WE
+        _WorldArtifactDoc = _WA
+    return _UniverseDoc, _CitizenDoc, _WorldEventDoc, _WorldArtifactDoc
 
 
 __all__ = [
@@ -437,6 +463,7 @@ def get_all_documents():
     cal_doc, evt_doc = _ensure_calendar_docs()
     mandate_doc, shift_doc, sighting_doc = _ensure_mandate_docs()
     artifact_version_doc = _ensure_version_docs()
+    universe_doc, citizen_doc, world_event_doc, world_artifact_doc = _ensure_terrarium_docs()
     return [
         User,
         Agent,
@@ -567,6 +594,13 @@ def get_all_documents():
         WorkspaceJobDoc,
         cal_doc,
         evt_doc,
+        # Terrarium — the agent-civilization runtime. Only
+        # ``ee.terrarium.service`` (+ its approve-side executor) imports these
+        # doc classes directly (import-linter "Terrarium" contract).
+        universe_doc,
+        citizen_doc,
+        world_event_doc,
+        world_artifact_doc,
         mandate_doc,
         shift_doc,
         sighting_doc,
