@@ -309,6 +309,70 @@ class TestLiteLLMSearchProvider:
         assert "T" in result and "https://u" in result
 
     @patch("pocketpaw.tools.builtin.web_search.get_settings")
+    async def test_the_paying_workspace_rides_a_header_not_the_body(self, mock_settings, tool):
+        """A search names its tenant, and does it where the search vendor never sees.
+
+        This request authenticates with the DEPLOYMENT's key, so without an id the
+        spend belongs to nobody and is served free. The id CANNOT go in the body
+        beside ``query``: the proxy forwards that body to the search vendor, and
+        Parallel AI rejects an unknown ``user`` with ``extra_forbidden`` — measured,
+        not assumed, and it fails the whole search with a 500. The proxy reads the
+        header and strips it.
+        """
+        mock_settings.return_value = MagicMock(
+            web_search_provider="litellm",
+            litellm_api_base="https://gw.example.com",
+            litellm_search_api_base=None,
+            litellm_api_key="sk-proxy",
+            litellm_search_tool_name="web_search",
+        )
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"results": [{"title": "T", "url": "https://u", "snippet": "S"}]}
+
+        with (
+            patch("httpx.AsyncClient") as cls,
+            patch(
+                "pocketpaw.agents.spend_attribution.current_workspace_id",
+                return_value="ws_alpha",
+            ),
+        ):
+            client = self._client(resp)
+            cls.return_value = client
+            await tool.execute(query="q")
+
+        kwargs = client.post.call_args[1]
+        assert kwargs["headers"]["x-litellm-end-user-id"] == "ws_alpha"
+        assert "user" not in kwargs["json"], "a body-level user field 500s the search vendor"
+
+    @patch("pocketpaw.tools.builtin.web_search.get_settings")
+    async def test_a_run_with_no_workspace_sends_no_tenant_header(self, mock_settings, tool):
+        """A CLI turn has nobody to bill, and a blank id would pool them all as one."""
+        mock_settings.return_value = MagicMock(
+            web_search_provider="litellm",
+            litellm_api_base="https://gw.example.com",
+            litellm_search_api_base=None,
+            litellm_api_key="sk-proxy",
+            litellm_search_tool_name="web_search",
+        )
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"results": [{"title": "T", "url": "https://u", "snippet": "S"}]}
+
+        with (
+            patch("httpx.AsyncClient") as cls,
+            patch(
+                "pocketpaw.agents.spend_attribution.current_workspace_id",
+                return_value=None,
+            ),
+        ):
+            client = self._client(resp)
+            cls.return_value = client
+            await tool.execute(query="q")
+
+        assert "x-litellm-end-user-id" not in client.post.call_args[1]["headers"]
+
+    @patch("pocketpaw.tools.builtin.web_search.get_settings")
     async def test_snippet_is_normalised_into_the_shared_result_shape(self, mock_settings, tool):
         """The gateway returns ``snippet``; every other provider yields ``content``.
 

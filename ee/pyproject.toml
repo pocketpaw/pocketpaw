@@ -312,6 +312,8 @@ meetings = "pocketpaw_ee.extensions:CloudMeetingsMcpProvider"
 sites = "pocketpaw_ee.extensions:CloudSitesMcpProvider"
 media = "pocketpaw_ee.extensions:CloudMediaMcpProvider"
 other_hand = "pocketpaw_ee.extensions:CloudOtherHandMcpProvider"
+
+browser = "pocketpaw_ee.extensions:CloudBrowserMcpProvider"
 stock = "pocketpaw_ee.extensions:CloudStockImagesMcpProvider"
 icons = "pocketpaw_ee.extensions:CloudIconsMcpProvider"
 palette = "pocketpaw_ee.extensions:CloudPaletteMcpProvider"

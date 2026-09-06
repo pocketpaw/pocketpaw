@@ -82,6 +82,7 @@ from typing import Any
 from beanie import Indexed
 from bson import ObjectId
 from pydantic import BaseModel, Field
+from pymongo import IndexModel
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 from pocketpaw_ee.cloud.surface.domain import PocketSurfaceProfile
@@ -220,3 +221,15 @@ class Pocket(TimestampedDocument):
 
     class Settings:
         name = "pockets"
+        indexes = [
+            # The list query is a $or over owner / shared_with / visibility,
+            # always anchored on ``workspace``. The inline ``Indexed`` on the
+            # workspace field alone left Mongo scanning every pocket in the
+            # workspace and filtering the $or in memory; these let it use the
+            # index for each branch of the union instead.
+            #
+            # shared_with is an array, so that one is multikey.
+            IndexModel([("workspace", 1), ("owner", 1)], name="workspace_owner_1"),
+            IndexModel([("workspace", 1), ("visibility", 1)], name="workspace_visibility_1"),
+            IndexModel([("workspace", 1), ("shared_with", 1)], name="workspace_shared_with_1"),
+        ]

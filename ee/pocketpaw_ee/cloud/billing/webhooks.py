@@ -12,12 +12,23 @@
 # (BC-1's idempotent grant, keyed on the webhook event id). A bad signature
 # raises ``BadRequest`` → 400 via the cloud error handler — no grant.
 #
+# Deliveries that move money the OTHER way (``refund.succeeded`` /
+# ``dispute.lost``) arrive on this same route and debit the credits back; the
+# route is unchanged for them because the trust boundary is identical.
+# ``WebhookAck`` stays ``{ok, granted}`` on the wire — the service's per-event
+# ``reversed`` count is internal, because the gateway's only question is whether
+# to stop retrying.
+#
 # SECURITY: read RAW bytes (the signature is over the exact bytes — never
 # re-serialize). Never log the secret or customer PII.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-2): new module.
 # Updated 2026-06-24 (security): correct the bad-signature docstring — the
 #   provider raises ``BadRequest`` (400), not ``ValidationError`` (422).
+# Updated 2026-09-02 (fix/billing-reversals-and-dunning): document that reversal
+#   and dunning deliveries ride this same unauthenticated route. No route change
+#   was needed — the signature is the trust boundary for every family — but the
+#   comment above claimed the route only ever granted, which is no longer true.
 
 from __future__ import annotations
 

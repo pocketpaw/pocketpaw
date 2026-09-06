@@ -73,6 +73,15 @@
 # secret and the API key are NEVER logged.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-2): new module.
+# Updated 2026-09-02 (fix/site-plan-change-gateway-conflict): every SDK call is
+#   now translated into a ``CloudError`` on failure. Nothing was, so the SDK's own
+#   exception escaped the provider, escaped the service, and reached the client as
+#   a 500 with a traceback. Changing a site's plan while the previous change was
+#   still awaiting payment is the case that surfaced it: Dodo answers ``409
+#   PENDING_PLAN_CHANGE_EXISTS``, which is a legible thing to tell a buyer, and
+#   ``POST /api/v1/sites/publish`` returned "Internal Server Error" instead. The
+#   mapping keeps the gateway's own message on the 4xx paths and refuses to
+#   dress an unclassifiable failure up as the caller's mistake.
 # Updated 2026-06-24 (security): warn (don't silently swallow) when a
 #   payment.succeeded event carries a non-int / missing ``total_amount`` — the
 #   safe-coerce-to-0 behavior is unchanged, but ops now get a log to triage.
@@ -104,16 +113,36 @@
 #   "leave the cart alone" at this gateway, it is "empty the cart". Forwarding
 #   unconditionally means the destructive case only happens when a caller asked
 #   for it.
+#
+# Updated 2026-09-02 (fix/billing-reversals-and-dunning, M1):
+#   ``verify_and_parse_webhook`` now recognizes a THIRD family — ``refund.*`` and
+#   ``dispute.*`` normalize to a ``ReversalEvent``. They cannot ride
+#   ``GatewayEvent``: a ``Refund`` puts its money on ``data.amount`` (optional
+#   int) while a ``Dispute`` puts it on ``data.amount`` as a STRING, neither has
+#   ``total_amount``, and a ``Dispute`` carries no ``metadata`` at all — so
+#   ``data.payment_id`` is the only field that can route a clawback back to a
+#   workspace. ``_reversal_amount`` reads both shapes and returns 0 for anything
+#   it cannot parse, which the service treats as "reverse the whole grant"
+#   rather than as a partial figure nobody stated.
 from __future__ import annotations
 
 import json
 import logging
 from typing import Any
 
-from pocketpaw_ee.cloud._core.errors import BadRequest, ValidationError
+from pocketpaw_ee.cloud._core.errors import (
+    BadRequest,
+    CloudError,
+    ConflictError,
+    Internal,
+    RateLimited,
+    ValidationError,
+    with_cause,
+)
 from pocketpaw_ee.cloud.billing.domain import (
     GatewayEvent,
     OneTimeCheckout,
+    ReversalEvent,
     SubscriptionCheckout,
     SubscriptionEvent,
 )
@@ -125,6 +154,13 @@ logger = logging.getLogger(__name__)
 # updated) are still parsed into a SubscriptionEvent — the service decides which
 # ones act — but these three are the ones BC-7's grant/revert logic keys on.
 _SUBSCRIPTION_EVENT_PREFIX = "subscription."
+
+# The verified REVERSAL families this provider normalizes (M1). EVERY
+# ``refund.*`` / ``dispute.*`` delivery becomes a ``ReversalEvent`` — the
+# SERVICE decides which of them move money (``refund.succeeded`` and
+# ``dispute.lost``; the other five dispute deliveries are lifecycle), exactly
+# as it already does for the subscription family.
+_REVERSAL_EVENT_PREFIXES = ("refund.", "dispute.")
 
 # Default billing country for the hosted checkout. Dodo requires a country on
 # the billing address; the buyer can change it on the hosted page. "US" is a
@@ -148,6 +184,44 @@ def _customer_param(email: str | None) -> dict[str, str]:
     """
     e = email or _PLACEHOLDER_EMAIL
     return {"email": e, "name": e.split("@", 1)[0] or "Customer"}
+
+
+def _reversal_amount(raw: Any, *, event_type: str, event_id: str) -> int:
+    """The reversed money in the currency's lowest denomination, or 0.
+
+    Dodo states this field in two DIFFERENT SHAPES and both reach here:
+    ``Refund.amount`` is an OPTIONAL int, while ``Dispute.amount`` is a required
+    STRING ("represented as a string to accommodate precision"). A string of
+    digits is that same lowest-denomination integer, so it is parsed; anything
+    else — a decimal string, a float, None — yields 0.
+
+    0 means "the gateway named no usable amount", which the service reads as a
+    FULL reversal capped at what the payment actually granted. That is the right
+    reading for the only two events that move money here (a completed refund and
+    a lost chargeback both take the whole charge unless they say otherwise), and
+    it keeps a money field we could not parse from being turned into a partial
+    figure nobody stated.
+    """
+    if isinstance(raw, bool):
+        value = None
+    elif isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str) and raw.strip().isdigit():
+        value = int(raw.strip())
+    else:
+        value = None
+    if value is None:
+        if raw is not None:
+            # Nothing to leak — it is not a number we could read.
+            logger.warning(
+                "billing.webhook: %s carried an unreadable amount (type=%s, event_id=%s) — "
+                "treating it as unstated; the reversal falls back to the full recorded grant",
+                event_type,
+                type(raw).__name__,
+                event_id,
+            )
+        return 0
+    return max(value, 0)
 
 
 class DodoProvider:
@@ -210,6 +284,65 @@ class DodoProvider:
     # Checkout
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _gateway_failure(exc: Exception, *, operation: str) -> CloudError:
+        """Turn a Dodo SDK status error into the error contract this layer owes.
+
+        Every call in this class used to let the SDK's own exception escape. That
+        exception is not a ``CloudError``, so nothing mapped it, and a perfectly
+        legible gateway refusal reached the client as a 500 with a stack trace —
+        including the one that prompted this: changing a site's plan while the
+        previous change was still awaiting payment answered ``409
+        PENDING_PLAN_CHANGE_EXISTS``, and the publish endpoint returned "Internal
+        Server Error" for a condition the buyer could have acted on.
+
+        The gateway's own ``code`` decides the mapping wherever it is specific
+        enough to be worth naming, and the status decides the rest. Anything we
+        cannot classify becomes a 500 deliberately: an unrecognised gateway
+        failure is our problem to look at, not something to dress up as the
+        caller's mistake.
+        """
+        status = int(getattr(exc, "status_code", 0) or 0)
+        body = getattr(exc, "body", None)
+        gateway_code = ""
+        gateway_message = ""
+        if isinstance(body, dict):
+            gateway_code = str(body.get("code") or "")
+            gateway_message = str(body.get("message") or "")
+
+        if gateway_code == "PENDING_PLAN_CHANGE_EXISTS":
+            # The actionable one. A previous change_plan charged a proration that
+            # has not settled, and the gateway refuses to queue a second change
+            # behind it. Waiting genuinely fixes it, so say so rather than
+            # inviting a retry that will fail the same way.
+            return ConflictError(
+                "billing.plan_change_pending",
+                "This subscription already has a plan change waiting on payment. "
+                "The change will apply once that payment settles; try again after it does.",
+            )
+
+        # The gateway's message is passed through on the 4xx paths. It is written
+        # for the account holder, and replacing it with our own wording would drop
+        # the only specific thing we know about the refusal.
+        detail = gateway_message or f"the payment gateway refused the {operation}"
+        if status == 409:
+            return ConflictError("billing.gateway_conflict", detail)
+        if status == 429:
+            return RateLimited("billing.gateway_rate_limited", detail)
+        if status in (400, 404, 422):
+            return ValidationError("billing.gateway_rejected", detail)
+        if status in (401, 403):
+            # OUR credential is wrong, not the caller's request. A 403 here would
+            # tell the buyer they lack permission for something they are entitled
+            # to, and send whoever reads it to the wrong system.
+            return Internal(
+                "billing.gateway_unauthorized",
+                "Billing is misconfigured and the payment gateway rejected our credentials.",
+            )
+        return Internal(
+            "billing.gateway_unavailable", f"The payment gateway failed the {operation}."
+        )
+
     def _client(self):  # pragma: no cover - thin SDK wiring, mocked in tests
         """Construct the async DodoPayments client from settings.
 
@@ -257,19 +390,24 @@ class DodoProvider:
         meta["workspace_id"] = str(workspace_id)
 
         client = self._client()
-        response = await client.payments.create(
-            billing={"country": self._billing_country},
-            customer=_customer_param(customer_email),
-            product_cart=[
-                {
-                    "product_id": self._credit_product_id,
-                    "quantity": 1,
-                    "amount": cart_amount_cents,
-                }
-            ],
-            payment_link=True,
-            metadata=meta,
-        )
+        try:
+            response = await client.payments.create(
+                billing={"country": self._billing_country},
+                customer=_customer_param(customer_email),
+                product_cart=[
+                    {
+                        "product_id": self._credit_product_id,
+                        "quantity": 1,
+                        "amount": cart_amount_cents,
+                    }
+                ],
+                payment_link=True,
+                metadata=meta,
+            )
+        except CloudError:
+            raise
+        except Exception as exc:
+            raise with_cause(self._gateway_failure(exc, operation="payment"), exc) from exc
 
         checkout_url = getattr(response, "payment_link", None)
         gateway_ref = getattr(response, "payment_id", "") or ""
@@ -340,7 +478,12 @@ class DodoProvider:
             create_kwargs["cancel_url"] = cancel_url
 
         client = self._client()
-        response = await client.checkout_sessions.create(**create_kwargs)
+        try:
+            response = await client.checkout_sessions.create(**create_kwargs)
+        except CloudError:
+            raise
+        except Exception as exc:
+            raise with_cause(self._gateway_failure(exc, operation="checkout"), exc) from exc
 
         checkout_url = getattr(response, "checkout_url", None)
         # The session id is repurposed onto SubscriptionCheckout.subscription_id —
@@ -363,7 +506,12 @@ class DodoProvider:
         # ``subscriptions.update(<id>, status="cancelled")``. Dodo emits the
         # ``subscription.cancelled`` webhook that drives the entitlement revert.
         client = self._client()
-        await client.subscriptions.update(subscription_id, status="cancelled")
+        try:
+            await client.subscriptions.update(subscription_id, status="cancelled")
+        except CloudError:
+            raise
+        except Exception as exc:
+            raise with_cause(self._gateway_failure(exc, operation="cancellation"), exc) from exc
 
     async def change_plan(
         self,
@@ -395,14 +543,19 @@ class DodoProvider:
         # alone" at this gateway — it is "empty the cart". Passing the caller's
         # list through unconditionally means the destructive case only happens
         # when a caller actually asked for it.
-        await client.subscriptions.change_plan(
-            subscription_id,
-            product_id=product_id,
-            quantity=1,
-            proration_billing_mode="difference_immediately",
-            on_payment_failure="prevent_change",
-            addons=list(addons),
-        )
+        try:
+            await client.subscriptions.change_plan(
+                subscription_id,
+                product_id=product_id,
+                quantity=1,
+                proration_billing_mode="difference_immediately",
+                on_payment_failure="prevent_change",
+                addons=list(addons),
+            )
+        except CloudError:
+            raise
+        except Exception as exc:
+            raise with_cause(self._gateway_failure(exc, operation="plan change"), exc) from exc
 
     # ------------------------------------------------------------------ #
     # Webhook
@@ -413,7 +566,7 @@ class DodoProvider:
         *,
         payload: bytes,
         headers: dict[str, str],
-    ) -> GatewayEvent | SubscriptionEvent:
+    ) -> GatewayEvent | SubscriptionEvent | ReversalEvent:
         if not self._webhook_secret:
             raise ValidationError(
                 "billing.webhook_unconfigured",
@@ -483,6 +636,26 @@ class DodoProvider:
                 product_id=product_id,
                 subscription_id=subscription_id,
                 site_id=site_id,
+                raw=verified,
+            )
+
+        # REVERSAL family (M1) — a ``refund.*`` / ``dispute.*`` delivery
+        # normalizes to a ``ReversalEvent``, NOT a GatewayEvent. Every field
+        # that matters differs: the money is on ``data.amount`` rather than
+        # ``total_amount``, and a ``Dispute`` carries no metadata at all, so
+        # ``data.payment_id`` is the only route back to a workspace. Parsed for
+        # the WHOLE family; the service picks which ones move money.
+        if event_type.startswith(_REVERSAL_EVENT_PREFIXES):
+            return ReversalEvent(
+                event_id=event_id,
+                type=event_type,
+                payment_id=str(data.get("payment_id") or ""),
+                amount_credits=_reversal_amount(
+                    data.get("amount"), event_type=event_type, event_id=event_id
+                ),
+                currency=str(data.get("currency") or ""),
+                workspace_id=workspace_id,
+                is_partial=bool(data.get("is_partial")),
                 raw=verified,
             )
 

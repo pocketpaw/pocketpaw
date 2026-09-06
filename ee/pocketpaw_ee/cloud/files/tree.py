@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import Literal, overload
 
@@ -92,8 +93,21 @@ async def build_tree(
 
 # In-process TTL cache for /tree.
 # Key is (user_id, workspace_id). Value is (expires_at, tree, warnings).
-_TREE_CACHE: dict[tuple[str, str | None], tuple[float, FolderNode, list[dict[str, str]]]] = {}
+#
+# An OrderedDict used as an LRU, not a plain dict. The TTL is checked on read
+# and decides whether an entry is USABLE; until 2026-09-04 nothing ever removed
+# an expired one, so a deployment retained one whole folder tree per (user,
+# workspace) pair ever seen, for the life of the process. Each value holds a
+# full FolderNode, which is the expensive part.
+_TREE_CACHE: OrderedDict[tuple[str, str | None], tuple[float, FolderNode, list[dict[str, str]]]] = (
+    OrderedDict()
+)
 _TREE_TTL_SECONDS = 30.0
+
+#: Ceiling on retained trees. Generous — with a 30-second TTL the working set
+#: is however many distinct users hit /tree in half a minute, so eviction is a
+#: backstop against growth, not something a real deployment should reach.
+_TREE_CACHE_MAX = 2_000
 
 
 def invalidate_tree_cache(*, user_id: str | None = None, workspace_id: str | None = None) -> None:
@@ -142,6 +156,7 @@ class CachedTreeBuilder:
         cached = _TREE_CACHE.get(key)
         if cached is not None and cached[0] > now:
             _, tree, warnings = cached
+            _TREE_CACHE.move_to_end(key)
             return tree, list(warnings)
         tree, warnings = await build_tree(
             ctx=ctx,
@@ -150,4 +165,9 @@ class CachedTreeBuilder:
             collect_warnings=True,
         )
         _TREE_CACHE[key] = (now + self._ttl, tree, warnings)
+        _TREE_CACHE.move_to_end(key)
+        # Drop the coldest entries past the ceiling. Evicting is always safe:
+        # a miss rebuilds, it does not return anything wrong.
+        while len(_TREE_CACHE) > _TREE_CACHE_MAX:
+            _TREE_CACHE.popitem(last=False)
         return tree, list(warnings)

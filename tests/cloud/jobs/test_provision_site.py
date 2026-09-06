@@ -317,7 +317,12 @@ async def test_workers_mode_deploys_via_wrangler_not_put_worker(
 
     calls: list[dict[str, Any]] = []
 
-    async def _fake_deploy(site_id: str, project_dir: str, *, d1_database_id: str | None = None):
+    # ``**_`` so a keyword the real ``deploy_workers`` grows does not fail this double
+    # for a reason unrelated to what it asserts. SA-2 added ``analytics_entitled``; this
+    # test is about the D1 id reaching the wrangler lane, not about the counter.
+    async def _fake_deploy(
+        site_id: str, project_dir: str, *, d1_database_id: str | None = None, **_: object
+    ):
         calls.append({"site_id": site_id, "d1": d1_database_id, "dir": project_dir})
         return "https://paw-site-x.acct.workers.dev"
 

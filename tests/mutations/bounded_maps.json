@@ -1,0 +1,44 @@
+[
+  {
+    "label": "H3: unmatched requests key on the raw URL again",
+    "file": "ee/pocketpaw_ee/cloud/_core/timing.py",
+    "find": "            else UNMATCHED_PATH",
+    "replace": "            else request.url.path",
+    "tests": ["tests/cloud/_core/test_unbounded_maps.py::TestTimingKeySpace"]
+  },
+  {
+    "label": "M4: audience cache stops evicting",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "        while len(self._cache) > self._max:\n            self._cache.popitem(last=False)",
+    "replace": "        pass",
+    "tests": ["tests/cloud/_core/test_unbounded_maps.py::TestAudienceCache"]
+  },
+  {
+    "label": "M4: single-flight removed, concurrent misses each query",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "        pending = self._inflight.get(ck)\n        if pending is not None:\n            return list(await pending)",
+    "replace": "        pending = None",
+    "tests": ["tests/cloud/_core/test_unbounded_maps.py::TestAudienceCache"]
+  },
+  {
+    "label": "M4: LRU recency not tracked on read, so eviction picks wrong",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "            self._cache.move_to_end(ck)\n            return list(entry[1])",
+    "replace": "            return list(entry[1])",
+    "tests": ["tests/cloud/_core/test_unbounded_maps.py::TestAudienceCache::test_eviction_is_least_recently_used"]
+  },
+  {
+    "label": "M5: cleanup_all reverts to the hand-written OSS-only list",
+    "file": "src/pocketpaw/security/rate_limiter.py",
+    "find": "    return sum(limiter.cleanup(max_age) for limiter in list(_REGISTRY))",
+    "replace": "    return api_limiter.cleanup(max_age) + auth_limiter.cleanup(max_age)",
+    "tests": ["tests/cloud/_core/test_unbounded_maps.py::TestLimiterRegistry"]
+  },
+  {
+    "label": "M5: trust the caller-supplied leftmost X-Forwarded-For again",
+    "file": "ee/pocketpaw_ee/cloud/_core/rate_limit.py",
+    "find": "    candidate = forwarded.rsplit(\",\", 1)[-1].strip()",
+    "replace": "    candidate = forwarded.split(\",\")[0].strip()",
+    "tests": ["tests/cloud/_core/test_unbounded_maps.py::TestForwardedForTrust"]
+  }
+]

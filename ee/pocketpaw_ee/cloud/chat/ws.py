@@ -10,6 +10,19 @@ Handles:
 - Presence tracking with grace period (30s before marking offline)
 - Per-socket liveness (see below)
 
+Updated: 2026-09-04 (fix/unblock-event-loop, backend-perf H1) — the three
+fan-out loops (``send_to_user``, ``broadcast_to_group``, ``send_to_room``) now
+send CONCURRENTLY under a bounded gather instead of one serial await per
+recipient. ``SEND_TIMEOUT_SECONDS`` below already bounds a single send, and the
+note on it explains exactly why: "one stuck socket would stall delivery to
+every other member and the sender's own request". That is true of one send, but
+the serial loop around it re-introduced the very stall the timeout was added to
+prevent — the cost was the SUM over recipients, so a 200-member workspace with
+ten back-pressured tabs held the emitting POST for ~50s with every individual
+timeout behaving perfectly. Delivery is now max-per-socket. The freshness gate,
+the dead-socket bookkeeping, and the ``delivered`` count (which
+``push/dispatch.py`` reads to choose WS over Web Push) are unchanged.
+
 Updated: 2026-08-18 (fix/ws-fanout-stale-sockets) — the liveness verdict below
 was only consulted by ``is_online``. Fan-out (``send_to_user`` /
 ``send_to_room``) still wrote to every registered socket, so a zombie kept
@@ -59,6 +72,7 @@ import time
 
 from fastapi import WebSocket
 
+from pocketpaw_ee.cloud._core.realtime.fanout import map_bounded
 from pocketpaw_ee.cloud.chat.schemas import WsOutbound
 
 logger = logging.getLogger(__name__)
@@ -323,13 +337,12 @@ class ConnectionManager:
         dropping the notification.
         """
         data = message.model_dump(mode="json")
-        delivered = 0
-        dead: list[WebSocket] = []
         now = time.monotonic()
         # Iterate a COPY: a concurrent _close_stale → disconnect mutates the
         # live set, and the resulting "set changed size during iteration" fires
         # at the for statement — outside the per-send try — so it would escape
         # to notify() and be mistaken for a WS failure, skipping the fallback.
+        fresh: list[WebSocket] = []
         for ws in list(self.get_user_connections(user_id)):
             # Same verdict as is_online: a stale ping-capable socket is a
             # zombie. Writing to it "succeeds" (kernel buffer) and would count
@@ -338,8 +351,22 @@ class ConnectionManager:
             # loop then runs the normal disconnect/presence path.
             if not self._is_fresh(ws, now=now):
                 self._close_stale(ws)
-                continue
-            if await self._send_bounded(ws, data):
+            else:
+                fresh.append(ws)
+        if not fresh:
+            return 0
+
+        # One user's sockets are their open tabs and devices. Sending serially
+        # made a single back-pressured tab cost every OTHER device on this user
+        # the full SEND_TIMEOUT_SECONDS before its own frame was even
+        # attempted. _send_bounded contains its own failures and returns a
+        # bool, so nothing raises out of the gather.
+        results = await map_bounded(fresh, lambda ws: self._send_bounded(ws, data))
+
+        delivered = 0
+        dead: list[WebSocket] = []
+        for ws, accepted in zip(fresh, results, strict=True):
+            if accepted:
                 delivered += 1
                 self._mark_outbound(ws)
             else:
@@ -357,10 +384,11 @@ class ConnectionManager:
         exclude_user: str | None = None,
     ) -> None:
         """Broadcast a message to all online members of a group."""
-        for uid in member_ids:
-            if uid == exclude_user:
-                continue
-            await self.send_to_user(uid, message)
+        targets = [uid for uid in member_ids if uid != exclude_user]
+        # Concurrent for the same reason as send_to_user, one level up: a
+        # group's members are independent recipients, so the broadcast should
+        # cost the slowest member rather than all of them added together.
+        await map_bounded(targets, lambda uid: self.send_to_user(uid, message))
 
     # ------------------------------------------------------------------
     # Room tracking (at most one current room per socket)
@@ -392,8 +420,8 @@ class ConnectionManager:
         in the group before calling ``join_room``).
         """
         data = message.model_dump(mode="json")
-        dead: list[WebSocket] = []
         now = time.monotonic()
+        fresh: list[WebSocket] = []
         for ws, room in list(self._ws_to_room.items()):
             if room != group_id:
                 continue
@@ -402,8 +430,16 @@ class ConnectionManager:
             # Same freshness gate as send_to_user — see the note there.
             if not self._is_fresh(ws, now=now):
                 self._close_stale(ws)
-                continue
-            if await self._send_bounded(ws, data):
+            else:
+                fresh.append(ws)
+        if not fresh:
+            return
+
+        results = await map_bounded(fresh, lambda ws: self._send_bounded(ws, data))
+
+        dead: list[WebSocket] = []
+        for ws, accepted in zip(fresh, results, strict=True):
+            if accepted:
                 self._mark_outbound(ws)
             else:
                 dead.append(ws)

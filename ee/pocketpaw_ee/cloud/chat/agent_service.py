@@ -2843,7 +2843,14 @@ def session_key_for(ctx: ScopeContext) -> str:
 
 
 async def load_history_for_scope(ctx: ScopeContext, *, limit: int = 50) -> list[dict[str, str]]:
-    """Return prior turns as ``[{"role", "content"}]``, oldest first.
+    """Return the most recent ``limit`` turns as ``[{"role", "content"}]``,
+    ordered oldest first.
+
+    Note both halves of that: the window is the NEWEST ``limit`` messages,
+    and within the window the order is ascending. Until 2026-09-04 the query
+    sorted ascending before limiting, which silently made it the OLDEST
+    ``limit`` instead — an agent whose memory froze at turn 50 while the
+    visible transcript kept growing.
 
     Why: the agent backend keeps conversation state in an in-process SDK
     subprocess keyed by ``session_key``. That state is wiped by any
@@ -2879,7 +2886,21 @@ async def load_history_for_scope(ctx: ScopeContext, *, limit: int = 50) -> list[
                 "group": ctx.scope_id,
                 "deleted": False,
             }
-        msgs = await Message.find(query).sort("createdAt").limit(limit).to_list()
+        # Newest-first in the query, then reversed back for the caller.
+        #
+        # Ascending + limit() returns the first ``limit`` messages ever
+        # written to the scope, so past that many turns the agent replayed
+        # the opening exchange forever and never saw anything recent. The
+        # window is meant to be the END of the conversation; only its
+        # internal ordering is oldest-first.
+        #
+        # Sorting descending in Mongo rather than fetching everything and
+        # slicing here is what lets the (workspace_id, session_key,
+        # createdAt) compound index serve the window directly.
+        #
+        # Same shape as memory/mongo_store.py:372-374, which had it right.
+        recent = await Message.find(query).sort("-createdAt").limit(limit).to_list()
+        msgs = list(reversed(recent))
     except Exception:
         logger.exception("load_history_for_scope failed for %s/%s", ctx.kind.value, ctx.scope_id)
         return []

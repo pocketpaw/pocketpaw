@@ -25,6 +25,18 @@ from __future__ import annotations
 from pocketpaw_ee.cloud.surface import SurfaceKind, SurfaceMeta, SurfaceProfile, resolve_profile
 
 
+# Every non-BROWSER surface now carries the agentic-browser tool ids in its deny
+# set (BR-1, ``service._deny_browser_off_surface``). The assertions below are
+# about each SURFACE'S OWN denies, so strip that always-on floor rather than
+# restating it in every expected set — and rather than narrowing the deny, which
+# is the boundary /chat depends on. ``test_browser_surface.py`` asserts the floor
+# itself, for every kind.
+def _own_deny(profile) -> frozenset[str]:
+    from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
+
+    return profile.deny_mcp_tool_ids - frozenset(BROWSER_TOOL_IDS)
+
+
 def test_sites_profile_turns_ripple_off():
     """The /sites SVELTE-CREATE surface hand-authors a Svelte Paw Site — the
     ripple LAW is wrong there, so its profile turns ripple off.
@@ -50,7 +62,7 @@ def test_sites_profile_declares_deny_set_and_skill():
     belong to the svelte-create mode, not to every /sites meta."""
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="svelte"))
     assert (
-        profile.deny_mcp_tool_ids
+        _own_deny(profile)
         == frozenset(
             {
                 "mcp__pocketpaw_sites_manager__create_landing_site",
@@ -78,11 +90,15 @@ def test_unmapped_kind_defaults_to_ripple_on():
 
 
 def test_default_profile_has_no_denies_or_skills():
-    """The default (ripple-on) profile carries empty deny / skill sets and no
-    SDK-tool allowlist — it imposes no surface-specific policy."""
+    """The default (ripple-on) profile carries no denies OF ITS OWN, empty skill
+    sets and no SDK-tool allowlist — it imposes no surface-specific policy.
+
+    Since BR-1 every non-BROWSER profile also carries the always-on browser deny
+    floor; ``_own_deny`` strips it so this stays an assertion about the default
+    profile rather than about that floor."""
     profile = resolve_profile(SurfaceKind.POCKETS_LIST, SurfaceMeta())
     assert profile.ripple_mode == "on"
-    assert profile.deny_mcp_tool_ids == frozenset()
+    assert _own_deny(profile) == frozenset()
     assert profile.skill_names == frozenset()
     assert profile.allowed_sdk_tools is None
     assert profile.system_message_override is None
@@ -122,7 +138,7 @@ def test_resolve_profile_sites_svelte_create_disables_ripple():
     ONLY /sites mode that loses ripple."""
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="svelte"))
     assert profile.ripple_mode == "off"
-    assert profile.deny_mcp_tool_ids == _RIPPLE_CREATE_DENY | _SITES_BUILTIN_DENY
+    assert _own_deny(profile) == _RIPPLE_CREATE_DENY | _SITES_BUILTIN_DENY
     assert "create-svelte-site" in profile.skill_names
 
 
@@ -135,7 +151,7 @@ def test_resolve_profile_sites_ripple_create_keeps_ripple():
     for meta in (SurfaceMeta(engine=None), SurfaceMeta(engine="ripple")):
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert profile.ripple_mode == "on", f"ripple-create meta {meta!r} must keep ripple"
-        assert profile.deny_mcp_tool_ids == _SITES_BUILTIN_DENY, (
+        assert _own_deny(profile) == _SITES_BUILTIN_DENY, (
             f"ripple-create meta {meta!r} denies only the file/shell built-ins"
         )
 
@@ -153,7 +169,7 @@ def test_resolve_profile_sites_refine_keeps_ripple():
     ):
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert profile.ripple_mode == "on", f"refine meta {meta!r} must keep ripple"
-        assert profile.deny_mcp_tool_ids == _SITES_BUILTIN_DENY, (
+        assert _own_deny(profile) == _SITES_BUILTIN_DENY, (
             f"refine meta {meta!r} keeps the ripple/pocket tools, drops only the built-ins"
         )
 

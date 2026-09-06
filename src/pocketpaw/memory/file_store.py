@@ -24,7 +24,11 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from pocketpaw._compat import require_extra
-from pocketpaw.memory.protocol import MemoryEntry, MemoryType
+from pocketpaw.memory.protocol import (
+    DEFAULT_SESSION_HISTORY_LIMIT,
+    MemoryEntry,
+    MemoryType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2433,8 +2437,18 @@ class FileMemoryStore:
                 break
         return results
 
-    async def get_session(self, session_key: str) -> list[MemoryEntry]:
-        """Get session history."""
+    async def get_session(
+        self, session_key: str, limit: int | None = DEFAULT_SESSION_HISTORY_LIMIT
+    ) -> list[MemoryEntry]:
+        """Get session history, oldest first, bounded by default.
+
+        The file store reads the whole session file either way — there is no
+        cheaper way to get the tail of a JSON array — so the bound here saves
+        the DESERIALIZATION and the retained MemoryEntry objects, not the read.
+        That is still the bulk of the cost on a long session, and it keeps the
+        adapter's contract identical to the Mongo one, which is what callers
+        depend on.
+        """
         session_file = self._get_session_file(session_key)
 
         if not session_file.exists():
@@ -2454,6 +2468,11 @@ class FileMemoryStore:
 
             raw = await asyncio.to_thread(safe_read)
             data = json.loads(raw)
+            # The file is stored oldest-first, so the newest `limit` is the
+            # TAIL. Slicing the head would return the oldest — the shape of the
+            # bug #2075 fixed in the chat history window.
+            if limit is not None:
+                data = data[-limit:]
             return [
                 MemoryEntry(
                     id=item["id"],

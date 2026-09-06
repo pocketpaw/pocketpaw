@@ -44,7 +44,21 @@ async def _workspace_pockets(ctx: ResolveCtx, args: dict[str, Any]) -> list[dict
             ctx.user_id,
         )
         return []
-    docs = await _PocketDoc.find(
+    # Projected deliberately. This resolver only ever returns the five fields
+    # below, but it used to hydrate whole Pocket documents to get them — and a
+    # Pocket carries ``rippleSpec``, every widget's ``spec``, and for a
+    # Svelte-track pocket a ``source`` map holding the full text of every
+    # source file. Those run to hundreds of kilobytes each.
+    #
+    # It matters more than a single query's cost because of where this sits:
+    # it fires once per ``workspace.pockets`` marker while resolving a spec,
+    # and the pocket list resolves every pocket, so an unprojected read here
+    # is O(N^2) bytes off the wire for one GET /pockets.
+    #
+    # ``get_pymongo_collection``, NOT ``get_motor_collection`` — the latter is
+    # beanie 1.x and this is on 2.1.0. Same trap documented at
+    # pockets/service.py:3168.
+    cursor = _PocketDoc.get_pymongo_collection().find(
         {
             "workspace": ctx.workspace_id,
             "$or": [
@@ -52,17 +66,24 @@ async def _workspace_pockets(ctx: ResolveCtx, args: dict[str, Any]) -> list[dict
                 {"shared_with": ctx.user_id},
                 {"visibility": "workspace"},
             ],
-        }
-    ).to_list()
+        },
+        {"_id": 1, "name": 1, "type": 1, "icon": 1, "color": 1},
+    )
+    # The fallbacks mirror the Pocket model's own defaults (models/pocket.py:
+    # type="custom", icon="", color=""). Hydrating the document used to apply
+    # those for free; reading raw BSON does not, so a document written before
+    # a field existed would come back None where it used to come back "".
+    # That matters downstream — widgets like people-picker call string methods
+    # on these — so a missing key must stay an empty string, not None.
     return [
         {
-            "id": str(d.id),
-            "name": d.name,
-            "type": d.type,
-            "icon": d.icon,
-            "color": d.color,
+            "id": str(row["_id"]),
+            "name": row.get("name", ""),
+            "type": row.get("type", "custom"),
+            "icon": row.get("icon", ""),
+            "color": row.get("color", ""),
         }
-        for d in docs
+        async for row in cursor
     ]
 
 

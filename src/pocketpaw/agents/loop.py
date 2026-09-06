@@ -45,6 +45,15 @@ SystemEvent apiece ({file_id,name,mime,size}) ahead of ``stream_end``, and
 persists a matching ``{type:"artifact", meta}`` attachment on the assistant
 message (persisting even on an artifact-only, empty-text turn). Mirrors the cloud
 run_core collector-drain contract so the client's card+viewer works in local mode.
+
+Updated: 2026-09-02 (fix/metering-partial-usage-capture) — ``token_usage``
+payloads are RUN-CUMULATIVE and ``usage_tracker.record`` is ADDITIVE, so the
+handler records the DELTA between payloads rather than each payload whole.
+Recording them whole counted turn 1 again in every later payload. This was
+latent while every backend reported exactly once per run; it stopped being
+latent when ``pydantic_ai`` began reporting as the run progresses — which it
+must, because the cloud run loop abandons a cancelled run's stream and never
+sees a payload produced at the end.
 """
 
 import asyncio
@@ -1383,6 +1392,15 @@ class AgentLoop:
             # boundaries are still caught.
             stream_buffer = ""
             safe_sent = ""
+            # What this run has already handed to the usage tracker. Backends
+            # report token_usage as a RUN-CUMULATIVE total, and
+            # ``usage_tracker.record`` is ADDITIVE, so a run that reports twice
+            # would count its first turn again in every later payload. Recording
+            # the delta keeps one row per model call and the right run total.
+            recorded_input = 0
+            recorded_output = 0
+            recorded_cached = 0
+            recorded_cost = 0.0
 
             await _policy_ctx.__aenter__()
             run_iter = router.run(
@@ -1489,15 +1507,34 @@ class AgentLoop:
                             if usage_tracker is None:
                                 usage_tracker = usage_tracker_module.get_usage_tracker()
 
-                            usage_tracker.record(
-                                backend=meta.get("backend", "unknown"),
-                                model=meta.get("model", ""),
-                                input_tokens=input_tokens,
-                                output_tokens=output_tokens,
-                                cached_input_tokens=cached_input_tokens,
-                                session_id=session_key or "",
-                                total_cost_usd=meta.get("total_cost_usd"),
-                            )
+                            # DELTA, not the payload. See ``recorded_*`` above:
+                            # the payload is the run's running total and this
+                            # call adds to a ledger, so passing it whole
+                            # re-counts every earlier turn. max(0, ...) because
+                            # a shrinking payload can only be a backend
+                            # regression and must never subtract from a bill.
+                            d_input = max(0, input_tokens - recorded_input)
+                            d_output = max(0, output_tokens - recorded_output)
+                            d_cached = max(0, cached_input_tokens - recorded_cached)
+                            reported_cost = meta.get("total_cost_usd")
+                            d_cost = None
+                            if isinstance(reported_cost, (int, float)):
+                                d_cost = max(0.0, float(reported_cost) - recorded_cost)
+                            if d_input or d_output or d_cached or d_cost:
+                                usage_tracker.record(
+                                    backend=meta.get("backend", "unknown"),
+                                    model=meta.get("model", ""),
+                                    input_tokens=d_input,
+                                    output_tokens=d_output,
+                                    cached_input_tokens=d_cached,
+                                    session_id=session_key or "",
+                                    total_cost_usd=d_cost,
+                                )
+                                recorded_input += d_input
+                                recorded_output += d_output
+                                recorded_cached += d_cached
+                                if d_cost is not None:
+                                    recorded_cost += d_cost
                         except Exception:
                             logger.debug(
                                 "Failed to persist token usage metrics",

@@ -65,6 +65,26 @@ def create_api_app():
 
     app.add_middleware(AuthMiddleware)
 
+    # --- Body-size ceiling ----------------------------------------------
+    # Registered after AuthMiddleware so it sits OUTSIDE it. That ordering is
+    # load-bearing twice over: the upload limits in uploads/service.py only run
+    # after Starlette has spooled the entire multipart body to disk, and
+    # AuthMiddleware itself reads the body on the login paths. A ceiling inside
+    # either of those cannot stop the buffering it exists to prevent.
+    #
+    # mount_cloud() and install_cors() add their layers after this one, so the
+    # final order is CORS → CSRF → RequestLog → Timing → EEAuthBridge → this →
+    # Auth. None of those four cloud layers touches the body, so it is still
+    # unread when this runs — and CORS being outermost means a 413 keeps its
+    # headers, which matters because a header-less rejection reads to the
+    # browser as a CORS failure rather than as the size limit it is.
+    #
+    # See H5 in the backend-perf audit. Pure ASGI, so it adds no fifth
+    # BaseHTTPMiddleware layer (audit M8 counts the four that already exist).
+    from pocketpaw.security.body_limit import BodySizeLimitMiddleware
+
+    app.add_middleware(BodySizeLimitMiddleware)
+
     # --- Mount Mission Control + Deep Work routers ----------------------
     from pocketpaw.deep_work.api import router as deep_work_router
     from pocketpaw.mission_control.api import router as mission_control_router

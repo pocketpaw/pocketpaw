@@ -5,8 +5,15 @@
 #   pro_max, enterprise}. PolicyContext.plan now defaults to "free" (the base
 #   floor) instead of "team"; the PLAN_FEATURES table sanity checks assert the new
 #   superset ladder (free < go < pro < pro_max < enterprise).
+# Updated 2026-09-02 (fix/billing-router-authorization): added
+#   TestBillingRouteAuthorization — the /billing router's routes driven through the
+#   REAL router with the REAL role resolution, because the gap that change closes
+#   was never in the ACTION table (billing.view / billing.manage were correct all
+#   along) but in nothing depending on it.
 
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 from fastapi import Depends, FastAPI, Request
@@ -37,11 +44,30 @@ class TestWorkspaceRole:
     def test_member_level_is_1(self):
         assert WorkspaceRole.MEMBER.level == 1
 
-    def test_admin_level_is_2(self):
-        assert WorkspaceRole.ADMIN.level == 2
+    def test_editor_level_is_2(self):
+        # The tier whose insertion stranded the two assertions below. Pinned so
+        # the next person to widen the ladder sees the whole shape fail at once
+        # rather than the top two silently.
+        assert WorkspaceRole.EDITOR.level == 2
 
-    def test_owner_level_is_3(self):
-        assert WorkspaceRole.OWNER.level == 3
+    def test_admin_level_is_3(self):
+        assert WorkspaceRole.ADMIN.level == 3
+
+    def test_owner_level_is_4(self):
+        assert WorkspaceRole.OWNER.level == 4
+
+    def test_the_ladder_is_strictly_ascending(self):
+        # The property the three literals above are only a sample of. Had this
+        # existed, inserting EDITOR would still have passed here and failed
+        # loudly there — which is the right split: the literals pin the contract,
+        # this pins that the contract stays ordered.
+        levels = [
+            WorkspaceRole.MEMBER.level,
+            WorkspaceRole.EDITOR.level,
+            WorkspaceRole.ADMIN.level,
+            WorkspaceRole.OWNER.level,
+        ]
+        assert levels == sorted(set(levels))
 
     @pytest.mark.parametrize(
         "value,expected",
@@ -402,8 +428,15 @@ class TestPolicyResult:
 class TestPlanFeatureTable:
     """Validate the PLAN_FEATURES table contract (consumer ladder)."""
 
-    def test_free_is_chat_and_pockets_only(self):
-        assert PLAN_FEATURES["free"] == {"pockets", "sessions"}
+    def test_free_is_chat_and_pockets_plus_the_approval_gate(self):
+        """The floor is the canvas, sessions, and the gate those sessions need.
+
+        ``instinct`` joined the floor in fix/instinct-is-a-gate-not-a-tier. It is
+        not a paid capability that leaked down — it is the approval gate agents
+        propose through, and ``sessions`` on this tier means agents ACT here. A
+        floor that can create proposals but not approve them strands them.
+        """
+        assert PLAN_FEATURES["free"] == {"pockets", "sessions", "instinct"}
 
     def test_go_has_core_four(self):
         assert {"pockets", "sessions", "agents", "memory"} <= PLAN_FEATURES["go"]
@@ -442,6 +475,23 @@ class TestActionRolesTable:
 
     def test_billing_manage_requires_owner(self):
         assert ACTION_ROLES["billing.manage"] == WorkspaceRole.OWNER
+
+    def test_billing_actions_carry_their_tiers_and_deny_codes(self):
+        """The read/manage pair IS the billing policy.
+
+        Pinned together with their deny CODES because until 2026-09-02 nothing in
+        the HTTP surface consulted either of them, and the codes are what proves,
+        in TestBillingRouteAuthorization below, that this gate refused rather than
+        some other 403. Reads guards.actions.ACTIONS rather than abac.ACTION_ROLES
+        because ACTIONS is the table check_workspace_action actually consults (and
+        ACTION_ROLES has no billing.view entry at all).
+        """
+        from pocketpaw_ee.guards.actions import ACTIONS
+
+        assert ACTIONS["billing.view"].minimum == WorkspaceRole.ADMIN
+        assert ACTIONS["billing.view"].deny_code == "billing.admin_only"
+        assert ACTIONS["billing.manage"].minimum == WorkspaceRole.OWNER
+        assert ACTIONS["billing.manage"].deny_code == "billing.owner_only"
 
     def test_workspace_delete_requires_owner(self):
         assert ACTION_ROLES["workspace.delete"] == WorkspaceRole.OWNER
@@ -736,3 +786,174 @@ class TestRequirePolicyDep:
             params={"agent_id": "agent-99"},
         )
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# /billing route authorization — the gate is ATTACHED, not merely declared
+#
+# Created 2026-09-02 (fix/billing-router-authorization). The billing router's only
+# dependency was ``require_license``. Every route then resolved
+# ``current_workspace_id`` / ``current_user_id``, which answer WHICH workspace the
+# caller is acting in and say nothing about WHETHER they may act — so any member
+# could cancel the organisation's subscription, switch its plan, or open a
+# checkout for $10,000 against it.
+#
+# ``billing.view`` (ADMIN) and ``billing.manage`` (OWNER) already existed in
+# ACTIONS, already had denial copy in audit/listeners.py, and were already enforced
+# on the MCP and admin-proposal surfaces. Nothing attached them here. A table entry
+# nobody depends on is not a gate — which is why these tests drive the REAL router
+# instead of asserting the table again (that assertion lives in
+# TestActionRolesTable above, and would have passed throughout the whole
+# vulnerable period).
+#
+# WHY EVERY TEST HERE IS A REFUSAL. A happy path passes just as well with no gate
+# at all: the OWNER cases below would have been green on the day the hole was open.
+# The load-bearing assertions are the denials, and each carries two parts:
+#   * the exact deny CODE (``billing.owner_only`` / ``billing.admin_only``) — a
+#     bare 403 is not evidence, since a non-member, a missing workspace and a
+#     licence failure all produce one too; and
+#   * the spied service asserted NOT called, so nothing reaches Dodo on the way to
+#     the refusal (the same shape as
+#     tests/cloud/sites/test_site_plan_purchase_authz.py).
+#
+# ADMIN is refused on the money routes on purpose. It is the case that separates
+# "OWNER-gated" from "gated at all" — a plain-member-only test would still pass if
+# the routes had been put on billing.view.
+# ---------------------------------------------------------------------------
+
+_BILLING_WS = "ws-billing"
+
+
+def _billing_client(monkeypatch, *, role: str):
+    """The REAL /billing router with only identity, licence and the money services
+    stubbed. Returns ``(client, spy)``.
+
+    Deliberately does NOT stub ``check_workspace_action`` — the real role
+    resolution is the thing under test, which is the one difference from
+    tests/cloud/meetings/test_router.py's fixture. ``require_license`` is bypassed
+    because entitlement is a different question from authorization, and the
+    services are recorders so an OWNER pass never reaches a payment gateway.
+    """
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud.auth import current_active_user
+    from pocketpaw_ee.cloud.billing import service as billing_service
+    from pocketpaw_ee.cloud.billing import usage as usage_service
+    from pocketpaw_ee.cloud.billing.dto import WorkspaceUsageResponse
+    from pocketpaw_ee.cloud.billing.router import router as billing_router
+    from pocketpaw_ee.cloud.license import require_license
+    from pocketpaw_ee.guards import deps as guards_deps
+
+    spy: dict = {}
+
+    # Per-member action overrides are a separate mechanism from the role ladder and
+    # are not what these tests measure. Pinned False so a denial is decided by the
+    # role alone. (In practice the live lookup already resolves to [] — it drives an
+    # async Mongo read through run_until_complete from a thread with no running loop
+    # — but pinning it makes that explicit rather than incidental.)
+    monkeypatch.setattr(guards_deps, "_has_action_override", lambda *a, **k: False)
+
+    async def _create_topup(**kwargs):
+        spy["topup"] = kwargs
+        return {"checkout_url": "https://checkout.test/topup"}
+
+    async def _subscribe(**kwargs):
+        spy["subscribe"] = kwargs
+        return {"checkout_url": "https://checkout.test/subscribe"}
+
+    async def _cancel(**kwargs):
+        spy["cancel"] = kwargs
+        return {"ok": True}
+
+    async def _get_workspace_usage(workspace_id, *, start_date=None, end_date=None):  # noqa: ANN001
+        spy["usage"] = {"workspace_id": workspace_id}
+        return WorkspaceUsageResponse(start_date="2026-08-01", end_date="2026-08-31")
+
+    monkeypatch.setattr(billing_service, "create_topup", _create_topup)
+    monkeypatch.setattr(billing_service, "subscribe", _subscribe)
+    monkeypatch.setattr(billing_service, "cancel", _cancel)
+    monkeypatch.setattr(usage_service, "get_workspace_usage", _get_workspace_usage)
+
+    user = SimpleNamespace(
+        id=f"u-{role}",
+        active_workspace=_BILLING_WS,
+        workspaces=[SimpleNamespace(workspace=_BILLING_WS, role=role)],
+    )
+
+    async def _fake_current_active_user():
+        return user
+
+    app = FastAPI()
+    add_error_handler(app)
+    app.dependency_overrides[require_license] = lambda: None
+    app.dependency_overrides[current_active_user] = _fake_current_active_user
+    app.include_router(billing_router)
+    return TestClient(app, raise_server_exceptions=False), spy
+
+
+#: The money routes: (spy key, verb, path, body). All three move money or the
+#: recurring commitment, so all three are OWNER (``billing.manage``).
+_MONEY_ROUTES = [
+    ("topup", "post", "/billing/topup", {"amount_credits": 1000}),
+    ("subscribe", "post", "/billing/subscribe", {"plan_key": "pro"}),
+    ("cancel", "post", "/billing/cancel", None),
+]
+
+
+class TestBillingRouteAuthorization:
+    """The /billing router's money routes are OWNER-gated, its usage read is
+    ADMIN-gated, and its catalogue reads stay open to everyone."""
+
+    # -- the money routes: OWNER only ------------------------------------
+
+    @pytest.mark.parametrize("spy_key,verb,path,body", _MONEY_ROUTES)
+    def test_owner_may_spend(self, monkeypatch, spy_key, verb, path, body):
+        client, spy = _billing_client(monkeypatch, role="owner")
+        resp = getattr(client, verb)(path, json=body) if body else getattr(client, verb)(path)
+        assert resp.status_code == 200, resp.text
+        assert spy_key in spy, "the owner's request never reached the service"
+
+    @pytest.mark.parametrize("role", ["admin", "member"])
+    @pytest.mark.parametrize("spy_key,verb,path,body", _MONEY_ROUTES)
+    def test_non_owner_cannot_spend(self, monkeypatch, role, spy_key, verb, path, body):
+        """THE HOLE. Before this gate every one of these returned 200 for a plain
+        member. ADMIN is included deliberately: it is the case that separates
+        OWNER-gated from merely gated."""
+        client, spy = _billing_client(monkeypatch, role=role)
+        resp = getattr(client, verb)(path, json=body) if body else getattr(client, verb)(path)
+        assert resp.status_code == 403, resp.text
+        # The CODE, not just the status — a non-member and a missing workspace also
+        # produce a 403, and neither would prove this gate ran.
+        assert resp.json()["error"]["code"] == "billing.owner_only"
+        # And nothing charged the card on the way to the refusal.
+        assert spy_key not in spy
+
+    # -- the usage read: ADMIN -------------------------------------------
+
+    @pytest.mark.parametrize("role", ["owner", "admin"])
+    def test_admin_and_owner_may_read_usage(self, monkeypatch, role):
+        client, spy = _billing_client(monkeypatch, role=role)
+        resp = client.get("/billing/usage")
+        assert resp.status_code == 200, resp.text
+        assert spy["usage"]["workspace_id"] == _BILLING_WS
+
+    def test_member_cannot_read_usage(self, monkeypatch):
+        """Per-model spend for the whole workspace is the "billing info" that the
+        audit denial copy in cloud/audit/listeners.py names, and that copy could
+        never fire before this route was attached to billing.view."""
+        client, spy = _billing_client(monkeypatch, role="member")
+        resp = client.get("/billing/usage")
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["error"]["code"] == "billing.admin_only"
+        assert "usage" not in spy
+
+    # -- the catalogues stay open ----------------------------------------
+
+    @pytest.mark.parametrize("path", ["/billing/plans", "/billing/site-plans"])
+    def test_member_may_still_read_the_catalogues(self, monkeypatch, path):
+        """Both are tenant-independent price lists holding no workspace data.
+        Gating them would break the pricing UI for exactly the people meant to read
+        a price before asking an owner to buy — so this pins that the fix did NOT
+        over-reach while it was closing the hole next door."""
+        client, _ = _billing_client(monkeypatch, role="member")
+        resp = client.get(path)
+        assert resp.status_code == 200, resp.text

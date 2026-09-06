@@ -1952,8 +1952,42 @@ async def list_pockets(
                 continue
         if oids:
             query["_id"] = {"$nin": oids}
-    docs = await _PocketDoc.find(query).to_list()
-    return [await _resolved_wire_dict(d, user_id) for d in docs]
+    # ``source`` is EXCLUDED from the read. It is the svelte track's content
+    # envelope: the full text of every file in the site, which for a real
+    # generated site runs to hundreds of kilobytes on a single pocket. A
+    # gallery of a hundred pockets was pulling all of it across the wire and
+    # through pydantic on one event loop, to render cards showing a name and
+    # an icon.
+    #
+    # Nothing reads it from THIS response. Every in-tree caller of
+    # ``list_pockets`` uses ``_id``, ``name`` and the widget count
+    # (mission_control, kb, the pockets surface handler), and the desktop
+    # gallery renders cards plus the canvas from ``rippleSpec`` - which is why
+    # rippleSpec and widgets are NOT dropped, despite being the same kind of
+    # weight. The single-pocket ``get`` is unprojected and is where the site
+    # generator and every other source consumer reads it.
+    #
+    # The key stays on the wire as ``None`` (the model default), so a consumer
+    # that looks for it sees a pocket with no source rather than a KeyError.
+    # If one ever needs the real value in a LIST, that is a paginated endpoint,
+    # not a wider projection here.
+    #
+    # ``get_pymongo_collection``, NOT ``get_motor_collection`` - the latter is
+    # beanie 1.x and this is on 2.1.0. Same trap documented at
+    # _resolve_pocket_id_tail below and in ripple_sources.
+    #
+    # Re-validating through the Beanie model (rather than reading raw BSON as
+    # the projected helpers do) is what keeps every OTHER field's default
+    # applying: a document written before ``engine`` existed still reads back
+    # ``"ripple"``, exactly as an unprojected find gives it.
+    cursor = _PocketDoc.get_pymongo_collection().find(query, {"source": 0})
+    docs = [_PocketDoc.model_validate(row) async for row in cursor]
+    # Resolve concurrently. Each _resolved_wire_dict awaits its own spec
+    # resolution and a team-id lookup, so the old list comprehension paid
+    # every pocket's round trips end to end, one after another — N sequential
+    # awaits for a list that renders all at once. gather keeps the ordering
+    # (results come back positionally) while overlapping the waits.
+    return list(await asyncio.gather(*(_resolved_wire_dict(d, user_id) for d in docs)))
 
 
 async def patterns_for_pockets(workspace_id: str, pocket_ids: list[str]) -> dict[str, str | None]:
@@ -3461,10 +3495,23 @@ async def agent_list(workspace_id: str, user_id: str) -> list[dict]:
     "have we already got one of these?" check, so the payload stays
     cheap. Visibility rules mirror ``list_pockets``: owned by the user,
     explicitly shared, or workspace-visible.
+
+    "Cheap" used to describe the RESPONSE only. The read behind it hydrated
+    every whole document to keep seven small fields, so a workspace with a few
+    generated sites paid megabytes off the wire on every creation flow to
+    answer a question about names. The query is projected now, which is what
+    the docstring above always claimed.
     """
     if not workspace_id or not user_id:
         return []
-    docs = await _PocketDoc.find(
+    # Projected to exactly the fields returned below. Safe to read as raw BSON
+    # because this response is hand-built rather than serialized from the
+    # model - but the model's defaults do not apply to raw BSON, so each
+    # fallback below has to stand in for one (models/pocket.py: type="custom",
+    # icon="", color="", description=""). A document written before a field
+    # existed must come back as its default, not as None: callers put these
+    # straight into prompt rows and call string methods on them.
+    cursor = _PocketDoc.get_pymongo_collection().find(
         {
             "workspace": workspace_id,
             "$or": [
@@ -3472,22 +3519,21 @@ async def agent_list(workspace_id: str, user_id: str) -> list[dict]:
                 {"shared_with": user_id},
                 {"visibility": "workspace"},
             ],
+        },
+        {"_id": 1, "name": 1, "description": 1, "type": 1, "icon": 1, "color": 1, "owner": 1},
+    )
+    return [
+        {
+            "id": str(row["_id"]),
+            "name": row.get("name") or "",
+            "description": row.get("description") or "",
+            "type": row.get("type") or "",
+            "icon": row.get("icon") or "",
+            "color": row.get("color") or "",
+            "owner": row.get("owner") or "",
         }
-    ).to_list()
-    out: list[dict] = []
-    for d in docs:
-        out.append(
-            {
-                "id": str(d.id),
-                "name": d.name,
-                "description": d.description or "",
-                "type": d.type or "",
-                "icon": d.icon or "",
-                "color": d.color or "",
-                "owner": d.owner,
-            }
-        )
-    return out
+        async for row in cursor
+    ]
 
 
 async def agent_update(

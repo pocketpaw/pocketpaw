@@ -17,8 +17,19 @@
 # ``init_beanie`` wires the ``billing_subscriptions`` collection.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-7): new entity.
+# Updated 2026-09-02 (fix/billing-reversals-and-dunning, M5): ``status`` gained
+#   ``on_hold`` (the card is failing and Dodo is retrying) and ``expired``
+#   (terminal at the gateway), and two dunning timestamps arrived with them —
+#   ``grace_until``, the deadline after which the plan is revoked, and
+#   ``suspended_at``, the stamp that records the sweep already did so. The pair
+#   is deliberate: a suspended subscription keeps ``status == "on_hold"``
+#   because suspension is OURS (it revokes the entitlements we grant) while the
+#   subscription is still alive at Dodo and can still recover, so it must stay
+#   billable or a re-subscribe opens a second one alongside it.
 
 from __future__ import annotations
+
+from datetime import datetime
 
 from beanie import Indexed
 from pymongo import IndexModel
@@ -48,9 +59,23 @@ class Subscription(TimestampedDocument):
     plan_key: str
     # The gateway recurring product id this subscription is for, when known.
     product_id: str | None = None
-    # ``active`` once a verified subscription.active landed; ``cancelled`` after
-    # a subscription.cancelled. Renewals leave it ``active``.
+    # The gateway lifecycle:
+    #   ``active``    — paying; set by a verified subscription.active/.renewed
+    #   ``on_hold``   — a payment failed and Dodo is retrying (M5). Still
+    #                   BILLABLE: opening a second subscription alongside it is
+    #                   a double charge.
+    #   ``expired``   — terminal at the gateway (subscription.expired/.failed)
+    #   ``cancelled`` — terminal, after a verified subscription.cancelled
     status: str = "active"
+    # When the plan is revoked if the card is still failing (M5). Stamped on the
+    # transition INTO ``on_hold`` and cleared by a successful renewal. A
+    # redelivered on_hold must not restamp it, or an at-least-once gateway hands
+    # a non-paying workspace a grace period that never expires.
+    grace_until: datetime | None = None
+    # When the grace sweep actually revoked the plan. Distinct from
+    # ``grace_until`` because it is what makes the sweep idempotent: an
+    # already-suspended row is skipped rather than re-revoked every five minutes.
+    suspended_at: datetime | None = None
 
     class Settings:
         name = "billing_subscriptions"

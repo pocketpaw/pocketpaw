@@ -1,5 +1,26 @@
 """arq worker entry point for Tier 2 run execution.
 
+Updated: 2026-09-04 (fix/queue-lanes, backend-perf C1) — THIS IS NO LONGER THE ONLY
+LANE. Site builds now enqueue onto their own queue and are consumed by
+``pocketpaw_ee.sites.build_worker.WorkerSettings``; both lanes run in one container
+under ``pocketpaw_ee.cloud.worker_supervisor``. The two site functions stay
+registered HERE as well, and deliberately: a deploy cuts over the enqueue side
+instantly, so anything already sitting on the default queue when the old process
+stopped still needs someone willing to claim it. That backlog drains once and is
+then permanently empty.
+
+``max_jobs`` below is therefore no longer the whole cluster's ceiling — it is this
+lane's. The sites lane carries its own, and neither can consume the other's.
+
+Updated: 2026-09-01 (feat/scale-concurrency-knobs) — ``WorkerSettings.max_jobs`` is
+now set, from ``POCKETPAW_ARQ_MAX_JOBS`` (default 10, arq's own). It was previously
+unset, so arq's default applied silently and the whole cluster ran ten concurrent
+jobs across ALL SIX registered lanes. That is the ceiling a multi-user deploy hits
+first — and it is invisible, because job 11 is not rejected or retried, it just sits
+in Redis behind a ``job_timeout`` of up to 30 minutes. Raise it together with the
+worker container's memory limit: the default ``claude_agent_sdk`` backend spawns a
+Node subprocess per run, so RAM binds before CPU does.
+
 Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — registered the /ship
 deploy job ``deploy_app_job`` into ``WorkerSettings.functions``, wrapped the same
 way as ``provision_box_job``: its own long timeout (a deploy pulls an image and
@@ -72,6 +93,7 @@ can't abort worker startup.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -82,7 +104,11 @@ from arq.worker import func
 # Imported at module scope so tests can ``monkeypatch.setattr(worker, …)``.
 from pocketpaw_ee.cloud import init_realtime
 from pocketpaw_ee.cloud._core.realtime import xproc
-from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
+from pocketpaw_ee.cloud.chat.runs.domain import (
+    DEFAULT_RUN_JOB_TIMEOUT_SECONDS,
+    RunSpec,
+    run_job_timeout_seconds,
+)
 from pocketpaw_ee.cloud.chat.runs.run_core import execute_run
 from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
 from pocketpaw_ee.cloud.jobs.domain import job_timeout_seconds
@@ -123,9 +149,14 @@ async def execute_run_job(ctx: dict[str, Any], spec_dict: dict[str, Any]) -> Non
     spec = RunSpec.model_validate(spec_dict)
     logger.info("worker: starting run %s", spec.run_id)
     await execute_run(spec)
+    # Same as the in-process executor: charge at completion so the balance is not
+    # a sweep interval behind. Idempotent, best-effort, sweeper still the backstop.
+    from pocketpaw_ee.cloud.metering.service import bill_run_now
+
+    await bill_run_now(spec.run_id)
 
 
-async def _startup(ctx: dict[str, Any]) -> None:
+async def _bootstrap(ctx: dict[str, Any]) -> None:
     """Boot the worker: pin role, init the DB + realtime bus, sweep orphans.
 
     ``xproc.set_role("worker")`` must run before any agent code emits, so
@@ -188,8 +219,62 @@ async def _startup(ctx: dict[str, Any]) -> None:
         logger.exception("worker boot: LiteLLM billing-cutover sweep failed")
 
 
+# TWO WorkerSettings classes now share this bootstrap inside ONE process: the chat
+# lane below and the sites lane in ``pocketpaw_ee.sites.build_worker``, started
+# together by ``pocketpaw_ee.cloud.worker_supervisor``. arq calls ``on_startup``
+# once per Worker, so without a guard the second lane would re-run ``init_cloud_db``
+# against a live client and re-run BOTH boot sweeps (compute-cost metering and the
+# LiteLLM billing cutover). Those two are idempotent by ledger key, so a second pass
+# would waste work rather than double-charge — but "probably harmless" is not the
+# standard for a billing path, and a second ``init_cloud_db`` is not something to
+# discover in production.
+#
+# The lock is held ACROSS the bootstrap, not just around the counter. A lane that
+# arrives while the first is still initialising has to wait for the database it is
+# about to run jobs against, and releasing the lock early would let it start empty.
+_bootstrap_lock = asyncio.Lock()
+_bootstrap_lanes = 0
+
+
+async def _startup(ctx: dict[str, Any]) -> None:
+    """Run :func:`_bootstrap` for the FIRST lane in this process only."""
+    global _bootstrap_lanes
+    async with _bootstrap_lock:
+        _bootstrap_lanes += 1
+        if _bootstrap_lanes > 1:
+            logger.info(
+                "worker boot: bootstrap already done in this process (lane %d)",
+                _bootstrap_lanes,
+            )
+            return
+        await _bootstrap(ctx)
+
+
 async def _shutdown(ctx: dict[str, Any]) -> None:
-    await close_cloud_db()
+    """Close the shared database once the LAST lane in this process has stopped."""
+    global _bootstrap_lanes
+    async with _bootstrap_lock:
+        _bootstrap_lanes -= 1
+        if _bootstrap_lanes > 0:
+            return
+        # Clamp rather than trust the count: an unbalanced shutdown (a lane whose
+        # on_startup raised still gets its on_shutdown called) would otherwise drive
+        # this negative and leave the NEXT bootstrap thinking a lane is still up.
+        _bootstrap_lanes = 0
+        await close_cloud_db()
+
+
+def _reset_bootstrap_for_tests() -> None:
+    """Drop the lane count so a test can bootstrap again from scratch."""
+    global _bootstrap_lanes
+    _bootstrap_lanes = 0
+
+
+# Public aliases so the sites lane can share this bootstrap without reaching across
+# modules for a private name. One bootstrap per process is the contract; see the
+# lane counter above for what happens without it.
+worker_startup = _startup
+worker_shutdown = _shutdown
 
 
 def _redis_settings() -> RedisSettings:
@@ -222,35 +307,101 @@ def _redis_settings() -> RedisSettings:
 # env-tunable; the 10-minute stale-run sweeper remains the backstop against a
 # genuinely runaway run holding a worker slot. (Workspace jobs get their OWN
 # per-function timeout below, so the two can't clip each other.)
-_DEFAULT_RUN_JOB_TIMEOUT_SECONDS = 1800  # 30 minutes
+#
+# The resolver itself moved to ``runs/domain.py`` on 2026-09-04 so the SSE
+# reader in ``router.py`` can share it: the stream's maximum lifetime is derived
+# from this timeout, and a second copy of the parse would let the two drift.
+# Re-exported under the old private names because they are the module's
+# established surface and the worker config tests read them here.
+_DEFAULT_RUN_JOB_TIMEOUT_SECONDS = DEFAULT_RUN_JOB_TIMEOUT_SECONDS
+_job_timeout_seconds = run_job_timeout_seconds
 
 
-def _job_timeout_seconds() -> int:
-    """Resolve the per-run arq job_timeout from ``POCKETPAW_CLOUD_RUN_JOB_TIMEOUT``.
+# arq's own default is max_jobs=10 (arq/worker.py). That ceiling is shared by
+# EVERY function registered below — chat runs, workspace jobs, both /ship jobs
+# and both site builds — so ten concurrent site publishes leave no slot for a
+# chat run. It is the cluster-wide concurrency limit, not a per-lane one:
+# replicas multiply it, this value does not.
+_DEFAULT_MAX_JOBS = 10
 
-    Defaults to 30 minutes. An unparseable or non-positive value falls back to the
-    default (rather than 0 / negative, which would disable or break the cap), so a
-    typo can't silently let runs run forever or crash the worker.
+
+def _max_jobs() -> int:
+    """Resolve the worker's concurrent-job ceiling from ``POCKETPAW_ARQ_MAX_JOBS``.
+
+    Same fail-soft contract as ``_job_timeout_seconds``: an unparseable or
+    non-positive value falls back to the default rather than being handed to
+    arq, where ``0`` would wedge the worker into accepting nothing and a
+    negative would crash ``BoundedSemaphore``.
+
+    Raise this WITH the container's memory limit, not instead of it. The
+    default ``claude_agent_sdk`` backend spawns a Node subprocess per run, so
+    concurrency here is bounded by RAM long before it is bounded by CPU.
     """
-    raw = os.environ.get("POCKETPAW_CLOUD_RUN_JOB_TIMEOUT", "").strip()
+    raw = os.environ.get("POCKETPAW_ARQ_MAX_JOBS", "").strip()
     if not raw:
-        return _DEFAULT_RUN_JOB_TIMEOUT_SECONDS
+        return _DEFAULT_MAX_JOBS
     try:
         val = int(raw)
     except ValueError:
         logger.warning(
-            "POCKETPAW_CLOUD_RUN_JOB_TIMEOUT=%r is not an int; using default %ds",
+            "POCKETPAW_ARQ_MAX_JOBS=%r is not an int; using default %d",
             raw,
-            _DEFAULT_RUN_JOB_TIMEOUT_SECONDS,
+            _DEFAULT_MAX_JOBS,
         )
-        return _DEFAULT_RUN_JOB_TIMEOUT_SECONDS
+        return _DEFAULT_MAX_JOBS
     if val <= 0:
         logger.warning(
-            "POCKETPAW_CLOUD_RUN_JOB_TIMEOUT=%d is not positive; using default %ds",
+            "POCKETPAW_ARQ_MAX_JOBS=%d is not positive; using default %d",
             val,
-            _DEFAULT_RUN_JOB_TIMEOUT_SECONDS,
+            _DEFAULT_MAX_JOBS,
         )
-        return _DEFAULT_RUN_JOB_TIMEOUT_SECONDS
+        return _DEFAULT_MAX_JOBS
+    return val
+
+
+# arq writes a health-check key to Redis every ``health_check_interval`` seconds
+# with a TTL of interval + 1, and ``arq --check <settings>`` exits 0 while that
+# key is alive. arq's own default interval is 3600, which makes the key a poor
+# liveness signal for anything that polls: a worker that died a minute ago still
+# reports healthy for the rest of the hour. That is worse than no probe, because
+# a container healthcheck built on it looks like coverage while catching nothing.
+#
+# 30 seconds costs one small Redis write every 30 seconds and makes the key mean
+# what a probe assumes it means.
+_DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS = 30
+
+
+def _health_check_interval_seconds() -> int:
+    """Resolve the arq health-key refresh period from the environment.
+
+    Same fail-soft contract as ``_max_jobs`` and ``_job_timeout_seconds``: an
+    unparseable or non-positive value falls back to the default rather than
+    reaching arq, where a non-positive interval turns the health loop into a
+    busy wait.
+
+    Raising this loosens every probe built on the key, because the key's TTL is
+    derived from it. Keep it comfortably below the healthcheck interval of
+    whatever is polling, or the probe flaps.
+    """
+    raw = os.environ.get("POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL", "").strip()
+    if not raw:
+        return _DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS
+    try:
+        val = int(raw)
+    except ValueError:
+        logger.warning(
+            "POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL=%r is not an int; using default %ds",
+            raw,
+            _DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS,
+        )
+        return _DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS
+    if val <= 0:
+        logger.warning(
+            "POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL=%d is not positive; using default %ds",
+            val,
+            _DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS,
+        )
+        return _DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS
     return val
 
 
@@ -348,5 +499,29 @@ class WorkerSettings:
     # it and make it env-tunable (POCKETPAW_CLOUD_RUN_JOB_TIMEOUT, default 30 min).
     # Plain int in __dict__ for the same arq-reads-__dict__ reason as redis_settings.
     job_timeout = _job_timeout_seconds()
+    # Concurrent-job ceiling, shared across every lane in ``functions``. arq's
+    # default of 10 is the first limit a multi-user deploy hits: job 11 waits in
+    # Redis behind a 30-minute ``job_timeout`` with ``max_tries=1``, so it is not
+    # retried, just queued. Plain int in __dict__ for the arq-reads-__dict__
+    # reason documented on `_redis_settings`.
+    max_jobs = _max_jobs()
+    # How often the worker refreshes its Redis health key, and therefore how
+    # quickly ``arq --check`` notices it is gone. arq's default of an hour makes
+    # that check answer "healthy" for up to an hour after the process died,
+    # which is exactly the wrong answer to give a container healthcheck. Plain
+    # int in __dict__ for the arq-reads-__dict__ reason above.
+    health_check_interval = _health_check_interval_seconds()
     # Eager: arq reads __dict__, which bypasses descriptors. See `_redis_settings`.
     redis_settings = _redis_settings()
+
+
+# Shared with the sites lane (``pocketpaw_ee.sites.build_worker``). Aliases rather
+# than a second definition: one copy of the site-build timeout, one copy of the
+# health-key period, one Redis resolver. A duplicated build timeout is precisely the
+# drift that would let arq cancel a build before its in-sandbox ``timeout(1)`` fires,
+# and that destroys the sentinel the lane classifies its verdict from — a healthy
+# but slow build would be recorded as lost infrastructure.
+site_build_fn = _site_build_fn
+site_preview_build_fn = _site_preview_build_fn
+arq_redis_settings = _redis_settings
+arq_health_check_interval_seconds = _health_check_interval_seconds

@@ -74,8 +74,15 @@ Beanie-writes-only-from-service contract.
 per-tenant LiteLLM key provisioning trigger — a BEST-EFFORT, NON-BLOCKING
 ensure_tenant_key(workspace) call. A proxy outage / mint failure is logged and
 swallowed (workspace creation NEVER fails on a provisioning error); the call is
-idempotent, so the billing-cutover sweep and any later workspace touch back-fill
-a key that didn't mint here. Mirrors the best-effort seed_default_agent step.
+idempotent, so a later workspace touch can mint a key that didn't mint here.
+Mirrors the best-effort seed_default_agent step.
+2026-09-02 (fix/bill-workspaces-the-sweep-cannot-see): the note above used to say
+the billing-cutover sweep back-filled a key that failed to mint here. It never
+did — the sweep started from the workspaces that ALREADY had one, so a swallowed
+mint failure meant a workspace nothing swept, and its chat spend was served free.
+The sweep now discovers such a workspace from the proxy's customer list and bills
+it without a key, so a failed mint costs the tenant their per-key budget ceiling
+rather than costing us the entire bill. Minting is still not retried here.
 2026-07-05 (fix/atlas-admin-security-hardening, FINDING A): privilege-escalation
 guard on ownership. ``update_member_role`` now refuses to GRANT the ``owner``
 role unless the ACTOR already holds owner (code ``owner_grant_requires_owner``),
@@ -1791,13 +1798,33 @@ async def decline_invite(token: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _user_ids_matching(query: dict) -> list[str]:
+    """Ids of the users matching *query*, without hydrating a single document.
+
+    These three helpers only ever return ``str(u.id)``, but they used to pull
+    whole ``User`` documents to get there — every field, then a full
+    BSON→pydantic construction per row, discarded one line later. On the
+    realtime path that is the expensive half: ``list_member_ids`` backs
+    ``AudienceResolver`` behind a 2-second cache, so it runs continuously
+    while anyone is chatting, on the single event loop.
+
+    ``get_pymongo_collection``, NOT ``get_motor_collection`` — the latter is
+    beanie 1.x and this is on 2.1.0, where it does not exist. Same trap
+    documented at pockets/service.py:3168, and deliberately NOT wrapped in a
+    broad ``except`` here: a missing attribute must fail loudly rather than
+    degrade to an empty audience, because an empty audience means the event
+    silently reaches nobody.
+    """
+    cursor = _UserDoc.get_pymongo_collection().find(query, {"_id": 1})
+    return [str(row["_id"]) async for row in cursor]
+
+
 async def list_member_ids(workspace_id: str) -> list[str]:
-    users = await _UserDoc.find({"workspaces.workspace": workspace_id}).to_list()
-    return [str(u.id) for u in users]
+    return await _user_ids_matching({"workspaces.workspace": workspace_id})
 
 
 async def list_admin_ids(workspace_id: str) -> list[str]:
-    users = await _UserDoc.find(
+    return await _user_ids_matching(
         {
             "workspaces": {
                 "$elemMatch": {
@@ -1806,8 +1833,7 @@ async def list_admin_ids(workspace_id: str) -> list[str]:
                 }
             }
         }
-    ).to_list()
-    return [str(u.id) for u in users]
+    )
 
 
 async def list_peer_ids(user_id: str) -> list[str]:
@@ -1819,10 +1845,9 @@ async def list_peer_ids(user_id: str) -> list[str]:
     if me is None or not getattr(me, "workspaces", None):
         return []
     ws_ids = [m.workspace for m in me.workspaces]
-    peers = await _UserDoc.find(
+    return await _user_ids_matching(
         {"workspaces.workspace": {"$in": ws_ids}, "_id": {"$ne": me.id}}
-    ).to_list()
-    return [str(u.id) for u in peers]
+    )
 
 
 async def get_default_workspace_id() -> str | None:

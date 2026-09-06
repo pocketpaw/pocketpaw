@@ -29,6 +29,12 @@
 #   omitting it removes every add-on the subscription holds. A default would make
 #   the destructive case the quiet one, and the destruction is invisible until the
 #   next invoice.
+#
+# Updated 2026-09-02 (fix/billing-reversals-and-dunning, M1):
+#   ``verify_and_parse_webhook`` may now also return a ``ReversalEvent`` — the
+#   normalized ``refund.*`` / ``dispute.*`` delivery. No new port METHOD: a
+#   reversal arrives on the same signed webhook every other family does, so it
+#   is a third return shape rather than a fourth gateway call.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -36,6 +42,7 @@ from abc import ABC, abstractmethod
 from pocketpaw_ee.cloud.billing.domain import (
     GatewayEvent,
     OneTimeCheckout,
+    ReversalEvent,
     SubscriptionCheckout,
     SubscriptionEvent,
 )
@@ -72,7 +79,7 @@ class IPaymentsProvider(ABC):
         *,
         payload: bytes,
         headers: dict[str, str],
-    ) -> GatewayEvent | SubscriptionEvent:
+    ) -> GatewayEvent | SubscriptionEvent | ReversalEvent:
         """VERIFY the webhook signature, then parse it into a normalized event.
 
         The signature is checked FIRST, against the RAW ``payload`` bytes. On a
@@ -82,9 +89,14 @@ class IPaymentsProvider(ABC):
         after verification passes is the body parsed and normalized. ``event_id``
         is the gateway's unique delivery id (the idempotency key the grant uses).
 
-        Returns a ``GatewayEvent`` for a one-time payment delivery (``payment.*``)
-        or a ``SubscriptionEvent`` for a recurring-subscription delivery
-        (``subscription.*``). The service routes on the returned type.
+        Returns a ``GatewayEvent`` for a one-time payment delivery (``payment.*``),
+        a ``SubscriptionEvent`` for a recurring-subscription delivery
+        (``subscription.*``), or a ``ReversalEvent`` for money going back out
+        (``refund.*`` / ``dispute.*``). The service routes on the returned type.
+
+        A reversal needs its own shape rather than a ``GatewayEvent`` because a
+        dispute carries no metadata: there is no ``workspace_id`` on the wire, so
+        the payment it is against is the only route back to a wallet.
         """
         raise NotImplementedError
 

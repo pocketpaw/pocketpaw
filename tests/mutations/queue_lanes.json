@@ -1,0 +1,201 @@
+[
+  {
+    "label": "the publish enqueue drops its queue kwarg, so site builds go back onto arq's default queue and compete with chat runs for one cluster-wide ceiling of 10 - the exact starvation this change removes",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "            _queue_name=SITE_BUILD_QUEUE_NAME,\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_build_job.py"
+    ]
+  },
+  {
+    "label": "the preview enqueue drops its queue kwarg, so draft renders - the lane a user hits by typing rather than by publishing - go back onto the chat lane's ceiling",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        _job_id=job_id,\n        _queue_name=SITE_BUILD_QUEUE_NAME,\n    )\n",
+    "replace": "        _job_id=job_id,\n    )\n",
+    "tests": [
+      "tests/ee/sites/test_preview_build_lane.py"
+    ]
+  },
+  {
+    "label": "the refused-enqueue status read looks in arq's default queue instead of the one the job was written to, so status() answers not_found, the lane reports 'building' forever, and a client polls a build that ended minutes ago",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    job = Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME)",
+    "replace": "    job = Job(job_id, pool)",
+    "tests": [
+      "tests/ee/sites/test_preview_build_lane.py"
+    ]
+  },
+  {
+    "label": "the queue constant becomes arq's own default, so every enqueue and read still names a queue and the split is a no-op that reads as done",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "SITE_BUILD_QUEUE_NAME = \"arq:queue:sites\"",
+    "replace": "SITE_BUILD_QUEUE_NAME = \"arq:queue\"",
+    "tests": [
+      "tests/ee/sites/test_build_job.py",
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "the sites worker stops declaring its queue, so it polls arq's default and the site-build queue has no consumer at all - jobs wait in Redis forever with nothing reporting it",
+    "file": "ee/pocketpaw_ee/sites/build_worker.py",
+    "find": "    queue_name = SITE_BUILD_QUEUE_NAME\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "the sites ceiling reads the chat lane's variable, so tuning chat concurrency silently retunes how many third-party build sandboxes the account pays for",
+    "file": "ee/pocketpaw_ee/sites/build_worker.py",
+    "find": "_MAX_JOBS_ENV = \"POCKETPAW_SITES_ARQ_MAX_JOBS\"",
+    "replace": "_MAX_JOBS_ENV = \"POCKETPAW_ARQ_MAX_JOBS\"",
+    "tests": [
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "the sites default ceiling matches the chat lane's, so the build lane can claim as much capacity as chat and the split moves the starvation rather than removing it",
+    "file": "ee/pocketpaw_ee/sites/build_worker.py",
+    "find": "_DEFAULT_SITES_MAX_JOBS = 4",
+    "replace": "_DEFAULT_SITES_MAX_JOBS = 10",
+    "tests": [
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "the sites ceiling stops rejecting non-positive values, so POCKETPAW_SITES_ARQ_MAX_JOBS=0 wedges the worker into accepting nothing and a negative crashes BoundedSemaphore on boot",
+    "file": "ee/pocketpaw_ee/sites/build_worker.py",
+    "find": "    if val <= 0:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "the sites max_jobs becomes a property, so arq's settings_cls.__dict__ read hands a descriptor straight to BoundedSemaphore - the _LazyRedisSettings deploy crash, on the new lane",
+    "file": "ee/pocketpaw_ee/sites/build_worker.py",
+    "find": "    max_jobs = _sites_max_jobs()",
+    "replace": "    max_jobs = property(lambda self: _sites_max_jobs())",
+    "tests": [
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "the sites lane stops registering the preview function, so preview jobs enqueued onto the sites queue have no worker willing to claim them and arq says nothing",
+    "file": "ee/pocketpaw_ee/sites/build_worker.py",
+    "find": "    functions = [site_build_fn, site_preview_build_fn]",
+    "replace": "    functions = [site_build_fn]",
+    "tests": [
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "the chat lane stops registering the site functions, so whatever was already sitting on the default queue at cutover is stranded forever - a backlog nobody is willing to claim",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
+    "find": "        _site_build_fn,\n        _site_preview_build_fn,\n    ]",
+    "replace": "    ]",
+    "tests": [
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "the shared bootstrap loses its guard, so a second lane in the same process re-runs init_cloud_db against a live client and re-runs both boot sweeps, one of which is a billing path",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
+    "find": "        if _bootstrap_lanes > 1:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "the shutdown closes the shared database as soon as ANY lane stops, pulling Mongo out from under every job the other lane still has in flight",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
+    "find": "        if _bootstrap_lanes > 0:\n            return\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "the lane counter loses its clamp, so an unbalanced shutdown drives it negative and the guard under-counts on the way back up - the second lane bootstraps too, re-running init_cloud_db and both boot sweeps",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/worker.py",
+    "find": "        _bootstrap_lanes = 0\n        await close_cloud_db()",
+    "replace": "        await close_cloud_db()",
+    "tests": [
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "a lane ending on its own reports success, so the container stays up and healthy with half its background work silently stopped - the exact failure a backgrounded 'arq A & arq B' would have given us",
+    "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
+    "find": "            exit_code = 1\n",
+    "replace": "            exit_code = 0\n",
+    "tests": [
+      "tests/cloud/test_worker_supervisor.py"
+    ]
+  },
+  {
+    "label": "the lanes keep arq's own signal handling, so two Workers register SIGTERM handlers on one loop and the last one silently replaces the first - one lane never drains on shutdown",
+    "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
+    "find": "    workers = [create_worker(cls, handle_signals=False) for cls in classes]",
+    "replace": "    workers = [create_worker(cls) for cls in classes]",
+    "tests": [
+      "tests/cloud/test_worker_supervisor.py"
+    ]
+  },
+  {
+    "label": "nobody installs a stop handler, so SIGTERM does nothing, Docker escalates to SIGKILL after the grace period, and in-flight jobs are killed instead of drained",
+    "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
+    "find": "    _install_stop_handlers(stop)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_worker_supervisor.py"
+    ]
+  },
+  {
+    "label": "the workers are never closed, so a stopping process leaves its arq health keys in Redis and 'arq --check' keeps answering healthy for a worker that is gone",
+    "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
+    "find": "        for worker, name in zip(workers, names, strict=True):\n            await _close_quietly(worker, name)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_worker_supervisor.py"
+    ]
+  },
+  {
+    "label": "a failing close is allowed to propagate, so one lane that cannot clean up prevents every later lane from cleaning up at all",
+    "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
+    "find": "    except Exception:\n        logger.warning(\"supervisor: closing lane %s failed\", name, exc_info=True)",
+    "replace": "    except Exception:\n        raise",
+    "tests": [
+      "tests/cloud/test_worker_supervisor.py"
+    ]
+  },
+  {
+    "label": "the deployment stops running the sites lane, so every site build and preview enqueued onto the sites queue waits forever with no consumer - worse than the shared queue it replaced",
+    "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
+    "find": "    return [ChatWorkerSettings, SiteBuildWorkerSettings]",
+    "replace": "    return [ChatWorkerSettings]",
+    "tests": [
+      "tests/cloud/test_worker_supervisor.py"
+    ]
+  },
+  {
+    "label": "a supervisor started with no lanes sits there idle and healthy instead of failing, so a misconfigured deploy looks like a running worker",
+    "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
+    "find": "    if not classes:\n        raise RuntimeError(\"worker supervisor started with no lanes to run\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_worker_supervisor.py"
+    ]
+  },
+  {
+    "label": "lanes are logged by class name instead of queue, and every settings class in this codebase is called WorkerSettings - so an incident log identifies neither lane",
+    "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
+    "find": "    return str(queue) if queue else default_queue_name",
+    "replace": "    return str(queue) if queue else settings_cls.__name__",
+    "tests": [
+      "tests/cloud/test_worker_supervisor.py"
+    ]
+  }
+]

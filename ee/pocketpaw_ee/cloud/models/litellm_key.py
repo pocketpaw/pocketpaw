@@ -25,6 +25,11 @@
 # in ``cloud.models.__init__`` (``get_all_documents()`` + ``__all__``) so
 # ``init_beanie`` wires the ``litellm_tenant_keys`` collection.
 
+# Updated 2026-09-04 (fix/litellm-spend-leaks): added ``pending_spend_usd``, the
+# per-tenant sub-credit remainder. Credits are integers and the proxy prices one API
+# call, so most rows are worth a fraction of one; the sweep used to discard every
+# such row. This is where the fraction waits for the row that tips it over.
+
 from __future__ import annotations
 
 from beanie import Indexed
@@ -59,7 +64,18 @@ class LiteLLMTenantKey(TimestampedDocument):
     # The proxy virtual key (the ``key`` from POST /key/generate). Sent as the
     # Bearer token on this tenant's proxy calls so the proxy attributes spend +
     # enforces the budget.
-    litellm_key: str
+    #
+    # OPTIONAL since 2026-09-02 (fix/bill-workspaces-the-sweep-cannot-see). A row
+    # is now also created for a workspace the SPEND sweep discovered on the proxy
+    # but that never minted a key — the row exists to hold that tenant's
+    # ``last_spend_ingest_ts``, which is what makes its spend billable exactly
+    # once. Every reader already coped with a missing key
+    # (``list_provisioned_workspaces`` filters on ``!= None``, the per-key spend
+    # read is guarded by ``if doc.litellm_key``), so this aligns the schema with
+    # code that was already written for it rather than loosening a guarantee.
+    # ``ensure_tenant_key`` upserts on ``workspace``, so a later mint fills this
+    # in on the same row instead of colliding with it.
+    litellm_key: str | None = None
     # The alias the proxy stamped on the key (``ws-<workspace>``) — for operator
     # legibility in the proxy admin UI / spend logs.
     key_alias: str | None = None
@@ -81,6 +97,12 @@ class LiteLLMTenantKey(TimestampedDocument):
     # /spend/logs row already debited to the ledger. The sweep reads rows AFTER
     # this and advances it; None means nothing has been ingested yet.
     last_spend_ingest_ts: str | None = None
+    # NOTE 2026-09-04: ``pending_spend_usd`` and ``spend_ingest_lease_until`` were
+    # added and removed the same day. They held the sub-credit remainder the sweep
+    # could not bill, and the lock that stopped two sweeps double-spending it. The
+    # micro-credit wallet made both unnecessary — a row now bills exactly, so there
+    # is no shared remainder to carry or to race on. Recorded here because the
+    # fields exist in deployed documents and the migration drops them.
 
     class Settings:
         name = "litellm_tenant_keys"

@@ -128,8 +128,8 @@
   {
     "label": "a failed workers deploy is swallowed, so the site's URL is re-stamped for a deploy that never happened",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        url = await deploy_w(site_id, build.project_dir, engine=engine)",
-    "replace": "        try:\n            url = await deploy_w(site_id, build.project_dir, engine=engine)\n        except Exception:\n            url = \"\"",
+    "find": "        url = await deploy_w(\n            site_id, build.project_dir, engine=engine, analytics_entitled=counts_pageviews\n        )",
+    "replace": "        try:\n            url = await deploy_w(\n                site_id, build.project_dir, engine=engine, analytics_entitled=counts_pageviews\n            )\n        except Exception:\n            url = \"\"",
     "tests": [
       "tests/ee/sites/test_fault_ladder_deploy.py"
     ]

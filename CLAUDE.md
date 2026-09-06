@@ -181,7 +181,7 @@ The processing pipeline lives in `agents/loop.py` and `agents/router.py`:
 ### Key Subsystems
 
 - **Memory** (`memory/`) — Session history + long-term facts, file-based storage in `~/.pocketpaw/memory/`. Protocol-based (`MemoryStoreProtocol`) for future backend swaps
-- **Browser** (`browser/`) — Playwright-based automation using accessibility tree snapshots (not screenshots). `BrowserDriver` returns `NavigationResult` with a `refmap` mapping ref numbers to CSS selectors
+- **Browser** (`browser/`) — Playwright-based automation using semantic DOM snapshots (not screenshots). One `page.evaluate` walks the visible DOM and stamps `data-paw-ref="N"` on interactive elements; `BrowserDriver` returns `NavigationResult` with a `refmap` mapping ref numbers to those CSS selectors. Playwright's `page.accessibility` API — which this used until 2026-09-06 — no longer exists
 - **Security** (`security/`) — Guardian AI (secondary LLM safety check) + append-only audit log (`~/.pocketpaw/audit.jsonl`)
 - **Tools** (`tools/`) — `ToolProtocol` with `ToolDefinition` supporting both Anthropic and OpenAI schema export. Built-in tools in `tools/builtin/`
 - **Bootstrap** (`bootstrap/`) — `AgentContextBuilder` assembles the system prompt from identity, memory, and current state
@@ -251,6 +251,43 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   env-configurable), marking queued/running `ChatRunDoc`s older than 10 minutes as
   `interrupted` so runs abandoned by a backend restart surface a retry affordance
   instead of leaving clients subscribed forever.
+- **Concurrency / capacity config**: five ceilings that are easy to confuse. In a
+  cloud deploy the first two are the ones that bound how much work executes at once.
+  `POCKETPAW_ARQ_MAX_JOBS` (default `10`, arq's own) — the **chat lane's** ceiling:
+  concurrent jobs ONE arq worker runs on arq's default queue (chat runs,
+  workspace jobs, both `/ship` jobs). Site builds shared it until 2026-09-04 and
+  now have `POCKETPAW_SITES_ARQ_MAX_JOBS` (default `4`) on their own queue,
+  consumed by the same container — `pocketpaw_ee.cloud.worker_supervisor` runs both
+  lanes in one process, so neither can consume the other's slots. Raise the sites
+  one with the Daytona sandbox quota, not with the container's memory limit: a
+  build compiles remotely and what runs here is an await. This was unset until
+  2026-09-01, so every earlier deploy ran on arq's default with no way to raise
+  it; ten concurrent site publishes left no slot for a chat run, and job 11 was
+  neither rejected nor retried (`max_tries = 1`) — it waited in Redis behind a
+  30-minute `job_timeout`. Total concurrency is this value x worker replicas.
+  Raise it WITH the container's memory limit: the default `claude_agent_sdk`
+  backend spawns a Node subprocess per run, so RAM binds before CPU.
+  `POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL` (default `30`) — **worker only**, and not
+  a capacity knob at all: it is how often the worker refreshes its Redis health
+  key, and therefore how fast `arq --check` can notice the worker is gone (the
+  key's TTL is this plus a second). arq's own default is `3600`, which answers
+  "healthy" for up to an hour after the process died — so a container
+  healthcheck built on it looks like coverage and catches nothing. The deploy
+  compose polls it every 30s; keep this comfortably under whatever polls it.
+  `POCKETPAW_AGENT_POOL_MAX_INSTANCES` (default `20`) — **per-process** AgentPool
+  ceiling; the web process and each worker each hold their own pool.
+  `POCKETPAW_SESSION_WARM_MAX_PER_TENANT` (default `8`) /
+  `POCKETPAW_SESSION_WARM_MAX_GLOBAL` (default `64`) — **per-process** warm
+  session slots. The per-tenant one is the fairness knob that stops one workspace
+  holding every slot; over the limit the oldest IDLE slot is evicted, never a busy
+  one. Each warm slot pins a live agent client, so raise the global one with the
+  container's memory limit.
+  `POCKETPAW_MAX_CONCURRENT_CONVERSATIONS` (default `5`) — the OSS `AgentLoop`
+  semaphore, which gates the CHANNEL adapters only. The cloud chat path
+  (`ee.cloud.chat.runs.run_core`) never imports `AgentLoop`, so raising this does
+  nothing for a cloud deploy. Every default above is the value that was already in
+  force, so shipping these knobs moved no deploy. Sizing guidance:
+  `docs/internal/2026-05-resumable-runs-deploy.md` -> "Sizing the worker".
 - **Growth outbound config (`GROWTH_SENDING_DOMAIN`)**: the secondary domain the
   `/growth` engine sends cold outreach from — **required**, with no default. The
   dispatch worker fails closed when it is unset (nothing goes out), validates the

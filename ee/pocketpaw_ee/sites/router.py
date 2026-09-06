@@ -3,6 +3,15 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# Updated 2026-09-02 (SA-4 — the visitor-analytics read): GET
+# ``/sites/{site_id}/analytics``, the read half of the counter SA-1/SA-2 deploy.
+# Gated ``fabric.read`` and tenant-scoped through the service's ``_load`` like the
+# per-site reads beside it. Its response leads with a ``status`` because THREE
+# different customer situations otherwise render as the same panel of zeros — not
+# on a plan that buys analytics, on one but not republished since, and genuinely no
+# traffic — and a FAILED read is an error response rather than a fourth status, so
+# an outage cannot arrive looking like a quiet week.
+#
 # Updated 2026-08-31 (feat/sites-public-asset-uploads): three endpoints for the
 # site's PUBLIC asset rail — POST/GET/DELETE ``/sites/by-pocket/{pocket_id}/assets``.
 # A site could not display an image the owner supplied: the source map the generator
@@ -227,7 +236,16 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
@@ -239,6 +257,7 @@ from pocketpaw_ee.sites.dto import (
     DevPreviewResponse,
     DomainRequest,
     DomainStatusResponse,
+    ImportBriefStatusResponse,
     ImportFromUrlRequest,
     ImportFromUrlResponse,
     LeafEditsRequest,
@@ -248,6 +267,7 @@ from pocketpaw_ee.sites.dto import (
     NativeArtifactResponse,
     PublishRequest,
     RequestPublishResponse,
+    SiteAnalyticsResponse,
     SiteAssetDeleteRequest,
     SiteAssetListResponse,
     SiteAssetResponse,
@@ -603,10 +623,23 @@ async def import_site_from_url(
     queued ``import_report``, schedule the background same-site crawl, and return
     202 {site_id, pocket_id, status:"queued"} immediately. The crawl runs the zip
     import pipeline and flips the report to "imported"/"failed" with crawl stats.
-    Tenant-scoped on ctx (fabric.write), like every sibling sites mutation."""
-    queued = await import_service.import_from_url(
-        workspace_id=ctx.workspace_id, user_id=ctx.user_id, url=body.url
-    )
+    Tenant-scoped on ctx (fabric.write), like every sibling sites mutation.
+
+    ``mode="rebuild"`` (IR-2a) takes the OTHER branch: the URL is read as a design
+    reference, so nothing is minted and the 202 carries a ``brief_id`` for the
+    captured design brief instead of a site. Both branches validate the URL
+    identically and 422 before any write. The default is ``copy``, so a client
+    that sends only ``url`` gets exactly the behaviour it always got.
+    """
+    if body.mode == "rebuild":
+        queued = await import_service.regenerate_from_url(
+            workspace_id=ctx.workspace_id, user_id=ctx.user_id, url=body.url
+        )
+    else:
+        queued = await import_service.import_from_url(
+            workspace_id=ctx.workspace_id, user_id=ctx.user_id, url=body.url
+        )
+        queued = {**queued, "mode": "copy"}
     return ImportFromUrlResponse(**queued)
 
 
@@ -967,6 +1000,36 @@ async def get_site_entitlements(
     return await sites_service.site_entitlements(workspace_id=ctx.workspace_id, site_id=site_id)
 
 
+@router.get("/sites/{site_id}/analytics", response_model=SiteAnalyticsResponse)
+async def site_analytics(
+    site_id: str,
+    window: str = Query(default="7d", description="24h | 7d | 30d | 90d"),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteAnalyticsResponse:
+    """This site's visitor numbers over one window, for the builder's Analytics panel.
+
+    ``status`` is the field to read FIRST, and the response is shaped so a client that
+    ignores it shows blanks rather than confident zeros. Three situations produce an
+    empty panel and they are three different sentences to the customer: the plan does
+    not include analytics, it does but nothing has been published since (so nothing was
+    ever recorded), or a counter is up and genuinely nobody visited. Only the last is
+    about their traffic.
+
+    A read that FAILS is an error response, never a status — see the service. A client
+    that defaults an unknown status to "no data" would otherwise render a Cloudflare
+    outage as a quiet week.
+
+    ``window`` is validated against a closed set (a bad one is a 422), which is a SQL
+    control and not only input hygiene: the Analytics Engine endpoint takes raw text
+    with no parameter binding. Tenant-scoped like every sibling per-site read, so a
+    cross-tenant or missing site is a 404.
+    """
+    return await sites_service.site_analytics(
+        workspace_id=ctx.workspace_id, site_id=site_id, window=window
+    )
+
+
 @router.get("/sites/{site_id}/client", response_model=SiteClientResponse)
 async def get_site_client(
     site_id: str,
@@ -1121,3 +1184,21 @@ async def delete_site_asset(
         await store.delete(workspace_id=ctx.workspace_id, pocket_id=pocket_id, key=body.key)
     except PublicAssetError as exc:
         raise HTTPException(403, str(exc)) from exc
+
+
+@router.get("/sites/import/brief/{brief_id}", response_model=ImportBriefStatusResponse)
+async def get_import_brief(
+    brief_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> ImportBriefStatusResponse:
+    """Where a rebuild capture has got to (IR-2b).
+
+    The rebuild 202 returns immediately with a ``brief_id`` and the crawl runs in
+    the background, so the client polls this to learn when there is a brief to
+    generate from. Four distinguishable states, because a client that cannot tell
+    ``queued`` from ``failed`` spins forever on a dead capture.
+
+    Tenant-scoped on ctx: a brief id from another workspace is not found here, not
+    readable. A read, so no ``fabric.write`` — same shape as the sibling listings.
+    """
+    return await import_service.read_design_brief(workspace_id=ctx.workspace_id, brief_id=brief_id)

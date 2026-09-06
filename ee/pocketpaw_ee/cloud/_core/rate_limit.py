@@ -13,6 +13,8 @@ assumption.
 
 from __future__ import annotations
 
+from ipaddress import ip_address
+
 from fastapi import Depends, Request
 
 from pocketpaw.security.rate_limiter import RateLimiter
@@ -37,13 +39,44 @@ _invite_resend_limiter = RateLimiter(rate=5.0 / 1800.0, capacity=5)
 _social_exchange_limiter = RateLimiter(rate=10.0 / 60.0, capacity=10)
 
 
+def _client_ip(request: Request) -> str:
+    """Best available client address for rate-limit bucketing.
+
+    Reads the RIGHTMOST ``X-Forwarded-For`` entry, not the leftmost.
+
+    The leftmost entry is whatever the caller sent. A proxy APPENDS the address
+    it actually observed, so on a request through our edge the header reads
+    ``<whatever the client claimed>, <real client>`` and only the last element
+    is trustworthy. Keying on the first one meant an attacker chose their own
+    bucket: a fresh value per request both evaded the limit entirely and minted
+    an unbounded number of ``_Bucket`` objects on an endpoint that requires no
+    authentication.
+
+    This assumes exactly one trusted proxy in front of the app, which matches
+    the current deployment (Traefik terminating for a single backend). Adding a
+    second hop means trusting the last N entries instead, and that wants real
+    trusted-proxy configuration — uvicorn's ``forwarded_allow_ips`` is unset
+    today, which is tracked separately in the operability audit.
+
+    Values are validated as IP addresses so a malformed header cannot become a
+    cache key on its own.
+    """
+    peer = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if not forwarded:
+        return peer
+    candidate = forwarded.rsplit(",", 1)[-1].strip()
+    if not candidate:
+        return peer
+    try:
+        return str(ip_address(candidate))
+    except ValueError:
+        return peer
+
+
 async def rate_limit_social_exchange(request: Request) -> None:
     """Per-IP bucket guarding POST /auth/social/exchange."""
-    client = request.client.host if request.client else "unknown"
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        # Left-most entry is the originating client when behind a proxy.
-        client = forwarded.split(",")[0].strip() or client
+    client = _client_ip(request)
     if not _social_exchange_limiter.check(f"social-exchange:{client}").allowed:
         raise RateLimited(
             "social.exchange_rate_limited",

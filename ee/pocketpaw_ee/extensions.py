@@ -25,6 +25,14 @@ also starts the RFC 03 v2 temporal trigger sweep scheduler in
 multi-replica deployments don't double-fire. Cadence is configurable via
 ``POCKETPAW_TEMPORAL_SWEEP_INTERVAL_SECONDS`` (default 3600, floor 60).
 
+Updated: 2026-09-06 (BR-1, feat/browser-surface-server) — added
+``CloudBrowserMcpProvider`` (``pocketpaw.mcp_servers`` entry ``browser``)
+exposing the /browser surface's agentic browser in-process server
+(``pocketpaw_browser``; navigate / snapshot / click / type / scroll /
+screenshot / close) to the claude_agent_sdk cloud chat backend, mirroring
+``CloudMediaMcpProvider``. Ambient — scoping is per-SURFACE (the BROWSER
+profile allows the ids; every other surface denies them), not per-agent.
+
 Updated: 2026-06-10 (feat/studio-code-migration) — added ``CloudMediaMcpProvider``
 (``pocketpaw.mcp_servers`` entry ``media``) exposing the STUDIO image +
 video generation in-process server (``pocketpaw_media``) to the
@@ -106,30 +114,87 @@ Updated: 2026-07-24 (CX-3, feat/code-agent-exclusive-tools) —
 agent (``ensure_code_agent_all_workspaces``) beside the default ``pocketpaw``
 one, so existing workspaces resolve ``/code`` turns to the exclusive-file-tool
 agent without waiting for the first-turn lazy seed.
+
+Updated: 2026-09-02 (fix/billing-reversals-and-dunning, M5) — the sweeper
+heartbeat gained ``billing.service.sweep_subscription_grace``, at boot and on
+every tick. A ``subscription.on_hold`` webhook only stamps a grace deadline and
+nothing arrives from the gateway when it passes, so this pass is the thing that
+actually ends the grace period and revokes the plan. It is idempotent (an
+already-suspended row is skipped) and never touches credits, so a five-minute
+cadence against a deadline measured in days is deliberate rather than lax.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import suppress
 from typing import Any
 
 _run_sweeper_logger = logging.getLogger(__name__)
+
+# Heartbeat cadence for the sweep loop below. 300s is the historical value and
+# stays the default; it was hardcoded, while every sibling sweeper in the
+# codebase (fabric_ingest, mandates, decisions) already reads its interval from
+# env. Made configurable for the same reason they are: this loop is the ONLY
+# thing between a finished run and a visible charge, so an operator tuning
+# billing latency should not have to edit source.
+#
+# The floor is deliberate. Each tick queries unbilled runs, iterates every
+# provisioned tenant and, in the LiteLLM cutover modes, calls the proxy admin API
+# once per tenant. A one-second interval would hammer the proxy rather than speed
+# anything up, so a lower value is clamped and logged rather than honoured.
+_DEFAULT_SWEEP_INTERVAL_SECONDS = 300
+_MIN_SWEEP_INTERVAL_SECONDS = 30
+_ENV_SWEEP_INTERVAL = "POCKETPAW_SWEEPER_INTERVAL_SECONDS"
+
+
+def _sweep_interval_seconds() -> int:
+    """Read the sweep cadence from env, default 300s, floored at 30s."""
+    raw = os.environ.get(_ENV_SWEEP_INTERVAL, "").strip()
+    if not raw:
+        return _DEFAULT_SWEEP_INTERVAL_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        _run_sweeper_logger.warning(
+            "%s=%r is not an int — falling back to %ds",
+            _ENV_SWEEP_INTERVAL,
+            raw,
+            _DEFAULT_SWEEP_INTERVAL_SECONDS,
+        )
+        return _DEFAULT_SWEEP_INTERVAL_SECONDS
+    if value < _MIN_SWEEP_INTERVAL_SECONDS:
+        _run_sweeper_logger.warning(
+            "%s=%d is below the %ds floor — clamping. Each tick hits the proxy "
+            "admin API once per provisioned tenant.",
+            _ENV_SWEEP_INTERVAL,
+            value,
+            _MIN_SWEEP_INTERVAL_SECONDS,
+        )
+        return _MIN_SWEEP_INTERVAL_SECONDS
+    return value
+
+
 _sweeper_task: asyncio.Task[None] | None = None
 _xproc_consumer_task: asyncio.Task[None] | None = None
 
 
 async def _sweeper_loop() -> None:
     from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
+    from pocketpaw_ee.cloud.billing.service import sweep_subscription_grace
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
     from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
 
+    interval = _sweep_interval_seconds()
+    _run_sweeper_logger.info("sweeper loop started (interval=%ds)", interval)
+
     while True:
         try:
-            await asyncio.sleep(300)
+            await asyncio.sleep(interval)
             await sweep_stale_runs()
         except asyncio.CancelledError:
             raise
@@ -167,6 +232,15 @@ async def _sweeper_loop() -> None:
             await sweep_pending_sites()
         except Exception:
             _run_sweeper_logger.exception("sweep_pending_sites tick failed")
+        # M5 dunning: revoke the plan of any subscription still on hold past its
+        # grace deadline. The webhook only stamps the deadline — nothing arrives
+        # from the gateway when it passes, so this pass is what actually ends the
+        # grace period. Own try so a failure here can't suppress the other sweeps
+        # (or vice versa). Never touches credits.
+        try:
+            await sweep_subscription_grace()
+        except Exception:
+            _run_sweeper_logger.exception("sweep_subscription_grace tick failed")
 
 
 async def start_run_sweeper() -> None:
@@ -176,10 +250,13 @@ async def start_run_sweeper() -> None:
     metering sweep (bill any terminal runs left unbilled by the prior process), the
     WU-F LiteLLM billing-cutover sweep (no-op / shadow-compare / live-ingest per the
     cutover mode), the charge-first pending-site reconciliation sweep (surface paid
-    sites stuck pending), and the ART-3 agent-jail GC (reclaim scratch left by a
-    prior process's idle runs); the 5-minute loop then ticks all of them.
+    sites stuck pending), the M5 dunning grace sweep (revoke the plan of a
+    subscription left on hold past its deadline while this process was down), and
+    the ART-3 agent-jail GC (reclaim scratch left by a prior process's idle runs);
+    the 5-minute loop then ticks all of them.
     """
     from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
+    from pocketpaw_ee.cloud.billing.service import sweep_subscription_grace
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
     from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
@@ -194,6 +271,8 @@ async def start_run_sweeper() -> None:
         await run_cutover_sweep()
     with suppress(Exception):
         await sweep_pending_sites()
+    with suppress(Exception):
+        await sweep_subscription_grace()
     with suppress(Exception):
         await sweep_agent_jails()
     _sweeper_task = asyncio.create_task(_sweeper_loop())
@@ -845,6 +924,33 @@ class CloudOtherHandMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.other_hand import OTHER_HAND_TOOL_IDS
 
         return list(OTHER_HAND_TOOL_IDS)
+
+
+class CloudBrowserMcpProvider:
+    """`pocketpaw.mcp_servers` — the /browser surface's agentic browser
+    (``pocketpaw_browser``). Hosts navigate / snapshot / click / type / scroll /
+    screenshot / close.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) like every sibling in-process server
+    — ``OPT_IN_MCP_SERVERS`` is a per-AGENT lever, and the browser is scoped per
+    SURFACE: the BROWSER ``SurfaceProfile`` allows these ids and every other
+    surface DENIES them, so /chat (where send-capable connector tools live)
+    cannot reach the browser at all.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.browser import build_browser_server
+
+            return build_browser_server()
+        except ImportError:
+            # claude_agent_sdk not installed — same degrade as the siblings.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
+
+        return list(BROWSER_TOOL_IDS)
 
 
 class CloudStockImagesMcpProvider:

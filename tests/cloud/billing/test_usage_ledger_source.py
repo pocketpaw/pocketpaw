@@ -27,6 +27,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from pocketpaw_ee.cloud.billing import usage
+from pocketpaw_ee.cloud.credits.domain import credits_to_micro
 from pocketpaw_ee.cloud.llm_provisioning import service as provisioning
 from pocketpaw_ee.cloud.models.credit import CreditLedgerEntry
 
@@ -59,8 +60,8 @@ async def _seed_spend(
     entry = CreditLedgerEntry(
         workspace=ws,
         kind="spend",
-        amount_delta=-credits,
-        balance_after=0,
+        amount_delta_micro=credits_to_micro(-credits),
+        balance_after_micro=credits_to_micro(0),
         applied=True,
         conditional=False,
         cause=cause,
@@ -156,8 +157,8 @@ async def test_usage_excludes_non_spend_causes(mongo_db):
     grant = CreditLedgerEntry(
         workspace=WS,
         kind="grant",
-        amount_delta=5000,
-        balance_after=0,
+        amount_delta_micro=credits_to_micro(5000),
+        balance_after_micro=credits_to_micro(0),
         applied=True,
         conditional=False,
         cause="top_up",

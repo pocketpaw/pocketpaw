@@ -4,6 +4,17 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-02 (SA-4 — the visitor-analytics read): added
+# ``analytics_since``, which says whether this site's visitors are being counted and,
+# if so, when that started. It is the ONLY thing on this document that separates "this
+# site has never recorded anything" from "this site is recording and nobody visited" —
+# ``deployed_at`` says a publish happened, not that it carried a counter. The read
+# endpoint reports those two as different states rather than serving 0 for both, which
+# is the whole point of the field. It is SET by a publish that deploys a counter and
+# CLEARED by one that does not, so a site that lapsed and re-upgraded cannot report a
+# stale start date over months nothing was recording. None on every pre-existing row,
+# and None reads as "not counting yet", so no migration.
+#
 # Updated 2026-08-12 (sites Settings consolidation): added the owner's CLIENT
 # record — ``client_name`` / ``client_contact`` / ``client_notes`` and a
 # ``client_invoices`` list of ``SiteInvoice``. TWO BILLING RELATIONSHIPS NOW MEET
@@ -274,6 +285,45 @@ class Site(TimestampedDocument):
     # flips True) — never on a preview/edit build, never on a plain updatedAt bump.
     # None until the pocket has been deployed at least once (old rows read null).
     deployed_at: datetime | None = None
+    # SA-4: when this site's visitors STARTED being counted (UTC), and None whenever
+    # they are not being counted at all. Read it as a state rather than as history —
+    # "counting is on, and it began at this stamp".
+    #
+    # It exists so the analytics read can tell "nothing was ever recorded" apart from
+    # "recorded, and genuinely nobody visited". Nothing else on this document can:
+    # ``deployed_at`` says a publish happened, not that it carried a counter, and a
+    # site upgraded an hour ago looks identical to a quiet site that has been counting
+    # for a month. Serving 0 for both is the exact failure the analytics read exists
+    # to avoid, so the two states get a field between them rather than a guess.
+    #
+    # WRITTEN FROM WHAT THE DEPLOY LEFT ON DISK, not from a second copy of the counting
+    # rule — see ``sites.service._deploy_site_doc``. That rule has three parts (the
+    # plan, the operator kill switch, and whether the engine emits its own worker), all
+    # resolved inside ``workers_deploy._write_deploy_files``, and re-deriving it here
+    # would be a fourth place for them to disagree.
+    #
+    # THE WRITE RULE HAS TWO HALVES:
+    #   * a publish that DEPLOYED a counter sets it to now if it is None, and otherwise
+    #     leaves it alone. First-set-wins WITHIN a counting era, so an ordinary
+    #     republish does not restart a paying site's history.
+    #   * a publish that deployed NO counter sets it back to None. Nothing is recording,
+    #     so there is no "since".
+    #
+    # CLEARING IS THE HALF THAT MAKES THE FIELD TRUSTWORTHY. A site that counted in
+    # June, dropped to free in July and re-upgraded today is entitled again — but no
+    # publish has carried a counter since the lapse, so nothing is recording. Against a
+    # stamp that was never cleared the read would answer "counting since June, and
+    # nobody visited", which is the invented zero this whole slice exists to prevent.
+    # Cleared, ``entitled AND analytics_since is None`` is exactly "you have not
+    # republished", with nothing left to guess.
+    #
+    # The price is that a lapse loses the earlier era's start date, and that is the
+    # right way round: Cloudflare drops the rows after three months, so a stamp older
+    # than the retention window already points at data that is gone.
+    #
+    # None on every row written before this field existed, which reads as "not counting
+    # yet" — correct for all of them, so there is no migration.
+    analytics_since: datetime | None = None
     # Canonical deployed URL. LOCAL mode: the localhost URL the per-site static
     # server serves. CF mode: "" in v1 (reached via custom domain).
     url: str = ""
@@ -503,6 +553,17 @@ class Site(TimestampedDocument):
     # public url, capture failed, Cloudflare unconfigured); the card falls back to
     # the text layout on empty, so this is never a gate on publishing.
     preview_image_url: str = ""
+    # 2026-09-02: the site's own ICON, as a data: URI, for the gallery card's mark
+    # chip — which until now was a hard-coded globe for every site alike. Written by
+    # the best-effort lookup ``sites.favicon`` schedules alongside the screenshot,
+    # via a targeted ``set`` for the same reason. Held INLINE rather than as an
+    # uploads link (and capped at a few KB by ``favicon._MAX_ICON_BYTES``): an icon
+    # is small enough that a blob row plus a per-card auth grant would cost more
+    # than the bytes themselves. "" when the site declares no icon we can use, when
+    # the page could not be read, or when the icon was over the cap — the card falls
+    # back to the globe on empty, so this is never a gate on publishing. Defaults ""
+    # so every existing row reads "no icon" — no migration.
+    favicon_url: str = ""
     # The site owner's record of WHO this site is for, and what they have billed
     # them. Two billing relationships meet on this document and they are not the
     # same one: ``plan_tier`` / ``subscription_status`` above are what the owner

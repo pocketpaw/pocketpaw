@@ -26,6 +26,14 @@ unconditionally ``{}`` — counting events proved the dedupe worked and said
 nothing about whether the arguments survived it. Its replacement counts one
 event PER PHASE, and ``test_streamed_tool_call_delivers_its_real_arguments``
 pins the payload the count test could never see.
+
+Updated 2026-09-02 (fix/metering-dated-pricing) — the backend prices through
+``usage_tracker.price_run`` instead of the flat table, so one pinned figure
+moved. ``test_the_usage_event_carries_what_the_meter_actually_reads`` now expects
+0.001645 rather than 0.00162: the 100 cache-WRITE tokens in its fixture used to
+be billed as ordinary input and are now billed at Anthropic's 1.25x write
+premium. The difference is a rounding error on that fixture and is not one on a
+write-heavy turn, which is the whole reason the write got its own line.
 """
 
 from __future__ import annotations
@@ -147,6 +155,18 @@ def test_model_routing_entry_exists():
         ("some-model", "auto", "auto", ("litellm", "some-model")),
         ("some-model", "auto", "ollama", ("ollama", "some-model")),
         ("some-model", "openrouter", "ollama", ("openrouter", "some-model")),
+        # A model NAME may contain a colon, so the prefix is only a provider
+        # when it names one. The first row is the gateway group that reported
+        # this: splitting it blind asked for a provider called
+        # minimax/minimax-m3.
+        ("minimax/minimax-m3:free", "auto", "auto", ("litellm", "minimax/minimax-m3:free")),
+        (
+            "openrouter:minimax/minimax-m3:free",
+            "auto",
+            "auto",
+            ("openrouter", "minimax/minimax-m3:free"),
+        ),
+        ("llama3.2:latest", "auto", "ollama", ("ollama", "llama3.2:latest")),
     ],
 )
 def test_parse_provider_model(model_setting, provider_setting, llm_provider, expected):
@@ -180,9 +200,73 @@ def test_litellm_base_url_not_double_suffixed():
 
 
 def test_unsupported_provider_raises():
-    backend = PydanticAIBackend(_settings(pydantic_ai_model="wat:some-model"))
+    """Reached through the provider SETTING, which can only be a provider."""
+    backend = PydanticAIBackend(
+        _settings(pydantic_ai_model="some-model", pydantic_ai_provider="wat")
+    )
     with pytest.raises(ValueError, match="unsupported provider"):
         backend._build_model()
+
+
+def test_an_unknown_prefix_stays_part_of_the_model_name():
+    """The cost of letting a model name carry a colon, stated as a test.
+
+    wat: used to raise here. It cannot any more, because the parser has no
+    way to tell a typo'd provider from a real vendor prefix, and a real model
+    the operator configured has to work. The typo still fails, one hop later,
+    as an unknown model at the gateway.
+    """
+    backend = PydanticAIBackend(_settings(pydantic_ai_model="wat:some-model", llm_provider="auto"))
+    assert backend._parse_provider_model() == ("litellm", "wat:some-model")
+
+
+async def _wire_roles(model) -> list[str]:
+    """The ``role`` of every message this model would put on the wire.
+
+    Asserting on the ROLES rather than on the profile flag on purpose: the flag
+    is what we set, and the roles are what the server rejects. A profile that
+    stopped being merged would still carry the flag we passed.
+    """
+    from pydantic_ai.messages import InstructionPart, ModelRequest, UserPromptPart
+    from pydantic_ai.models import ModelRequestParameters
+
+    mapped = await model._map_messages(
+        [ModelRequest(parts=[UserPromptPart(content="hi")])],
+        ModelRequestParameters(
+            # Two parts is the shipped shape, not a contrivance: the joined
+            # literals are one, and every toolset with ``get_instructions``
+            # (``Planning``, the skills catalog, an MCP server that ships an
+            # ``instructions`` field) contributes another.
+            instruction_parts=[
+                InstructionPart(content="persona"),
+                InstructionPart(content="skills catalog", dynamic=True),
+            ]
+        ),
+    )
+    return [m["role"] for m in mapped]
+
+
+async def test_litellm_sends_one_leading_system_message():
+    """A vLLM-backed model group 400s on the second one.
+
+    ``System message must be at the beginning.`` — surfaced through LiteLLM as
+    ``Custom_openaiException``, and it fires on the FIRST turn, so a retry
+    reproduces it rather than recovering from it.
+    """
+    backend = PydanticAIBackend(_settings(pydantic_ai_model="litellm:hetzner/Qwen3.8-27B"))
+    assert await _wire_roles(backend._build_model()) == ["system", "user"]
+
+
+async def test_openrouter_keeps_its_system_messages_separate():
+    """The merge is scoped to providers that front a self-hosted server.
+
+    OpenRouter and OpenAI accept several leading system messages, so collapsing
+    them there would be a behaviour change bought for nothing.
+    """
+    backend = PydanticAIBackend(
+        _settings(pydantic_ai_model="openrouter:some/model", openrouter_api_key="sk-test")
+    )
+    assert await _wire_roles(backend._build_model()) == ["system", "system", "user"]
 
 
 # --------------------------------------------------------------------------
@@ -1476,15 +1560,22 @@ def test_the_usage_event_carries_what_the_meter_actually_reads():
 
     # The exact number, not just "> 0", and asserted HERE rather than only in the
     # end-to-end test below, because this test carries no pocketpaw_ee import and
-    # so runs in the OSS-only CI job too. Haiku 4.5 is $1/$5/$0.10 per MTok:
-    # 300 uncached input + 250 output + 700 cache reads.
+    # so runs in the OSS-only CI job too. Haiku 4.5 is $1.00 input / $5.00 output
+    # / $0.10 cache read / $1.25 cache WRITE per MTok:
+    #   200 uncached input + 250 output + 700 cache reads + 100 cache writes
+    #   = 0.0002 + 0.00125 + 0.00007 + 0.000125 = 0.001645
     #
-    # ">0" would pass on the double-subtraction bug this guards. ``input_tokens``
-    # here is the INCLUSIVE 1000 and the estimator removes the cached portion
-    # itself; handing it the uncached remainder instead removes those tokens a
-    # second time, giving 0.00132 - still positive, still wrong, invisible to a
+    # This was 0.00162 until 2026-09-02, when the write stopped being billed as
+    # ordinary input. The old number folded the 100 write tokens into the fresh
+    # input at $1.00 and never charged the 1.25x premium; the difference is small
+    # here and is not small on a write-heavy turn.
+    #
+    # ">0" would pass on the double-subtraction bug this also guards.
+    # ``input_tokens`` here is the INCLUSIVE 1000 and ``price_run`` removes the
+    # cached portion itself; handing it the uncached remainder instead removes
+    # those tokens a second time - still positive, still wrong, invisible to a
     # truthiness check.
-    assert meta["total_cost_usd"] == pytest.approx(0.00162)
+    assert meta["total_cost_usd"] == pytest.approx(0.001645)
 
 
 def test_the_meter_prices_a_pydantic_ai_run_end_to_end():
@@ -1497,6 +1588,8 @@ def test_the_meter_prices_a_pydantic_ai_run_end_to_end():
     """
     pytest.importorskip("pocketpaw_ee", reason="pocketpaw-ee not installed")
 
+    from datetime import UTC, datetime
+
     from pocketpaw_ee.cloud.metering.service import resolve_cost
 
     class _Usage:
@@ -1506,15 +1599,16 @@ def test_the_meter_prices_a_pydantic_ai_run_end_to_end():
         cache_write_tokens = 0
 
     meta = PydanticAIBackend(_settings())._usage_event(_event_for(_Usage())).metadata
-    cost = resolve_cost(meta)
+    cost = resolve_cost(meta, at=datetime(2026, 9, 1, tzinfo=UTC))
 
     assert cost.source != "none", "the meter could not price this run"
-    # "reported" and not "estimated": the payload now prices itself, so the meter
-    # takes the reported branch and never reaches its estimator. That is the
-    # point - the estimator expects an inclusive input_tokens while this payload
-    # carries the uncached remainder, and only pricing upstream avoids the
-    # mismatch. If this ever flips to "estimated", the cost is being computed
-    # from the wrong number.
+    # "reported" and not "estimated": the payload prices itself, so the meter
+    # takes the reported branch and never reaches its own lookup. Both roads now
+    # lead to the same number - since 2026-09-02 the meter reconstitutes the
+    # inclusive prompt from the cache lines instead of mistaking the remainder
+    # for the total - but pricing upstream is still preferred, because upstream
+    # has the real counts and the meter only has a dict. If this flips to
+    # "estimated", the payload stopped carrying its own cost.
     assert cost.source == "reported"
     assert cost.model == "claude-haiku-4-5-20251001"
     # The exact number, not just "> 0". Haiku 4.5 is $1/$5/$0.10 per MTok, so
@@ -1570,6 +1664,214 @@ def test_a_missing_response_does_not_lose_the_token_counts():
     assert meta["input_tokens"] == 300
     assert meta["output_tokens"] == 40
     assert meta["model"] is None
+
+
+# --------------------------------------------------------------------------
+# usage on the runs that never reach AgentRunResultEvent
+#
+# ``AgentRunResultEvent`` is the last event of a COMPLETED run, so while it was
+# the only producer of ``token_usage`` here, every cancel / stop() / crash
+# reported no usage at all and the meter faithfully billed it zero.
+# --------------------------------------------------------------------------
+
+
+async def test_usage_reaches_a_consumer_that_walks_away_mid_run():
+    """The cloud run loop does not ask this backend to stop on a cancel — it
+    stops READING. ``_drive_agent_loop`` breaks on the cancel flag and its
+    ``finally`` cancels the pending ``__anext__``, so nothing produced after
+    that moment is delivered.
+
+    That is why usage is emitted AS the run consumes it rather than on the way
+    out: a payload built only at the end cannot bill a cancelled run no matter
+    where it is built. Yielding from a ``finally`` is not an escape either — the
+    OSS loop closes this generator (``agents/loop.py`` ``run_iter.aclose()``)
+    and yielding under GeneratorExit raises ``RuntimeError``.
+    """
+    seen = []
+    async for ev in _search_backend("c1").run("search for pocketpaw"):
+        seen.append(ev)
+        if ev.type == "tool_result":
+            break  # the consumer walks away, exactly like the cancel path
+
+    usage = [e for e in seen if e.type == "token_usage"]
+    assert usage, f"nothing was delivered before the consumer stopped: {[e.type for e in seen]}"
+    assert usage[-1].metadata["input_tokens"] > 0
+    assert usage[-1].metadata["backend"] == "pydantic_ai"
+
+
+async def test_a_stopped_run_still_reports_the_tokens_it_burned():
+    """``stop()`` was a free-usage path: the loop broke out and the run ended on
+    a bare ``done``."""
+    backend = _search_backend("c1")
+    seen = []
+    async for ev in backend.run("search for pocketpaw"):
+        seen.append(ev)
+        if ev.type == "tool_result":
+            await backend.stop()
+
+    kinds = [e.type for e in seen]
+    assert kinds[-1] == "done"
+    usage = [e for e in seen if e.type == "token_usage"]
+    assert usage, f"a stopped run reported no usage at all: {kinds}"
+    assert usage[-1].metadata["input_tokens"] > 0
+
+
+async def test_a_run_that_dies_mid_response_still_bills_that_response():
+    """A provider dying part-way through a response is the ordinary crash, and it
+    is not free: pydantic-ai folds a cut-short response's tokens into the run's
+    usage before the exception propagates.
+
+    No completed response means no mid-run snapshot fired, so the payload here
+    comes from the crash path itself — and it has to arrive BEFORE the ``error``
+    frame, because the cloud run loop treats ``error`` as terminal and stops
+    reading the stream at it. A payload emitted after it is thrown away.
+    """
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        yield "partial answer "
+        raise RuntimeError("proxy died mid-response")
+
+    events = await _collect(_backend_with_model(FunctionModel(stream_function=stream_fn)), "go")
+    kinds = [e.type for e in events]
+
+    assert "error" in kinds
+    usage_at = [i for i, k in enumerate(kinds) if k == "token_usage"]
+    assert usage_at, f"a run that died mid-response reported no usage at all: {kinds}"
+    assert usage_at[-1] < kinds.index("error"), f"usage must precede the error frame: {kinds}"
+
+    usage = events[usage_at[-1]]
+    assert usage.metadata["input_tokens"] > 0, "the prompt it already paid for must be billed"
+
+
+async def test_usage_payloads_are_run_cumulative_and_never_shrink():
+    """Consumers keep the LATEST payload (the cloud run loop) or fold in its
+    DIFFERENCE (``agents/loop.py``, ``status.py``, ``trace_collector.py``). Both
+    read a payload as the run's running total, so the sequence has to grow."""
+    events = await _collect(_search_backend("c1"), "search for pocketpaw")
+    totals = [
+        e.metadata["input_tokens"] + e.metadata["output_tokens"]
+        for e in events
+        if e.type == "token_usage"
+    ]
+    assert len(totals) >= 2, f"expected a mid-run snapshot and a final total, got {totals}"
+    assert totals == sorted(totals), f"payloads must never shrink: {totals}"
+
+
+async def test_a_hard_cancel_still_delivers_the_usage_it_had():
+    """A consumer that cancels a pending ``__anext__`` still receives the run's
+    usage, and the cancel still propagates afterwards.
+
+    This covers the one case the in-run snapshots cannot reach: usage that
+    advanced with no further event behind it to carry a snapshot out. Yielding
+    from the ``except CancelledError`` handler delivers the value to that
+    cancelled await before the exception resumes.
+    """
+    started = asyncio.Event()
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        yield "partial "
+        started.set()
+        await asyncio.sleep(30)  # cancelled here, mid-response
+        yield "never"
+
+    gen = _backend_with_model(FunctionModel(stream_function=stream_fn)).run("go")
+
+    received = []
+    received.append(await gen.__anext__())
+
+    # The pending pull is what drives the model into its mid-response wait, so
+    # it has to exist BEFORE we wait on the event — otherwise nothing advances.
+    pending = asyncio.create_task(gen.__anext__())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await asyncio.sleep(0.1)
+    pending.cancel()
+    try:
+        received.append(await pending)
+    except asyncio.CancelledError:
+        pass
+
+    usage = [e for e in received if getattr(e, "type", None) == "token_usage"]
+    assert usage, f"a hard cancel delivered no usage: {[getattr(e, 'type', e) for e in received]}"
+    assert usage[-1].metadata["input_tokens"] > 0
+
+
+async def test_an_early_break_does_not_crash_the_consumers_aclose():
+    """The reason usage is NOT emitted from a ``finally:``.
+
+    ``agents/loop.py`` closes this generator on every early break. A generator
+    that yields while GeneratorExit is propagating raises ``RuntimeError: async
+    generator ignored GeneratorExit`` out of that ``aclose()`` — trading a
+    billing gap for a crash on a path that today merely under-bills. The cancel
+    handler is deliberately narrow (``CancelledError``, not ``BaseException``)
+    so GeneratorExit passes through untouched.
+    """
+    gen = _search_backend("c1").run("search for pocketpaw")
+
+    async for _ev in gen:
+        break  # walk away mid-stream, exactly as the OSS loop can
+
+    await gen.aclose()  # must not raise
+
+
+async def test_a_cancelled_run_is_priced_under_the_same_convention_as_a_completed_one():
+    """The meter reads a payload's CONVENTION off its own shape: one carrying
+    ``cache_read_tokens`` / ``cache_write_tokens`` is Anthropic-shaped and its
+    ``input_tokens`` is the UNCACHED REMAINDER, anything else is OpenAI-shaped
+    and ``input_tokens`` already includes the cached subset.
+
+    So a partial run must emit the SAME shape as a completed one, or the same
+    tokens get priced under two different conventions depending only on how the
+    run ended. Every path here builds the payload through one function, and this
+    is what keeps that true.
+
+    Skipped on an OSS-only install: the meter it asserts against lives in
+    ``pocketpaw_ee``, and the OSS lane does not install it.
+    """
+    pytest.importorskip("pocketpaw_ee", reason="pocketpaw-ee not installed")
+
+    from pocketpaw_ee.cloud.metering.service import _prompt_tokens
+
+    completed = [
+        e.metadata
+        for e in await _collect(_search_backend("c1"), "search for pocketpaw")
+        if e.type == "token_usage"
+    ][-1]
+
+    partial = None
+    async for ev in _search_backend("c1").run("search for pocketpaw"):
+        if ev.type == "token_usage":
+            partial = ev.metadata
+        if ev.type == "tool_result":
+            break
+
+    assert partial is not None
+    assert sorted(partial) == sorted(completed), "a partial run emitted a different payload shape"
+    # Both must land on the Anthropic branch — the one that reads input_tokens
+    # as the uncached remainder. Emitting the inclusive total instead would make
+    # the meter add the cache lines a second time and overbill.
+    for name, payload in (("completed", completed), ("partial", partial)):
+        assert "cache_read_tokens" in payload and "cache_write_tokens" in payload, name
+        inclusive, read, write = _prompt_tokens(payload)
+        assert inclusive == payload["input_tokens"] + read + write, name
+
+
+def test_the_abnormal_path_names_the_model_the_run_resolved():
+    """No mid-stream event carries a model name — the event union is parts,
+    tools and enqueued messages only — so an abnormal-path payload falls back to
+    the RESOLVED model. The completed path still reads it off the response,
+    which stays the truthful source there."""
+    from pydantic_ai.usage import RunUsage
+
+    event = PydanticAIBackend(_settings())._usage_event_from(
+        RunUsage(input_tokens=500, output_tokens=120),
+        model_name="claude-haiku-4-5-20251001",
+    )
+
+    assert event.type == "token_usage"
+    assert event.metadata["model"] == "claude-haiku-4-5-20251001"
+    assert event.metadata["input_tokens"] == 500
+    assert event.metadata["output_tokens"] == 120
+    assert event.metadata["total_cost_usd"] > 0
 
 
 # --------------------------------------------------------------------------

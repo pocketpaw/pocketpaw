@@ -1,6 +1,82 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-04 (AD-4 — the overview chart's data): ``site_analytics`` answers a
+# ``series`` block, the same totals grouped by a time bucket. SEVEN queries per uncached
+# read now, up from six. The bucket is an HOUR for the 24-hour window and a DAY for the
+# other three, which is a readability limit rather than a preference: a bar chart stops
+# being legible somewhere around a hundred bars, and a week of hourly buckets is a hundred
+# and sixty-eight of them before the month and the quarter are even considered.
+#
+# The part worth knowing before reading the code is that the RANGE IS BUILT IN PYTHON and
+# the query only fills it. Serving the rows Cloudflare returned would silently omit every
+# bucket nobody visited, and a chart handed a shorter list joins the ends of the gap with a
+# straight line — a quiet Sunday rendered as no Sunday at all. So the buckets are generated
+# and then filled, which also makes the series sum to the pageview total above it.
+#
+# It adds NO empty state. The column it groups on is the row's own timestamp, which every
+# stored row has carried since the first one, so unlike the device class and the visit id
+# there is no row shape this cannot answer.
+#
+# Updated 2026-09-04 (AD-2 — visits, bounce rate and visit duration): ``site_analytics``
+# answers a VISIT block beside the pageview totals, read off the visit id AD-1 stamps on
+# every row. It costs one more query — SIX per uncached read, up from five — and it is the
+# only statement in this module with a subquery, which is why ``_analytics_sql`` grew an
+# ``outer`` parameter. That shape is not a preference: the SQL API documents a subquery in
+# FROM but neither JOIN, UNION nor a CTE, so grouping by a visit id STORED at write time is
+# the only way these three numbers are reachable at all.
+#
+# It brings a FOURTH empty state, governed by the same rule as the other three. A window
+# whose rows all predate the visit id is not a site with a zero bounce rate; it is a site
+# that has not republished since the counter learned to record visits. It reads as
+# ``visits: null`` with ``"visits"`` named in ``unrecorded``, exactly as the device class
+# already reports a row shape that cannot answer it.
+#
+# Updated 2026-09-02 (SA-5 — the entitlement on the wire): ``site_entitlements`` now
+# reports ``analytics``, echoed off the resolver. It is the cheap pre-check that lets
+# the dashboard disable the panel with a reason instead of calling the endpoint to be
+# refused. It does not replace that endpoint's ``status``, which stays authoritative:
+# entitlement alone cannot tell "your plan does not include this" from "it does, and
+# you have not republished since you upgraded", and those need different sentences.
+#
+# Updated 2026-09-02 (SA-4 — the visitor-analytics read): the read half of the feature
+# SA-1/SA-2 built. Two things landed here.
+#
+# ``site_analytics`` aggregates a site's pageview rows out of Workers Analytics Engine
+# and answers ``SiteAnalyticsResponse``. Its governing rule is that it NEVER INVENTS A
+# ZERO: not entitled, entitled-but-never-counted, counting-and-genuinely-quiet, and a
+# read that failed are four different answers to a customer, and three of them would
+# otherwise render as the same panel of zeros. The first three are ``status`` values
+# with every metric left None; the fourth is an exception, so a Cloudflare outage
+# cannot arrive shaped like a quiet week. It gates on the SAME
+# ``entitlements.site_analytics_entitled`` the publish path reads, never a second copy.
+#
+# ``_deploy_site_doc`` now stamps ``Site.analytics_since``, which is what makes the
+# second of those states knowable. The value is read off WHAT THE DEPLOY LEFT ON DISK
+# (the generated entry ``workers_deploy`` writes or deletes) rather than re-derived
+# from the plan, because the counting rule already lives in three places and a fourth
+# would be one more thing to disagree. Set on a publish that deployed a counter,
+# CLEARED on one that did not — a site that lapsed and re-upgraded is entitled with no
+# stamp, which is exactly "you have not republished yet".
+#
+# Updated 2026-09-02 (feat/sites-analytics-gate, SA-2): the workers deploy now carries
+# whether THIS site's plan buys the visitor pageview counter. SA-1 wired that counter
+# onto every assets-only publish; a Worker invocation is billed where a static asset is
+# not, so a free site was costing money for numbers nobody paid for.
+#
+# The resolution belongs HERE and nowhere lower, because this is the only layer that
+# can see the Site document the plan lives on — ``_site_counts_pageviews`` reads the
+# two billing fields and hands them to ``entitlements.site_analytics_entitled``, which
+# is the single predicate the read endpoint gates on too. The deploy writer defaults to
+# counting, so the gate is worth nothing unless this call is actually made; that is
+# asserted end to end in ``tests/ee/sites/test_sites_analytics_gate.py`` rather than
+# left to the deploy writer's own unit tests, which would pass either way.
+#
+# ``provision_deploy`` (the dynamic lane) passes False outright. It holds a site id and
+# a directory and cannot resolve a plan from either, and a dynamic site's ``main`` is
+# already SvelteKit's own worker — so the honest value is a stated False rather than an
+# inherited default.
+#
 # Updated 2026-09-01 (fix/sites-html-orphan-create): ``edit_html_file`` gains the
 # same ``unreferenced`` verdict, for the same defect on the track where it costs
 # more. An unimported react component is invisible; an unlinked html page is written
@@ -192,6 +268,19 @@
 # sync: a screenshot is a picture of a site that is ALREADY deployed and serving,
 # so nothing about it may fail, delay, or block the publish. On any failure the
 # field stays empty and the card falls back to its text layout.
+#
+# Updated 2026-09-02 (the card's MARK, not just its picture): both live-deploy tails
+# now also schedule ``_schedule_site_favicon``, and ``_to_response`` / ``pocket_status``
+# surface the resulting ``favicon_url`` on both DTOs — so the gallery card's chip can
+# be the site's own icon instead of the hard-coded globe every card wore. A SEPARATE
+# scheduler from the screenshot deliberately: a screenshot needs Cloudflare Browser
+# Rendering (paid, quota'd, unconfigured in plenty of deployments) while an icon needs
+# one GET of a page the readiness probe already proved is serving, so folding the two
+# together would cost every Browser-Rendering-less deployment its cards' marks for no
+# reason. Wrapped exactly like the screenshot and the KB sync, and for the same
+# reason: this runs at the tail of a publish that has already succeeded. The DRAFT
+# half is not scheduled here — it hangs off ``screenshot.take_draft_screenshot``,
+# which already holds the assembled markup and must not pay to build it twice.
 #
 # Updated 2026-08-07 (SC-2 — drafts get art too): ``create_draft_site`` now schedules
 # a capture of its own (``_schedule_draft_screenshot``). A draft has no url, so that
@@ -946,6 +1035,7 @@ import json
 import logging
 import re
 import secrets
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -973,10 +1063,18 @@ from pocketpaw_ee.cloud.models.site import SiteInvoice as _SiteInvoiceDoc
 from pocketpaw_ee.sites.build_state import claim_precondition
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
+    ANALYTICS_STATUS_NEVER_COUNTED,
+    ANALYTICS_STATUS_NOT_ENTITLED,
+    ANALYTICS_STATUS_OK,
     AuditFinding,
     AuditResponse,
     DevPreviewResponse,
     DomainStatusResponse,
+    SiteAnalyticsBreakdown,
+    SiteAnalyticsResponse,
+    SiteAnalyticsSeries,
+    SiteAnalyticsSeriesPoint,
+    SiteAnalyticsVisits,
     SiteClientResponse,
     SiteClientUpdate,
     SiteDataRowsResponse,
@@ -2050,6 +2148,11 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # None until a capture lands (empty string on the doc, and every pre-SC-1
         # row via the getattr default, read as None on the wire).
         preview_image_url=getattr(doc, "preview_image_url", "") or None,
+        # 2026-09-02: the site's own icon for the card's mark chip, as a data: URI.
+        # None until a lookup lands (empty string on the doc, and every row that
+        # predates the field via the getattr default, read as None on the wire) and
+        # whenever the site declares no icon — the card falls back to the globe.
+        favicon_url=getattr(doc, "favicon_url", "") or None,
         # SL-3: the build lane's state, straight off the persisted row. These three
         # were declared on the DTO by SG-9i and never populated here, so every
         # response carried the DEFAULTS — ``build_status`` frozen at "none" no matter
@@ -2799,6 +2902,10 @@ async def _deploy_site_doc(
         mode = "wfp"
 
     url = ""
+    # SA-4: did THIS deploy actually leave a pageview counter in front of the site?
+    # Only the workers branch can, so every other target answers False without asking.
+    # ``analytics_since`` is written from this below.
+    counter_deployed = False
     if mode == "local":
         from pocketpaw_ee.sites import local_server
 
@@ -2825,7 +2932,47 @@ async def _deploy_site_doc(
         # HE-4 / RX-1: pass the engine so an html OR react site deploys as an
         # assets-only Worker (no server script — react builds, but to a prerendered
         # static dist/), while ripple/svelte keep the SvelteKit-worker config.
-        url = await deploy_w(site_id, build.project_dir, engine=engine)
+        #
+        # SA-2: and pass whether this site's plan buys the visitor counter. Resolved
+        # HERE rather than defaulted in the deployer, because this is the only layer
+        # that can see the Site document the plan lives on — a Worker invocation is
+        # billed where a static asset is not, so a free site must deploy the config
+        # that ships no Worker at all.
+        counts_pageviews = await _site_counts_pageviews(workspace_id=workspace_id, site_id=site_id)
+        url = await deploy_w(
+            site_id, build.project_dir, engine=engine, analytics_entitled=counts_pageviews
+        )
+        # SA-4: and read back what the deploy ACTUALLY did, from the artifact rather
+        # than from ``counts_pageviews``. The counting rule has three parts — the plan
+        # (above), the operator kill switch, and whether the engine emits its own
+        # worker — and only the last two are resolved inside
+        # ``workers_deploy._write_deploy_files``. Re-deriving the answer here would put
+        # a fourth copy of that rule in the tree, and the field this feeds exists
+        # precisely to be trusted when the copies disagree.
+        #
+        # The generated entry is the artifact of the decision: written when counting is
+        # on, deleted when it is off. ``is_file`` rather than ``exists`` so the one case
+        # where the delete legitimately fails — a directory sitting on the entry's name,
+        # which ``_write_deploy_files`` swallows — reads as no counter, which is what
+        # wrangler will actually deploy.
+        #
+        # BOTH names, and the reason is a bug this shipped with for one afternoon.
+        # ``_write_deploy_files`` emits ONE OF TWO artifacts: ``ENTRY_FILENAME`` for an
+        # assets-only build, whose counter IS the worker, and ``SHIM_FILENAME`` for a
+        # build that already has a worker of its own (ripple, dynamic svelte), whose
+        # counter wraps it. This check knew only the first, because when it was written
+        # only the first existed — the shim arrived on a SIBLING branch, so neither
+        # slice was wrong alone and the merge is what made this wrong. The result was
+        # the worst-shaped failure this feature has: a paid ripple site deployed a
+        # working counter, counted real visitors, and told its owner counting had never
+        # started, with a Publish button that could not fix it because the next publish
+        # failed the same check.
+        from pocketpaw_ee.sites import analytics_worker
+
+        counter_deployed = any(
+            Path(build.project_dir, name).is_file()
+            for name in (analytics_worker.ENTRY_FILENAME, analytics_worker.SHIM_FILENAME)
+        )
     else:  # "wfp"
         cf = cloudflare or _cf_client()
         bundle = bundle_reader(build.project_dir)
@@ -2880,6 +3027,10 @@ async def _deploy_site_doc(
             script_name=site_id,
             deployed=True,
             deployed_at=now,
+            # SA-4: the stamp says counting is ON and began here. A first publish that
+            # deployed no counter records None, which the read reports as "nothing has
+            # been recorded yet" rather than as a quiet week.
+            analytics_since=now if counter_deployed else None,
             # Record WHICH target this deploy used, not which one was configured. The
             # custom-domain lane needs "does this site have its own route-addressable
             # Worker", and PAW_CF_DEPLOY_MODE cannot answer it at request time.
@@ -2911,6 +3062,18 @@ async def _deploy_site_doc(
         doc.deployed_at = now
         doc.deploy_target = mode
         doc.url = url
+        # SA-4, and unlike ``deployed_at`` this is NOT "last" — it is "since", so a
+        # republish that keeps counting keeps the original stamp. First-set-wins holds
+        # only WITHIN a counting era: a publish that carried no counter clears the field
+        # outright, because nothing is recording and there is no "since" to report.
+        #
+        # Clearing is what closes the lapse hole. A site that counted in June, dropped
+        # to free in July and re-upgraded today is entitled again, but no publish has
+        # carried a counter since the lapse. Left stamped, the read would answer
+        # "counting since June, and nobody visited" over months in which nothing was
+        # recording at all — the invented zero this feature exists to avoid. Cleared,
+        # entitled-with-no-stamp is exactly "you have not republished".
+        doc.analytics_since = (doc.analytics_since or now) if counter_deployed else None
         # The deploy may have moved (local → workers, or a new sites domain), so
         # re-assert the site's own host on every publish. Idempotent and additive:
         # a host already present is not duplicated, and a custom domain appended by
@@ -2939,6 +3102,12 @@ async def _deploy_site_doc(
     # already live, so a screenshot may never fail or delay the publish. A
     # preview publish never reaches here, so a draft is never photographed.
     _schedule_site_screenshot(doc)
+    # 2026-09-02: and its ICON, on the same trigger and under the same rule. A
+    # separate lane from the screenshot rather than a step inside it: this one costs
+    # a single GET of a page we already probe, so it must not be gated on Cloudflare
+    # Browser Rendering being configured — a deployment that gets no screenshots at
+    # all still gets its cards' marks.
+    _schedule_site_favicon(doc)
     return doc
 
 
@@ -3180,6 +3349,44 @@ async def _stamp_free_badge(
     )
 
 
+async def _site_counts_pageviews(*, workspace_id: str, site_id: str) -> bool:
+    """May this site's visitors be counted? Resolved from its OWN per-site plan.
+
+    The publish path's read of ``entitlements.site_analytics_entitled`` (SA-2), which
+    is where the RULE lives — this function only fetches the two billing fields that
+    predicate takes. The read endpoint (SA-4) calls the same predicate over the same
+    fields, which is the whole reason it is a named function rather than a condition
+    written twice: a site whose publish counted but whose read refuses is a customer
+    paying for a blank chart.
+
+    A SEPARATE DOCUMENT READ from ``_stamp_free_badge``'s, deliberately. Sharing one
+    would mean threading a resolved object through two seams with opposite failure
+    postures — the badge aborts a publish, this one only decides a config key — and
+    this file already reads the doc per question (the concierge embed and the D1 id do
+    the same). One extra ``find_one`` on a path that runs a full site build is not the
+    cost worth trading that clarity for.
+
+    Fails closed on a missing doc, exactly as the badge does and for a related reason.
+    A FIRST publish reaches here before the ``Site`` row is inserted, so "no doc" has
+    to mean "free": ``getattr(None, "plan_tier", None)`` is already that answer. The
+    consequence is a real one and belongs on screen rather than buried here — a site's
+    first publish never counts, and nothing backfills what was not recorded.
+    """
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+    entitled = entitlements_service.site_analytics_entitled(
+        plan_tier=getattr(doc, "plan_tier", None),
+        subscription_status=getattr(doc, "subscription_status", None),
+    )
+    if not entitled:
+        logger.info(
+            "sites: site %s is not entitled to visitor analytics — deploying with no counter",
+            site_id,
+        )
+    return entitled
+
+
 def _with_deployed_host(allowed_origins: list[str], url: str) -> list[str]:
     """Ensure a site's OWN deployed host is on its capture/concierge allowlist.
 
@@ -3250,6 +3457,34 @@ def _schedule_site_screenshot(site: _SiteDoc) -> None:
     except Exception:  # noqa: BLE001 — never fail a live publish over a screenshot
         logger.warning(
             "sites.screenshot: could not schedule capture for site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
+
+
+def _schedule_site_favicon(site: _SiteDoc) -> None:
+    """Fire the background lookup of a LIVE site's own icon, for the gallery card's
+    mark chip. Non-async, never blocks, never raises. Looked up through the module so
+    tests can patch it, mirroring ``_schedule_site_screenshot`` directly above.
+
+    Its own scheduler rather than a step inside the screenshot's, because the two
+    have different dependencies and different failure modes. A screenshot needs
+    Cloudflare Browser Rendering — paid, quota'd, and unconfigured in plenty of
+    deployments; an icon needs one GET of a page the readiness probe has already
+    proved is serving. Folding this into the screenshot would mean every deployment
+    without Browser Rendering also lost its cards' marks, for no reason.
+
+    The try/except is the same requirement as the screenshot's and no weaker: this
+    runs from the tail of a LIVE deploy, so anything escaping fails a publish of a
+    site that is already deployed and serving — in exchange for an icon.
+    """
+    try:
+        from pocketpaw_ee.sites.favicon import schedule_site_favicon
+
+        schedule_site_favicon(site)
+    except Exception:  # noqa: BLE001 — never fail a live publish over an icon
+        logger.warning(
+            "sites.favicon: could not schedule icon lookup for site %s",
             getattr(site, "id", "?"),
             exc_info=True,
         )
@@ -3865,6 +4100,10 @@ async def site_entitlements(*, workspace_id: str, site_id: str) -> SiteEntitleme
         # tier that cannot hold a domain and hand back
         # ``billing.custom_domain_not_entitled``.
         domain_slots_available=resolved.custom_domain and not exceeded,
+        # Echoed straight off the resolver. There is no second condition to AND in
+        # here — unlike the domain slot, whose plan grant and workspace room are two
+        # different questions, analytics has no per-workspace count to exhaust.
+        analytics=resolved.analytics,
         concierge_entitled=resolved.concierge_entitled,
         concierge_enabled=resolved.concierge_enabled,
     )
@@ -4122,8 +4361,15 @@ async def provision_deploy(
     if mode == "workers":
         from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
 
+        # SA-2 — explicitly NOT counting, rather than riding the deployer's default.
+        # This lane provisions DYNAMIC sites, whose ``main`` is already SvelteKit's own
+        # worker, so no counter can be bolted in front of it from a config key and the
+        # answer is False whatever the plan says. Stating it here means a build that
+        # somehow resolved assets-only on this lane still cannot deploy a counter for a
+        # site whose plan was never consulted — this function holds a site id and a
+        # directory, and cannot resolve one.
         url = await workers_deploy_mod.deploy_workers(
-            site_id, project_dir, d1_database_id=d1_database_id
+            site_id, project_dir, d1_database_id=d1_database_id, analytics_entitled=False
         )
         return url, "workers"
 
@@ -4181,6 +4427,12 @@ async def finalize_provisioned_site(site: _SiteDoc, *, url: str, deploy_target: 
     site.deployed = True
     site.deployed_at = datetime.now(UTC)
     site.url = url
+    # SA-4: this lane deploys no pageview counter and says so outright —
+    # ``provision_deploy`` passes ``analytics_entitled=False`` because a dynamic site's
+    # ``main`` is already SvelteKit's own worker. So the honest value here is None: a
+    # site that stood up through this job is not recording, whatever an earlier static
+    # publish may have left on the field.
+    site.analytics_since = None
     if deploy_target:
         site.deploy_target = deploy_target
     await site.save()
@@ -4192,6 +4444,9 @@ async def finalize_provisioned_site(site: _SiteDoc, *, url: str, deploy_target: 
     # dynamic site becomes reachable, so it is the moment there is a page to
     # photograph. The url was stamped a few lines above.
     _schedule_site_screenshot(site)
+    # 2026-09-02: and its icon, for the same reason — a reachable page is a page
+    # whose <head> can finally be read.
+    _schedule_site_favicon(site)
 
 
 async def mark_provision_failed(site: _SiteDoc) -> None:
@@ -4882,6 +5137,712 @@ async def domain_status(
     await site.save()
     return DomainStatusResponse(
         hostname=dom.hostname, cname_target=dom.cname_target, status=status.value
+    )
+
+
+# ── SA-4: the visitor-analytics read ────────────────────────────────────────
+#
+# THE ONE RULE GOVERNING EVERYTHING BELOW: never invent a zero. Four situations can
+# produce an empty-looking dashboard and they are four different sentences to the
+# customer —
+#
+#   1. this plan does not buy analytics                    → ``not_entitled``
+#   2. it does, but nothing has ever been recorded         → ``never_counted``
+#   3. counting, and genuinely nobody visited              → ``ok`` with real zeros
+#   4. the read itself failed                              → an EXCEPTION, never a status
+#
+# Only the third is a report about traffic. Rendering the first two as "0 visitors"
+# tells a customer their marketing is not working when the truth is that they have not
+# upgraded, or have not republished since they did. And the fourth is deliberately not
+# a status value at all: a client that maps an unfamiliar status to "no data" would
+# turn a Cloudflare outage into a quiet week, so a failed read leaves as a CloudError
+# and arrives as an error response.
+#
+# THE WINDOWS ARE A CLOSED SET, and that is a SQL-injection control rather than a UX
+# choice. The Analytics Engine SQL endpoint takes raw text with no parameter binding
+# (see ``cloudflare_client.query_analytics_sql``), so nothing user-controlled may be
+# interpolated into a statement. A caller's ``window`` selects a row from this table
+# and never reaches the SQL; the only other substitution is the site id, which has
+# already round-tripped through ``ObjectId`` and is re-checked at the call site.
+#
+# Retention at Cloudflare is THREE MONTHS, so ``90d`` is the longest window that can
+# return anything and there is no point offering more.
+_ANALYTICS_WINDOWS: dict[str, int] = {"24h": 1, "7d": 7, "30d": 30, "90d": 90}
+_ANALYTICS_DEFAULT_WINDOW = "7d"
+
+# Cloudflare drops a row three months after it is written. On the wire (see
+# ``SiteAnalyticsResponse.retention_days``) so a UI can say why the earliest date it
+# offers is the one it offers, rather than looking like it lost the data.
+_ANALYTICS_RETENTION_DAYS = 90
+
+# How many rows a breakdown returns. A top-N list, not a full inventory: a site with
+# four thousand paths would otherwise send four thousand rows to render ten.
+_ANALYTICS_BREAKDOWN_LIMIT = 10
+
+# THE CACHE. A dashboard reload must not be a Cloudflare round trip: Analytics Engine
+# bills READ queries and the free allowance is 10,000 a day for the whole account,
+# which four people leaning on F5 can spend by lunchtime. One entry per (site, window)
+# holding the assembled response.
+#
+# Sixty seconds, chosen against what the data can actually do rather than picked round.
+# The counter writes a row per pageview with no aggregation delay, so a shorter TTL
+# buys freshness that visitors cannot produce; a longer one starts to feel stale on the
+# release-day reload this panel exists for.
+#
+# IN-PROCESS AND DELIBERATELY NOT SHARED. A second API replica keeps its own, so the
+# worst case is one query set per replica per minute rather than one per account —
+# still far under the allowance, and it costs no Redis dependency on a read whose whole
+# value is being cheap. Bounded so a workspace with thousands of sites cannot grow it
+# without limit.
+#
+# ONLY SUCCESSES ARE CACHED. A failed read raises, and caching a failure would extend a
+# Cloudflare blip into a minute of errors for everyone.
+_ANALYTICS_CACHE_TTL_SECONDS = 60.0
+_ANALYTICS_CACHE_MAX_ENTRIES = 512
+_analytics_cache: dict[tuple[str, str, str], tuple[float, SiteAnalyticsResponse]] = {}
+
+
+def _analytics_cache_get(key: tuple[str, str, str]) -> SiteAnalyticsResponse | None:
+    """The cached response for this (workspace, site, window), or None.
+
+    ``monotonic`` rather than wall time so an NTP correction or a DST jump cannot make
+    an entry look hours old — or hours in the future, which would pin it forever."""
+    hit = _analytics_cache.get(key)
+    if hit is None:
+        return None
+    expires_at, response = hit
+    if time.monotonic() >= expires_at:
+        _analytics_cache.pop(key, None)
+        return None
+    return response
+
+
+def _analytics_cache_put(key: tuple[str, str, str], response: SiteAnalyticsResponse) -> None:
+    """Cache one assembled response, evicting expired entries first.
+
+    The eviction sweep is what keeps this bounded without an LRU: entries expire in a
+    minute anyway, so dropping the dead ones is almost always enough. The hard cap
+    behind it clears the whole map rather than choosing a victim — at this size the
+    next request simply re-queries, and a correct dumb policy beats a clever one on a
+    cache whose entries are worth a fraction of a cent each."""
+    if len(_analytics_cache) >= _ANALYTICS_CACHE_MAX_ENTRIES:
+        now = time.monotonic()
+        for stale in [k for k, (expires_at, _) in _analytics_cache.items() if now >= expires_at]:
+            _analytics_cache.pop(stale, None)
+        if len(_analytics_cache) >= _ANALYTICS_CACHE_MAX_ENTRIES:
+            _analytics_cache.clear()
+    _analytics_cache[key] = (time.monotonic() + _ANALYTICS_CACHE_TTL_SECONDS, response)
+
+
+def _analytics_int(row: dict, key: str) -> int:
+    """One numeric cell out of an Analytics Engine row.
+
+    The SQL API answers JSON, and an aggregate comes back as a number or — for the
+    64-bit sums — as a STRING holding one, which is how ClickHouse-shaped APIs avoid
+    JavaScript's integer limit. Both are read; anything else is 0 rather than a 500,
+    because a malformed cell in one breakdown row must not cost the whole panel.
+
+    A missing key is 0 too, and that is safe HERE and only here: this runs after the
+    caller has established that the read SUCCEEDED. The "never invent a zero" rule is
+    about the four states above, not about a cell inside a row that really came back.
+
+    A string is parsed as an INTEGER FIRST and only then as a float. Going through
+    ``float`` unconditionally would round every count above 2^53 to the nearest even —
+    which is precisely the range the string encoding exists to protect, so the shortcut
+    would corrupt exactly the values it was written to handle."""
+    raw = row.get(key)
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        try:
+            return int(float(text))
+        except ValueError:
+            return 0
+    return 0
+
+
+def _analytics_label(row: dict, key: str, *, empty: str) -> str:
+    """One label cell, with the name an empty one is reported under.
+
+    A blank is a REAL answer for most of these dimensions and must not be dropped: an
+    empty referrer is a direct visit, an empty country is a request Cloudflare could
+    not geolocate. Silently discarding those rows would inflate every remaining
+    percentage — the classic way a chart lies without a single wrong number in it."""
+    raw = row.get(key)
+    text = raw.strip() if isinstance(raw, str) else ""
+    return text or empty
+
+
+def _analytics_breakdown(
+    rows: list[dict], *, label_key: str, empty: str
+) -> list[SiteAnalyticsBreakdown]:
+    """Map query rows onto breakdown rows, in the order the query returned them."""
+    return [
+        SiteAnalyticsBreakdown(
+            label=_analytics_label(row, label_key, empty=empty),
+            pageviews=_analytics_int(row, "pageviews"),
+            visitors=_analytics_int(row, "visitors"),
+        )
+        for row in rows
+    ]
+
+
+def _analytics_sql(
+    *,
+    select: str,
+    site_id: str,
+    days: int,
+    group: str = "",
+    limit: int = 0,
+    where: str = "",
+    outer: str = "",
+    order: str = "pageviews DESC",
+) -> str:
+    """Build ONE Analytics Engine statement over this site's pageview rows.
+
+    EVERY value interpolated here is one this module controls: ``site_id`` is
+    re-validated as a 24-character hex ObjectId immediately below, ``days`` comes from
+    ``_ANALYTICS_WINDOWS``, and ``select`` / ``group`` are literals written in this
+    file. Nothing a request carries reaches the statement, which is the contract the
+    SQL endpoint demands — it has no parameter binding, so a caller that interpolates a
+    request value has written an injection.
+
+    ``SUM(_sample_interval)`` rather than ``COUNT()``: Analytics Engine downsamples a
+    hot index and exposes the sampling rate per row, so a plain count under-reports
+    exactly the busiest sites — the ones most likely to notice. Distinct visitors are
+    counted the way they are stored, on the per-day hash in ``blob4``, so a visitor who
+    returns tomorrow counts twice. That is the privacy design rather than a defect: the
+    salt rotates at UTC midnight, so no join across days is possible even in principle.
+
+    ``where`` ANDs one more condition onto the window filter, and ``outer`` wraps the
+    whole statement in a second SELECT reading its rows — the SUBQUERY FORM the visit
+    metrics need, and the only shape in which they are reachable, since the SQL API
+    documents a subquery in FROM but neither JOIN, UNION nor a CTE. Both are literals
+    written in this file exactly as ``select`` and ``group`` are, for the same reason.
+    The dataset, the site filter and the window all stay on the INNER half — the only
+    half that touches a table — so a subquery form is scoped by the same two conditions
+    every other statement here is.
+
+    ``order`` names the sort a grouped statement gets. It defaults to the breakdowns'
+    ``pageviews DESC``, which is what makes their LIMIT a top-N; the time series overrides
+    it with the bucket, because a chart's rows are read by WHEN and sorting a quarter of
+    days by traffic would be a sort whose result nothing looks at. Another literal written
+    in this file, for the reason the paragraph above gives.
+    """
+    if not re.fullmatch(r"[0-9a-f]{24}", site_id):
+        # Belt and braces behind ``_load``'s ObjectId round-trip. This is the last
+        # place before raw SQL, and the cost of being wrong is an injected query
+        # against the account's whole analytics dataset.
+        raise ValidationError("sites.invalid_site_id", "site_id is not a site identifier")
+    from pocketpaw_ee.sites import analytics_worker
+
+    parts = [
+        f"SELECT {select}",
+        f"FROM {analytics_worker.dataset_name()}",
+        f"WHERE index1 = '{site_id}' AND timestamp > NOW() - INTERVAL '{int(days)}' DAY",
+    ]
+    if where:
+        parts.append(f"AND {where}")
+    if group:
+        parts.append(f"GROUP BY {group}")
+        if not outer:
+            # The sort is what makes a breakdown's LIMIT a top-N. An aggregate reading a
+            # subquery does not care what order its rows arrive in, so the outer form does
+            # not pay Cloudflare to sort a site's whole visit table and then discard it.
+            parts.append(f"ORDER BY {order}")
+    if limit:
+        parts.append(f"LIMIT {int(limit)}")
+    if outer:
+        parts = [f"SELECT {outer}", "FROM (", *parts, ")"]
+    parts.append("FORMAT JSON")
+    return "\n".join(parts)
+
+
+# The dimensions a stored row can answer, and the blob each sits in. The layout is a
+# CONTRACT with ``analytics_worker`` — Analytics Engine columns are positional and have
+# no names, so reading the wrong blob silently reports referrers as countries.
+#
+# ``blob5`` is a DEVICE CLASS that may or may not be there. A row written before SA-3
+# has four blobs and a row written after has five; Analytics Engine has no schema and
+# answers an empty string for a blob a row never carried, so both shapes arrive here in
+# one window and neither may crash. See ``_analytics_devices`` for what an empty one
+# means and why it is bucketed rather than dropped.
+_ANALYTICS_DIMENSIONS: tuple[tuple[str, str, str], ...] = (
+    ("top_pages", "blob1", "(unknown)"),
+    ("referrers", "blob2", "(direct)"),
+    ("countries", "blob3", "(unknown)"),
+    ("devices", "blob5", "unknown"),
+)
+
+
+# ── AD-2: the visit statement ────────────────────────────────────────────────
+#
+# A VISIT is a run of pageviews sharing ``blob6``, the id the counting Worker stamps on
+# every row under a salt that rotates on the HOUR — ``analytics_worker``'s row contract
+# holds the construction and the hour-boundary caveat. Grouping by an id STORED at write
+# time is the whole reason these numbers are reachable: the SQL API documents a subquery
+# in FROM but neither JOIN, UNION nor a CTE, so RECONSTRUCTING a visit at read time —
+# ordering one visitor's timestamps and cutting them on an inactivity gap — is not
+# expressible here at all, and the fallback is pulling raw rows and clustering them in
+# Python on a read path whose entire value is being cheap.
+#
+# The inner statement answers ONE ROW PER VISIT: how many pages it viewed, how long it
+# lasted, and the sampling interval its rows carry. The outer collapses those into three
+# integers. Bounce rate and mean duration are deliberately NOT computed in SQL — they are
+# ratios whose denominators go to zero in two ordinary situations (a window with no
+# visits, and a window of nothing but bounces), and both have to be answered as "not
+# measurable" rather than as a zero. That belongs where it can be said.
+#
+# WHY THE OUTER SUMS AN INTERVAL RATHER THAN COUNTING ROWS. Analytics Engine downsamples
+# a hot index: it keeps a fraction of the rows and sets ``_sample_interval`` on each
+# survivor to the number of rows it stands for. Counting the subquery's rows would
+# under-report visits by exactly that factor on the busiest sites — the failure
+# ``SUM(_sample_interval)`` exists to prevent, one level up — and it would leave visits on
+# a different scale from the pageviews they are divided into. Each visit is therefore
+# weighted by the interval its own rows carry, ``MAX`` of them so a sampling rate that
+# changed mid-visit cannot round the estimate down. The weight is exact for a
+# single-pageview visit, which is every bounce, and generous for a long visit that
+# survived sampling on several rows. Unsampled traffic weighs 1 and the question does not
+# arise.
+_ANALYTICS_VISIT_SELECT = (
+    "blob6 AS visit, "
+    "SUM(_sample_interval) AS pageviews, "
+    "MAX(_sample_interval) AS sample_interval, "
+    "toUnixTimestamp(MAX(timestamp)) - toUnixTimestamp(MIN(timestamp)) AS seconds"
+)
+
+# Rows written before AD-1 carry no visit id, and Analytics Engine answers an empty string
+# for a blob a row never held. Left in, every one of them would group TOGETHER into a
+# single fabricated visit spanning the window: one visit, thousands of pageviews, a
+# duration measured in days, and not one number on the panel true. Dropped instead — and
+# their absence is what the fourth empty state is read from.
+_ANALYTICS_VISIT_RECORDED = "blob6 != ''"
+
+_ANALYTICS_VISIT_TOTALS = (
+    "SUM(sample_interval) AS visits, "
+    "sumIf(sample_interval, pageviews = 1) AS bounces, "
+    "sumIf(seconds * sample_interval, pageviews > 1) AS total_seconds"
+)
+
+
+# ── AD-4: the time series ────────────────────────────────────────────────────
+#
+# WHICH BUCKET EACH WINDOW GETS, and the reasoning, because the two long windows are the
+# ones a reader will question. A bar chart stops being readable somewhere around a hundred
+# bars — past that the bars are thinner than the gaps between them and the axis labels
+# collide — so the bucket has to divide the window into fewer than that:
+#
+#   24h → HOUR, 25 buckets. The only window short enough for hours, and the one where
+#         hours are what the reader actually wants: "when today did the traffic come".
+#   7d  → DAY, 8 buckets. Hourly would be 168, past the limit — and a week read hour by
+#         hour is a chart of the same daily shape drawn seven times, which answers a
+#         question ("what time of day do people read") that 24h already answers better.
+#   30d → DAY, 31 buckets. Hourly would be 720.
+#   90d → DAY, 91 buckets. Just inside the limit, and the reason there is no third bucket
+#         size: a week bucket would fit a quarter into 13 bars, but it would also make the
+#         series' units change twice across four windows for one bar's worth of clutter.
+#
+# The counts are one MORE than the window's name suggests because the window is a rolling
+# one — ``timestamp > NOW() - INTERVAL 'n' DAY``, not a calendar range — so its start lands
+# inside a bucket rather than on one. That leading bucket is genuinely partial and is kept
+# rather than dropped: dropping it would delete real traffic from the chart and leave the
+# series summing to less than the pageview total printed directly above it.
+_ANALYTICS_SERIES_HOUR = "hour"
+_ANALYTICS_SERIES_DAY = "day"
+_ANALYTICS_SERIES_INTERVALS: dict[str, str] = {
+    "24h": _ANALYTICS_SERIES_HOUR,
+    "7d": _ANALYTICS_SERIES_DAY,
+    "30d": _ANALYTICS_SERIES_DAY,
+    "90d": _ANALYTICS_SERIES_DAY,
+}
+
+# The bucketing expression per interval. ``toStartOfHour`` and ``toStartOfDay`` are both in
+# the SQL API's documented date-and-time set, and both work in UTC with no zone argument —
+# which is the zone every other stamp on this response is in, so nothing here has to
+# reconcile two.
+#
+# Wrapped in ``toUnixTimestamp`` — also documented, and already used by the visit statement
+# — so the bucket arrives as an INTEGER rather than as whatever string form the JSON
+# renderer picks for a DateTime. An integer needs no parsing contract with Cloudflare, goes
+# through ``_analytics_int`` like every other cell here, and cannot be read in the wrong
+# zone on the way in.
+_ANALYTICS_SERIES_BUCKET_SQL: dict[str, str] = {
+    _ANALYTICS_SERIES_HOUR: "toStartOfHour(timestamp)",
+    _ANALYTICS_SERIES_DAY: "toStartOfDay(timestamp)",
+}
+
+_ANALYTICS_SERIES_STEP: dict[str, timedelta] = {
+    _ANALYTICS_SERIES_HOUR: timedelta(hours=1),
+    _ANALYTICS_SERIES_DAY: timedelta(days=1),
+}
+
+
+async def site_analytics(
+    *,
+    workspace_id: str,
+    site_id: str,
+    window: str = _ANALYTICS_DEFAULT_WINDOW,
+    _cloudflare: Any | None = None,
+) -> SiteAnalyticsResponse:
+    """Visitor analytics for ONE site over ONE window (GET /sites/{id}/analytics).
+
+    Tenant-scoped through ``_load``, so a missing, malformed or cross-tenant site id is
+    a 404 exactly as it is on every sibling per-site read. That check runs FIRST — a
+    caller must not be able to learn that another workspace's site exists by watching
+    which error comes back.
+
+    Entitlement is resolved through ``entitlements.site_analytics_entitled``, the SAME
+    predicate the publish path gates the counter on. Not a second copy: a site whose
+    publish counted but whose read refuses is a customer paying for a blank chart, and
+    the reverse serves numbers a site was never entitled to gather.
+
+    THE FOUR OUTCOMES, and why three of them return no numbers at all:
+
+    * NOT ENTITLED — nothing was ever recorded and nothing can be until the plan
+      changes. The metrics stay None so a UI that renders them without reading the
+      status shows blanks rather than a confident zero.
+    * NEVER COUNTED — entitled, but ``analytics_since`` is None, which after the SA-4
+      write rule means precisely "no publish has deployed a counter, so nothing is
+      recording". Republishing starts it; upgrading does not backfill, because the rows
+      do not exist to backfill from.
+    * OK — a counter is up. The numbers are real, and they may legitimately be zero.
+    * THE READ FAILED — this raises. ``query_analytics_sql`` is fail-closed by design
+      and its ValidationError travels out of here untouched, because a failed read is
+      not a report about the site's traffic and must not arrive shaped like one.
+
+    ``devices`` and ``visits`` may each come back None with their own name in
+    ``unrecorded``. That is not a fifth status: the stored row has GROWN twice since
+    the oldest rows in a window were written, so one part of an otherwise healthy
+    response can be unanswerable while the rest of it is real. See
+    ``_analytics_devices`` and ``_analytics_visits``.
+
+    ``series`` is NOT one of those. It groups on the row's own timestamp, which every
+    stored row has carried since the first one, so there is no row shape it cannot answer
+    and no window in which it goes unrecorded — a quiet week is a full range of zeroes.
+    See ``_analytics_series`` for why the range is generated rather than returned.
+    """
+    doc = await _load(workspace_id, site_id)
+
+    window = window.strip() or _ANALYTICS_DEFAULT_WINDOW
+    days = _ANALYTICS_WINDOWS.get(window)
+    if days is None:
+        raise ValidationError(
+            "sites.invalid_analytics_window",
+            f"window must be one of: {', '.join(sorted(_ANALYTICS_WINDOWS))}",
+        )
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    entitled = entitlements_service.site_analytics_entitled(
+        plan_tier=getattr(doc, "plan_tier", None),
+        subscription_status=getattr(doc, "subscription_status", None),
+    )
+    if not entitled:
+        return _analytics_empty(site_id, window, ANALYTICS_STATUS_NOT_ENTITLED, None)
+
+    since = getattr(doc, "analytics_since", None)
+    if since is None:
+        # Exactly "counting is off", after the write rule that CLEARS this field on a
+        # publish carrying no counter. Nothing to query, and querying anyway would
+        # spend a billed read to confirm an emptiness whose reason is already known.
+        return _analytics_empty(site_id, window, ANALYTICS_STATUS_NEVER_COUNTED, None)
+
+    # The cache is checked AFTER the two states above, which cost nothing to recompute,
+    # and after ``_load``, so a cached entry can never answer a cross-tenant request.
+    cache_key = (workspace_id, site_id, window)
+    cached = _analytics_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    cf = _cloudflare or _cf_client()
+    totals_rows = await cf.query_analytics_sql(
+        _analytics_sql(
+            select="SUM(_sample_interval) AS pageviews, COUNT(DISTINCT blob4) AS visitors",
+            site_id=site_id,
+            days=days,
+        )
+    )
+    # An aggregate with no GROUP BY answers exactly one row. No rows at all means the
+    # window held no data — a real answer, and the ``ok``-with-zeros state rather than a
+    # failure. A failure would already have raised out of the client.
+    totals = totals_rows[0] if totals_rows else {}
+    pageviews = _analytics_int(totals, "pageviews")
+
+    # THE VISIT QUERY, read here rather than beside the breakdowns because its empty
+    # state is decided against the totals above: no visits AND no pageviews is a quiet
+    # week, while no visits AND real pageviews is a window written before the visit id
+    # existed. Those are different sentences — see ``_analytics_visits``.
+    visit_rows = await cf.query_analytics_sql(
+        _analytics_sql(
+            select=_ANALYTICS_VISIT_SELECT,
+            site_id=site_id,
+            days=days,
+            group="visit",
+            where=_ANALYTICS_VISIT_RECORDED,
+            outer=_ANALYTICS_VISIT_TOTALS,
+        )
+    )
+    visits, visits_unrecorded = _analytics_visits(
+        visit_rows[0] if visit_rows else {}, pageviews=pageviews
+    )
+
+    # THE SERIES. One more grouped read of the same rows the totals came from, bucketed by
+    # the row's own timestamp. It is ordered by the bucket rather than by traffic because a
+    # chart reads its rows by WHEN — and the range it fills is built below, not taken from
+    # what came back, so a bucket nobody visited is a zero instead of a hole.
+    interval = _ANALYTICS_SERIES_INTERVALS[window]
+    series_rows = await cf.query_analytics_sql(
+        _analytics_sql(
+            select=(
+                f"toUnixTimestamp({_ANALYTICS_SERIES_BUCKET_SQL[interval]}) AS bucket, "
+                "SUM(_sample_interval) AS pageviews, "
+                "COUNT(DISTINCT blob4) AS visitors"
+            ),
+            site_id=site_id,
+            days=days,
+            group="bucket",
+            order="bucket",
+        )
+    )
+    series = _analytics_series(series_rows, interval=interval, days=days, since=since)
+
+    breakdowns: dict[str, list[SiteAnalyticsBreakdown]] = {}
+    for field, blob, empty in _ANALYTICS_DIMENSIONS:
+        rows = await cf.query_analytics_sql(
+            _analytics_sql(
+                select=(
+                    f"{blob} AS label, SUM(_sample_interval) AS pageviews, "
+                    "COUNT(DISTINCT blob4) AS visitors"
+                ),
+                site_id=site_id,
+                days=days,
+                group="label",
+                limit=_ANALYTICS_BREAKDOWN_LIMIT,
+            )
+        )
+        breakdowns[field] = _analytics_breakdown(rows, label_key="label", empty=empty)
+
+    devices, unrecorded = _analytics_devices(breakdowns["devices"])
+    response = SiteAnalyticsResponse(
+        site_id=site_id,
+        window=window,
+        status=ANALYTICS_STATUS_OK,
+        counting_since=_analytics_iso(since),
+        retention_days=_ANALYTICS_RETENTION_DAYS,
+        pageviews=pageviews,
+        visitors=_analytics_int(totals, "visitors"),
+        visits=visits,
+        series=series,
+        top_pages=breakdowns["top_pages"],
+        referrers=breakdowns["referrers"],
+        countries=breakdowns["countries"],
+        devices=devices,
+        unrecorded=unrecorded + visits_unrecorded,
+    )
+    _analytics_cache_put(cache_key, response)
+    return response
+
+
+def _analytics_devices(
+    rows: list[SiteAnalyticsBreakdown],
+) -> tuple[list[SiteAnalyticsBreakdown] | None, list[str]]:
+    """Split the device breakdown into what to serve and what to declare unrecorded.
+
+    THE ROW SHAPE CHANGED UNDER THIS READER, which is why this is its own function. A
+    pageview row written before SA-3's device class holds four blobs; one written after
+    holds five. Analytics Engine has no schema and no column names — a blob a row never
+    carried reads as an empty string — so both shapes arrive here together inside a
+    single window, and neither may crash.
+
+    An EMPTY device label is therefore ambiguous in one direction only: it is a row that
+    recorded nothing about the device, whether because it predates the change or because
+    the class could not be determined. Either way it belongs in the ``unknown`` bucket
+    rather than being discarded, since discarding it would rescale every real device's
+    share against a smaller total.
+
+    When EVERY row is unknown the dimension is not answered-and-empty, it is
+    unanswerable: SA-3 has not landed, or nothing has been published since it did. That
+    returns None plus ``"devices"`` in ``unrecorded``, which a client renders as "not
+    recorded" instead of as a chart of one bar called unknown. An empty list would read
+    as "no devices", and omitting the field is indistinguishable from a version skew.
+    """
+    if not rows or all(row.label == "unknown" for row in rows):
+        return None, ["devices"]
+    return rows, []
+
+
+def _analytics_visits(row: dict, *, pageviews: int) -> tuple[SiteAnalyticsVisits | None, list[str]]:
+    """The visit block for one window, or None plus ``"visits"`` in ``unrecorded``.
+
+    THE FOURTH EMPTY STATE IS DECIDED HERE, and it is the device class's problem one
+    metric over. A site published before AD-1 is counting pageviews perfectly well and
+    stamping a visit id on none of them, so the visit query answers nothing while the
+    totals answer real traffic. Rendering that as 0 visits and a 0% bounce rate would be
+    the invented zero this whole endpoint is built against — and a worse one than the
+    others, because 0% bounce does not look like an empty panel, it looks like a
+    spectacular result. Real pageviews with no visits therefore returns None and names
+    ``"visits"`` unrecorded, which a client shows as "republish to start measuring
+    visits", the way it already shows a device class it cannot answer.
+
+    NO pageviews and no visits is a different sentence and keeps its numbers: the site is
+    counting, the window is genuinely quiet, and that zero is honest. The two ratios stay
+    None even then, because a bounce rate over zero visits is undefined rather than zero.
+
+    A MIXED WINDOW — some rows before the republish, some after — reports the visits it
+    can measure and under-states them until the window has rolled past that publish. It
+    is the shape ``counting_since`` already has, and it is transient by the length of the
+    window; refusing the whole block instead would black the panel out for up to ninety
+    days after an upgrade."""
+    visits = _analytics_int(row, "visits")
+    if visits <= 0:
+        if pageviews > 0:
+            return None, ["visits"]
+        return SiteAnalyticsVisits(count=0), []
+    # Clamped because the remainder is a denominator below. More bounces than visits is
+    # impossible out of the statement above, and a negative mean duration reaching a
+    # customer's screen is not worth the one call it costs to make it unreachable.
+    bounces = min(_analytics_int(row, "bounces"), visits)
+    measured = visits - bounces
+    total_seconds = _analytics_int(row, "total_seconds")
+    return (
+        SiteAnalyticsVisits(
+            count=visits,
+            # Rounded because a ratio of two sampled estimates means nothing in its
+            # fifteenth decimal place, and the wire should not carry float noise that a
+            # UI then has to hide.
+            bounce_rate=round(bounces / visits, 4),
+            duration_seconds=round(total_seconds / measured, 1) if measured else None,
+        ),
+        [],
+    )
+
+
+def _analytics_series_floor(moment: datetime, interval: str) -> datetime:
+    """The start of the bucket a moment falls in, in UTC.
+
+    A NAIVE value is read as UTC, for the reason ``_analytics_iso`` gives one function
+    down: Mongo hands back a stamp written as tz-aware with no zone on it, and ``since``
+    arrives here straight off the document. Without this the comparison against an aware
+    window bound raises, and floor'ing whatever the host's local zone happens to be would
+    start the chart at the machine's midnight rather than at the day's.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    moment = moment.astimezone(UTC)
+    if interval == _ANALYTICS_SERIES_HOUR:
+        return moment.replace(minute=0, second=0, microsecond=0)
+    return moment.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _analytics_series(
+    rows: list[dict], *, interval: str, days: int, since: datetime
+) -> SiteAnalyticsSeries:
+    """The chart's points for one window — every bucket in the range, oldest first.
+
+    THE RANGE IS GENERATED HERE AND THE QUERY ONLY FILLS IT, which is the whole reason
+    this is a function rather than a comprehension over ``rows``. Analytics Engine answers
+    one row per bucket that HAD traffic, and a chart drawn from that list joins the two
+    ends of every gap with a straight line: an hour nobody visited does not appear as an
+    empty hour, it stops existing, and a quiet Sunday is drawn as no Sunday at all. A zero
+    is a measurement. A missing entry is a different claim and it is not a true one.
+
+    IT COVERS THE WHOLE WINDOW, always: a seven-day request is seven days of buckets
+    whether or not the site was counting for all of them. Trimming the start to when
+    counting began is what the two earlier versions did, and rendered it is the worse
+    failure — a two-day-old site answering a seven-day request with two bars fills the
+    plot edge to edge and reads as a broken component. The leading empty run it was
+    avoiding is explained on the panel, in words, directly under the chart.
+
+    ROWS OUTSIDE THE RANGE ARE FOLDED INTO THE NEAREST END rather than dropped, because
+    our clock and Cloudflare's ``NOW()`` are not the same clock and the newest bucket can
+    land a moment past the end. Dropping it would leave the chart summing to less than the
+    pageview total printed directly above it, with nothing on screen to explain the gap.
+    The fold moves that traffic by at most one bucket.
+    """
+    step = _ANALYTICS_SERIES_STEP[interval]
+    now = datetime.now(UTC)
+    end = _analytics_series_floor(now, interval)
+    # THE SERIES COVERS THE WHOLE WINDOW THE CALLER ASKED FOR. Two earlier versions
+    # trimmed the start — first to ``counting_since``, then to the earliest bucket
+    # carrying traffic — to stop a new site's ninety-day chart opening with eighty-eight
+    # empty days. Seen rendered, that trim is the worse bug of the two it was choosing
+    # between: a site counting for two days answered a SEVEN-day request with two bars,
+    # which fill the plot edge to edge and read as a broken component rather than as a
+    # short history. Asking for seven days and being shown two is also simply not the
+    # question that was asked.
+    #
+    # The empty run it was avoiding is already explained, and not by this function: the
+    # response carries ``counting_since``, and the panel prints "counting started on
+    # <date>, part way through this period — the days before that were never recorded"
+    # directly under the chart. A leading flat run with that sentence beneath it is not
+    # ambiguous, and it is what every comparable product draws.
+    #
+    # Dropping the trim also removes the case the earlier fix existed for: a lapsed site's
+    # rows sit inside the window on their own days, because nothing is moving the start
+    # past them any more.
+    start = _analytics_series_floor(now - timedelta(days=days), interval)
+
+    buckets: dict[datetime, list[int]] = {}
+    moment = start
+    while moment <= end:
+        buckets[moment] = [0, 0]
+        moment += step
+
+    for row in rows:
+        stamp = _analytics_series_floor(
+            datetime.fromtimestamp(_analytics_int(row, "bucket"), UTC), interval
+        )
+        cell = buckets[min(max(stamp, start), end)]
+        cell[0] += _analytics_int(row, "pageviews")
+        cell[1] += _analytics_int(row, "visitors")
+
+    return SiteAnalyticsSeries(
+        interval=interval,
+        points=[
+            SiteAnalyticsSeriesPoint(
+                bucket=_analytics_iso(moment), pageviews=pageviews, visitors=visitors
+            )
+            for moment, (pageviews, visitors) in buckets.items()
+        ],
+    )
+
+
+def _analytics_iso(moment: datetime) -> str:
+    """A stored stamp as an ISO-8601 string in UTC.
+
+    Mongo stores a datetime with no zone, so a value written as tz-aware reads back
+    NAIVE. Putting that on the wire bare would let a client read a UTC instant as its
+    own local time — a silent several-hour lie about when counting started, which is
+    the very value a chart's x-axis begins at.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC).isoformat()
+
+
+def _analytics_empty(
+    site_id: str, window: str, status: str, since: datetime | None
+) -> SiteAnalyticsResponse:
+    """A response carrying a STATUS and no numbers.
+
+    Every metric is left at its None default rather than zeroed, and that is the point
+    of the shape: a client that renders the numbers without reading the status shows
+    blanks, which is honest, instead of zeros, which are a claim about traffic nobody
+    measured.
+    """
+    return SiteAnalyticsResponse(
+        site_id=site_id,
+        window=window,
+        status=status,
+        counting_since=_analytics_iso(since) if since is not None else None,
+        retention_days=_ANALYTICS_RETENTION_DAYS,
     )
 
 
@@ -7775,6 +8736,10 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         preview_image_url=(getattr(doc, "preview_image_url", "") or None)
         if doc is not None
         else None,
+        # 2026-09-02: the same icon the list row carries, so a by-pocket status read
+        # can show the site's own mark too. None when there is no Site doc, no
+        # lookup has landed, or the site declares no icon we can use.
+        favicon_url=(getattr(doc, "favicon_url", "") or None) if doc is not None else None,
         # SL-3: the build lane's state on the read a builder polls BY POCKET. This is
         # the only GET keyed on a pocket id, so a client watching a build it just
         # triggered has nowhere else to look — without these it would have to fetch the

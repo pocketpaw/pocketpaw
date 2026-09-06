@@ -1,4 +1,10 @@
-"""Tests for Copilot SDK backend — mocked (no real CLI/SDK needed)."""
+"""Tests for Copilot SDK backend — mocked (no real CLI/SDK needed).
+
+Updated 2026-09-02 (fix/metering-partial-usage-capture) — ``TestCopilotUsageCardinality``
+pins that ``token_usage`` reports the RUN total. ``assistant.usage`` is emitted
+per LLM API call and one turn makes several, so without the accumulator a
+multi-call turn billed for one call.
+"""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -602,3 +608,60 @@ class TestCopilotSDKRegistry:
 
         backends = list_backends()
         assert "copilot_sdk" in backends
+
+
+class TestCopilotUsageCardinality:
+    """``assistant.usage`` is emitted PER LLM API CALL — the SDK's own payload
+    carries ``apiCallId``, ``duration`` and ``ttft_ms``, which only mean anything
+    per call — and one agent turn makes several.
+
+    Every consumer of ``token_usage`` reads a payload as the RUN's running total
+    (the cloud run loop keeps the latest; the OSS loop, the status tracker and
+    the trace collector fold in the difference), so the per-call numbers have to
+    be accumulated here or a multi-call run bills for one call.
+    """
+
+    @pytest.mark.asyncio
+    async def test_usage_is_run_cumulative_across_api_calls(self):
+        backend, mock_session, _ = _setup_backend_with_mock_client()
+        _wire_events(
+            mock_session,
+            [
+                _make_sdk_event("assistant.usage", input_tokens=100, output_tokens=20),
+                _make_sdk_event("assistant.usage", input_tokens=300, output_tokens=40),
+                _make_sdk_event("session.idle"),
+            ],
+        )
+
+        events = []
+        async for event in backend.run("Hi"):
+            events.append(event)
+
+        usage = [e for e in events if e.type == "token_usage"]
+        assert len(usage) == 2
+        assert usage[0].metadata["input_tokens"] == 100
+        # The RUN total, not the second call's 300.
+        assert usage[-1].metadata["input_tokens"] == 400
+        assert usage[-1].metadata["output_tokens"] == 60
+
+    @pytest.mark.asyncio
+    async def test_the_usage_accumulator_does_not_leak_between_runs(self):
+        """One backend instance serves every run on its agent, so a counter kept
+        on ``self`` would bill one run for another's tokens."""
+        backend, mock_session, _ = _setup_backend_with_mock_client()
+
+        for _ in range(2):
+            _wire_events(
+                mock_session,
+                [
+                    _make_sdk_event("assistant.usage", input_tokens=100, output_tokens=20),
+                    _make_sdk_event("session.idle"),
+                ],
+            )
+            events = []
+            async for event in backend.run("Hi"):
+                events.append(event)
+            usage = [e for e in events if e.type == "token_usage"]
+            assert usage[-1].metadata["input_tokens"] == 100, (
+                "the second run inherited the first run's tokens"
+            )

@@ -1,5 +1,12 @@
 # ee/pocketpaw_ee/sites/import_service.py — Paw Sites IMPORT control plane (SI-4).
 #
+# Edited 2026-09-04 (IR-2a, feat/sites-import-design-brief): added REBUILD mode
+# beside the existing byte mirror. ``regenerate_from_url`` validates the same URL
+# floors, inserts a queued ``SiteDesignBrief`` and schedules a background capture
+# that harvests the page and persists a typed ``DesignBrief``. It mints NO pocket
+# and NO Site doc, deliberately — see the section header at the foot of the file.
+# The mirror path above is untouched.
+#
 # Edited 2026-07-23 (SI-FIX review): the zip path now persists the REWIRED source on
 # the pocket too (set_imported_source), not just the deployed artifact — a re-publish
 # from the builder was reading the raw upload and redeploying un-rewired forms.
@@ -66,8 +73,9 @@ import io
 import logging
 import zipfile
 from datetime import UTC, datetime
+from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 
 from pocketpaw_ee.cloud._core.errors import CloudError, Internal, ValidationError
@@ -740,3 +748,333 @@ async def import_from_url(*, workspace_id: str, user_id: str, url: str) -> dict[
         _run_url_import(workspace_id=workspace_id, user_id=user_id, site_id=str(oid), url=candidate)
     )
     return {"site_id": str(oid), "pocket_id": pocket_id, "status": "queued"}
+
+
+# --------------------------------------------------------------------------- #
+# Rebuild mode (IR-2a) — capture a DESIGN BRIEF instead of mirroring the bytes
+# --------------------------------------------------------------------------- #
+# The mirror above re-hosts the source's own files. Rebuild reads the source as a
+# DESIGN REFERENCE and hands a typed brief to the generator, which authors a
+# native site from it. The two share the URL validation and the crawler, and
+# nothing else — in particular this path mints NO pocket and NO Site doc.
+#
+# WHY IT MINTS NOTHING: the /sites surface routes a run to REFINE whenever a
+# pocket_id rides in its meta, engine hint or not. A create flow therefore has to
+# run with no pocket, and the agent mints its own through ``create_svelte_site``
+# (which stamps engine="svelte" and the right pattern). Pre-minting a pocket here
+# to have an id to return would hand the agent the ripple refine toolset pointed
+# at an html pocket. It would also stamp IMPORT_PATTERN, which is what
+# ``service._refs_must_resolve`` reads to RELAX the publish smoke gate — correct
+# for a byte mirror that can reference something the crawl did not harvest, wrong
+# for a site we authored ourselves.
+
+
+class _MetaScan(HTMLParser):
+    """Pull the page's own account of itself: title, meta description, favicon
+    and og:image.
+
+    A real parser, never a regex: minified markup carries UNQUOTED attributes
+    (``<link href=/a.css rel=stylesheet>``), and a quote-assuming pattern returns
+    zero matches with no error, which is indistinguishable from a page that
+    genuinely declares nothing.
+    """
+
+    _ICON_RELS = {"icon", "shortcut icon", "apple-touch-icon", "mask-icon"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.title = ""
+        self.description = ""
+        self.og_title = ""
+        self.favicon = ""
+        self.og_image = ""
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "title":
+            self._in_title = True
+            return
+        attr = {k.lower(): (v or "") for k, v in attrs}
+        if tag == "meta":
+            key = (attr.get("name") or attr.get("property") or "").lower()
+            content = attr.get("content", "").strip()
+            if not content:
+                return
+            if key in ("description", "og:description") and not self.description:
+                self.description = content
+            elif key == "og:title" and not self.og_title:
+                self.og_title = content
+            elif key == "og:image" and not self.og_image:
+                self.og_image = content
+        elif tag == "link":
+            rels = " ".join((attr.get("rel") or "").lower().split())
+            href = attr.get("href", "").strip()
+            if href and rels in self._ICON_RELS and not self.favicon:
+                self.favicon = href
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self._in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title and not self.title:
+            self.title = data.strip()
+
+
+def _seed_page_file(url: str, files: dict[str, bytes]) -> tuple[str, bytes]:
+    """Find the crawled seed page in the harvest.
+
+    The crawler keys pages by PATH, not by "index.html": ``/landing`` lands at
+    ``landing/index.html``. Ask for the seed's own path first, fall back to the
+    root, then to the first html file in path order — a seed that redirects to
+    another host re-homes the crawl, and that final URL is not returned to us.
+    """
+    from pocketpaw_ee.sites.url_crawler import _rel_path_for_page
+
+    want = _rel_path_for_page(urlparse(url).path)
+    for candidate in (want, "index.html"):
+        blob = files.get(candidate)
+        if blob:
+            return candidate, blob
+    for path in sorted(files):
+        if path.endswith(".html") and files[path]:
+            return path, files[path]
+    raise ValidationError(
+        "sites.import_no_page", "the crawl of that URL did not yield a readable page"
+    )
+
+
+def _brief_from_crawl(url: str, crawl: Any) -> Any:
+    """Turn a harvest into the site-authoring crew's ``DesignBrief``.
+
+    Deliberately the crew's own baton rather than a second brief type: the crew
+    threads it Designer → Branding → Frontend, and
+    ``surface/handlers/sites.py::_frontend_preamble`` already renders build
+    instructions from one and routes to ``create_svelte_site``. IR-2a fills the
+    identity layer; the sitemap, design system and asset manifest are each a
+    later slice and land empty, which the crew model already tolerates because
+    its own stages fill them one at a time too.
+    """
+    from pocketpaw_ee.sites.design_brief import build_brief_from_source
+
+    warnings = list(crawl.warnings)
+    path, blob = _seed_page_file(url, crawl.files)
+    scan = _MetaScan()
+    try:
+        scan.feed(blob.decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 — a malformed page is a warning, not a failure
+        logger.warning("sites rebuild: meta scan of %s failed", path, exc_info=True)
+        warnings.append(f"could not read page metadata from {path}")
+    title = scan.title or scan.og_title
+    if not title:
+        warnings.append("the source page declares no title")
+    brief = build_brief_from_source(
+        source_url=url,
+        title=title,
+        description=scan.description,
+        # Resolved against the SOURCE url so a stored brief carries an absolute
+        # address; the crawl's own rewrite made these site-relative, and
+        # ``AssetRef`` refuses anything that is not fetchable.
+        favicon_url=urljoin(url, scan.favicon) if scan.favicon else None,
+        warnings=warnings,
+    )
+
+    # IR-4 — the source's own design language, read out of its stylesheets. This
+    # is the difference between a site ABOUT the source and one that looks like
+    # it: with no design system on the brief the agent has nothing to match and
+    # picks a direction of its own, which is exactly what it did.
+    from pocketpaw_ee.sites.design_extract import (
+        apply_to_brief,
+        stylesheets_from_crawl,
+    )
+
+    try:
+        sheets = stylesheets_from_crawl(crawl.files, blob.decode("utf-8", "replace"))
+        brief.open_questions.extend(apply_to_brief(brief, sheets, name=urlparse(url).netloc or url))
+    except Exception:  # noqa: BLE001 — a brief without tokens still builds a site
+        logger.warning("sites rebuild: token extraction for %s failed", url, exc_info=True)
+        brief.open_questions.append(
+            "we could not read this site's design tokens; the result will not match its colours"
+        )
+    return brief
+
+
+async def _mark_brief_failed(doc: Any, *, message: str) -> None:
+    """Stamp a readable failed state on the brief. ``message`` comes from
+    ``_safe_crawl_failure``, so it never carries a traceback or upstream text."""
+    doc.status = "failed"
+    doc.error = message
+    await doc.save()
+
+
+async def capture_design_brief(
+    *,
+    brief_id: str,
+    workspace_id: str,
+    url: str,
+    _transport: Any | None = None,
+    _resolver: Any | None = None,
+    _politeness_delay: float | None = None,
+) -> Any:
+    """Crawl ``url`` and persist a design brief on the queued brief document.
+
+    Runs under the SAME wall-clock cap and the SAME SSRF-pinned crawler as the
+    mirror path. Every failure lands as a readable ``failed`` status rather than
+    escaping: this runs detached from the request that queued it, so an exception
+    here has nobody to return to.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
+    from pocketpaw_ee.sites import url_crawler
+
+    try:
+        oid = ObjectId(brief_id)
+    except (InvalidId, TypeError):
+        raise ValidationError("sites.brief_missing", "Unknown design brief id.") from None
+    doc = await SiteDesignBrief.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        raise ValidationError("sites.brief_missing", "Unknown design brief id.")
+
+    doc.status = "capturing"
+    await doc.save()
+    try:
+        async with asyncio.timeout(MAX_CRAWL_WALL_CLOCK_SEC):
+            crawl = await url_crawler.crawl_site(
+                url,
+                total_byte_cap=MAX_IMPORT_UNCOMPRESSED_BYTES,
+                transport=_transport,
+                resolver=_resolver,
+                politeness_delay=_politeness_delay,
+            )
+    except Exception as exc:  # noqa: BLE001 — every crawl failure becomes a safe status
+        logger.warning("sites rebuild: crawl of %s failed", url, exc_info=True)
+        await _mark_brief_failed(doc, message=_safe_crawl_failure(exc))
+        return doc
+
+    try:
+        brief = _brief_from_crawl(url, crawl)
+    except Exception as exc:  # noqa: BLE001 — same rule: a status, never an escape
+        logger.warning("sites rebuild: brief build for %s failed", url, exc_info=True)
+        await _mark_brief_failed(doc, message=_safe_crawl_failure(exc))
+        return doc
+
+    from pocketpaw_ee.sites.design_brief import dump_brief
+
+    doc.brief = dump_brief(brief)
+    doc.error = ""
+    doc.status = "ready"
+    await doc.save()
+    _emit_import_journal(
+        action="site.design_brief_captured",
+        workspace_id=workspace_id,
+        user_id=doc.owner,
+        pocket_id="",
+        site_id="",
+        payload={
+            "kind": "rebuild",
+            "url": url,
+            "brief_id": brief_id,
+            "open_questions": len(brief.open_questions),
+        },
+    )
+    return doc
+
+
+async def _run_design_capture(*, brief_id: str, workspace_id: str, url: str) -> None:
+    """Background wrapper around ``capture_design_brief`` — it must NEVER let an
+    exception escape into the event loop (failures are already stamped on the
+    brief inside; this catches only the truly unexpected)."""
+    try:
+        await capture_design_brief(brief_id=brief_id, workspace_id=workspace_id, url=url)
+    except Exception:  # noqa: BLE001 — background task: log, never crash the loop
+        logger.exception("sites rebuild: background capture failed for brief %s", brief_id)
+
+
+async def regenerate_from_url(*, workspace_id: str, user_id: str, url: str) -> dict[str, str]:
+    """Queue a REBUILD-mode import: validate the URL (shape + SSRF floors → 422
+    before any write), insert a queued design-brief document, schedule the
+    background capture, and return ``{brief_id, status: "queued", mode: "rebuild"}``
+    immediately (the same 202 contract shape as the mirror path).
+
+    Deliberately mints no pocket and no Site doc — see the section header above.
+    """
+    from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
+
+    await sites_service.require_sites_plan(workspace_id)
+    candidate = _validate_import_url(url)
+    doc = SiteDesignBrief(
+        workspace=workspace_id, owner=user_id, source_url=candidate, status="queued"
+    )
+    await doc.insert()
+    brief_id = str(doc.id)
+    _emit_import_journal(
+        action="site.rebuild_queued",
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id="",
+        site_id="",
+        payload={"kind": "from_url_rebuild", "url": candidate, "brief_id": brief_id},
+    )
+    _default_crawl_scheduler(
+        _run_design_capture(brief_id=brief_id, workspace_id=workspace_id, url=candidate)
+    )
+    return {"brief_id": brief_id, "status": "queued", "mode": "rebuild"}
+
+
+async def read_design_brief(*, workspace_id: str, brief_id: str) -> Any:
+    """Read a captured brief's state for the import panel (IR-2b).
+
+    Returns the four states as themselves rather than collapsing any pair: a
+    client that cannot tell ``queued`` from ``failed`` shows a spinner forever on
+    a capture that already died, which is the same class of bug the import report
+    panel shipped with. ``error`` is already safe text (``_safe_crawl_failure``
+    wrote it), so it goes straight to a reader.
+
+    The brief BODY is not returned. Only the goal and the open questions, which
+    are the readable half — the baton itself is for the generation run, and
+    shipping it to a browser would be sending the whole design system to render
+    one status line.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
+    from pocketpaw_ee.sites.design_brief import BriefVersionError, load_brief
+    from pocketpaw_ee.sites.dto import ImportBriefStatusResponse
+
+    try:
+        oid = ObjectId(brief_id)
+    except (InvalidId, TypeError):
+        raise ValidationError("sites.brief_missing", "Unknown design brief id.") from None
+    doc = await SiteDesignBrief.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        raise ValidationError("sites.brief_missing", "Unknown design brief id.")
+
+    goal, questions = "", []
+    if doc.status == "ready" and doc.brief:
+        try:
+            brief = load_brief(doc.brief)
+            goal, questions = brief.goal, list(brief.open_questions)
+        except BriefVersionError as exc:
+            # A stored brief this build cannot read is a FAILED capture from the
+            # reader's point of view: there is nothing here to generate from, and
+            # saying "ready" would start a run against a brief the preamble will
+            # also refuse. Recapturing is the fix, so say so.
+            logger.warning("sites rebuild: brief %s is unreadable: %s", brief_id, exc)
+            return ImportBriefStatusResponse(
+                brief_id=brief_id,
+                status="failed",
+                source_url=doc.source_url,
+                error="that capture was saved by a different version — import the URL again",
+            )
+
+    return ImportBriefStatusResponse(
+        brief_id=brief_id,
+        status=doc.status,
+        source_url=doc.source_url,
+        error=doc.error,
+        goal=goal,
+        open_questions=questions,
+    )
