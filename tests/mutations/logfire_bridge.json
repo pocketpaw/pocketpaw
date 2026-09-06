@@ -114,8 +114,8 @@
   {
     "label": "POCKETPAW_LOGFIRE_INSTRUMENT is ignored, so the bill cannot be trimmed without a deploy",
     "file": "src/pocketpaw/observability.py",
-    "find": "    raw = os.environ.get(\"POCKETPAW_LOGFIRE_INSTRUMENT\", \"\").strip()\n    known = _instrumentations()\n    if not raw:\n        return list(known)",
-    "replace": "    raw = \"\"\n    known = _instrumentations()\n    if not raw:\n        return list(known)",
+    "find": "    raw = os.environ.get(\"POCKETPAW_LOGFIRE_INSTRUMENT\", \"\").strip()",
+    "replace": "    raw = \"\"",
     "tests": "tests/test_logfire_bridge.py"
   },
   {
@@ -172,6 +172,13 @@
     "file": "tests/conftest.py",
     "find": "    os.environ[_var] = _safe",
     "replace": "    os.environ.pop(_var, None)",
+    "tests": "tests/test_logfire_bridge.py"
+  },
+  {
+    "label": "redis goes back into the default set, so every idle deployment resumes emitting ~6 poll spans a second and buries the traces Logfire exists to show",
+    "file": "src/pocketpaw/observability.py",
+    "find": "_DEFAULT_OFF = frozenset({\"redis\"})",
+    "replace": "_DEFAULT_OFF = frozenset()",
     "tests": "tests/test_logfire_bridge.py"
   }
 ]
