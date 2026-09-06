@@ -13,6 +13,11 @@
 #      ``pocketpaw.security.safe_fetch.assert_public_url`` (one IP-rule
 #      implementation for the whole codebase). This catches clicks, redirects,
 #      subresources and JS fetches — not just the top-level navigate.
+#      KNOWN GAPS (accepted): the check does its OWN getaddrinfo and Chromium
+#      re-resolves and owns the socket, so a DNS-rebinding host (public to us,
+#      private to Chromium) can slip the TOCTOU — a full fix needs socket IP
+#      pinning Playwright does not expose; the per-host verdict is memoized for
+#      the driver's life; and WebSocket traffic needs ``route_web_socket``.
 #   3. ``--no-sandbox`` is passed ONLY inside a container (``/.dockerenv`` or
 #      ``POCKETPAW_IN_CONTAINER``); never on a dev machine.
 #   ``navigate`` raises ``BlockedURLError`` (not a raw Chromium net::ERR_FAILED)
@@ -346,34 +351,35 @@ class BrowserDriver:
                 self.blocked_hosts.append(host)
             raise BlockedURLError(f"Blocked URL: {exc}") from None
 
+        blocked_before = len(self.blocked_hosts)
         try:
             await page.goto(url, wait_until="domcontentloaded")
         except Exception:
             # A failed goto RAISES while its navigation is still in flight —
             # aborted by the SSRF guard, Chromium then loads its own
-            # ``chrome-error://`` page. That in-flight navigation interrupts
-            # whatever goto comes next, so one blocked URL bricked the session
-            # for every URL after it. Let the error page land before re-raising.
-            try:
-                await page.wait_for_load_state("domcontentloaded", timeout=5000)
-            except Exception:  # noqa: BLE001 — best-effort settle
-                logger.debug("page did not settle after a failed navigation", exc_info=True)
-            # Chromium reports an aborted request as a generic net::ERR_FAILED,
-            # which reads to an agent like a transient error worth retrying. If
-            # OUR guard is what aborted it, say so — and say so on the SECOND
-            # attempt at the same host too, which is why this reads the verdict
-            # cache rather than watching ``blocked_hosts`` grow.
-            # Still reachable when a PUBLIC url redirects to a private one: the
-            # pre-check above passed, the route guard aborted the redirect hop.
-            # Park on about:blank so the dead error page is not left in flight
-            # to interrupt the next call, then report our own verdict.
+            # ``chrome-error://`` page. That in-flight navigation would interrupt
+            # the NEXT goto, so park on about:blank to clear it — one blocked URL
+            # used to brick the session for every URL after it. (A settle via
+            # ``wait_for_load_state`` does NOT help: the error page has already
+            # reached domcontentloaded while the commit is still in flight.)
             try:
                 await page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
             except Exception:  # noqa: BLE001 — best-effort reset
                 logger.debug("could not reset page after a failed navigation", exc_info=True)
 
-            if self._host_verdicts.get(urlparse(url).netloc) is False:
-                raise BlockedURLError("Blocked URL: resolved to non-public IP address.") from None
+            # Report a guard block as BlockedURLError (not a transient-looking
+            # net::ERR_FAILED the agent would retry). Two ways it can be ours:
+            # the top-level host was cached non-public, OR the route guard
+            # aborted a redirect hop DURING this goto (a PUBLIC url that 30x'd to
+            # a private one) — which shows up as ``blocked_hosts`` having grown.
+            if (
+                self._host_verdicts.get(urlparse(url).netloc) is False
+                or len(self.blocked_hosts) > blocked_before
+            ):
+                raise BlockedURLError(
+                    "Blocked URL: the page (or a redirect it followed) resolved "
+                    "to a non-public address."
+                ) from None
             raise
 
         return await self._take_snapshot()

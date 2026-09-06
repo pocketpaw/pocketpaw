@@ -55,3 +55,26 @@ class TestRenderSnapshot:
         text, refmap = render_snapshot({})
         assert refmap.refs == {}
         assert "Page:" in text
+
+
+def test_render_snapshot_never_carries_a_password_field_value():
+    """A pre-filled / autofilled password (or OTP / card) input must not leak its
+    VALUE into the snapshot text — that text goes straight into the agent's
+    context. Regression for the review finding: nameOf fell back to el.value.
+
+    render_snapshot is pure over the SNAPSHOT_JS payload, so we assert the
+    contract the JS must satisfy: a password ref line carries no value as its
+    name. (The live DOM-walk half is exercised by the driver leak smoke.)
+    """
+    from pocketpaw.browser.snapshot import render_snapshot
+
+    # Shape SNAPSHOT_JS returns for a password input whose value was suppressed.
+    payload = {
+        "text": '- textbox "" [ref=1] type=password SENSITIVE',
+        "count": 1,
+        "title": "Login",
+        "url": "https://example.com/login",
+    }
+    text, _ = render_snapshot(payload)
+    assert "type=password SENSITIVE" in text
+    assert "hunter2" not in text

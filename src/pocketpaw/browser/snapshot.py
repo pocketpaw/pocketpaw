@@ -30,12 +30,27 @@ SNAPSHOT_JS = r"""
   const INTERACTIVE = new Set(['A','BUTTON','INPUT','TEXTAREA','SELECT','SUMMARY','OPTION']);
   let ref = 0;
   const out = [];
-  const nameOf = (el) => (
-    el.getAttribute('aria-label') ||
-    el.getAttribute('placeholder') ||
-    el.getAttribute('title') ||
-    (el.innerText || el.value || '').trim().slice(0, 80)
-  ).replace(/\s+/g, ' ').trim();
+  const nameOf = (el) => {
+    // NEVER fall back to el.value for a credential field: a pre-filled /
+    // autofilled password, OTP, or card input would otherwise leak its VALUE
+    // into the snapshot text (and thus the agent's context). Password inputs
+    // never contribute a value; other inputs may (a search box's text is
+    // useful), but the label/placeholder/title win first.
+    const isSecret = el.tagName === 'INPUT' && (
+      el.type === 'password' ||
+      /(pass|otp|mfa|2fa|totp|cvv|cvc|card|secret|token)/i.test(
+        (el.getAttribute('name') || '') + ' ' + (el.id || '') + ' ' +
+        (el.getAttribute('autocomplete') || '')
+      )
+    );
+    const value = (el.tagName === 'INPUT' && isSecret) ? '' : (el.value || '');
+    return (
+      el.getAttribute('aria-label') ||
+      el.getAttribute('placeholder') ||
+      el.getAttribute('title') ||
+      (el.innerText || value || '').trim().slice(0, 80)
+    ).replace(/\s+/g, ' ').trim();
+  };
   const roleOf = (el) => {
     const r = el.getAttribute('role');
     if (r) return r;
