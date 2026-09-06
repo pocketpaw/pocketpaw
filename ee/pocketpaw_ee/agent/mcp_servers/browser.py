@@ -28,6 +28,21 @@
 #
 # Every tool returns the FRESH snapshot text so the agent always reasons about
 # the page as it is now rather than the page it last saw.
+#
+# 2026-09-06 (BR-4, feat/browser-surface-extract) — two additions:
+#   * ``extract`` reads a page as MARKDOWN (html2text over ``page.content()``,
+#     the same converter ``tools/builtin/url_extract.py`` already uses). A
+#     snapshot is for CLICKING — it carries [ref=N] markers and the structural
+#     noise that goes with them — so reading a long article through one costs
+#     several times the tokens of the prose itself. Truncation at ``max_chars``
+#     is MARKED, so the agent never reasons about half a page believing it saw
+#     all of it.
+#   * ``screenshot`` now also SAVES the PNG through the studio media storage
+#     (``cloud.media.storage.save_generated``) and returns its
+#     ``/api/v1/media/<name>`` URL alongside the image block, so a capture can
+#     go into a Ripple image widget instead of only being looked at. The file
+#     name carries a per-workspace owner token (``capture_name_prefix``) and the
+#     serve route refuses a capture belonging to another tenant.
 
 from __future__ import annotations
 
@@ -52,6 +67,7 @@ CLICK_TOOL_ID = f"mcp__{SERVER_NAME}__click"
 TYPE_TOOL_ID = f"mcp__{SERVER_NAME}__type"
 SCROLL_TOOL_ID = f"mcp__{SERVER_NAME}__scroll"
 SCREENSHOT_TOOL_ID = f"mcp__{SERVER_NAME}__screenshot"
+EXTRACT_TOOL_ID = f"mcp__{SERVER_NAME}__extract"
 CLOSE_TOOL_ID = f"mcp__{SERVER_NAME}__close"
 
 BROWSER_TOOL_IDS = (
@@ -61,8 +77,15 @@ BROWSER_TOOL_IDS = (
     TYPE_TOOL_ID,
     SCROLL_TOOL_ID,
     SCREENSHOT_TOOL_ID,
+    EXTRACT_TOOL_ID,
     CLOSE_TOOL_ID,
 )
+
+# `extract` defaults. The floor stops a caller asking for a useless sliver; the
+# ceiling stops one asking for a whole context window.
+DEFAULT_EXTRACT_CHARS = 12_000
+MIN_EXTRACT_CHARS = 500
+MAX_EXTRACT_CHARS = 200_000
 
 # --- Credential refusal -------------------------------------------------------
 # The agent may fill a search box or a shipping address. It may NOT fill a
@@ -309,6 +332,78 @@ async def _scroll_handler(args: dict) -> dict:
     return _success_response({"ok": True, "url": driver.current_url, "snapshot": result.snapshot})
 
 
+def _to_markdown(html: str) -> str:
+    """HTML → markdown, tuned so the result is CHEAPER than a snapshot.
+
+    Same converter ``tools/builtin/url_extract.py`` uses, with two deliberate
+    differences: links lose their URLs (the link TEXT survives, and a page of
+    nav chrome is mostly URLs by weight) and images are dropped entirely.
+    ``body_width = 0`` stops html2text hard-wrapping prose at 78 columns, which
+    would spend tokens on newlines the agent has no use for.
+    """
+    import html2text
+
+    converter = html2text.HTML2Text()
+    converter.ignore_links = True
+    converter.ignore_images = True
+    converter.body_width = 0
+    return converter.handle(html).strip()
+
+
+async def _extract_handler(args: dict) -> dict:
+    workspace_id, user_id = _identity()
+    if not workspace_id:
+        return _error_response("No workspace context; the browser is unavailable on this run.")
+
+    try:
+        max_chars = int(args.get("max_chars") or DEFAULT_EXTRACT_CHARS)
+    except (TypeError, ValueError):
+        max_chars = DEFAULT_EXTRACT_CHARS
+    max_chars = max(MIN_EXTRACT_CHARS, min(max_chars, MAX_EXTRACT_CHARS))
+
+    try:
+        driver = await _driver(workspace_id)
+        html = await driver.content_html()
+        text = _to_markdown(html)
+    except ImportError:
+        reason = "extract needs html2text (install pocketpaw[extract])."
+        _audit(workspace_id, user_id, "extract", ok=False, reason=reason)
+        return _error_response(reason)
+    except Exception as exc:  # noqa: BLE001
+        _audit(workspace_id, user_id, "extract", ok=False, reason=str(exc)[:200])
+        return _error_response(f"extract failed: {exc}")
+
+    total = len(text)
+    truncated = total > max_chars
+    if truncated:
+        # MARKED, not silent — an agent that reasons about half a page believing
+        # it read all of it answers confidently and wrongly.
+        text = (
+            f"{text[:max_chars]}\n\n"
+            f"[truncated: {max_chars} of {total} characters. Call extract again "
+            f"with a larger `max_chars` to read the rest.]"
+        )
+
+    _audit(
+        workspace_id,
+        user_id,
+        "extract",
+        ok=True,
+        url=driver.current_url,
+        chars=total,
+        truncated=truncated,
+    )
+    return _success_response(
+        {
+            "ok": True,
+            "url": driver.current_url,
+            "chars": total,
+            "truncated": truncated,
+            "markdown": text,
+        }
+    )
+
+
 async def _screenshot_handler(_args: dict) -> dict:
     workspace_id, user_id = _identity()
     if not workspace_id:
@@ -320,8 +415,35 @@ async def _screenshot_handler(_args: dict) -> dict:
         _audit(workspace_id, user_id, "screenshot", ok=False, reason=str(exc)[:200])
         return _error_response(f"screenshot failed: {exc}")
 
-    _audit(workspace_id, user_id, "screenshot", ok=True, url=driver.current_url, bytes=len(png))
-    # Bytes back to the agent — never a file in the server's cwd on a shared box.
+    # Saved through the SAME storage + serve route studio generations use, under
+    # a name that carries this workspace's owner token — so the capture has a URL
+    # a Ripple image widget can render, and another tenant's request for it 404s.
+    try:
+        from pocketpaw_ee.cloud.media import storage as media_storage
+
+        media_url = await media_storage.save_generated(
+            png, mime="image/png", name_prefix=media_storage.capture_name_prefix(workspace_id)
+        )
+    except Exception:  # noqa: BLE001 — the image itself is still useful
+        logger.warning("browser: saving the screenshot failed", exc_info=True)
+        media_url = None
+
+    _audit(
+        workspace_id,
+        user_id,
+        "screenshot",
+        ok=True,
+        url=driver.current_url,
+        bytes=len(png),
+        saved=media_url is not None,
+    )
+    # The bytes go back for the agent to LOOK at; the URL is what it can hand to
+    # an image widget. Never a file in the server's cwd on a shared box.
+    note = (
+        f"Screenshot of {driver.current_url} — image URL: {media_url}"
+        if media_url
+        else f"Screenshot of {driver.current_url} (could not be saved, so it has no URL)"
+    )
     return {
         "content": [
             {
@@ -329,7 +451,7 @@ async def _screenshot_handler(_args: dict) -> dict:
                 "data": base64.b64encode(png).decode("ascii"),
                 "mimeType": "image/png",
             },
-            {"type": "text", "text": f"Screenshot of {driver.current_url}"},
+            {"type": "text", "text": note},
         ]
     }
 
@@ -451,11 +573,35 @@ def build_browser_server() -> tuple[str, Any] | None:
         return await _scroll_handler(args)
 
     @tool(
+        "extract",
+        (
+            "Read the current page as markdown. Use this whenever you need the "
+            "page's CONTENT — an article, docs, a long answer — because it is far "
+            "cheaper than a snapshot, which exists for CLICKING and carries "
+            "[ref=N] markers, nav chrome and link URLs you do not need to read. "
+            "Args: `max_chars` (default 12000). Returns {ok, url, chars, "
+            "truncated, markdown}; when `truncated` is true the text ends with a "
+            "marker — call again with a larger `max_chars` for the rest, and "
+            "never assume you saw the whole page without checking that flag."
+        ),
+        {
+            "type": "object",
+            "properties": {"max_chars": {"type": "integer", "minimum": 500}},
+            "additionalProperties": False,
+        },
+    )
+    async def extract(args):  # type: ignore[no-untyped-def]
+        return await _extract_handler(args)
+
+    @tool(
         "screenshot",
         (
             "Capture the current page as a PNG image. Use it when the LOOK of the "
-            "page matters (a chart, a layout, a visual check) — for reading text or "
-            "finding controls, `snapshot` is cheaper and more precise."
+            "page matters (a chart, a layout, a visual check) — to READ a page use "
+            "`extract`, to find controls use `snapshot`. The image comes back for "
+            "you to look at AND is saved, so the text block carries an image URL "
+            "you may put in a Ripple image widget. Use that URL verbatim; never "
+            "invent one."
         ),
         {"type": "object", "properties": {}, "additionalProperties": False},
     )
@@ -476,7 +622,7 @@ def build_browser_server() -> tuple[str, Any] | None:
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[navigate, snapshot, click, type_, scroll, screenshot, close],
+        tools=[navigate, snapshot, extract, click, type_, scroll, screenshot, close],
     )
     return SERVER_NAME, server
 
@@ -485,6 +631,8 @@ __all__ = [
     "BROWSER_TOOL_IDS",
     "CLICK_TOOL_ID",
     "CLOSE_TOOL_ID",
+    "DEFAULT_EXTRACT_CHARS",
+    "EXTRACT_TOOL_ID",
     "CREDENTIAL_REFUSAL",
     "NAVIGATE_TOOL_ID",
     "SCREENSHOT_TOOL_ID",

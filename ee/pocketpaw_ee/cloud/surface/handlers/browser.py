@@ -16,6 +16,14 @@
 # rule is doubled — ``type`` refuses password / card / OTP fields in code, and
 # the preamble tells the agent so, so it never burns a turn discovering it.
 #
+# 2026-09-06 (BR-4, feat/browser-surface-extract): two corrections the tools
+# earned. ``extract`` exists now, so the procedure says READ with extract and ACT
+# with snapshot — the token win only lands if the agent knows which is which. And
+# a screenshot now carries a real ``/api/v1/media/<name>`` URL, so ``image`` is
+# back in the widget list and the "no URL for it yet" refusal is gone. The rule
+# that replaces it is the same one the no-invented-verbs paragraph makes: use the
+# URL the tool returned, verbatim, and never invent one.
+#
 # The /browser SurfaceProfile sets ``ripple_mode="trim"`` (see
 # surface_registry.py) — unlike /studio's "off" — because here a widget often IS
 # the deliverable. The answer section leans on that: prose by default, a pocket
@@ -48,6 +56,12 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "snapshot only: after anything that changes the page (a click, a "
         "submit, a scroll that loads more, a navigation) take a fresh snapshot "
         "before using a ref again. Use `navigate` to open a new URL.\n"
+        "READ with `mcp__pocketpaw_browser__extract`, ACT with `snapshot`. "
+        "Extract returns the page as markdown and costs a fraction of a "
+        "snapshot, so reach for it for articles, docs, and any long page you "
+        "need the CONTENT of. It reports `truncated` — when that is true you "
+        "did NOT see the whole page, so either say so or call it again with a "
+        "larger `max_chars`.\n"
         "NEVER ask the user for a password and never type one. The `type` tool "
         "refuses password, payment-card and one-time-code fields at the code "
         "level, so trying anyway just costs a turn. When a page needs a login "
@@ -65,10 +79,10 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "report it and stop. Never attempt to solve or evade one.\n"
         "Answer in PROSE by default. Emit a Ripple pocket when the result is a "
         "list, a table, or a comparison. Use only widget types that already "
-        "exist (table, cards, timeline, text). A screenshot comes back to YOU "
-        "as an image to read and describe — there is no URL for it yet, so do "
-        "NOT put one in an image widget: you would have to invent a source and "
-        "it would render empty. "
+        "exist (table, cards, timeline, text, image). A screenshot comes back "
+        "to YOU as an image to read AND with a saved image URL in its text "
+        "block — put THAT url, verbatim, in an image widget when the look of "
+        "the page is the point. Never invent a src. "
         "Do NOT invent action verbs for widget buttons — a button wired "
         "to a verb the dispatcher does not know renders fine and does nothing, "
         "which reads to the user as a broken product. If you are not sure a "
