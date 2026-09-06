@@ -1,4 +1,5 @@
 # surface_registry.py — The declarative surface registry (SR-1 + SR-2).
+# Updated: 2026-09-06 (feat/fx-mcp-server) — FX_TOOL_IDS joined the /sites toolbelt allow-list.
 #
 # Created: 2026-06-22 (feat/surface-registry-backend, SR-1) — the single
 # declarative source of truth for "what surfaces exist and how each one
@@ -567,6 +568,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
         from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.files import FILES_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.fx import FX_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.inspo import INSPO_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
@@ -603,6 +605,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             | frozenset(INSPO_TOOL_IDS)
             | frozenset(SITE_MEDIA_TOOL_IDS)
             | frozenset(ICON_TOOL_IDS)
+            | frozenset(FX_TOOL_IDS)
             | frozenset(PALETTE_TOOL_IDS)
             # ask_user: interactive question chips. Needed most on svelte-create
             # (ripple OFF) where the agent otherwise can only ask in plain text.

@@ -1,5 +1,10 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-09-06 (feat/fx-mcp-server) — strip the always-on ``pocketpaw_fx``
+  server too (search_effects / list_effect_categories / get_effect, registered
+  always-on via the ``fx`` mcp_servers entry point). Another entry in the list;
+  the 2026-07-27 note still stands.
+
 Updated: 2026-09-16 (feat/sites-bundled-design-research) — ``_strip_builtin_servers``
   now also drops ``pocketpaw_inspo`` (research_page_design /
   get_reference_design_system, registered always-on via the ``inspo``
@@ -165,6 +170,7 @@ from pocketpaw_ee.agent.mcp_servers.external_actions import (
 from pocketpaw_ee.agent.mcp_servers.fabric import SERVER_NAME as _FABRIC_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.files import SERVER_NAME as _FILES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.fx import SERVER_NAME as _FX_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.growth import SERVER_NAME as _GROWTH_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.icons import SERVER_NAME as _ICONS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.inspo import SERVER_NAME as _INSPO_MCP_SERVER_NAME
@@ -260,6 +266,7 @@ def _strip_builtin_servers(result: dict) -> dict:
     # the interactive ask_user question chips) is ambient, same regime as
     # stock/media. Pure read / in-process, no identity.
     out.pop(_ICONS_MCP_SERVER_NAME, None)
+    out.pop(_FX_MCP_SERVER_NAME, None)
     out.pop(_PALETTE_MCP_SERVER_NAME, None)
     out.pop(_ASK_MCP_SERVER_NAME, None)
     # ``pocketpaw_inspo`` is always-on too — the /sites create preamble names
