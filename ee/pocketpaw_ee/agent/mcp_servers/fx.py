@@ -1,5 +1,6 @@
 # fx.py — in-process MCP server serving the paw-fx effects registry (drop-in
 # visual effects: backgrounds, particles, 3d-hero, scroll, text, cursor,
+# menu, gallery,
 # transition) to the claude_agent_sdk cloud chat backend.
 #
 # Created: 2026-09-06 (feat/fx-mcp-server, FX-2). Clones the icons.py shape:
@@ -254,7 +255,8 @@ def build_fx_server() -> tuple[str, Any] | None:
             "backgrounds, particles, 3D heroes, scroll/text/cursor effects, page "
             "transitions) for a generated site. Args: `query` (omit it to BROWSE, but "
             "then pass a filter), optional "
-            "`category` (backgrounds|particles|3d-hero|scroll|text|cursor|transition), "
+            "`category` (backgrounds|particles|3d-hero|scroll|text|cursor|transition|"
+            "menu|gallery), "
             "optional `needs_js` (false = only dependency-free effects, which is what "
             "svelte and react sites can use), optional "
             "`limit` (default 20). Returns {items:[{name, category, tags, summary, "
