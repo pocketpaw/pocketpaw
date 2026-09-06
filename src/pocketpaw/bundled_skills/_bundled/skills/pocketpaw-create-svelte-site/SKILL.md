@@ -568,3 +568,6 @@ D1 + wires the read/write layer. Done.
   (draft-first — STEP 4); a plain "create a site" stops at the draft.
 - `mcp__pocketpaw_pocket__list_pockets` — find an existing pocket if the
   user named one rather than describing a new site.
+- `mcp__pocketpaw_fx__search_effects` / `get_effect` — drop-in visual effects.
+  On this engine only dependency-free effects (empty `needs`) are served; pass
+  `needs_js=false` to `search_effects`.
