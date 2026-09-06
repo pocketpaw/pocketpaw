@@ -111,6 +111,11 @@
 # SURFACE profile denies only the BUILT-IN tools the MCP cap cannot reach —
 # ``_CODE_BUILTIN_DENY`` (backend-disk tools + ``Agent``) and ``_CODE_SKILL_DENY``
 # (``Skill``), both KEPT unchanged.
+#
+# Changes: 2026-09-06 (BR-2, feat/browser-surface-preamble) — the BROWSER row
+# points at its own ``handlers/browser.build_preamble`` instead of the GENERIC
+# placeholder BR-1 parked there. The profile (``_browser_profile``, ripple
+# "trim" + the browser tool allow-list) is unchanged.
 
 from __future__ import annotations
 
@@ -128,6 +133,7 @@ from pocketpaw_ee.cloud.surface.handlers import (
     activity,
     audit,
     belt,
+    browser,
     calendar,
     code,
     concierge,
@@ -916,10 +922,7 @@ SURFACES: list[SurfaceSpec] = [
     SurfaceSpec(
         SurfaceKind.BROWSER,
         _route_for(SurfaceKind.BROWSER),
-        # PLACEHOLDER handler — the /browser preamble is BR-2. The registry is
-        # asserted 1:1 with SurfaceKind, so the row must exist now; generic's
-        # preamble is a usable stand-in until BR-2 lands the real one.
-        generic.build_preamble,
+        browser.build_preamble,
         profile_resolver=_browser_profile,
     ),
     SurfaceSpec(SurfaceKind.GENERIC, _route_for(SurfaceKind.GENERIC), generic.build_preamble),
