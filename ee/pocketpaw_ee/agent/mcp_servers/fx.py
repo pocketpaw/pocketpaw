@@ -12,6 +12,11 @@
 # produced by the separate ``paw-fx`` repo, holding ``registry.json`` (the index)
 # and ``items/<name>.json`` (full items with inlined files). Loaded lazily on
 # first call, cached in-process, re-read when ``registry.json``'s mtime changes.
+# Updated: 2026-09-06 — `search_effects` supports BROWSE mode: an empty query is
+# allowed when `category` or `needs_js` narrows it, because "what can I use on
+# svelte" has no search word and an agent should not have to invent one. A call
+# with neither a query nor a filter is still an error.
+#
 # Missing dir or malformed index logs ONE warning and behaves as an empty
 # registry (fail-open, the surface never crashes). Item file paths must start
 # with ``_fx/`` and contain no ``..`` (registry is trusted, the check is cheap).
@@ -133,7 +138,12 @@ def _search(
         tags = [str(t).lower() for t in item.get("tags") or []]
         summary = str(item.get("summary") or "").lower()
         cat = str(item.get("category") or "").lower()
-        if q == name:
+        if not q:
+            # Browse mode. An empty query with a `category` or `needs_js` filter
+            # lists everything that passes it, because "what can I use on svelte"
+            # has no search word and the agent should not have to invent one.
+            rank = 3
+        elif q == name:
             rank = 0
         elif q in name or any(q in t for t in tags):
             rank = 1
@@ -159,8 +169,14 @@ def _search(
 
 async def _search_handler(args: dict) -> dict:
     query = args.get("query")
-    if not isinstance(query, str) or not query.strip():
-        return _error_response("search_effects requires a non-empty `query`.")
+    if not isinstance(query, str):
+        query = ""
+    has_filter = bool(args.get("category")) or isinstance(args.get("needs_js"), bool)
+    if not query.strip() and not has_filter:
+        return _error_response(
+            "search_effects needs a non-empty `query`, or a `category` / `needs_js` "
+            "filter to browse with."
+        )
     limit = args.get("limit")
     if not isinstance(limit, int) or limit < 1:
         limit = 20
@@ -236,9 +252,11 @@ def build_fx_server() -> tuple[str, Any] | None:
         (
             "Search the paw-fx registry of drop-in visual effects (animated "
             "backgrounds, particles, 3D heroes, scroll/text/cursor effects, page "
-            "transitions) for a generated site. Args: `query` (required), optional "
+            "transitions) for a generated site. Args: `query` (omit it to BROWSE, but "
+            "then pass a filter), optional "
             "`category` (backgrounds|particles|3d-hero|scroll|text|cursor|transition), "
-            "optional `needs_js` (false = only dependency-free effects), optional "
+            "optional `needs_js` (false = only dependency-free effects, which is what "
+            "svelte and react sites can use), optional "
             "`limit` (default 20). Returns {items:[{name, category, tags, summary, "
             "needs, license, preview_url}]}. Call get_effect with a `name` to fetch "
             "its files and snippet. Empty items means nothing matched; do not invent "
@@ -247,12 +265,11 @@ def build_fx_server() -> tuple[str, Any] | None:
         {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "minLength": 1},
+                "query": {"type": "string"},
                 "category": {"type": "string"},
                 "needs_js": {"type": "boolean"},
                 "limit": {"type": "integer"},
             },
-            "required": ["query"],
             "additionalProperties": False,
         },
     )

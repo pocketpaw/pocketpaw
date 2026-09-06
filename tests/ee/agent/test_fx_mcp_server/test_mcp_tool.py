@@ -228,3 +228,37 @@ class TestCategories:
             {"category": "backgrounds", "count": 2},
             {"category": "particles", "count": 2},
         ]
+
+
+class TestBrowseMode:
+    """An agent asking "what can I use on svelte" has no search word.
+
+    The amended design-taste skill tells it to filter with ``needs_js=false``, so
+    that call has to work without a query. A bare call with neither a query nor a
+    filter still errors, because dumping the whole registry is not a search.
+    """
+
+    @pytest.mark.asyncio
+    async def test_needs_js_filter_alone_browses(self, registry) -> None:
+        body = _decode(await fx_mcp._search_handler({"needs_js": False}))
+        assert body["items"], "needs_js=False with no query must list dependency-free effects"
+        assert all(not i["needs"] for i in body["items"])
+
+    @pytest.mark.asyncio
+    async def test_category_filter_alone_browses(self, registry) -> None:
+        body = _decode(await fx_mcp._search_handler({"category": "backgrounds"}))
+        assert body["items"]
+        assert all(i["category"] == "backgrounds" for i in body["items"])
+
+    @pytest.mark.asyncio
+    async def test_empty_query_with_no_filter_is_error(self, registry) -> None:
+        assert (await fx_mcp._search_handler({}))["is_error"]
+        assert (await fx_mcp._search_handler({"query": "   "}))["is_error"]
+
+    @pytest.mark.asyncio
+    async def test_query_still_narrows_when_filter_present(self, registry) -> None:
+        wide = _decode(await fx_mcp._search_handler({"category": "backgrounds"}))
+        narrow = _decode(
+            await fx_mcp._search_handler({"query": "aurora", "category": "backgrounds"})
+        )
+        assert len(narrow["items"]) <= len(wide["items"])
