@@ -205,6 +205,32 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
 - **Env vars**: All settings use `POCKETPAW_` prefix (e.g., `POCKETPAW_ANTHROPIC_API_KEY`)
 - **Soul config**: `POCKETPAW_SOUL_ENABLED=true`, `POCKETPAW_SOUL_NAME`, `POCKETPAW_SOUL_ARCHETYPE`, `POCKETPAW_SOUL_PATH`, `POCKETPAW_SOUL_AUTO_SAVE_INTERVAL`
 - **Files-as-Knowledge config** (Phase 1): `POCKETPAW_EXTRACTION_CHAIN` (JSON list of adapter names, e.g. `'["gemini-flash","local"]'`), `POCKETPAW_EXTRACTION_PER_MIME` (JSON map of mime→adapter), `POCKETPAW_GEMINI_API_KEY` for the cloud captioning adapter; `POCKETPAW_KB_SCOPES` (JSON list, e.g. `'["workspace:w1","agent:a1"]'`) drives multi-scope KB injection in the agent system prompt. The legacy `POCKETPAW_KB_SCOPE` (single string) still works via a deprecation shim that copies it into `kb_scopes` on startup. Phase 3 (Stage 3.E): uploads can carry `pocket_id` (form field on `POST /api/v1/uploads`, query on `GET /api/v1/files`); the FileReady listener routes pocket uploads into `pocket:{id}` KB and the agent's `_get_kb_context` resolves scope priority `pocket > agent > workspace` via the per-request `KbContext` threaded from the cloud chat path.
+- **Media transcription config** (T2, ingest-time speech-to-text): `audio/*` and
+  `video/*` uploads skip the extraction chain entirely and go to
+  `ee/pocketpaw_ee/cloud/uploads/transcription.py`, which calls fal directly —
+  the LiteLLM gateway serves no speech-to-text model (probed 2026-08-29: 80
+  models, zero). The transcript is returned as an ordinary `ExtractionResult`
+  and persisted through T0's `persist_extracted_text`, so the existing
+  comprehension, auto-tagging and kb-go ingest give a recording a summary, tags
+  and content search with no new code in any of those paths.
+  `POCKETPAW_FILE_TRANSCRIPTION_MODEL` (default `fal-ai/wizper` — measured
+  $0.0017/audio-min against `fal-ai/whisper`'s $0.0062 for the same clip;
+  **the code sends `language: null` explicitly and must keep doing so**, because
+  wizper defaults that parameter to `"en"` and then returns confident English for
+  audio that was not in English);
+  `POCKETPAW_FILE_TRANSCRIPTION_MAX_MINUTES` (default `30`) and
+  `POCKETPAW_FILE_TRANSCRIPTION_MAX_MB` (default `256`) are the ceilings, both
+  checked BEFORE the spend — the duration is read from the container header by
+  `uploads/media_duration.py` (stdlib; mp4/mov/m4a, wav, mp3 — ogg/webm/flac
+  return "unknown" and fall to the size ceiling);
+  `POCKETPAW_FILE_TRANSCRIPTION_DAILY` (default `100`, `0` disables the feature)
+  is a per-workspace/UTC-day cap that fails CLOSED, the sibling of
+  `POCKETPAW_FILE_COMPREHENSION_DAILY` (default `500`) and a SEPARATE counter,
+  so a bulk photo import cannot exhaust the ceiling that exists to stop a
+  podcast library; `POCKETPAW_FILE_TRANSCRIPTION_TIMEOUT_S` (default `600`) is
+  the end-to-end deadline. The fal key resolves via
+  `studio.fal_edit.fal_api_key` (`FAL_AI_API_KEY`, then `FAL_KEY`); with no key
+  configured, media uploads simply carry no transcript.
 - **Resumable chat runs config**: `POCKETPAW_REDIS_URL` (e.g.
   `redis://redis:6379/0`; Dragonfly / Valkey work as drop-in since they
   speak the Redis wire protocol). When unset, the transport falls back to

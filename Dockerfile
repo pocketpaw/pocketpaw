@@ -40,7 +40,7 @@ COPY src/ src/
 # nothing at all. Adding an extra to pyproject does NOT put it in this image.
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-RUN pip install --no-cache-dir '.[all]'
+RUN pip install --no-cache-dir '.[all]' '.[knowledge]'
 
 # Enterprise edition: also install the FSL enterprise layer (pocketpaw-ee).
 # For an OSS build, ee/ lands only in this throwaway builder stage and is

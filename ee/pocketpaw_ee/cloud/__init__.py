@@ -1,5 +1,9 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-08-25 (feat/other-hand-surface, Otherhand v1) — Mounts the
+    Otherhand snapshot router (``other_hand/router.py``) at /api/v1: the single
+    POST that persists a notebook page's PNG to a workspace-scoped scratch path
+    and hands back the path the agent reads it from.
 Modified: 2026-08-06 (feat/coupling-alerts-to-bell, T-10) — Registers the
     OSS operational-alert bridge (``notifications/bridges/alerts.py``):
     SystemEvent(event_type="alert") on the OSS MessageBus now fans into
@@ -260,6 +264,7 @@ def mount_cloud(app: FastAPI) -> None:
     )
     from pocketpaw_ee.cloud.billing.router import router as billing_router
     from pocketpaw_ee.cloud.billing.webhooks import router as billing_webhooks_router
+    from pocketpaw_ee.cloud.byok.router import router as byok_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
     from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
     from pocketpaw_ee.cloud.codeagent.router import router as codeagent_router
@@ -353,6 +358,7 @@ def mount_cloud(app: FastAPI) -> None:
     # (POST /billing/webhooks/dodo) is mounted SEPARATELY just below with NO auth
     # dependency — Dodo is the caller; trust is the Standard-Webhooks signature.
     app.include_router(billing_router, prefix="/api/v1")
+    app.include_router(byok_router, prefix="/api/v1")
     app.include_router(billing_webhooks_router, prefix="/api/v1")
     # Entitlements (BC-6, the Entitlement primitive) — the workspace-scoped
     # resolver (GET /entitlements -> the workspace's plan + features + monthly
@@ -582,6 +588,16 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.ship.router import router as ship_router
 
     app.include_router(ship_router, prefix="/api/v1")
+
+    # Otherhand page snapshots (feat/other-hand-surface, Otherhand v1). One
+    # route: POST /api/v1/other-hand/pages/{page_id}/snapshot writes the page's
+    # PNG to a workspace-scoped scratch path and returns it. That path is how
+    # the agent SEES the page — it stamps onto the next chat turn's surface meta
+    # and the other_hand handler puts it in the preamble for the agent to Read,
+    # because this pipeline cannot carry an image to the model any other way.
+    from pocketpaw_ee.cloud.other_hand.router import router as other_hand_router
+
+    app.include_router(other_hand_router, prefix="/api/v1")
 
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can

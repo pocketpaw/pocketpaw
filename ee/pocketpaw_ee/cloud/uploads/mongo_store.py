@@ -1,5 +1,48 @@
 """Mongo-backed metadata store, workspace-scoped.
 
+2026-08-29 (T0 "Persist the extracted text"): added ``set_extracted_text`` —
+the workspace-scoped setter ``uploads.extracted_text`` uses to point a row at
+the derived blob holding its ``ExtractionResult``, shaped exactly like
+``set_kb_article`` (read through the workspace filter, write the pair, save).
+The key and the ``content_version`` it was extracted from are always written
+TOGETHER: a key without a version is a blob whose freshness nobody can judge.
+``extracted_text`` never touches Beanie itself; this store stays the only owner
+of ``FileUpload`` writes in the package. Deliberately NOT threaded into
+``_to_record`` or the ``iter_by_*`` dict rows — unlike ``tags``/``summary``,
+nothing in a listing renders it, and ``FileRecord`` is a ``src/`` type whose
+shape ripples well past this package.
+
+2026-08-29 (T3 "Files content search"): added ``list_by_kb_articles`` — the
+reverse of ``set_kb_article``. Given the article ids a kb-go search returned,
+it resolves them back to the FILE rows that were ingested into them, so the
+Files panel can answer "which of my files contains this?" instead of "which
+filename contains this?". Three filters are load-bearing and not cosmetic:
+the always-applied ``workspace`` pin, ``hide_from_ai`` (a file the owner hid
+from AI must not resurface through content search — and it is written as
+``$ne: True`` because legacy rows have no such key at all, so ``== False``
+would silently drop every one of them), and the same tri-state ``pocket_id``
+partition ``list_by_workspace`` uses, so pocket files never bleed into the
+workspace panel through the search door. Returns ``KbTrackedRecord`` triples
+rather than bare records because the caller has to rank by the SEARCH's order
+and disambiguate an article id that exists in two scopes.
+
+2026-08-28 (FC-1 "File comprehension"): ``summary`` is threaded exactly the way
+``tags`` is — ``set_library_metadata`` grew a ``summary`` keyword, and both
+``iter_by_workspace`` / ``iter_by_pocket`` dict rows now carry it so the
+/files listing can show what a file IS without a second query. Same
+only-touch-what-was-passed rule as the other library fields, and the same
+always-applied workspace filter, so a caller still cannot write across tenants.
+
+2026-08-29 (BA-1 "Make an agent of this book"): added ``set_book_agent`` —
+the workspace-scoped setter ``uploads.book_agent`` uses to bind a file to the
+dedicated co-reader agent made from it, shaped exactly like ``set_kb_article``
+(read the row through the workspace filter, then write). ``book_agent`` never
+touches Beanie itself; this store stays the only owner of ``FileUpload``
+writes in the package. The ``iter_by_workspace`` / ``iter_by_pocket`` dict rows
+also carry ``agent_id`` now, so the /files listing can render "open the agent"
+instead of "make one" without a second query — the same way ``tags`` is
+threaded.
+
 2026-08-04 (Living-wiki API): ``iter_by_workspace`` rows now also carry
 ``kb_article_id`` and ``kb_scope`` (the FL-11b ingest-tracking columns) so
 GET /knowledge/uploads can derive ``has_article`` without a second query,
@@ -38,7 +81,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 from pocketpaw.uploads.file_store import FileRecord
 from pocketpaw_ee.cloud.uploads.models import FileUpload
@@ -61,6 +104,20 @@ class _Sentinel:
 
 LIST_WORKSPACE_ONLY = _Sentinel()
 """Sentinel: pass as ``pocket_id`` to filter rows where ``pocket_id IS None``."""
+
+
+class KbTrackedRecord(NamedTuple):
+    """One file row plus the kb-go article it was ingested into (FL-11b).
+
+    ``scope`` is the row's stored ``kb_scope`` and may be ``None`` on a row
+    written before the column existed. The caller keeps the pair together
+    because the same article id can legitimately exist in two scopes (kb-go
+    slugs an article off its title), so the id alone does not identify a hit.
+    """
+
+    article_id: str
+    scope: str | None
+    record: FileRecord
 
 
 class MongoFileStore:
@@ -103,13 +160,20 @@ class MongoFileStore:
         tags: list[str] | None = None,
         collections: list[str] | None = None,
         hide_from_ai: bool | None = None,
+        summary: str | None = None,
     ) -> FileUpload | None:
-        """Set library metadata on one live row, workspace-scoped (FL-1).
+        """Set library metadata on one live row, workspace-scoped (FL-1, FC-1).
 
         Only the fields passed as non-``None`` are updated — omitted fields
         keep their current value. Returns the updated doc, or ``None`` if no
         live row matches ``(file_id, workspace)``. The workspace filter is
         always applied, so a caller cannot mutate another tenant's rows.
+
+        ``summary`` (FC-1) follows the same rule, which means this setter
+        cannot CLEAR a summary — ``None`` is "leave it alone", not "erase it".
+        That is deliberate and matches the other fields; the only writer that
+        would want to erase one is a human, and the PATCH route handles an
+        explicit empty string by writing ``""``.
         """
         doc = await self.get_doc_scoped(file_id, workspace)
         if doc is None:
@@ -120,6 +184,8 @@ class MongoFileStore:
             doc.collections = [str(c) for c in collections]
         if hide_from_ai is not None:
             doc.hide_from_ai = bool(hide_from_ai)
+        if summary is not None:
+            doc.summary = str(summary)
         await doc.save()
         return doc
 
@@ -146,6 +212,58 @@ class MongoFileStore:
             return None
         doc.kb_article_id = article_id
         doc.kb_scope = scope
+        await doc.save()
+        return doc
+
+    async def set_book_agent(
+        self,
+        file_id: str,
+        workspace: str,
+        *,
+        agent_id: str | None,
+    ) -> FileUpload | None:
+        """Bind (or clear) this file's dedicated book agent (BA-1).
+
+        Workspace-scoped like every other write here — the filter is applied on
+        the read, so a caller cannot bind another tenant's row. Pass an agent id
+        after the book's text has landed in that agent's KB scope; pass ``None``
+        to clear a bind (e.g. the agent was deleted). Returns the updated doc,
+        or ``None`` if no live row matches ``(file_id, workspace)``.
+        """
+        doc = await self.get_doc_scoped(file_id, workspace)
+        if doc is None:
+            return None
+        doc.agent_id = agent_id
+        await doc.save()
+        return doc
+
+    async def set_extracted_text(
+        self,
+        file_id: str,
+        workspace: str,
+        *,
+        key: str | None,
+        content_version: int | None,
+    ) -> FileUpload | None:
+        """Point a row at its persisted extraction blob (T0).
+
+        Workspace-scoped like every other write here — the filter is applied on
+        the read, so a caller cannot re-point another tenant's row. Pass the
+        storage key plus the ``content_version`` the text was extracted FROM
+        after a successful blob write; pass ``None`` for both to clear the
+        pointer (the reader then falls back to a live extraction). Both fields
+        are always written to the given values, the way ``set_kb_article``
+        writes its pair — they only mean anything together, so a partial update
+        would leave a key whose freshness cannot be judged.
+
+        Returns the updated doc, or ``None`` if no live row matches
+        ``(file_id, workspace)``.
+        """
+        doc = await self.get_doc_scoped(file_id, workspace)
+        if doc is None:
+            return None
+        doc.extracted_text_key = key
+        doc.extracted_text_version = content_version
         await doc.save()
         return doc
 
@@ -274,6 +392,15 @@ class MongoFileStore:
             owner_id=doc.owner,
             chat_id=doc.chat_id,
             created=doc.createdAt or datetime.now(UTC),
+            # Library metadata, read defensively: legacy rows predate every
+            # one of these fields. This is the path the flat ``GET /files``
+            # listing is built from, so a field missing HERE is a field the
+            # Files panel can never render no matter what the DB holds.
+            folder_path=getattr(doc, "folder_path", None) or "/",
+            tags=list(getattr(doc, "tags", None) or []),
+            collections=list(getattr(doc, "collections", None) or []),
+            summary=getattr(doc, "summary", None),
+            agent_id=getattr(doc, "agent_id", None),
         )
 
     async def iter_by_workspace(
@@ -314,12 +441,17 @@ class MongoFileStore:
                 "tags": list(getattr(doc, "tags", []) or []),
                 "collections": list(getattr(doc, "collections", []) or []),
                 "hide_from_ai": bool(getattr(doc, "hide_from_ai", False)),
+                # FC-1: read defensively — legacy rows predate the field.
+                "summary": getattr(doc, "summary", None),
                 # Living-wiki API: FL-11b ingest tracking, so /knowledge/uploads
                 # can derive has_article without a second query; pocket_id so
                 # workspace-level listings can exclude pocket-private rows.
                 "kb_article_id": getattr(doc, "kb_article_id", None),
                 "kb_scope": getattr(doc, "kb_scope", None),
                 "pocket_id": getattr(doc, "pocket_id", None),
+                # BA-1: the dedicated co-reader agent made from this file, so
+                # the listing can offer "open" vs "make" without a second read.
+                "agent_id": getattr(doc, "agent_id", None),
             }
 
     async def list_by_workspace(
@@ -357,6 +489,76 @@ class MongoFileStore:
             query["pocket_id"] = pocket_id
         docs = await FileUpload.find(query).sort([("createdAt", -1)]).limit(capped).to_list()
         return [r for r in (self._to_record(d) for d in docs) if r is not None]
+
+    async def list_by_kb_articles(
+        self,
+        workspace: str,
+        article_ids: list[str],
+        *,
+        pocket_id: str | None | _Sentinel = None,
+        limit: int = 200,
+    ) -> list[KbTrackedRecord]:
+        """Resolve kb-go article ids back to the file rows ingested into them.
+
+        The reverse of :meth:`set_kb_article`, and the join that turns a kb
+        content search into a FILES answer. Returns one triple per matching
+        live row; ordering is not meaningful here (the caller re-ranks by the
+        search's own order), so no sort is applied.
+
+        Filters, all deliberate:
+
+        * ``workspace`` — always applied, like every other read here. Without
+          it a shared article id would read another tenant's row.
+        * ``deleted_at IS NULL`` — a soft-deleted file is gone from the panel
+          and must be gone from search.
+        * ``hide_from_ai`` — written as ``$ne: True`` rather than ``== False``.
+          Rows created before FL-1 have NO ``hide_from_ai`` key in Mongo, and
+          ``{"hide_from_ai": False}`` does not match a missing key, so the
+          equality form would silently return nothing for every legacy row.
+          The ``$ne`` form matches missing-and-False and excludes only rows the
+          owner explicitly hid. This filter is defence in depth: hiding a file
+          also purges its article, but a purge that failed leaves the tracking
+          behind, and a hidden file resurfacing in search is exactly the leak
+          the toggle exists to prevent.
+        * ``pocket_id`` — the same tri-state as :meth:`list_by_workspace`
+          (``None`` = no filter, a string = that pocket, ``LIST_WORKSPACE_ONLY``
+          = workspace-scoped rows only), so search partitions pockets exactly
+          the way the listing does.
+
+        An empty ``article_ids`` short-circuits — an unbounded ``$in: []``
+        query is a pointless round trip.
+        """
+        ids = [a for a in article_ids if a]
+        if not ids:
+            return []
+        capped = max(1, min(limit, 500))
+        query: dict = {
+            "workspace": workspace,
+            "deleted_at": None,
+            "kb_article_id": {"$in": ids},
+            "hide_from_ai": {"$ne": True},
+        }
+        if pocket_id is LIST_WORKSPACE_ONLY:
+            query["pocket_id"] = None
+        elif isinstance(pocket_id, str):
+            query["pocket_id"] = pocket_id
+        docs = await FileUpload.find(query).limit(capped).to_list()
+        out: list[KbTrackedRecord] = []
+        for doc in docs:
+            rec = self._to_record(doc)
+            if rec is None:
+                continue
+            article_id = getattr(doc, "kb_article_id", None)
+            if not article_id:
+                continue
+            out.append(
+                KbTrackedRecord(
+                    article_id=article_id,
+                    scope=getattr(doc, "kb_scope", None),
+                    record=rec,
+                )
+            )
+        return out
 
     async def count_by_workspace(
         self,
@@ -427,6 +629,11 @@ class MongoFileStore:
                 "tags": list(getattr(doc, "tags", []) or []),
                 "collections": list(getattr(doc, "collections", []) or []),
                 "hide_from_ai": bool(getattr(doc, "hide_from_ai", False)),
+                # FC-1: read defensively — legacy rows predate the field.
+                "summary": getattr(doc, "summary", None),
+                # BA-1: same bind the workspace listing carries — a pocket's
+                # Files panel offers the book agent on the same terms.
+                "agent_id": getattr(doc, "agent_id", None),
             }
 
     async def count_by_pocket(self, workspace: str, pocket_id: str) -> int:

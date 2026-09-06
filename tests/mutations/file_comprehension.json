@@ -1,0 +1,130 @@
+[
+  {
+    "label": "the controlled vocabulary stops being controlled — anything the model invents becomes a shelf",
+    "file": "ee/pocketpaw_ee/cloud/uploads/comprehension.py",
+    "find": "        if value not in CATEGORIES or value in seen:",
+    "replace": "        if value in seen:",
+    "tests": [
+      "tests/cloud/uploads/test_comprehension.py::TestTheVocabularyIsClosed::test_a_category_outside_the_list_is_dropped",
+      "tests/cloud/uploads/test_comprehension.py::TestTheVocabularyIsClosed::test_nothing_is_mapped_to_the_nearest_legal_value"
+    ]
+  },
+  {
+    "label": "the three-category cap is removed — a file lands on every shelf and therefore on none",
+    "file": "ee/pocketpaw_ee/cloud/uploads/comprehension.py",
+    "find": "        if len(out) >= MAX_CATEGORIES:\n            break",
+    "replace": "        if False:\n            break",
+    "tests": [
+      "tests/cloud/uploads/test_comprehension.py::TestTheVocabularyIsClosed::test_more_than_three_categories_are_capped"
+    ]
+  },
+  {
+    "label": "the input cap is removed — a 400-page PDF becomes a 400-page prompt",
+    "find": "    if len(stripped) <= MAX_INPUT_CHARS:\n        return stripped",
+    "file": "ee/pocketpaw_ee/cloud/uploads/comprehension.py",
+    "replace": "    if True:\n        return stripped",
+    "tests": [
+      "tests/cloud/uploads/test_comprehension.py::TestTheInputIsCapped::test_oversized_text_is_truncated_before_the_call"
+    ]
+  },
+  {
+    "label": "an x-api-key rides along — the gateway forwards it upstream and a user's own key pays to summarise their upload",
+    "file": "ee/pocketpaw_ee/cloud/uploads/comprehension.py",
+    "find": "    headers = {\"Content-Type\": \"application/json\"}",
+    "replace": "    headers = {\"Content-Type\": \"application/json\", \"x-api-key\": \"a-tenants-own-key\"}",
+    "tests": [
+      "tests/cloud/uploads/test_comprehension.py::TestThePlatformPaysNotTheUser::test_the_request_never_carries_an_x_api_key"
+    ]
+  },
+  {
+    "label": "the model call stops failing open — a dead proxy raises out of comprehend instead of returning None",
+    "file": "ee/pocketpaw_ee/cloud/uploads/comprehension.py",
+    "find": "            payload[\"model\"],\n            exc_info=True,\n        )\n        return None",
+    "replace": "            payload[\"model\"],\n            exc_info=True,\n        )\n        raise",
+    "tests": [
+      "tests/cloud/uploads/test_comprehension.py::TestFailureReturnsNone::test_a_non_2xx_is_none"
+    ]
+  },
+  {
+    "label": "the listener stops containing comprehension — a raise in the pass takes the whole upload down with it",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "    except Exception:\n        logger.exception(\n            \"file comprehension failed for file_id=%s; the file stays indexed, tagged and usable\",",
+    "replace": "    except KeyboardInterrupt:\n        logger.exception(\n            \"file comprehension failed for file_id=%s; the file stays indexed, tagged and usable\",",
+    "tests": [
+      "tests/cloud/uploads/test_comprehension.py::TestTheListener::test_a_raising_comprehension_does_not_take_the_upload_down"
+    ]
+  },
+  {
+    "label": "the hide-from-AI gate is removed — a file the user hid from AI is sent to a model",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "    if getattr(doc, \"hide_from_ai\", False):",
+    "replace": "    if False and getattr(doc, \"hide_from_ai\", False):",
+    "tests": [
+      "tests/cloud/uploads/test_comprehension.py::TestTheListener::test_hide_from_ai_means_ZERO_model_calls",
+      "tests/cloud/uploads/test_listener_auto_tag.py::test_hide_from_ai_skips_ingest_and_tags"
+    ]
+  },
+  {
+    "label": "the daily cap is ignored at the call site — a refused claim generates anyway",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "        allowed, spent, cap = await comprehension_budget.try_spend(workspace_id)\n        if not allowed:",
+    "replace": "        allowed, spent, cap = await comprehension_budget.try_spend(workspace_id)\n        if False:",
+    "tests": [
+      "tests/cloud/uploads/test_comprehension.py::TestTheListener::test_an_exhausted_cap_leaves_the_file_indexed_and_tagged"
+    ]
+  },
+  {
+    "label": "the counter fails OPEN — a degraded database becomes an open tab at the model",
+    "file": "ee/pocketpaw_ee/cloud/uploads/comprehension_budget.py",
+    "find": "            exc_info=True,\n        )\n        return False, 0, cap",
+    "replace": "            exc_info=True,\n        )\n        return True, 0, cap",
+    "tests": [
+      "tests/cloud/uploads/test_comprehension.py::TestTheDailyCap::test_an_unreadable_counter_fails_CLOSED"
+    ]
+  },
+  {
+    "label": "off by one at the ceiling — a cap of 2 serves 3",
+    "file": "ee/pocketpaw_ee/cloud/uploads/comprehension_budget.py",
+    "find": "    if spent > cap:",
+    "replace": "    if spent > cap + 1:",
+    "tests": [
+      "tests/cloud/uploads/test_comprehension.py::TestTheDailyCap::test_the_cap_refuses_the_next_claim"
+    ]
+  },
+  {
+    "label": "a workspace with no tenancy is charged to nobody and served anyway",
+    "file": "ee/pocketpaw_ee/cloud/uploads/comprehension_budget.py",
+    "find": "        logger.warning(\"file comprehension refused — no workspace on the event\")\n        return False, 0, cap",
+    "replace": "        logger.warning(\"file comprehension refused — no workspace on the event\")\n        return True, 0, cap",
+    "tests": [
+      "tests/cloud/uploads/test_comprehension.py::TestTheDailyCap::test_no_workspace_is_refused"
+    ]
+  },
+  {
+    "label": "a human's summary is overwritten by the next ingest's guess",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "        if (existing_summary or \"\").strip():",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/uploads/test_comprehension.py::TestTheListener::test_a_human_set_summary_survives_reingest"
+    ]
+  },
+  {
+    "label": "collections stops merging — the model's shelves replace the ones a person chose",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "        merged = merge_tags(existing_collections, understood.categories)",
+    "replace": "        merged = list(understood.categories)",
+    "tests": [
+      "tests/cloud/uploads/test_comprehension.py::TestTheListener::test_an_existing_shelf_is_not_removed_by_comprehension"
+    ]
+  },
+  {
+    "label": "a reply with no summary is written anyway — the row grows an empty subtitle",
+    "file": "ee/pocketpaw_ee/cloud/uploads/comprehension.py",
+    "find": "    if not isinstance(summary, str) or not summary.strip():",
+    "replace": "    if not isinstance(summary, str):",
+    "tests": [
+      "tests/cloud/uploads/test_comprehension.py::TestFailureReturnsNone::test_a_missing_summary_is_none_even_with_good_categories"
+    ]
+  }
+]

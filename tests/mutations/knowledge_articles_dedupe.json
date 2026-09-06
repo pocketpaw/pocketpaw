@@ -1,0 +1,84 @@
+[
+  {
+    "label": "match on the article id alone, ignoring scope",
+    "file": "ee/pocketpaw_ee/cloud/kb/knowledge_router.py",
+    "find": "    return [a for a in articles if a.id not in wildcard and (a.id, a.scope) not in scoped]",
+    "replace": "    return [a for a in articles if a.id not in wildcard and a.id not in {i for i, _s in scoped}]",
+    "tests": [
+      "tests/cloud/test_knowledge_articles_dedupe.py::test_the_same_slug_in_another_scope_is_not_collateral",
+      "tests/cloud/test_knowledge_articles_dedupe.py::test_an_agent_article_sharing_a_slug_with_an_upload_survives"
+    ]
+  },
+  {
+    "label": "a scopeless claim stops matching anything",
+    "file": "ee/pocketpaw_ee/cloud/kb/knowledge_router.py",
+    "find": "            wildcard.add(claim.article_id)",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_knowledge_articles_dedupe.py::test_a_claim_that_names_no_scope_matches_any_scope"
+    ]
+  },
+  {
+    "label": "the flag stops suppressing anything",
+    "file": "ee/pocketpaw_ee/cloud/kb/knowledge_router.py",
+    "find": "    if exclude_upload_derived and articles:",
+    "replace": "    if False and exclude_upload_derived and articles:",
+    "tests": [
+      "tests/cloud/test_knowledge_articles_dedupe.py::test_the_upload_twin_is_dropped_and_the_standalone_article_is_not"
+    ]
+  },
+  {
+    "label": "suppression becomes the default (the wiki loses upload-derived knowledge)",
+    "file": "ee/pocketpaw_ee/cloud/kb/knowledge_router.py",
+    "find": "    exclude_upload_derived: bool = Query(\n        False,",
+    "replace": "    exclude_upload_derived: bool = Query(\n        True,",
+    "tests": [
+      "tests/cloud/test_knowledge_articles_dedupe.py::test_without_the_flag_the_listing_is_unchanged"
+    ]
+  },
+  {
+    "label": "the claim lookup stops filtering out pocket uploads",
+    "file": "ee/pocketpaw_ee/cloud/kb/knowledge_router.py",
+    "find": "        pocket_id=LIST_WORKSPACE_ONLY,",
+    "replace": "        pocket_id=None,",
+    "tests": [
+      "tests/cloud/test_knowledge_articles_dedupe.py::test_a_pocket_upload_does_not_suppress_a_workspace_article"
+    ]
+  },
+  {
+    "label": "a hidden-from-AI upload starts suppressing its article again",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "            \"kb_article_id\": {\"$in\": ids},\n            \"hide_from_ai\": {\"$ne\": True},",
+    "replace": "            \"kb_article_id\": {\"$in\": ids},",
+    "tests": [
+      "tests/cloud/test_knowledge_articles_dedupe.py::test_a_file_hidden_from_ai_does_not_suppress_its_article"
+    ]
+  },
+  {
+    "label": "a soft-deleted upload starts suppressing its article again",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "            \"deleted_at\": None,\n            \"kb_article_id\": {\"$in\": ids},",
+    "replace": "            \"kb_article_id\": {\"$in\": ids},",
+    "tests": [
+      "tests/cloud/test_knowledge_articles_dedupe.py::test_a_soft_deleted_file_does_not_suppress_its_article"
+    ]
+  },
+  {
+    "label": "the claim lookup failure stops being contained",
+    "file": "ee/pocketpaw_ee/cloud/kb/knowledge_router.py",
+    "find": "        except Exception:\n            logger.warning(\n                \"upload-claim lookup failed for workspace=%s; listing un-deduplicated\",",
+    "replace": "        except Exception:\n            raise\n            logger.warning(\n                \"upload-claim lookup failed for workspace=%s; listing un-deduplicated\",",
+    "tests": [
+      "tests/cloud/test_knowledge_articles_dedupe.py::test_a_failed_claim_lookup_leaves_the_listing_intact"
+    ]
+  },
+  {
+    "label": "the join goes back to one query per article",
+    "file": "ee/pocketpaw_ee/cloud/kb/knowledge_router.py",
+    "find": "            claims = await _upload_claims(active_workspace_id, [a.id for a in articles])",
+    "replace": "            claims = [c for a in articles for c in await _upload_claims(active_workspace_id, [a.id])]",
+    "tests": [
+      "tests/cloud/test_knowledge_articles_dedupe.py::test_the_claim_lookup_is_one_query_for_the_whole_page"
+    ]
+  }
+]

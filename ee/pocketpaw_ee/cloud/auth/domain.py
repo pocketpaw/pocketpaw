@@ -39,6 +39,9 @@ class AuthUser:
     is_verified: bool
     is_superuser: bool
     mfa_enabled: bool = False
+    # BYOK-first onboarding (2026-09-01): the frontend renders signup nudges
+    # and upload blocks off this flag; it must survive a reload via /auth/me.
+    is_guest: bool = False
 
 
 @dataclass(frozen=True)

@@ -901,6 +901,31 @@ class CloudMediaMcpProvider:
         return list(MEDIA_TOOL_IDS)
 
 
+class CloudOtherHandMcpProvider:
+    """`pocketpaw.mcp_servers` — the Otherhand illustration server
+    (``pocketpaw_other_hand``). Hosts ``illustrate`` only.
+
+    Ambient like the media server, and gated where it matters instead: the
+    Otherhand surface allow-lists the tool id, so no other surface's agent can
+    reach it, and a per-workspace daily budget bounds what it can spend even
+    there. Registering it here rather than per-surface keeps one road for every
+    in-process server; the surface profile is the door.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.other_hand import build_other_hand_server
+
+            return build_other_hand_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.other_hand import OTHER_HAND_TOOL_IDS
+
+        return list(OTHER_HAND_TOOL_IDS)
+
+
 class CloudBrowserMcpProvider:
     """`pocketpaw.mcp_servers` — the /browser surface's agentic browser
     (``pocketpaw_browser``). Hosts navigate / snapshot / click / type / scroll /

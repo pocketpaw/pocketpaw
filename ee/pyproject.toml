@@ -190,11 +190,18 @@ dependencies = [
     # uses it for the per-workspace keypair + subscribe/unsubscribe endpoints.
     "py-vapid>=1.9.0",
     "pywebpush>=2.3.0",
-    # --- fal.ai client — /studio canvas EDIT ops (cloud.studio.fal_edit) ---
+    # --- fal.ai client — /studio canvas EDIT ops + media transcription ---
     # LiteLLM serves the text-to-image generation models but has no route for
     # fal's image-EDIT endpoints (nano-banana-2/edit, birefnet/v2, esrgan, …),
     # so those run DIRECTLY against fal through the official fal-client SDK.
-    # Only imported by ee/pocketpaw_ee/cloud/studio/fal_edit.py.
+    # The gateway serves no speech-to-text model either (probed 2026-08-29:
+    # 80 models, zero), so ingest-time audio/video transcription calls fal
+    # direct for the same reason.
+    # Imported (lazily) by ee/pocketpaw_ee/cloud/studio/fal_edit.py and
+    # ee/pocketpaw_ee/cloud/uploads/transcription.py. It is a BASE dependency,
+    # not an extra, deliberately — both importers are lazy, so demoting it to
+    # an extra builds green and then produces nothing at runtime. Pinned there
+    # by tests/packaging/test_extraction_deps_reach_the_image.py.
     "fal-client>=0.3.0",
     "hcloud>=2.23.0",
 ]
@@ -207,6 +214,20 @@ extraction = [
     "trafilatura",
     "python-docx>=1.1.0",
     "pytesseract>=0.3.10",
+    # Office formats beyond docx (2026-08-29, files-intelligence Track 1).
+    # python-pptx reads .pptx slide shapes + speaker notes; openpyxl reads
+    # .xlsx sheets in read-only mode. Both are pure-Python wheels, no system
+    # libs. They are ALSO listed in the root `knowledge` extra — same as pypdf
+    # and trafilatura — because `uv sync --all-extras` only resolves the ROOT
+    # project's extras, so a dep that lives only here can never be exercised
+    # by a real-fixture test locally or in CI.
+    "python-pptx>=1.0.0",
+    "openpyxl>=3.1.0",
+    # HEIF/HEIC decoding for Pillow. iPhones produce .heic by default and
+    # Pillow does NOT decode it natively (`PIL.features.check("heif")` is
+    # False on Pillow 12.2), so without this an iPhone photo takes the raw
+    # read_text fallback and yields mojibake instead of OCR text.
+    "pillow-heif>=0.18.0",
     # PyMuPDF (fitz) rasterizes image-heavy PDF pages so the Gemini adapter can
     # caption scanned/diagram pages (FL-15). Pure-wheel, no system poppler.
     # Lazy-imported in gemini_flash.py, so it stays optional. Floor 1.24.0
@@ -290,6 +311,8 @@ composio = "pocketpaw_ee.extensions:CloudComposioMcpProvider"
 meetings = "pocketpaw_ee.extensions:CloudMeetingsMcpProvider"
 sites = "pocketpaw_ee.extensions:CloudSitesMcpProvider"
 media = "pocketpaw_ee.extensions:CloudMediaMcpProvider"
+other_hand = "pocketpaw_ee.extensions:CloudOtherHandMcpProvider"
+
 browser = "pocketpaw_ee.extensions:CloudBrowserMcpProvider"
 stock = "pocketpaw_ee.extensions:CloudStockImagesMcpProvider"
 icons = "pocketpaw_ee.extensions:CloudIconsMcpProvider"

@@ -7,6 +7,15 @@ to JSON responses.
 Re-exports remain accessible via `ee.cloud.shared.errors` (a shim) for
 the transition period; new code should import from this module.
 
+Changed 2026-09-01 (feat/byok-guest-backend): added ``GuestLimitError`` (402,
+``guest_limit_reached``, carries ``kind`` = sessions|turns as a TOP-LEVEL wire
+key beside the standard envelope), ``GuestUploadForbidden`` (403,
+``guest_upload_forbidden``) and ``GuestKeyRequired`` (402,
+``guest_key_required``) — the BYOK-first guest-onboarding family. The
+top-level ``code``/``kind`` keys are a frozen frontend contract (the signup
+prompt keys on them); the standard ``{"error": {...}}`` envelope is kept
+beside them so generic clients are unaffected.
+
 Changed 2026-06-30 (feat/billing-quota-enforcement, chunk 2): added
 `QuotaExceeded` (402, `credits.quota_exceeded`) — the monthly-credit-cap
 sibling of `InsufficientCredits`. Same 402 status (the client can't spend
@@ -111,6 +120,101 @@ class ValidationError(CloudError):
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(422, code, message)
+
+
+class GuestLimitError(CloudError):
+    """A guest account hit one of its hard caps (402, ``guest_limit_reached``).
+
+    Added 2026-09-01 (feat/byok-guest-backend). ``kind`` says WHICH cap:
+    ``"sessions"`` (session create) or ``"turns"`` (daily turn budget). The wire
+    body carries top-level ``code`` + ``kind`` — the exact shape the frontend's
+    signup prompt keys on — BESIDE the standard ``{"error": {...}}`` envelope,
+    so generic error handling keeps working.
+    """
+
+    def __init__(self, kind: str, message: str | None = None) -> None:
+        self.kind = kind
+        noun = "sessions" if kind == "sessions" else "turns for today"
+        super().__init__(
+            402,
+            "guest_limit_reached",
+            message or f"You've used all your guest {noun}. Sign up to keep going.",
+        )
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base["code"] = self.code
+        base["kind"] = self.kind
+        return base
+
+
+class GuestIllustrateForbidden(CloudError):
+    """Guests cannot generate illustrations (403, ``guest_illustrate_forbidden``).
+
+    Added 2026-09-01. The daily budget is a COST CEILING, not an entitlement:
+    it caps how much a workspace can spend, and a guest can mint a fresh
+    workspace to get a fresh ceiling. Generation costs real money on the
+    PLATFORM's account (a guest's own BYOK key pays for their tokens and not
+    for this), so the ceiling alone left an unbounded bill attached to a
+    signup form that asks for nothing.
+
+    Same contract discipline as ``GuestUploadForbidden``: top-level ``code``
+    beside the standard envelope, and the refusal doubles as the signup hook.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            403,
+            "guest_illustrate_forbidden",
+            "Sign up to have Otherhand draw for you.",
+        )
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base["code"] = self.code
+        return base
+
+
+class GuestUploadForbidden(CloudError):
+    """Guests cannot upload files (403, ``guest_upload_forbidden``).
+
+    Added 2026-09-01 (feat/byok-guest-backend). Top-level ``code`` beside the
+    standard envelope — same contract discipline as ``GuestLimitError``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            403,
+            "guest_upload_forbidden",
+            "Sign up to upload files and keep your pages.",
+        )
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base["code"] = self.code
+        return base
+
+
+class GuestKeyRequired(CloudError):
+    """A guest turn found no usable BYOK key (402, ``guest_key_required``).
+
+    Added 2026-09-01 (feat/byok-guest-backend). Guests have NO platform
+    fallback by design — a missing/undecryptable stored key refuses the turn
+    with this code (the frontend re-prompts for the key) instead of silently
+    billing the platform.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            402,
+            "guest_key_required",
+            "Your API key is missing or no longer usable. Re-enter it to keep going.",
+        )
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base["code"] = self.code
+        return base
 
 
 class BadRequest(CloudError):
@@ -378,6 +482,9 @@ def with_cause(error: CloudError, cause: BaseException) -> CloudError:
 
 
 __all__ = [
+    "GuestKeyRequired",
+    "GuestLimitError",
+    "GuestUploadForbidden",
     "BadRequest",
     "CallLimitError",
     "CloudError",

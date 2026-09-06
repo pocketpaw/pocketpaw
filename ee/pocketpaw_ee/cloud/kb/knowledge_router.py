@@ -1,4 +1,20 @@
 # knowledge_router.py — Workspace-level knowledge browser router.
+# Updated: 2026-08-31 (FX-kb "one document, one row") — GET /articles accepts
+#   ``exclude_upload_derived``. When set, an article that a live workspace
+#   upload row CLAIMS (via the FL-11b ``kb_article_id`` + ``kb_scope`` columns)
+#   is dropped from the listing, so the Files panel — which merges this route's
+#   rows with GET /files client-side — stops rendering an uploaded PDF and the
+#   article compiled out of it as two separate documents.
+#   OPT-IN, deliberately: this same route feeds KnowledgeBrowser, the command
+#   palette and /knowledge-lab, where the compiled article IS the thing being
+#   read and repaired. Suppressing there would make upload-derived knowledge
+#   silently vanish from the wiki — a filter that hides too much reads as
+#   "switched off", not "broken", and nothing logs an error. Callers that want
+#   knowledge-as-knowledge pass nothing and pay nothing (no extra query).
+#   Suppression matches on (article_id, scope), never on the id alone: kb-go
+#   slugs an article off its title, so ``hello`` can exist in workspace: AND
+#   agent: scope at once and an id-only match would drop a standalone article
+#   nobody uploaded.
 # Updated: 2026-08-04 (review follow-up) — security + tracking fixes:
 #   * GET /uploads is WORKSPACE-scoped only: rows with a pocket_id are
 #     excluded (files-service precedent — pocket reads are ACL-gated on
@@ -306,6 +322,84 @@ def _call_kb_list(scope: str) -> list[Any]:
     return wiki_articles + orphan_rows
 
 
+# ---------------------------------------------------------------------------
+# Upload-derived suppression (FX-kb) — one document, one row
+# ---------------------------------------------------------------------------
+
+# Ceiling on the single claim lookup. ``list_by_kb_articles`` caps at 500 of
+# its own accord; naming it here is what makes the failure direction explicit.
+# A workspace with more than 500 tracked uploads UNDER-suppresses: a duplicate
+# row survives. That is the safe end to fail at — a visible duplicate is the
+# bug we are already fixing, whereas over-suppression deletes knowledge from
+# the panel with nothing logged anywhere.
+_CLAIM_LOOKUP_LIMIT = 500
+
+
+async def _upload_claims(workspace_id: str, article_ids: list[str]) -> list[Any]:
+    """The live workspace uploads that claim any of *article_ids* (one query).
+
+    ``list_by_kb_articles`` already encodes every filter this needs, which is
+    why nothing is re-implemented here: the workspace pin, ``deleted_at IS
+    NULL``, and ``hide_from_ai: {$ne: True}``. That is not incidental — the
+    brief's rule is that an upload which is not itself visible must not
+    suppress anything, because then the article is the only surviving copy of
+    that content in the panel.
+
+    ``LIST_WORKSPACE_ONLY`` is the right third of the tri-state: this route
+    aggregates ``workspace:`` and ``agent:`` scopes only, and a pocket-scoped
+    upload ingests into ``pocket:{id}`` (uploads/listeners.py), so only a
+    workspace-scoped upload can be the twin of anything in this listing.
+    Mirrors ``files/content_search.py``'s use of the same seam.
+
+    Imported inside the function, matching ``list_ingestable_uploads`` right
+    below: the uploads store reaches back into cloud modules this router is
+    imported by, and the local import keeps that edge out of import order.
+    """
+    from pocketpaw_ee.cloud.uploads.mongo_store import LIST_WORKSPACE_ONLY, MongoFileStore
+
+    return await MongoFileStore().list_by_kb_articles(
+        workspace_id,
+        article_ids,
+        pocket_id=LIST_WORKSPACE_ONLY,
+        limit=_CLAIM_LOOKUP_LIMIT,
+    )
+
+
+def _drop_upload_derived(articles: list[Any], claims: list[Any]) -> list[Any]:
+    """Return *articles* minus the ones a *claim* says came from an upload.
+
+    Pure — the query lives in ``_upload_claims`` so this half is testable
+    without Mongo, and so the matching rule can be read on its own.
+
+    An article is dropped when a claim carries the same id AND either the same
+    scope or no scope at all. The scope half is the whole safety story: kb-go
+    slugs an article id off its title, so ``hello`` can legitimately exist in
+    ``workspace:w1`` and ``agent:a1`` at the same time
+    (``KbTrackedRecord``'s own docstring says so). Matching on the id alone
+    would drop the agent's standalone article because an unrelated file with
+    the same name was uploaded to the workspace.
+
+    A claim with ``scope is None`` matches any scope. Both existing precedents
+    in this codebase read a null scope as a wildcard — ``has_article`` in this
+    same module (``kb_scope is None or kb_scope == resolved``) and
+    ``content_search``'s candidate narrowing (``c.scope in (hit_scope, None)``)
+    — and the case is close to unreachable: ``kb_article_id`` and ``kb_scope``
+    were added in the same field-add (FL-11b, uploads/models.py) and
+    ``set_kb_article`` writes both in one call, so a row cannot record an
+    article without recording where it went.
+    """
+    if not claims:
+        return list(articles)
+    scoped: set[tuple[str, str]] = set()
+    wildcard: set[str] = set()
+    for claim in claims:
+        if claim.scope is None:
+            wildcard.add(claim.article_id)
+        else:
+            scoped.add((claim.article_id, claim.scope))
+    return [a for a in articles if a.id not in wildcard and (a.id, a.scope) not in scoped]
+
+
 @router.get(
     "/articles",
     dependencies=[Depends(require_action_any_workspace("kb.read"))],
@@ -327,6 +421,14 @@ async def list_workspace_articles(
         ge=0,
         description="Offset into the newest-first listing (with `limit`).",
     ),
+    exclude_upload_derived: bool = Query(
+        False,
+        description=(
+            "Drop articles that were compiled out of a file already listed by "
+            "GET /files, so the Files panel shows one row per document. Leave "
+            "off for knowledge browsers, where the article is the thing."
+        ),
+    ),
     active_workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> dict:
@@ -341,6 +443,18 @@ async def list_workspace_articles(
       Files panel. The merge itself still fans out across every scope; only
       the response window is sliced. When ``limit`` is omitted the endpoint
       keeps returning every article (existing consumers unchanged).
+    - ``exclude_upload_derived`` — de-duplication for the Files panel, which
+      merges these rows with ``GET /files`` on the client. An upload records
+      the article it was ingested into (FL-11b ``kb_article_id`` /
+      ``kb_scope``); when this is set, those articles are dropped so a PDF and
+      the article compiled out of it stop reading as two documents. Costs one
+      extra query and only when set. Standalone knowledge — an article
+      ingested from chat, a URL, or typed straight in — has no upload behind
+      it and is never touched: this de-duplicates, it does not hide a source.
+
+    Suppression happens BEFORE the offset slice, so ``total`` and ``has_more``
+    describe the rows the caller can actually page through rather than the
+    pre-filter count.
     """
     if workspace_id_q is not None and workspace_id_q != active_workspace_id:
         raise Forbidden(
@@ -369,6 +483,21 @@ async def list_workspace_articles(
         kb_list=lambda scope: asyncio.to_thread(_call_kb_list, scope),
         agent_filter=agent_id,
     )
+
+    if exclude_upload_derived and articles:
+        # One query for the whole page, never one per row: the listing is hot
+        # and paged. Contained — a store that can't be reached must not turn a
+        # de-duplication preference into a failed listing, so the un-filtered
+        # rows go out (a duplicate is visible and recoverable; a 500 is not).
+        try:
+            claims = await _upload_claims(active_workspace_id, [a.id for a in articles])
+            articles = _drop_upload_derived(articles, claims)
+        except Exception:
+            logger.warning(
+                "upload-claim lookup failed for workspace=%s; listing un-deduplicated",
+                active_workspace_id,
+                exc_info=True,
+            )
 
     total = len(articles)
     page = articles[offset : offset + limit] if limit is not None else articles
