@@ -21,6 +21,8 @@
 #     entry, like paw-sites-gen), VERIFIES it with `wrangler --version` at build
 #     time, and sets `PAW_CF_WRANGLER_CMD=wrangler`. Without this the migrate step of
 #     a live dynamic publish would try to network-fetch wrangler on the box.
+#   - 2026-09-06 (feat/fx-mcp-server): COPY deploy/paw-fx/ to /opt/paw-fx; build-arg
+#     PAW_FX=1 fails the build when the vendored registry is missing.
 #   - 2026-06-25 (feat/paw-sites-prod-deploy, DEP-1 + DEP-2): the Paw Sites publish
 #     path shells out to the paw-sites generator (`paw-sites-gen`) + `bun` at
 #     publish time, and a generated ripple-track site installs `@ripple-ui/svelte`.
@@ -324,6 +326,15 @@ COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 # `join(dirname(import.meta.url), '..', 'templates')` correctly finds
 # /opt/paw-sites/templates.
 COPY --from=paw-sites /out /opt/paw-sites
+# paw-fx effects registry (feat/fx-mcp-server). deploy/paw-fx/ always exists (a
+# tracked .gitkeep), so the COPY never fails; scripts/vendor-paw-fx.sh stages
+# ../paw-fx/dist/registry into deploy/paw-fx/registry. PAW_FX=1 makes a missing
+# registry a build FAILURE; the default (0) skips the check so existing builds
+# don't break and the pocketpaw_fx MCP server serves an empty registry.
+ARG PAW_FX=0
+COPY deploy/paw-fx/ /opt/paw-fx/
+RUN [ "$PAW_FX" != "1" ] || test -f /opt/paw-fx/registry/registry.json \
+    || ( echo "ERROR: PAW_FX=1 but deploy/paw-fx/registry/registry.json is missing. Run scripts/vendor-paw-fx.sh first." && exit 1 )
 RUN printf '#!/bin/sh\nexec node /opt/paw-sites/dist/cli.js "$@"\n' > /usr/local/bin/paw-sites-gen && \
     chmod 0755 /usr/local/bin/paw-sites-gen
 # ripple tarball: a generated ripple-track site installs @ripple-ui/svelte from the

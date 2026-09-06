@@ -1,5 +1,7 @@
 """In-process MCP servers exposed to agent backends for cloud features.
 
+Updated: 2026-09-06 (feat/fx-mcp-server) — added ``fx.py`` (``pocketpaw_fx``).
+
 Updated: 2026-09-06 (BR-1, feat/browser-surface-server) — added ``browser.py``
 (``pocketpaw_browser``) to the listing below: the /browser surface's agentic
 browser. Unlike its siblings it is scoped by DENY as well as allow — every
@@ -45,6 +47,9 @@ Server surfaces (module → server name → tools):
   sends and nothing reaches the gate-owned draft statuses ``approved`` /
   ``sent`` — the agent's reach ends at ``proposed``, a human approves in the
   Tray, and the dispatch worker sends
+* ``fx.py`` → ``pocketpaw_fx`` → ``search_effects`` / ``get_effect`` /
+  ``list_effect_categories`` (the paw-fx drop-in visual-effects registry read
+  from ``PAW_FX_REGISTRY_DIR``; pure read, no identity)
 * ``icons.py`` → ``pocketpaw_icons`` → ``search_icons`` (free open-source
   icon/SVG search via Iconify for site iconography; pure read, no identity)
 * ``instinct.py`` → ``pocketpaw_instinct`` → ``instinct_pending`` /
