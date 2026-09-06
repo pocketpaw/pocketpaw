@@ -21,6 +21,13 @@
 #     ``publish_pocket`` is shared with the in-process MCP publish tool, which
 #     passes no tier today and could start to. ``purchase_authorized`` defaults
 #     False so a new caller fails closed rather than silently buying.
+#
+# Amended 2026-09-05 (fix/sites-plan-credits). Dropping a paying site to the free
+# floor used to leave its subscription open and change nothing anyone was billed
+# for, so the gate only had to ask "is the tier being BOUGHT a priced one?". The
+# credits rail closes the subscription on that move, which makes it a billing
+# change a member could perform — see
+# ``test_a_member_cannot_cancel_a_paid_plan_by_applying_free``.
 
 from __future__ import annotations
 
@@ -29,7 +36,6 @@ from types import SimpleNamespace
 
 import pytest
 from pocketpaw_ee.cloud._core.errors import Forbidden
-from pocketpaw_ee.cloud.billing import site_plans
 from pocketpaw_ee.sites import service as sites_service
 
 pytestmark = pytest.mark.anyio
@@ -60,14 +66,53 @@ class _RecordingGenerator:
         return BuildResult(project_dir="/tmp/site", ripple_version="0.2.0")
 
 
+# THE WORKSPACE PLAN MATTERS NOW, and this fixture pins it deliberately.
+#
+# Two facts collide (2026-09-06, feat/plan-included-sites): Paw Go / Pro / Pro Max
+# CARRY sites — 1 / 3 / 10, at ``staff`` quality for no money — and the ``sites``
+# feature itself starts at Go, so a ``free`` workspace cannot publish one at all.
+# Between them the credit wallet is reached in exactly one situation: a workspace
+# that has used up the sites its plan carries. So the workspace here is on ``go``
+# with its ONE slot already filled. That is the only population this rail has
+# left, and a fixture that skipped it would test a path no customer can reach.
+#
+# It matters twice over here: the authorization gate EXEMPTS a move the plan
+# carries (taking a slot spends nothing, so it needs no admin), which is its own
+# test below. Every gate test in this module is therefore about the OVERFLOW
+# purchase — the one that really does commit the company to a charge.
 async def _make_workspace() -> str:
     from pocketpaw_ee.cloud.models.workspace import Workspace
 
     ws = Workspace(
-        name="Acme", slug=f"acme-authz-{datetime.now(UTC).timestamp()}", owner="u1", plan="pro"
+        name="Acme", slug=f"acme-authz-{datetime.now(UTC).timestamp()}", owner="u1", plan="go"
     )
     await ws.insert()
+    await _fill_plan_slots(str(ws.id))
     return str(ws.id)
+
+
+async def _fill_plan_slots(workspace_id: str, count: int = 1) -> None:
+    """Occupy ``count`` of the workspace's plan-carried site slots.
+
+    Decoy sites on their own pocket ids, so they never collide with the site under
+    test. Stamped exactly as a carried site is — plan rail, staff tier, active, no
+    renewal date — because ``plan_site_slots`` counts on ``billing_rail`` and a
+    decoy with the wrong shape leaves the slot open and sends the test down the
+    free rail while looking like it did the opposite."""
+    from pocketpaw_ee.cloud.models.site import Site as _S
+
+    for i in range(count):
+        await _S(
+            workspace=workspace_id,
+            pocket_id=f"decoy-{workspace_id}-{i}",
+            owner="u1",
+            name=f"Decoy {i}",
+            deployed=True,
+            url="http://local/decoy/",
+            plan_tier="staff",
+            subscription_status="active",
+            billing_rail="plan",
+        ).insert()
 
 
 async def _make_pocket(workspace_id: str) -> str:
@@ -93,13 +138,6 @@ async def _make_subscription(workspace_id: str) -> None:
     ).insert()
 
 
-def _addon_rail(monkeypatch) -> None:
-    monkeypatch.setattr(
-        site_plans, "_dodo_addon_for", lambda k: {"site": "adn_site", "staff": "adn_staff"}.get(k)
-    )
-    monkeypatch.setattr(site_plans, "_dodo_product_for", lambda k: None)
-
-
 def _local_deploy(monkeypatch) -> None:
     monkeypatch.setenv("PAW_SITES_LOCAL", "1")
     monkeypatch.setattr(sites_service, "GeneratorClient", lambda *a, **k: _RecordingGenerator())
@@ -108,17 +146,40 @@ def _local_deploy(monkeypatch) -> None:
     monkeypatch.setattr(local_server, "deploy_local", lambda sid, d, **kw: f"http://local/{sid}/")
 
 
+async def _balance(workspace_id: str) -> int:
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    return await credits_service.balance(workspace_id)
+
+
+async def _fund(workspace_id: str, credits: int = 9000) -> None:
+    """Put credits in the wallet, because a paid site is bought from it since
+    2026-09-05.
+
+    Called by the REFUSAL cases too, and deliberately. The authorization gate runs
+    before any charge, so an empty wallet would also stop the purchase — with a
+    ``402`` rather than the ``Forbidden`` these tests name. Funding first means the
+    refusal they assert can only be the gate's."""
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    await credits_service.grant(
+        workspace=workspace_id,
+        amount=credits,
+        cause="top_up",
+        idempotency_key=f"seed-{workspace_id}-{credits}",
+    )
+
+
 # --------------------------------------------------------------------------- #
 
 
 async def test_an_unauthorized_caller_cannot_buy_a_paid_tier(mongo_db, monkeypatch):  # noqa: ARG001
     """THE HOLE. A member asking for a $19 tier must not charge the company."""
-    _addon_rail(monkeypatch)
     _local_deploy(monkeypatch)
     ws = await _make_workspace()
     await _make_subscription(ws)
+    await _fund(ws)
     pocket_id = await _make_pocket(ws)
-    provider = _RecordingBillingProvider()
 
     with pytest.raises(Forbidden) as exc:
         await sites_service.publish_pocket(
@@ -127,12 +188,12 @@ async def test_an_unauthorized_caller_cannot_buy_a_paid_tier(mongo_db, monkeypat
             pocket_id=pocket_id,
             site_plan_key="staff",
             _bundle_reader=lambda d: b"x",
-            _billing_provider=provider,
         )
 
     assert exc.value.code == "sites.plan_purchase_forbidden"
-    assert provider.change_plan_calls == [], "nothing may reach the gateway"
-    assert provider.create_calls == []
+    # And no money moved. The wallet is funded, so a balance still at its seed
+    # value is the refusal biting rather than an empty balance masking it.
+    assert await _balance(ws) == 9000
 
 
 async def test_the_default_is_refusal(mongo_db, monkeypatch):  # noqa: ARG001
@@ -146,12 +207,11 @@ async def test_the_default_is_refusal(mongo_db, monkeypatch):  # noqa: ARG001
 
 
 async def test_an_authorized_caller_buys_normally(mongo_db, monkeypatch):  # noqa: ARG001
-    _addon_rail(monkeypatch)
     _local_deploy(monkeypatch)
     ws = await _make_workspace()
     await _make_subscription(ws)
+    await _fund(ws)
     pocket_id = await _make_pocket(ws)
-    provider = _RecordingBillingProvider()
 
     doc = await sites_service.publish_pocket(
         workspace_id=ws,
@@ -160,21 +220,24 @@ async def test_an_authorized_caller_buys_normally(mongo_db, monkeypatch):  # noq
         site_plan_key="staff",
         purchase_authorized=True,
         _bundle_reader=lambda d: b"x",
-        _billing_provider=provider,
     )
 
     assert doc.plan_tier == "staff"
-    assert provider.change_plan_calls, "an authorized buy still charges"
+    # An authorized buy still CHARGES — it just charges the wallet rather than the
+    # gateway. Asserted on the balance, because "the gateway was called" stopped
+    # being the signal that money moved when the rail changed, and a test that
+    # only checked the tier landed would pass on a purchase nobody paid for.
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    assert await credits_service.balance(ws) == 9000 - 1900
 
 
 async def test_a_free_publish_needs_no_authorization(mongo_db, monkeypatch):  # noqa: ARG001
     """The ordinary employee workflow. Gating this would make building a site
     need an admin, which is not what the hole was about."""
-    _addon_rail(monkeypatch)
     _local_deploy(monkeypatch)
     ws = await _make_workspace()
     pocket_id = await _make_pocket(ws)
-    provider = _RecordingBillingProvider()
 
     doc = await sites_service.publish_pocket(
         workspace_id=ws,
@@ -182,22 +245,23 @@ async def test_a_free_publish_needs_no_authorization(mongo_db, monkeypatch):  # 
         pocket_id=pocket_id,
         site_plan_key="free",
         _bundle_reader=lambda d: b"x",
-        _billing_provider=provider,
     )
 
     assert doc.deployed is True
-    assert provider.change_plan_calls == []
+    # Unfunded on purpose: the floor must publish with an EMPTY wallet, which is
+    # the state of every workspace that has not bought credits yet. A seeded
+    # balance here would pass even if the free publish had started charging.
+    assert await _balance(ws) == 0, "the free floor costs nothing"
 
 
 async def test_republishing_a_paid_site_needs_no_authorization(mongo_db, monkeypatch):  # noqa: ARG001
     """A content edit on a site someone already bought. The member who builds the
     site must be able to ship changes without an admin present each time."""
-    _addon_rail(monkeypatch)
     _local_deploy(monkeypatch)
     ws = await _make_workspace()
     await _make_subscription(ws)
+    await _fund(ws)
     pocket_id = await _make_pocket(ws)
-    provider = _RecordingBillingProvider()
 
     await sites_service.publish_pocket(
         workspace_id=ws,
@@ -206,7 +270,6 @@ async def test_republishing_a_paid_site_needs_no_authorization(mongo_db, monkeyp
         site_plan_key="staff",
         purchase_authorized=True,
         _bundle_reader=lambda d: b"x",
-        _billing_provider=provider,
     )
 
     # Same tier, no authorization — a republish, not a purchase.
@@ -216,7 +279,6 @@ async def test_republishing_a_paid_site_needs_no_authorization(mongo_db, monkeyp
         pocket_id=pocket_id,
         site_plan_key="staff",
         _bundle_reader=lambda d: b"x",
-        _billing_provider=provider,
     )
 
     assert doc.plan_tier == "staff"
@@ -225,12 +287,11 @@ async def test_republishing_a_paid_site_needs_no_authorization(mongo_db, monkeyp
 async def test_an_unauthorized_upgrade_is_refused(mongo_db, monkeypatch):  # noqa: ARG001
     """Moving a site UP a rung is a purchase too. Only same-tier republishes are
     exempt — otherwise a member upgrades $7 to $19 and calls it an edit."""
-    _addon_rail(monkeypatch)
     _local_deploy(monkeypatch)
     ws = await _make_workspace()
     await _make_subscription(ws)
+    await _fund(ws)
     pocket_id = await _make_pocket(ws)
-    provider = _RecordingBillingProvider()
 
     await sites_service.publish_pocket(
         workspace_id=ws,
@@ -239,9 +300,8 @@ async def test_an_unauthorized_upgrade_is_refused(mongo_db, monkeypatch):  # noq
         site_plan_key="site",
         purchase_authorized=True,
         _bundle_reader=lambda d: b"x",
-        _billing_provider=provider,
     )
-    before = len(provider.change_plan_calls)
+    before = await _balance(ws)
 
     with pytest.raises(Forbidden):
         await sites_service.publish_pocket(
@@ -250,11 +310,99 @@ async def test_an_unauthorized_upgrade_is_refused(mongo_db, monkeypatch):  # noq
             pocket_id=pocket_id,
             site_plan_key="staff",
             _bundle_reader=lambda d: b"x",
-            _billing_provider=provider,
         )
 
-    assert len(provider.change_plan_calls) == before
+    assert await _balance(ws) == before, "a refused upgrade must not charge"
 
+
+
+async def test_a_member_cannot_cancel_a_paid_plan_by_applying_free(mongo_db, monkeypatch):  # noqa: ARG001
+    """THE OTHER DIRECTION, and it opened the day the free path started closing
+    the subscription. Publishing ``free`` costs nothing, so a gate that asks only
+    "is the requested tier priced?" waves it through — and it ENDS a plan the
+    workspace is paying for, taking the custom domain, the concierge and badge
+    removal off a live site. Nothing refunds the month already bought and nothing
+    restores the tier; the site simply drops. Spending the company's money and
+    destroying what it already bought are the same decision seen from two sides.
+
+    Mutation: narrow the gate back to ``is_paid`` alone and this is the only test
+    that fails."""
+    _local_deploy(monkeypatch)
+    ws = await _make_workspace()
+    await _make_subscription(ws)
+    await _fund(ws)
+    pocket_id = await _make_pocket(ws)
+
+    doc = await sites_service.publish_pocket(
+        workspace_id=ws,
+        user_id="u1",
+        pocket_id=pocket_id,
+        site_plan_key="staff",
+        purchase_authorized=True,
+        _bundle_reader=lambda d: b"x",
+    )
+    renewal_before = doc.renewal_date
+    assert renewal_before is not None
+
+    with pytest.raises(Forbidden) as exc:
+        await sites_service.publish_pocket(
+            workspace_id=ws,
+            user_id="u2",
+            pocket_id=pocket_id,
+            site_plan_key="free",
+            _bundle_reader=lambda d: b"x",
+        )
+
+    assert exc.value.code == "sites.plan_purchase_forbidden"
+
+    # Re-read rather than trusting the in-memory doc: the refusal has to have
+    # happened BEFORE any write, so the row the next renewal sweep reads is the
+    # one the admin paid for.
+    from pocketpaw_ee.cloud.models.site import Site
+
+    fresh = await Site.get(doc.id)
+    assert fresh.plan_tier == "staff"
+    assert fresh.subscription_status == "active"
+    assert fresh.renewal_date == renewal_before
+    assert fresh.period_paid_usd == 19
+
+
+async def test_an_admin_may_still_cancel_a_paid_plan(mongo_db, monkeypatch):  # noqa: ARG001
+    """The gate above must not lock the door on the person holding the key. An
+    admin dropping a site to free is the supported way to stop paying for it, and
+    a refusal here would leave the only exit as a support ticket.
+
+    What cancelling DOES — schedule the close for the end of the paid period
+    rather than take the month back — is pinned in ``test_credits_tier_changes``.
+    This one is only about who may ask."""
+    _local_deploy(monkeypatch)
+    ws = await _make_workspace()
+    await _make_subscription(ws)
+    await _fund(ws)
+    pocket_id = await _make_pocket(ws)
+
+    await sites_service.publish_pocket(
+        workspace_id=ws,
+        user_id="u1",
+        pocket_id=pocket_id,
+        site_plan_key="staff",
+        purchase_authorized=True,
+        _bundle_reader=lambda d: b"x",
+    )
+    after_purchase = await _balance(ws)
+
+    doc = await sites_service.publish_pocket(
+        workspace_id=ws,
+        user_id="u1",
+        pocket_id=pocket_id,
+        site_plan_key="free",
+        purchase_authorized=True,
+        _bundle_reader=lambda d: b"x",
+    )
+
+    assert doc.plan_cancels_at_period_end is True
+    # Cancelling is not a purchase. A charge here would bill somebody for leaving.
+    assert await _balance(ws) == after_purchase
 
 def test_buying_sits_above_publishing_in_the_role_ladder():
     """The two questions must not collapse back into one. Publishing is MEMBER;

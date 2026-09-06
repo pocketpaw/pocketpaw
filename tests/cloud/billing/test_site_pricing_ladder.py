@@ -25,10 +25,12 @@
 #     thing standing between the rename and that outcome, so they are asserted by
 #     CAPABILITY, not just by resolving to something non-None.
 #
-#   * THE REKEY SILENTLY DISABLING CHECKOUT. ``POCKETPAW_DODO_SITE_PRODUCTS`` is
-#     deployed keyed {"pro": ..., "business": ...}. A catalog that only looked up
-#     the new names would find nothing, every paid tier would go unpurchasable,
-#     and publishes would quietly record the free floor while taking no money.
+#   * (RETIRED 2026-09-05) THE REKEY SILENTLY DISABLING CHECKOUT. The catalog
+#     used to resolve a Dodo product per tier, and a rename that missed the
+#     legacy env keys made every paid tier unpurchasable while publishes quietly
+#     recorded the free floor. There is no gateway in the per-site ladder any
+#     more — a site is paid for from the workspace credit balance — so both the
+#     ids and that whole failure mode are gone.
 #
 #   * AN ORG FLAT REACHING A SITE. studio/agency are one subscription covering
 #     many sites. Their keys are not legal ``Site.plan_tier`` values, and a plain
@@ -134,22 +136,21 @@ def test_an_org_flat_is_refused_as_a_sites_own_tier(key):
 
 
 @pytest.mark.parametrize("key", ["studio", "agency"])
-def test_an_org_flat_is_never_purchasable_however_config_is_set(key, monkeypatch):
-    """Not "has no product configured" — NEVER, whatever config says.
+def test_an_org_flat_is_never_purchasable(key):
+    """SCOPE, not configuration — and since 2026-09-05 scope is the only thing
+    ``purchasable`` consults at all.
 
-    There is exactly one checkout and it buys one site. Pointing it at a $149
-    org flat would charge the org price and grant a single site's capability.
-    So the refusal cannot be left to "nobody configured a product for it": a
-    well-meaning operator filling in every key of POCKETPAW_DODO_SITE_PRODUCTS
-    would otherwise switch on a checkout that overcharges.
+    An org flat covers a whole workspace. The per-site purchase buys one site and
+    debits one site's price from the credit balance, so letting one through would
+    take $7 and hand over a $149 plan's worth of claims. There is no org
+    subscription entity to buy it properly with, so the storefront sells it by
+    conversation.
 
     Breaks on: ``purchasable`` dropping its ``is_org_scoped`` early return.
     """
-    monkeypatch.setattr(site_plans, "_dodo_product_for", lambda _k: "pdt_configured")
-
     assert site_plans.get_site_plan(key).purchasable is False
-    # ...while a per-site rung with the same product IS purchasable, so the test
-    # is measuring the scope and not a blanket "nothing is purchasable".
+    # ...while a per-site rung IS purchasable, so this measures the scope rather
+    # than a blanket "nothing is purchasable".
     assert site_plans.get_site_plan("site").purchasable is True
 
 
@@ -243,46 +244,6 @@ def test_an_unknown_key_still_resolves_to_nothing():
 # ---------------------------------------------------------------------------
 # The rekey must not break the DEPLOYED Dodo product map
 # ---------------------------------------------------------------------------
-
-
-def test_the_deployed_legacy_product_map_still_opens_a_checkout(monkeypatch):
-    """The trap that would have shipped silently.
-
-    The live environment sets POCKETPAW_DODO_SITE_PRODUCTS keyed by the OLD tier
-    names. Renaming the catalog without teaching ``_dodo_product_for`` about the
-    aliases means every paid tier comes back ``purchasable = False`` the moment
-    the rename deploys — no checkout opens, and ``publish_pocket`` falls back to
-    publishing live and recording the free floor. Nothing errors. The customer
-    picks a paid plan, is charged nothing, and gets nothing.
-
-    Breaks on: ``_dodo_product_for`` looking up only the canonical key.
-    """
-
-    class _Settings:
-        dodo_site_products = {"pro": "pdt_old_site", "business": "pdt_old_staff"}
-
-    import pocketpaw.config as config_mod
-
-    monkeypatch.setattr(config_mod, "get_settings", lambda: _Settings())
-
-    assert site_plans.get_site_plan("site").dodo_product_id == "pdt_old_site"
-    assert site_plans.get_site_plan("staff").dodo_product_id == "pdt_old_staff"
-    assert site_plans.get_site_plan("site").purchasable is True
-
-
-def test_the_new_key_wins_over_a_legacy_one_for_the_same_tier(monkeypatch):
-    """A half-migrated environment holding both must not be ambiguous — the
-    canonical key is the answer, so re-keying the env var takes effect
-    immediately rather than being shadowed by the value it replaces."""
-
-    class _Settings:
-        dodo_site_products = {"site": "pdt_new", "pro": "pdt_old"}
-
-    import pocketpaw.config as config_mod
-
-    monkeypatch.setattr(config_mod, "get_settings", lambda: _Settings())
-
-    assert site_plans.get_site_plan("site").dodo_product_id == "pdt_new"
 
 
 # ---------------------------------------------------------------------------
@@ -391,20 +352,28 @@ def test_highlights_are_kept_out_of_the_enforced_feature_set():
 # ---------------------------------------------------------------------------
 
 
-def test_a_zero_price_tier_is_always_purchasable(monkeypatch):
-    """``purchasable`` is ``price == 0 or a product is configured``. The rename has
-    to carry that through, or the free tier becomes unbuyable the moment Dodo is
-    unconfigured and every publish falls back to nothing."""
-    monkeypatch.setattr(site_plans, "_dodo_product_for", lambda key: None)
+def test_every_per_site_rung_is_purchasable():
+    """``purchasable`` is now ``scope == "site"``, and this is the case that pins
+    it. It used to be ``price == 0 or a product is configured``, which meant a
+    deployment with no Dodo map — the ordinary state of a self-hosted install —
+    offered a ladder where only the free rung could be selected.
 
+    A paid site is bought from the workspace credit wallet now, so the gateway
+    map has nothing to say about whether a rung is on sale. Every rung is,
+    including with the product resolver stubbed to return nothing at all."""
     assert site_plans.get_site_plan("free").purchasable is True
-    assert site_plans.get_site_plan("site").purchasable is False
-
-
-def test_a_priced_tier_is_purchasable_once_it_has_a_product(monkeypatch):
-    monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: "prod_x" if key == "site" else None
-    )
-
     assert site_plans.get_site_plan("site").purchasable is True
-    assert site_plans.get_site_plan("staff").purchasable is False
+    assert site_plans.get_site_plan("staff").purchasable is True
+
+
+def test_the_org_flats_stay_unpurchasable():
+    """The one row that must still read False, and the reason ``purchasable``
+    survives at all rather than being deleted with the rule that motivated it.
+
+    An org flat covers a whole workspace. There is no org subscription entity, no
+    org checkout and no webhook that could activate one, so a buy button on one
+    would take money and grant a single site's worth of capability. Configuring a
+    product for one does not change that — asserted with the map stubbed to
+    resolve every key, so the answer cannot be coming from an absent id."""
+    assert site_plans.get_site_plan("studio").purchasable is False
+    assert site_plans.get_site_plan("agency").purchasable is False

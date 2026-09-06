@@ -477,3 +477,71 @@ def test_every_gated_kind_guard_runs_on_the_shared_chokepoint():
 
     src = inspect.getsource(router._assert_gated_workspaces)
     assert "_assert_site_plan_request_workspace" in src
+
+
+# --------------------------------------------------------------------------- #
+# What the Tray card SAYS. An admin approves from these two sentences and
+# nothing else, so they are the interface, not decoration.
+# --------------------------------------------------------------------------- #
+
+
+async def _card(monkeypatch, *, site_plan_key: str, site_name: str = "Acme Dental"):
+    """File a request against a recording store and return the proposed card."""
+    from pocketpaw_ee.cloud.site_plan_requests import propose as pr
+
+    seen: dict[str, Any] = {}
+
+    class _Store:
+        async def propose(self, **kw: Any):
+            seen.update(kw)
+            return SimpleNamespace(id="act-1")
+
+    # Patched on ``pocketpaw.stores``, not on ``pr``: propose.py imports the
+    # factory INSIDE the function, so a module-attribute patch on pr never runs.
+    import pocketpaw.stores as _stores
+
+    monkeypatch.setattr(_stores, "get_instinct_store", lambda **kw: _Store())
+
+    await pr.propose_site_plan_request(
+        workspace_id="ws-1",
+        pocket_id="pkt-1",
+        site_plan_key=site_plan_key,
+        requested_by="member-1",
+        site_name=site_name,
+    )
+    return seen
+
+
+async def test_a_request_for_the_free_floor_reads_as_a_CANCELLATION(monkeypatch):
+    """It only started reaching this queue on 2026-09-05.
+
+    Dropping a paying site to the free floor used to change nothing anyone was
+    billed for, so the purchase gate let it through and no card was ever filed. It
+    CLOSES the plan now, so a member asking for it is refused and lands here like
+    any other plan change — on copy written for a purchase. Unfixed, an admin
+    approves "Put Acme Dental on the Free plan ($0/month, added to this
+    workspace's subscription)": no cost named, a line being ADDED for a request
+    that removes one, and no hint that a paid plan is about to end."""
+    card = await _card(monkeypatch, site_plan_key="free")
+
+    assert "end" in card["description"].lower()
+    assert "$0" not in card["description"]
+    assert "already paid for" in card["description"]
+    # And the recommendation must not promise a charge for a request that removes
+    # one. "Approving adds $0/month" is the sentence this replaces.
+    assert "adds $" not in card["recommendation"]
+    assert "nothing is charged or refunded" in card["recommendation"]
+
+
+async def test_a_paid_request_still_names_the_price_and_the_rail(monkeypatch):
+    """The other branch, unchanged in substance: an admin needs the number.
+
+    The rail wording is not: a paid site is bought from the workspace CREDIT
+    balance since the same cutover, and an admin told the charge lands on a
+    subscription goes looking for an invoice line that does not exist."""
+    card = await _card(monkeypatch, site_plan_key="staff")
+
+    assert "$19" in card["description"]
+    assert "credits" in card["description"]
+    assert "subscription" not in card["description"]
+    assert "credits" in card["recommendation"]

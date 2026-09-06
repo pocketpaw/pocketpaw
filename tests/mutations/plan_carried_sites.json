@@ -1,0 +1,146 @@
+[
+  {
+    "label": "the plan never carries a site, so an included site is billed to the wallet",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if allowance is None:\n        return True\n    return used < allowance",
+    "replace": "    if allowance is None:\n        return True\n    return False",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_the_first_site_on_go_is_carried_not_bought"
+    ]
+  },
+  {
+    "label": "a carried site is stamped on the credits rail, so the renewal sweep bills it every month",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        rail=_PLAN_RAIL if covered_by_plan else _CREDITS_RAIL,",
+    "replace": "        rail=_CREDITS_RAIL,",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_the_first_site_on_go_is_carried_not_bought"
+    ]
+  },
+  {
+    "label": "the charge is not skipped for a carried site (the plan and the wallet both pay)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not covered_by_plan:\n        await billing_service.charge_site_plan_credits(",
+    "replace": "    if True:\n        await billing_service.charge_site_plan_credits(",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_the_first_site_on_go_is_carried_not_bought"
+    ]
+  },
+  {
+    "label": "activate_site stamps a renewal date on the plan rail, putting the sweep on a free site",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if getattr(deployed, \"billing_rail\", \"\") != _PLAN_RAIL:\n        deployed.renewal_date = datetime.now(UTC) + relativedelta(months=1)",
+    "replace": "    if True:\n        deployed.renewal_date = datetime.now(UTC) + relativedelta(months=1)",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_a_carried_site_is_invisible_to_the_renewal_sweep"
+    ]
+  },
+  {
+    "label": "a carried site keeps period_paid_usd, so leaving the plan carries a month of unpaid credit",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if covered_by_plan:\n        doc.renewal_date = None\n        doc.period_paid_usd = 0",
+    "replace": "    if covered_by_plan:\n        doc.renewal_date = None\n        doc.period_paid_usd = int(tier.monthly_price_usd)",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_the_first_site_on_go_is_carried_not_bought"
+    ]
+  },
+  {
+    "label": "the slot count reads plan_tier instead of the rail, so bought sites eat the plan's slots",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    query: dict[str, Any] = {\"workspace\": workspace_id, \"billing_rail\": _PLAN_RAIL}",
+    "replace": "    query: dict[str, Any] = {\"workspace\": workspace_id, \"plan_tier\": _PLAN_CARRIED_TIER_KEY}",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_a_wallet_bought_site_does_not_eat_a_plan_slot"
+    ]
+  },
+  {
+    "label": "a republish counts itself, so the second publish of one site falls off the plan and is charged",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    used, allowance = await plan_site_slots(workspace_id, excluding_site_id=site_id)",
+    "replace": "    used, allowance = await plan_site_slots(workspace_id)",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_recovering_a_carried_site_that_never_deployed_is_still_free"
+    ]
+  },
+  {
+    "label": "a carried site is priced by the credits arithmetic, so a downgrade debits the wallet",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if _on_plan_rail and tier_change_requested:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_a_carried_site_is_never_charged_to_change_tier"
+    ]
+  },
+  {
+    "label": "_apply_site_plan writes the requested rung over the carried one, silently dropping the concierge",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if getattr(doc, \"billing_rail\", \"\") == _PLAN_RAIL:\n        plan_key = _PLAN_CARRIED_TIER_KEY",
+    "replace": "    if False:\n        plan_key = _PLAN_CARRIED_TIER_KEY",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_a_carried_site_is_never_charged_to_change_tier"
+    ]
+  },
+  {
+    "label": "releasing a slot leaves the rail stamped, so the workspace never gets the slot back",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            existing_doc.billing_rail = \"\"\n            existing_doc.subscription_status = \"none\"",
+    "replace": "            existing_doc.subscription_status = \"none\"",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_dropping_a_carried_site_to_free_releases_the_slot_at_once"
+    ]
+  },
+  {
+    "label": "the authorization gate stops exempting a carried move, so an included site needs an admin",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        and not (_plan_carries or _on_plan_rail)",
+    "replace": "        and True",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_taking_a_slot_needs_no_admin"
+    ]
+  },
+  {
+    "label": "a plan downgrade releases nothing, so the sites it can no longer carry stay free forever",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if used <= allowance:\n        return {\"carried\": used, \"released\": 0}",
+    "replace": "    if True:\n        return {\"carried\": used, \"released\": 0}",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_a_downgrade_releases_the_sites_the_new_plan_cannot_carry"
+    ]
+  },
+  {
+    "label": "the reconciler orders on _id, which in this collection is a HASH — an arbitrary site keeps the slot",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        .sort(\"createdAt\")",
+    "replace": "        .sort(\"_id\")",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_a_downgrade_releases_the_sites_the_new_plan_cannot_carry"
+    ]
+  },
+  {
+    "label": "a plan change never reconciles its sites, so only a direct call would ever converge them",
+    "file": "ee/pocketpaw_ee/cloud/workspace/service.py",
+    "find": "        counts = await sites_service.reconcile_plan_carried_sites(workspace_id)",
+    "replace": "        counts = {\"carried\": 0, \"released\": 0}",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_a_downgrade_releases_the_sites_the_new_plan_cannot_carry"
+    ]
+  },
+  {
+    "label": "an unknown plan key defaults to a generous site allowance instead of failing closed",
+    "file": "ee/pocketpaw_ee/cloud/billing/plans.py",
+    "find": "        included_sites=_INCLUDED_SITES.get(key, _INCLUDED_SITES[\"free\"]),",
+    "replace": "        included_sites=_INCLUDED_SITES.get(key, _INCLUDED_SITES[\"pro_max\"]),",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_the_catalog_fails_closed_on_a_plan_it_does_not_know"
+    ]
+  },
+  {
+    "label": "the plan grants the rung that was asked for, so an included site loses the concierge it includes",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            _carried_tier = site_plans.site_scoped_tier(_PLAN_CARRIED_TIER_KEY) or tier",
+    "replace": "            _carried_tier = tier",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_the_plan_grants_staff_even_when_a_cheaper_rung_is_asked_for"
+    ]
+  }
+]

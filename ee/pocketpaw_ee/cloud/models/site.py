@@ -101,6 +101,27 @@
 # "none") so every pre-BC-9 row and every workspace-plan-only site reads as having
 # no per-site sub — no migration.
 #
+# Updated 2026-09-05 (fix/sites-plan-credits): added ``billing_rail`` — WHICH rail
+# paid for this site (``"credits"`` | ``"addon"`` | ``"subscription"`` | ``""`` for
+# rows written before the field). A paid site now bills against the workspace
+# CREDIT WALLET by default, and a credits-paid site is byte-identical to an
+# add-on one on every other field, so without this the Dodo add-on cart would
+# pick it up and invoice the customer a second time. See the field's own comment
+# for why the exclusion keys on ``== "credits"`` rather than ``!= "addon"``.
+#
+# Also added ``period_paid_usd`` — the most expensive tier already bought for the
+# CURRENT period. A mid-period tier change charges the difference against it, so a
+# downgrade costs nothing and re-entering a tier inside one period cannot be billed
+# twice. See the field's comment for why it is a high-water mark rather than the
+# price of whatever tier the site holds right now.
+#
+# Also added ``plan_cancels_at_period_end``. Dropping a paying site to the free
+# floor used to leave a live subscription behind on a $0 tier; closing it on the
+# spot fixed that and introduced the opposite unfairness — the remainder of a
+# month the customer had already paid for was forfeited. The flag schedules the
+# close for the renewal instead, so the paid month is honoured and the sweep is
+# what ends it.
+#
 # Updated 2026-06-24 (feat/charge-first-sites — charge-first per-site publishing):
 # a PAID-tier site is now created as PENDING and NOT deployed live until the
 # ``subscription.active`` webhook confirms payment. Two additions support that:
@@ -420,6 +441,71 @@ class Site(TimestampedDocument):
     subscription_id: str | None = None
     renewal_date: datetime | None = None
     subscription_status: str = "none"
+    # WHICH RAIL PAID FOR THIS SITE, and it exists because two of the three are
+    # indistinguishable without it. A site bought with workspace CREDITS and a
+    # site bought as a Dodo ADD-ON both end up ``subscription_status="active"``
+    # with a paid ``plan_tier`` and NO ``subscription_id`` — and the add-on cart
+    # (``billing.service._site_addon_cart``) selects on exactly that shape. So a
+    # credits-paid site would be silently added to the workspace's next Dodo
+    # invoice and charged a second time for the month the wallet already bought.
+    #
+    # Values: ``"credits"`` (the wallet paid — the rail every new purchase takes),
+    # ``"addon"`` (a line on the workspace's Dodo subscription), ``"subscription"``
+    # (a legacy per-site Dodo subscription, which also holds a ``subscription_id``),
+    # and ``""`` for every document written before this field existed.
+    #
+    # EMPTY MUST KEEP MEANING WHAT IT MEANT. Every pre-existing paid row is an
+    # add-on or a per-site subscription, so the cart's exclusion keys on
+    # ``== "credits"`` rather than ``!= "addon"``: an unstamped legacy row stays on
+    # the invoice it is already on, and no migration is needed to keep billing
+    # correct.
+    billing_rail: str = ""
+    # THE MOST EXPENSIVE TIER THIS SITE HAS ALREADY PAID FOR IN THE CURRENT PERIOD,
+    # in whole USD. It exists so a mid-period tier change charges the DIFFERENCE
+    # rather than a fresh month, and so a change that is not an upgrade charges
+    # nothing at all.
+    #
+    # Without it the publish path priced every tier change at the new tier's full
+    # month, which produced three separate wrong bills from one line of code: a
+    # DOWNGRADE charged more than the plan it was leaving; flipping between two
+    # tiers on one afternoon charged a month per flip and could drain a wallet;
+    # and an upgrade charged a second full month for a period already bought.
+    # Comparing against a stored "already paid" high-water mark makes all three
+    # arithmetic instead of policy.
+    #
+    # It is a HIGH-WATER MARK and deliberately not "the price of the current
+    # tier": after staff -> site the customer has still paid for staff until the
+    # period ends, so going back up to staff inside that period must be free. A
+    # downgrade therefore leaves this field alone; only a charge raises it, and
+    # only a new period (the renewal sweep) or a fresh purchase resets it.
+    #
+    # 0 on every row written before the field, which is the safe default for the
+    # only population that has one: legacy Dodo-rail sites, whose tier changes are
+    # refused outright rather than priced from this.
+    period_paid_usd: int = 0
+    # CANCEL AT PERIOD END. True when someone has dropped this site to the free
+    # floor while it is still inside a month it has already paid for.
+    #
+    # It exists because closing the subscription on the spot would have taken back
+    # what the customer bought. The whole pricing model here is "the PERIOD is
+    # bought, and a tier change re-prices it rather than restarting it" — which is
+    # exactly why a downgrade costs nothing and going back up inside the period is
+    # free. Ending the plan the instant somebody clicks away would contradict that
+    # for the one move where it costs the customer real money: paying $19 on the
+    # 1st and cancelling on the 2nd would forfeit 28 days and make re-buying cost
+    # a whole second month.
+    #
+    # So the plan STAYS ACTIVE and keeps its tier, its ``renewal_date`` and its
+    # ``period_paid_usd``; entitlements read ``subscription_status``, so the custom
+    # domain, analytics and badge removal all survive to the end of the month that
+    # paid for them. The renewal sweep is what closes it: a due site carrying this
+    # flag drops to the floor instead of being charged.
+    #
+    # Cleared by resuming (an authorized republish naming the tier again) and by
+    # any authorized tier change, so a site cannot be scheduled to close and then
+    # be quietly renewed anyway. False on every legacy row, which is right — none
+    # of them was ever scheduled to close.
+    plan_cancels_at_period_end: bool = False
     # charge-first: the deploy inputs captured at publish time for a PENDING paid
     # site, so the ``subscription.active`` webhook can run the deferred deploy
     # without re-reading the pocket (the webhook carries only workspace_id +

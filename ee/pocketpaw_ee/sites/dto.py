@@ -311,7 +311,6 @@ class SiteResponse(BaseModel):
     # the caller redirects the buyer to; the site deploys + goes live only after
     # the ``subscription.active`` webhook confirms payment. None for a free/base
     # publish (which deploys immediately) and for any non-publish response.
-    checkout_url: str | None = None
     # DP0-4: where a dynamic site sits in the durable D1 provision job
     # ---- per-site billing state (BC-9) -------------------------------------
     # The frontend has declared and branched on these since BC-9: SiteSummary types
@@ -329,6 +328,56 @@ class SiteResponse(BaseModel):
     plan_tier: str = ""
     subscription_status: str = "none"
     renewal_date: str | None = None
+    # WHAT THIS PERIOD HAS ALREADY BEEN PAID FOR, in whole USD, so the builder can
+    # show what switching plans actually costs instead of the tier's sticker price.
+    #
+    # The two numbers differ for every move except a first purchase: an upgrade
+    # charges only the difference against this, and a downgrade charges nothing.
+    # Without it on the wire the plan cards can only show the full monthly price,
+    # which for a site already on a paid rung is never the amount that will be
+    # taken — so the one screen where a customer is deciding how to spend money
+    # quotes them a figure the publish will not charge.
+    period_paid_usd: int = 0
+    # Is this plan already scheduled to close at ``renewal_date``?
+    #
+    # Without it the Billing tab cannot tell the two states apart: a site running
+    # normally and a site whose last month is running out both read as an active
+    # paid plan with a renewal date, because that is exactly what they are. The
+    # difference is whether that date is the next charge or the end — and showing
+    # "renews on the 14th" to somebody who cancelled is how a cancellation gets
+    # made twice, or gets escalated as one that did not take.
+    plan_cancels_at_period_end: bool = False
+    # WHICH RAIL IS PAYING: "plan" (the workspace subscription carries this site),
+    # "credits" (the wallet bought it), "addon"/"subscription" (sold before the
+    # 2026-09-05 cutover), or "" (free floor).
+    #
+    # On the wire because the Billing tab cannot otherwise tell the two paid
+    # states apart: a carried site and a bought site both read tier ``staff``,
+    # status ``active``. Only the rail says whether the number beside it is a
+    # price the customer pays or an inclusion they already have, and showing
+    # "$19/month" against a site their plan carries is the kind of wrong that
+    # generates a support ticket about a charge that never happened.
+    billing_rail: str = ""
+    # THE WORKSPACE'S SITE SLOTS: how many the plan carries and how many are taken.
+    # ``plan_sites_included`` is None for an uncapped plan (Enterprise) and 0 for
+    # one that carries none.
+    #
+    # Here rather than on ``/entitlements`` because the storefront needs BOTH
+    # halves to price the next publish, and the used count is a question about
+    # sites — it belongs with the read that already owns them. Costs one indexed
+    # count on a read that already does several.
+    plan_sites_used: int = 0
+    plan_sites_included: int | None = None
+    # "Paw Pro" — the WORKSPACE plan's display name, so the Billing tab can say
+    # "included in Paw Pro" rather than "included in your plan".
+    #
+    # Sent from here rather than looked up on the client: the client would have to
+    # fetch the plan catalog on a page that needs nothing else from it, and the
+    # obvious shortcut — title-casing the key — turns "pro_max" into "Pro Max"
+    # while the product is called "Paw Pro Max". The catalog is the only place
+    # that mapping is right. "" when it cannot be resolved, and every consumer
+    # falls back to a generic phrase rather than rendering an empty name.
+    workspace_plan_name: str = ""
     # (none | provisioning | provisioned | failed). A DYNAMIC-site publish does NOT
     # deploy inline — it enqueues the ``provision_site`` job and returns immediately
     # with ``provision_status="provisioning"`` (``deployed=False``); the site goes
@@ -521,6 +570,25 @@ class SiteStatusResponse(BaseModel):
     build_status: str = "none"
     build_reason: str | None = None
     build_job_id: str | None = None
+    # ── The site's BILLING state on the by-pocket read ──────────────────────────
+    #
+    # The frontend has declared these on its own ``SiteStatusResponse`` since BC-11
+    # and the Billing tab prefers them over the gallery summary row — "the
+    # authoritative status", its comment says. This DTO never carried them, so
+    # every one of those reads was ``undefined`` and silently fell through to the
+    # summary. Nothing broke, which is why it survived: the fallback is the same
+    # data one fetch staler. It stops being harmless now that applying a plan
+    # changes these fields and the panel re-reads them to price the NEXT change —
+    # a stale ``period_paid_usd`` quotes an upgrade at a month the customer has
+    # already paid.
+    #
+    # Defaults are the "no plan" values, so a pocket with no Site doc and every
+    # pre-field row read as a free site rather than as an error.
+    plan_tier: str = ""
+    subscription_status: str = "none"
+    renewal_date: str | None = None
+    period_paid_usd: int = 0
+    plan_cancels_at_period_end: bool = False
 
 
 class SiteVersionResponse(BaseModel):

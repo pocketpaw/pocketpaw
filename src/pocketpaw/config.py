@@ -163,20 +163,14 @@ Changes:
     recurring checkout; the subscription webhook reverses it (product_id ->
     plan key) to know which tier renewed. A before-validator degrades a
     malformed env string to {} so a typo can't crash settings load.
-  - 2026-08-21: Added ``dodo_site_products`` (default {}, env
-    POCKETPAW_DODO_SITE_PRODUCTS as a JSON object) — the PER-SITE analogue of
-    ``dodo_plan_products``. ``site_plans._dodo_product_for`` has read
-    ``getattr(get_settings(), "dodo_site_products", None)`` since BC-9 and the
-    field it reads was never declared, so the getattr always returned None, every
-    site tier's ``dodo_product_id`` was None, and no per-site plan could be
-    purchased on any deployment however it was configured. Declaring it makes the
-    env var mean something for the first time.
-  - 2026-08-26: Added ``dodo_site_addons`` (default {}, env
-    POCKETPAW_DODO_SITE_ADDONS as a JSON object) — the tier -> Dodo ADD-ON id map
-    that bills a paid site as a LINE on the workspace subscription instead of a
-    separate per-site subscription. ``dodo_site_products`` is deliberately kept
-    alongside it: per-site subscriptions are live in production and their renewal
-    and cancel webhooks still route through the product map.
+  - 2026-09-05: REMOVED ``dodo_site_products`` and ``dodo_site_addons`` (envs
+    POCKETPAW_DODO_SITE_PRODUCTS / POCKETPAW_DODO_SITE_ADDONS). Paw Sites plans
+    are paid from the workspace CREDIT BALANCE — the publish debits the tier's
+    monthly price and a monthly sweep debits it again each period — so neither
+    map had a reader left. Both are deleted rather than kept unread: a setting
+    nothing consumes is one a future change quietly depends on again. Setting
+    either env var is now inert. ``dodo_plan_products`` and the credit product id
+    are UNTOUCHED — workspace plans and credit top-ups still bill through Dodo.
   - 2026-09-02: Added ``billing_dunning_grace_days`` (default 7, env
     ``POCKETPAW_BILLING_DUNNING_GRACE_DAYS``) — how long a workspace keeps its
     paid plan after a renewal payment fails. A ``subscription.on_hold`` webhook
@@ -2375,51 +2369,6 @@ class Settings(BaseSettings):
             "subscriptions (subscribe raises a clear ValidationError)."
         ),
     )
-    dodo_site_products: Annotated[dict[str, str], NoDecode] = Field(
-        default_factory=dict,
-        description=(
-            "Mapping of PER-SITE plan tier key -> Dodo RECURRING product id (BC-9 "
-            "per-site subscriptions), the per-site analogue of "
-            "dodo_plan_products. ``sites.service.publish_pocket`` looks the "
-            "product up here to decide whether a paid site tier can open a "
-            "checkout at all: with a product it goes charge-first (the site is "
-            "created PENDING and deployed by the subscription.active webhook), "
-            "without one it publishes live and records the tier with NO charge. "
-            "Set via POCKETPAW_DODO_SITE_PRODUCTS as a JSON object keyed by tier, "
-            'e.g. {"site":"pdt_...","staff":"pdt_..."}. Only the SITE-SCOPED rungs '
-            "belong here — the org flats (studio, agency) are bought through an "
-            "org subscription that does not exist yet, and site_plans refuses "
-            "them regardless of what this map says. The pre-2026-08-22 keys "
-            '("pro", "business") are still honoured, so an existing deployment '
-            "keeps charging while the env var is re-keyed. Default empty "
-            "means no per-site tier is purchasable, which is what every "
-            "deployment has been until now — this field was READ by "
-            "site_plans._dodo_product_for from the day per-site plans shipped and "
-            "never DECLARED, so the read always found nothing and setting the env "
-            "var did nothing at all."
-        ),
-    )
-    dodo_site_addons: Annotated[dict[str, str], NoDecode] = Field(
-        default_factory=dict,
-        description=(
-            "Mapping of PER-SITE plan tier key -> Dodo ADD-ON id, the rails a paid "
-            "site bills on now that it is an add-on LINE on the workspace "
-            "subscription rather than a subscription of its own. An add-on is its "
-            "own Dodo entity with its own id and is NOT a product id, so this "
-            "cannot reuse dodo_site_products (which stays, for the per-site "
-            "subscriptions already live in production). "
-            "``billing.service.sync_site_addons`` reads it to build the workspace's "
-            "full add-on cart and pushes that cart with subscriptions.change_plan. "
-            "Set via POCKETPAW_DODO_SITE_ADDONS as a JSON object keyed by tier, "
-            'e.g. {"site":"adn_...","staff":"adn_..."}. Only the SITE-SCOPED rungs '
-            "belong here — the org flats (studio, agency) are refused by site_plans "
-            'regardless of what this map says. The pre-2026-08-22 keys ("pro", '
-            '"business") are honoured through the same alias lookup the product map '
-            "uses. Default empty means no site tier is purchasable as an add-on, and "
-            "a paid publish records the tier without a charge exactly as it does "
-            "with an unconfigured product."
-        ),
-    )
     dodo_checkout_return_base: str = Field(
         default="",
         description=(
@@ -2949,49 +2898,6 @@ class Settings(BaseSettings):
             "instead of a raw URL in the chat. Set False to disable if detection is brittle."
         ),
     )
-
-    @field_validator("dodo_site_products", mode="before")
-    @classmethod
-    def _parse_dodo_site_products(cls, v: object) -> object:
-        """Same degrade as the workspace-plan map: a malformed env string becomes
-        an empty mapping rather than crashing settings load at boot.
-
-        The consequence of an empty mapping is milder here and worth knowing: no
-        per-site tier is purchasable, so a paid selection publishes live and
-        records the tier without a charge. It does not raise.
-        """
-        if v is None or v == "":
-            return {}
-        if isinstance(v, str):
-            try:
-                parsed = json.loads(v)
-            except ValueError:
-                return {}
-            return parsed if isinstance(parsed, dict) else {}
-        return v
-
-    @field_validator("dodo_site_addons", mode="before")
-    @classmethod
-    def _parse_dodo_site_addons(cls, v: object) -> object:
-        """Same degrade as the two product maps: a malformed env string becomes an
-        empty mapping rather than crashing settings load at boot.
-
-        Needs ``NoDecode`` on the field for this to run at all — ``EnvSettingsSource``
-        JSON-decodes a complex field at SOURCE time and raises ``SettingsError``
-        before any field validator sees the value. The field carries it.
-
-        An empty mapping means no site tier is purchasable as an add-on: a paid
-        publish records the tier with no charge. It does not raise.
-        """
-        if v is None or v == "":
-            return {}
-        if isinstance(v, str):
-            try:
-                parsed = json.loads(v)
-            except ValueError:
-                return {}
-            return parsed if isinstance(parsed, dict) else {}
-        return v
 
     @field_validator("dodo_plan_products", mode="before")
     @classmethod

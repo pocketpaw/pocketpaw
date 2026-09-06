@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from uuid import uuid4
 
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.sites import service as sites_service
@@ -61,9 +62,15 @@ def _enforce(monkeypatch, *, on: bool = True) -> None:
 async def _make_workspace() -> str:
     from pocketpaw_ee.cloud.models.workspace import Workspace
 
+    # ``uuid4`` and not a timestamp. A slug built from ``datetime.now()`` collides
+    # when two workspaces are created in the same clock tick, which on Windows is
+    # ~15.6 ms — comfortably longer than two inserts. The tenancy test below makes
+    # exactly that call twice in a row, and a collision hands it the SAME workspace
+    # for owner and intruder, so the read it expects to be refused succeeds and the
+    # test fails intermittently for a reason that has nothing to do with tenancy.
     ws = Workspace(
         name="Acme",
-        slug=f"acme-wire-{datetime.now(UTC).timestamp()}",
+        slug=f"acme-wire-{uuid4().hex}",
         owner="u1",
         plan="pro",
     )

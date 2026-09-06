@@ -261,10 +261,33 @@ async def propose_site_plan_request(
 
     tier_label = getattr(tier, "display_name", "") or canonical_key
     subject = site_name or "this site"
-    human_summary = (
-        f"Put {subject} on the {tier_label} plan "
-        f"(${monthly_price_usd}/month, added to this workspace's subscription)."
-    )
+
+    # A REQUEST FOR THE $0 FLOOR IS A CANCELLATION, and it has to read like one.
+    #
+    # It only started arriving here on 2026-09-05. Dropping a paying site to the
+    # free floor used to change nothing anyone was billed for, so the purchase
+    # gate let it through and no card was ever filed; it CLOSES the plan now, so a
+    # member asking for it is refused and lands in this queue like any other plan
+    # change. Left on the paid wording, the card an admin approves would have read
+    # "Put Acme Dental on the Free plan ($0/month, added to this workspace's
+    # subscription)" — which names no cost, mentions adding a line for a request
+    # that removes one, and gives no hint that a $19 plan is about to end. That is
+    # a money decision described as a formality.
+    is_cancellation = monthly_price_usd <= 0
+    if is_cancellation:
+        human_summary = (
+            f"End {subject}'s paid plan. It keeps what it has until the period it "
+            f"has already paid for runs out, then drops to {tier_label}."
+        )
+    else:
+        # "workspace credits", not "this workspace's subscription": a paid site is
+        # bought from the credit wallet since the same cutover, and an admin told
+        # it lands on a subscription will go looking for an invoice line that does
+        # not exist.
+        human_summary = (
+            f"Put {subject} on the {tier_label} plan "
+            f"(${monthly_price_usd}/month, charged to this workspace's credits)."
+        )
 
     blob: dict[str, Any] = {
         "kind": SITE_PLAN_REQUEST_KIND,
@@ -281,11 +304,20 @@ async def propose_site_plan_request(
         "proposed_event_id": None,
     }
 
-    recommendation = (
-        f"Approving adds ${monthly_price_usd}/month to this workspace's "
-        f"subscription and publishes {subject} on the {tier_label} plan. "
-        "Rejecting leaves the site on its current plan."
-    )
+    if is_cancellation:
+        recommendation = (
+            f"Approving ends the paid plan on {subject} — nothing is charged or "
+            "refunded, the site stays online, and it loses its paid features when "
+            "the current period runs out. Rejecting leaves the plan running."
+        )
+    else:
+        recommendation = (
+            f"Approving charges this workspace's credits for {tier_label} and "
+            f"publishes {subject} on it — the difference only if the site is "
+            "already inside a paid period, otherwise "
+            f"${monthly_price_usd} for the month. "
+            "Rejecting leaves the site on its current plan."
+        )
     trigger = ActionTrigger(
         type="user",
         source=requested_by,

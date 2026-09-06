@@ -3,14 +3,11 @@
 # layer). The Webflow model — each PUBLISHED site carries its OWN recurring
 # ANNUAL plan on a tier, distinct from the workspace plan (``billing.plans``).
 #
-# This is the read-only catalog the per-site subscription flow (publish_pocket)
-# builds on. For each site tier it pairs:
+# This is the read-only catalog the publish flow (publish_pocket) builds on. For
+# each site tier it pairs:
 #   * ``monthly_price_usd`` — the recurring MONTHLY price for the tier (USD,
-#     whole dollars). The intended sticker; the live charge runs through Dodo.
-#   * ``dodo_product_id`` — the Dodo recurring-product id for the tier, or None
-#     until config populates it (read from the ``POCKETPAW_DODO_SITE_PRODUCTS``
-#     mapping setting when configured). None v1 degrades gracefully — the publish
-#     records the intended tier WITHOUT a live charge.
+#     whole dollars). It is BOTH the sticker and the charge: the publish debits
+#     exactly this many dollars, as credits, from the workspace balance.
 #   * ``cloudflare_features`` — the set of Cloudflare features a higher tier
 #     resells (BC-10 provisions these on publish). The base tier resells none.
 #   * ``badge_removal`` — whether a site on this tier may ship WITHOUT the
@@ -52,17 +49,9 @@
 #   own comment for why a site-unit cap needs a hostname-unit companion.
 
 # Updated 2026-08-21 (feat/site-plan-purchasable): added the ``purchasable``
-# property — "can a customer actually buy this tier right now". It is not a new
-# rule, it is an existing one that had no name: a paid tier with no configured
-# Dodo product cannot open a checkout, so ``publish_pocket`` skips charge-first
-# and publishes live with no charge. Nothing on the wire said so, which meant the
-# storefront happily offered an upgrade button that took no money and granted no
-# capability. Naming it lets the card say so instead.
-#
-# It was unbuyable everywhere until today for a duller reason than "unconfigured":
-# ``_dodo_product_for`` reads ``dodo_site_products`` off settings, and that field
-# was never declared, so the read always found None no matter what the environment
-# said. The field exists now.
+# property — "can a customer actually buy this tier right now". It then meant
+# "is a Dodo product configured for it"; see the 2026-09-05 note for what it
+# means now that no site plan touches a gateway.
 #
 # Updated 2026-08-22 (feat/site-pricing-ladder): the catalog now IS the pricing
 # spec — five tiers on the captain's approved ladder (free / site / staff /
@@ -79,14 +68,6 @@
 # ``staff``). ``scripts/migrate_site_plan_keys.py`` rewrites the stored values so
 # the aliases go quiet; nothing breaks if it is never run.
 #
-# THE SAME TRAP EXISTS IN CONFIG and is easier to miss: the deployed
-# ``POCKETPAW_DODO_SITE_PRODUCTS`` map is keyed ``{"pro": ..., "business": ...}``.
-# A rekey that only renamed the catalog would have made every paid tier
-# ``purchasable = False`` the moment it deployed — no checkout, no charge, and a
-# publish silently recording the free floor. ``_dodo_product_for`` therefore
-# reads the canonical key FIRST and falls back to any legacy alias of it, so the
-# existing environment keeps working and the new key wins once it is set.
-#
 # TWO SCOPES NOW LIVE IN ONE CATALOG, which is new and is the other thing to read
 # carefully. ``free``/``site``/``staff`` are PER-SITE: they are bought one site at
 # a time and their key lands in ``Site.plan_tier``. ``studio``/``agency`` are
@@ -97,40 +78,34 @@
 # (by a bug, a hand-edit, or a replayed webhook) fails closed to the floor instead
 # of handing one site the whole org's white-label allowance.
 #
-# The org tiers are CATALOG-ONLY today. There is no org subscription entity, no
-# org checkout and no webhook that could activate one, so they carry no Dodo
-# product and ``purchasable`` is False for both — the storefront renders them as
-# "talk to us", the same shape ``billing.plans`` already uses for Enterprise. That
+# The org tiers are CATALOG-ONLY today. There is no org subscription entity and
+# nothing that could activate one, so ``purchasable`` is False for both — the
+# storefront renders them as "talk to us", the same shape ``billing.plans``
+# already uses for Enterprise. That
 # is deliberate: a buy button that takes no money and grants nothing is worse than
 # an honest contact link. ``white_label`` / ``included_sites`` / the conversation
 # meter fields below are CATALOG CLAIMS — what a tier will sell — and no seam
 # reads them as an entitlement yet. ``SiteEntitlements`` still does not carry
 # them, for the reason its own docstring gives.
 #
-# Updated 2026-08-26 (feat/site-plans-as-addons): added ``dodo_addon_id`` and its
-# resolver ``_dodo_addon_for`` (reading a new ``POCKETPAW_DODO_SITE_ADDONS``
-# map), because a paid site now bills as an ADD-ON LINE on the workspace
-# subscription instead of opening a subscription of its own.
+# Updated 2026-09-05 (fix/sites-plan-credits): DODO IS GONE FROM THIS CATALOG.
 #
-# THE TWO IDS ARE NOT INTERCHANGEABLE and that is why this is a second field
-# rather than a reinterpretation of the first. A Dodo add-on is its own entity
-# with its own id; ``subscriptions.change_plan`` takes ``addons=[{addon_id,
-# quantity}]`` and a product id is rejected there. So the product map stays, the
-# add-on map is new, and each is read by the rail it belongs to.
+# A per-site plan is paid from the WORKSPACE CREDIT BALANCE — the publish debits
+# ``monthly_price_usd * 100`` credits (a credit is a cent) and a monthly sweep
+# debits it again each period. So the two gateway id fields (``dodo_product_id``,
+# ``dodo_addon_id``), their resolvers and the two settings maps that fed them
+# (``POCKETPAW_DODO_SITE_PRODUCTS``, ``POCKETPAW_DODO_SITE_ADDONS``) are all
+# removed rather than left unread. A field nothing consumes is a field someone
+# reintroduces a dependency on.
 #
-# ``purchasable`` now passes on EITHER id. That is deliberate rollout slack: a
-# deployment that has the product map set and the add-on map not yet would
-# otherwise turn every paid tier unbuyable the moment this shipped, and publish
-# paid selections as the free floor — the exact failure the 2026-08-22 rekey note
-# above describes. Per-site subscriptions already sold stay live and keep
-# renewing through the product half; only NEW purchases take the add-on rail.
+# ``purchasable`` therefore changed meaning rather than value: it asks "does the
+# ladder sell this tier ONE SITE AT A TIME", which is True for every per-site rung
+# and False only for the org flats. Whether a given workspace can afford a rung
+# today is a question about its balance, answered at purchase time with a 402 —
+# not a property of the catalog.
 #
-# Updated 2026-09-02 (feat/sites-analytics-gate, SA-2): added
-# ``ANALYTICS_FEATURE`` — the name of the ``cloudflare_features`` member that
-# gates the visitor pageview counter. No new rule and no new column: the tiers
-# that resell ``analytics`` are the ones this catalog has listed since the pricing
-# ladder landed. What is new is that a seam finally READS it, so the string needs
-# a home other than a literal retyped at each caller. See its own comment.
+# The workspace-plan catalog (``billing.plans``) still bills through Dodo and is
+# untouched. Only the per-site ladder left the gateway.
 
 from __future__ import annotations
 
@@ -388,8 +363,7 @@ class SitePlanTier:
     ``key`` matches the ``Site.plan_tier`` string FOR SITE-SCOPED TIERS ONLY; an
     org-scoped row's key is never a legal value there (see ``scope``).
     ``monthly_price_usd`` is the recurring MONTHLY sticker (USD, whole dollars).
-    ``dodo_product_id`` is the recurring-product id, or None until config
-    populates it. ``cloudflare_features`` is the set of Cloudflare features the
+    ``cloudflare_features`` is the set of Cloudflare features the
     tier resells (BC-10 provisions them). ``badge_removal`` is whether a site on
     this tier may ship without the attribution badge — read by
     ``sites.badge.badge_required``. ``sells_concierge`` is whether the tier sells
@@ -412,13 +386,7 @@ class SitePlanTier:
 
     key: str
     monthly_price_usd: int
-    dodo_product_id: str | None
     cloudflare_features: frozenset[str]
-    # Sits here rather than next to ``dodo_product_id``, where it belongs by
-    # meaning, because a defaulted dataclass field cannot precede an undefaulted
-    # one and ``cloudflare_features`` has no default. It defaults so the existing
-    # direct constructions (tests, fixtures) keep working unchanged.
-    dodo_addon_id: str | None = None
     scope: str = ORG_SCOPE
     badge_removal: bool = False
     max_domained_sites: int | None = 0
@@ -466,11 +434,20 @@ class SitePlanTier:
         """Can a customer actually buy this tier right now?
 
         A $0 tier is always purchasable — there is nothing to buy, so selecting it
-        always succeeds. A priced tier needs a configured Dodo recurring product,
-        because without one ``publish_pocket`` cannot open a checkout and falls
-        back to publishing live and recording the tier with no charge. The site
-        then holds a paid ``plan_tier`` with ``subscription_status="none"``, which
-        every entitlement resolves against as the free floor.
+        always succeeds. EVERY PRICED PER-SITE TIER IS ALSO PURCHASABLE NOW, and
+        that is a change of meaning rather than a relaxation: this used to read
+        "has a configured Dodo product" because a gateway was the only thing that
+        could take money, so an unconfigured tier published live with no charge
+        and left the site holding a paid ``plan_tier`` at
+        ``subscription_status="none"`` — the free floor wearing a paid name.
+
+        A paid site now bills against the workspace CREDIT WALLET, which exists on
+        every deployment and needs no gateway configuration at all, so there is no
+        longer a per-site tier that cannot be charged for. What an empty wallet
+        produces is a clean 402 at purchase time, not a silent free grant — so
+        "can this be bought" is answered by the ladder, and "can this be bought
+        RIGHT NOW by this workspace" by the balance, which is the buyer's own
+        business and not a property of the catalog.
 
         AN ORG-SCOPED TIER IS NEVER PURCHASABLE HERE, whatever config says. The
         per-site checkout is the only checkout that exists, and it buys one site;
@@ -484,17 +461,12 @@ class SitePlanTier:
         """
         if self.is_org_scoped:
             return False
-        if self.monthly_price_usd == 0:
-            return True
-        # EITHER rail makes a tier buyable, and the ADD-ON one is the rail new
-        # purchases take. ``dodo_product_id`` is kept in the OR because the
-        # per-site subscriptions it opened are live in production: a deployment
-        # mid-rollout has the product map set and the add-on map not yet, and
-        # returning False there would make every paid tier abruptly unbuyable and
-        # publish paid selections as the free floor. Once the add-on map is
-        # configured everywhere, the product half is only reached by rows that
-        # already hold a per-site subscription.
-        return self.dodo_addon_id is not None or self.dodo_product_id is not None
+        # No gateway test remains. The credit wallet is the rail every new
+        # purchase takes and it needs no configuration, so a per-site rung is
+        # buyable on its price alone. The two Dodo maps are still read elsewhere,
+        # by the paths that renew the subscriptions already sold — they just no
+        # longer decide whether anything can be sold.
+        return True
 
 
 def canonical_site_tier_key(key: str | None) -> str | None:
@@ -515,74 +487,6 @@ def canonical_site_tier_key(key: str | None) -> str | None:
     return _LEGACY_SITE_TIER_ALIASES.get(key)
 
 
-def _dodo_product_for(key: str) -> str | None:
-    """Resolve the Dodo recurring-product id for a site tier, or None.
-
-    Reads an optional ``POCKETPAW_DODO_SITE_PRODUCTS`` mapping
-    (``{tier_key: product_id}``) off settings when present. None is the correct
-    default in v1 — the per-site sub degrades to "record the tier, skip the live
-    charge" when no product is configured. Lazy ``get_settings`` import so building
-    the catalog never forces config load in a context that doesn't have it (e.g. a
-    unit test of ``list_site_plans``); any config error degrades safely to None
-    rather than breaking the read. Mirrors ``billing.plans._dodo_product_for``.
-
-    THE CANONICAL KEY WINS, THEN ANY LEGACY ALIAS OF IT. The deployed environment
-    is keyed ``{"pro": ..., "business": ...}``, and a rename that only looked up
-    the new name would have found nothing — turning every paid tier unpurchasable
-    on deploy, with publishes quietly recording the free floor. Looking through
-    the alias means the running config keeps working and a re-keyed config takes
-    precedence the moment it is set.
-    """
-    try:
-        from pocketpaw.config import get_settings
-
-        mapping = getattr(get_settings(), "dodo_site_products", None)
-    except Exception:
-        return None
-    if not isinstance(mapping, dict):
-        return None
-    candidates = [key] + [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key]
-    for candidate in candidates:
-        val = mapping.get(candidate)
-        if isinstance(val, str) and val:
-            return val
-    return None
-
-
-def _dodo_addon_for(key: str) -> str | None:
-    """Resolve the Dodo ADD-ON id for a site tier, or None.
-
-    The add-on analogue of ``_dodo_product_for``, and a SEPARATE map because a
-    Dodo add-on is its own entity with its own id — it is not a product id and
-    the two are not interchangeable at the API.
-
-    Reads an optional ``POCKETPAW_DODO_SITE_ADDONS`` mapping
-    (``{tier_key: addon_id}``) off settings when present. None is the correct
-    default: a paid publish then records the tier without a live charge, exactly
-    as it does with no product configured. Lazy ``get_settings`` import and a
-    blanket degrade-to-None for the same reason the product resolver has them —
-    building the catalog must never force a config load or raise.
-
-    THE CANONICAL KEY WINS, THEN ANY LEGACY ALIAS OF IT, identically to the
-    product map. A deployment keyed ``{"pro": ..., "business": ...}`` keeps
-    resolving after the 2026-08-22 rename.
-    """
-    try:
-        from pocketpaw.config import get_settings
-
-        mapping = getattr(get_settings(), "dodo_site_addons", None)
-    except Exception:
-        return None
-    if not isinstance(mapping, dict):
-        return None
-    candidates = [key] + [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key]
-    for candidate in candidates:
-        val = mapping.get(candidate)
-        if isinstance(val, str) and val:
-            return val
-    return None
-
-
 def _build(key: str) -> SitePlanTier:
     """Construct a ``SitePlanTier`` for ``key`` from the catalog constants + config.
 
@@ -595,8 +499,6 @@ def _build(key: str) -> SitePlanTier:
     return SitePlanTier(
         key=key,
         monthly_price_usd=_SITE_PLAN_MONTHLY_PRICE_USD.get(key, 0),
-        dodo_product_id=_dodo_product_for(key),
-        dodo_addon_id=_dodo_addon_for(key),
         cloudflare_features=_SITE_PLAN_CF_FEATURES.get(key, frozenset()),
         scope=_SITE_PLAN_SCOPE.get(key, ORG_SCOPE),
         badge_removal=_SITE_PLAN_BADGE_REMOVAL.get(key, False),

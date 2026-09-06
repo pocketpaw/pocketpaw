@@ -678,8 +678,9 @@
 # live charge, never crashing the publish. The publish ENTITLEMENT gate is the
 # existing ``require_sites_plan`` (the "sites" plan feature) ``publish`` already
 # runs FIRST, before any Site insert — a workspace lacking it raises Forbidden and
-# no Site is created. New seam ``_billing_provider`` on ``publish_pocket`` injects
-# a mock subscription provider in tests. A PREVIEW publish skips all of BC-9 (it
+# no Site is created. (The ``_billing_provider`` seam that injected a mock
+# subscription provider went with the rails on 2026-09-05.) A PREVIEW publish
+# skips all of BC-9 (it
 # never persists a Site doc).
 #
 # Updated 2026-06-24 (BC-10 — resell Cloudflare features by site-plan tier):
@@ -1049,6 +1050,7 @@ from pydantic import BaseModel
 from pocketpaw.sites_capture.contact_form import CONTACT_FORM_TYPE, default_event_mapping
 from pocketpaw_ee.cloud._core.errors import (
     CloudError,
+    ConflictError,
     CustomDomainLimitError,
     CustomDomainNotEntitled,
     Forbidden,
@@ -1143,6 +1145,35 @@ _SITES_PLAN_FEATURE = "sites"
 # Site doc — always fits, and the failure surfaces as a clear 422 at publish time
 # rather than an opaque BSON write error (or a doc that can never be updated again).
 _MAX_PENDING_DEPLOY_INPUT_BYTES = 4_000_000
+
+# The rail every paid site is bought on, mirrored from ``billing.service`` so
+# this module does not import billing just to compare a string. Mirrored and not
+# re-exported: billing owns the vocabulary, and
+# ``tests/cloud/sites/test_credits_publish.py`` pins the two copies equal so a
+# rename in one cannot drift from the other.
+#
+# It is the ONLY value anything writes now. ``Site.billing_rail`` still reads
+# ``"addon"`` / ``"subscription"`` / ``""`` on rows sold before Dodo was removed
+# from sites, and those legacy values are exactly what keeps the renewal sweep
+# off a site the gateway may still be billing.
+_CREDITS_RAIL = "credits"
+# The rail a site rides when the WORKSPACE PLAN carries it — Paw Go carries 1,
+# Pro 3, Pro Max 10 — rather than the credit wallet buying it. Mirrored from
+# ``billing.service.PLAN_BILLING_RAIL`` for the same reason ``_CREDITS_RAIL`` is,
+# and pinned equal by the same test.
+#
+# A site on this rail holds ``staff`` capabilities, has no ``renewal_date`` and
+# no ``period_paid_usd``, and is invisible to the renewal sweep. Nothing was
+# bought, so there is no period to honour and no month to price a change against
+# — which is why its tier changes take their own branch below rather than the
+# credits arithmetic.
+_PLAN_RAIL = "plan"
+# The per-site rung a plan-carried site is granted. The workspace ladder's promise
+# is "N sites, no badge, with the concierge", which is precisely what ``staff``
+# is — so the number lives in one place (the plan catalog) and the CAPABILITIES
+# live in another (this rung), rather than being spelled out a second time here.
+# Change the rung the plans include and this is the line to change.
+_PLAN_CARRIED_TIER_KEY = "staff"
 
 
 def _default_bundle_reader(project_dir: str) -> bytes:
@@ -2110,10 +2141,8 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # when unresolved, so the gallery's engine badge is empty-safe.
         engine=engine,
         # charge-first: the Dodo checkout link a PAID-tier publish returns, read
-        # from the transient ``_checkout_url`` PrivateAttr (never persisted). None
         # for a free/live publish and for any list/status read (those docs are
         # loaded from Mongo, where the PrivateAttr defaults to None).
-        checkout_url=getattr(doc, "_checkout_url", None),
         # The per-site billing state. Read straight off the doc — no extra query.
         # These were declared in the frontend and branched on, and never sent.
         #
@@ -2135,6 +2164,13 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
             _renewal.isoformat()
             if (_renewal := getattr(doc, "renewal_date", None)) is not None
             else None
+        ),
+        # What the current period has already been bought at, so the builder can
+        # price a plan CHANGE correctly. Sent for every site, including free ones
+        # (where it is 0), because the client subtracts against it unconditionally.
+        period_paid_usd=int(getattr(doc, "period_paid_usd", 0) or 0),
+        plan_cancels_at_period_end=bool(
+            getattr(doc, "plan_cancels_at_period_end", False)
         ),
         # DP0-4: the dynamic-site provision state (persisted) + the id of the job a
         # dynamic publish just enqueued (transient ``_provision_job_id`` PrivateAttr,
@@ -4109,38 +4145,6 @@ async def site_entitlements(*, workspace_id: str, site_id: str) -> SiteEntitleme
     )
 
 
-async def mark_site_subscription(
-    *,
-    workspace_id: str,
-    site_id: str,
-    status: str,
-    subscription_id: str | None = None,
-    renewal_date: datetime | None = None,
-) -> _SiteDoc | None:
-    """Advance a site's per-site annual subscription lifecycle (BC-9).
-
-    The entity-isolation write the billing webhook calls when a verified PER-SITE
-    ``subscription.*`` delivery (one carrying a ``site_id``) lands: billing owns
-    the Workspace / credits writes, the sites service owns the Site write, so the
-    per-site sub state is updated HERE, not by billing reaching into the Site
-    model. Sets ``subscription_status`` (active | cancelled), and on an
-    activation/renewal also advances ``renewal_date``. Reuses the stored
-    ``subscription_id`` when the caller passes one (a renewal may re-confirm it).
-
-    Tenant-scoped on ``workspace`` via ``_load`` (a missing / cross-tenant /
-    malformed site id raises NotFound → the webhook acks without a write). Returns
-    the updated doc, or raises NotFound when the site does not exist for the
-    workspace (the caller — a verified webhook — treats that as nothing to do)."""
-    site = await _load(workspace_id, site_id)
-    site.subscription_status = status
-    if subscription_id:
-        site.subscription_id = subscription_id
-    if renewal_date is not None:
-        site.renewal_date = renewal_date
-    await site.save()
-    return site
-
-
 async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
     """The ONE canonical Site doc for (workspace, pocket_id), or None (PERF-1).
 
@@ -5982,9 +5986,6 @@ async def publish_pocket(
     site_plan_key: str | None = None,
     builder_origin: str | None = None,
     prewarm_origin: str | None = None,
-    # The buyer's app origin (the router reads it off the Origin / Referer header),
-    # used to build the checkout's return_url so a paid publish can send them back.
-    origin: str | None = None,
     # May THIS caller commit the workspace to a recurring charge? Defaults to
     # False so every path fails closed: the in-process MCP publish tool passes no
     # tier today, and a future caller that starts passing one cannot buy by
@@ -5996,7 +5997,6 @@ async def publish_pocket(
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
     _local_deploy: Callable[[str, str], str] | None = None,
-    _billing_provider: Any | None = None,
 ) -> _SiteDoc:
     """Publish a pocket as a site by id — the shared path for the REST router
     and the in-process MCP tool.
@@ -6009,7 +6009,7 @@ async def publish_pocket(
         ``publish`` → ``require_sites_plan`` — a workspace lacking it never reaches
         the Site insert);
       * stamps ``Site.plan_tier`` + ``Site.subscription_id`` for the tier;
-      * initiates a PER-SITE annual Dodo subscription (BC-7's ``create_subscription``)
+      * (REMOVED 2026-09-05) initiated a PER-SITE annual Dodo subscription
         with ``metadata={workspace_id, site_id, plan_key}`` — the ``site_id`` is how
         the renewal webhook tells a per-site sub from a workspace-plan sub. When
         Dodo is not configured (no recurring product for the site tier), this
@@ -6096,7 +6096,7 @@ async def publish_pocket(
     # ``generator_client.build``, the deferred-activation snapshot — keeps
     # receiving a plain resolved ``bool``, so no other signature changes.
     # Local import, matching this module's existing ``get_settings`` use in
-    # ``_billing_provider`` — the top of the file deliberately imports no
+    # the top of the file deliberately imports no
     # ``pocketpaw.config``.
     from pocketpaw.config import get_settings
 
@@ -6144,27 +6144,18 @@ async def publish_pocket(
     # "paid tier has no configured Dodo product" on the way to being refused
     # downstream by ``_apply_site_plan`` anyway. Refusing it once, here, keeps the
     # dispatcher's two branches meaning what they say.
-    tier = site_plans.site_scoped_tier(site_plan_key) or site_plans.get_site_plan(
-        site_plans.BASE_SITE_PLAN_KEY
-    )
+    # TWO VARIABLES, because "asked for the free floor" and "asked for nothing"
+    # are different requests and the branches below act differently on them.
+    # ``requested_tier`` is None for BOTH a missing key and an org-scoped one
+    # (``studio`` / ``agency`` are not legal per-site tiers), so neither can be
+    # mistaken for a deliberate downgrade to free.
+    requested_tier = site_plans.site_scoped_tier(site_plan_key)
+    tier = requested_tier or site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)
+    # ONE QUESTION, where there used to be three. A tier is either priced or it is
+    # not; there is no longer a second question about whether some gateway happens
+    # to be configured to charge for it, because the workspace credit balance is
+    # the only instrument and every deployment has one.
     is_paid = tier is not None and tier.monthly_price_usd > 0
-    dodo_configured = tier is not None and bool(tier.dodo_product_id)
-    # THE ADD-ON RAIL, and it WINS over the per-site one when both are configured.
-    # A paid site is a line on the workspace's existing subscription now; the
-    # per-site product only still exists so the subscriptions already sold keep
-    # renewing. Checking the add-on first is what stops a deployment that has both
-    # maps set (the normal state during rollout) from opening exactly the separate
-    # subscription this rail replaces.
-    addon_configured = tier is not None and bool(tier.dodo_addon_id)
-
-    if is_paid and not dodo_configured and not addon_configured:
-        # A paid tier with neither rail configured can't charge at all — fall back
-        # to publishing LIVE immediately so the user is never stranded.
-        logger.warning(
-            "sites.publish: paid tier %s has no configured Dodo add-on or product — "
-            "publishing live immediately (no charge)",
-            tier.key if tier is not None else site_plan_key,
-        )
 
     # Is this site ALREADY paying? A republish of a live paid site is a content
     # edit, not a purchase, and the charge-first branch below used to treat the two
@@ -6199,26 +6190,6 @@ async def publish_pocket(
     # billed, and the check then compared the new tier against itself, saw a
     # no-op republish, and allowed what it had just paid for. Caught by
     # test_an_unauthorized_upgrade_is_refused.
-    _requested_tier_key = (
-        site_plans.canonical_site_tier_key(site_plan_key) if site_plan_key else None
-    )
-    _held_tier_key = (
-        site_plans.canonical_site_tier_key(getattr(existing_doc, "plan_tier", None))
-        if existing_doc is not None
-        else None
-    )
-    if (
-        is_paid
-        and site_plan_key is not None
-        and _requested_tier_key != _held_tier_key
-        and not purchase_authorized
-    ):
-        raise Forbidden(
-            "sites.plan_purchase_forbidden",
-            "Buying a paid site plan needs a workspace admin. Publish on the free "
-            "plan, or ask an admin to upgrade this site.",
-        )
-
     # TWO RAILS PAY, AND ONLY ONE OF THEM LEAVES A ``subscription_id``.
     #
     # "has an active per-site subscription id" was the whole test until add-ons
@@ -6236,85 +6207,342 @@ async def publish_pocket(
         if existing_doc is not None
         else None
     )
-    paying_on_addon = (
-        existing_doc is not None
-        and existing_doc.subscription_status == "active"
-        and not existing_doc.subscription_id
-        and _existing_tier is not None
-        and _existing_tier.monthly_price_usd > 0
-    )
+    # ONE RAIL PAYS, so this is one predicate. It used to be three, because a site
+    # could be paying through a per-site Dodo subscription, through an add-on line
+    # on the workspace subscription, or through the wallet — and telling those
+    # apart decided which instrument a tier change moved.
+    #
+    # "Active, on a priced tier" IS the proof of payment now. It deliberately does
+    # NOT consult ``billing_rail``: a site left on a legacy rail by the Dodo
+    # removal is still a site the customer is paying for, and reading it as unpaid
+    # would charge them for a republish of something they already own.
     already_paying = (
         existing_doc is not None
         and existing_doc.subscription_status == "active"
-        and (bool(existing_doc.subscription_id) or paying_on_addon)
+        and _existing_tier is not None
+        and _existing_tier.monthly_price_usd > 0
     )
 
-    if paying_on_addon and is_paid and addon_configured and existing_doc.plan_tier != tier.key:
-        # A genuine TIER CHANGE on a site paying via an add-on. There is no
-        # per-site subscription to move — the change is expressed as a different
-        # cart on the workspace's subscription, so stamp the new tier first and
-        # then re-sync. Stamp first for the same reason the purchase path does:
-        # the cart is built from the documents.
+    _held_tier_key = (
+        site_plans.canonical_site_tier_key(getattr(existing_doc, "plan_tier", None))
+        if existing_doc is not None
+        else None
+    )
+
+    # DOES THE WORKSPACE PLAN CARRY THIS SITE? Go carries 1, Pro 3, Pro Max 10, at
+    # ``staff`` quality and for no money. Resolved BEFORE the authorization gate
+    # because a carried site is not a purchase, and a gate that fired first would
+    # send a member to find an admin to approve spending nothing.
+    #
+    # Asked only when the answer can change something — a paid tier is being
+    # requested, or the site is already riding the plan — so an ordinary free
+    # publish still costs no extra reads.
+    _on_plan_rail = (
+        existing_doc is not None and getattr(existing_doc, "billing_rail", "") == _PLAN_RAIL
+    )
+    _plan_carries = False
+    if is_paid or _on_plan_rail:
+        _plan_carries = await _plan_can_carry(
+            workspace_id, site_id=str(existing_doc.id) if existing_doc is not None else None
+        )
+    # ``is_paid or already_paying``, and the second half is not redundant. The gate
+    # used to ask only "is the tier being requested a priced one?", which was the
+    # whole question while dropping to the free floor left the subscription open
+    # and changed nothing anyone was billed for. It closes the subscription now —
+    # so without ``already_paying`` here, a member too junior to see the billing
+    # page could END a plan the workspace pays for, taking the custom domain, the
+    # concierge and badge removal off a live site, and nothing would restore any
+    # of it. Spending the company's money and cancelling what the company already
+    # bought are the same decision seen from two sides.
+    #
+    # Still narrow: it needs an EXPLICIT key naming a different tier. A republish
+    # that omits the key, or names the tier the site already holds, is a content
+    # edit and stays a member action, which is what the people who build these
+    # sites do all day.
+    #
+    # Keyed on ``requested_tier`` and not on the raw key, so an ORG flat cannot
+    # trip it. ``studio`` and ``agency`` are not per-site tiers at all: the
+    # request is rejected downstream and the site keeps the tier it holds, so
+    # answering it with "ask an admin" would name a permission that would not
+    # help and imply the upgrade is one an admin could make.
+    # ...and it exempts a move the PLAN carries, in both directions. The line this
+    # gate draws is money, not capability: ``sites.buy_plan`` is named for buying,
+    # its refusal code is ``plan_purchase_forbidden``, and the hole it was written
+    # to close was a member committing the company to a recurring charge. Taking a
+    # slot the workspace subscription already paid for commits it to nothing, and
+    # giving one back is free AND reversible — a member can re-apply the tier and
+    # the slot comes back, which is exactly what a credits cancellation cannot do
+    # without spending a fresh month. Irreversible-or-costly needs an admin; free
+    # and reversible does not.
+    if (
+        requested_tier is not None
+        and (is_paid or already_paying)
+        and requested_tier.key != _held_tier_key
+        and not purchase_authorized
+        and not (_plan_carries or _on_plan_rail)
+    ):
+        raise Forbidden(
+            "sites.plan_purchase_forbidden",
+            "Changing a site's paid plan needs a workspace admin. Publish on the "
+            "plan it already has, or ask an admin to change it.",
+        )
+
+    # Is the caller asking to MOVE this paying site to a different tier? Compared
+    # on canonical keys so a stored legacy alias does not read as a change to the
+    # tier it is an alias of, and gated on ``requested_tier`` so a republish that
+    # simply omits the key is never mistaken for one.
+    tier_change_requested = (
+        already_paying
+        and requested_tier is not None
+        and _held_tier_key != requested_tier.key
+    )
+
+    # A PAYING SITE STILL ON A LEGACY DODO RAIL CANNOT CHANGE TIER HERE.
+    #
+    # This is the one case the credits cutover cannot serve, and it is refused
+    # rather than approximated. A site sold before the cutover is a line on the
+    # workspace's Dodo subscription (or, older still, a per-site subscription).
+    # Dodo goes on billing that line every month, and the code that could adjust
+    # or cancel it — ``sync_site_addons`` — was deleted with the rest of the
+    # gateway. So every way of serving a tier change here takes money twice:
+    # charging the wallet bills the customer on both rails at once, and NOT
+    # charging hands them a paid upgrade Dodo is still invoicing at the old price.
+    #
+    # ``already_paying`` deliberately ignores ``billing_rail`` one block up, which
+    # is right for its own question — a legacy site IS paid for, and reading it as
+    # unpaid would charge for a republish of something the customer already owns.
+    # This narrower guard is the other half of that: paid, yes; re-priceable here,
+    # no. A same-tier republish is untouched and stays free, which is what the
+    # people affected actually do every day.
+    #
+    # The remedy is an operator moving the row to the wallet once the Dodo line is
+    # cancelled — one field, and the runbook has it. Refusing a downgrade to free
+    # on the same rail is deliberate too: it looks hostile, but silently clearing
+    # the subscription would strip the entitlements while Dodo kept charging, and
+    # nothing left in the product would ever surface that again.
+    if tier_change_requested and existing_doc.billing_rail not in (_CREDITS_RAIL, _PLAN_RAIL):
+        raise ConflictError(
+            "sites.legacy_billing_rail",
+            "This site is still billed through the old payment provider, so its "
+            "plan can't be changed here yet. Contact support and we'll move it "
+            "over to workspace credits. Nothing has been charged.",
+        )
+
+    # A PLAN-CARRIED SITE HAS NO PRICE, so none of the credits arithmetic below
+    # applies to it and running that arithmetic would invent one. ``period_paid_usd``
+    # is 0 on this rail, so a move to ``site`` would compute a $7 difference and
+    # DEBIT THE WALLET to make a free site cheaper — a charge for a downgrade, on a
+    # site nobody is paying for.
+    #
+    # Two moves are possible and both are free:
+    #
+    #   * to a paid rung — a no-op. The plan already carries this site at ``staff``,
+    #     which is the top of the per-site ladder, so there is nothing above to move
+    #     to and nothing to charge for moving below. The request is honoured by
+    #     leaving the site exactly as it is rather than by refusing it, because the
+    #     buyer asked for a capability they already have.
+    #   * to the free floor — the slot is RELEASED, immediately. Unlike a credits
+    #     cancellation there is no paid period to run to the end of: nothing was
+    #     bought, so there is nothing to honour and nothing to forfeit. The slot
+    #     goes back to the workspace the moment it is given up, which is what makes
+    #     this reversible enough to be a member action.
+    if _on_plan_rail and tier_change_requested:
+        if is_paid:
+            logger.info(
+                "sites.publish: site %s is carried by the workspace plan — the "
+                "request for %s changes nothing and costs nothing (it already holds "
+                "%s)",
+                str(existing_doc.id),
+                tier.key,
+                existing_doc.plan_tier,
+            )
+        else:
+            existing_doc.billing_rail = ""
+            existing_doc.subscription_status = "none"
+            existing_doc.renewal_date = None
+            existing_doc.period_paid_usd = 0
+            existing_doc.plan_cancels_at_period_end = False
+            await existing_doc.save()
+            logger.info(
+                "sites.publish: site %s released its workspace-plan slot and "
+                "dropped to the free floor",
+                str(existing_doc.id),
+            )
+    elif tier_change_requested and is_paid:
+        # A TIER CHANGE on a credits site, priced as the DIFFERENCE against what
+        # this period has already been paid for — never as a fresh month.
+        #
+        # Charging the new tier's full month, which is what this did, was wrong
+        # three separate ways at once. A DOWNGRADE took more money than the plan
+        # being left. Flipping between two tiers in an afternoon charged a month
+        # per flip, so a wallet could be drained by a customer doing nothing but
+        # changing their mind. And an upgrade charged a second full month for a
+        # period the customer had already bought, then reset ``renewal_date`` and
+        # handed back a free month to hide it.
+        #
+        # ``period_paid_usd`` is a HIGH-WATER MARK, so one subtraction answers all
+        # three: an upgrade pays only the gap, a downgrade pays nothing, and
+        # returning to a tier already bought this period pays nothing. It is not
+        # time-prorated — an upgrade on day 29 costs the same gap as one on day 2
+        # — because the wallet has no proration machinery and inventing one here
+        # would be a second pricing model maintained in the wrong module. That
+        # rounds in the customer's favour on a downgrade and against them on a
+        # late upgrade, by at most the gap, and it is written down rather than
+        # left to be discovered.
+        #
+        # ``renewal_date`` IS NOT TOUCHED. The period was bought; a tier change
+        # re-prices it, it does not restart it.
+        #
+        # CHARGE BEFORE STAMP. A wallet debit takes the amount as an argument and
+        # reads no documents, so stamping first would only widen the window in
+        # which a refused charge leaves the site claiming a tier it never paid for.
         from pocketpaw_ee.cloud.billing import service as _billing_service
 
+        already_paid_usd = int(getattr(existing_doc, "period_paid_usd", 0) or 0)
+        delta_usd = int(tier.monthly_price_usd) - already_paid_usd
+        if delta_usd > 0:
+            await _billing_service.charge_site_plan_credits(
+                workspace_id=workspace_id,
+                site_id=str(existing_doc.id),
+                tier_key=tier.key,
+                amount_usd=delta_usd,
+                period_start=datetime.now(UTC),
+                member_id=user_id,
+            )
+            existing_doc.period_paid_usd = int(tier.monthly_price_usd)
         _previous_tier = existing_doc.plan_tier
         existing_doc.plan_tier = tier.key
+        # Moving to a different paid tier is a decision to keep paying, so it
+        # cancels a pending close. Left set, the sweep would drop the site to the
+        # floor at the renewal the admin just paid to change.
+        existing_doc.plan_cancels_at_period_end = False
         await existing_doc.save()
-        try:
-            await _billing_service.sync_site_addons(workspace_id, provider=_billing_provider)
-        except Exception:
-            existing_doc.plan_tier = _previous_tier
-            await existing_doc.save()
-            raise
         logger.info(
-            "sites.publish: site %s moved %s -> %s on the workspace add-on cart",
+            "sites.publish: site %s moved %s -> %s, $%s charged to the credit "
+            "wallet (period already covered $%s)",
             str(existing_doc.id),
             _previous_tier,
             tier.key,
+            max(delta_usd, 0),
+            already_paid_usd,
         )
 
-    if already_paying and is_paid and dodo_configured and existing_doc.plan_tier != tier.key:
-        # A genuine TIER CHANGE on a paying site. Move the existing subscription
-        # rather than buying a second one; the gateway prorates, so the buyer keeps
-        # the term they already paid for. Cancel-then-create would forfeit it.
+    if tier_change_requested and not is_paid and not _on_plan_rail:
+        # AN EXPLICIT DOWNGRADE TO THE FREE FLOOR ends the plan, and the document
+        # has to say so — the original bug here was that it did not. The site kept
+        # ``subscription_status="active"`` and a live ``renewal_date`` while
+        # sitting on a $0 tier: a free site the product described as an active paid
+        # subscription, which the renewal sweep then woke on and healed every tick.
         #
-        # Deliberately NOT wrapped in a try/except that falls back to
-        # ``create_subscription``: that fallback is precisely the double-billing
-        # this branch exists to remove. A gateway refusal propagates, the site keeps
-        # the tier it is actually paying for, and the caller sees the error.
-        prov = _billing_provider or _default_billing_provider()
-        await prov.change_plan(
-            subscription_id=existing_doc.subscription_id,
-            product_id=tier.dodo_product_id,
-            plan_key=tier.key,
-            # EMPTY ON PURPOSE, and only safe because of what this subscription is.
-            # ``existing_doc.subscription_id`` is a PER-SITE subscription — one
-            # subscription that buys one site — and nothing ever attaches an add-on
-            # to one. The workspace subscription that DOES carry site add-ons is a
-            # different row and is not touched here. Sending [] to that one would
-            # cancel every paid site in the workspace.
-            addons=[],
-        )
+        # Reached only through ``tier_change_requested``, which needs an explicit
+        # site-scoped key. A republish that merely OMITS ``site_plan_key`` must
+        # never land here — that request means "leave the plan alone", and
+        # treating it as a downgrade is how a paying customer silently loses every
+        # capability they are still being billed for.
+        #
+        # The end is SCHEDULED, NOT IMMEDIATE, while the site is still inside a
+        # month it has paid for. Closing on the spot is the mirror image of the
+        # whole change removed: the model is "the PERIOD is bought, and a tier
+        # change re-prices it rather than restarting it" — which is why a downgrade
+        # costs nothing and going back up inside the period is free — and ending
+        # the plan the moment someone clicks away contradicts that for the one move
+        # where it costs the customer money. Paying $19 on the 1st and cancelling
+        # on the 2nd would forfeit 28 days AND make re-buying cost a second full
+        # month, because ``period_paid_usd`` would already be back to zero.
+        #
+        # So everything the customer bought is left standing — tier, active status,
+        # renewal date, paid mark — and the renewal sweep closes it when the period
+        # it paid for actually runs out. Entitlements read ``subscription_status``,
+        # so the custom domain, analytics and badge removal survive to the same
+        # date rather than disappearing under a live site mid-month.
+        _period_end = getattr(existing_doc, "renewal_date", None)
+        if _period_end is not None:
+            existing_doc.plan_cancels_at_period_end = True
+            await existing_doc.save()
+            logger.info(
+                "sites.publish: site %s set to close at the end of the period it "
+                "has paid for (%s) — tier %s and its capabilities stay until then",
+                str(existing_doc.id),
+                _period_end,
+                existing_doc.plan_tier,
+            )
+        else:
+            # No period end to run to. An active paid site with no renewal date is
+            # not a shape this path writes; it is a legacy or half-healed row, and
+            # there is nothing to honour, so close it now rather than leave a paid
+            # tier standing with nothing scheduled to ever end it.
+            existing_doc.subscription_status = "none"
+            existing_doc.renewal_date = None
+            existing_doc.period_paid_usd = 0
+            existing_doc.plan_cancels_at_period_end = False
+            await existing_doc.save()
+            logger.info(
+                "sites.publish: site %s moved to the free floor — subscription "
+                "closed immediately (no renewal date to run to)",
+                str(existing_doc.id),
+            )
+
+    # RESUMING a plan that is scheduled to close. The gesture is "apply the plan
+    # this site already has" — which is what the Billing tab's plan selector shows
+    # while a close is pending — so it arrives as a same-tier republish, the one
+    # shape ``tier_change_requested`` is written to ignore.
+    #
+    # It needs the EXPLICIT key and it needs authorization. A republish carrying no
+    # key means "leave the plan alone" and must not resurrect a cancellation the
+    # workspace decided on; and resuming re-arms a recurring charge, which is a
+    # spend commitment and therefore an admin's to make. An unauthorized member
+    # republishing the same tier is NOT refused — that is their daily content edit
+    # and it stays free — the close simply remains scheduled.
+    #
+    # Nothing is charged: the period was already bought, ``period_paid_usd`` still
+    # records it, and the renewal that was about to close the plan now renews it.
+    if (
+        already_paying
+        and requested_tier is not None
+        and _held_tier_key == requested_tier.key
+        and purchase_authorized
+        and getattr(existing_doc, "plan_cancels_at_period_end", False)
+    ):
+        existing_doc.plan_cancels_at_period_end = False
+        await existing_doc.save()
         logger.info(
-            "sites.publish: site %s moved %s → %s on subscription %s (no new checkout)",
+            "sites.publish: site %s resumed on %s — the scheduled close is off and "
+            "it renews on %s as normal",
             str(existing_doc.id),
             existing_doc.plan_tier,
-            tier.key,
-            existing_doc.subscription_id,
+            getattr(existing_doc, "renewal_date", None),
         )
 
-    if is_paid and addon_configured and not already_paying:
-        # PAID + not yet paying → bill it as an ADD-ON on the workspace's own
-        # subscription and deploy in the same request.
+    if is_paid and not already_paying:
+        # PAID + not yet paying → the plan carries it, or the wallet buys it.
         #
-        # STILL CHARGE-FIRST, without the pending/webhook dance. The old rail had
-        # to defer the deploy because payment happened on a hosted checkout the
-        # buyer wandered off to, so "did they pay" was only answerable later, by a
-        # webhook. Attaching an add-on charges the card already on the
-        # subscription, synchronously, inside this request — so the answer is
-        # known here and the site can go live immediately. The buyer never leaves
-        # the app and there is no ``checkout_url`` in the response.
-        return await _publish_addon_site(
+        # THIS REPLACED TWO DODO RAILS, and the reason is worth keeping. The add-on
+        # rail could only charge a workspace that already held a Dodo subscription;
+        # every workspace without one — self-hosted, or simply not on a paid
+        # workspace plan — got ``NoActiveSubscription``, a site left PENDING and
+        # undeployed, and a Billing tab telling it to complete a checkout that was
+        # never opened. The per-site rail did open one, and then waited forever for
+        # a payment nobody could make. Neither had a route forward from inside the
+        # product. The wallet has no such dependency and answers "did they pay"
+        # inside the request, which is what lets the deploy happen in it.
+        # THE PLAN CARRIES ITS SITES AT ``staff``, whichever rung was asked for.
+        # A buyer on Paw Pro who picks the $7 rung is not asking to be given less
+        # than their subscription includes — they are picking from a price list
+        # that does not apply to them. Granting the lower rung would leave the
+        # concierge off on a site the plan pays for, and the difference would be
+        # invisible: both cost nothing.
+        _carried_tier = tier
+        if _plan_carries:
+            _carried_tier = site_plans.site_scoped_tier(_PLAN_CARRIED_TIER_KEY) or tier
+            if _carried_tier.key != tier.key:
+                logger.info(
+                    "sites.publish: workspace %s asked for %s and its plan carries "
+                    "%s — granting the higher rung the subscription includes",
+                    workspace_id,
+                    tier.key,
+                    _carried_tier.key,
+                )
+        return await _publish_credits_site(
             workspace_id=workspace_id,
             user_id=user_id,
             pocket_id=pocket_id,
@@ -6326,35 +6554,16 @@ async def publish_pocket(
             name=name or pocket.get("name", ""),
             builder_origin=builder_origin,
             keeps_client_bundle=keeps_client_bundle,
-            tier=tier,
-            provider=_billing_provider,
+            tier=_carried_tier,
+            covered_by_plan=_plan_carries,
             _generator=_generator,
             _cloudflare=_cloudflare,
             _bundle_reader=_bundle_reader,
             _local_deploy=_local_deploy,
         )
 
-    if is_paid and dodo_configured and not already_paying:
-        # PAID + chargeable on the LEGACY per-site rail (no add-on configured for
-        # the tier) → defer the deploy until subscription.active.
-        return await _publish_pending_site(
-            workspace_id=workspace_id,
-            user_id=user_id,
-            pocket_id=pocket_id,
-            ripple_spec=ripple_spec,
-            theme=theme,
-            engine=engine,
-            source=source,
-            pattern=pattern,
-            name=name or pocket.get("name", ""),
-            builder_origin=builder_origin,
-            keeps_client_bundle=keeps_client_bundle,
-            tier=tier,
-            provider=_billing_provider,
-            origin=origin,
-        )
-
-    # FREE/base (or paid-but-unconfigured fallback) → publish LIVE now.
+    # FREE/base → publish LIVE now. Every PAID tier was handled above by the
+    # credits rail, so nothing priced reaches this point.
     doc = await publish(
         workspace_id=workspace_id,
         user_id=user_id,
@@ -6410,7 +6619,6 @@ async def publish_pocket(
         user_id=user_id,
         pocket_id=pocket_id,
         site_plan_key=site_plan_key,
-        provider=_billing_provider,
     )
 
 
@@ -6421,7 +6629,6 @@ async def _apply_site_plan(
     user_id: str,
     pocket_id: str,
     site_plan_key: str | None,
-    provider: Any | None,
 ) -> _SiteDoc:
     """Stamp the per-site annual plan on a freshly published Site doc, open its
     per-site Dodo subscription, and emit ``SitePublished`` (BC-9).
@@ -6487,14 +6694,16 @@ async def _apply_site_plan(
                 str(doc.id),
                 existing_tier.key,
             )
-    # An UNPURCHASABLE paid tier is not recorded. A priced tier with no configured
-    # Dodo product cannot open a checkout, so ``publish_pocket`` deliberately
-    # publishes live rather than strand the buyer — but stamping the tier anyway
-    # wrote a claim the site could not back: ``plan_tier="pro"`` with
-    # ``subscription_status="none"``, which every entitlement resolves as the free
-    # floor. The buyer picked a paid plan, was charged nothing, received nothing,
-    # and the plan card said "pro". The publish still succeeds and the site still
-    # goes live; what changes is that the record stays true.
+    # A tier the ladder does not sell ONE SITE AT A TIME is not recorded. Only an
+    # ORG flat can be that now — every per-site rung is buyable, because the
+    # workspace credit balance can pay for any of them — and an org key is already
+    # refused upstream by ``site_scoped_tier``. The check is kept as a belt: the
+    # field is derived from the catalog, and a rung retired later must not be
+    # stamped onto a site that cannot hold it.
+    #
+    # It used to mean "no Dodo product is configured for this tier", which was the
+    # state that made the buyer pick a paid plan, pay nothing, receive nothing, and
+    # see the plan card say the tier anyway. That state no longer exists.
     #
     # Falls back exactly like the unknown-key path above — to the site's existing
     # tier, and only then to the floor — so this never downgrades a site that is
@@ -6504,9 +6713,9 @@ async def _apply_site_plan(
         existing_tier = site_plans.site_scoped_tier(getattr(doc, "plan_tier", None))
         tier = existing_tier or site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)
         logger.warning(
-            "sites: publish for site %s asked for tier %s, which has no configured "
-            "Dodo product and so cannot be bought — recording %s instead of a paid "
-            "tier the site would not actually hold",
+            "sites: publish for site %s asked for tier %s, which the ladder does "
+            "not sell per site — recording %s instead of a tier the site would not "
+            "actually hold",
             str(doc.id),
             unbuyable,
             tier.key if tier is not None else site_plans.BASE_SITE_PLAN_KEY,
@@ -6514,77 +6723,55 @@ async def _apply_site_plan(
 
     plan_key = tier.key if tier is not None else site_plans.BASE_SITE_PLAN_KEY
 
-    site_id = str(doc.id)
-    subscription_id: str | None = None
-    # Open a PER-SITE annual Dodo subscription when the tier has a configured
-    # recurring product. metadata.site_id is the per-site discriminator the
-    # webhook routes on. No product configured (v1 default) → record the tier
-    # without a live charge; never crash the publish.
-    # A site that is ALREADY paying must not be charged again by the stamp path.
+    # A PENDING CLOSE KEEPS ITS TIER UNTIL THE PERIOD ENDS. The request that
+    # scheduled the close carries ``site_plan_key="free"``, so without this the
+    # stamp below would write the floor onto the row immediately — and entitlements
+    # resolve from ``plan_tier`` as much as from ``subscription_status``, so the
+    # custom domain and the badge removal would vanish the instant somebody
+    # cancelled, in the middle of a month they had paid for. That is the exact
+    # forfeit ``plan_cancels_at_period_end`` exists to prevent, and it would have
+    # been invisible: the scheduling branch upstream writes the flag correctly and
+    # this function, running afterwards, quietly undid the half that the customer
+    # can see.
     #
-    # This guard is here and not only in the caller on purpose. Until the republish
-    # fix, a paid+configured tier could never REACH this function — the dispatcher
-    # always routed it to ``_publish_pending_site`` — so the branch below was
-    # effectively dead for paying sites. Routing same-tier republishes through the
-    # live path is what arms it, and without this check it would open a fresh
-    # checkout, take the ``if subscription_id`` arm of the stamp below, overwrite
-    # the authoritative gateway id with a checkout session id, and knock the status
-    # back to "pending". That is the whole defect, reintroduced one layer down.
-    #
-    # With no new checkout, ``subscription_id`` stays None and the stamp falls to
-    # the ``elif`` — whose existing ``!= "active"`` carve-out then preserves both
-    # the id and the status untouched.
-    already_paying = getattr(doc, "subscription_status", None) == "active" and bool(
-        getattr(doc, "subscription_id", None)
-    )
-    # ``not tier.dodo_addon_id``: a tier that HAS an add-on rail is billed on the
-    # workspace subscription, and this live path must not also open a per-site
-    # subscription for it — that is the double charge the add-on rail removes. The
-    # add-on rail does its own charging in ``_publish_addon_site`` before the
-    # deploy; by the time a site on that rail reaches here it is already paying.
-    if tier is not None and tier.dodo_product_id and not tier.dodo_addon_id and not already_paying:
-        try:
-            prov = provider or _default_billing_provider()
-            checkout = await prov.create_subscription(
-                plan_key=plan_key,
-                product_id=tier.dodo_product_id,
-                workspace_id=workspace_id,
-                customer_email=None,
-                metadata={
-                    "workspace_id": workspace_id,
-                    "site_id": site_id,
-                    "plan_key": plan_key,
-                },
-            )
-            subscription_id = checkout.subscription_id or None
-        except Exception:  # noqa: BLE001 — a billing hiccup must not undo the deploy
-            logger.warning(
-                "sites.publish: per-site subscription init failed for site %s "
-                "(tier=%s) — recording the tier without a live charge",
-                site_id,
-                plan_key,
-                exc_info=True,
-            )
+    # The renewal sweep writes the floor when the paid period actually runs out.
+    if getattr(doc, "plan_cancels_at_period_end", False) and (
+        tier is None or tier.monthly_price_usd <= 0
+    ):
+        _held = site_plans.site_scoped_tier(getattr(doc, "plan_tier", None))
+        if _held is not None and _held.monthly_price_usd > 0:
+            plan_key = _held.key
 
-    # Stamp the per-site plan on the (already persisted) canonical Site doc.
-    doc.plan_tier = plan_key
-    # A live sub starts pending until Dodo posts a verified subscription.active;
-    # an unconfigured (no-charge) tier has no live sub to activate, so it stays
-    # "none". The per-site webhook advances "pending" → "active".
+    # A PLAN-CARRIED SITE KEEPS THE RUNG ITS PLAN CARRIES, whatever was requested.
+    # The publish path already decided that a site riding the workspace plan holds
+    # ``staff`` and charged nothing for it — and then this function, running
+    # afterwards, wrote the requested key straight over the top. So asking a
+    # carried site for the $7 rung silently DOWNGRADED it: same rail, same zero
+    # cost, concierge gone, and the only trace a tier string nobody was watching.
     #
-    # The ACTIVE case is carved out, for the same reason the tier fallback above is:
-    # a republish of a site that is already paying opened no new subscription
-    # (``subscription_id`` is None on this pass because no fresh checkout was made),
-    # and writing "none" over "active" silently strips every paid capability from a
-    # customer who is still being charged. Nothing restores it — only the webhook
-    # writes "active", and it has already fired for this subscription. Keep what the
-    # site has; a genuine cancellation arrives as a webhook, never as the absence of
-    # a checkout during an unrelated republish.
-    if subscription_id:
-        doc.subscription_id = subscription_id
-        doc.subscription_status = "pending"
-    elif doc.subscription_status != "active":
-        doc.subscription_id = subscription_id
+    # The release path is unaffected: dropping a carried site to the floor clears
+    # the rail BEFORE this runs, so there is nothing here to preserve.
+    if getattr(doc, "billing_rail", "") == _PLAN_RAIL:
+        plan_key = _PLAN_CARRIED_TIER_KEY
+
+    site_id = str(doc.id)
+
+    # NO CHARGE HAPPENS HERE, and that is worth stating where a gateway call used
+    # to be. This function is the FREE path's stamp: a priced tier is bought and
+    # marked active by ``_publish_credits_site`` before its deploy, so anything
+    # reaching this line is either the floor or a republish of a site that is
+    # already paying for what it holds.
+    #
+    # What was removed: an ``await prov.create_subscription(...)`` that opened a
+    # per-site Dodo subscription whenever the tier had a product configured, and
+    # then wrote the returned CHECKOUT SESSION id into ``subscription_id`` and
+    # knocked the status back to "pending" — a site that had just been deployed
+    # live, told it was awaiting a payment.
+    doc.plan_tier = plan_key
+    # Leave a PAYING site's status alone. Writing "none" over "active" during an
+    # unrelated republish silently strips every paid capability from a customer who
+    # is still being billed, and nothing restores it.
+    if doc.subscription_status != "active":
         doc.subscription_status = "none"
     await doc.save()
 
@@ -6602,30 +6789,146 @@ async def _apply_site_plan(
     return doc
 
 
-def _site_checkout_return_urls(origin: str | None) -> tuple[str | None, str | None]:
-    """Build (return_url, cancel_url) for a per-site checkout, or (None, None).
+async def plan_site_slots(
+    workspace_id: str, *, excluding_site_id: str | None = None
+) -> tuple[int, int | None]:
+    """How many of this workspace's plan-carried site slots are taken, and how many it has.
 
-    The frontend navigates the WHOLE PAGE to the checkout url
-    (``window.location.href = site.checkout_url``), so without these the buyer pays
-    and is left sitting on the gateway with no route back into the app.
+    Returns ``(used, allowance)``; ``allowance`` is ``None`` for an uncapped plan
+    (Enterprise) and ``0`` for a workspace whose plan carries no sites (Free, and
+    any plan key the catalog does not recognise — the fail-closed default, because
+    a generous guess here is free hosting nothing later reclaims).
 
-    Deliberately not ``billing._checkout_return_urls``: that one lands the buyer on
-    ``/settings/billing``, which is right for a workspace plan and wrong here — the
-    buyer just bought a SITE and expects to see it. Same origin/config fallback
-    chain, different destination.
+    ``excluding_site_id`` leaves one site out of the count. Every caller that asks
+    "may THIS site take a slot" has to, because a republish of a site already on
+    the rail would otherwise count itself and report the workspace one over.
+
+    The count is over ``billing_rail``, not over ``plan_tier``: a site the WALLET
+    bought also holds ``staff``, and counting it would let a Pro workspace's three
+    purchased sites eat the three slots it is entitled to on top of them.
+
+    Public (no underscore) because the reconciler and the read endpoints ask it
+    too, and a workspace's slot arithmetic expressed twice is a workspace billed
+    twice or not at all.
     """
-    base = (origin or "").strip()
-    if not base:
-        from pocketpaw.config import get_settings
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
 
-        base = (getattr(get_settings(), "dodo_checkout_return_base", "") or "").strip()
-    if not base:
-        return None, None
-    base = base.rstrip("/")
-    return (f"{base}/sites?checkout=success", f"{base}/sites?checkout=cancel")
+    ent = await entitlements_service.resolve_entitlements(workspace_id)
+    allowance = ent.included_sites
+    query: dict[str, Any] = {"workspace": workspace_id, "billing_rail": _PLAN_RAIL}
+    if excluding_site_id:
+        # A malformed id excludes nothing rather than raising. This function is
+        # called on the publish path with an id the caller derived, not one a
+        # visitor supplied, so an ``InvalidId`` here would be an internal bug —
+        # and turning it into a 500 mid-publish is a worse answer than counting
+        # one site too many, which the reconciler corrects.
+        try:
+            query["_id"] = {"$ne": ObjectId(excluding_site_id)}
+        except InvalidId:
+            logger.warning(
+                "sites.plan_slots: ignoring malformed excluding_site_id %r", excluding_site_id
+            )
+    used = await _SiteDoc.find(query).count()
+    return used, allowance
 
 
-async def _publish_addon_site(
+async def reconcile_plan_carried_sites(workspace_id: str) -> dict[str, int]:
+    """Bring a workspace's plan-carried sites back within what its plan carries.
+
+    The other half of the plan rail, and the half without which it leaks. Taking a
+    slot is decided at publish time against the allowance THEN; a workspace that
+    drops from Pro Max to Go keeps ten carried sites and nothing ever asks again.
+    They would stay free permanently — not overspend somebody can see on a bill,
+    but hosting the customer stopped paying for, invisible in both directions.
+
+    Sites over the allowance are RELEASED TO THE FREE FLOOR, not taken down. The
+    page stays live and keeps serving; it loses the badge removal, the custom
+    domain and the concierge, which is the same thing a lapsed credits renewal
+    does. Taking a customer's public page off the internet over a plan change is
+    data loss with a billing excuse.
+
+    OLDEST FIRST KEEPS ITS SLOT. Some order has to be chosen and this one is
+    defensible without asking: the sites a workspace has had longest are the ones
+    most likely to be linked, indexed and printed on something.
+
+    ORDERED ON ``createdAt``, NOT ON ``_id``, and the difference is not academic
+    here. A Site's ``_id`` is normally a timestamp-led ObjectId — but not in this
+    collection: ``_live_object_id`` mints it as a DETERMINISTIC HASH of
+    ``(workspace, pocket)`` so a republish lands on the same document. Sorting on
+    it would order sites by the digest of their pocket id, which is to say
+    arbitrarily, and "oldest first" would be a sentence in a docstring rather
+    than a property of the code. Found by the test below, which publishes three
+    sites in order and asserts the first keeps its slot.
+
+    Returns ``{"carried": n, "released": n}``. Idempotent: a second pass over a
+    workspace already inside its allowance releases nothing.
+    """
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    used, allowance = await plan_site_slots(workspace_id)
+    if allowance is None:
+        return {"carried": used, "released": 0}
+    if used <= allowance:
+        return {"carried": used, "released": 0}
+
+    carried = (
+        await _SiteDoc.find({"workspace": workspace_id, "billing_rail": _PLAN_RAIL})
+        .sort("createdAt")
+        .to_list()
+    )
+    released = 0
+    for doc in carried[allowance:]:
+        doc.billing_rail = ""
+        doc.plan_tier = site_plans.BASE_SITE_PLAN_KEY
+        doc.subscription_status = "none"
+        doc.renewal_date = None
+        doc.period_paid_usd = 0
+        doc.plan_cancels_at_period_end = False
+        await doc.save()
+        released += 1
+        logger.info(
+            "sites.reconcile: site %s (workspace=%s) released to the free floor — "
+            "the plan carries %d and this one is past it. The site STAYS LIVE.",
+            str(doc.id),
+            workspace_id,
+            allowance,
+        )
+
+    if released:
+        logger.warning(
+            "sites.reconcile: workspace %s had %d plan-carried sites on a plan that "
+            "carries %d — released %d to the free floor",
+            workspace_id,
+            used,
+            allowance,
+            released,
+        )
+    return {"carried": allowance, "released": released}
+
+
+async def _plan_can_carry(workspace_id: str, *, site_id: str | None) -> bool:
+    """Is there a free slot on the workspace plan for this site?
+
+    True when the plan is uncapped, or when the slots taken by OTHER sites are
+    fewer than the allowance. The site itself is excluded so a republish of a
+    site already on the rail always says yes — it is holding the slot it is
+    asking about.
+
+    RACY BY CONSTRUCTION, and acceptably so. Two concurrent publishes on a
+    one-slot plan can both read 0 used and both take a slot, leaving a Go
+    workspace with two carried sites. There is no transaction here and adding one
+    would be the only ``session.start_transaction`` in the sites service; the
+    reconciler that already has to exist for plan DOWNGRADES converges the same
+    over-count on its next pass, and the worst case in the window is one extra
+    site carried free for a few minutes.
+    """
+    used, allowance = await plan_site_slots(workspace_id, excluding_site_id=site_id)
+    if allowance is None:
+        return True
+    return used < allowance
+
+
+async def _publish_credits_site(
     *,
     workspace_id: str,
     user_id: str,
@@ -6639,40 +6942,55 @@ async def _publish_addon_site(
     builder_origin: str | None,
     keeps_client_bundle: bool,
     tier: Any,
-    provider: Any | None,
+    covered_by_plan: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
     _local_deploy: Callable[[str, str], str] | None = None,
 ) -> _SiteDoc:
-    """Buy a paid site as an ADD-ON on the workspace subscription, then deploy it.
+    """Buy a paid site from the workspace CREDIT WALLET, then deploy it.
 
-    The add-on half of ``publish_pocket``, and the rail every new paid publish
-    takes. The site is not a subscription of its own: it becomes a line on the
-    subscription the workspace already pays, so the customer gets one bill, one
-    renewal date and one payment method however many sites they run.
+    The rail every new paid publish takes. The site is not a subscription and not
+    a cart line: a month of the tier is debited from the wallet the workspace
+    already funds, so buying a site needs no payment gateway, no workspace plan
+    and no hosted checkout — which is what makes it work on a self-hosted
+    deployment and on a workspace that has never bought anything.
 
-    ORDER IS THE WHOLE DESIGN HERE, so it is worth being explicit about:
+    ORDER IS THE WHOLE DESIGN HERE, and it is the reverse of the add-on rail's:
 
-      1. Create the site PENDING and not deployed, exactly as the per-site rail
-         does, capturing the deploy inputs on the doc.
-      2. Mark it ``active`` BEFORE charging. This looks backwards and is not: the
-         cart is computed from the ``Site`` documents, so the site has to be in
-         the documents to be in the cart. Marking it after the charge would bill
-         the workspace for every site EXCEPT the one being bought.
-      3. Sync the cart, which charges the card on the subscription synchronously.
-      4. Only then deploy, through the SAME ``activate_site`` the per-site
-         webhook uses — one deferred-deploy implementation, not two.
+      1. Create the site PENDING and not deployed, capturing the deploy inputs,
+         exactly as the other deferred rails do. The deterministic ``site_id``
+         this mints is what the debit's idempotency key is built from, so the doc
+         has to exist before the charge.
+      2. CHARGE THE WALLET. A wallet debit reads no documents — it takes the
+         price as an argument — so unlike the add-on cart there is no reason to
+         mark the site paid before charging it, and every reason not to: an
+         underfunded wallet must never leave a site holding paid capabilities.
+         ``InsufficientCredits`` (402) propagates with the site still pending and
+         still undeployed, and NOTHING has been debited.
+      3. Only then mark it active, stamp the rail and the renewal date, and
+         deploy through the SAME ``activate_site`` the other rails use — one
+         deferred-deploy implementation, not three.
 
-    A FAILED CHARGE REVERTS STEP 2 AND PROPAGATES. Leaving the site ``active``
-    after a refusal would hand it every paid capability — badge off, custom
-    domain, concierge — for free and forever, since nothing else rewrites that
-    field. The revert runs in a ``finally``-shaped except so a gateway refusal,
-    a network error and a bug all take it.
+    ``billing_rail="credits"`` is not decoration. A credits site is identical to
+    an add-on site on every other field, and the Dodo add-on cart selects on
+    exactly that shape — so without the stamp, a workspace that later starts a
+    subscription would be invoiced a second time for a site the wallet has
+    already paid for.
 
-    The site stays PENDING and undeployed on failure rather than being deleted:
-    the buyer can fix their card and republish onto the same deterministic
-    ``site_id``, which is the same recovery the per-site rail offers.
+    The site stays PENDING and undeployed on a refusal rather than being deleted:
+    the buyer tops up and republishes onto the same deterministic ``site_id``,
+    the same recovery the other rails offer.
+
+    ``covered_by_plan`` SKIPS STEP 2 AND ONLY STEP 2. The workspace plan carries a
+    number of sites (Go 1, Pro 3, Pro Max 10) and this site is filling one of
+    those slots, so there is nothing to debit — but every other thing this
+    function does is still exactly right, which is why it is a flag here rather
+    than a second publish function. The doc is created pending, activated, and
+    deployed through the same ``activate_site`` as every other rail; what changes
+    is the rail stamped on it, the absence of a ``renewal_date`` (the plan renews,
+    the site does not) and a ``period_paid_usd`` of 0 (nothing was paid, so a
+    later change has nothing to price against).
     """
     from pocketpaw_ee.cloud.billing import service as billing_service
 
@@ -6689,41 +7007,75 @@ async def _publish_addon_site(
         builder_origin=builder_origin,
         keeps_client_bundle=keeps_client_bundle,
         tier=tier,
-        provider=provider,
-        addon_rail=True,
+        rail=_PLAN_RAIL if covered_by_plan else _CREDITS_RAIL,
     )
 
     site_id = str(doc.id)
-    previous_status = doc.subscription_status
-    doc.subscription_status = "active"
+    if not covered_by_plan:
+        await billing_service.charge_site_plan_credits(
+            workspace_id=workspace_id,
+            site_id=site_id,
+            tier_key=tier.key,
+            amount_usd=tier.monthly_price_usd,
+            period_start=datetime.now(UTC),
+            member_id=user_id,
+        )
+
+    # NEITHER ``billing_rail`` NOR ``subscription_status`` IS SET HERE, and both
+    # omissions were found the same way — by a mutation that deleted the write and
+    # escaped, because a second write downstream covered for it.
+    #
+    # ``_publish_pending_site`` stamps the rail; ``activate_site`` flips the status
+    # to "active" and saves it BEFORE running the deploy, which is the ordering the
+    # paid capabilities depend on (the badge stamper and the concierge embed each
+    # re-read the doc mid-deploy). Re-asserting either here would only make those
+    # single points of truth untestable.
+    # A PLAN-CARRIED SITE HAS NO RENEWAL DATE AND NOTHING PRE-PAID, and both
+    # absences are load-bearing rather than tidy. ``renewal_date`` is what the
+    # renewal sweep selects on, so a date here would put the sweep on a site the
+    # wallet never bought — the exact double charge ``billing_rail`` exists to
+    # prevent, arriving by the other door. And ``period_paid_usd`` is the number a
+    # tier change subtracts from: leaving the tier's price there would let someone
+    # move a plan-carried site to a cheaper rung, drop off the plan, and come back
+    # holding a month of credit for money nobody spent.
+    if covered_by_plan:
+        doc.renewal_date = None
+        doc.period_paid_usd = 0
+    else:
+        doc.renewal_date = datetime.now(UTC) + relativedelta(months=1)
+        # WHAT THIS PERIOD HAS BEEN PAID FOR, which is what a later tier change
+        # prices against. Without it every upgrade would subtract from 0 and charge
+        # the new tier's full month on top of the one just bought here.
+        doc.period_paid_usd = int(tier.monthly_price_usd)
+    # A FRESH PURCHASE STARTS UNSCHEDULED. Reaching here means the site was not
+    # already paying, so a pending close should be impossible — but a stale flag
+    # surviving into a month somebody just paid for would have the sweep close it
+    # at the first renewal, and the row is being rewritten anyway.
+    doc.plan_cancels_at_period_end = False
     await doc.save()
-    try:
-        # Thread the caller's provider through rather than letting the sync fall
-        # back to the default one. The publish path takes an injectable provider
-        # and every other billing call here honours it; dropping it at this one
-        # call reaches the real gateway from a caller that explicitly supplied a
-        # substitute.
-        result = await billing_service.sync_site_addons(workspace_id, provider=provider)
-    except Exception:
-        doc.subscription_status = previous_status
-        await doc.save()
-        logger.warning(
-            "sites.publish: add-on charge failed for site %s (tier=%s) — left PENDING "
-            "and undeployed, nothing charged",
+
+    if covered_by_plan:
+        logger.info(
+            "sites.publish: site %s is carried by the workspace plan (tier=%s) — "
+            "no credits debited and no renewal scheduled",
             site_id,
             tier.key,
-            exc_info=True,
         )
-        raise
+    else:
+        logger.info(
+            "sites.publish: site %s bought from the credit wallet (tier=%s, $%s/month)",
+            site_id,
+            tier.key,
+            tier.monthly_price_usd,
+        )
 
-    logger.info(
-        "sites.publish: site %s billed as an add-on on subscription %s (tier=%s, cart=%s)",
-        site_id,
-        result.get("subscription_id"),
-        tier.key,
-        result.get("addons"),
-    )
-
+    # ``force`` is a BELT, and honestly labelled as one: nothing on this path
+    # currently marks the site active before the deploy, so ``activate_site``'s
+    # "deployed and active is terminal" guard cannot fire and a mutation flipping
+    # this to False escapes every test. It stays because the guard is one edit
+    # away from mattering — the add-on rail that preceded this one HAD to mark the
+    # site active first (its cart was computed from the documents), and doing so
+    # silently made every upgrade charge the customer and redeploy nothing.
     return await activate_site(
         workspace_id=workspace_id,
         site_id=site_id,
@@ -6749,9 +7101,7 @@ async def _publish_pending_site(
     builder_origin: str | None,
     keeps_client_bundle: bool,
     tier: Any,
-    provider: Any | None,
-    origin: str | None = None,
-    addon_rail: bool = False,
+    rail: str = _CREDITS_RAIL,
 ) -> _SiteDoc:
     """Charge-first: create a PAID-tier site as PENDING and open its checkout,
     WITHOUT deploying it live.
@@ -6850,34 +7200,13 @@ async def _publish_pending_site(
     # metadata carries it without the doc existing yet. If opening the checkout
     # raises, it PROPAGATES (no swallow) and NO pending doc is created — never an
     # orphan pending row with no subscription_id. The buyer can simply retry.
-    checkout_url: str | None = None
-    subscription_id: str | None = None
-    if not addon_rail:
-        prov = provider or _default_billing_provider()
-        return_url, cancel_url = _site_checkout_return_urls(origin)
-        checkout = await prov.create_subscription(
-            plan_key=plan_key,
-            product_id=tier.dodo_product_id,
-            workspace_id=workspace_id,
-            customer_email=None,
-            metadata={
-                "workspace_id": workspace_id,
-                "site_id": site_id,
-                "plan_key": plan_key,
-            },
-            return_url=return_url,
-            cancel_url=cancel_url,
-        )
-        checkout_url = checkout.checkout_url or None
-        subscription_id = checkout.subscription_id or None
-    # ON THE ADD-ON RAIL ``subscription_id`` STAYS None, and that is load-bearing
-    # rather than incidental. It is the discriminator the cart builder reads: a
-    # site holding a per-site subscription id is billed on the old rail and is
-    # EXCLUDED from the workspace cart, so stamping the workspace's subscription
-    # id here to be informative would silently drop the site off its own invoice.
+    # NO CHECKOUT IS OPENED. This is where a hosted Dodo checkout used to be
+    # created before the doc was written, so a checkout failure could not leave an
+    # orphan pending row. Nothing to orphan any more: the caller charges the
+    # workspace credit balance right after this returns, and a refused debit leaves
+    # the row exactly as written here — pending, undeployed, nothing billed.
 
-    # Checkout opened — NOW upsert the PENDING canonical Site doc with the
-    # subscription_id already set (review fix B). The size cap (A) already ran.
+    # Upsert the PENDING canonical Site doc. The size cap already ran.
     if existing is None:
         doc = _SiteDoc(
             id=oid,
@@ -6891,8 +7220,17 @@ async def _publish_pending_site(
             url="",
             builder_origin=builder_origin or "",
             plan_tier=plan_key,
-            subscription_id=subscription_id,
             subscription_status="pending",
+            # Stamped HERE, before the charge, and only in this one place. The
+            # rail is a property of what is being ATTEMPTED, not of whether the
+            # attempt succeeded, and re-asserting it after the debit made a
+            # mutation that deletes the stamp escape — the second write covered
+            # for the first, so no test could tell whether either worked.
+            #
+            # ``rail`` is a parameter because there are two attempts to describe
+            # now: the wallet buying a month, and the workspace plan carrying the
+            # site for nothing. It still has exactly one write site.
+            billing_rail=rail,
             pending_deploy_inputs=pending_inputs,
             allowed_origins=_default_allowed_origins(),
             event_mapping=_DEFAULT_EVENT_MAPPING,
@@ -6907,14 +7245,11 @@ async def _publish_pending_site(
         doc.owner = user_id
         doc.name = site_name
         doc.plan_tier = plan_key
-        doc.subscription_id = subscription_id
         doc.subscription_status = "pending"
+        doc.billing_rail = rail
         doc.pending_deploy_inputs = pending_inputs
         await doc.save()
 
-    # Stash the checkout link on the transient PrivateAttr so the router can surface
-    # it on SiteResponse.checkout_url (never persisted).
-    doc._checkout_url = checkout_url
     return doc
 
 
@@ -6922,7 +7257,6 @@ async def activate_site(
     *,
     workspace_id: str,
     site_id: str,
-    subscription_id: str | None = None,
     force: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
@@ -7014,21 +7348,6 @@ async def activate_site(
     # opposite direction, and it is the lesser of the two: a paid site that retries
     # its deploy beats a paid site permanently branded as free.
     doc.subscription_status = "active"
-    # Persist the AUTHORITATIVE gateway subscription id from the verified webhook.
-    #
-    # What the doc holds until this point is the checkout SESSION id (``cks_``)
-    # that ``create_subscription`` returned — Dodo creates the subscription at
-    # PAYMENT time, so the real ``sub_`` id does not exist yet when the checkout
-    # opens. It arrives here, on subscription.active, and was previously dropped on
-    # the floor: the webhook called this function without it.
-    #
-    # A session id cannot cancel a subscription and cannot change its plan — the
-    # gateway rejects it. So every downstream lifecycle operation was unbuildable
-    # until this line existed, and any subscription opened before it shipped is
-    # unreachable from our side. ``mark_site_subscription`` already does the same
-    # thing on renewed/cancelled; activation was the gap.
-    if subscription_id:
-        doc.subscription_id = subscription_id
     await doc.save()
 
     deployed = await _deploy_site_doc(
@@ -7069,8 +7388,17 @@ async def activate_site(
     # ``relativedelta`` rather than ``timedelta(days=30)``, same as
     # ``billing.service``: fixed 30-day steps walk the date backwards through the
     # calendar, losing five days over a year of renewals.
+    # ...and NOT on the plan rail, which is the second writer of this field and the
+    # one that had to learn about it. A site the workspace plan CARRIES is not on a
+    # charge cycle at all: the plan renews, the site does not. Stamping a date here
+    # would hand the renewal sweep a site the wallet never bought — it selects on
+    # ``renewal_date <= now`` and would find this one a month later — so the rail
+    # check is what keeps a free site free.
     deployed.subscription_status = "active"
-    deployed.renewal_date = datetime.now(UTC) + relativedelta(months=1)
+    if getattr(deployed, "billing_rail", "") != _PLAN_RAIL:
+        deployed.renewal_date = datetime.now(UTC) + relativedelta(months=1)
+    else:
+        deployed.renewal_date = None
     await deployed.save()
 
     # Promote the pocket's draft to published — the durable "this was published"
@@ -7109,17 +7437,6 @@ async def activate_site(
         )
     )
     return deployed
-
-
-def _default_billing_provider() -> Any:
-    """Build the default payments provider (Dodo) for a per-site subscription.
-
-    Lazy so importing the sites service never constructs an SDK client; tests
-    inject their own provider via ``publish_pocket(_billing_provider=...)``."""
-    from pocketpaw.config import get_settings
-    from pocketpaw_ee.cloud.billing.providers.dodo import DodoProvider
-
-    return DodoProvider.from_settings(get_settings())
 
 
 def apply_edits(source: str, edits: list[dict[str, str]]) -> str:
@@ -8712,6 +9029,27 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     # resolved (empty-safe).
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
+    # The workspace's site-slot arithmetic, so the Billing tab can say whether the
+    # NEXT publish is carried by the plan or costs credits. Counted here rather
+    # than derived on the client, which would mean re-implementing "which rail
+    # counts as a slot" in TypeScript — the rule that decides whether a customer
+    # is charged.
+    _plan_slots_used, _plan_slots_allowance = await plan_site_slots(workspace_id)
+
+    # The plan's DISPLAY name for the same copy. Best-effort: a name that will not
+    # resolve is a phrasing problem on one line, not a reason to fail a status read
+    # the whole builder polls.
+    _workspace_plan_name = ""
+    try:
+        from pocketpaw_ee.cloud.billing import plans as _plan_catalog
+        from pocketpaw_ee.cloud.entitlements import service as _ent_service
+
+        _ent = await _ent_service.resolve_entitlements(workspace_id)
+        _tier = _plan_catalog.get_plan(_ent.plan)
+        _workspace_plan_name = getattr(_tier, "display_name", "") or ""
+    except Exception:  # noqa: BLE001 — a nicer sentence is not worth a failed read
+        logger.debug("sites.status: could not resolve the workspace plan name", exc_info=True)
+
     patterns = await pockets_service.patterns_for_pockets(workspace_id, [pocket_id])
     pattern = patterns.get(pocket_id) or ""
     engines = await pockets_service.engines_for_pockets(workspace_id, [pocket_id])
@@ -8751,6 +9089,30 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         build_status=getattr(doc, "build_status", "none") if doc is not None else "none",
         build_reason=getattr(doc, "build_reason", None) if doc is not None else None,
         build_job_id=getattr(doc, "build_job_id", None) if doc is not None else None,
+        # The billing state the Billing tab has always asked this read for and
+        # never received. Read off the same ``doc``, so it costs no extra query.
+        #
+        # ``period_paid_usd`` is the one that has to be here rather than only on
+        # the gallery row: the panel subtracts it to quote what a plan CHANGE
+        # costs, and the summary it was falling back to is a fetch behind the
+        # publish that just moved it.
+        plan_tier=(getattr(doc, "plan_tier", "") or "") if doc is not None else "",
+        subscription_status=(
+            (getattr(doc, "subscription_status", "none") or "none") if doc is not None else "none"
+        ),
+        renewal_date=(
+            doc.renewal_date.isoformat()
+            if doc is not None and getattr(doc, "renewal_date", None) is not None
+            else None
+        ),
+        period_paid_usd=int(getattr(doc, "period_paid_usd", 0) or 0) if doc is not None else 0,
+        plan_cancels_at_period_end=(
+            bool(getattr(doc, "plan_cancels_at_period_end", False)) if doc is not None else False
+        ),
+        billing_rail=(getattr(doc, "billing_rail", "") or "") if doc is not None else "",
+        plan_sites_used=_plan_slots_used,
+        plan_sites_included=_plan_slots_allowance,
+        workspace_plan_name=_workspace_plan_name,
     )
 
 
