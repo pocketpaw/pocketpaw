@@ -908,6 +908,47 @@ async def list_artifacts(workspace_id: str, universe_id: str) -> dict[str, Any]:
     return {"artifacts": [artifact_wire(a) for a in docs]}
 
 
+async def list_gates(workspace_id: str, universe_id: str) -> dict[str, Any]:
+    """Pending human decisions for this universe — today, only ``world_spawn``.
+
+    READ ONLY, on purpose. Approving still goes through
+    ``POST /instinct/actions/{id}/approve``, because the Instinct gate is the
+    single chain authority and a second approve path here would be a second
+    place for the chain to close. The observatory needs this route because a
+    citizen asking for a child is otherwise invisible from the world it
+    happened in — the Action exists, but only the tray knows about it.
+    """
+    await _universe(workspace_id, universe_id)
+    try:
+        from pocketpaw.instinct.models import ActionStatus
+        from pocketpaw.stores import get_instinct_store
+
+        store = get_instinct_store(workspace_id=workspace_id or None)
+        actions = await store.list_actions()
+    except Exception:  # noqa: BLE001 — a gate-read failure must not break the page
+        logger.warning("terrarium: could not read the gate list", exc_info=True)
+        return {"gates": []}
+
+    gates: list[dict[str, Any]] = []
+    for action in actions:
+        if getattr(action, "status", None) != ActionStatus.PENDING:
+            continue
+        blob = (getattr(action, "parameters", None) or {}).get(WORLD_SPAWN_PARAM_KEY)
+        if not isinstance(blob, dict) or blob.get("universe_id") != universe_id:
+            continue
+        gates.append(
+            {
+                "action_id": str(getattr(action, "id", "")),
+                "kind": "world_spawn",
+                "title": getattr(action, "title", ""),
+                "parent": blob.get("parent"),
+                "child_name": blob.get("child_name"),
+                # No DIDs and no requester id: this is a room a viewer reads.
+            }
+        )
+    return {"gates": gates}
+
+
 # ---------------------------------------------------------------------------
 # Viewer actions — speaking and weather. Never anonymous.
 # ---------------------------------------------------------------------------
