@@ -25,10 +25,12 @@
 #     thing standing between the rename and that outcome, so they are asserted by
 #     CAPABILITY, not just by resolving to something non-None.
 #
-#   * THE REKEY SILENTLY DISABLING CHECKOUT. ``POCKETPAW_DODO_SITE_PRODUCTS`` is
-#     deployed keyed {"pro": ..., "business": ...}. A catalog that only looked up
-#     the new names would find nothing, every paid tier would go unpurchasable,
-#     and publishes would quietly record the free floor while taking no money.
+#   * (RETIRED 2026-09-05) THE REKEY SILENTLY DISABLING CHECKOUT. The catalog
+#     used to resolve a Dodo product per tier, and a rename that missed the
+#     legacy env keys made every paid tier unpurchasable while publishes quietly
+#     recorded the free floor. There is no gateway in the per-site ladder any
+#     more — a site is paid for from the workspace credit balance — so both the
+#     ids and that whole failure mode are gone.
 #
 #   * AN ORG FLAT REACHING A SITE. studio/agency are one subscription covering
 #     many sites. Their keys are not legal ``Site.plan_tier`` values, and a plain
@@ -59,7 +61,7 @@ def _by_key() -> dict[str, SitePlanTier]:
 
 @pytest.mark.parametrize(
     ("key", "price"),
-    [("free", 0), ("site", 7), ("staff", 19), ("studio", 39), ("agency", 149)],
+    [("free", 0), ("site", 7), ("staff", 19)],
 )
 def test_the_ladder_matches_the_pricing_spec(key, price):
     tier = site_plans.get_site_plan(key)
@@ -100,57 +102,41 @@ def test_every_tier_carries_the_copy_a_card_needs():
 
 
 # ---------------------------------------------------------------------------
-# The two scopes — the org flats must never become a site's own plan
+# The retired org flats — a key that LEFT the catalog must still fail closed
 # ---------------------------------------------------------------------------
 
 
-def test_the_catalog_holds_both_scopes_and_says_which_is_which():
-    by_key = _by_key()
+def test_the_catalog_ships_three_per_site_rungs_and_nothing_else():
+    """``studio`` and ``agency`` were retired on 2026-09-06.
 
+    The workspace plan carries sites now (Paw Go 1, Pro 3, Pro Max 10), so a
+    second ladder selling 5 sites for $39 both contradicted it and priced worse
+    than Pro Max's 10 for $49. Neither flat was ever purchasable, so nothing was
+    sold on either.
+    """
+    assert [t.key for t in site_plans.list_site_plans()] == ["free", "site", "staff"]
+    # ...and the scoped list agrees, because nothing is org-scoped any more.
     assert [t.key for t in site_plans.list_site_scoped_plans()] == ["free", "site", "staff"]
-    assert [t.key for t in site_plans.list_site_plans() if t.is_org_scoped] == [
-        "studio",
-        "agency",
-    ]
-    assert by_key["staff"].is_org_scoped is False
-    assert by_key["studio"].is_org_scoped is True
+    assert not any(t.is_org_scoped for t in site_plans.list_site_plans())
 
 
 @pytest.mark.parametrize("key", ["studio", "agency"])
-def test_an_org_flat_is_refused_as_a_sites_own_tier(key):
-    """The security property of the whole two-scope change.
+def test_a_retired_org_key_stored_on_a_site_still_resolves_to_nothing(key):
+    """THE PROPERTY THAT HAD TO SURVIVE THE RETIREMENT, and the reason it now
+    holds is different from the reason it used to.
 
-    ``get_site_plan`` resolves it — it is a real catalog row and the storefront
-    renders it. ``site_scoped_tier`` must NOT, because every entitlement seam
-    reads a site's stored ``plan_tier`` through that function, and an org key
-    resolving there hands one site the white-label allowance an org pays for
-    across its whole estate.
+    Before, these were real catalog rows that ``site_scoped_tier`` refused by
+    scope. Now they are simply gone, so the refusal comes from the unknown-key
+    path instead. The ANSWER is what a Site doc holding one of these keys depends
+    on — there is no migration, and a document written before today still says
+    ``plan_tier: "studio"`` — and the answer must stay None either way, which
+    lands that site on the free floor rather than handing it an org allowance.
 
-    Breaks on: ``site_scoped_tier`` losing its ``is_org_scoped`` check, or any
-    entitlement seam being switched back to ``get_site_plan``.
+    Breaks on: adding either key back to the catalog without deciding what a site
+    storing it should get.
     """
-    assert site_plans.get_site_plan(key) is not None
+    assert site_plans.get_site_plan(key) is None
     assert site_plans.site_scoped_tier(key) is None
-
-
-@pytest.mark.parametrize("key", ["studio", "agency"])
-def test_an_org_flat_is_never_purchasable_however_config_is_set(key, monkeypatch):
-    """Not "has no product configured" — NEVER, whatever config says.
-
-    There is exactly one checkout and it buys one site. Pointing it at a $149
-    org flat would charge the org price and grant a single site's capability.
-    So the refusal cannot be left to "nobody configured a product for it": a
-    well-meaning operator filling in every key of POCKETPAW_DODO_SITE_PRODUCTS
-    would otherwise switch on a checkout that overcharges.
-
-    Breaks on: ``purchasable`` dropping its ``is_org_scoped`` early return.
-    """
-    monkeypatch.setattr(site_plans, "_dodo_product_for", lambda _k: "pdt_configured")
-
-    assert site_plans.get_site_plan(key).purchasable is False
-    # ...while a per-site rung with the same product IS purchasable, so the test
-    # is measuring the scope and not a blanket "nothing is purchasable".
-    assert site_plans.get_site_plan("site").purchasable is True
 
 
 def test_a_tier_the_catalog_does_not_know_is_built_org_scoped():
@@ -163,9 +149,9 @@ def test_a_tier_the_catalog_does_not_know_is_built_org_scoped():
     for the caller that eventually does, and a mutation flipping the default to
     ``SITE_SCOPE`` escaped every other test in this file.
 
-    ORG is the safe default precisely because it is the scope that is NOT a legal
-    ``Site.plan_tier``: an unknown key fails closed OUT of the per-site path
-    rather than into it, and ``site_scoped_tier`` then refuses it.
+    ORG stays the safe default even though no tier is org-scoped any more: it is
+    the scope that is NOT a legal ``Site.plan_tier``, so an unknown key fails
+    closed OUT of the per-site path rather than into it.
 
     Breaks on: changing that default to ``SITE_SCOPE``.
     """
@@ -176,18 +162,6 @@ def test_a_tier_the_catalog_does_not_know_is_built_org_scoped():
     assert unknown.badge_removal is False
     assert unknown.max_domained_sites == 0
     assert unknown.purchasable is False
-
-
-def test_only_the_org_flats_include_a_site_count():
-    """``included_sites`` answers "how many sites does this flat cover", which is
-    not a question a per-site subscription has an answer to. A number there would
-    read as a per-site quota."""
-    by_key = _by_key()
-
-    assert by_key["studio"].included_sites == 5
-    assert by_key["agency"].included_sites == 25
-    for key in ("free", "site", "staff"):
-        assert by_key[key].included_sites is None, f"{key} should not include a site count"
 
 
 # ---------------------------------------------------------------------------
@@ -245,46 +219,6 @@ def test_an_unknown_key_still_resolves_to_nothing():
 # ---------------------------------------------------------------------------
 
 
-def test_the_deployed_legacy_product_map_still_opens_a_checkout(monkeypatch):
-    """The trap that would have shipped silently.
-
-    The live environment sets POCKETPAW_DODO_SITE_PRODUCTS keyed by the OLD tier
-    names. Renaming the catalog without teaching ``_dodo_product_for`` about the
-    aliases means every paid tier comes back ``purchasable = False`` the moment
-    the rename deploys — no checkout opens, and ``publish_pocket`` falls back to
-    publishing live and recording the free floor. Nothing errors. The customer
-    picks a paid plan, is charged nothing, and gets nothing.
-
-    Breaks on: ``_dodo_product_for`` looking up only the canonical key.
-    """
-
-    class _Settings:
-        dodo_site_products = {"pro": "pdt_old_site", "business": "pdt_old_staff"}
-
-    import pocketpaw.config as config_mod
-
-    monkeypatch.setattr(config_mod, "get_settings", lambda: _Settings())
-
-    assert site_plans.get_site_plan("site").dodo_product_id == "pdt_old_site"
-    assert site_plans.get_site_plan("staff").dodo_product_id == "pdt_old_staff"
-    assert site_plans.get_site_plan("site").purchasable is True
-
-
-def test_the_new_key_wins_over_a_legacy_one_for_the_same_tier(monkeypatch):
-    """A half-migrated environment holding both must not be ambiguous — the
-    canonical key is the answer, so re-keying the env var takes effect
-    immediately rather than being shadowed by the value it replaces."""
-
-    class _Settings:
-        dodo_site_products = {"site": "pdt_new", "pro": "pdt_old"}
-
-    import pocketpaw.config as config_mod
-
-    monkeypatch.setattr(config_mod, "get_settings", lambda: _Settings())
-
-    assert site_plans.get_site_plan("site").dodo_product_id == "pdt_new"
-
-
 # ---------------------------------------------------------------------------
 # The concierge is the difference between the two paid PER-SITE rungs
 # ---------------------------------------------------------------------------
@@ -316,15 +250,14 @@ def test_the_conversation_allowance_belongs_to_the_tier_that_sells_the_concierge
     assert by_key["free"].conversation_allowance == 0
 
 
-def test_the_agency_rate_is_the_discount_it_is_sold_on():
-    """$0.05 against a $0.10 list rate is half the headline reason to buy agency.
-    In CENTS — a float rate multiplied by a conversation count is a rounding bug
-    waiting for a big enough customer."""
-    by_key = _by_key()
-
-    assert by_key["agency"].conversation_rate_cents == 5
-    assert by_key["staff"].conversation_rate_cents == 10
-    assert isinstance(by_key["agency"].conversation_rate_cents, int)
+def test_the_conversation_rate_is_cents_and_stays_an_int():
+    """This asserted ``agency``'s $0.05 against the $0.10 list rate until that
+    tier was retired. What it was really guarding outlives the tier: the rate is
+    in CENTS, and a float rate multiplied by a conversation count is a rounding
+    bug waiting for a big enough customer."""
+    for tier in site_plans.list_site_plans():
+        assert isinstance(tier.conversation_rate_cents, int)
+    assert _by_key()["staff"].conversation_rate_cents == 10
 
 
 def test_a_tier_that_sells_no_concierge_still_carries_the_list_rate():
@@ -365,25 +298,21 @@ def test_the_free_floor_keeps_its_one_domained_site():
     assert site_plans.get_site_plan("free").max_domained_sites == 1
 
 
-def test_white_label_is_what_separates_an_org_flat_from_five_site_subscriptions():
-    by_key = _by_key()
-
-    assert by_key["studio"].white_label is True
-    assert by_key["agency"].white_label is True
-    for key in ("free", "site", "staff"):
-        assert by_key[key].white_label is False
-
-
-def test_highlights_are_kept_out_of_the_enforced_feature_set():
+def test_highlights_stay_out_of_the_enforced_feature_set():
     """SSO and an SLA are commitments a human honours, not flags code checks.
     Folded into ``cloudflare_features`` they would render as an enforced
-    inclusion beside the WAF, which nothing would be enforcing."""
-    agency = _by_key()["agency"]
+    inclusion beside the WAF, which nothing would be enforcing.
 
-    assert agency.highlights, "agency's selling points vanished"
-    for claim in agency.highlights:
-        assert claim.lower() not in {f.lower() for f in agency.cloudflare_features}
-    assert "sso" not in {f.lower() for f in agency.cloudflare_features}
+    No rung ships highlights since the org flats were retired — they were the only
+    tiers that had any. The separation is still asserted rather than deleted,
+    because the next tier to sell an unenforceable promise will reach for this
+    field, and the mistake it guards against is putting the promise in the other
+    one."""
+    for tier in site_plans.list_site_plans():
+        features = {f.lower() for f in tier.cloudflare_features}
+        for claim in tier.highlights:
+            assert claim.lower() not in features
+        assert "sso" not in features
 
 
 # ---------------------------------------------------------------------------
@@ -391,20 +320,28 @@ def test_highlights_are_kept_out_of_the_enforced_feature_set():
 # ---------------------------------------------------------------------------
 
 
-def test_a_zero_price_tier_is_always_purchasable(monkeypatch):
-    """``purchasable`` is ``price == 0 or a product is configured``. The rename has
-    to carry that through, or the free tier becomes unbuyable the moment Dodo is
-    unconfigured and every publish falls back to nothing."""
-    monkeypatch.setattr(site_plans, "_dodo_product_for", lambda key: None)
+def test_every_per_site_rung_is_purchasable():
+    """``purchasable`` is now ``scope == "site"``, and this is the case that pins
+    it. It used to be ``price == 0 or a product is configured``, which meant a
+    deployment with no Dodo map — the ordinary state of a self-hosted install —
+    offered a ladder where only the free rung could be selected.
 
+    A paid site is bought from the workspace credit wallet now, so the gateway
+    map has nothing to say about whether a rung is on sale. Every rung is,
+    including with the product resolver stubbed to return nothing at all."""
     assert site_plans.get_site_plan("free").purchasable is True
-    assert site_plans.get_site_plan("site").purchasable is False
-
-
-def test_a_priced_tier_is_purchasable_once_it_has_a_product(monkeypatch):
-    monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: "prod_x" if key == "site" else None
-    )
-
     assert site_plans.get_site_plan("site").purchasable is True
-    assert site_plans.get_site_plan("staff").purchasable is False
+    assert site_plans.get_site_plan("staff").purchasable is True
+
+
+def test_purchasable_still_answers_by_scope_rather_than_configuration():
+    """``purchasable`` outlived the rows that motivated it, and this pins why.
+
+    It used to read "is a Dodo product configured", which made a self-hosted
+    install — the ordinary case — offer a ladder where only the free rung could be
+    selected. It reads ``scope == "site"`` now, so every shipped rung is buyable
+    and a key that fails closed to org scope is not.
+    """
+    for tier in site_plans.list_site_plans():
+        assert tier.purchasable is True, f"{tier.key} should be buyable one site at a time"
+    assert site_plans._build("tier-that-does-not-exist").purchasable is False

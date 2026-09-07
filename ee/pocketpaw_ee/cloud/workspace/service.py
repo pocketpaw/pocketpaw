@@ -1961,6 +1961,43 @@ async def set_workspace_plan(workspace_id: str, plan: str) -> bool:
         return False
     doc.plan = plan
     await doc.save()
+
+    # THE PLAN CARRIES SITES NOW (2026-09-06), so moving it can strand them. Go
+    # carries 1, Pro 3, Pro Max 10; a workspace dropping from Pro Max to Go has
+    # nine sites riding a slot its plan no longer has, and nothing else would ever
+    # ask again — they would stay free permanently. Not an overspend somebody sees
+    # on a bill: hosting the customer stopped paying for, invisible both ways.
+    #
+    # Wired HERE rather than beside each caller, and that is the point. Four places
+    # write a plan today (subscription.active, cancelled, the recovery path, the
+    # grace sweep) and the admin MCP and proposal executor reach this function too.
+    # A reconcile bolted onto the webhook would have covered the first four and
+    # silently missed the rest, and the fifth writer somebody adds next.
+    #
+    # BEST-EFFORT, always. The plan move is the thing the customer paid for and it
+    # has already landed; a failure to tidy sites must not undo it or 500 a webhook
+    # that will never be redelivered. The periodic sites sweep re-runs this, so a
+    # failure here costs a delay rather than the outcome.
+    try:
+        from pocketpaw_ee.sites import service as sites_service
+
+        counts = await sites_service.reconcile_plan_carried_sites(workspace_id)
+        if counts.get("released"):
+            logger.info(
+                "workspace.set_workspace_plan: workspace=%s moved to %s — released %d "
+                "site(s) the new plan does not carry",
+                workspace_id,
+                plan,
+                counts["released"],
+            )
+    except Exception:
+        logger.exception(
+            "workspace.set_workspace_plan: could not reconcile plan-carried sites for "
+            "workspace=%s after moving to %s — the plan move STANDS; the sites sweep "
+            "will converge it",
+            workspace_id,
+            plan,
+        )
     return True
 
 

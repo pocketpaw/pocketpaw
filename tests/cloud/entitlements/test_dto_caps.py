@@ -24,6 +24,7 @@ def test_plan_tier_dto_carries_caps() -> None:
         assert dto.max_pockets == tier.max_pockets
         assert dto.max_connectors == tier.max_connectors
         assert dto.max_storage_bytes == tier.max_storage_bytes
+        assert dto.included_sites == tier.included_sites
 
 
 def test_free_tier_dto_caps_are_concrete() -> None:
@@ -61,9 +62,15 @@ def test_entitlements_dto_carries_caps() -> None:
         # constructor, not asserted on ``dto``).
         max_call_seconds_per_day=7200,
         max_storage_bytes=50_000_000_000,
+        included_sites=3,
     )
     dto = entitlements_to_dto(ent)
     assert dto.max_seats == 25
     assert dto.max_pockets == 5000
     assert dto.max_connectors == 250
     assert dto.max_storage_bytes == 50_000_000_000
+    # The site allowance reaches the wire too. The builder asks "is my next site
+    # covered or does it cost credits" before a publish, and answering it from
+    # the plan catalog on the client would mean re-deriving the workspace's tier
+    # there — which is the drift this endpoint exists to prevent.
+    assert dto.included_sites == 3

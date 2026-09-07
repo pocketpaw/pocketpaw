@@ -44,12 +44,17 @@ def test_only_the_top_per_site_rung_sells_the_concierge():
     that is the point of the 2026-08-22 edit rather than a detail of it. The old
     assertion was ``selling == [tiers[-1].key]`` — "only the last row in the
     catalog" — which was a statement about POSITION that happened to coincide with
-    the rule while the catalog was one ladder. The five-tier catalog holds two
-    ladders: the per-site rungs (free/site/staff) and the org flats
-    (studio/agency), and ``agency`` legitimately sells the concierge too. Under the
-    old wording that reads as a violation, and "fixing" it by appending agency to
-    the expected list would have quietly permitted the actual regression this test
-    exists to catch — ``site`` gaining a ``staff`` feature.
+    the rule while the catalog was one ladder. The five-tier catalog held two:
+    the per-site rungs (free/site/staff) and the org flats (studio/agency), and
+    ``agency`` legitimately sold the concierge too. Under the old wording that read
+    as a violation, and "fixing" it by appending agency to the expected list would
+    have quietly permitted the actual regression this test exists to catch —
+    ``site`` gaining a ``staff`` feature.
+
+    The flats were retired on 2026-09-06 and the catalog is one ladder again, so
+    position and rule coincide once more. THE POSITIONAL WORDING IS STILL WRONG,
+    and is not restored: it would pass for the wrong reason today and break again
+    the next time a tier is added anywhere but the end.
 
     So the rule is asserted where it lives: among the rungs a single site can be
     put on, exactly one sells the concierge, and it is the most expensive one.

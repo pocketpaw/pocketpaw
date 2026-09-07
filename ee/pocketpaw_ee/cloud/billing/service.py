@@ -171,7 +171,6 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from beanie.operators import In
-from dateutil.relativedelta import relativedelta
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
@@ -195,6 +194,37 @@ from pocketpaw_ee.cloud.models.subscription import Subscription
 logger = logging.getLogger(__name__)
 
 _GATEWAY = "dodo"
+
+# --- Site plans paid from the credit wallet -------------------------------
+# The value ``Site.billing_rail`` carries when the workspace's own credit wallet
+# bought the month, and the ``cause`` its ledger rows are written under. Exported
+# rather than inlined because THREE modules have to agree on the same two
+# strings: this one (the add-on cart's exclusion, and the debit below), the sites
+# service (which stamps the field on purchase) and the renewal sweep (which finds
+# the rows to re-charge). A fourth spelling of "credits" in any of them is a
+# silent double charge in one direction or a free site in the other.
+CREDITS_BILLING_RAIL = "credits"
+# The other two rails, named here beside the first so all three live in one
+# place. ``ADDON`` is a line on the workspace's Dodo subscription and ``SUBSCRIPTION``
+# a legacy per-site Dodo subscription; neither is sold any more, and both are
+# kept because the sites already on them still renew and still cancel.
+ADDON_BILLING_RAIL = "addon"
+SUBSCRIPTION_BILLING_RAIL = "subscription"
+# The fourth rail, and the only one that never moves money. A workspace plan
+# CARRIES sites — Go 1, Pro 3, Pro Max 10 — and a site filling one of those slots
+# is stamped with this instead of being charged: it holds ``staff`` capabilities
+# with no debit, no ``renewal_date``, and nothing for the renewal sweep to find.
+#
+# It has to be a distinct value rather than an empty rail or a flag, because
+# every seam that decides whether to take money keys on this string. Reusing
+# ``credits`` would put the sweep on a site nobody bought; reusing ``""`` would
+# make it indistinguishable from the pre-cutover Dodo rows, which is precisely
+# the population the sweep must NOT touch.
+PLAN_BILLING_RAIL = "plan"
+SITE_PLAN_DEBIT_CAUSE = "site_plan"
+# 1 credit == 1 cent. The same mapping the top-up grant enforces (and gates on
+# USD for), written once here so the site price never gets converted by hand.
+_CENTS_PER_USD = 100
 # Only this event type grants credits. The other one-time families
 # (payment.failed / payment.processing / …) are acknowledged but never grant.
 # Refunds and disputes do not merely fail to grant — they REVERSE; see
@@ -439,133 +469,84 @@ def _dunning_grace_days() -> int:
     return max(int(get_settings().billing_dunning_grace_days), 0)
 
 
-async def _site_addon_cart(workspace_id: str) -> list[dict]:
-    """The COMPLETE Dodo add-on cart a workspace's sites should be billed for.
+def site_plan_debit_key(site_id: str, tier_key: str, period_start: datetime) -> str:
+    """The idempotency key for one site-month bought from the credit wallet.
 
-    Rebuilt from the ``Site`` documents every time, never from what the gateway
-    currently holds. That is not defensiveness, it is the contract:
-    ``change_plan`` REPLACES the whole add-on list, so the only safe thing to
-    send is a full cart derived from our own source of truth. A function that
-    read the gateway's cart and appended to it would inherit any drift already
-    there and make it permanent.
+    ANCHORED ON A DATE, not a timestamp, and that is the whole design. The key is
+    what stops the same month being charged twice, so it has to be identical
+    across every call that means "this month" and different across calls that
+    mean different months. A timestamp is unique per call, which makes a
+    double-submitted purchase two charges; a bare ``site_id`` is identical
+    forever, which makes the second month free.
 
-    Three exclusions, each load-bearing:
+    The date is UTC and comes from the caller: a PURCHASE passes now, a RENEWAL
+    passes the ``renewal_date`` it is consuming. Since renewals step a month at a
+    time the two can never collide.
 
-      * A site holding a ``subscription_id`` is on a LEGACY per-site
-        subscription. Dodo is already billing it on its own rail, and counting it
-        here too would charge the customer twice for one site. Only sites with no
-        per-site subscription of their own ride the add-on rail.
-      * A site whose ``subscription_status`` is not active is not paying — a
-        cancelled site must drop off the next cart, which is precisely how a
-        cancellation stops costing money under this model.
-      * A tier with no configured ``dodo_addon_id`` cannot be expressed as an
-        add-on. It is skipped rather than guessed at; the publish path already
-        refuses to record an unpurchasable tier.
-
-    Quantities aggregate: four sites on ``site`` are one cart line of quantity 4,
-    not four lines. Dodo keys a cart line by add-on id, so emitting the same id
-    twice would be a malformed cart rather than a double charge.
-
-    Sorted by add-on id so the cart is deterministic — two calls with the same
-    sites produce byte-identical payloads, which is what makes a no-op sync
-    genuinely a no-op and keeps test assertions stable.
+    The tier is in the key because an upgrade is a genuinely new charge on the
+    same day. The consequence — buying back down to a tier already bought today
+    is free — is the correct reading of a same-day flip-flop rather than a gap.
     """
-    from pocketpaw_ee.cloud.billing import site_plans
-    from pocketpaw_ee.cloud.models.site import Site
-
-    counts: dict[str, int] = {}
-    async for doc in Site.find(Site.workspace == workspace_id):
-        if getattr(doc, "subscription_id", None):
-            continue
-        if (getattr(doc, "subscription_status", None) or "none") != "active":
-            continue
-        tier = site_plans.site_scoped_tier(getattr(doc, "plan_tier", None))
-        if tier is None or tier.monthly_price_usd == 0:
-            continue
-        addon_id = tier.dodo_addon_id
-        if not addon_id:
-            continue
-        counts[addon_id] = counts.get(addon_id, 0) + 1
-    return [{"addon_id": addon_id, "quantity": qty} for addon_id, qty in sorted(counts.items())]
+    return f"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}"
 
 
-async def sync_site_addons(
-    workspace_id: str,
+async def charge_site_plan_credits(
     *,
-    provider: IPaymentsProvider | None = None,
-) -> dict:
-    """Push the workspace's full site add-on cart onto its EXISTING subscription.
+    workspace_id: str,
+    site_id: str,
+    tier_key: str,
+    amount_usd: int,
+    period_start: datetime,
+    member_id: str | None = None,
+) -> int:
+    """Debit the workspace credit wallet for a paid site tier.
 
-    This is how a paid site is billed now: as a line on the one subscription the
-    workspace already has, rather than as a subscription of its own. One bill,
-    one renewal date, one payment method, and a per-site charge that prorates
-    against the term the workspace has already paid for.
+    ``amount_usd`` IS NOT ALWAYS THE TIER'S STICKER PRICE, which is why the
+    parameter is not called ``monthly_price_usd`` any more. It is a full month on
+    a purchase and on a renewal, and on a mid-period UPGRADE it is only the
+    difference between the new tier and the most expensive one this site has
+    already paid for in the current period. Naming it after the month made the
+    upgrade call site read as though it were buying a second month, which is
+    exactly the overcharge it was written to stop.
 
-    The cart is recomputed from the ``Site`` documents on every call and sent
-    whole, so callers do not need to know whether a sync is "needed" — the same
-    cart sent twice describes the same subscription.
+    THE RAIL EVERY NEW PAID SITE TAKES. The add-on rail it replaces could only
+    charge a workspace that already held a Dodo subscription, so a workspace
+    without one — every self-hosted deployment, and every workspace that has not
+    bought a plan — had its site created PENDING, its charge refused with
+    ``NoActiveSubscription``, and the site left undeployed with a Billing tab
+    telling the buyer to complete a checkout that was never opened. The wallet is
+    already funded and is already what everything else in the product spends.
 
-    That is NOT the same as being safe to call twice in quick succession, and
-    this docstring used to claim it was. A change that prorates has to be PAID
-    before it settles, and until it does, Dodo refuses a second one with
-    ``409 PENDING_PLAN_CHANGE_EXISTS``. So a second publish arriving before the
-    first proration clears raises ``ConflictError`` rather than no-opping. That
-    is the honest behaviour: the gateway is telling us the earlier change is
-    still in flight, and the caller has to leave it alone until it lands.
+    STRICT, not overdraftable: this is a discretionary purchase, not metered
+    compute that has already been consumed. An underfunded wallet raises
+    ``InsufficientCredits`` (402) with ZERO side effects — no ledger row, no
+    balance movement — and the caller leaves the site unpaid and undeployed.
 
-    RAISES ``NoActiveSubscription`` WHEN THE WORKSPACE HAS NO SUBSCRIPTION, and
-    that refusal is the deliberate shape of the feature rather than a gap in it.
-    An add-on attaches to something; there is no subscription-less add-on at this
-    gateway. A free workspace buying its first site therefore has to start a
-    workspace subscription, and the alternative — quietly opening a standalone
-    per-site subscription for it — is the separate payment this change exists to
-    remove. Reversing that trade is one branch here (create a subscription with
-    the cart attached, rather than refusing), but it needs a target workspace
-    plan that the publish request does not carry today, so it is not guessed.
+    Returns the new balance in whole credits. A replayed call for the same
+    (site, tier, day) is a no-op that returns the current balance; see
+    ``site_plan_debit_key``.
+
+    Lives here rather than in the sites service so the money stays in the module
+    that owns money: sites asks for a charge, billing decides what a charge is,
+    and only ``credits.service`` touches the ledger.
     """
-    sub = await _billable_subscription(workspace_id)
-    if sub is None:
-        raise NoActiveSubscription(
-            "This workspace has no active subscription to add a site plan to."
-        )
-    # The gateway needs the plan the subscription is ALREADY on: ``change_plan``
-    # is one call that sets both the product and the cart, so "keep the plan,
-    # change the cart" is expressed by re-sending the current product. Prefer the
-    # product recorded on the row over a catalog lookup — the row is what the
-    # gateway actually charged, and a catalog remapped since the sale would
-    # otherwise silently move the workspace's plan as a side effect of publishing
-    # a site.
-    product_id = sub.product_id or _dodo_product_for_plan(sub.plan_key)
-    if not product_id:
+    amount = int(amount_usd) * _CENTS_PER_USD
+    if amount <= 0:
         raise ValidationError(
-            "billing.plan_product_unconfigured",
-            f"No Dodo product is configured for plan '{sub.plan_key}'.",
+            "billing.site_plan_not_priced",
+            f"Site tier '{tier_key}' has no price to charge.",
         )
-    if not sub.gateway_subscription_id:
-        raise ValidationError(
-            "billing.invalid_subscription",
-            "The active subscription has no gateway id to attach add-ons to.",
-        )
-
-    cart = await _site_addon_cart(workspace_id)
-    prov = provider or _default_provider()
-    await prov.change_plan(
-        subscription_id=sub.gateway_subscription_id,
-        product_id=product_id,
-        plan_key=sub.plan_key,
-        addons=cart,
+    return await credits_service.debit(
+        workspace=workspace_id,
+        amount=amount,
+        cause=SITE_PLAN_DEBIT_CAUSE,
+        idempotency_key=site_plan_debit_key(site_id, tier_key, period_start),
+        member_id=member_id,
+        ref={"site_id": site_id, "plan_tier": tier_key, "kind": "site_plan"},
+        # A purchase, so the wallet must actually cover it. ``allow_negative`` is
+        # for spend that already happened and can only be recorded.
+        allow_negative=False,
     )
-    logger.info(
-        "billing.sync_site_addons: workspace=%s subscription=%s cart=%s",
-        workspace_id,
-        sub.gateway_subscription_id,
-        cart,
-    )
-    return {
-        "subscription_id": sub.gateway_subscription_id,
-        "plan_key": sub.plan_key,
-        "addons": cart,
-    }
 
 
 async def subscribe(
@@ -1528,112 +1509,38 @@ async def sweep_subscription_grace() -> int:
 
 
 async def _handle_site_subscription_event(event: SubscriptionEvent) -> dict:
-    """Act on a VERIFIED PER-SITE ``subscription.*`` webhook (BC-9 + charge-first).
+    """Acknowledge a VERIFIED subscription webhook that carries a ``site_id``.
 
-    A per-site annual sub (each published site has its OWN recurring plan) is
-    distinguished from a workspace-plan sub by the ``site_id`` on its metadata.
-    This path updates the SITE's lifecycle ONLY — it NEVER grants workspace
-    credits and NEVER changes ``Workspace.plan`` (the two grant/plan side effects
-    of the BC-7 workspace path). All site writes are delegated to the sites service
-    (entity isolation — billing never imports the Site model):
+    ACKS AND DOES NOTHING, and the "does nothing" is the point of the function
+    rather than a gap in it. Paw Sites left Dodo on 2026-09-05: a paid site is
+    charged to the workspace credit balance, renews from the credit balance, and
+    has no gateway subscription of its own. Nothing we create can produce one of
+    these deliveries any more.
 
-      * ``subscription.active`` → CHARGE-FIRST ACTIVATION. A paid-tier site was
-        published as PENDING (created but NOT deployed live) and is deployed + goes
-        live only now that payment is confirmed: ``sites_service.activate_site``
-        runs the deferred deploy (generate + smoke-gate + Cloudflare/local deploy)
-        and marks the sub active. It is idempotent — an already-active/deployed
-        site is a no-op, so a replayed delivery (or a renewal that arrives as
-        ``active``) does not re-deploy.
-      * ``subscription.renewed`` → the site is already live; just refresh the
-        renewal date (one year out) via ``mark_site_subscription`` — no re-deploy.
-      * ``subscription.cancelled`` → mark the site sub ``cancelled``. The live site
-        is NOT undeployed in v1 (a cancelled annual plan keeps serving until the
-        paid period would lapse; an undeploy/teardown is a follow-up).
-      * any other subscription.* delivery → acked, no action.
+    WHY THE FORK STAYS ANYWAY. Dispatch routes on the presence of ``site_id``, and
+    the other side of that fork is the WORKSPACE-plan path — which grants credits
+    and rewrites ``Workspace.plan``. Deleting this branch would not stop a stray
+    delivery arriving; it would send it there. A per-site subscription that was
+    sold before the cutover and has not been cancelled at the gateway yet is
+    exactly such a delivery, and it must not be allowed to top up a wallet or
+    change a plan on its way past.
 
-    Returns ``{"ok": True, "granted": False}`` always — a per-site sub never
-    moves the workspace credit wallet, so ``granted`` is never True here.
+    So the site's lifecycle is no longer driven from here. A gateway subscription
+    that is still billing a customer for a site has to be cancelled IN DODO — see
+    docs/runbooks/2026-09-05-site-plans-on-credits.md. Logged at WARNING rather
+    than INFO because a delivery reaching this function means exactly that: money
+    is still moving at the gateway for something this product no longer sells.
+
+    Returns ``{"ok": True, "granted": False}`` — acked so Dodo stops retrying, and
+    never a grant.
     """
-    # Lazy import — keeps billing free of an eager sites-service import at module
-    # load, mirroring the workspace-service lazy import in the BC-7 path.
-    from pocketpaw_ee.cloud._core.errors import NotFound
-    from pocketpaw_ee.sites import service as sites_service
-
-    try:
-        if event.type == _SUB_ACTIVE:
-            # CHARGE-FIRST: payment confirmed → deploy the pending site live and
-            # mark the sub active. Idempotent for at-least-once delivery.
-            await sites_service.activate_site(
-                workspace_id=event.workspace_id,
-                site_id=event.site_id,
-                # The authoritative gateway subscription id. Dodo creates the
-                # subscription at payment time, so this is the FIRST delivery that
-                # carries it — the site is still holding the ``cks_`` checkout
-                # session id until we hand it over. Without it nothing downstream
-                # can cancel or change the plan.
-                subscription_id=event.subscription_id or None,
-            )
-            status = "active"
-        elif event.type == _SUB_RENEWED:
-            # Already live — just refresh the renewal date (no re-deploy).
-            #
-            # ONE MONTH, not 365 days. Site plans went monthly on 2026-08-22; a
-            # renewal that stamps a year ahead on a monthly plan puts every
-            # subsequent renewal a year out, and the site keeps its paid
-            # capabilities for that whole year regardless of what happens to the
-            # card. relativedelta rather than timedelta(days=30) so the date does
-            # not drift backwards through the calendar over a year of renewals.
-            await sites_service.mark_site_subscription(
-                workspace_id=event.workspace_id,
-                site_id=event.site_id,
-                status="active",
-                subscription_id=event.subscription_id or None,
-                renewal_date=datetime.now(UTC) + relativedelta(months=1),
-            )
-            status = "active"
-        elif event.type == _SUB_CANCELLED:
-            # Mark cancelled; do NOT undeploy the live site in v1.
-            # TODO(billing-lapse): a cancelled per-site sub is recorded but the live
-            # site keeps serving. Full lapse / teardown / dunning — grace-period
-            # length, undeploy-vs-grace, buyer notifications — is a DELIBERATE
-            # follow-up pending a product decision on the grace policy. Until that
-            # lands, cancellation is visibility-only: the status flips to
-            # "cancelled" and the site stays up. Do NOT add an undeploy here without
-            # that policy.
-            await sites_service.mark_site_subscription(
-                workspace_id=event.workspace_id,
-                site_id=event.site_id,
-                status="cancelled",
-                subscription_id=event.subscription_id or None,
-                renewal_date=None,
-            )
-            status = "cancelled"
-        else:
-            # on_hold / paused / failed / expired / plan_changed / updated — acked,
-            # no site-state action in v1.
-            logger.info(
-                "billing.webhook: ignoring per-site subscription event type=%s (site=%s)",
-                event.type,
-                event.site_id,
-            )
-            return {"ok": True, "granted": False}
-    except NotFound:
-        # A verified delivery for a site that doesn't exist for this workspace
-        # (deleted, or a stale/cross-tenant id) — ack (200) so Dodo stops
-        # retrying, but take no action. Nothing to update.
-        logger.warning(
-            "billing.webhook: per-site %s for unknown site=%s (event_id=%s) — ignoring",
-            event.type,
-            event.site_id,
-            event.event_id,
-        )
-        return {"ok": True, "granted": False}
-
-    logger.info(
-        "billing.webhook: per-site %s for site=%s → %s (event_id=%s)",
+    logger.warning(
+        "billing.webhook: per-site subscription event type=%s for site=%s "
+        "(event_id=%s) — Paw Sites no longer bills through Dodo, so this is a "
+        "subscription left live at the gateway. Acked with NO action; cancel it "
+        "in the Dodo dashboard.",
         event.type,
         event.site_id,
-        status,
         event.event_id,
     )
     return {"ok": True, "granted": False}
@@ -1718,9 +1625,10 @@ async def _upsert_subscription(
 
 __all__ = [
     "cancel",
+    "charge_site_plan_credits",
     "create_topup",
     "handle_webhook",
+    "site_plan_debit_key",
     "subscribe",
     "sweep_subscription_grace",
-    "sync_site_addons",
 ]

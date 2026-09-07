@@ -1,6 +1,6 @@
 [
   {
-    "label": "the plan is never consulted — concierge_entitled reverts to a pass-through",
+    "label": "the plan is never consulted \u2014 concierge_entitled reverts to a pass-through",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
     "find": "        concierge_entitled = tier.sells_concierge",
     "replace": "        concierge_entitled = True",
@@ -10,7 +10,7 @@
     ]
   },
   {
-    "label": "the fail-closed default inverts — an unknown tier is handed a concierge",
+    "label": "the fail-closed default inverts \u2014 an unknown tier is handed a concierge",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
     "find": "    concierge_entitled = False",
     "replace": "    concierge_entitled = True",
@@ -21,7 +21,7 @@
     ]
   },
   {
-    "label": "the subscription is ignored — a lapsed paid tier keeps its concierge",
+    "label": "the subscription is ignored \u2014 a lapsed paid tier keeps its concierge",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
     "find": "    if tier is not None and subscription_active:\n        badge_removal = tier.badge_removal",
     "replace": "    if tier is not None:\n        badge_removal = tier.badge_removal",
@@ -40,7 +40,7 @@
     ]
   },
   {
-    "label": "concierge_available drops the owner half — entitlement overrides the switch",
+    "label": "concierge_available drops the owner half \u2014 entitlement overrides the switch",
     "file": "ee/pocketpaw_ee/cloud/entitlements/domain.py",
     "find": "        return self.concierge_enabled and self.concierge_entitled",
     "replace": "        return self.concierge_entitled",
@@ -58,7 +58,7 @@
     ]
   },
   {
-    "label": "the frame stops asking the plan — a free site's bar renders",
+    "label": "the frame stops asking the plan \u2014 a free site's bar renders",
     "file": "ee/pocketpaw_ee/paw_bar/router.py",
     "find": "    if not concierge_available(site):\n        return _dead_frame_response(po, site.allowed_origins)",
     "replace": "    pass",
@@ -76,7 +76,7 @@
     ]
   },
   {
-    "label": "the billing_enforced guard is dropped — OSS/self-host loses its concierge",
+    "label": "the billing_enforced guard is dropped \u2014 OSS/self-host loses its concierge",
     "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
     "find": "    if not sites_enforced():\n        return True",
     "replace": "    if False:\n        return True",
@@ -85,7 +85,7 @@
     ]
   },
   {
-    "label": "the guard inverts — the gate fires ONLY when billing is off",
+    "label": "the guard inverts \u2014 the gate fires ONLY when billing is off",
     "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
     "find": "    if not sites_enforced():\n        return True",
     "replace": "    if sites_enforced():\n        return True",
@@ -104,7 +104,7 @@
     ]
   },
   {
-    "label": "the entitled path breaks too — the gate refuses every site",
+    "label": "the entitled path breaks too \u2014 the gate refuses every site",
     "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
     "find": "    return ent.concierge_entitled",
     "replace": "    return False",
@@ -114,7 +114,7 @@
     ]
   },
   {
-    "label": "publish embeds the bar on an unentitled site — it would 403 every visitor",
+    "label": "publish embeds the bar on an unentitled site \u2014 it would 403 every visitor",
     "file": "ee/pocketpaw_ee/paw_bar/embed.py",
     "find": "    if not concierge_enabled or not concierge_entitled or not site_key or not pocket_id:",
     "replace": "    if not concierge_enabled or not site_key or not pocket_id:",
@@ -133,7 +133,7 @@
     ]
   },
   {
-    "label": "the charge-first window reopens — pending is refused at publish",
+    "label": "the charge-first window reopens \u2014 pending is refused at publish",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "                subscription_status=\"active\" if status == \"pending\" else status,",
     "replace": "                subscription_status=status,",
@@ -144,8 +144,8 @@
   {
     "label": "activation flips the status AFTER the deploy again (the original P0)",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    doc.subscription_status = \"active\"\n    # Persist the AUTHORITATIVE gateway subscription id from the verified webhook.",
-    "replace": "    # Persist the AUTHORITATIVE gateway subscription id from the verified webhook.",
+    "find": "    doc.subscription_status = \"active\"\n    await doc.save()\n\n    deployed = await _deploy_site_doc(",
+    "replace": "    await doc.save()\n\n    deployed = await _deploy_site_doc(",
     "tests": [
       "tests/cloud/sites/test_charge_first.py::test_the_subscription_reads_active_before_the_activation_deploy_runs"
     ]

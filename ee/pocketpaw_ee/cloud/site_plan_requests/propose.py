@@ -242,13 +242,20 @@ async def propose_site_plan_request(
     if not requested_by:
         raise ValueError("propose_site_plan_request requires a non-empty requested_by")
 
-    # ``site_scoped_tier`` rather than ``get_site_plan``: it resolves a legacy
-    # alias AND returns None for an ORG-scoped flat (studio / agency), which is
-    # exactly the refusal wanted here. An org key is not a legal ``site_plan_key``
-    # on a publish, so a request for one could only ever become a Tray card that
-    # fails on approval — refuse it at the door, where the requester is present to
-    # be told why. Using the same helper the entitlement seams use also means this
-    # cannot drift from their idea of what a per-site rung is.
+    # THE REFUSAL BELOW IS THE GATE; the choice of lookup is not.
+    #
+    # ``site_scoped_tier`` was picked here because it resolved a legacy alias AND
+    # returned None for an ORG-scoped flat (studio / agency). Those flats were
+    # retired on 2026-09-06, so it now returns exactly what ``get_site_plan``
+    # returns — the mutation swapping the two escaped, which is how this comment
+    # came to be rewritten. It stays because it is the helper every entitlement
+    # seam uses, so this cannot drift from their idea of what a per-site rung is.
+    #
+    # What still refuses anything is the ``tier is None`` raise: a key the ladder
+    # cannot sell — retired, mistyped, invented — is not a legal ``site_plan_key``
+    # on a publish, so a request carrying one could only ever become a Tray card
+    # that fails on approval. Refuse it at the door, where the requester is present
+    # to be told why.
     canonical_key = site_plans.canonical_site_tier_key(str(site_plan_key or ""))
     tier = site_plans.site_scoped_tier(canonical_key)
     if tier is None:
@@ -261,10 +268,33 @@ async def propose_site_plan_request(
 
     tier_label = getattr(tier, "display_name", "") or canonical_key
     subject = site_name or "this site"
-    human_summary = (
-        f"Put {subject} on the {tier_label} plan "
-        f"(${monthly_price_usd}/month, added to this workspace's subscription)."
-    )
+
+    # A REQUEST FOR THE $0 FLOOR IS A CANCELLATION, and it has to read like one.
+    #
+    # It only started arriving here on 2026-09-05. Dropping a paying site to the
+    # free floor used to change nothing anyone was billed for, so the purchase
+    # gate let it through and no card was ever filed; it CLOSES the plan now, so a
+    # member asking for it is refused and lands in this queue like any other plan
+    # change. Left on the paid wording, the card an admin approves would have read
+    # "Put Acme Dental on the Free plan ($0/month, added to this workspace's
+    # subscription)" — which names no cost, mentions adding a line for a request
+    # that removes one, and gives no hint that a $19 plan is about to end. That is
+    # a money decision described as a formality.
+    is_cancellation = monthly_price_usd <= 0
+    if is_cancellation:
+        human_summary = (
+            f"End {subject}'s paid plan. It keeps what it has until the period it "
+            f"has already paid for runs out, then drops to {tier_label}."
+        )
+    else:
+        # "workspace credits", not "this workspace's subscription": a paid site is
+        # bought from the credit wallet since the same cutover, and an admin told
+        # it lands on a subscription will go looking for an invoice line that does
+        # not exist.
+        human_summary = (
+            f"Put {subject} on the {tier_label} plan "
+            f"(${monthly_price_usd}/month, charged to this workspace's credits)."
+        )
 
     blob: dict[str, Any] = {
         "kind": SITE_PLAN_REQUEST_KIND,
@@ -281,11 +311,20 @@ async def propose_site_plan_request(
         "proposed_event_id": None,
     }
 
-    recommendation = (
-        f"Approving adds ${monthly_price_usd}/month to this workspace's "
-        f"subscription and publishes {subject} on the {tier_label} plan. "
-        "Rejecting leaves the site on its current plan."
-    )
+    if is_cancellation:
+        recommendation = (
+            f"Approving ends the paid plan on {subject} — nothing is charged or "
+            "refunded, the site stays online, and it loses its paid features when "
+            "the current period runs out. Rejecting leaves the plan running."
+        )
+    else:
+        recommendation = (
+            f"Approving charges this workspace's credits for {tier_label} and "
+            f"publishes {subject} on it — the difference only if the site is "
+            "already inside a paid period, otherwise "
+            f"${monthly_price_usd} for the month. "
+            "Rejecting leaves the site on its current plan."
+        )
     trigger = ActionTrigger(
         type="user",
         source=requested_by,

@@ -188,6 +188,7 @@ async def _sweeper_loop() -> None:
     from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
+    from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
 
     interval = _sweep_interval_seconds()
     _run_sweeper_logger.info("sweeper loop started (interval=%ds)", interval)
@@ -232,6 +233,17 @@ async def _sweeper_loop() -> None:
             await sweep_pending_sites()
         except Exception:
             _run_sweeper_logger.exception("sweep_pending_sites tick failed")
+        # Credits site plans: charge the next month for every wallet-paid site
+        # whose renewal has come due. This is what makes a MONTHLY site plan
+        # actually recur — the gateway subscription used to do it, and a paid
+        # site no longer has one. Without this pass a customer pays once and
+        # keeps every paid capability for good. A site that cannot afford its
+        # renewal drops to the free floor and STAYS LIVE; nothing is ever taken
+        # down here. Own try so a failure cannot suppress the other sweeps.
+        try:
+            await sweep_site_renewals()
+        except Exception:
+            _run_sweeper_logger.exception("sweep_site_renewals tick failed")
         # M5 dunning: revoke the plan of any subscription still on hold past its
         # grace deadline. The webhook only stamps the deadline — nothing arrives
         # from the gateway when it passes, so this pass is what actually ends the
@@ -250,10 +262,12 @@ async def start_run_sweeper() -> None:
     metering sweep (bill any terminal runs left unbilled by the prior process), the
     WU-F LiteLLM billing-cutover sweep (no-op / shadow-compare / live-ingest per the
     cutover mode), the charge-first pending-site reconciliation sweep (surface paid
-    sites stuck pending), the M5 dunning grace sweep (revoke the plan of a
-    subscription left on hold past its deadline while this process was down), and
-    the ART-3 agent-jail GC (reclaim scratch left by a prior process's idle runs);
-    the 5-minute loop then ticks all of them.
+    sites stuck pending), the credits site-plan renewal sweep (charge the month for
+    every wallet-paid site that came due while this process was down — the pass
+    that makes a monthly site plan recur at all), the M5 dunning grace sweep
+    (revoke the plan of a subscription left on hold past its deadline while this
+    process was down), and the ART-3 agent-jail GC (reclaim scratch left by a
+    prior process's idle runs); the 5-minute loop then ticks all of them.
     """
     from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
     from pocketpaw_ee.cloud.billing.service import sweep_subscription_grace
@@ -261,6 +275,7 @@ async def start_run_sweeper() -> None:
     from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
+    from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
 
     global _sweeper_task
     with suppress(Exception):
@@ -271,6 +286,8 @@ async def start_run_sweeper() -> None:
         await run_cutover_sweep()
     with suppress(Exception):
         await sweep_pending_sites()
+    with suppress(Exception):
+        await sweep_site_renewals()
     with suppress(Exception):
         await sweep_subscription_grace()
     with suppress(Exception):

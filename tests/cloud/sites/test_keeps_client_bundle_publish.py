@@ -28,13 +28,15 @@
 # workspace_id + site_id — it never re-reads the pocket. So any field the publish
 # path reads but the snapshot omits is silently dropped, and a PAID interactive site
 # would go live with its JavaScript stripped while every free-path test stayed green.
-# ``test_deferred_paid_publish_preserves_the_flag`` runs the real charge-first flow
-# (pending publish → signed webhook → activation) and asserts the flag reaches the
-# generator at activation time.
+# ``test_a_deferred_deploy_replays_the_flag`` captures the declaration on a
+# pending doc and then runs the deferred deploy, asserting the flag reaches the
+# generator from the SNAPSHOT rather than from a fresh pocket read.
 #
-# The generator / Cloudflare / Dodo provider are mocked exactly like the sibling
-# test_charge_first.py (never touches Bun/workerd/Dodo); the webhook path signs with
-# the REAL standardwebhooks library so activation runs through the verified route.
+# Updated 2026-09-05 (fix/sites-plan-credits): that case used to drive activation
+# through a signed ``subscription.active`` webhook, because a hosted checkout was
+# how a paid publish got paid for. Paw Sites left Dodo, so the credits rail calls
+# ``activate_site`` inside the publish request and the test calls it the same
+# way. The behaviour under test — capture, then replay — is unchanged.
 
 from __future__ import annotations
 
@@ -42,7 +44,6 @@ import base64
 import json
 from datetime import UTC, datetime
 
-from pocketpaw_ee.cloud.billing import service as billing
 from pocketpaw_ee.cloud.billing import site_plans
 from pocketpaw_ee.cloud.billing.domain import SubscriptionCheckout
 from pocketpaw_ee.cloud.billing.providers.dodo import DodoProvider
@@ -165,9 +166,6 @@ def _site_subscription_body(*, workspace_id: str, site_id: str) -> str:
 
 def _paid_tier(monkeypatch) -> None:
     """Make the "pro" site tier chargeable so publish defers the deploy."""
-    monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"site": "prod_site_pro"}.get(key)
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -346,47 +344,50 @@ async def test_an_explicit_declaration_beats_a_default_that_says_dont(
 # ---------------------------------------------------------------------------
 
 
-async def test_paid_publish_captures_the_flag_in_the_deploy_snapshot(mongo_db, monkeypatch):
-    """A paid publish defers the deploy, so the flag must land in
-    ``pending_deploy_inputs`` — that snapshot is all the webhook will ever see."""
-    _paid_tier(monkeypatch)
-    ws = await _make_workspace()
-    pocket_id = await _make_pocket(workspace_id=ws, keeps_client_bundle=True)
-    gen = _RecordingGenerator()
+async def _pending_on_the_legacy_rail(*, workspace_id, pocket_id, keeps_client_bundle):
+    """Build the PENDING, deferred-deploy site these cases replay.
 
-    doc = await sites_service.publish_pocket(
-        workspace_id=ws,
+    Calls ``_publish_pending_site`` on the SUBSCRIPTION rail directly. Since
+    2026-09-05 ``publish_pocket`` buys a new paid site from the workspace credit
+    wallet and deploys in the same request, so it no longer produces a pending
+    doc for a webhook to activate. The snapshot-and-replay machinery these tests
+    guard is not legacy though: it is what BOTH deferred rails run on, and the
+    subscriptions already sold still activate through it.
+
+    ``keeps_client_bundle`` is passed explicitly rather than re-read from the
+    pocket, because that is exactly what the publish path does — resolving the
+    declaration and handing it down is the step under test.
+    """
+    return await sites_service._publish_pending_site(
+        workspace_id=workspace_id,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="site",
-        purchase_authorized=True,
-        _generator=gen,
-        _cloudflare=_RecordingCF(),
-        _bundle_reader=lambda d: b"x",
-        _billing_provider=_RecordingBillingProvider(),
+        ripple_spec=None,
+        theme={},
+        engine="ripple",
+        source=None,
+        pattern="landing",
+        name="My Landing",
+        builder_origin=None,
+        keeps_client_bundle=keeps_client_bundle,
+        tier=site_plans.get_site_plan("site"),
     )
 
-    # Deploy really was deferred (nothing built yet) …
-    assert doc.deployed is False
-    assert gen.build_calls == []
-    # … and the declaration is persisted for the webhook to replay.
-    persisted = await Site.find_one(Site.id == doc.id)
-    assert persisted is not None
-    assert persisted.pending_deploy_inputs["keeps_client_bundle"] is True
 
+async def test_a_deferred_deploy_replays_the_flag(mongo_db, monkeypatch):  # noqa: ARG001
+    """THE ONE THAT MATTERS: capture the declaration on the pending doc, then let
+    the deferred deploy run, and assert the generator is still told the site keeps
+    its client bundle.
 
-async def test_deferred_paid_publish_preserves_the_flag(mongo_db, recording_bus, monkeypatch):
-    """THE ONE THAT MATTERS: publish paid → pending, then let the real signed
-    ``subscription.active`` webhook drive activation, and assert the generator is
-    still told the site keeps its client bundle.
+    The deferred deploy never re-reads the pocket — it replays
+    ``pending_deploy_inputs`` — so this fails the moment the flag stops being
+    captured in or replayed from that snapshot. No free-path test can see it.
 
-    The webhook carries only workspace_id + site_id and never re-reads the pocket,
-    so this fails the moment the flag stops being captured in / replayed from
-    ``pending_deploy_inputs`` — the failure mode no free-path test can see.
-    """
-    _paid_tier(monkeypatch)
-    # Local deploy mode + a patched GeneratorClient, because the webhook-driven
-    # activation takes no injected seams.
+    Driven through ``activate_site`` directly. It used to go through a signed
+    ``subscription.active`` webhook, which is how the deferred deploy was reached
+    when payment happened on a hosted checkout; since 2026-09-05 the credits rail
+    calls ``activate_site`` itself, inside the publish request, so this is the
+    real path rather than a shortcut around one."""
     monkeypatch.setenv("PAW_SITES_LOCAL", "1")
     activation_gen = _RecordingGenerator()
     monkeypatch.setattr(sites_service, "GeneratorClient", lambda *a, **k: activation_gen)
@@ -398,41 +399,28 @@ async def test_deferred_paid_publish_preserves_the_flag(mongo_db, recording_bus,
 
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws, keeps_client_bundle=True)
-    doc = await sites_service.publish_pocket(
-        workspace_id=ws,
-        user_id="u1",
-        pocket_id=pocket_id,
-        site_plan_key="site",
-        purchase_authorized=True,
-        _generator=_RecordingGenerator(),  # publish-path generator: must NOT run
-        _billing_provider=_RecordingBillingProvider(),
+    doc = await _pending_on_the_legacy_rail(
+        workspace_id=ws, pocket_id=pocket_id, keeps_client_bundle=True
     )
-    site_id = str(doc.id)
     assert doc.deployed is False
 
-    body = _site_subscription_body(workspace_id=ws, site_id=site_id)
-    result = await billing.handle_webhook(
-        payload=body.encode(),
-        headers=_sign(body, msg_id="evt_active_keeps_bundle_1"),
-        provider=_provider(),
-    )
-    assert result == {"ok": True, "granted": False}
+    await sites_service.activate_site(workspace_id=ws, site_id=str(doc.id), force=True)
 
-    # The deferred deploy ran — and it still knows the site keeps its JavaScript.
     assert len(activation_gen.build_calls) == 1
     assert activation_gen.build_calls[0]["keeps_client_bundle"] is True
 
     updated = await Site.find_one(Site.id == doc.id)
     assert updated is not None
     assert updated.deployed is True
-    assert updated.subscription_status == "active"
 
 
-async def test_activation_of_a_pre_mt1_pending_site_defaults_to_false(mongo_db, monkeypatch):
+async def test_a_snapshot_written_before_the_field_existed_replays_as_false(
+    mongo_db,  # noqa: ARG001
+    monkeypatch,
+):
     """BACK-COMPAT: a site that went pending BEFORE this field existed has no
-    ``keeps_client_bundle`` key in its snapshot. Activation must read that as False
-    and deploy normally, not raise."""
-    _paid_tier(monkeypatch)
+    ``keeps_client_bundle`` key in its snapshot. The deferred deploy must read
+    that as False and deploy normally, not raise."""
     monkeypatch.setenv("PAW_SITES_LOCAL", "1")
     activation_gen = _RecordingGenerator()
     monkeypatch.setattr(sites_service, "GeneratorClient", lambda *a, **k: activation_gen)
@@ -444,16 +432,9 @@ async def test_activation_of_a_pre_mt1_pending_site_defaults_to_false(mongo_db, 
 
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws, keeps_client_bundle=True)
-    doc = await sites_service.publish_pocket(
-        workspace_id=ws,
-        user_id="u1",
-        pocket_id=pocket_id,
-        site_plan_key="site",
-        purchase_authorized=True,
-        _generator=_RecordingGenerator(),
-        _billing_provider=_RecordingBillingProvider(),
+    doc = await _pending_on_the_legacy_rail(
+        workspace_id=ws, pocket_id=pocket_id, keeps_client_bundle=True
     )
-    site_id = str(doc.id)
 
     # Rewrite the snapshot to the PRE-MT-1 shape: the key simply isn't there.
     persisted = await Site.find_one(Site.id == doc.id)
@@ -463,13 +444,27 @@ async def test_activation_of_a_pre_mt1_pending_site_defaults_to_false(mongo_db, 
     persisted.pending_deploy_inputs = legacy_inputs
     await persisted.save()
 
-    body = _site_subscription_body(workspace_id=ws, site_id=site_id)
-    await billing.handle_webhook(
-        payload=body.encode(),
-        headers=_sign(body, msg_id="evt_active_keeps_bundle_legacy"),
-        provider=_provider(),
-    )
+    await sites_service.activate_site(workspace_id=ws, site_id=str(doc.id), force=True)
 
-    # Deployed fine, with the historical (non-declaring) behaviour.
     assert len(activation_gen.build_calls) == 1
     assert activation_gen.build_calls[0]["keeps_client_bundle"] is False
+
+
+async def test_paid_publish_captures_the_flag_in_the_deploy_snapshot(mongo_db, monkeypatch):
+    """A paid publish defers the deploy, so the flag must land in
+    ``pending_deploy_inputs`` — that snapshot is all the webhook will ever see."""
+    ws = await _make_workspace()
+    pocket_id = await _make_pocket(workspace_id=ws, keeps_client_bundle=True)
+    gen = _RecordingGenerator()
+
+    doc = await _pending_on_the_legacy_rail(
+        workspace_id=ws, pocket_id=pocket_id, keeps_client_bundle=True
+    )
+
+    # Deploy really was deferred (nothing built yet) …
+    assert doc.deployed is False
+    assert gen.build_calls == []
+    # … and the declaration is persisted for the webhook to replay.
+    persisted = await Site.find_one(Site.id == doc.id)
+    assert persisted is not None
+    assert persisted.pending_deploy_inputs["keeps_client_bundle"] is True

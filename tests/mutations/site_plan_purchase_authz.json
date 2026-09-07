@@ -2,8 +2,8 @@
   {
     "label": "the purchase gate is deleted — any member charges the company card",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        and _requested_tier_key != _held_tier_key\n        and not purchase_authorized",
-    "replace": "        and _requested_tier_key != _held_tier_key\n        and False",
+    "find": "        and requested_tier.key != _held_tier_key\n        and not purchase_authorized",
+    "replace": "        and requested_tier.key != _held_tier_key\n        and False",
     "tests": [
       "tests/cloud/sites/test_site_plan_purchase_authz.py::test_an_unauthorized_caller_cannot_buy_a_paid_tier"
     ]
@@ -11,7 +11,7 @@
   {
     "label": "the gate stops exempting a same-tier republish — every content edit needs an admin",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        and _requested_tier_key != _held_tier_key\n        and not purchase_authorized",
+    "find": "        and requested_tier.key != _held_tier_key\n        and not purchase_authorized",
     "replace": "        and not purchase_authorized",
     "tests": [
       "tests/cloud/sites/test_site_plan_purchase_authz.py::test_republishing_a_paid_site_needs_no_authorization"
@@ -20,8 +20,8 @@
   {
     "label": "the gate also refuses a FREE publish — an employee cannot ship at all",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if (\n        is_paid\n        and site_plan_key is not None",
-    "replace": "    if (\n        site_plan_key is not None",
+    "find": "    if (\n        requested_tier is not None\n        and (is_paid or already_paying)",
+    "replace": "    if (\n        requested_tier is not None",
     "tests": [
       "tests/cloud/sites/test_site_plan_purchase_authz.py::test_a_free_publish_needs_no_authorization"
     ]
