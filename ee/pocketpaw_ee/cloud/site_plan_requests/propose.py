@@ -242,13 +242,20 @@ async def propose_site_plan_request(
     if not requested_by:
         raise ValueError("propose_site_plan_request requires a non-empty requested_by")
 
-    # ``site_scoped_tier`` rather than ``get_site_plan``: it resolves a legacy
-    # alias AND returns None for an ORG-scoped flat (studio / agency), which is
-    # exactly the refusal wanted here. An org key is not a legal ``site_plan_key``
-    # on a publish, so a request for one could only ever become a Tray card that
-    # fails on approval — refuse it at the door, where the requester is present to
-    # be told why. Using the same helper the entitlement seams use also means this
-    # cannot drift from their idea of what a per-site rung is.
+    # THE REFUSAL BELOW IS THE GATE; the choice of lookup is not.
+    #
+    # ``site_scoped_tier`` was picked here because it resolved a legacy alias AND
+    # returned None for an ORG-scoped flat (studio / agency). Those flats were
+    # retired on 2026-09-06, so it now returns exactly what ``get_site_plan``
+    # returns — the mutation swapping the two escaped, which is how this comment
+    # came to be rewritten. It stays because it is the helper every entitlement
+    # seam uses, so this cannot drift from their idea of what a per-site rung is.
+    #
+    # What still refuses anything is the ``tier is None`` raise: a key the ladder
+    # cannot sell — retired, mistyped, invented — is not a legal ``site_plan_key``
+    # on a publish, so a request carrying one could only ever become a Tray card
+    # that fails on approval. Refuse it at the door, where the requester is present
+    # to be told why.
     canonical_key = site_plans.canonical_site_tier_key(str(site_plan_key or ""))
     tier = site_plans.site_scoped_tier(canonical_key)
     if tier is None:

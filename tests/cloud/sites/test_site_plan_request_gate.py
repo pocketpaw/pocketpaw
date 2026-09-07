@@ -158,10 +158,15 @@ def test_the_request_hash_covers_identity_and_not_price():
 
 
 async def test_an_org_scoped_flat_cannot_be_requested_for_one_site():
-    """``studio`` / ``agency`` cover a whole workspace and are refused by
+    """``studio`` / ``agency`` covered a whole workspace and are refused by
     ``publish_pocket`` as a ``site_plan_key``. A request for one could only ever
     become a Tray card that fails on approval, so it is refused at the door —
-    where the requester is present to be told why."""
+    where the requester is present to be told why.
+
+    Both were retired on 2026-09-06, so the refusal now comes from the key not
+    being in the catalog rather than from its scope. The error message and the
+    outcome are unchanged, which is the point — this asserts on what the requester
+    is told, not on which check told them."""
     from pocketpaw_ee.cloud.site_plan_requests import propose_site_plan_request
 
     with pytest.raises(ValueError, match="not a plan a single site"):

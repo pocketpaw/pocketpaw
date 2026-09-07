@@ -554,11 +554,19 @@ async def test_a_republish_without_a_plan_key_never_downgrades(mongo_db, monkeyp
 
 
 async def test_an_org_flat_is_not_read_as_a_downgrade(mongo_db, monkeypatch):  # noqa: ARG001
-    """``studio`` is a workspace-wide flat, not a per-site tier, so it is not a
-    legal ``site_plan_key``. It has a PRICE though, and it resolves in the
-    catalog — so a downgrade check written against the price map rather than the
-    per-site one would treat it as a request for the free floor and close a
-    paying customer's subscription."""
+    """``studio`` is not a legal ``site_plan_key``, and asking for one must not
+    close a paying customer's subscription.
+
+    The hazard when this was written: ``studio`` was a workspace-wide flat that
+    RESOLVED in the catalog and carried a price, so a downgrade check written
+    against the price map rather than the per-site one would read it as a request
+    for the free floor. It was retired on 2026-09-06, so that particular route is
+    gone — the key resolves to nothing at all now.
+
+    The test is kept, and the name with it (a mutation plan cites it), because the
+    behaviour it pins is not about org scope: ANY key the per-site ladder does not
+    sell must leave a paying site exactly where it was. A retired key is simply the
+    realest example available, since production documents still hold one."""
     _local_deploy(monkeypatch)
     ws = await _make_workspace()
     await _fund(ws, 9000)

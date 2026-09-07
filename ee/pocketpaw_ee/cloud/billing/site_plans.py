@@ -587,9 +587,15 @@ def site_scoped_tier(key: str | None) -> SitePlanTier | None:
     input. The catalog ships no org-scoped tier any more, and a RETIRED key is not
     a tier at all — ``canonical_site_tier_key("studio")`` is None, so the plain
     lookup already answers None and there is nothing left for the guard to catch.
-    Two mutations swapping this call for ``get_site_plan`` at the entitlement and
-    ``add_domain`` seams were observed to ESCAPE, which is the honest evidence and
-    the reason this paragraph replaced a claim that it still guarded them.
+    FOUR seams had a mutation swapping this call for ``get_site_plan``, and after
+    the retirement all four ESCAPED — entitlements, ``add_domain``, the analytics
+    gate, and the site-plan request door. That is the honest evidence, and the
+    reason this paragraph replaced a claim that it still guarded them. Each of
+    those mutations was repointed at a guard that still fires or, where the
+    neighbouring mutations already covered what was left, removed. DO NOT RE-ADD
+    ONE: an escape here is not a gap in the tests, it is this function being a
+    synonym, and a plan with an escaping mutation reads as covered while proving
+    nothing.
 
     It is kept anyway, and deliberately: it is the named seam every read of a
     ``Site.plan_tier`` goes through, so the day an org-scoped tier returns, the
