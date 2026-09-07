@@ -13,6 +13,9 @@
 #   * ``claude`` — shells ``claude -p <prompt> --output-format json``, reading
 #     the ``result`` field. The prompt is ONE argv element, never interpolated
 #     into a shell string. Same transport shape as ``mandates.foreman``.
+#   * ``HttpLlm`` — NOT env-selected: used whenever the universe brought its own
+#     Anthropic key (service.tick decrypts it and passes it in). Messages API
+#     over httpx; the model comes from the physics ``models.founders`` tier.
 #
 # Mock is the default (foreman defaults to ``claude``) because a terrarium tick
 # fans out one call PER CITIZEN: an accidental real-model tick on a 50-citizen
@@ -31,6 +34,8 @@ import logging
 import os
 import re
 from typing import Any, Protocol
+
+import httpx
 
 from pocketpaw_ee.terrarium.physics import PhysicsFile
 from pocketpaw_ee.terrarium.world import (
@@ -100,6 +105,70 @@ class ClaudeCliLlm:
         if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
             return envelope["result"]
         return out
+
+
+_API_URL = "https://api.anthropic.com/v1/messages"
+_DEFAULT_MODEL = "claude-sonnet-4-6"
+# Physics tier -> model id. Unknown tiers fall back to the default.
+_MODEL_BY_TIER = {
+    "premium": "claude-sonnet-4-6",
+    "mid": "claude-sonnet-4-6",
+    "tail": "claude-haiku-4-5",
+}
+
+
+def model_for_tier(tier: str | None) -> str:
+    return _MODEL_BY_TIER.get((tier or "").strip().lower(), _DEFAULT_MODEL)
+
+
+class HttpLlm:
+    """BYOK transport — the Anthropic Messages API with the universe's own key.
+
+    ``client`` is injectable so tests stub the transport; the key is held only on
+    this instance and never logged."""
+
+    def __init__(
+        self, api_key: str, model: str = _DEFAULT_MODEL, *, client: httpx.AsyncClient | None = None
+    ) -> None:
+        self._key = api_key
+        self.model = model
+        self._client = client
+
+    async def decide(
+        self,
+        *,
+        prompt: str,
+        physics: PhysicsFile,
+        citizen: CitizenSnapshot,
+        digest: SenseDigest,
+    ) -> str:
+        headers = {
+            "x-api-key": self._key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        body = {
+            "model": self.model,
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        client = self._client or httpx.AsyncClient(timeout=_CLI_TIMEOUT)
+        try:
+            res = await client.post(_API_URL, headers=headers, json=body)
+        finally:
+            if client is not self._client:
+                await client.aclose()
+        if res.status_code != 200:
+            # The response body may echo request details; keep the status only.
+            raise RuntimeError(f"anthropic API failed (HTTP {res.status_code})")
+        envelope = res.json()
+        blocks = envelope.get("content") if isinstance(envelope, dict) else None
+        text = "".join(
+            b.get("text", "")
+            for b in (blocks or [])
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+        return text or json.dumps(envelope)
 
 
 # Test hook — when set, MockLlm returns this verbatim (a dict is JSON-dumped).
@@ -173,8 +242,11 @@ class MockLlm:
         return json.dumps({"thought": "another day by the spring", "acts": acts})
 
 
-def resolve_llm() -> CitizenLlm:
-    """Pick the transport from ``POCKETPAW_TERRARIUM_LLM``. DEFAULT ``mock``."""
+def resolve_llm(*, api_key: str | None = None, tier: str | None = None) -> CitizenLlm:
+    """A universe with its own key gets ``HttpLlm``; otherwise the transport
+    from ``POCKETPAW_TERRARIUM_LLM``. DEFAULT ``mock``."""
+    if api_key:
+        return HttpLlm(api_key, model_for_tier(tier))
     choice = (os.environ.get("POCKETPAW_TERRARIUM_LLM") or "mock").strip().lower()
     if choice == "claude":
         return ClaudeCliLlm()

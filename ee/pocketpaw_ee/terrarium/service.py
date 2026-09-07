@@ -35,6 +35,7 @@ from uuid import uuid4
 
 from pocketpaw_ee.cloud._core.errors import BadRequest, NotFound, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud.byok import service as byok_service
 from pocketpaw_ee.terrarium import events as world_events
 from pocketpaw_ee.terrarium import llm as citizen_llm
 from pocketpaw_ee.terrarium import scheduler as clock
@@ -509,8 +510,12 @@ async def tick(workspace_id: str, user_id: str, universe_id: str, n: int = 1) ->
         uni = await _universe(workspace_id, universe_id)
         if uni.status == "archived":
             raise BadRequest("terrarium.archived", "an archived universe does not tick")
-        llm = citizen_llm.resolve_llm()
         physics = physics_of(uni)
+        # Bring-your-own-key: the workspace's key, via the ONE decrypting reader
+        # in cloud.byok (the same store the rest of the product uses). No second
+        # copy of a key lives on the universe. Platform credentials otherwise.
+        creds = await byok_service.resolve_turn_credentials(uni.workspace)
+        llm = citizen_llm.resolve_llm(api_key=creds.api_key, tier=physics.models.founders)
         for _ in range(n):
             produced.extend(await _one_tick(uni, physics, llm, user_id))
         uni.last_tick_at = datetime.now(UTC)

@@ -231,7 +231,7 @@ async def test_the_viewer_line_still_reaches_the_citizen_labelled(client):
     import pocketpaw_ee.terrarium.service as svc
 
     original = citizen_llm.resolve_llm
-    citizen_llm.resolve_llm = lambda: Spy()  # type: ignore[assignment]
+    citizen_llm.resolve_llm = lambda **_: Spy()  # type: ignore[assignment]
     svc.citizen_llm.resolve_llm = citizen_llm.resolve_llm  # type: ignore[attr-defined]
     try:
         client.post(f"/terrarium/universes/{uni['id']}/tick?n=1")
@@ -360,7 +360,7 @@ async def test_a_citizen_hears_what_another_said_last_tick(client):
     import pocketpaw_ee.terrarium.service as svc
 
     original = citizen_llm.resolve_llm
-    svc.citizen_llm.resolve_llm = lambda: Spy()  # type: ignore[attr-defined]
+    svc.citizen_llm.resolve_llm = lambda **_: Spy()  # type: ignore[attr-defined]
     try:
         client.post(f"/terrarium/universes/{uni['id']}/tick?n=2")
     finally:
@@ -395,7 +395,7 @@ async def test_a_viewer_line_is_heard_once_not_on_every_tick(client):
     import pocketpaw_ee.terrarium.service as svc
 
     original = citizen_llm.resolve_llm
-    svc.citizen_llm.resolve_llm = lambda: Spy()  # type: ignore[attr-defined]
+    svc.citizen_llm.resolve_llm = lambda **_: Spy()  # type: ignore[attr-defined]
     try:
         client.post(f"/terrarium/universes/{uni['id']}/tick?n=3")
     finally:

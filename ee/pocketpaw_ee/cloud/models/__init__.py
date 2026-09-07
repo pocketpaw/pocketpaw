@@ -177,6 +177,7 @@ from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
 from pocketpaw_ee.cloud.models.auth_session import AuthSession
 from pocketpaw_ee.cloud.models.belt_workspace_config import BeltWorkspaceConfig
 from pocketpaw_ee.cloud.models.builtin_widget import BuiltInWidget, BuiltInWidgetPosition
+from pocketpaw_ee.cloud.models.byok_key import ByokProviderKey
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.code_connection import CodeConnection
 from pocketpaw_ee.cloud.models.code_project import CodeProject
@@ -360,6 +361,7 @@ def _ensure_terrarium_docs():
 
 
 __all__ = [
+    "ByokProviderKey",
     "APIKey",
     "Agent",
     "AgentConfig",
@@ -465,6 +467,7 @@ def get_all_documents():
     artifact_version_doc = _ensure_version_docs()
     universe_doc, citizen_doc, world_event_doc, world_artifact_doc = _ensure_terrarium_docs()
     return [
+        ByokProviderKey,
         User,
         Agent,
         Pocket,
