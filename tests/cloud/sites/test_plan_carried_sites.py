@@ -383,13 +383,37 @@ async def test_a_downgrade_releases_the_sites_the_new_plan_cannot_carry(
 
     Three sites on Pro, then the subscription cancels to Go. Without a reconcile
     all three keep riding a plan that carries one — free hosting, permanently, and
-    nothing in the product ever mentions it again."""
+    nothing in the product ever mentions it again.
+
+    THE ``createdAt`` REWRITE BELOW IS THE TEST, not setup noise. A Site's ``_id``
+    here is a deterministic hash of ``(workspace, pocket)``, so sorting on it
+    orders by DIGEST — and a digest order agrees with insertion order roughly a
+    sixth of the time for three documents. Publishing three sites and asserting the
+    first one survives therefore passes against a reconciler sorted on ``_id``
+    whenever the workspace uuid happens to hash favourably: the mutation that swaps
+    ``.sort("createdAt")`` for ``.sort("_id")`` was watched to ESCAPE this test on
+    one run and be caught on the next, off nothing but a fresh uuid.
+
+    So the two orders are forced APART: whichever site sorts first by ``_id`` is
+    stamped NEWEST, and the survivor asserted below is the one that is oldest by
+    ``createdAt`` — which is now guaranteed to be the LAST by ``_id``. Sorting on
+    the wrong field cannot coincide with the right answer any more."""
     _local_deploy(monkeypatch)
     ws = await _make_workspace("pro")
     pockets = [await _make_pocket(ws, f"Site {i}") for i in range(3)]
     for pid in pockets:
         await _publish(ws, pid, "staff")
     assert (await sites_service.plan_site_slots(ws))[0] == 3
+
+    by_id = await Site.find(Site.workspace == ws).sort("_id").to_list()
+    assert len(by_id) == 3
+    base = datetime.now(UTC) - timedelta(days=30)
+    for rank, doc in enumerate(by_id):
+        # First by ``_id`` gets the LATEST createdAt, so the two orders are exact
+        # opposites rather than merely unlikely to match.
+        doc.createdAt = base + timedelta(days=len(by_id) - rank)
+        await doc.save()
+    oldest, released = by_id[-1], by_id[:-1]
 
     from pocketpaw_ee.cloud.workspace import service as workspace_service
 
@@ -398,9 +422,9 @@ async def test_a_downgrade_releases_the_sites_the_new_plan_cannot_carry(
     used, allowance = await sites_service.plan_site_slots(ws)
     assert (used, allowance) == (1, 1)
     # OLDEST FIRST KEEPS ITS SLOT — the site most likely to be linked and indexed.
-    assert (await _site_for(pockets[0])).billing_rail == "plan"
-    for pid in pockets[1:]:
-        doc = await _site_for(pid)
+    assert (await _site_for(oldest.pocket_id)).billing_rail == "plan"
+    for stale in released:
+        doc = await _site_for(stale.pocket_id)
         assert doc.billing_rail == ""
         assert doc.subscription_status == "none"
         assert doc.deployed is True, "a released site stays live on the free floor"
@@ -473,3 +497,41 @@ def test_the_catalog_fails_closed_on_a_plan_it_does_not_know():
 
     tier = plan_catalog._build("platinum-unlimited")
     assert tier.included_sites == 0
+
+
+def test_the_plan_ladder_carries_the_decided_site_counts():
+    """The three numbers the ladder was sold on, pinned as numbers.
+
+    Nothing else asserts them. ``plan_site_slots`` is tested against ``pro``
+    alone, the DTO test copies whatever the tier says, and the fail-closed test
+    only covers the default — so every count above Free could be edited to
+    anything, including ``None``, with the whole suite green. ``None`` is the
+    dangerous direction: it means UNCAPPED here, so a slip in this dict is not a
+    mispriced plan but free hosting with no ceiling at all.
+
+    Free is 0 and Enterprise is None on purpose, and both are asserted rather
+    than skipped: Free at anything above 0 gives away a site to every signup, and
+    Enterprise at a number would cap a contract the catalog does not price."""
+    from pocketpaw_ee.cloud.billing import plans as plan_catalog
+
+    counts = {t.key: t.included_sites for t in plan_catalog.list_plans()}
+    assert counts["free"] == 0
+    assert counts["go"] == 1
+    assert counts["pro"] == 3
+    assert counts["pro_max"] == 10
+    assert counts["enterprise"] is None
+
+
+def test_the_site_allowance_only_ever_goes_up_the_ladder():
+    """A paid rung may never carry FEWER sites than the rung below it.
+
+    Pinning the four numbers catches an edit to any one of them; this catches the
+    shape, so a fifth rung added between two existing ones cannot land out of
+    order. An inverted pair is not merely odd — it makes an UPGRADE trigger the
+    reconciler's release path and silently drop sites the customer just paid
+    more to keep."""
+    from pocketpaw_ee.cloud.billing import plans as plan_catalog
+
+    priced = [t for t in plan_catalog.list_plans() if t.included_sites is not None]
+    counts = [t.included_sites for t in priced]
+    assert counts == sorted(counts), [(t.key, t.included_sites) for t in priced]

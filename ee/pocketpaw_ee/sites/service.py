@@ -5008,10 +5008,16 @@ async def add_domain(
     # Resolve the site's tier → its cloudflare_features and provision them on the
     # custom hostname. A base-tier (or unknown) site resolves to an empty set, so
     # create_custom_hostname stays on the basic path.
-    # ``site_scoped_tier`` — this reads a STORED ``plan_tier``, and the catalog
-    # also holds org flats whose keys are not legal there. Resolving one would
-    # provision the WAF and edge-cache controls an org buys across its whole
-    # estate onto one site nobody billed for them.
+    # ``site_scoped_tier`` — the named seam for reading a STORED ``plan_tier``.
+    # It is equivalent to ``get_site_plan`` since the org flats were retired
+    # (2026-09-06), so this is a shape the code holds rather than a live guard;
+    # the mutation swapping it for the plain lookup escapes, and that is recorded
+    # in ``site_scoped_tier``'s own docstring rather than pretended away here.
+    #
+    # The GUARD that still fires at this seam is the ``else set()`` below: a tier
+    # this catalog does not recognise — a retired key, a typo, a restored document
+    # from a future schema — provisions NOTHING. Defaulting it to anything else
+    # would hand a site the WAF and edge-cache controls nobody billed it for.
     plan = site_plans.site_scoped_tier(site.plan_tier)
     features = set(plan.cloudflare_features) if plan else set()
     ch = await cf.create_custom_hostname(hostname, features=features)

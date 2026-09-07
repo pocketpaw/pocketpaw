@@ -56,7 +56,8 @@
 # Updated 2026-08-22 (feat/site-pricing-ladder): the catalog now IS the pricing
 # spec — five tiers on the captain's approved ladder (free / site / staff /
 # studio / agency), rekeyed off the placeholder basic/pro/business names, at
-# $0 / $7 / $19 / $39 / $149 a month.
+# $0 / $7 / $19 / $39 / $149 a month. (The last two were retired on 2026-09-06;
+# the ladder is the three per-site rungs. See the 2026-09-06 note below.)
 #
 # THE REKEY IS THE RISKY HALF, and it is handled by aliasing rather than by a
 # flag day. ``Site.plan_tier`` holds the OLD strings in production, and an
@@ -68,26 +69,38 @@
 # ``staff``). ``scripts/migrate_site_plan_keys.py`` rewrites the stored values so
 # the aliases go quiet; nothing breaks if it is never run.
 #
-# TWO SCOPES NOW LIVE IN ONE CATALOG, which is new and is the other thing to read
-# carefully. ``free``/``site``/``staff`` are PER-SITE: they are bought one site at
-# a time and their key lands in ``Site.plan_tier``. ``studio``/``agency`` are
+# TWO SCOPES ONCE LIVED IN ONE CATALOG — worth reading because the machinery is
+# still here. ``free``/``site``/``staff`` are PER-SITE: they are bought one site at
+# a time and their key lands in ``Site.plan_tier``. ``studio``/``agency`` were
 # PER-ORG flats — one subscription covering many sites — and their key must NEVER
 # reach ``Site.plan_tier``, because a per-site publish cannot buy an org plan.
+# Both flats were retired on 2026-09-06, so the catalog ships one scope today; the
+# paragraph stays in the present tense because the SHAPE does, and the next
+# org-scoped tier inherits it rather than re-deriving it.
 # ``scope`` names the difference and ``site_scoped_tier`` enforces it: every
 # entitlement seam resolves through that function, so an org key stored on a site
 # (by a bug, a hand-edit, or a replayed webhook) fails closed to the floor instead
 # of handing one site the whole org's white-label allowance.
 #
-# The org tiers are CATALOG-ONLY today. There is no org subscription entity and
-# nothing that could activate one, so ``purchasable`` is False for both — the
-# storefront renders them as "talk to us", the same shape ``billing.plans``
-# already uses for Enterprise. That
-# is deliberate: a buy button that takes no money and grants nothing is worse than
-# an honest contact link. ``white_label`` / ``included_sites`` / the conversation
-# meter fields below are CATALOG CLAIMS — what a tier will sell — and no seam
-# reads them as an entitlement yet. ``SiteEntitlements`` still does not carry
-# them, for the reason its own docstring gives.
+# Updated 2026-09-06 (feat/plan-included-sites): THE ORG FLATS ARE RETIRED.
 #
+# ``studio`` ($39, 5 sites) and ``agency`` ($149, 25) are gone, along with the
+# ``white_label`` and ``included_sites`` fields that existed only to describe
+# them. The WORKSPACE plan carries sites now — Paw Go 1, Pro 3, Pro Max 10, at
+# ``staff`` quality — so a second ladder selling sites by the flat fee both
+# contradicted it in the storefront and priced worse than Pro Max ($49 for 10) at
+# every rung. Neither was purchasable, so nothing was sold on either and no
+# customer migration is needed.
+#
+# ``scope`` / ``is_org_scoped`` / ``site_scoped_tier`` STAY, and are still the
+# guard every entitlement seam reads through. Nothing in the catalog is org-scoped
+# any more, so the guard now protects against a key that is merely GONE: a Site
+# doc that still stores "studio" from before today resolves to None and lands on
+# the free floor, exactly as it did when the key resolved to an org flat. The
+# unsafe reading — a plain ``get_site_plan`` handing one site an org allowance —
+# is unreachable either way, and keeping the seam means re-introducing an org tier
+# does not have to re-derive which lookups were safe.
+
 # Updated 2026-09-05 (fix/sites-plan-credits): DODO IS GONE FROM THIS CATALOG.
 #
 # A per-site plan is paid from the WORKSPACE CREDIT BALANCE — the publish debits
@@ -99,9 +112,10 @@
 # reintroduces a dependency on.
 #
 # ``purchasable`` therefore changed meaning rather than value: it asks "does the
-# ladder sell this tier ONE SITE AT A TIME", which is True for every per-site rung
-# and False only for the org flats. Whether a given workspace can afford a rung
-# today is a question about its balance, answered at purchase time with a 402 —
+# ladder sell this tier ONE SITE AT A TIME", which is True for every rung the
+# catalog now ships — the org flats it answered False for are gone. Whether a
+# given workspace can afford a rung today is a question about its balance,
+# answered at purchase time with a 402 —
 # not a property of the catalog.
 #
 # The workspace-plan catalog (``billing.plans``) still bills through Dodo and is
@@ -115,21 +129,26 @@ from dataclasses import dataclass, field
 # The site-plan ladder — the captain's approved pricing spec, monthly, in whole
 # US dollars.
 #
-#   free    — $0    — per account. Unlimited builds, badge ON, our subdomain,
+#   free    — $0    — per account. Unlimited builds, watermark ON, our subdomain,
 #                     and ONE custom-domained site (the floor grant).
-#   site    — $7    — per SITE. Custom domain + the badge comes off.
+#   site    — $7    — per SITE. Custom domain + the Paw watermark comes off.
 #   staff   — $19   — per SITE. Everything in site, plus the visitor concierge
 #                     with 200 conversations a month included.
-#   studio  — $39   — per ORG, flat. White-label across 5 included sites.
-#   agency  — $149  — per ORG, flat. 25 included sites, SSO + SLA, pooled
-#                     conversation credits at the agency rate.
+#
+# A ``studio`` ($39, 5 sites) and an ``agency`` ($149, 25 sites) sat below those
+# until 2026-09-06, both per-ORG flats. They were retired rather than repriced:
+# the WORKSPACE plan carries sites now (Go 1 / Pro 3 / Pro Max 10, in
+# ``billing.plans._INCLUDED_SITES``), so a second ladder selling a bundle of sites
+# for a flat fee both contradicted it and priced worse than Pro Max. Bundled sites
+# have exactly one home, and it is the workspace ladder.
+#
+# What remains here is per-SITE overflow: the rungs a workspace buys for site
+# N+1 once its plan's included sites are used up.
 # ---------------------------------------------------------------------------
 _SITE_PLAN_MONTHLY_PRICE_USD: dict[str, int] = {
     "free": 0,
     "site": 7,
     "staff": 19,
-    "studio": 39,
-    "agency": 149,
 }
 
 # What a subscription on this tier BUYS: one site, or the whole workspace.
@@ -145,8 +164,6 @@ _SITE_PLAN_SCOPE: dict[str, str] = {
     "free": SITE_SCOPE,
     "site": SITE_SCOPE,
     "staff": SITE_SCOPE,
-    "studio": ORG_SCOPE,
-    "agency": ORG_SCOPE,
 }
 
 # The ``cloudflare_features`` member that gates VISITOR ANALYTICS: the pageview
@@ -171,8 +188,6 @@ _SITE_PLAN_CF_FEATURES: dict[str, frozenset[str]] = {
     "free": frozenset(),
     "site": frozenset({"custom_domain", "analytics"}),
     "staff": frozenset({"custom_domain", "analytics", "waf", "edge_cache"}),
-    "studio": frozenset({"custom_domain", "analytics", "waf", "edge_cache"}),
-    "agency": frozenset({"custom_domain", "analytics", "waf", "edge_cache"}),
 }
 
 # Does this tier sell the visitor concierge at all?
@@ -181,15 +196,14 @@ _SITE_PLAN_CF_FEATURES: dict[str, frozenset[str]] = {
 # That derivation was only ever correct while no tier sold the concierge: under
 # this ladder the concierge is precisely the difference between ``site`` and
 # ``staff``, so deriving it would hand the $7 rung the $19 rung's feature.
-# ``studio`` is white-label hosting, not staffing — it sells the badge removal
-# five times over, not the concierge. ``agency`` sells it, which is what its
-# pooled conversation rate is for. Unknown keys resolve False in ``_build``.
+# (The retired ``studio`` flat sold white-label hosting rather than staffing — the
+# badge removal five times over, not the concierge — while ``agency`` did sell it,
+# which is what its pooled conversation rate was for. Neither is in the catalog
+# since 2026-09-06.) Unknown keys resolve False in ``_build``.
 _SITE_PLAN_SELLS_CONCIERGE: dict[str, bool] = {
     "free": False,
     "site": False,
     "staff": True,
-    "studio": False,
-    "agency": True,
 }
 
 # Whether a tier may ship a site WITHOUT the attribution badge. ``free`` is the
@@ -200,33 +214,18 @@ _SITE_PLAN_BADGE_REMOVAL: dict[str, bool] = {
     "free": False,
     "site": True,
     "staff": True,
-    "studio": True,
-    "agency": True,
 }
 
-# WHITE-LABEL: no Paw marks anywhere across the org, not just the badge off one
-# site. A CATALOG CLAIM — the org tiers that carry it cannot be bought yet, and no
-# seam reads this field as an entitlement. It exists so the plan card can name what
-# separates a $39 org flat from five $7 sites. When org billing lands, this is the
-# field the resolver will AND with an active org subscription.
-_SITE_PLAN_WHITE_LABEL: dict[str, bool] = {
-    "free": False,
-    "site": False,
-    "staff": False,
-    "studio": True,
-    "agency": True,
-}
-
-# How many sites an ORG-scoped flat includes before the bulk per-site rate starts.
-# ``None`` on every per-site tier — the question does not apply to a subscription
-# that buys exactly one site. Catalog claim, same caveat as ``white_label``.
-_SITE_PLAN_INCLUDED_SITES: dict[str, int | None] = {
-    "free": None,
-    "site": None,
-    "staff": None,
-    "studio": 5,
-    "agency": 25,
-}
+# WHITE-LABEL AND INCLUDED-SITES ARE GONE FROM THIS CATALOG (2026-09-06).
+#
+# Both existed only to describe the ``studio``/``agency`` org flats, which are
+# retired — the workspace plan carries sites now (Paw Go 1, Pro 3, Pro Max 10),
+# so a second per-site ladder promising 5 or 25 sites for a flat fee contradicted
+# it in the storefront and priced worse than Pro Max at every rung.
+#
+# ``included_sites`` in particular had to go rather than sit unread. The name is
+# live again on ``billing.plans.PlanTier``, where it means the real thing, and one
+# name meaning two things across two catalogs is how the wrong one gets wired up.
 
 # Concierge conversations included per month, and the rate per conversation
 # beyond them, in CENTS.
@@ -245,21 +244,23 @@ _SITE_PLAN_CONVERSATION_ALLOWANCE: dict[str, int] = {
     "free": 0,
     "site": 0,
     "staff": 200,
-    "studio": 0,
-    "agency": 0,
 }
 
-# The list rate is 10 cents; ``agency``'s pooled rate is half of it and is the
-# reason the tier exists at its price. Tiers that sell no concierge still carry
-# the list rate rather than 0 — a 0 here would read as "free conversations" to
-# anything that renders it, which is the opposite of the truth (they get none).
+# The list rate is 10 cents, and after the 2026-09-06 retirement of the ``studio``
+# and ``agency`` org flats EVERY tier carries it — the half-price pooled rate was
+# ``agency``'s, and it left the catalog with the tier. The dict stays a dict rather
+# than collapsing to the constant because the rate is a per-tier CLAIM: the day a
+# rung is sold on a cheaper conversation, this is where it is priced, and a caller
+# reading ``tier.conversation_rate_cents`` needs no edit.
+#
+# Tiers that sell no concierge still carry the list rate rather than 0 — a 0 here
+# would read as "free conversations" to anything that renders it, which is the
+# opposite of the truth (they get none).
 _LIST_CONVERSATION_RATE_CENTS = 10
 _SITE_PLAN_CONVERSATION_RATE_CENTS: dict[str, int] = {
     "free": _LIST_CONVERSATION_RATE_CENTS,
     "site": _LIST_CONVERSATION_RATE_CENTS,
     "staff": _LIST_CONVERSATION_RATE_CENTS,
-    "studio": _LIST_CONVERSATION_RATE_CENTS,
-    "agency": 5,
 }
 
 # Buyer-facing name + the one line a plan card leads with. The catalog owns these
@@ -268,10 +269,15 @@ _SITE_PLAN_CONVERSATION_RATE_CENTS: dict[str, int] = {
 # and the keys just changed. Mirrors ``billing.plans._PLAN_DISPLAY``.
 _SITE_PLAN_DISPLAY: dict[str, tuple[str, str]] = {
     "free": ("Free", "Build and publish as many sites as you like, on a pawsites subdomain."),
-    "site": ("Site", "Point your own domain at it and the Paw badge comes off."),
+    # "WATERMARK", NOT "BADGE", AND NOT "PAW BAR". This is card copy the client
+    # renders verbatim, and it has to agree with the inclusion row beside it
+    # ("Paw watermark removed", ``core/billing/site-plan-inclusions.ts``) — the
+    # same thing under two names three inches apart is worse than either name.
+    # "Paw Bar" would be actively wrong: that is the embeddable chat widget a
+    # customer mounts on their own page, and paying for this rung does not
+    # remove it. The mark here is ``sites.badge``'s attribution anchor.
+    "site": ("Site", "Point your own domain at it and the Paw watermark comes off."),
     "staff": ("Staff", "Adds the visitor concierge — 200 conversations a month, then metered."),
-    "studio": ("Studio", "White-label across five sites, on one flat bill for the whole org."),
-    "agency": ("Agency", "Twenty-five sites with SSO, an SLA, and pooled conversation credits."),
 }
 
 # Extra selling points that are NOT capability flags, and the distinction matters
@@ -282,8 +288,6 @@ _SITE_PLAN_HIGHLIGHTS: dict[str, tuple[str, ...]] = {
     "free": (),
     "site": (),
     "staff": (),
-    "studio": ("No Paw marks anywhere", "One bill for the whole org"),
-    "agency": ("Single sign-on", "Service-level agreement", "Pooled conversation credits"),
 }
 
 # How many SITES in a workspace may carry a custom domain on this tier.
@@ -303,16 +307,11 @@ _SITE_PLAN_HIGHLIGHTS: dict[str, tuple[str, ...]] = {
 # tier whether or not the site is paying. Unknown keys resolve to 0 in ``_build``:
 # fail-closed, matching ``badge_removal``.
 #
-# The ORG tiers are ``None`` here and carry their real allowance in
-# ``included_sites`` instead. This field answers "how many domained sites does
-# THIS SITE's own plan allow", and an org key can never be a site's own plan —
-# ``site_scoped_tier`` refuses it before this field is ever read.
+# This field answers "how many domained sites does THIS SITE's own plan allow".
 _SITE_PLAN_MAX_DOMAINED_SITES: dict[str, int | None] = {
     "free": 1,
     "site": None,
     "staff": None,
-    "studio": None,
-    "agency": None,
 }
 
 # How many HOSTNAMES one FLOOR-tier site may carry. The companion cap to
@@ -327,9 +326,8 @@ _SITE_PLAN_MAX_DOMAINED_SITES: dict[str, int | None] = {
 # subject to it.
 _FREE_MAX_HOSTNAMES_PER_SITE = 2
 
-# Order the catalog is listed in — the price ladder, cheapest first, per-site
-# tiers before the org flats.
-_SITE_TIER_ORDER: tuple[str, ...] = ("free", "site", "staff", "studio", "agency")
+# Order the catalog is listed in — the price ladder, cheapest first.
+_SITE_TIER_ORDER: tuple[str, ...] = ("free", "site", "staff")
 
 # The base/floor site tier — a publish with no explicit tier resolves here.
 BASE_SITE_PLAN_KEY = "free"
@@ -374,7 +372,7 @@ class SitePlanTier:
     ``scope`` is ``"site"`` or ``"org"`` and decides which of the two billing
     shapes this row is. Read it before doing anything with ``key``.
 
-    ``white_label``, ``included_sites``, ``conversation_allowance`` and
+    ``conversation_allowance`` and
     ``conversation_rate_cents`` are CATALOG CLAIMS — what the tier will sell. No
     seam gates on them, and ``SiteEntitlements`` deliberately does not carry them.
     They are here so a plan card can describe the ladder honestly; do not mistake
@@ -390,8 +388,6 @@ class SitePlanTier:
     scope: str = ORG_SCOPE
     badge_removal: bool = False
     max_domained_sites: int | None = 0
-    white_label: bool = False
-    included_sites: int | None = None
     conversation_allowance: int = 0
     conversation_rate_cents: int = _LIST_CONVERSATION_RATE_CENTS
     display_name: str = ""
@@ -506,8 +502,6 @@ def _build(key: str) -> SitePlanTier:
         # domains, while a present key mapped to None means UNCAPPED. Collapsing
         # the two would hand an unknown tier the uncapped answer.
         max_domained_sites=_SITE_PLAN_MAX_DOMAINED_SITES.get(key, 0),
-        white_label=_SITE_PLAN_WHITE_LABEL.get(key, False),
-        included_sites=_SITE_PLAN_INCLUDED_SITES.get(key),
         conversation_allowance=_SITE_PLAN_CONVERSATION_ALLOWANCE.get(key, 0),
         conversation_rate_cents=_SITE_PLAN_CONVERSATION_RATE_CENTS.get(
             key, _LIST_CONVERSATION_RATE_CENTS
@@ -587,9 +581,22 @@ def site_scoped_tier(key: str | None) -> SitePlanTier | None:
     rungs — so an org key in that field means something went wrong: a bug, a
     hand-edited document, a replayed webhook, a restored backup from a future
     schema. Whatever the cause, the safe reading is "this site has no plan of its
-    own", which lands it on the free floor. The unsafe reading is the one a plain
-    catalog lookup gives: one site silently holding the white-label allowance an
-    org pays $149 a month for.
+    own", which lands it on the free floor.
+
+    SINCE 2026-09-06 THIS RETURNS EXACTLY WHAT ``get_site_plan`` RETURNS, for every
+    input. The catalog ships no org-scoped tier any more, and a RETIRED key is not
+    a tier at all — ``canonical_site_tier_key("studio")`` is None, so the plain
+    lookup already answers None and there is nothing left for the guard to catch.
+    Two mutations swapping this call for ``get_site_plan`` at the entitlement and
+    ``add_domain`` seams were observed to ESCAPE, which is the honest evidence and
+    the reason this paragraph replaced a claim that it still guarded them.
+
+    It is kept anyway, and deliberately: it is the named seam every read of a
+    ``Site.plan_tier`` goes through, so the day an org-scoped tier returns, the
+    lookups that were safe do not have to be re-derived one call site at a time.
+    Treat it as a shape the code holds, not as a live gate — the reachable half of
+    the scope machinery is ``_build``'s ORG default for an unknown key, which IS
+    tested and mutation-caught (``test_a_tier_the_catalog_does_not_know_is_built_org_scoped``).
     """
     tier = get_site_plan(key)
     if tier is None or tier.is_org_scoped:

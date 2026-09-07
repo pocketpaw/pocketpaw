@@ -151,5 +151,33 @@
     "tests": [
       "tests/cloud/sites/test_billing_state_on_the_wire.py::test_every_field_the_service_sets_exists_on_the_dto"
     ]
+  },
+  {
+    "label": "the plan's site counts go uncapped — every rung hosts unlimited sites for free",
+    "file": "ee/pocketpaw_ee/cloud/billing/plans.py",
+    "find": "    \"go\": 1,\n    \"pro\": 3,\n    \"pro_max\": 10,",
+    "replace": "    \"go\": None,\n    \"pro\": None,\n    \"pro_max\": None,",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_the_plan_ladder_carries_the_decided_site_counts"
+    ]
+  },
+  {
+    "label": "the ladder inverts — an UPGRADE releases sites the customer just paid more to keep",
+    "file": "ee/pocketpaw_ee/cloud/billing/plans.py",
+    "find": "    \"go\": 1,\n    \"pro\": 3,\n    \"pro_max\": 10,",
+    "replace": "    \"go\": 10,\n    \"pro\": 3,\n    \"pro_max\": 1,",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_the_site_allowance_only_ever_goes_up_the_ladder"
+    ]
+  },
+  {
+    "label": "the free floor is given a site — every signup gets hosting nobody reclaims",
+    "file": "ee/pocketpaw_ee/cloud/billing/plans.py",
+    "find": "_INCLUDED_SITES: dict[str, int | None] = {\n    \"free\": 0,",
+    "replace": "_INCLUDED_SITES: dict[str, int | None] = {\n    \"free\": 1,",
+    "tests": [
+      "tests/cloud/sites/test_plan_carried_sites.py::test_the_plan_ladder_carries_the_decided_site_counts",
+      "tests/cloud/sites/test_plan_carried_sites.py::test_a_workspace_on_free_carries_nothing"
+    ]
   }
 ]

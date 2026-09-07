@@ -117,15 +117,16 @@ def test_every_priced_per_site_rung_is_purchasable():
         assert tier.purchasable is True, f"{tier.key} is not on sale"
 
 
-@pytest.mark.parametrize("key", ["studio", "agency"])
-def test_an_org_flat_is_not_purchasable(key):
-    """The one row that still refuses, and the reason ``purchasable`` survives
-    rather than being deleted with the rule that motivated it.
+def test_a_key_that_fails_closed_to_org_scope_is_not_purchasable():
+    """The reason ``purchasable`` survives rather than being deleted with the rule
+    that motivated it.
 
-    An org flat covers a whole workspace. The per-site purchase buys one site and
-    debits one site's price, so letting one through would take the price of a site
-    and hand over an org plan's worth of claims."""
-    assert site_plans.get_site_plan(key).purchasable is False
+    This used to be parametrized over ``studio`` and ``agency``. Both were retired
+    on 2026-09-06, so there is no org row left to refuse — but the refusal itself
+    is still reachable and still matters: an unknown key builds org-scoped (the
+    fail-closed default) and must not be offered as something a site can buy.
+    """
+    assert site_plans._build("tier-that-does-not-exist").purchasable is False
 
 
 def test_the_dto_carries_purchasable():
@@ -135,9 +136,10 @@ def test_the_dto_carries_purchasable():
 
     assert rows[site_plans.BASE_SITE_PLAN_KEY].purchasable is True
     assert rows[_a_priced_tier()].purchasable is True
-    org = [t.key for t in site_plans.list_site_plans() if t.is_org_scoped]
-    assert org, "the catalog lost its org flats — the assertion below is vacuous"
-    assert all(rows[k].purchasable is False for k in org)
+    # Every shipped rung is buyable since the org flats were retired, so the
+    # false side is asserted on the fail-closed default rather than on a row.
+    # Without it this test only proves the DTO can say True.
+    assert site_plan_tier_to_dto(site_plans._build("nope")).purchasable is False
 
 
 def test_purchasable_is_not_a_per_site_entitlement():

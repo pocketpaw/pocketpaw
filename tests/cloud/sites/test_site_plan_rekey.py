@@ -209,27 +209,22 @@ async def test_a_republish_that_omits_the_tier_leaves_a_legacy_key_resolvable(mo
 
 
 @pytest.mark.parametrize("org_key", ["studio", "agency"])
-async def test_publishing_a_site_on_an_org_flat_records_the_floor_instead(
+async def test_publishing_a_site_on_a_retired_org_key_records_the_floor_instead(
     mongo_db, org_key, monkeypatch, caplog
 ):
     """A publish asking for ``studio`` must not stamp ``studio``.
 
-    The Dodo product is configured for EVERY key here on purpose. Without it the
-    test would pass through the pre-existing "paid tier with no product" fallback
-    and prove nothing about the scope check — the org tier would be refused for
-    being unconfigured rather than for being org-scoped, and the day someone
-    added a studio product the refusal would silently stop happening.
+    ``studio`` and ``agency`` were org flats until 2026-09-06 and are now retired,
+    so the key resolves to nothing at all. The OUTCOME this asserts is unchanged
+    and still the one that matters: whatever a client sends, the document must not
+    end up holding a key that grants an allowance nobody bought.
 
-    THE LOG ASSERTION IS LOAD-BEARING, and this is why. Two guards stand between
-    an org key and the document: the scope check, and ``purchasable`` (hard-False
-    for org tiers). Belt and braces is right for the code and useless for a test
-    — deleting either one leaves the persisted result identical, so a
-    stored-state-only assertion measures "at least one guard survives", not the
-    one it names. It passed against a mutation that stubbed the scope check out
-    entirely. The two guards log different lines, so the line is the only
-    evidence that distinguishes them.
-
-    Breaks on: ``_apply_site_plan`` losing its ``is_org_scoped`` guard.
+    The log assertion that used to close this test is gone, and deliberately.
+    Two guards stood between an org key and the document — the scope check and
+    ``purchasable`` — so a stored-state assertion measured "at least one survives"
+    rather than the one it named, and only the differing log line told them apart.
+    Retiring the rows collapsed both into the unknown-key path, so there is one
+    guard now and the persisted state is unambiguous evidence for it.
     """
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
@@ -240,22 +235,17 @@ async def test_publishing_a_site_on_an_org_flat_records_the_floor_instead(
     persisted = await Site.find_one(Site.id == doc.id)
     assert persisted.plan_tier == site_plans.BASE_SITE_PLAN_KEY
     assert persisted.subscription_status != "active"
-    # ``getMessage()``, not ``.message``: the latter is only populated once a
-    # Formatter has run, so on a raw captured record it is either absent or the
-    # unformatted template — and ``template % args`` blows up on a record whose
-    # args were already applied.
-    assert any("org-wide flat" in r.getMessage() for r in caplog.records), (
-        "the tier was refused, but not BY THE SCOPE CHECK — see the docstring"
-    )
+    assert site_plans.get_site_plan(org_key) is None, "the key must stay unresolvable"
 
 
 async def test_an_org_flat_cannot_downgrade_a_site_that_is_already_paying(mongo_db, monkeypatch):
     """The refusal must fall back to the site's OWN tier, not to the floor.
 
-    An org key arriving on a republish is a bad request, and punishing a paying
-    site for it — by resetting ``plan_tier`` to free and dropping its badge
+    A retired org key arriving on a republish is a bad request, and punishing a
+    paying site for it — by resetting ``plan_tier`` to free and dropping its badge
     removal — turns a rejected upgrade into a silent downgrade. Same rule the
-    unknown-key and unpurchasable-tier paths already follow.
+    unknown-key and unpurchasable-tier paths already follow, and since the flats
+    were retired it IS the unknown-key path.
     """
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws)
@@ -273,17 +263,19 @@ async def test_an_org_flat_cannot_downgrade_a_site_that_is_already_paying(mongo_
     assert after.plan_tier == "site", "a rejected org key downgraded a paying site"
 
 
-async def test_the_catalog_endpoint_offers_org_flats_but_the_publish_path_does_not(mongo_db):
-    """The two lists exist for different callers and must not be confused.
+async def test_the_catalog_and_the_publish_path_now_offer_the_same_rungs(mongo_db):  # noqa: ARG001
+    """The two lists existed for different callers while the catalog held two
+    scopes: the storefront rendered the org flats to sell them, the publish path
+    offered only the per-site rungs.
 
-    The storefront reads the whole catalog — it has to render Studio and Agency to
-    sell them. The publish path reads only the per-site rungs. If a picker were
-    ever wired to ``list_site_plans`` it would offer a tier the backend refuses,
-    which reads to the buyer as an upgrade that did nothing.
+    Retiring the flats collapsed the difference, and this asserts the collapse
+    rather than deleting the test — the seam is still there, and if a tier the
+    publish path cannot accept is ever added back, this is what notices that the
+    storefront started offering it.
     """
     catalog_keys = {t.key for t in site_plans.list_site_plans()}
     publishable = {t.key for t in site_plans.list_site_scoped_plans()}
 
-    assert {"studio", "agency"} <= catalog_keys
-    assert not ({"studio", "agency"} & publishable)
-    assert publishable < catalog_keys
+    assert catalog_keys == {"free", "site", "staff"}
+    assert publishable == catalog_keys
+    assert not ({"studio", "agency"} & catalog_keys)

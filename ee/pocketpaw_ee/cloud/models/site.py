@@ -426,9 +426,11 @@ class Site(TimestampedDocument):
     # BC-9: per-site annual plan (the Webflow model — each published site has its
     # OWN recurring annual plan on a tier, distinct from the workspace plan).
     # ``plan_tier`` is the site-plan catalog key — one of the SITE-SCOPED rungs
-    # (free | site | staff — see ``billing.site_plans``), never one of the org
-    # flats (studio | agency), which cover a whole workspace and are refused here
-    # by ``site_plans.site_scoped_tier``. Documents written before 2026-08-22 hold
+    # (free | site | staff — see ``billing.site_plans``). The org flats it could
+    # never hold (studio | agency) were retired on 2026-09-06; a document still
+    # storing one now resolves to no tier at all and lands on the free floor —
+    # the same answer the scope guard used to give, from the plain catalog lookup.
+    # Documents written before 2026-08-22 hold
     # the old names (basic | pro | business); those resolve through the catalog's
     # permanent legacy aliases, and ``scripts/migrate_site_plan_keys.py`` rewrites
     # them. None until a publish stamps one. ``subscription_id``

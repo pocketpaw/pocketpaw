@@ -104,10 +104,12 @@ async def concierge_conversation_quota_exceeded(
       * The tier's allowance is 0. That is NOT "no conversations" — 0 means the
         tier sells no allowance, and reading it as a ceiling would refuse every
         conversation on a tier that is meant to be metered from the first one.
-        ``agency`` is the tier designed that way, at its pooled rate; note it
-        cannot actually reach this line today, because it is an ORG flat and
-        ``site_scoped_tier`` refuses it above. The branch is what keeps a future
-        metered per-site rung from being silently capped at zero.
+        The retired ``agency`` flat was the tier designed that way, at its pooled
+        rate, and it could not reach this line even then — it was an ORG flat, and
+        the lookup above refused it. It is gone from the catalog entirely since
+        2026-09-06, so today NO shipping tier reaches this branch. It stays because
+        it is what keeps the next metered per-site rung from being silently capped
+        at zero the day someone prices one.
       * The store read fails. A bookkeeping error must not silence a paying
         customer's concierge, so the failure direction is to serve.
 

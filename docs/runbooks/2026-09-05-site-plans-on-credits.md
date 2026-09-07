@@ -4,6 +4,12 @@ Created 2026-09-05 (`fix/sites-plan-credits`). Read this before touching site
 billing, before diagnosing a site stuck showing "pending", and before assuming
 any site charge appears on a Dodo invoice.
 
+Updated 2026-09-06 (`feat/plan-included-sites`): **there is now a SECOND way a
+site is paid for, and it is not the wallet.** The workspace plan carries sites
+(Go 1 / Pro 3 / Pro Max 10) — see "The plan rail" below, which is the section to
+read first if a paid-looking site shows no debit. The same change retired the
+`studio` and `agency` org flats; "What was removed" records that.
+
 ## What was broken
 
 Selecting a paid plan for a site produced a site that said **pending payment** and
@@ -36,8 +42,75 @@ tier debits 700 credits.
 - An underfunded wallet raises `credits.insufficient` (402) with **zero** side
   effects — nothing debited, the site left unpublished. The builder shows "Not
   enough workspace credits… top up in Settings → Billing".
-- `Site.billing_rail` records which rail paid: `credits` for everything bought
-  from now on, `addon` / `subscription` / `""` on rows sold before the cutover.
+- `Site.billing_rail` records which rail paid: `credits` for a site bought from
+  the wallet, `plan` for one the workspace subscription carries (see below),
+  `addon` / `subscription` / `""` on rows sold before the cutover.
+
+## The plan rail — the workspace subscription carries sites
+
+Added 2026-09-06. **A paid-looking site with no debit against it is not a bug.**
+Before the wallet is touched, the publish path asks whether the workspace plan has
+a free site slot, and if it does the site rides the plan instead of the balance.
+
+| Workspace plan | Sites carried |
+|---|---|
+| Free | 0 |
+| Paw Go | 1 |
+| Paw Pro | 3 |
+| Paw Pro Max | 10 |
+| Enterprise | uncapped |
+
+Four things follow from that, and each is a place this goes wrong quietly:
+
+- **A carried site is stamped `billing_rail = "plan"`**, and that field is the only
+  thing telling the two answers apart. Stamp a carried site `credits` and the
+  renewal sweep bills a customer every month for a site their subscription already
+  covers; stamp a bought site `plan` and they keep paid capabilities after they
+  stop paying.
+- **A carried site gets `staff` regardless of the rung asked for.** Both rungs cost
+  the buyer nothing here, so handing them the cheaper one would only withhold the
+  concierge their subscription includes.
+- **It carries no `renewal_date` and `period_paid_usd` stays 0.** The sweep selects
+  on `credits` alone, so a carried site is invisible to it. The 0 is load-bearing
+  rather than tidy: leaving the tier's price there would let someone walk a carried
+  site down a rung, drop off the plan, and come back holding a month of credit for
+  money nobody spent.
+- **A tier change on a carried site is free**, and is refused the credits
+  arithmetic entirely rather than being priced at a difference of zero.
+
+### A downgrade releases the sites the new plan cannot carry
+
+This is the leak the rail would otherwise have. The allowance is checked when a
+site is published and never again, so three sites published on Pro keep riding a
+plan that carries one after the subscription drops to Go — free hosting,
+permanently, with nothing in the product ever mentioning it again.
+
+`sites.service.reconcile_plan_carried_sites` is what closes it, and it is called
+from `workspace.service.set_workspace_plan` — the chokepoint, not from each
+caller, so a plan written by a webhook, an admin action, or a test converges the
+same way. **Oldest first keeps its slot**, ordered on `createdAt`: the oldest site
+is the one most likely to be linked to and indexed, and losing its custom domain
+is the most expensive release available.
+
+Ordering on `_id` would be wrong in a way that looks right. A `Site`'s `_id` here
+is a deterministic hash of `(workspace, pocket)`, so sorting on it orders by
+digest — arbitrary, and it agrees with insertion order often enough that a test
+built on three sites passes against the bug about a sixth of the time. The test
+that guards this stamps the two orders into deliberate opposition for that reason.
+
+A released site keeps `deployed = True` — it stays live on the free floor, with
+the watermark back and the custom domain no longer resolving. It is not taken
+down.
+
+### Reading a site's rail
+
+```javascript
+db.sites.aggregate([{ $group: { _id: "$billing_rail", n: { $sum: 1 } } }])
+```
+
+`""` is a pre-cutover row. If a site shows `plan` on a workspace whose plan
+carries fewer sites than it holds, the reconciler has not run for it — write the
+workspace's plan again through `set_workspace_plan` rather than editing documents.
 
 ## What a plan CHANGE costs, which is not the sticker price
 
@@ -188,9 +261,30 @@ because a field nothing consumes is one a later change quietly depends on again:
 and credit top-ups still bill through Dodo. Only the per-site ladder left.
 
 `purchasable` therefore changed meaning rather than value: it asks "does the
-ladder sell this tier one site at a time", true for every per-site rung and false
-only for the org flats (`studio`, `agency`) that cover a whole workspace and are
-sold by conversation.
+ladder sell this tier one site at a time", which is true for every rung the
+catalog now ships.
+
+**The `studio` ($39, 5 sites) and `agency` ($149, 25 sites) org flats were retired
+on 2026-09-06**, along with the `white_label` and `included_sites` fields that
+existed only for them. They were not repriced: the workspace plan carries sites
+now, so a second ladder selling a bundle of sites for a flat fee both contradicted
+it and priced worse than Pro Max. Bundled sites have one home, the workspace
+ladder, and the per-site rungs are overflow above it.
+
+Nothing migrates, and nothing needs to: a `Site` still holding `"studio"` resolves
+to no tier at all and reads as the free floor — the same answer the scope guard
+gave while the key existed. Check for any before assuming there are none:
+
+```javascript
+db.sites.find({ plan_tier: { $in: ["studio", "agency"] } }, { workspace: 1, plan_tier: 1 })
+```
+
+The scope machinery (`SitePlanTier.scope`, `is_org_scoped`, `site_scoped_tier`)
+stayed. It no longer guards anything — with no org-scoped tier shipping, that
+lookup returns exactly what the plain one returns, and two mutations swapping it
+out were watched to escape — but it is the named seam every read of a stored
+`plan_tier` goes through, so the next org-scoped tier does not have to re-derive
+which call sites were safe. Treat it as shape, not as a live gate.
 
 ## The one thing an operator must do
 

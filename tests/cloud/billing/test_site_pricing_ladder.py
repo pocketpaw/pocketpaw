@@ -61,7 +61,7 @@ def _by_key() -> dict[str, SitePlanTier]:
 
 @pytest.mark.parametrize(
     ("key", "price"),
-    [("free", 0), ("site", 7), ("staff", 19), ("studio", 39), ("agency", 149)],
+    [("free", 0), ("site", 7), ("staff", 19)],
 )
 def test_the_ladder_matches_the_pricing_spec(key, price):
     tier = site_plans.get_site_plan(key)
@@ -102,56 +102,41 @@ def test_every_tier_carries_the_copy_a_card_needs():
 
 
 # ---------------------------------------------------------------------------
-# The two scopes — the org flats must never become a site's own plan
+# The retired org flats — a key that LEFT the catalog must still fail closed
 # ---------------------------------------------------------------------------
 
 
-def test_the_catalog_holds_both_scopes_and_says_which_is_which():
-    by_key = _by_key()
+def test_the_catalog_ships_three_per_site_rungs_and_nothing_else():
+    """``studio`` and ``agency`` were retired on 2026-09-06.
 
+    The workspace plan carries sites now (Paw Go 1, Pro 3, Pro Max 10), so a
+    second ladder selling 5 sites for $39 both contradicted it and priced worse
+    than Pro Max's 10 for $49. Neither flat was ever purchasable, so nothing was
+    sold on either.
+    """
+    assert [t.key for t in site_plans.list_site_plans()] == ["free", "site", "staff"]
+    # ...and the scoped list agrees, because nothing is org-scoped any more.
     assert [t.key for t in site_plans.list_site_scoped_plans()] == ["free", "site", "staff"]
-    assert [t.key for t in site_plans.list_site_plans() if t.is_org_scoped] == [
-        "studio",
-        "agency",
-    ]
-    assert by_key["staff"].is_org_scoped is False
-    assert by_key["studio"].is_org_scoped is True
+    assert not any(t.is_org_scoped for t in site_plans.list_site_plans())
 
 
 @pytest.mark.parametrize("key", ["studio", "agency"])
-def test_an_org_flat_is_refused_as_a_sites_own_tier(key):
-    """The security property of the whole two-scope change.
+def test_a_retired_org_key_stored_on_a_site_still_resolves_to_nothing(key):
+    """THE PROPERTY THAT HAD TO SURVIVE THE RETIREMENT, and the reason it now
+    holds is different from the reason it used to.
 
-    ``get_site_plan`` resolves it — it is a real catalog row and the storefront
-    renders it. ``site_scoped_tier`` must NOT, because every entitlement seam
-    reads a site's stored ``plan_tier`` through that function, and an org key
-    resolving there hands one site the white-label allowance an org pays for
-    across its whole estate.
+    Before, these were real catalog rows that ``site_scoped_tier`` refused by
+    scope. Now they are simply gone, so the refusal comes from the unknown-key
+    path instead. The ANSWER is what a Site doc holding one of these keys depends
+    on — there is no migration, and a document written before today still says
+    ``plan_tier: "studio"`` — and the answer must stay None either way, which
+    lands that site on the free floor rather than handing it an org allowance.
 
-    Breaks on: ``site_scoped_tier`` losing its ``is_org_scoped`` check, or any
-    entitlement seam being switched back to ``get_site_plan``.
+    Breaks on: adding either key back to the catalog without deciding what a site
+    storing it should get.
     """
-    assert site_plans.get_site_plan(key) is not None
+    assert site_plans.get_site_plan(key) is None
     assert site_plans.site_scoped_tier(key) is None
-
-
-@pytest.mark.parametrize("key", ["studio", "agency"])
-def test_an_org_flat_is_never_purchasable(key):
-    """SCOPE, not configuration — and since 2026-09-05 scope is the only thing
-    ``purchasable`` consults at all.
-
-    An org flat covers a whole workspace. The per-site purchase buys one site and
-    debits one site's price from the credit balance, so letting one through would
-    take $7 and hand over a $149 plan's worth of claims. There is no org
-    subscription entity to buy it properly with, so the storefront sells it by
-    conversation.
-
-    Breaks on: ``purchasable`` dropping its ``is_org_scoped`` early return.
-    """
-    assert site_plans.get_site_plan(key).purchasable is False
-    # ...while a per-site rung IS purchasable, so this measures the scope rather
-    # than a blanket "nothing is purchasable".
-    assert site_plans.get_site_plan("site").purchasable is True
 
 
 def test_a_tier_the_catalog_does_not_know_is_built_org_scoped():
@@ -164,9 +149,9 @@ def test_a_tier_the_catalog_does_not_know_is_built_org_scoped():
     for the caller that eventually does, and a mutation flipping the default to
     ``SITE_SCOPE`` escaped every other test in this file.
 
-    ORG is the safe default precisely because it is the scope that is NOT a legal
-    ``Site.plan_tier``: an unknown key fails closed OUT of the per-site path
-    rather than into it, and ``site_scoped_tier`` then refuses it.
+    ORG stays the safe default even though no tier is org-scoped any more: it is
+    the scope that is NOT a legal ``Site.plan_tier``, so an unknown key fails
+    closed OUT of the per-site path rather than into it.
 
     Breaks on: changing that default to ``SITE_SCOPE``.
     """
@@ -177,18 +162,6 @@ def test_a_tier_the_catalog_does_not_know_is_built_org_scoped():
     assert unknown.badge_removal is False
     assert unknown.max_domained_sites == 0
     assert unknown.purchasable is False
-
-
-def test_only_the_org_flats_include_a_site_count():
-    """``included_sites`` answers "how many sites does this flat cover", which is
-    not a question a per-site subscription has an answer to. A number there would
-    read as a per-site quota."""
-    by_key = _by_key()
-
-    assert by_key["studio"].included_sites == 5
-    assert by_key["agency"].included_sites == 25
-    for key in ("free", "site", "staff"):
-        assert by_key[key].included_sites is None, f"{key} should not include a site count"
 
 
 # ---------------------------------------------------------------------------
@@ -277,15 +250,14 @@ def test_the_conversation_allowance_belongs_to_the_tier_that_sells_the_concierge
     assert by_key["free"].conversation_allowance == 0
 
 
-def test_the_agency_rate_is_the_discount_it_is_sold_on():
-    """$0.05 against a $0.10 list rate is half the headline reason to buy agency.
-    In CENTS — a float rate multiplied by a conversation count is a rounding bug
-    waiting for a big enough customer."""
-    by_key = _by_key()
-
-    assert by_key["agency"].conversation_rate_cents == 5
-    assert by_key["staff"].conversation_rate_cents == 10
-    assert isinstance(by_key["agency"].conversation_rate_cents, int)
+def test_the_conversation_rate_is_cents_and_stays_an_int():
+    """This asserted ``agency``'s $0.05 against the $0.10 list rate until that
+    tier was retired. What it was really guarding outlives the tier: the rate is
+    in CENTS, and a float rate multiplied by a conversation count is a rounding
+    bug waiting for a big enough customer."""
+    for tier in site_plans.list_site_plans():
+        assert isinstance(tier.conversation_rate_cents, int)
+    assert _by_key()["staff"].conversation_rate_cents == 10
 
 
 def test_a_tier_that_sells_no_concierge_still_carries_the_list_rate():
@@ -326,25 +298,21 @@ def test_the_free_floor_keeps_its_one_domained_site():
     assert site_plans.get_site_plan("free").max_domained_sites == 1
 
 
-def test_white_label_is_what_separates_an_org_flat_from_five_site_subscriptions():
-    by_key = _by_key()
-
-    assert by_key["studio"].white_label is True
-    assert by_key["agency"].white_label is True
-    for key in ("free", "site", "staff"):
-        assert by_key[key].white_label is False
-
-
-def test_highlights_are_kept_out_of_the_enforced_feature_set():
+def test_highlights_stay_out_of_the_enforced_feature_set():
     """SSO and an SLA are commitments a human honours, not flags code checks.
     Folded into ``cloudflare_features`` they would render as an enforced
-    inclusion beside the WAF, which nothing would be enforcing."""
-    agency = _by_key()["agency"]
+    inclusion beside the WAF, which nothing would be enforcing.
 
-    assert agency.highlights, "agency's selling points vanished"
-    for claim in agency.highlights:
-        assert claim.lower() not in {f.lower() for f in agency.cloudflare_features}
-    assert "sso" not in {f.lower() for f in agency.cloudflare_features}
+    No rung ships highlights since the org flats were retired — they were the only
+    tiers that had any. The separation is still asserted rather than deleted,
+    because the next tier to sell an unenforceable promise will reach for this
+    field, and the mistake it guards against is putting the promise in the other
+    one."""
+    for tier in site_plans.list_site_plans():
+        features = {f.lower() for f in tier.cloudflare_features}
+        for claim in tier.highlights:
+            assert claim.lower() not in features
+        assert "sso" not in features
 
 
 # ---------------------------------------------------------------------------
@@ -366,14 +334,14 @@ def test_every_per_site_rung_is_purchasable():
     assert site_plans.get_site_plan("staff").purchasable is True
 
 
-def test_the_org_flats_stay_unpurchasable():
-    """The one row that must still read False, and the reason ``purchasable``
-    survives at all rather than being deleted with the rule that motivated it.
+def test_purchasable_still_answers_by_scope_rather_than_configuration():
+    """``purchasable`` outlived the rows that motivated it, and this pins why.
 
-    An org flat covers a whole workspace. There is no org subscription entity, no
-    org checkout and no webhook that could activate one, so a buy button on one
-    would take money and grant a single site's worth of capability. Configuring a
-    product for one does not change that — asserted with the map stubbed to
-    resolve every key, so the answer cannot be coming from an absent id."""
-    assert site_plans.get_site_plan("studio").purchasable is False
-    assert site_plans.get_site_plan("agency").purchasable is False
+    It used to read "is a Dodo product configured", which made a self-hosted
+    install — the ordinary case — offer a ladder where only the free rung could be
+    selected. It reads ``scope == "site"`` now, so every shipped rung is buyable
+    and a key that fails closed to org scope is not.
+    """
+    for tier in site_plans.list_site_plans():
+        assert tier.purchasable is True, f"{tier.key} should be buyable one site at a time"
+    assert site_plans._build("tier-that-does-not-exist").purchasable is False

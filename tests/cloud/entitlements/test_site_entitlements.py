@@ -195,27 +195,28 @@ def test_an_unknown_or_absent_tier_falls_to_the_base(tier):
 
 
 @pytest.mark.parametrize("org_key", ["studio", "agency"])
-def test_an_org_flat_stored_on_a_site_grants_that_site_nothing(org_key):
-    """The security property of the two-scope catalog, at the resolver.
+def test_a_retired_org_key_stored_on_a_site_grants_that_site_nothing(org_key):
+    """The property survives the tier, which is the point of keeping this test.
 
-    ``studio`` and ``agency`` are real, resolvable catalog rows that sell
-    white-label and badge removal across a whole workspace. They are NOT legal
-    ``Site.plan_tier`` values, and this is what happens when one shows up there
-    anyway — a hand-edited document, a replayed webhook, a restored backup: the
-    site is treated as having no plan of its own and lands on the free floor.
+    ``studio`` and ``agency`` were org flats — real catalog rows selling
+    white-label and badge removal across a workspace, and never legal
+    ``Site.plan_tier`` values. They were retired on 2026-09-06 when the workspace
+    plan started carrying sites, and there is no migration: a Site document
+    written before then still says ``plan_tier: "studio"``.
 
-    Note the ``active`` status. That is deliberate: the tier grants badge removal
-    and the subscription says paid, so every gate this resolver has would open if
-    the key were accepted. The ONLY thing refusing is the scope check.
+    So the question this asks is unchanged and still live. What changed is which
+    line answers it — the scope check used to, and the unknown-key path does now.
+    Either way the site is treated as having no plan of its own and lands on the
+    free floor rather than holding an allowance an org used to pay for.
+
+    Note the ``active`` status. That is deliberate: the subscription says paid, so
+    every gate in this resolver would open if the key were accepted. The only
+    thing refusing is the resolution.
 
     Breaks on: ``resolve_site_entitlements`` reading ``get_site_plan`` instead of
-    ``site_scoped_tier``.
+    ``site_scoped_tier``, or either key returning to the catalog without a
+    decision about what a site storing it should get.
     """
-    assert site_plan_catalog.get_site_plan(org_key) is not None, "the row must still exist"
-    assert site_plan_catalog.get_site_plan(org_key).badge_removal is True, (
-        "if the org tier stopped selling badge removal this test would pass for the wrong reason"
-    )
-
     ent = _resolve(plan_tier=org_key, subscription_status="active")
 
     assert ent.plan_tier == site_plan_catalog.BASE_SITE_PLAN_KEY

@@ -206,7 +206,8 @@ def test_list_site_plans_returns_tiers_with_price_and_cf_features():
     tiers = site_plans.list_site_plans()
     keys = [t.key for t in tiers]
     # Cheapest first, per-site rungs before the org flats.
-    assert keys == ["free", "site", "staff", "studio", "agency"]
+    # Three per-site rungs; the studio/agency org flats were retired 2026-09-06.
+    assert keys == ["free", "site", "staff"]
     # The per-site view is the subset a publish may choose from — the org flats
     # cover a whole workspace and their keys are not legal ``Site.plan_tier``
     # values.
