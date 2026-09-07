@@ -382,6 +382,7 @@ def _ensure_terrarium_docs():
 
 
 __all__ = [
+    "ByokProviderKey",
     "APIKey",
     "Agent",
     "AgentConfig",
@@ -489,6 +490,7 @@ def get_all_documents():
     artifact_version_doc = _ensure_version_docs()
     universe_doc, citizen_doc, world_event_doc, world_artifact_doc = _ensure_terrarium_docs()
     return [
+        ByokProviderKey,
         User,
         Agent,
         Pocket,
