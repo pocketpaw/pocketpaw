@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 from uuid import uuid4
@@ -28,6 +29,45 @@ from pocketpaw_ee.terrarium.domain import CitizenDoc, UniverseDoc
 logger = logging.getLogger(__name__)
 
 WORLD_SPAWN_PARAM_KEY = service.WORLD_SPAWN_PARAM_KEY
+
+
+# Default half-width of a child's per-trait drift. Matches soul-protocol's
+# EvolutionConfig.mutation_rate default order of magnitude; small enough that a
+# lineage wanders rather than lurches.
+DRIFT_WIDTH = 0.08
+
+
+def child_ocean(
+    parent_ocean: dict[str, float],
+    *,
+    parent_did: str | None,
+    child_name: str,
+    width: float = DRIFT_WIDTH,
+) -> dict[str, float]:
+    """A child's OCEAN: the parent's, with each trait nudged INDEPENDENTLY.
+
+    Each of the five traits gets its own signed delta in ``[-width, +width]``,
+    clamped to 0..1. That independence is the whole point — a single shared
+    delta is not drift but a translation: every child would be strictly more
+    (or less) than its parent on all five axes at once, lineages would never
+    diverge in shape, and a few generations of it saturates everyone at the
+    ends of the scale. The first version of this added a flat +0.08 and did
+    exactly that.
+
+    DETERMINISTIC, seeded from the parent DID and the child's name, because the
+    engine takes no RNG: a Journal replayed from the same seed has to produce
+    the same world, and a birth is part of that world (see the explore verb in
+    ``world.py`` for the same rule).
+    """
+    seed = f"{parent_did or ''}:{child_name}"
+    out: dict[str, float] = {}
+    for i, (trait, value) in enumerate(sorted(parent_ocean.items())):
+        # One stable hash per (lineage, child, trait) -> a delta across the
+        # whole [-width, +width] range, not a fixed step.
+        h = int(hashlib.sha256(f"{seed}:{trait}:{i}".encode()).hexdigest()[:8], 16)
+        delta = (h / 0xFFFFFFFF) * 2 * width - width
+        out[trait] = round(min(1.0, max(0.0, float(value) + delta)), 4)
+    return out
 
 
 def world_spawn_blob(action: Any) -> dict[str, Any] | None:
@@ -67,7 +107,7 @@ async def execute_approved_spawn(action: Any) -> dict[str, Any]:
             return {"ok": False, "reason": f"{parent.name} cannot afford {cost}"}
 
         name = str(blob.get("child_name") or "child")[:40]
-        ocean = {k: round(min(1.0, max(0.0, v + 0.08)), 2) for k, v in (parent.ocean or {}).items()}
+        ocean = child_ocean(parent.ocean or {}, parent_did=parent.did, child_name=name)
         path = service.soul_root() / str(uni.id) / f"{name.lower()}-{uuid4().hex[:6]}.soul"
         did = await soul_link.birth_soul(
             path,
@@ -117,4 +157,10 @@ async def execute_approved_spawn(action: Any) -> dict[str, Any]:
         return {"ok": False, "reason": str(exc)}
 
 
-__all__ = ["WORLD_SPAWN_PARAM_KEY", "execute_approved_spawn", "world_spawn_blob"]
+__all__ = [
+    "DRIFT_WIDTH",
+    "WORLD_SPAWN_PARAM_KEY",
+    "child_ocean",
+    "execute_approved_spawn",
+    "world_spawn_blob",
+]

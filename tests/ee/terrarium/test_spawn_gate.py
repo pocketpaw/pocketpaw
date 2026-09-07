@@ -183,3 +183,43 @@ async def test_a_gate_read_failure_degrades_to_empty_not_a_broken_page(client, m
     res = client.get(f"/terrarium/universes/{uni['id']}/gates")
     assert res.status_code == 200
     assert res.json()["gates"] == []
+
+
+# --- a child is not its parent shifted ------------------------------------
+#
+# The first version added a flat +0.08 to every trait, which is a translation
+# rather than drift: every child strictly exceeded its parent on all five axes,
+# lineages never diverged in shape, and six generations saturated everyone at
+# 1.0. That would have quietly emptied the evolution claim while looking fine.
+
+
+def test_each_trait_drifts_on_its_own_not_all_by_the_same_step():
+    parent = {"O": 0.5, "C": 0.5, "E": 0.5, "A": 0.5, "N": 0.5}
+    child = executor.child_ocean(parent, parent_did="did:soul:vela-aaa", child_name="Nim")
+
+    deltas = [round(child[t] - parent[t], 6) for t in parent]
+    assert len(set(deltas)) > 1, f"every trait moved by the same amount: {deltas}"
+    assert any(d < 0 for d in deltas), f"drift only ever went up: {deltas}"
+
+
+def test_drift_stays_inside_the_width_and_the_scale():
+    for n in range(60):
+        parent = {"O": 0.99, "C": 0.01, "E": 0.5, "A": 0.0, "N": 1.0}
+        child = executor.child_ocean(parent, parent_did=f"did:soul:p-{n}", child_name=f"c{n}")
+        for t, v in child.items():
+            assert 0.0 <= v <= 1.0, (t, v)
+            assert abs(v - parent[t]) <= executor.DRIFT_WIDTH + 1e-9, (t, v, parent[t])
+
+
+def test_the_same_birth_replays_identically():
+    """The engine takes no RNG so a Journal replay reproduces the world."""
+    a = executor.child_ocean({"O": 0.4, "C": 0.6}, parent_did="did:soul:x", child_name="Kin")
+    b = executor.child_ocean({"O": 0.4, "C": 0.6}, parent_did="did:soul:x", child_name="Kin")
+    assert a == b
+
+
+def test_two_children_of_one_parent_differ_from_each_other():
+    parent = {"O": 0.5, "C": 0.5, "E": 0.5, "A": 0.5, "N": 0.5}
+    first = executor.child_ocean(parent, parent_did="did:soul:vela", child_name="Nim")
+    second = executor.child_ocean(parent, parent_did="did:soul:vela", child_name="Kin")
+    assert first != second, "siblings would be identical twins forever"
