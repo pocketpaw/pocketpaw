@@ -5,6 +5,16 @@ description: "Build small, always-on WebGL visuals (identity avatars, ambient or
 
 # WebGL Components
 
+<!--
+  Updated: 2026-09-06 (feat/fx-skill-amendments): constraint 2 no longer says
+  libraries are impossible everywhere. It now sends the agent to the paw-fx
+  registry first (search_effects / get_effect) and carves out the html engine,
+  which has no build step and so ships vendored dependencies as written. The
+  svelte / react half of the rule (generator-owned package.json, dependency-free
+  effects only, hand-written GLSL otherwise) is unchanged, and so is constraint 1
+  (the static-site client-bundle prune).
+-->
+
 > **PocketPaw note (read this first).** Vendored from
 > [flornkm/skills](https://github.com/flornkm/skills) (MIT) and true as written for
 > app UI. Two PocketPaw constraints come first and override anything below:
@@ -17,11 +27,18 @@ description: "Build small, always-on WebGL visuals (identity avatars, ambient or
 >    that explicitly declared `keepsClientBundle`, or app UI (paw-enterprise,
 >    ripple). On a plain static site, ship the CSS background alone. If you are
 >    unsure which you are on, assume the bundle is pruned.
-> 2. **No npm imports on a Paw Site.** The generated `package.json` is
+> 2. **Search paw-fx before you hand-write anything.**
+>    `mcp__pocketpaw_fx__search_effects` / `get_effect` serve finished shader,
+>    particle and 3D sections, and `get_effect` returns files you write verbatim
+>    under `_fx/`. On the **html** engine every effect is available, vendored
+>    dependency and all: that engine has no build step, so its scripts ship as
+>    written. On **svelte** and **react** the generated `package.json` is
 >    generator-owned and your source map supplies files only, so `three`, `ogl`,
->    `threlte` and `gsap` never resolve. Hand-written GLSL only. See
->    `pocketpaw-design-taste` §2.C, which owns the canvas guardrail and stays
->    authoritative on Paw Sites; this skill supplies the mechanics behind it.
+>    `threlte` and `gsap` never resolve; only dependency-free effects (empty
+>    `needs`) are served there (pass `needs_js=false` to `search_effects`), and
+>    anything else is hand-written GLSL. See `pocketpaw-design-taste` §2.C, which
+>    owns the canvas guardrail and stays authoritative on Paw Sites; this skill
+>    supplies the mechanics behind it.
 >
 > The fallback section near the end is the part worth reading even when you never
 > write a shader, because it is about what users see when the GPU says no.
