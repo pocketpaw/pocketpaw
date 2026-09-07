@@ -1,0 +1,93 @@
+[
+  {
+    "label": "the filters go back on the root LOGGER instead of its handlers (the original bug)",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "    for handler in logging.getLogger().handlers:\n        installed = {type(existing) for existing in handler.filters}\n        for scrubber in filters:\n            if type(scrubber) not in installed:\n                handler.addFilter(scrubber)",
+    "replace": "    for scrubber in filters:\n        logging.getLogger().addFilter(scrubber)",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "install_scrubbing_filters becomes a no-op",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "    filters: list[logging.Filter] = [SecretFilter()]\n    pii = _build_pii_filter()",
+    "replace": "    filters: list[logging.Filter] = []\n    pii = _build_pii_filter()",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "the idempotence guard is dropped, so repeated installs stack duplicates",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "            if type(scrubber) not in installed:\n                handler.addFilter(scrubber)",
+    "replace": "            handler.addFilter(scrubber)",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "the worker supervisor reverts to basicConfig, which installs no filters",
+    "file": "ee/pocketpaw_ee/cloud/worker_supervisor.py",
+    "find": "    setup_logging(level=os.environ.get(\"POCKETPAW_LOG_LEVEL\", \"INFO\"))",
+    "replace": "    logging.basicConfig(level=logging.INFO)",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "the secret pattern list is emptied, so nothing matches",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "    re.compile(r\"sk-ant-[a-zA-Z0-9_-]+\"),  # Anthropic",
+    "replace": "    re.compile(r\"MATCHES-NOTHING-AT-ALL-XYZ\"),  # Anthropic",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "_scrub stops substituting, so every path silently passes the secret through",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "def _scrub(text: str) -> str:\n    for pattern in _SECRET_PATTERNS:\n        text = pattern.sub(\"***REDACTED***\", text)\n    return text",
+    "replace": "def _scrub(text: str) -> str:\n    return text",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "SecretFilter stops scrubbing record.args, so the %s form leaks",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "        record.args = _scrub_args(record.args)",
+    "replace": "        record.args = record.args",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "SecretFilter stops scrubbing record.msg, so the f-string form leaks",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "        if isinstance(record.msg, str):\n            record.msg = _scrub(record.msg)",
+    "replace": "        if False:\n            record.msg = _scrub(record.msg)",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "SecretFilter stops scrubbing the traceback, so an exception leaks the key",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "        if record.exc_info:\n            if not record.exc_text:\n                record.exc_text = \"\".join(traceback.format_exception(*record.exc_info))\n            record.exc_text = _scrub(record.exc_text)",
+    "replace": "        if False:\n            record.exc_text = _scrub(record.exc_text or \"\")",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "Rich is selected even off a TTY, so container logs lose timestamp and level",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "    return bool(getattr(sys.stderr, \"isatty\", lambda: False)())",
+    "replace": "    return True",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "the exception OBJECT is no longer scrubbed, so a renderer reading exc_info leaks",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "                if scrubbed != original:\n                    exc.args = scrubbed",
+    "replace": "                if False:\n                    exc.args = scrubbed",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "args are rewritten unconditionally, so a clean exception is mangled too",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "                scrubbed = tuple(_scrub(a) if isinstance(a, str) else a for a in original)",
+    "replace": "                scrubbed = tuple(\"***REDACTED***\" for a in original)",
+    "tests": "tests/test_log_scrubbing.py"
+  },
+  {
+    "label": "a mapping args record is rebuilt as a tuple, so logging drops the line",
+    "file": "src/pocketpaw/logging_setup.py",
+    "find": "    if isinstance(args, Mapping):\n        return {k: scrub(v) if isinstance(v, str) else v for k, v in args.items()}",
+    "replace": "    if isinstance(args, Mapping):\n        return tuple(scrub(v) if isinstance(v, str) else v for v in args.values())",
+    "tests": "tests/test_log_scrubbing.py"
+  }
+]

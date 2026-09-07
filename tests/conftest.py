@@ -25,6 +25,53 @@ from pocketpaw.security.audit import AuditLogger
 # strict behaviour monkeypatch POCKETPAW_ALLOW_INTERNAL_URLS=false themselves.
 os.environ.setdefault("POCKETPAW_ALLOW_INTERNAL_URLS", "true")
 
+# A test run must NEVER configure Logfire. Same class of dev-machine leak as the
+# line above, and a worse blast radius, because it leaves the machine.
+#
+# ``security/url_validators.py`` calls ``load_dotenv()`` at import, and
+# python-dotenv walks UP from the calling FILE when the frame is not
+# interactive. From a git worktree that walk reaches the PARENT checkout's
+# ``.env``, so an operator's real project token arrives in a test process that
+# never asked for one. (``python -c`` counts as interactive and searches the cwd
+# instead, which is why this does not reproduce from a one-liner.)
+#
+# It has to be popped here, at import, rather than in a fixture:
+# ``logfire.configure`` is process-global and there is no un-configure, so one
+# test reaching ``setup_logging`` before the fixture ran would arm exporting for
+# the whole session. With POCKETPAW_LOGFIRE_INCLUDE_CONTENT also set, what ships
+# is fixture text.
+#
+# SET to a safe value, not popped -- popping does not hold, and that was the
+# first thing tried here. The pop runs at conftest import; ``load_dotenv`` runs
+# whenever the module that calls it is first imported, which for
+# ``url_validators`` is later, and for ``dashboard_lifecycle`` and
+# ``uploads/factory`` is inside a function at run time. Any of those re-adds
+# what was popped.
+#
+# Every one of those calls uses ``override=False`` (the default), so a value
+# already present in the environment WINS. Setting a safe one is therefore the
+# only form of this that survives a later load. Checked: no call in src/ or ee/
+# passes override=True.
+#
+# The token is emptied rather than removed for the same reason -- an empty string
+# is present, so it cannot be replaced, and it is falsy, so
+# ``send_to_logfire="if-token-present"`` exports nothing even if something did
+# manage to configure.
+#
+# A test that wants the ON path uses ``monkeypatch.setenv``, which restores the
+# safe value afterwards.
+#
+# POCKETPAW_LOGFIRE_INSTRUMENT is deliberately NOT pinned here. It only selects
+# which integrations attach, and nothing attaches unless configure ran, which the
+# master switch already gates -- so pinning it would buy no safety and would
+# fight the tests that exercise the selection.
+for _var, _safe in (
+    ("POCKETPAW_LOGFIRE_ENABLED", "false"),
+    ("POCKETPAW_LOGFIRE_INCLUDE_CONTENT", "false"),
+    ("LOGFIRE_TOKEN", ""),
+):
+    os.environ[_var] = _safe
+
 
 def pytest_report_header() -> str | None:
     """Say so, loudly, when a mutation sweep is running in this worktree.

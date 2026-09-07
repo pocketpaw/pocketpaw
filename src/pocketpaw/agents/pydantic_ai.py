@@ -7,6 +7,11 @@ self-hosted LiteLLM proxy.
 
 Design source: ``docs/design/drafts/2026-07-29-pydantic-ai-agent-backend-prd.md``.
 
+Changed 2026-09-05: this file no longer calls ``logfire.configure`` itself. That
+call is process-global and this file is not — see
+``_build_instrumentation_capability``. It now delegates to
+``pocketpaw.observability.configure_observability``, which startup calls first.
+
 Why this exists: ``claude_agent_sdk`` spawns a Claude Code CLI Node subprocess
 per concurrent run (~300-500 MB RSS). At the 300-400 concurrent-user target
 that is ~75 GB of agent RSS before any other cost. This backend runs the agent
@@ -450,10 +455,6 @@ _POCKET_SCOPE_SENTINEL = "<pocket-scope>"
 _SKILLS_CAPABILITY_ID = "pocketpaw-skills"
 
 # Bounds on the per-session transcript cache (see ``_session_messages``).
-# ``logfire.configure`` is process-global and one backend instance exists per
-# agent, so the capability builder would otherwise reconfigure it per agent.
-_LOGFIRE_CONFIGURED = False
-
 _MAX_TRACKED_SESSIONS = 200
 _MAX_SESSION_MESSAGES = 60
 
@@ -1803,11 +1804,13 @@ class PydanticAIBackend:
         is still unrun. Spans are what make that measurable from the inside
         rather than by wrapping a stopwatch around the whole request.
 
-        ``logfire.configure`` is called with ``send_to_logfire='if-token-present'``
-        so this is safe to enable on a deployment with no Logfire account: the
-        spans go to whatever OTel exporter is already configured, or nowhere.
-        Configuration is process-global and guarded by a module flag, because
-        one instance per agent means this method runs many times.
+        Logfire is configured at STARTUP now, by ``setup_logging``, because
+        ``logfire.configure`` is process-global and this method is not: it runs
+        once per agent, and only in a process that actually builds a pydantic-ai
+        agent — which with ``POCKETPAW_CLOUD_RUN_EXECUTOR=arq`` is the worker and
+        never the web process. The call kept here is the fallback for a process
+        that never ran ``setup_logging`` at all (tests, library use, anything
+        embedding the backend), and it is a no-op when startup already did it.
         """
         if not getattr(self.settings, "pydantic_ai_instrumentation", False):
             return None
@@ -1816,21 +1819,11 @@ class PydanticAIBackend:
         except ImportError:  # pragma: no cover - pydantic-ai too old
             return None
 
-        global _LOGFIRE_CONFIGURED
-        if not _LOGFIRE_CONFIGURED:
-            _LOGFIRE_CONFIGURED = True
-            try:
-                import logfire
+        # Never load-bearing: configure_observability swallows its own failures,
+        # so a misconfigured exporter cannot stop a tenant's run.
+        from pocketpaw.observability import configure_observability
 
-                logfire.configure(
-                    send_to_logfire="if-token-present",
-                    service_name="pocketpaw-pydantic-ai",
-                    console=False,
-                )
-            except Exception as exc:  # noqa: BLE001
-                # Instrumentation is observability, never load-bearing: a
-                # misconfigured exporter must not stop a tenant's run.
-                logger.warning("Could not configure logfire, spans stay local: %s", exc)
+        configure_observability()
         return Instrumentation()
 
     def _build_web_capabilities(self) -> list:

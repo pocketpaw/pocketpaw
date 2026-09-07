@@ -1,5 +1,9 @@
 """API server for ``pocketpaw serve``.
 
+Changed 2026-09-05: the app is handed to ``instrument_fastapi_app`` after the
+routers are mounted, so a deployed request has a span with its route, status and
+duration on it. Off unless POCKETPAW_LOGFIRE_ENABLED is set.
+
 Starts the versioned ``/api/v1/`` routers **and** a ``/ws`` WebSocket endpoint
 with auth middleware and CORS — no web dashboard frontend assets.  Ideal for
 external clients (Tauri desktop app, scripts) that provide their own UI.
@@ -164,6 +168,15 @@ def create_api_app():
     ):
         """WebSocket v1 short path — for clients using /v1/ws."""
         await _handle_ws(websocket, token, resume_session)
+
+    # --- Request tracing (last) ------------------------------------------
+    # After every router is mounted, because the instrumentor reads the route
+    # table to label a span by route TEMPLATE. Instrument before mounting and
+    # /api/v1/pockets/{id} becomes one span name per pocket id. No-op unless
+    # POCKETPAW_LOGFIRE_ENABLED is set.
+    from pocketpaw.observability import instrument_fastapi_app
+
+    instrument_fastapi_app(app)
 
     return app
 

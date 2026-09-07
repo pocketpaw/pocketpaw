@@ -3115,18 +3115,31 @@ def test_a_withheld_web_tool_is_not_granted_back_by_the_native_capability():
 def test_instrumentation_is_off_by_default_and_configures_logfire_once():
     """One backend instance exists per agent, so a per-instance
     ``logfire.configure`` would reconfigure the process on every agent built."""
-    import pocketpaw.agents.pydantic_ai as mod
+    # The configure call moved to ``pocketpaw.observability`` so that STARTUP owns
+    # it: this method runs once per agent, and only in a process that builds a
+    # pydantic-ai agent, which under POCKETPAW_CLOUD_RUN_EXECUTOR=arq is the worker
+    # and never the web process. The idempotence this test names is unchanged, it
+    # is just guarded one module further out.
+    import pocketpaw.observability as mod
 
     assert "Instrumentation" not in {
         type(c).__name__ for c in PydanticAIBackend(_settings())._build_capabilities()
     }
 
     calls: list = []
-    original_flag = mod._LOGFIRE_CONFIGURED
-    mod._LOGFIRE_CONFIGURED = False
+    original_flag = mod._CONFIGURED
+    mod._CONFIGURED = False
     import sys
 
-    fake = SimpleNamespace(configure=lambda **kw: calls.append(kw))
+    # A fuller stub than ``configure`` alone: a fake missing ``ScrubbingOptions``
+    # makes the real call raise inside our own try/except, which warns and moves
+    # on — so the assertion below would fail for a reason that has nothing to do
+    # with what it is testing.
+    fake = SimpleNamespace(
+        configure=lambda **kw: calls.append(kw),
+        ScrubbingOptions=lambda **kw: SimpleNamespace(**kw),
+        instrument_pydantic_ai=lambda **kw: None,
+    )
     saved, sys.modules["logfire"] = sys.modules.get("logfire"), fake
     try:
         for _ in range(3):
@@ -3142,7 +3155,7 @@ def test_instrumentation_is_off_by_default_and_configures_logfire_once():
             sys.modules["logfire"] = saved
         else:
             sys.modules.pop("logfire", None)
-        mod._LOGFIRE_CONFIGURED = original_flag
+        mod._CONFIGURED = original_flag
 
     assert len(calls) == 1, f"logfire configured {len(calls)} times across 3 backends"
     assert calls[0]["send_to_logfire"] == "if-token-present", (
@@ -3154,15 +3167,17 @@ def test_a_broken_logfire_does_not_break_the_run():
     """Observability is never load-bearing."""
     import sys
 
-    import pocketpaw.agents.pydantic_ai as mod
+    import pocketpaw.observability as mod
 
     def _boom(**kw):
         raise RuntimeError("no exporter")
 
-    original_flag = mod._LOGFIRE_CONFIGURED
-    mod._LOGFIRE_CONFIGURED = False
+    original_flag = mod._CONFIGURED
+    mod._CONFIGURED = False
     saved = sys.modules.get("logfire")
-    sys.modules["logfire"] = SimpleNamespace(configure=_boom)
+    sys.modules["logfire"] = SimpleNamespace(
+        configure=_boom, ScrubbingOptions=lambda **kw: SimpleNamespace(**kw)
+    )
     try:
         caps = {
             type(c).__name__
@@ -3175,6 +3190,6 @@ def test_a_broken_logfire_does_not_break_the_run():
             sys.modules["logfire"] = saved
         else:
             sys.modules.pop("logfire", None)
-        mod._LOGFIRE_CONFIGURED = original_flag
+        mod._CONFIGURED = original_flag
 
     assert "Instrumentation" in caps, "a dead exporter must not drop instrumentation"

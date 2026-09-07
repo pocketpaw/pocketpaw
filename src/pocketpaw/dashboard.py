@@ -1734,6 +1734,15 @@ def run_dashboard(
     """
     global _uvicorn_server, _restart_requested
 
+    # Request tracing, here rather than beside the app object: this module keeps
+    # registering routes with decorators all the way to the bottom of the file, and
+    # the instrumentor reads the route table to name spans by route TEMPLATE. By
+    # the time run_dashboard is called the whole module has been imported and every
+    # decorator has run. No-op unless POCKETPAW_LOGFIRE_ENABLED is set.
+    from pocketpaw.observability import instrument_fastapi_app
+
+    instrument_fastapi_app(app)
+
     _MAX_RESTARTS = 5
     _restart_count = 0
     first_run = True
