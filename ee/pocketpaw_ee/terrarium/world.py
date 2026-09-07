@@ -421,14 +421,27 @@ def hibernates(balance: int) -> bool:
 Rung = Literal["camp", "town", "nation", "planet", "multiverse"]
 
 
+# The ladder is a POPULATION ladder, and these are the exact thresholds the
+# observatory prints beside the label (camp "1–10 souls", town "10²", nation
+# "10⁴", planet "10⁶"). They live here so the HUD can never contradict the
+# ladder drawn next to it — five souls labelled "town" above a line reading
+# "5 souls here" makes the whole ladder look arbitrary, and the ladder is how a
+# viewer understands that Earth is stuck on rung four.
+_RUNG_POP = {"town": 100, "nation": 10_000, "planet": 1_000_000}
+# Tech is a FLOOR, not a substitute: a hundred souls with no infrastructure are
+# a crowd, not a town.
+_RUNG_TECH = {"town": 2, "nation": 4, "planet": 6}
+
+
 def rung_for(pop: int, unlocked: int) -> str:
-    """The ladder rung a universe has reached. Cheap projection, not state."""
-    if unlocked >= 6 and pop >= 20:
-        return "planet"
-    if unlocked >= 4 and pop >= 10:
-        return "nation"
-    if unlocked >= 2:
-        return "town"
+    """The ladder rung a universe has reached. Cheap projection, not state.
+
+    ``multiverse`` is never returned: it means a soul has crossed into another
+    universe, which is migration rather than scale, and nothing in v0 does it.
+    """
+    for rung in ("planet", "nation", "town"):
+        if pop >= _RUNG_POP[rung] and unlocked >= _RUNG_TECH[rung]:
+            return rung
     return "camp"
 
 

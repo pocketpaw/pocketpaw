@@ -201,3 +201,38 @@ def test_episodic_summary_is_empty_when_only_viewer_events_landed():
         ]
     )
     assert world.episodic_summary("Vela", 1, out) == ""
+
+
+# --- the ladder ----------------------------------------------------------
+#
+# The rung is printed beside a ladder that tells the viewer town means 10²
+# souls. If the two disagree the ladder reads as decoration, and the ladder is
+# how anyone understands why Earth sits on rung four. So population gates the
+# rung, and tech is only a floor on top of it.
+
+
+def test_a_founding_five_is_a_camp_however_much_they_have_built():
+    # The launch bug: `unlocked >= 2` alone returned "town", so Dust showed
+    # "town" directly above the line "5 souls here".
+    assert world.rung_for(5, 0) == "camp"
+    assert world.rung_for(5, 2) == "camp"
+    assert world.rung_for(5, 99) == "camp"
+
+
+def test_each_rung_needs_the_population_the_ladder_advertises():
+    assert world.rung_for(99, 2) == "camp"
+    assert world.rung_for(100, 2) == "town"
+    assert world.rung_for(9_999, 4) == "town"
+    assert world.rung_for(10_000, 4) == "nation"
+    assert world.rung_for(999_999, 6) == "nation"
+    assert world.rung_for(1_000_000, 6) == "planet"
+
+
+def test_tech_is_a_floor_so_a_crowd_is_not_a_town():
+    assert world.rung_for(1_000_000, 5) == "nation"
+    assert world.rung_for(10_000, 3) == "town"
+    assert world.rung_for(100, 1) == "camp"
+
+
+def test_multiverse_is_never_reached_by_scale_alone():
+    assert world.rung_for(10**9, 99) == "planet"
