@@ -139,3 +139,33 @@ async def test_scheduler_sweep_skips_archived(client):
     doc.status = "archived"
     await doc.save()
     assert await service.scheduler_sweep(T0) == []
+
+
+# --- the wiring, not just the logic --------------------------------------
+#
+# The clock was registered with `@app.on_event("startup")` inside mount_cloud,
+# which FastAPI silently drops when the app is built with a custom lifespan=
+# (this host's default). Every unit test passed and no universe ever ticked:
+# a local run sat at tick 0 through three sweep intervals. So the gate is not
+# "does the loop work" but "does anything actually start it".
+
+
+def test_the_cloud_lifecycle_hook_starts_and_stops_the_clock():
+    """The hook the OSS host really calls on startup must reference the clock.
+
+    Mutation that must fail this: delete the reconcile_scheduler call from
+    CloudLifecycleHook.on_startup.
+    """
+    import inspect
+
+    from pocketpaw_ee.extensions import CloudLifecycleHook
+
+    started = inspect.getsource(CloudLifecycleHook.on_startup)
+    stopped = inspect.getsource(CloudLifecycleHook.on_shutdown)
+
+    assert "terrarium.scheduler" in started or "terrarium import scheduler" in started, (
+        "nothing in the lifecycle hook starts the terrarium clock — "
+        "mount_cloud's on_event registration is dropped under FastAPI(lifespan=...)"
+    )
+    assert "reconcile_scheduler" in started
+    assert "shutdown_scheduler" in stopped
