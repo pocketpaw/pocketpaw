@@ -1192,6 +1192,19 @@ def mount_cloud(app: FastAPI) -> None:
         async def _stop_member_ingest() -> None:
             await stop_member_ingest(app)
 
+    # Terrarium clock — ticks every running universe on its own physics cadence
+    # (dormant cadence when nobody has watched for a world-day). Same gate.
+    if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from pocketpaw_ee.terrarium import scheduler as _terrarium_clock
+
+        @app.on_event("startup")
+        async def _start_terrarium_clock() -> None:
+            await _terrarium_clock.reconcile_scheduler()
+
+        @app.on_event("shutdown")
+        async def _stop_terrarium_clock() -> None:
+            await _terrarium_clock.shutdown_scheduler()
+
     # Generic Firestore→Fabric ingest sweep. Every 5 minutes
     # (POCKETPAW_FABRIC_INGEST_INTERVAL_SECONDS override) it mirrors each
     # workspace's configured Firestore collections into Fabric objects (backfill
