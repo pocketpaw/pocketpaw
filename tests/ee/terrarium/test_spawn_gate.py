@@ -133,3 +133,53 @@ async def test_a_non_spawn_action_is_ignored():
     assert executor.world_spawn_blob(SimpleNamespace(parameters=None)) is None
     result = await executor.execute_approved_spawn(SimpleNamespace(parameters={}))
     assert result == {"ok": False, "reason": "not a world_spawn action"}
+
+
+# --- the gate is visible from the world it happened in --------------------
+#
+# A citizen asking for a child files a real Instinct Action, but until this
+# route existed only the tray knew. From the observatory the request was
+# invisible, so nobody approved it and no universe ever reached generation 2.
+
+
+async def test_the_gates_route_shows_a_pending_spawn_for_this_universe(client, instinct_store):
+    uni = create_universe(client, founders=1, endowment=RICH)
+    citizen_llm.set_mock_decision(
+        {"thought": "the world needs another", "acts": [{"verb": "spawn", "name": "Nim"}]}
+    )
+    client.post(f"/terrarium/universes/{uni['id']}/tick?n=1")
+
+    gates = client.get(f"/terrarium/universes/{uni['id']}/gates").json()["gates"]
+
+    assert len(gates) == 1, gates
+    g = gates[0]
+    assert g["kind"] == "world_spawn"
+    assert g["child_name"] == "Nim"
+    assert g["parent"]
+    assert g["action_id"]
+    # A viewer reads this room; it must not carry identity or requester ids.
+    assert "parent_did" not in g and "requested_by" not in g
+
+
+async def test_another_universes_gate_never_shows_here(client, instinct_store):
+    a = create_universe(client, founders=1, endowment=RICH)
+    b = create_universe(client, founders=1, endowment=RICH)
+    citizen_llm.set_mock_decision(
+        {"thought": "one more", "acts": [{"verb": "spawn", "name": "Kin"}]}
+    )
+    client.post(f"/terrarium/universes/{a['id']}/tick?n=1")
+
+    assert client.get(f"/terrarium/universes/{b['id']}/gates").json()["gates"] == []
+
+
+async def test_a_gate_read_failure_degrades_to_empty_not_a_broken_page(client, monkeypatch):
+    uni = create_universe(client, founders=1)
+
+    def boom(**_kw):
+        raise RuntimeError("instinct store is down")
+
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", boom)
+
+    res = client.get(f"/terrarium/universes/{uni['id']}/gates")
+    assert res.status_code == 200
+    assert res.json()["gates"] == []

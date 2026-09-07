@@ -158,6 +158,21 @@ async def list_artifacts(
     return await service.list_artifacts(workspace_id, universe_id)
 
 
+@router.get("/universes/{universe_id}/gates")
+async def list_gates(
+    universe_id: str,
+    _user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """Pending human decisions in this world — today, citizens asking for a child.
+
+    Read only. Approving is still ``POST /instinct/actions/{id}/approve``: one
+    gate, one authority. This exists so a spawn request is visible from the
+    world it happened in instead of only in the tray.
+    """
+    return await service.list_gates(workspace_id, universe_id)
+
+
 @router.post("/universes/{universe_id}/speak")
 async def speak(
     universe_id: str,
