@@ -1,6 +1,4 @@
 # ee/pocketpaw_ee/terrarium/service.py
-# Updated: 2026-09-07 — the clock: ticks stamp last_tick_at, event reads stamp
-#   last_viewed_at, and ``scheduler_sweep`` feeds scheduler.py its due list.
 #
 # The terrarium glue: Beanie persistence, the Soul bridge, the Instinct gate and
 # the realtime bus. The ONLY module that imports the ``domain`` Beanie doc
@@ -600,6 +598,42 @@ async def _one_tick(
     return written
 
 
+# Artifact kinds that carry a readable payload. Structures and tools are things
+# on the map, not documents.
+_FILE_BEARING_KINDS = frozenset({"book", "law", "map"})
+
+
+async def _land_artifact_file(uni: UniverseDoc, user_id: str, art: Any) -> str | None:
+    """Write a payload-bearing artifact into the /files surface; return its id.
+
+    Returns None for structures, for empty bodies, and on ANY failure — the
+    Journal is the truth and the file is how a human reads it, so a storage
+    hiccup degrades to "inline only", never to a failed tick. The upload
+    service is imported lazily so the terrarium package stays import-light.
+    """
+    if art.kind not in _FILE_BEARING_KINDS or not (art.body or "").strip():
+        return None
+    try:
+        from pocketpaw_ee.cloud.uploads.service import write_text_file
+
+        safe = (
+            "".join(ch if ch.isalnum() or ch in "-_ " else "-" for ch in art.name).strip()
+            or "artifact"
+        )
+        rec = await write_text_file(
+            workspace_id=uni.workspace,
+            owner_id=user_id,
+            folder_path=f"/terrarium/{uni.name}",
+            filename=f"{safe}.md",
+            content=f"# {art.name}\n\n_{art.kind}, by {art.author}, day {uni.day}_\n\n{art.body}",
+            mime="text/markdown",
+        )
+        return str(rec.id)
+    except Exception:  # noqa: BLE001 — best-effort, the doc keeps the body inline
+        logger.warning("terrarium: could not land artifact %r in /files", art.name, exc_info=True)
+        return None
+
+
 async def _persist_outcome(
     uni: UniverseDoc,
     physics: PhysicsFile,
@@ -613,6 +647,11 @@ async def _persist_outcome(
 
     artifact_ids: list[str] = []
     for art in outcome.artifacts:
+        # A book, a law or a map is a FILE in the workspace's /files surface, so
+        # a viewer opens it in the same inline viewer as any other file. The
+        # body stays on the doc too (the contract keeps it); the file is how
+        # humans read it. Best-effort: a files failure must never wedge a tick.
+        file_id = await _land_artifact_file(uni, user_id, art)
         a = ArtifactDoc(
             workspace=uni.workspace,
             universe_id=universe_id,
@@ -621,15 +660,13 @@ async def _persist_outcome(
             author=art.author,
             day=uni.day,
             cost=art.cost,
-            mime=art.mime,
+            mime=art.mime if file_id is None else "text/markdown",
             x=art.x,
             y=art.y,
             unlocks=art.unlocks,
             stage="done",
             body=art.body,
-            # ponytail: payload stays inline. The contract wants it in the
-            # /files surface (``file_id``); wire that when a previewer needs it.
-            file_id=None,
+            file_id=file_id,
         )
         await a.insert()
         artifact_ids.append(str(a.id))
