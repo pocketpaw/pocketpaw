@@ -100,6 +100,24 @@ class EEAuthBridgeMiddleware(BaseHTTPMiddleware):
         if user is None:
             return await call_next(request)
 
+        # Stamp the SESSION's tenant so OSS-package routers mounted under
+        # /api/v1/ can scope themselves without importing pocketpaw_ee (the
+        # open-core import boundary forbids it, and an import-linter contract
+        # enforces that).
+        #
+        # This exists because src/pocketpaw/api/v1/cloud_projects.py stores
+        # per-tenant data and had no way to learn the tenant, so it read one
+        # out of an X-Workspace-Id header. A header is chosen by the caller, so
+        # every tenant's project storage was readable and writable by anyone
+        # who named the workspace. These two attributes are the supported way
+        # for an OSS router to get an authenticated tenant; nothing else on
+        # request.state carries one.
+        #
+        # Set for EVERY resolved user, not only superusers — an ordinary
+        # workspace member is exactly who needs their own workspace resolved.
+        request.state.workspace_id = getattr(user, "active_workspace", None)
+        request.state.user_id = str(getattr(user, "id", "") or "") or None
+
         # full_access is the OSS superuser bypass — reserve it for genuine
         # platform administrators. A workspace owner/admin is NOT a superuser
         # over the OSS guards (settings/channels/budget); granting it here let
