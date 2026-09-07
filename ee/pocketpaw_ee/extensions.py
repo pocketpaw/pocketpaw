@@ -528,6 +528,25 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Paw Sites dev-server reaper start failed (non-fatal): %s", exc)
 
+        # The Terrarium clock — the loop that makes a universe tick on its own
+        # physics, and slow to its dormant cadence when nobody is watching. It
+        # is started HERE, for the same reason the two reconcilers above are:
+        # ``mount_cloud`` registers it with ``@app.on_event("startup")``, and
+        # that is silently dropped under ``FastAPI(lifespan=...)``, which is the
+        # host's default. Registered there it looked wired and never ran — a
+        # local run showed a universe sitting at tick 0 through three sweep
+        # intervals. Gated inside ``reconcile_scheduler`` on
+        # ``POCKETPAW_CLOUD_SCHEDULER_ENABLED``, so this call is a no-op when the
+        # deployment has not opted in, and idempotent if something already
+        # started one.
+        try:
+            from pocketpaw_ee.terrarium.scheduler import reconcile_scheduler
+
+            if await reconcile_scheduler():
+                logger.info("Terrarium clock started")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Terrarium clock start failed (non-fatal): %s", exc)
+
     async def on_shutdown(self) -> None:
         import logging
 
@@ -539,6 +558,15 @@ class CloudLifecycleHook:
             await shutdown_scheduler()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Meeting scheduler shutdown error: %s", exc)
+
+        # Stop the Terrarium clock started in on_startup. Its own shutdown hook
+        # in mount_cloud is dropped for the same lifespan reason.
+        try:
+            from pocketpaw_ee.terrarium.scheduler import shutdown_scheduler as stop_terrarium
+
+            await stop_terrarium()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Terrarium clock shutdown error: %s", exc)
 
         # Most cloud teardown is handled inside mount_cloud's own shutdown
         # hook. The interval-refresh scheduler is owned by this lifecycle
