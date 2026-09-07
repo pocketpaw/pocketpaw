@@ -588,3 +588,18 @@ async def test_call_lifecycle_events_still_route_to_group_members():
     for cls in (CallStarted, CallEnded, CallNotesPosted):
         ev = cls(data={"group_id": "g1"})
         assert set(await r.audience(ev)) == {"u1", "u2"}, cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_file_updated_fans_out_to_workspace():
+    # The Library is per-workspace; a row's tags/links/summary landing after
+    # file.ready must reach every member's /files, not only a chat group.
+    from pocketpaw_ee.cloud._core.realtime.events import Event
+
+    async def ws_members(_wid: str) -> list[str]:
+        return ["wm1", "wm2"]
+
+    r = AudienceResolver(workspace_members=ws_members)
+    ev = Event(type="file.updated", data={"file_id": "f1", "workspace_id": "w1"})
+    assert set(await r.audience(ev)) == {"wm1", "wm2"}
+    assert await r.audience(Event(type="file.updated", data={"file_id": "f1"})) == []

@@ -1,0 +1,110 @@
+[
+  {
+    "label": "the editor's FileReady carries the bare client path, so the KB listener never finds the row and every note save silently indexes nothing",
+    "file": "ee/pocketpaw_ee/cloud/file_versions/service.py",
+    "find": "        \"file_id\": doc.file_id,\n        \"filename\": doc.filename,",
+    "replace": "        \"file_id\": doc.filename,\n        \"filename\": doc.filename,",
+    "tests": [
+      "tests/cloud/file_versions/test_file_ready_emit.py::test_write_emits_file_ready_with_resolvable_id"
+    ]
+  },
+  {
+    "label": "an update stops emitting FileReady, so a note edited in the editor keeps its stale links and article",
+    "file": "ee/pocketpaw_ee/cloud/file_versions/service.py",
+    "find": "    await emit(FileReady(data=_file_ready_payload(doc)))\n\n    logger.info(\n        \"file %s updated to version %d by %s:%s\",",
+    "replace": "    logger.info(\n        \"file %s updated to version %d by %s:%s\",",
+    "tests": [
+      "tests/cloud/file_versions/test_file_ready_emit.py::test_update_emits_file_ready_and_noop_does_not"
+    ]
+  },
+  {
+    "label": "the re-index stops purging the previously tracked article, so every note save leaves one more copy in the KB",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "        if old_id and old_scope and old_id != article_id:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/uploads/test_listener_links.py::test_reindex_under_new_article_id_removes_the_old_one"
+    ]
+  },
+  {
+    "label": "note tags are merged after the derived keywords, so the author's #tag is the one dropped at the cap",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "            base = merge_tags(base, [*note.hashtags, *note.frontmatter_tags], min_len=2)",
+    "replace": "            derived = [*derived, *note.hashtags, *note.frontmatter_tags]",
+    "tests": [
+      "tests/cloud/uploads/test_listener_links.py::test_note_tag_beats_derived_keywords_at_the_cap"
+    ]
+  },
+  {
+    "label": "link_names never reach the store, so links are parsed and thrown away",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "            file_id, workspace_id, tags=merged, link_names=link_names\n",
+    "replace": "            file_id, workspace_id, tags=merged\n",
+    "tests": [
+      "tests/cloud/uploads/test_listener_links.py::test_markdown_note_gets_links_and_tags_merged"
+    ]
+  },
+  {
+    "label": "the link-rows read drops its workspace filter, so another tenant's note shows up as a backlink and in the graph",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "        query: dict = {\"workspace\": workspace, \"deleted_at\": None}\n",
+    "replace": "        query: dict = {\"deleted_at\": None}\n",
+    "tests": [
+      "tests/cloud/files/test_links.py::test_cross_workspace_id_is_404_and_never_a_backlink"
+    ]
+  },
+  {
+    "label": "filenames are matched raw instead of through the normalizer, so [[beta]] never finds Beta.MD",
+    "file": "ee/pocketpaw_ee/cloud/files/service.py",
+    "find": "        out.setdefault(normalize_link_name(r[\"filename\"]), r)",
+    "replace": "        out.setdefault(r[\"filename\"], r)",
+    "tests": [
+      "tests/cloud/files/test_links.py::test_outgoing_links_resolve_by_normalized_stem"
+    ]
+  },
+  {
+    "label": "backlinks are scanned across every pocket, so a pocket-private note leaks into a workspace file's linked mentions",
+    "file": "ee/pocketpaw_ee/cloud/files/service.py",
+    "find": "            workspace_id, pocket_id=doc.pocket_id or LIST_WORKSPACE_ONLY, limit=GRAPH_CAP\n",
+    "replace": "            workspace_id, pocket_id=None, limit=GRAPH_CAP\n",
+    "tests": [
+      "tests/cloud/files/test_links.py::test_pocket_private_note_is_not_a_workspace_backlink"
+    ]
+  },
+  {
+    "label": "the graph stops checking pocket membership, so a non-member can pull a pocket's file names and links",
+    "file": "ee/pocketpaw_ee/cloud/files/router.py",
+    "find": "    if pocket_id and not await _pocket_readable(pocket_id, user_id):\n        return JSONResponse(\n            status_code=403,\n            content={\"detail\": \"files.pocket_forbidden\"},\n        )\n    return await _SVC.files_graph(",
+    "replace": "    if pocket_id and not await _pocket_readable(pocket_id, user_id) and False:\n        return JSONResponse(\n            status_code=403,\n            content={\"detail\": \"files.pocket_forbidden\"},\n        )\n    return await _SVC.files_graph(",
+    "tests": [
+      "tests/cloud/files/test_links.py::test_graph_pocket_membership"
+    ]
+  },
+  {
+    "label": "the same-stem tie goes to the oldest file instead of the newest",
+    "file": "ee/pocketpaw_ee/cloud/files/service.py",
+    "find": "        out.setdefault(normalize_link_name(r[\"filename\"]), r)",
+    "replace": "        out[normalize_link_name(r[\"filename\"])] = r",
+    "tests": [
+      "tests/cloud/files/test_links.py::test_same_stem_newest_wins"
+    ]
+  },
+  {
+    "label": "links: pocket gate removed",
+    "file": "ee/pocketpaw_ee/cloud/files/service.py",
+    "find": "        if doc.pocket_id and (can_read_pocket is None or not await can_read_pocket(doc.pocket_id)):\n            raise NotFound(\"file\", file_id)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/files/test_links.py::test_links_applies_the_pocket_membership_rule"
+    ]
+  },
+  {
+    "label": "links: gate keys on the query instead of the row",
+    "file": "ee/pocketpaw_ee/cloud/files/router.py",
+    "find": "    return await _SVC.file_links(\n        current_workspace, file_id, can_read_pocket=partial(_pocket_readable, user_id=user_id)\n    )",
+    "replace": "    return await _SVC.file_links(current_workspace, file_id)",
+    "tests": [
+      "tests/cloud/files/test_links.py::test_links_applies_the_pocket_membership_rule"
+    ]
+  }
+]

@@ -1,5 +1,15 @@
 """EE /files router — unified workspace files listing + v2 tree/browse.
 
+2026-09-05 (files vault, feat/files-links): two reads guarded by ``kb.read``
+(the same MEMBER action the knowledge search uses). ``GET /files/{id}/links``
+returns a file's outgoing wikilink targets and backlinks;
+``GET /files/graph?pocket_id=`` returns the library as nodes + edges with the
+same pocket gate as ``GET /files`` and ``POST /files/search`` (the shared
+``_pocket_readable`` helper and the same ``{"detail": "files.pocket_forbidden"}``
+403 body). The links route takes ``{file_id:path}`` because editor notes store
+``ws:path`` ids that can carry slashes. A missing or cross-workspace id is a
+``CloudError`` ``file.not_found``, never ``HTTPException``.
+
 The module-level ``router`` keeps the Cluster E sub-PR 4 contract
 intact: ``GET /files`` returns a single list the paw-enterprise
 FilesPanel renders without caring which origin each row came from.
@@ -27,6 +37,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from functools import partial
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -35,7 +46,12 @@ from fastapi.responses import JSONResponse
 from pocketpaw_ee.cloud.files.abac_config import AbacRuleSet
 from pocketpaw_ee.cloud.files.browse import browse_mount
 from pocketpaw_ee.cloud.files.content_search import CONTENT_SEARCH_ROUTE, search_file_contents
-from pocketpaw_ee.cloud.files.dto import ContentSearchRequest, RequestContext
+from pocketpaw_ee.cloud.files.dto import (
+    ContentSearchRequest,
+    FileLinksResponse,
+    FilesGraphResponse,
+    RequestContext,
+)
 from pocketpaw_ee.cloud.files.errors import FilesError, MountNotFound
 from pocketpaw_ee.cloud.files.registry import ProviderRegistry
 from pocketpaw_ee.cloud.files.service import UnifiedFilesService
@@ -191,6 +207,55 @@ async def search_files_by_content(
             "degraded": result.degraded,
             "limit": body.limit,
         }
+    )
+
+
+@router.get(
+    "/graph",
+    response_model=FilesGraphResponse,
+    dependencies=[Depends(require_action_any_workspace("kb.read"))],
+)
+async def files_graph(
+    pocket_id: str | None = Query(None),
+    user_id: str = Depends(current_user_id),
+    current_workspace: str = Depends(current_workspace_id),
+) -> FilesGraphResponse | JSONResponse:
+    """The library as a link graph. Same pocket rule as ``GET /files``: with
+    ``pocket_id`` the caller must be a member; without it, workspace-only rows."""
+    if pocket_id and not await _pocket_readable(pocket_id, user_id):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "files.pocket_forbidden"},
+        )
+    return await _SVC.files_graph(current_workspace, pocket_id=pocket_id)
+
+
+@router.get(
+    # ``:path`` so an editor-written id (``ws:Daily/2026-09-05.md``, slash
+    # included) reaches the handler; Starlette backtracks past ``/links``.
+    "/{file_id:path}/links",
+    response_model=FileLinksResponse,
+    dependencies=[Depends(require_action_any_workspace("kb.read"))],
+)
+async def file_links(
+    file_id: str,
+    user_id: str = Depends(current_user_id),
+    current_workspace: str = Depends(current_workspace_id),
+) -> FileLinksResponse:
+    """What this file links to, and what links to it. 404 ``file.not_found``
+    for a missing or cross-workspace id, and for a pocket the caller is not in.
+
+    The pocket gate is the same membership rule ``GET /files`` and
+    ``/files/graph`` apply. Without it a workspace member outside a private
+    pocket could name that pocket's files: the read resolves links against the
+    file's OWN pocket scope, so ``outgoing[].filename`` and every backlink
+    would hand back rows the caller cannot list. The scope here is chosen by
+    the row, not by a query parameter, so a refusal is ``file.not_found``
+    rather than the graph's ``pocket_forbidden`` — the caller named a file, and
+    a file they may not read is a file that is not there.
+    """
+    return await _SVC.file_links(
+        current_workspace, file_id, can_read_pocket=partial(_pocket_readable, user_id=user_id)
     )
 
 

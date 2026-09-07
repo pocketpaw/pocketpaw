@@ -1,4 +1,16 @@
 # listeners.py — In-process subscribers for upload-related bus events.
+# 2026-09-05: the tag and comprehension writes now emit file.updated (workspace
+#   audience) so /files refetches the row; file.ready fires before those writes.
+# Updated: 2026-09-05 — files vault (feat/files-links). (1) For text notes (text/markdown,
+#   text/plain) the listener parses ``[[wikilinks]]``, ``#hashtags`` and frontmatter tags out of
+#   the extracted text right after ``persist_extracted_text`` (same ``ExtractionResult`` that
+#   was just persisted; ``uploads.links``) and persists ``link_names`` in the SAME write as the
+#   auto-tags. ``summary`` is untouched; note tags rank as human tags (they win over derived
+#   keyword tags at the MAX_TAGS cap). Sits under the hide_from_ai gate; a parser error is
+#   logged and the file stays indexed. (2) Idempotent re-index: the editor now emits FileReady
+#   on every note save, so when the fresh ingest lands under a DIFFERENT article id than the row
+#   already tracks, the old article is removed from kb-go before the tracking is overwritten.
+#   One file, one article.
 # Updated: 2026-08-29 — T2 "Audio/video transcription at ingest". ``audio/*``
 #   and ``video/*`` no longer go through the extraction chain at all; they go
 #   to ``uploads.transcription``, which returns the transcript as an ordinary
@@ -133,6 +145,7 @@ import logging
 from pathlib import Path
 
 from pocketpaw_ee.cloud._core.realtime.bus import get_bus
+from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import Event, FileReady
 from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
 from pocketpaw_ee.cloud.uploads.extracted_text import persist_extracted_text
@@ -292,6 +305,8 @@ async def index_uploaded_file(event: Event) -> None:
             workspace_id=str(workspace_id),
             result=result,
             existing_tags=existing_tags,
+            note=_parse_note(mime, getattr(result, "text", None), file_id=file_id),
+            existing_links=list(getattr(doc, "link_names", []) or []),
         )
 
         # FC-3: comprehension, beside auto-tagging and independent of it. Runs
@@ -352,6 +367,7 @@ async def index_uploaded_file(event: Event) -> None:
             workspace_id=str(workspace_id),
             article_id=article_id,
             scope=scope,
+            previous=(getattr(doc, "kb_article_id", None), getattr(doc, "kb_scope", None)),
         )
 
         await _maybe_attach_vector(
@@ -540,14 +556,37 @@ async def _record_kb_article(
     workspace_id: str,
     article_id: str,
     scope: str,
+    previous: tuple[str | None, str | None] = (None, None),
 ) -> None:
     """Persist the kb-go article id + scope on the FileUpload row (FL-11b).
 
     Lets a later hide-from-AI toggle purge exactly this article from the KB.
+    ``previous`` is the (article_id, scope) the row tracked before this
+    ingest; when the fresh article landed under a different id the old one is
+    removed so a re-indexed note never leaves two articles behind.
     Fully contained: any failure (store unavailable, row already gone) is
     logged and swallowed so the ingest that already succeeded is never undone.
     """
     try:
+        old_id, old_scope = previous
+        if old_id and old_scope and old_id != article_id:
+            from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+
+            # remove_article swallows its own subprocess errors and answers
+            # False. Ignoring that answer strands the old article: nothing
+            # tracks it any more, it keeps answering searches, and a later
+            # hide-from-AI purge only ever targets the new id. Say so loudly
+            # instead — the ingest still stands, but the leftover is named.
+            if not await KnowledgeService.remove_article(old_scope, old_id):
+                logger.error(
+                    "kb article %s in scope %s could not be removed while "
+                    "re-indexing file_id=%s; it is now orphaned and will not "
+                    "be purged by a later hide_from_ai toggle",
+                    old_id,
+                    old_scope,
+                    file_id,
+                )
+
         from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 
         updated = await MongoFileStore().set_kb_article(
@@ -595,14 +634,20 @@ async def _write_auto_tags(
     workspace_id: str,
     result,
     existing_tags: list[str],
+    note=None,
+    existing_links: list[str] | None = None,
 ) -> None:
     """Derive free-form tags from extraction output and persist the union.
 
     Reuses whatever extraction already produced (title, captions, text, and
     any adapter-supplied labels in ``metadata``) — never calls a new external
     LLM. Merges with ``existing_tags`` so a user-applied tag survives a
-    re-index. Fully contained: any failure (or an empty derivation, or a
-    missing row) leaves the file untagged rather than aborting the ingest.
+    re-index. ``note`` (a parsed ``NoteLinks``, text notes only) contributes
+    its ``#hashtags`` + frontmatter tags AHEAD of the derived keywords, so a
+    tag the author typed is never the one dropped at the cap, and its
+    ``link_names`` land in the same write. Fully contained: any failure (or
+    an empty derivation, or a missing row) leaves the file untagged rather
+    than aborting the ingest.
     """
     try:
         from pocketpaw_ee.cloud.uploads.tagging import derive_tags, merge_tags
@@ -613,15 +658,25 @@ async def _write_auto_tags(
             text=getattr(result, "text", None),
             metadata=getattr(result, "metadata", None),
         )
-        merged = merge_tags(existing_tags, derived)
+        base = list(existing_tags)
+        link_names: list[str] | None = None
+        if note is not None:
+            # A typed #tag skips the keyword noise floor: #q3 and #ai are real tags.
+            base = merge_tags(base, [*note.hashtags, *note.frontmatter_tags], min_len=2)
+            link_names = list(note.link_names)
+        merged = merge_tags(base, derived)
         # Nothing new to write (derivation empty and no existing tags to
         # normalize into place) — skip the DB round-trip.
-        if merged == list(existing_tags):
+        if merged == list(existing_tags) and (
+            link_names is None or link_names == list(existing_links or [])
+        ):
             return
 
         from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 
-        updated = await MongoFileStore().set_library_metadata(file_id, workspace_id, tags=merged)
+        updated = await MongoFileStore().set_library_metadata(
+            file_id, workspace_id, tags=merged, link_names=link_names
+        )
         if updated is None:
             logger.debug(
                 "auto-tag write found no row for file_id=%s workspace=%s",
@@ -630,6 +685,14 @@ async def _write_auto_tags(
             )
         else:
             logger.info("auto-tagged file_id=%s with %d tag(s)", file_id, len(merged))
+            # Tell the Library the row changed; file.ready fired before this
+            # write, so without it the tag pane is stale until a reload.
+            await emit(
+                Event(
+                    type="file.updated",
+                    data={"file_id": file_id, "workspace_id": workspace_id, "reason": "tags"},
+                )
+            )
     except Exception:
         logger.exception("auto-tagging failed for file_id=%s; KB ingest unaffected", file_id)
 
@@ -731,11 +794,45 @@ async def _write_comprehension(
             )
         else:
             logger.info("comprehended file_id=%s into %d collection(s)", file_id, len(merged))
+            await emit(
+                Event(
+                    type="file.updated",
+                    data={
+                        "file_id": file_id,
+                        "workspace_id": workspace_id,
+                        "reason": "comprehension",
+                    },
+                )
+            )
     except Exception:
         logger.exception(
             "file comprehension failed for file_id=%s; the file stays indexed, tagged and usable",
             file_id,
         )
+
+
+_NOTE_MIMES = frozenset({"text/markdown", "text/plain"})
+
+
+def _parse_note(mime: str, text: str | None, *, file_id: str):
+    """Parse links + tags out of a text note; ``None`` for anything else.
+
+    Fail-open: a parser error logs and returns ``None`` so the file is still
+    tagged and indexed like any other upload.
+    """
+    # Split the parameters off: an upload can arrive as
+    # "text/markdown; charset=utf-8" and an exact match would silently give it
+    # no links and no #tags, while the same file made in the editor (bare mime
+    # from _guess_mime) worked — a difference invisible in local testing.
+    if mime.split(";", 1)[0].strip().lower() not in _NOTE_MIMES or not text:
+        return None
+    try:
+        from pocketpaw_ee.cloud.uploads.links import parse_note_links
+
+        return parse_note_links(text)
+    except Exception:
+        logger.exception("note link parsing failed for file_id=%s; indexing continues", file_id)
+        return None
 
 
 def _resolve_adapter():
