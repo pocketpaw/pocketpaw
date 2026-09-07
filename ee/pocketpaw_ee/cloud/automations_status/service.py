@@ -51,6 +51,11 @@ logger = logging.getLogger(__name__)
 _CLOUD_SCHEDULER_FLAG = "POCKETPAW_CLOUD_SCHEDULER_ENABLED"
 # The pocket-interval refresh sweep carries its own gate.
 _REFRESH_SCHEDULER_FLAG = "POCKETPAW_POCKET_REFRESH_SCHEDULER_ENABLED"
+#: The temporal sweeps have their OWN gate. They are started from
+#: ``CloudLifecycleHook.on_startup`` (ee/pocketpaw_ee/extensions.py), not from
+#: mount_cloud, and this table used to list them under the cloud-scheduler flag
+#: -- so the one row whose sweep was actually running named the wrong variable.
+_TEMPORAL_SWEEP_FLAG = "POCKETPAW_TEMPORAL_SWEEP_ENABLED"
 
 
 def _env_flag_on(name: str) -> bool:
@@ -70,15 +75,24 @@ def scheduler_enabled() -> bool:
 # the single place that enumerates them, kept in sync with the app-factory
 # wiring by the C4 touch-time rule (add a sweep → add a row here). The env-flag
 # on/off value is resolved at read time so the status reflects THIS process.
+#
+# The sixth column is the name of the START HOOK, and it is what makes the
+# ``running`` field trustworthy. ``_install_cloud_lifespan`` records a hook name
+# only after that hook has run without raising, so a row can report running only
+# if its loop was actually spawned in this process. Before that existed, this
+# table reported every sweep as on for the entire period all of them were
+# silently dropped. A row with ``None`` here is started somewhere other than
+# mount_cloud and says so rather than guessing.
 # ---------------------------------------------------------------------------
 
-_SWEEP_TABLE: tuple[tuple[str, str, str, str, str | None, str], ...] = (
+_SWEEP_TABLE: tuple[tuple[str, str, str, str, str | None, str | None, str], ...] = (
     (
         "cycles_snapshot",
         "Cycle daily snapshot",
         "snapshot",
         _CLOUD_SCHEDULER_FLAG,
         None,
+        "_start_cycle_scheduler",
         "Once per UTC midnight, snapshots every active cycle in each active workspace.",
     ),
     (
@@ -87,6 +101,7 @@ _SWEEP_TABLE: tuple[tuple[str, str, str, str, str | None, str], ...] = (
         "decisions",
         _CLOUD_SCHEDULER_FLAG,
         None,
+        "_start_decisions_reconciler",
         "60s reconciler drains chain events the hot path missed; hourly sweeper "
         "closes chains for parked Actions past the TTL.",
     ),
@@ -96,6 +111,7 @@ _SWEEP_TABLE: tuple[tuple[str, str, str, str, str | None, str], ...] = (
         "ingest",
         _CLOUD_SCHEDULER_FLAG,
         "POCKETPAW_MEMBER_INGEST_INTERVAL_SECONDS",
+        "_start_member_ingest",
         "Backfills/incrementally syncs each consented member's Gmail + Calendar "
         "into their private KB scope.",
     ),
@@ -105,6 +121,7 @@ _SWEEP_TABLE: tuple[tuple[str, str, str, str, str | None, str], ...] = (
         "ingest",
         _CLOUD_SCHEDULER_FLAG,
         "POCKETPAW_FABRIC_INGEST_INTERVAL_SECONDS",
+        "_start_fabric_ingest",
         "Mirrors each workspace's configured Firestore collections into Fabric "
         "objects (backfill then incremental).",
     ),
@@ -112,8 +129,9 @@ _SWEEP_TABLE: tuple[tuple[str, str, str, str, str | None, str], ...] = (
         "temporal_sweeps",
         "Pocket temporal sweeps",
         "temporal",
-        _CLOUD_SCHEDULER_FLAG,
+        _TEMPORAL_SWEEP_FLAG,
         None,
+        "_start_temporal_sweeps",
         "Fires per-pocket temporal triggers across the workspace × pocket "
         "cross-product for pockets that declare interval sources.",
     ),
@@ -123,13 +141,24 @@ _SWEEP_TABLE: tuple[tuple[str, str, str, str, str | None, str], ...] = (
         "refresh",
         _REFRESH_SCHEDULER_FLAG,
         None,
+        "_start_pocket_refresh",
         "Re-pulls each pocket's interval data sources on its declared cadence.",
     ),
 )
 
 
 def build_sweep_registry() -> list[SweepDescriptor]:
-    """Return the constructed cloud sweep registry with live env-flag state."""
+    """The cloud sweep registry, with both the env flag AND whether it is running.
+
+    Reporting the flag alone is what made the dropped-hook bug expensive: this
+    function answered "are the sweeps on" from a variable that had never been
+    connected to a running loop, and said yes for months while every one of them
+    was dead. ``running`` comes from ``sweep_runtime``, which is written only
+    after a start hook completes, so the pair can now express "configured but not
+    running" -- the state this deployment was actually in.
+    """
+    from pocketpaw_ee.cloud._core import sweep_runtime
+
     return [
         SweepDescriptor(
             key=key,
@@ -137,10 +166,19 @@ def build_sweep_registry() -> list[SweepDescriptor]:
             kind=kind,  # type: ignore[arg-type]
             env_flag=env_flag,
             env_flag_on=_env_flag_on(env_flag),
+            running=sweep_runtime.is_running(start_hook),
             interval_env=interval_env,
             description=description,
         )
-        for (key, label, kind, env_flag, interval_env, description) in _SWEEP_TABLE
+        for (
+            key,
+            label,
+            kind,
+            env_flag,
+            interval_env,
+            start_hook,
+            description,
+        ) in _SWEEP_TABLE
     ]
 
 

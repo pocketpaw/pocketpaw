@@ -449,9 +449,15 @@ class CloudLifecycleHook:
         # exactly one replica). The task lives at module scope inside the
         # scheduler so this no-`app` lifecycle hook can still own it.
         try:
+            from pocketpaw_ee.cloud._core import sweep_runtime
             from pocketpaw_ee.cloud.pockets.refresh_scheduler import start_scheduler
 
             await start_scheduler()
+            # These two sweeps start HERE, not in mount_cloud, so the lifespan
+            # that records the rest never sees them. Marked by hand under the
+            # name /api/v1/automations/status looks them up by, so that endpoint
+            # cannot report them running when this call raised above.
+            sweep_runtime.mark_started("_start_pocket_refresh")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pocket interval-refresh scheduler start failed: %s", exc)
 
@@ -465,11 +471,13 @@ class CloudLifecycleHook:
         # scope inside the scheduler so this no-``app`` lifecycle hook
         # can still own it.
         try:
+            from pocketpaw_ee.cloud._core import sweep_runtime
             from pocketpaw_ee.cloud._core.temporal_scheduler import (
                 start_scheduler as start_temporal_scheduler,
             )
 
             await start_temporal_scheduler()
+            sweep_runtime.mark_started("_start_temporal_sweeps")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Temporal sweep scheduler start failed: %s", exc)
 
@@ -540,17 +548,26 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Meeting scheduler shutdown error: %s", exc)
 
-        # Most cloud teardown is handled inside mount_cloud's own shutdown
-        # hook. The interval-refresh scheduler is owned by this lifecycle
-        # hook (it was started in on_startup), so it is cancelled here so
-        # the background task does not outlive the process.
+        # NOTE: this method runs only because the host lifecycle calls it --
+        # see dashboard_lifecycle.shutdown_event. It was called by nothing at
+        # all until 2026-09-05, and the comment that used to sit here said
+        # "most cloud teardown is handled inside mount_cloud's own shutdown
+        # hook", which was wrong twice over: mount_cloud's shutdown hooks were
+        # themselves dropped, and a reader checking whether teardown was
+        # covered found a sentence saying yes.
+        #
+        # mount_cloud now owns its own teardown through the composed lifespan
+        # (_install_cloud_lifespan). What is cancelled below is what THIS hook
+        # started in on_startup.
         import logging
 
         logger = logging.getLogger(__name__)
         try:
+            from pocketpaw_ee.cloud._core import sweep_runtime
             from pocketpaw_ee.cloud.pockets.refresh_scheduler import stop_scheduler
 
             await stop_scheduler()
+            sweep_runtime.mark_stopped("_start_pocket_refresh")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pocket interval-refresh scheduler stop failed: %s", exc)
 
