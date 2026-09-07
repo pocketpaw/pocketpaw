@@ -199,6 +199,7 @@ async def transcribe(
     file: UploadFile = File(..., description="Audio extracted from a clip (wav/mp3/m4a/ogg)"),
     model: str | None = Form(default=None, description="Deepgram model override (e.g. nova-2)"),
     language: str | None = Form(default=None, description="BCP-47 language hint (e.g. en-US)"),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> schemas.TranscriptResponse:
     """Transcribe speech in an uploaded audio file via Deepgram.
 
@@ -209,8 +210,17 @@ async def transcribe(
     Multipart rather than JSON because the payload is raw audio bytes. An empty
     upload returns 400; a provider failure or missing key returns 502 with
     Deepgram's message relayed plainly, so the UI never shows a phantom
-    transcript. License-gated by the router-wide dependency like every other
-    route here."""
+    transcript.
+
+    ``current_workspace_id`` is the AUTH here, not bookkeeping. This route spends
+    real money — it uploads caller-supplied audio to Deepgram against a
+    deployment-wide POCKETPAW_DEEPGRAM_API_KEY — and it previously had no session
+    dependency at all, so any anonymous caller could drain that credit unmetered.
+    The router-wide ``require_license`` is NOT a substitute: it checks one
+    process-wide licence key and answers identically for every caller, including
+    one with no session. Every other spending route on this router (/generate,
+    /edit, /music, /video-*) already resolved a workspace; this one was missed.
+    """
     audio_bytes = await file.read()
     try:
         return await service.transcribe(
