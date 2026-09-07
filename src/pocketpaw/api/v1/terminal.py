@@ -33,13 +33,33 @@ import struct
 import subprocess
 import termios
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from pocketpaw.api.deps import require_scope
+from pocketpaw.api.v1.terminal_gate import require_terminal_enabled
+
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Terminal"])
+# Two dependencies, in this order, and both are load-bearing. See
+# api/v1/terminal_gate.py for the whole argument; the short version:
+#
+#   require_terminal_enabled  404s the routes unless the deployment opted in,
+#                             so a box that does not want a remote shell does
+#                             not advertise one. Declared FIRST so the 404
+#                             reaches everyone, authenticated or not.
+#   require_scope("admin")    the identity check. Genuine localhost and the
+#                             master token carry full_access and pass; an
+#                             anonymous caller does not. This is the one that
+#                             closes the unauthenticated RCE, and it is
+#                             separately tested with the terminal ENABLED,
+#                             because a test that only ever hits the 404 above
+#                             would pass with this line deleted.
+router = APIRouter(
+    tags=["Terminal"],
+    dependencies=[Depends(require_terminal_enabled), Depends(require_scope("admin"))],
+)
 
 # ---------------------------------------------------------------------------
 # Singleton shell process — one PTY-backed bash per server lifetime.

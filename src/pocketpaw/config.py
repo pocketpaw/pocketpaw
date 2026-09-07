@@ -1698,6 +1698,15 @@ class Settings(BaseSettings):
         default=True,
         description="Allow unauthenticated localhost access (disable for non-CF proxies)",
     )
+    terminal_enabled: bool = Field(
+        default=False,
+        description=(
+            "Expose the PTY terminal routes (/api/v1/terminal/*). Off by default: "
+            "they write to the stdin of a real bash process running as the server "
+            "user, and nothing in the product calls them. Turning this on also "
+            "requires an admin scope on the request."
+        ),
+    )
     session_token_ttl_hours: int = Field(
         default=24,
         gt=0,
