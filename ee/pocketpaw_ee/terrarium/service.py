@@ -1,4 +1,6 @@
 # ee/pocketpaw_ee/terrarium/service.py
+# Updated: 2026-09-07 — the clock: ticks stamp last_tick_at, event reads stamp
+#   last_viewed_at, and ``scheduler_sweep`` feeds scheduler.py its due list.
 #
 # The terrarium glue: Beanie persistence, the Soul bridge, the Instinct gate and
 # the realtime bus. The ONLY module that imports the ``domain`` Beanie doc
@@ -35,6 +37,7 @@ from pocketpaw_ee.cloud._core.errors import BadRequest, NotFound, ValidationErro
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.terrarium import events as world_events
 from pocketpaw_ee.terrarium import llm as citizen_llm
+from pocketpaw_ee.terrarium import scheduler as clock
 from pocketpaw_ee.terrarium import soul_link, weather, world
 from pocketpaw_ee.terrarium.domain import (
     ZERO_COST_KINDS,
@@ -510,6 +513,8 @@ async def tick(workspace_id: str, user_id: str, universe_id: str, n: int = 1) ->
         physics = physics_of(uni)
         for _ in range(n):
             produced.extend(await _one_tick(uni, physics, llm, user_id))
+        uni.last_tick_at = datetime.now(UTC)
+        await uni.save()
     return {"events": produced, "universe": universe_wire(uni, pop=await _pop(universe_id))}
 
 
@@ -765,8 +770,46 @@ async def get_universe(workspace_id: str, universe_id: str) -> dict[str, Any]:
 async def list_events(
     workspace_id: str, universe_id: str, since: int = 0, limit: int = 200
 ) -> dict[str, Any]:
-    await _universe(workspace_id, universe_id)
+    await _touch_viewed(await _universe(workspace_id, universe_id))
     return await _events_page(universe_id, since, limit)
+
+
+async def _touch_viewed(uni: UniverseDoc) -> None:
+    """Somebody is watching — the clock (scheduler.py) reads this to decide
+    between the running and the dormant cadence."""
+    uni.last_viewed_at = datetime.now(UTC)
+    await uni.save()
+
+
+async def scheduler_sweep(now: datetime) -> list[dict[str, Any]]:
+    """The clock's per-interval read: flip running/dormant on every live
+    universe from its own physics, and return the rows whose next tick is due.
+    Called by ``scheduler.run_scheduler_tick``; one universe failing is logged
+    and skipped so the sweep always sees the rest."""
+    due_rows: list[dict[str, Any]] = []
+    docs = await UniverseDoc.find({"status": {"$in": ["running", "dormant"]}}).to_list()
+    for uni in docs:
+        try:
+            due, status = clock.due_state(
+                (uni.physics or {}).get("time") or {},
+                now=now,
+                last_tick_at=uni.last_tick_at,
+                last_viewed_at=uni.last_viewed_at or uni.createdAt,
+            )
+            if status != uni.status:
+                uni.status = status
+                await uni.save()
+            if due:
+                due_rows.append(
+                    {
+                        "workspace_id": uni.workspace,
+                        "universe_id": str(uni.id),
+                        "user_id": uni.creator or "system:scheduler",
+                    }
+                )
+        except Exception:  # noqa: BLE001 — one bad universe never sinks the sweep
+            logger.warning("terrarium clock: sweep failed for universe %s", uni.id, exc_info=True)
+    return due_rows
 
 
 async def _events_page(universe_id: str, since: int, limit: int) -> dict[str, Any]:
@@ -961,7 +1004,7 @@ async def public_get_universe(universe_id: str) -> dict[str, Any]:
 
 
 async def public_list_events(universe_id: str, since: int = 0, limit: int = 200) -> dict[str, Any]:
-    await _public_universe(universe_id)
+    await _touch_viewed(await _public_universe(universe_id))
     return await _events_page(universe_id, since, limit)
 
 

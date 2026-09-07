@@ -1,4 +1,5 @@
 # ee/pocketpaw_ee/terrarium/domain.py
+# Updated: 2026-09-07 — UniverseDoc gains last_tick_at / last_viewed_at (the clock).
 #
 # Terrarium persistence + frozen read-path value objects.
 #
@@ -92,6 +93,11 @@ class UniverseDoc(TimestampedDocument):
     seq: int = 0
     weather_pledges: dict[str, dict[str, Any]] = Field(default_factory=dict)
     storm_ticks: int = 0
+    # The clock (scheduler.py). ``last_tick_at`` is when the sweeper (or a manual
+    # /tick) last advanced the world; ``last_viewed_at`` is when a viewer last
+    # read the Journal — a world nobody watches for a world-day goes dormant.
+    last_tick_at: datetime | None = None
+    last_viewed_at: datetime | None = None
 
     class Settings:
         name = "terrarium_universes"
