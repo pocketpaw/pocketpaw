@@ -1,0 +1,51 @@
+[
+  {
+    "label": "drop the session from the listing, the shipped state",
+    "file": "ee/pocketpaw_ee/cloud/media/router.py",
+    "find": "    limit: int = Query(50, description=\"Max items to return\"),\n    workspace_id: str = Depends(current_workspace_id),\n) -> Response:",
+    "replace": "    limit: int = Query(50, description=\"Max items to return\"),\n    workspace_id: str = \"\",\n) -> Response:",
+    "tests": ["tests/cloud/test_media_gallery_tenancy.py"]
+  },
+  {
+    "label": "drop the session from the upload route",
+    "file": "ee/pocketpaw_ee/cloud/media/router.py",
+    "find": "    file: UploadFile = File(...),\n    workspace_id: str = Depends(current_workspace_id),\n) -> Response:",
+    "replace": "    file: UploadFile = File(...),\n    workspace_id: str = \"\",\n) -> Response:",
+    "tests": ["tests/cloud/test_media_gallery_tenancy.py"]
+  },
+  {
+    "label": "gate the serve route too, blanking every published site",
+    "file": "ee/pocketpaw_ee/cloud/media/router.py",
+    "find": "    workspace_id: str | None = Depends(optional_workspace_id),\n) -> Response:",
+    "replace": "    workspace_id: str | None = Depends(current_workspace_id),\n) -> Response:",
+    "tests": ["tests/cloud/test_media_gallery_tenancy.py"]
+  },
+  {
+    "label": "stop stamping the owner onto an upload",
+    "file": "ee/pocketpaw_ee/cloud/media/router.py",
+    "find": "    name = f\"{storage.owned_name_prefix(workspace_id)}{safe_name}\"",
+    "replace": "    name = safe_name",
+    "tests": ["tests/cloud/test_media_gallery_tenancy.py"]
+  },
+  {
+    "label": "show every workspace's file in the listing",
+    "file": "ee/pocketpaw_ee/cloud/media/storage.py",
+    "find": "    owner = owner_of(name)\n    if owner is None:\n        return True  # legacy, untagged — see the note above\n    return workspace_id is not None and owner == capture_owner_token(workspace_id)",
+    "replace": "    return True",
+    "tests": ["tests/cloud/test_media_gallery_tenancy.py"]
+  },
+  {
+    "label": "match the owner prefix without checking the token shape",
+    "file": "ee/pocketpaw_ee/cloud/media/storage.py",
+    "find": "    token = name[len(OWNED_PREFIX) :].split(\"-\", 1)[0]\n    return token if _OWNED_TOKEN_RE.match(token) else None",
+    "replace": "    return name[len(OWNED_PREFIX) :].split(\"-\", 1)[0]",
+    "tests": ["tests/cloud/test_media_gallery_tenancy.py"]
+  },
+  {
+    "label": "skip the visibility filter in the local listing",
+    "file": "ee/pocketpaw_ee/cloud/media/router.py",
+    "find": "        if not storage.visible_to(f.name, workspace_id):\n            continue",
+    "replace": "        pass",
+    "tests": ["tests/cloud/test_media_gallery_tenancy.py"]
+  }
+]

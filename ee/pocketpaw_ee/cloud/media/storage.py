@@ -102,6 +102,59 @@ def capture_owner_of(name: str) -> str | None:
     return token if _CAPTURE_TOKEN_RE.match(token) else None
 
 
+# --- Uploaded gallery files -------------------------------------------------
+# The SAME problem as a capture, and a deliberately different answer.
+#
+# ``POST /api/v1/media`` had no auth and ``media_key`` carried no tenant, so one
+# gallery was shared by every workspace on the deployment: GET /api/v1/media
+# returned every tenant's filenames and URLs, and anyone on the internet could
+# add to it. The key cannot grow a workspace segment — ``serve_media`` refuses
+# any name containing a slash — so, as with captures, the owner travels in the
+# filename.
+#
+# Where this DIFFERS from a capture, and the difference is the whole design:
+# ``serve_media`` does NOT enforce this token. A capture is private to its
+# workspace; a gallery image is embedded in ripple specs, and a pocket
+# published as a site is served from the edge with no session, so enforcing an
+# owner on the read would blank every published page that shows one. The token
+# makes a file ATTRIBUTABLE so the LISTING can be scoped. Reads stay
+# capability-based on an unguessable name, exactly like /uploads.
+#
+# Files written before this existed carry no token. They stay visible to every
+# workspace's listing, which matches what ``studio.service.list_generations``
+# already does with untagged history records (``_workspace is None`` is shown
+# to everyone). Consistency with the neighbouring subsystem beats a private
+# rule here, and hiding them instead would empty existing galleries.
+OWNED_PREFIX = "ws-"
+_OWNED_TOKEN_RE = re.compile(r"[0-9a-f]{16}\Z")
+
+
+def owned_name_prefix(workspace_id: str) -> str:
+    """Filename prefix marking a gallery upload as owned by ``workspace_id``."""
+    return f"{OWNED_PREFIX}{capture_owner_token(workspace_id)}-"
+
+
+def owner_of(name: str) -> str | None:
+    """The owner token in an uploaded filename, or None when it carries none.
+
+    Shape-checked rather than prefix-checked: a user's own file called
+    "ws-holiday.png" is not an owned upload, and treating it as one would hide
+    it from every listing including its owner's.
+    """
+    if not name.startswith(OWNED_PREFIX):
+        return None
+    token = name[len(OWNED_PREFIX) :].split("-", 1)[0]
+    return token if _OWNED_TOKEN_RE.match(token) else None
+
+
+def visible_to(name: str, workspace_id: str | None) -> bool:
+    """Whether ``name`` belongs in ``workspace_id``'s gallery listing."""
+    owner = owner_of(name)
+    if owner is None:
+        return True  # legacy, untagged — see the note above
+    return workspace_id is not None and owner == capture_owner_token(workspace_id)
+
+
 async def save_generated(data: bytes, *, mime: str, ext: str = "png", name_prefix: str = "") -> str:
     """Persist a freshly generated blob (image / audio / …) through the media
     adapter and return its backend-relative ``/api/v1/media/<name>`` URL.
@@ -137,6 +190,7 @@ def local_generated_dir() -> Path | None:
 
 __all__ = [
     "CAPTURE_PREFIX",
+    "OWNED_PREFIX",
     "MEDIA_ROOT",
     "MEDIA_KEY_PREFIX",
     "media_key",

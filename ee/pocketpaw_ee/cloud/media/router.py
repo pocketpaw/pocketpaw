@@ -7,9 +7,24 @@ the gallery grid, serves them over HTTP so the frontend can render ``<img>`` /
 ``<video>`` tags, and accepts the canvas editor's "save edited image" upload.
 
 Endpoints:
-  GET  /api/v1/media          — list all generated media files
-  POST /api/v1/media          — upload a generated file (canvas "save edited image")
-  GET  /api/v1/media/{name}   — serve a single media file
+  GET  /api/v1/media          — list the caller's workspace's media (session required)
+  POST /api/v1/media          — upload a generated file (session required)
+  GET  /api/v1/media/{name}   — serve a single media file (capability-based, see below)
+
+Updated: 2026-09-07 — list and upload had NO auth and the key carried no tenant,
+so one gallery was shared by every workspace: the listing returned every
+tenant's filenames and URLs, and anyone on the internet could store bytes on
+this infrastructure and have them served from this origin. Both routes now take
+``current_workspace_id``, and an upload's filename carries an owner token so the
+listing can be scoped.
+
+``serve_media`` is deliberately NOT gated, and that asymmetry is the design
+rather than an omission. Gallery URLs are embedded in ripple specs, and a pocket
+published as a site is served from the edge with no session — enforcing an owner
+on the read would blank every published page showing one. The read stays
+capability-based on an unguessable name, like /uploads. A /browser capture is
+different: it is private to its workspace and never embedded, so serve_media
+does enforce ITS owner token.
 
 Updated: 2026-09-06 (BR-4, feat/browser-surface-extract): /browser screenshots
 are saved through this same storage so they have a URL an image widget can
@@ -37,6 +52,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
+from pocketpaw_ee.cloud._core.deps import current_workspace_id
 from pocketpaw_ee.cloud.auth.core import fastapi_users
 from pocketpaw_ee.cloud.media import storage
 from pocketpaw_ee.cloud.studio.service import tracked_generation_filenames
@@ -77,7 +93,7 @@ _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 # writes local disk).
 
 
-def _local_entries(generated: Path, sort: str, tracked: set[str]) -> list[dict]:
+def _local_entries(generated: Path, sort: str, tracked: set[str], workspace_id: str) -> list[dict]:
     """List one local generated directory (mtime-sorted, media-only, excluding
     generation-tracked files) as MediaFile dicts."""
     if not generated.exists():
@@ -97,6 +113,8 @@ def _local_entries(generated: Path, sort: str, tracked: set[str]) -> list[dict]:
             continue
         if f.name in tracked or storage.capture_owner_of(f.name):
             continue
+        if not storage.visible_to(f.name, workspace_id):
+            continue
         entries.append(
             {
                 "name": f.name,
@@ -109,7 +127,7 @@ def _local_entries(generated: Path, sort: str, tracked: set[str]) -> list[dict]:
     return entries
 
 
-async def _remote_entries(sort: str, tracked: set[str]) -> list[dict]:
+async def _remote_entries(sort: str, tracked: set[str], workspace_id: str) -> list[dict]:
     """List S3 keys under the media prefix as MediaFile dicts. Remote listings
     carry no mtime, so ``modified`` comes from the timestamp baked into generated
     filenames (``<ms>-<uuid>.png``); uploads without one report 0."""
@@ -124,6 +142,8 @@ async def _remote_entries(sort: str, tracked: set[str]) -> list[dict]:
         if mime is None:
             continue
         if item.name in tracked or storage.capture_owner_of(item.name):
+            continue
+        if not storage.visible_to(item.name, workspace_id):
             continue
         entries.append(
             {
@@ -142,6 +162,7 @@ async def _remote_entries(sort: str, tracked: set[str]) -> list[dict]:
 async def list_media(
     sort: str = Query("newest", description="Sort order: 'newest' or 'oldest'"),
     limit: int = Query(50, description="Max items to return"),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> Response:
     """List all generated media files with metadata.
 
@@ -156,9 +177,9 @@ async def list_media(
     tracked = tracked_generation_filenames()
     generated = storage.local_generated_dir()
     entries = (
-        _local_entries(generated, sort, tracked)
+        _local_entries(generated, sort, tracked, workspace_id)
         if generated is not None
-        else await _remote_entries(sort, tracked)
+        else await _remote_entries(sort, tracked, workspace_id)
     )
     return Response(
         content=json.dumps({"media": entries[:limit]}),
@@ -167,7 +188,10 @@ async def list_media(
 
 
 @router.post("")
-async def upload_media(file: UploadFile = File(...)) -> Response:
+async def upload_media(
+    file: UploadFile = File(...),
+    workspace_id: str = Depends(current_workspace_id),
+) -> Response:
     """Upload a generated file into the gallery (used by the canvas editor's
     "save edited image"). Returns the MediaFile JSON so the frontend can select
     it after re-listing.
@@ -188,7 +212,11 @@ async def upload_media(file: UploadFile = File(...)) -> Response:
         safe_name = f"{stem}{suffix}"
 
     adapter = storage.get_adapter()
-    name = safe_name
+    # The owner travels in the filename, because the key cannot carry a
+    # workspace segment (serve_media refuses any name with a slash). This makes
+    # the file attributable so the LISTING can be scoped; the read stays
+    # capability-based so a published site that embeds the URL keeps working.
+    name = f"{storage.owned_name_prefix(workspace_id)}{safe_name}"
     while await adapter.exists(storage.media_key(name)):
         stem = Path(name).stem
         name = f"{stem}-{uuid4().hex[:8]}{suffix}"
