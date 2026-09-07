@@ -13,6 +13,14 @@ rule set + request-context factory. ``build_files_router`` in
 ``pocket_id``. Members see the pocket's files; non-members get a 403.
 Without ``pocket_id`` the listing returns workspace-scoped rows only —
 pocket files don't bleed into the workspace Files panel.
+
+2026-08-29 (T3 "Files content search"): added ``POST /files/search`` — the
+same listing rows, selected by what is INSIDE them rather than by filename.
+It lives here, on the surface that already speaks file rows, rather than as a
+flag on ``POST /kb/search`` which answers with kb articles; the full argument
+is in ``files/content_search.py``'s header. The pocket-read gate that
+``list_files`` had inline is now ``_pocket_readable``, shared by both
+endpoints so the two can't drift into enforcing different rules.
 """
 
 from __future__ import annotations
@@ -26,13 +34,18 @@ from fastapi.responses import JSONResponse
 
 from pocketpaw_ee.cloud.files.abac_config import AbacRuleSet
 from pocketpaw_ee.cloud.files.browse import browse_mount
-from pocketpaw_ee.cloud.files.dto import RequestContext
+from pocketpaw_ee.cloud.files.content_search import CONTENT_SEARCH_ROUTE, search_file_contents
+from pocketpaw_ee.cloud.files.dto import ContentSearchRequest, RequestContext
 from pocketpaw_ee.cloud.files.errors import FilesError, MountNotFound
 from pocketpaw_ee.cloud.files.registry import ProviderRegistry
 from pocketpaw_ee.cloud.files.service import UnifiedFilesService
 from pocketpaw_ee.cloud.files.tree import CachedTreeBuilder
 from pocketpaw_ee.cloud.license import require_license
-from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
+from pocketpaw_ee.cloud.shared.deps import (
+    current_user_id,
+    current_workspace_id,
+    require_action_any_workspace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +56,22 @@ router = APIRouter(
 )
 
 _SVC = UnifiedFilesService()
+
+
+async def _pocket_readable(pocket_id: str, user_id: str) -> bool:
+    """The pocket-read gate for this surface (Stage 3.E).
+
+    Extracted so the listing and content search cannot drift apart — one
+    endpoint enforcing a slightly different membership rule than the other is
+    how a "private pocket" stops being private. A failing membership lookup
+    denies: an ACL that can't be evaluated is not an ACL that passed.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        return await pockets_service.is_member(pocket_id=pocket_id, user_id=user_id)
+    except Exception:
+        return False
 
 
 @router.get("")
@@ -85,18 +114,11 @@ async def list_files(
             },
         )
 
-    if pocket_id:
-        from pocketpaw_ee.cloud.pockets import service as pockets_service
-
-        try:
-            allowed = await pockets_service.is_member(pocket_id=pocket_id, user_id=user_id)
-        except Exception:
-            allowed = False
-        if not allowed:
-            return JSONResponse(
-                status_code=403,
-                content={"detail": "files.pocket_forbidden"},
-            )
+    if pocket_id and not await _pocket_readable(pocket_id, user_id):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "files.pocket_forbidden"},
+        )
 
     page = await _SVC.list_unified(
         current_workspace, source=source, limit=limit, offset=offset, pocket_id=pocket_id
@@ -107,24 +129,67 @@ async def list_files(
             "workspace_id": current_workspace,
             "pocket_id": pocket_id,
             "source": source or "all",
-            "files": [
-                {
-                    "id": f.id,
-                    "source": f.source,
-                    "filename": f.filename,
-                    "mime": f.mime,
-                    "size": f.size,
-                    "url": f.url,
-                    "created": f.created.isoformat() if f.created else None,
-                    "chat_id": f.chat_id,
-                }
-                for f in page.files
-            ],
+            # One serializer, on the dataclass. The inline dict this replaces
+            # silently re-dropped summary/collections/tags/agent_id after the
+            # service was fixed to carry them — same bug, one hop later.
+            "files": [f.to_json() for f in page.files],
             "warnings": page.warnings,
             "total": page.total,
             "has_more": page.has_more,
             "offset": offset,
             "limit": limit,
+        }
+    )
+
+
+@router.post(
+    CONTENT_SEARCH_ROUTE,
+    dependencies=[Depends(require_action_any_workspace("kb.read"))],
+)
+async def search_files_by_content(
+    body: ContentSearchRequest,
+    user_id: str = Depends(current_user_id),
+    current_workspace: str = Depends(current_workspace_id),
+) -> JSONResponse:
+    """Search INSIDE the caller's files; return listing rows, not kb articles.
+
+    Rows carry the same shape ``GET /files`` returns plus a ``match`` block
+    (article id, scope, kb title, snippet, whether that article is verbatim),
+    so the panel can render a hit with the components it already has.
+
+    Guarded by ``kb.read``: the ``match`` block carries kb titles and
+    summaries, which is kb content — without the guard this would be a second,
+    ungated door to what ``POST /kb/search`` protects. ``pocket_id`` goes
+    through the same membership gate as the listing.
+
+    ``degraded`` is the honesty field. ``"kb_unavailable"`` means the search
+    could not run (the UI must say so — an empty list would read as "nothing
+    matched"); ``"verbatim"`` means at least one hit is an uncompiled article,
+    so matching against it was literal. ``null`` means a normal search.
+    """
+    if body.pocket_id and not await _pocket_readable(body.pocket_id, user_id):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "files.pocket_forbidden"},
+        )
+
+    result = await search_file_contents(
+        workspace_id=current_workspace,
+        user_id=user_id,
+        query=body.query,
+        limit=body.limit,
+        pocket_id=body.pocket_id,
+    )
+
+    return JSONResponse(
+        content={
+            "workspace_id": current_workspace,
+            "pocket_id": body.pocket_id,
+            "query": body.query,
+            "files": [m.to_json() for m in result.matches],
+            "scopes": result.scopes,
+            "degraded": result.degraded,
+            "limit": body.limit,
         }
     )
 

@@ -1,0 +1,23 @@
+[
+  {
+    "label": "credential fingerprint ignores the key — two BYOK tenants share one cached agent",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        if raw == \"|\":\n            return \"none\"\n        return hashlib.sha256(raw.encode()).hexdigest()[:16]",
+    "replace": "        return \"none\"",
+    "tests": ["tests/cloud/byok/test_byok_service.py::TestNoCredentialBleedBetweenTenants"]
+  },
+  {
+    "label": "x-api-key attached unconditionally — a platform run carries a stale BYOK header",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "headers = {\"x-api-key\": byok_key} if byok_key else None",
+    "replace": "headers = {\"x-api-key\": byok_key}",
+    "tests": ["tests/cloud/byok/test_byok_service.py::TestTheHeaderThatCarriesTheKey"]
+  },
+  {
+    "label": "undecryptable stored key raises instead of degrading — every turn fails after a key rotation",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "        return TurnCredentials(source=\"platform\")\n\n    if not plaintext:",
+    "replace": "        raise\n\n    if not plaintext:",
+    "tests": ["tests/cloud/byok/test_byok_service.py::TestEncryptionEnvelope"]
+  }
+]

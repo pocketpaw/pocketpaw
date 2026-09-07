@@ -81,6 +81,32 @@ class RecordingBus:
 
 
 @pytest.fixture(autouse=True, scope="session")
+def never_the_real_upload_bucket():
+    """Force the upload adapter to local disk for the whole cloud suite.
+
+    Added 2026-08-29. ``uploads/router.py`` builds ``_ADAPTER`` AT IMPORT via
+    ``build_adapter``, which calls ``load_dotenv()`` — and dotenv walks UP from
+    the cwd, so a worktree with no ``.env`` of its own still finds the
+    workspace one, where ``POCKETPAW_UPLOAD_ADAPTER=s3``. The process-wide
+    singleton is therefore a LIVE S3 client pointed at a real bucket, and any
+    test that reaches it writes real objects over the network. This is not
+    hypothetical: three unguarded runs during the 2026-08-29 files sprint put
+    74 test fixtures into ``interacly-dev-private``.
+
+    ``load_dotenv()`` does not override variables already in the environment
+    (``src/pocketpaw/uploads/factory.py``), so setting it here wins and
+    ``_build_s3()`` is never called — no S3 client is even constructed. Session
+    scope and an env var rather than a monkeypatch because the damage happens
+    at IMPORT time, before any function-scoped fixture could run.
+
+    Sibling of ``local_store_home`` below, same principle: a suite that writes
+    to the world it runs in is one accident away from mattering.
+    """
+    os.environ["POCKETPAW_UPLOAD_ADAPTER"] = "local"
+    yield
+
+
+@pytest.fixture(autouse=True, scope="session")
 def local_store_home(tmp_path_factory):
     """Point the local store factory at a session tmp dir, never ``~/.pocketpaw``.
 

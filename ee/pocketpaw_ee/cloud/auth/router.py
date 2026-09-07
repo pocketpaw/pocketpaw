@@ -1,5 +1,11 @@
 """Auth domain — FastAPI router.
 
+Updated 2026-09-01 (feat/byok-guest-backend): added POST /auth/guest (mint an
+anonymous BYOK guest — rate-limited per IP, key validated before anything is
+created, answers with the same cookie login response /auth/login uses) and
+POST /auth/guest/upgrade (attach email+password to the SAME guest user id).
+Both registered BEFORE the fastapi-users sub-routers, like the MFA overrides.
+
 Profile endpoints use ``Depends(request_context)`` and call into
 ``ee.cloud.auth.service`` module functions directly. The fastapi-users
 sub-routers (login/logout/register) and the avatar file-serving / upload
@@ -21,9 +27,10 @@ from fastapi_users.router.common import ErrorCode
 from pydantic import BaseModel
 from starlette.responses import FileResponse
 
-from pocketpaw.security.rate_limiter import mfa_challenge_limiter
+from pocketpaw.security.rate_limiter import guest_mint_limiter, mfa_challenge_limiter
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud.audit import service as audit_service
+from pocketpaw_ee.cloud.auth import guest as guest_service
 from pocketpaw_ee.cloud.auth import mfa as mfa_service
 from pocketpaw_ee.cloud.auth import service as auth_service
 from pocketpaw_ee.cloud.auth import sessions as sessions_service
@@ -291,6 +298,61 @@ async def revoke_other_sessions(
     cur = _current_jti(request) or ""
     n = await sessions_service.revoke_all_others(str(user.id), cur)
     return RevokeOthersResponse(revoked=n)
+
+
+# ---------------------------------------------------------------------------
+# Guest accounts (BYOK-first onboarding, 2026-09-01, feat/byok-guest-backend).
+# Registered BEFORE the fastapi-users sub-routers below, same as the MFA login
+# overrides at the top of this file. /auth/guest mints an anonymous account
+# from a validated provider key and answers with the SAME cookie login
+# response /auth/login answers with; /auth/guest/upgrade attaches real
+# credentials to the SAME user id (the stock /auth/register cannot — it
+# always creates a new user).
+# ---------------------------------------------------------------------------
+
+
+class _GuestMintRequest(BaseModel):
+    api_key: str
+    provider: str = "anthropic"
+
+
+class _GuestUpgradeRequest(BaseModel):
+    email: str
+    password: str
+
+
+@router.post("/auth/guest", name="auth:guest.mint")
+async def guest_mint(
+    body: _GuestMintRequest,
+    request: Request,
+):
+    """Try-before-signup: validate the key, mint guest user + workspace.
+
+    Rate-limited per IP as literally the first step — the key validation
+    inside ``mint_guest`` is a provider round trip on our egress, and an
+    unthrottled mint route doubles as a key-checking oracle.
+    """
+    if not guest_mint_limiter.allow(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="guest_mint_rate_limited")
+    user = await guest_service.mint_guest(body.api_key, provider=body.provider)
+    response = await _mint_and_record(cookie_backend, user, request)
+    return response
+
+
+@router.post("/auth/guest/upgrade", name="auth:guest.upgrade")
+async def guest_upgrade(
+    body: _GuestUpgradeRequest,
+    user: Any = Depends(current_active_user),
+) -> dict:
+    """Attach email+password to the authenticated guest — same user id,
+    workspace/sessions/pages/key all stay. The existing session keeps working;
+    the client should re-fetch /auth/me."""
+    upgraded = await guest_service.upgrade_guest(user, email=body.email, password=body.password)
+    return {
+        "id": str(upgraded.id),
+        "email": upgraded.email,
+        "is_guest": upgraded.is_guest,
+    }
 
 
 # ---------------------------------------------------------------------------

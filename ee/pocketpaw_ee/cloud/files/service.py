@@ -14,6 +14,13 @@ that pocket only. When ``None`` (the default), the listing returns
 workspace-only rows — the workspace Files panel never sees pocket files,
 which is the privacy contract for pocket-scoped uploads.
 
+2026-08-29 (T3 "Files content search"): the record→row projection that was
+inlined in ``list_chat_uploads`` is now the module-level
+``unified_from_record``. ``files/content_search.py`` projects the rows a kb
+hit resolves to through the SAME function — a second hand-written copy is how
+summary/collections/tags/agent_id got dropped three separate times in this
+pipeline, and the fix was always "one projection, one place".
+
 2026-08-13 (Files pagination): ``list_unified`` now returns a
 ``UnifiedPage`` (files + warnings + total + has_more) and accepts an
 ``offset`` for offset-based paging. ``total`` comes from a cheap count
@@ -27,10 +34,11 @@ only need the flat list keep working via ``page.files``.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
+from pocketpaw.uploads.file_store import FileRecord
 from pocketpaw_ee.cloud.uploads.mongo_store import LIST_WORKSPACE_ONLY, MongoFileStore
 
 logger = logging.getLogger(__name__)
@@ -51,6 +59,48 @@ class UnifiedFile:
     url: str | None  # None for local fs (FE uses Tauri for those)
     created: datetime | None
     chat_id: str | None = None
+    # Library metadata. THIS is the shape the flat ``GET /files`` listing
+    # returns — the one the Files panel renders. FL-1/FC-1/BA-1 each added
+    # their field to ``files/dto.py::FileEntry`` (the v2 /files/browse tree)
+    # and to the uploads provider, but not here, so the values were written,
+    # stored and then dropped one layer before the client: a summary that
+    # exists in Mongo and renders as an empty panel. Defaults keep every
+    # non-upload source (drive, local, kb) unchanged.
+    tags: list[str] = field(default_factory=list)
+    collections: list[str] = field(default_factory=list)
+    summary: str | None = None
+    agent_id: str | None = None
+    # Where the row LIVES. Absent until 2026-08-29, so the flat listing never
+    # told a client which folder a file was in — and a Move UI that guards on
+    # `folder_path ?? "/"` therefore decided every file was already at the
+    # root and quietly did nothing. Non-upload sources have no folders and
+    # keep the "/" default.
+    folder_path: str = "/"
+
+    def to_json(self) -> dict:
+        """The wire shape of one flat-listing row.
+
+        The router used to hand-build this dict inline, which re-dropped
+        summary/collections/tags/agent_id AFTER the service started carrying
+        them — the third hop in the same pipeline to silently narrow the row.
+        Serialization lives on the dataclass now so a new field has exactly
+        one place to be forgotten, and the carrier test pins this method.
+        """
+        return {
+            "id": self.id,
+            "source": self.source,
+            "filename": self.filename,
+            "mime": self.mime,
+            "size": self.size,
+            "url": self.url,
+            "created": self.created.isoformat() if self.created else None,
+            "chat_id": self.chat_id,
+            "tags": self.tags,
+            "collections": self.collections,
+            "summary": self.summary,
+            "agent_id": self.agent_id,
+            "folder_path": self.folder_path,
+        }
 
 
 @dataclass
@@ -65,6 +115,34 @@ class UnifiedPage:
     warnings: list[str]
     total: int
     has_more: bool
+
+
+def unified_from_record(rec: FileRecord) -> UnifiedFile:
+    """Project one uploads ``FileRecord`` into a flat-listing row.
+
+    THE record→row projection, extracted 2026-08-29 so there is exactly one.
+    It used to be inlined in ``list_chat_uploads``; content search
+    (``files/content_search.py``) needs the same projection for the rows a kb
+    hit resolves to, and a second hand-written copy is precisely how
+    summary/collections/tags/agent_id were dropped three times in this
+    pipeline already. A new field added to ``UnifiedFile`` now has one hop to
+    be threaded through, not two.
+    """
+    return UnifiedFile(
+        id=rec.id,
+        source="chat",
+        filename=rec.filename,
+        mime=rec.mime,
+        size=rec.size,
+        url=f"/api/v1/uploads/{rec.id}",
+        created=rec.created,
+        chat_id=rec.chat_id,
+        folder_path=getattr(rec, "folder_path", None) or "/",
+        tags=list(rec.tags or []),
+        collections=list(rec.collections or []),
+        summary=rec.summary,
+        agent_id=rec.agent_id,
+    )
 
 
 def _dedupe(files: list[UnifiedFile]) -> list[UnifiedFile]:
@@ -110,19 +188,7 @@ class UnifiedFilesService:
             records = await self._uploads.list_by_workspace(
                 workspace_id, limit=limit, pocket_id=LIST_WORKSPACE_ONLY
             )
-        return [
-            UnifiedFile(
-                id=rec.id,
-                source="chat",
-                filename=rec.filename,
-                mime=rec.mime,
-                size=rec.size,
-                url=f"/api/v1/uploads/{rec.id}",
-                created=rec.created,
-                chat_id=rec.chat_id,
-            )
-            for rec in records
-        ]
+        return [unified_from_record(rec) for rec in records]
 
     async def list_drive(self, workspace_id: str, *, limit: int) -> list[UnifiedFile]:
         """Drive source — stubbed until Cluster C lands connector status.

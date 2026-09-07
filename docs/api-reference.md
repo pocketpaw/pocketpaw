@@ -1226,6 +1226,78 @@ v1 is a plain GET for the client to poll. A push stream is the upgrade path
 if polling stops being enough — event-driven off the existing run-status
 transitions, not a faster poll.
 
+## Files — Content Search
+
+`POST /files/search` answers "which of my files says this?" — as distinct from
+the listing's filename filter, which answers "which of my files is called
+this?". It searches the caller's kb-go scopes and resolves each hit back to the
+FILE row that was ingested into it, via the `kb_article_id` the FileReady
+listener records. Rows come back in the same shape `GET /files` returns, plus a
+`match` block, so a client renders a hit with the components it already has.
+
+Why it is not a mode on `POST /kb/search`: that endpoint returns kb *articles*
+(compiled derivatives, not files) and accepts a client `scope` override bound to
+the caller by an allowlist. This one returns file rows and accepts **no scope at
+all** — its scopes are derived from the caller through the same
+`_kb_scopes_for_context` precedence the chat path uses (`user:` > `pocket:` >
+`agent:` > `workspace:`). The only partition a client may ask for is
+`pocket_id`, gated by the same membership check the listing uses.
+
+Requires a valid license and the `kb.read` action — the `match` block carries kb
+titles and summaries, so this is a kb read whichever door it comes through.
+
+**Request**
+
+```json
+{ "query": "quarterly revenue", "limit": 20, "pocket_id": null }
+```
+
+`limit` is 1–50 (default 20). A non-member `pocket_id` returns 403
+`files.pocket_forbidden`, exactly as `GET /files?pocket_id=` does.
+
+**Response**
+
+```json
+{
+  "workspace_id": "w1",
+  "pocket_id": null,
+  "query": "quarterly revenue",
+  "files": [
+    { "id": "f1", "source": "chat", "filename": "board-minutes.docx",
+      "mime": "…", "size": 1234, "url": "/api/v1/uploads/f1",
+      "created": "…", "chat_id": null, "tags": [], "collections": [],
+      "summary": "…", "agent_id": null,
+      "match": { "article_id": "board-minutes", "scope": "workspace:w1",
+                 "title": "Board minutes", "snippet": "…",
+                 "verbatim": false } }
+  ],
+  "scopes": ["user:u1", "workspace:w1"],
+  "degraded": null,
+  "limit": 20
+}
+```
+
+Results are in kb-go's BM25 rank order. Files that were never ingested (no
+`kb_article_id`), files hidden from AI, soft-deleted files, and — on a
+workspace-scoped search — pocket-scoped files are all absent by construction.
+
+**`degraded` — read this before rendering an empty list**
+
+| value | meaning | what a client must show |
+| --- | --- | --- |
+| `null` | normal search | the results, whatever their number |
+| `"kb_unavailable"` | kb-go could not be reached; the search did **not** run | "couldn't search" — never "nothing matched" |
+| `"verbatim"` | at least one hit is an uncompiled article (kb-go's keyless fallback), so it was matched on raw text | the results, plus a note that some were matched literally |
+
+The `kb_unavailable` distinction is the point of the field. An empty `files`
+array is an answer; a failed search is not one, and rendering them identically
+is how a broken feature passes for a working one with nothing to show.
+
+Source: `ee/pocketpaw_ee/cloud/files/content_search.py` (the service and the
+argument for the surface), `ee/pocketpaw_ee/cloud/files/router.py` (the route),
+`ee/pocketpaw_ee/cloud/uploads/mongo_store.py::list_by_kb_articles` (the join
+and its tenancy filters).
+
 ## Files — Versioned Writes
 
 The `file_versions` entity layers a versioned write path over the uploads
@@ -2422,6 +2494,26 @@ Better, assert it in a test against the ASGI app with no session, the way
 spoofed `X-Forwarded-For`, so a remote caller cannot claim loopback — the trap
 here is local verification, not a production hole.
 
+### Guest onboarding (BYOK-first, 2026-09-01)
+
+| Endpoint | Notes |
+|---|---|
+| `POST /auth/guest` | `{api_key, provider?="anthropic"}`. Rate-limited per IP (429). Validates the key against the provider FIRST (422 `byok.key_rejected` / `byok.provider_unavailable` / `byok.provider_unsupported` — Anthropic only in v1); a dead key mints **nothing**. On success mints an anonymous user (`is_guest`) + workspace + default agent, stores the key encrypted (the same per-workspace Fernet store the `/byok` routes use), and answers exactly like `POST /auth/login` (204 + cookies). Public by necessity — a guest has no account yet; on the route-auth-audit allowlist with that reason. |
+| `POST /auth/guest/upgrade` | Authenticated guest only. `{email, password}` attaches real credentials to the **same user id** (workspace, sessions, key all stay) and flips `is_guest` off. 409 `auth.email_taken` / `auth.not_a_guest`. The stock `/auth/register` always creates a NEW user, hence the dedicated route. |
+
+Guest limits are server-side and fail-CLOSED: 2 sessions and 40 turns/day by
+default (per-user `guest_limits`). Over-limit responses are 402 with top-level
+`{"code": "guest_limit_reached", "kind": "sessions"|"turns"}`; uploads answer
+403 `{"code": "guest_upload_forbidden"}`; a guest whose stored key is missing
+or undecryptable gets 402 `{"code": "guest_key_required"}` — guests never fall
+back to platform credentials. `GET /auth/me` carries `is_guest`.
+
+Turn billing: every workspace with a stored BYOK key (guest or not) now runs
+its chat turns on that key — the executor resolves credentials per turn and
+threads them into the agent pool's isolated backend. The turn's model must
+belong to the key's provider (402-style `byok.model_provider_mismatch` error
+frame on a mismatch, never a silent upstream 401).
+
 ### Sign-in endpoints (no session — that is the point)
 
 | Endpoint | Notes |
@@ -2848,7 +2940,26 @@ Errors use the standard envelope `{"error": {"code", "message"}}`.
 ### `GET /knowledge/articles`
 
 Query params: `workspace_id` (optional, must match the active workspace),
-`agent_id` (optional filter; `"workspace"` = workspace-only).
+`agent_id` (optional filter; `"workspace"` = workspace-only), `limit` /
+`offset` (optional offset pagination; omit `limit` for the legacy one-shot
+full listing), and `exclude_upload_derived`.
+
+`exclude_upload_derived` (default `false`) is de-duplication for the Files
+panel, which merges these rows with `GET /files` on the client. An upload
+records the article it was ingested into (the FL-11b `kb_article_id` /
+`kb_scope` columns), so when this is set those articles are dropped and an
+uploaded PDF stops appearing beside the article compiled out of it as two
+separate documents. Standalone knowledge — an article ingested from chat or a
+URL, with no file behind it — is never touched; nor is an article whose upload
+is hidden from AI, soft-deleted, or pocket-scoped, because then the article is
+the only surviving copy in the panel.
+
+**Leave it off for knowledge browsers.** `/knowledge`, `/knowledge-lab` and the
+command palette read this same route, and there the compiled article *is* the
+thing being read and repaired — suppressing for them would make upload-derived
+knowledge silently vanish from the wiki. The extra query only runs when the
+flag is set, so the default path costs nothing. Suppression happens before the
+`offset` slice, so `total` and `has_more` describe the filtered set.
 
 Response:
 
