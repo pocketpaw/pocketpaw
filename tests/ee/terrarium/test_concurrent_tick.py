@@ -84,6 +84,10 @@ _SERIAL_JOURNAL = [
     ("think", "Sabe", -2),
     ("say", "Sabe", -1),
     ("build", "Sabe", -20),
+    # The three founders build the same node in the same tick, so the tick ends
+    # with one moment over their acts. It is written after them, by the clock,
+    # not by any citizen — so a reordered fan-out cannot move it.
+    ("moment", "Vela", 0),
 ]
 
 

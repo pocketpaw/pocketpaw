@@ -57,11 +57,12 @@ EVENT_KINDS: tuple[str, ...] = (
     "arrive",
     "raid",
     "gain",
+    "moment",
 )
 
 # Contract invariant 2: every event costs or earns. ``cost: 0`` is legal only
 # for these kinds. The service asserts this before it writes an EventDoc.
-ZERO_COST_KINDS: frozenset[str] = frozenset({"gate", "weather", "hibernate", "arrive"})
+ZERO_COST_KINDS: frozenset[str] = frozenset({"gate", "weather", "hibernate", "arrive", "moment"})
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,11 @@ class EventDoc(TimestampedDocument):
 
     ``viewer_origin`` marks text that came from a human. Write-policy: such text
     is NEVER written into a soul as fact (see ``world.label_viewer_claim``).
+
+    ``data`` is the row's free-form structured payload — empty for every act,
+    and the ``world.NewMoment`` fields (actors, act_seqs, place, x, y, kind) on
+    a ``moment`` row. It exists so a moment rides the SAME Journal the acts do,
+    keeping ``seq`` paging and the public events route as the only read path.
     """
 
     workspace: Indexed(str)  # type: ignore[valid-type]
@@ -156,6 +162,7 @@ class EventDoc(TimestampedDocument):
     artifact_id: str | None = None
     origin: EventOrigin = "citizen"
     viewer_origin: bool = False
+    data: dict[str, Any] = Field(default_factory=dict)
 
     class Settings:
         name = "terrarium_events"

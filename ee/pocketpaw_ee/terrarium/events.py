@@ -62,11 +62,18 @@ class WorldLedger(Event):
     EVENT_TYPE: ClassVar[str] = "world.ledger"
 
 
+@dataclass
+class WorldMoment(Event):
+    EVENT_TYPE: ClassVar[str] = "world.moment"
+
+
 # Journal event kind -> the topic it rides. ``think`` is the only kind that
 # gets its own topic (thoughts are the cheap, high-volume stream a viewer can
-# turn off); every other citizen act shares ``world.act``.
+# turn off) and ``moment`` gets one because it is the stream a stranger watches
+# instead of the raw feed; every other citizen act shares ``world.act``.
 KIND_TOPIC: dict[str, type[Event]] = {
     "think": WorldThought,
+    "moment": WorldMoment,
     "weather": WorldWeather,
     "gate": WorldGate,
     "spawn": WorldSpawn,
@@ -82,6 +89,7 @@ TERRARIUM_TOPICS: tuple[str, ...] = (
     "world.spawn",
     "world.hibernate",
     "world.ledger",
+    "world.moment",
 )
 
 
@@ -97,6 +105,7 @@ __all__ = [
     "WorldGate",
     "WorldHibernate",
     "WorldLedger",
+    "WorldMoment",
     "WorldSpawn",
     "WorldThought",
     "WorldTick",

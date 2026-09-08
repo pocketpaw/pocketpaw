@@ -8,6 +8,9 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
+
 import pytest
 
 pytest.importorskip("pocketpaw_ee")
@@ -236,3 +239,81 @@ def test_tech_is_a_floor_so_a_crowd_is_not_a_town():
 
 def test_multiverse_is_never_reached_by_scale_alone():
     assert world.rung_for(10**9, 99) == "planet"
+
+
+# ---------------------------------------------------------------------------
+# Moments — two citizens acting in one place
+# ---------------------------------------------------------------------------
+
+
+def _act(seq: int, actor: str, kind: str = "say", **kw) -> world.PlacedAct:
+    return world.PlacedAct(
+        seq=seq, actor=actor, kind=kind, x=kw.pop("x", 50.0), y=kw.pop("y", 50.0), **kw
+    )
+
+
+def test_two_citizens_at_one_node_make_one_moment():
+    moments = world.cluster_moments(
+        [_act(1, "Kell", "build", node="well"), _act(2, "Orin", "build", node="well")]
+    )
+    assert len(moments) == 1
+    m = moments[0]
+    assert m.place == "well"
+    assert m.actors == ("Kell", "Orin")
+    assert m.act_seqs == (1, 2)
+    assert m.headline == "Kell and Orin raised the well"
+
+
+def test_one_citizen_acting_alone_is_not_a_moment():
+    """Two ACTS by one citizen are still one citizen. The bar is two names."""
+    assert (
+        world.cluster_moments(
+            [_act(1, "Kell", "build", node="well"), _act(2, "Kell", "say", node="well")]
+        )
+        == []
+    )
+
+
+def test_a_raid_in_the_cluster_wins_the_kind():
+    """Rank, not order: the raid is written last and still names the moment."""
+    moments = world.cluster_moments(
+        [
+            _act(1, "Kell", "say", node="well"),
+            _act(2, "Orin", "trade", node="well"),
+            _act(3, "Vela", "raid", node="well"),
+        ]
+    )
+    assert [m.kind for m in moments] == ["raid"]
+    assert moments[0].headline == "Kell, Orin and Vela fought over the well"
+
+
+def test_citizens_far_apart_with_no_node_do_not_share_a_moment():
+    """Position clustering has a radius; opposite corners are two places."""
+    assert world.cluster_moments([_act(1, "Kell", x=10, y=10), _act(2, "Orin", x=90, y=90)]) == []
+    near = world.cluster_moments([_act(1, "Kell", x=10, y=10), _act(2, "Orin", x=12, y=11)])
+    assert len(near) == 1
+    assert near[0].place is None
+    assert near[0].headline == "Kell and Orin talked in the north west"
+
+
+def test_the_same_acts_produce_byte_identical_moments():
+    """Determinism is the whole contract: a replay of the Journal must retell
+    the same story. Feeding the acts in reversed order changes nothing."""
+    acts = [
+        _act(3, "Vela", "craft", node="kiln"),
+        _act(1, "Kell", "build", node="well"),
+        _act(2, "Orin", "build", node="well"),
+        _act(4, "Nira", "craft", node="kiln"),
+    ]
+    first = json.dumps([asdict(m) for m in world.cluster_moments(acts)], sort_keys=True)
+    second = json.dumps(
+        [asdict(m) for m in world.cluster_moments(list(reversed(acts)))], sort_keys=True
+    )
+    assert first == second
+    assert json.loads(first)[0]["headline"] == "Kell and Orin raised the well"
+
+
+def test_thinking_together_is_not_a_moment():
+    """Every citizen thinks every tick — counting thoughts would make the feed
+    one endless moment and say nothing."""
+    assert world.cluster_moments([_act(1, "Kell", "think"), _act(2, "Orin", "think")]) == []

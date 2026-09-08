@@ -127,7 +127,7 @@ async def test_every_event_carries_a_cost_or_is_an_allowed_zero(client):
     assert events
     for e in events:
         if e["cost"] == 0:
-            assert e["kind"] in {"gate", "weather", "hibernate", "arrive"}, e
+            assert e["kind"] in {"gate", "weather", "hibernate", "arrive", "moment"}, e
 
 
 async def test_events_page_by_seq(client):

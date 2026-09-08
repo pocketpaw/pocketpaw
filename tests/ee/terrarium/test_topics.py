@@ -1,4 +1,4 @@
-# tests/ee/terrarium/test_topics.py — the eight ``world.*`` realtime topics.
+# tests/ee/terrarium/test_topics.py — the nine ``world.*`` realtime topics.
 #
 # Registration happens at IMPORT time via ``Event.__init_subclass__``, so what
 # actually has to hold is (a) every contract topic is defined and registered,
@@ -25,6 +25,7 @@ def test_every_contract_topic_is_registered():
         "world.spawn",
         "world.hibernate",
         "world.ledger",
+        "world.moment",
     )
     for topic in world_events.TERRARIUM_TOPICS:
         assert topic in EVENT_REGISTRY, f"{topic} never reached EVENT_REGISTRY"
@@ -44,6 +45,7 @@ def test_journal_kinds_map_onto_the_right_topic():
     assert world_events.topic_for("gate") is world_events.WorldGate
     assert world_events.topic_for("spawn") is world_events.WorldSpawn
     assert world_events.topic_for("hibernate") is world_events.WorldHibernate
+    assert world_events.topic_for("moment") is world_events.WorldMoment
     # Everything a citizen DOES shares world.act.
     for kind in ("say", "write", "craft", "build", "explore", "vote", "trade", "arrive"):
         assert world_events.topic_for(kind) is world_events.WorldAct

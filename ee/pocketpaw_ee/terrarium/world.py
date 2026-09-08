@@ -14,6 +14,9 @@
 #     digest separately so the citizen can check the claim. Nothing produced
 #     here is ever written into a soul as fact — ``episodic_summary`` builds the
 #     soul memory from citizen-origin events ONLY.
+#   * ``cluster_moments`` — a MOMENT is two or more citizens acting in the same
+#     place on the same day. Pure, deterministic, and the only thing that turns
+#     a stream of acts into something a stranger can read as a story.
 #   * ``apply_acts`` re-validates every act server-side against the citizen's
 #     balance, the physics verb list, and the tech tree. The model is never
 #     trusted: an act it cannot afford or has not unlocked is DROPPED, not run.
@@ -22,6 +25,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -124,7 +128,11 @@ class SenseDigest:
 @dataclass
 class NewEvent:
     """A Journal row the engine wants written. ``cost`` is signed: negative =
-    the actor spent credits, positive = the actor earned them."""
+    the actor spent credits, positive = the actor earned them.
+
+    ``node`` is the place the act named (a tech-tree node), carried so the
+    moment clusterer can group by place without re-reading the decision.
+    """
 
     kind: str
     actor: str
@@ -133,6 +141,7 @@ class NewEvent:
     artifact_index: int | None = None
     origin: str = "citizen"
     viewer_origin: bool = False
+    node: str | None = None
 
 
 @dataclass
@@ -401,6 +410,7 @@ def apply_acts(
                 body=body,
                 cost=-cost,
                 artifact_index=artifact_index,
+                node=act.node or None,
             )
         )
         balance -= cost
@@ -411,6 +421,155 @@ def apply_acts(
             outcome.pool_delta += cost
 
     return outcome
+
+
+# ---------------------------------------------------------------------------
+# MOMENTS — when two citizens act in the same place on the same day
+# ---------------------------------------------------------------------------
+
+# Which act kinds can make a moment, and which kind wins when a cluster mixes
+# them. A raid beats a build beats a trade beats speech: the loudest thing that
+# happened is what the day is remembered for. ``think`` is absent on purpose —
+# every citizen thinks every tick, so counting thoughts would make every tick a
+# moment and the feed would say nothing.
+MOMENT_KIND_RANK: dict[str, int] = {
+    "say": 1,
+    "explore": 2,
+    "vote": 3,
+    "write": 4,
+    "craft": 5,
+    "trade": 6,
+    "build": 7,
+    "raid": 8,
+}
+
+# How close two citizens have to stand to be "in the same place" when neither
+# act named a node. The map is 100x100, so this is roughly a village.
+MOMENT_RADIUS = 8.0
+
+_COUNT_WORD = {4: "Four", 5: "Five", 6: "Six", 7: "Seven", 8: "Eight", 9: "Nine"}
+
+# One plain sentence per kind. No em dashes: these are read aloud in a feed.
+_MOMENT_TEMPLATE: dict[str, str] = {
+    "say": "{who} talked {where}",
+    "explore": "{who} went out {where}",
+    "vote": "{who} voted {where}",
+    "write": "{who} wrote {where}",
+    "craft": "{who} made things {where}",
+    "trade": "{who} traded {where}",
+}
+
+
+@dataclass(frozen=True)
+class PlacedAct:
+    """One written act, with the place it happened. The clusterer's input."""
+
+    seq: int
+    actor: str
+    kind: str
+    x: float
+    y: float
+    day: int = 1
+    tick: int = 0
+    node: str | None = None
+
+
+@dataclass(frozen=True)
+class NewMoment:
+    """Two or more citizens acting in one place on one day."""
+
+    day: int
+    tick_from: int
+    tick_to: int
+    place: str | None
+    x: float
+    y: float
+    actors: tuple[str, ...]
+    act_seqs: tuple[int, ...]
+    kind: str
+    headline: str
+
+
+def _who(actors: tuple[str, ...]) -> str:
+    """Name the actors, or count them once there are too many to read."""
+    if len(actors) == 1:
+        return actors[0]
+    if len(actors) == 2:
+        return f"{actors[0]} and {actors[1]}"
+    if len(actors) == 3:
+        return f"{actors[0]}, {actors[1]} and {actors[2]}"
+    return f"{_COUNT_WORD.get(len(actors), str(len(actors)))} citizens"
+
+
+def _quadrant(x: float, y: float) -> str:
+    """Which corner of the map this was, in words a viewer can point at."""
+    return f"{'north' if y < 50 else 'south'} {'west' if x < 50 else 'east'}"
+
+
+def _headline(kind: str, actors: tuple[str, ...], place: str | None, x: float, y: float) -> str:
+    who = _who(actors)
+    where = f"at the {place}" if place else f"in the {_quadrant(x, y)}"
+    if kind == "raid":
+        return f"{who} fought over the {place}" if place else f"{who} fought {where}"
+    if kind == "build":
+        return f"{who} raised the {place}" if place else f"{who} built something together {where}"
+    return _MOMENT_TEMPLATE.get(kind, "{who} gathered {where}").format(who=who, where=where)
+
+
+def cluster_moments(day_acts: Sequence[PlacedAct], *, phase: str | None = None) -> list[NewMoment]:
+    """Group a day's acts into moments. PURE and DETERMINISTIC.
+
+    A moment is two or more DISTINCT citizens acting at the same place on the
+    same day. "Place" is the act's node when it named one, otherwise the
+    citizens' positions inside ``MOMENT_RADIUS``. Acts are sorted by seq before
+    grouping, so the caller's ordering can never leak into the output: the same
+    acts in produce byte-identical moments out.
+
+    ``phase`` is the story director's pacing phase. There is no director yet, so
+    it is accepted and ignored rather than left out of the signature.
+    """
+    acts = sorted((a for a in day_acts if a.kind in MOMENT_KIND_RANK), key=lambda a: (a.day, a.seq))
+    groups: list[list[PlacedAct]] = []
+    for act in acts:
+        for group in groups:
+            head = group[0]
+            if head.day != act.day:
+                continue
+            if head.node is not None or act.node is not None:
+                if head.node == act.node:
+                    group.append(act)
+                    break
+                continue
+            if (act.x - head.x) ** 2 + (act.y - head.y) ** 2 <= MOMENT_RADIUS**2:
+                group.append(act)
+                break
+        else:
+            groups.append([act])
+
+    moments: list[NewMoment] = []
+    for group in groups:
+        actors = tuple(dict.fromkeys(a.actor for a in group))
+        if len(actors) < 2:
+            continue
+        kind = max(group, key=lambda a: MOMENT_KIND_RANK[a.kind]).kind
+        place = group[0].node
+        x = round(sum(a.x for a in group) / len(group), 2)
+        y = round(sum(a.y for a in group) / len(group), 2)
+        moments.append(
+            NewMoment(
+                day=group[0].day,
+                tick_from=min(a.tick for a in group),
+                tick_to=max(a.tick for a in group),
+                place=place,
+                x=x,
+                y=y,
+                actors=actors,
+                act_seqs=tuple(a.seq for a in group),
+                kind=kind,
+                headline=_headline(kind, actors, place, x, y),
+            )
+        )
+    return moments
 
 
 def hibernates(balance: int) -> bool:
@@ -446,6 +605,8 @@ def rung_for(pop: int, unlocked: int) -> str:
 
 
 __all__ = [
+    "MOMENT_KIND_RANK",
+    "MOMENT_RADIUS",
     "VERB_ARTIFACT_KIND",
     "VERB_TO_KIND",
     "VIEWER_CLAIM_PREFIX",
@@ -454,11 +615,14 @@ __all__ = [
     "Decision",
     "NewArtifact",
     "NewEvent",
+    "NewMoment",
+    "PlacedAct",
     "SenseDigest",
     "TickOutcome",
     "ViewerMessage",
     "apply_acts",
     "build_digest",
+    "cluster_moments",
     "episodic_summary",
     "hibernates",
     "label_viewer_claim",

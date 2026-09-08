@@ -15,7 +15,8 @@
 #
 # Invariants enforced at this seam:
 #   1. ``seq`` is monotonic per universe (assigned under a per-universe lock).
-#   2. ``cost: 0`` only for gate/weather/hibernate/arrive (asserted on write).
+#   2. ``cost: 0`` only for gate/weather/hibernate/arrive/moment (asserted on
+#      write).
 #   3. balance <= 0 at end of tick -> state ``hibernating``, soul file KEPT.
 #   4. viewer-origin text never becomes soul fact (the episodic summary is
 #      built from citizen-origin events only — see world.episodic_summary).
@@ -28,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -150,6 +152,7 @@ def event_wire(doc: EventDoc) -> dict[str, Any]:
         "artifact_id": doc.artifact_id,
         "origin": doc.origin,
         "viewer_origin": doc.viewer_origin,
+        "data": doc.data,
     }
 
 
@@ -254,6 +257,7 @@ async def _append_event(
     artifact_id: str | None = None,
     origin: str = "citizen",
     viewer_origin: bool = False,
+    data: dict[str, Any] | None = None,
 ) -> EventDoc:
     """Append one Journal row and bump the universe's monotonic ``seq``.
 
@@ -281,6 +285,7 @@ async def _append_event(
         artifact_id=artifact_id,
         origin=origin,
         viewer_origin=viewer_origin,
+        data=data or {},
     )
     await doc.insert()
     return doc
@@ -649,13 +654,50 @@ async def _one_tick(
     fanned = (await fw.tick(active_ids=ids)).last_tick_actions
 
     written: list[dict[str, Any]] = []
+    placed: list[world.PlacedAct] = []
     for (doc, snap, _digest), action in zip(rows, fanned):
         # ``decide_tick`` already degrades a bad transport to an empty Decision,
         # so ``ok: False`` only appears if the adapter itself blew up. Same
         # degrade either way: the citizen thinks, does nothing, and still pays.
         decision = world.Decision.model_validate(action) if action.get("ok") else world.Decision()
         outcome = world.apply_acts(physics, snap, decision, storm=storm)
-        written.extend(await _persist_outcome(uni, physics, doc, outcome, user_id))
+        mine = await _persist_outcome(uni, physics, doc, outcome, user_id)
+        written.extend(mine)
+        # ``_persist_outcome`` writes ``outcome.events`` FIRST and in order, so
+        # the head of what it returns lines up with them one for one (the gain
+        # and hibernate rows it appends after are not acts). ``doc`` already
+        # carries any move this tick made, so the position is where the citizen
+        # ended up, not where it started.
+        for ev, wire in zip(outcome.events, mine):
+            if ev.kind in world.MOMENT_KIND_RANK:
+                placed.append(
+                    world.PlacedAct(
+                        seq=int(wire["seq"]),
+                        actor=ev.actor,
+                        kind=ev.kind,
+                        x=doc.x,
+                        y=doc.y,
+                        day=uni.day,
+                        tick=uni.tick,
+                        node=ev.node,
+                    )
+                )
+
+    # A MOMENT is the story layer over the acts just written: two or more
+    # citizens in one place on one day. It rides the same Journal, so ``seq``
+    # paging, the realtime topic and the public events route carry it for free.
+    for moment in world.cluster_moments(placed):
+        row = await _append_event(
+            uni,
+            kind="moment",
+            actor=moment.actors[0],
+            body=moment.headline,
+            cost=0,
+            origin="system",
+            data=asdict(moment),
+        )
+        await _publish(uni, row)
+        written.append(event_wire(row))
 
     uni.tick += 1
     if uni.tick % max(1, physics.time.ticks_per_day) == 0:
