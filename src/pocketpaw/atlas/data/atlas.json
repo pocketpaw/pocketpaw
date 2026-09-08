@@ -2111,6 +2111,20 @@
     },
     {
       "gist": "",
+      "how": "a user invokes it as /sites-craft in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:sites-craft",
+      "keywords": [
+        "sites-craft"
+      ],
+      "kind": "skill",
+      "name": "sites-craft",
+      "narrative": "The CRAFT MECHANICS for a Paw Site — how to actually build the type scale, the colour ramp, the spacing rhythm and the surface treatment, with exact values. Invoke it WHILE AUTHORING sections, at the moment you lock tokens and again whenever you set a font size, pick a colour step, space a group, round a corner, or style a state. `pocketpaw-design-taste` chooses WHICH font, WHICH palette family and WHICH layout composition; this decides HOW those are constructed so they read as one system instead of a pile of one-off values. It answers \"what line-height does a heading take\", \"how do I build a ramp\", \"what radius does a nested element get\", \"how much space separates two groups\". Generative, not corrective — `sites-interface-review` checks a built page against these same rules; this one is for while you are writing it.",
+      "requires": [],
+      "summary": "The CRAFT MECHANICS for a Paw Site — how to actually build the type scale, the colour ramp, the spacing rhythm and the surface treatment, with exact values.",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "a user invokes it as /sites-interface-review in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:sites-interface-review",
       "keywords": [

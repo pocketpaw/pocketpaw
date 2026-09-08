@@ -334,6 +334,33 @@
 # is the single source both read; the two are pinned together by
 # `test_sites_create_skill_names_cover_the_advertised_skills`.
 
+# Updated: 2026-09-08 (feat/sites-design-skills, second pass) - a SIXTH skill,
+# `sites-craft`, ships EMBEDDED rather than named, so there are now two embedded
+# blocks and five named ones. It carries the craft MECHANICS - how a type scale, a
+# colour ramp, a spacing rhythm and a surface treatment are CONSTRUCTED - which
+# design-taste does not: measured on this commit, design-taste contains none of
+# ramp construction, perceived lightness, the primitive/semantic token seam, the
+# concentric-radius formula, `text-wrap`, line-height by role, `oklab`, or hit-area
+# minimums. It picks the ingredient; craft is the method.
+#
+# Embedded because the trigger is "every section of every site", which is the same
+# test `_design_taste_system` passes and the five named skills fail. A subset-of-
+# briefs skill can be left to a probabilistic invocation and cost nothing on the
+# turns it does not fire; an every-turn one cannot - invoked four turns in five it
+# leaves one site in five built from ad-hoc values, which is the exact defect the
+# material exists to remove. It rides BOTH preambles: create is obvious, and refine
+# is where craft drift actually enters, because an edit lands new markup beside a
+# system the agent can no longer see.
+#
+# The two embedded blocks share `_read_bundled_skill_body`, which returns None
+# rather than raising, so a missing bundle degrades each block to its own one-line
+# directive instead of taking the preamble down. Precedence is stated in the block
+# itself and in PHASE 2: DESIGN SYSTEM outranks CRAFT SYSTEM on any CHOICE (which
+# face, which palette family, which composition); craft governs the construction of
+# whatever was chosen. They do not overlap, so there is no value for them to
+# disagree about - the precedence line exists for the case where the agent thinks
+# they do.
+
 from __future__ import annotations
 
 import functools
@@ -518,6 +545,32 @@ def _publish_runs_async(engine: str) -> bool:
         return True
 
 
+def _read_bundled_skill_body(name: str) -> str | None:
+    """Return a bundled skill's ``SKILL.md`` with its YAML frontmatter stripped.
+
+    Shared by the two blocks this surface EMBEDS rather than names
+    (``_design_taste_system``, ``_craft_system``). Returns ``None`` — it never
+    raises — when the bundle is missing or the file is unreadable, so each caller
+    degrades to its own short inline directive instead of taking the whole preamble
+    down with it.
+    """
+    try:
+        from pocketpaw.bundled_skills import bundled_skills_plugin_dir
+
+        base = bundled_skills_plugin_dir()
+        if base is None:
+            return None
+        md = (base / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001 — never let a read error break the preamble
+        logger.debug("sites_handler: bundled skill %s unreadable", name, exc_info=True)
+        return None
+    if md.startswith("---"):
+        parts = md.split("---", 2)
+        if len(parts) == 3:
+            return parts[2].strip()
+    return md
+
+
 @functools.lru_cache(maxsize=1)
 def _design_taste_system() -> str:
     """Return the ``pocketpaw-design-taste`` SKILL.md body (frontmatter stripped)
@@ -532,29 +585,16 @@ def _design_taste_system() -> str:
     skill file (the SKILL.md stays the single source of truth) and cached. A
     missing file degrades to a short inline directive, never a crash.
     """
-    try:
-        from pocketpaw.bundled_skills import bundled_skills_plugin_dir
-
-        base = bundled_skills_plugin_dir()
-        if base is not None:
-            md = (base / "skills" / "pocketpaw-design-taste" / "SKILL.md").read_text(
-                encoding="utf-8"
-            )
-            body = md
-            if md.startswith("---"):
-                parts = md.split("---", 2)
-                if len(parts) == 3:
-                    body = parts[2].strip()
-            return (
-                '<design-system name="pocketpaw-design-taste">\n'
-                "This 2026 Creative Director system GOVERNS every site you build "
-                "on this surface. It is ALREADY LOADED here — apply it in full; "
-                "you do NOT need to invoke any skill to use it.\n\n"
-                f"{body}\n"
-                "</design-system>"
-            )
-    except Exception:  # noqa: BLE001 — never let a read error break the preamble
-        pass
+    body = _read_bundled_skill_body("pocketpaw-design-taste")
+    if body is not None:
+        return (
+            '<design-system name="pocketpaw-design-taste">\n'
+            "This 2026 Creative Director system GOVERNS every site you build "
+            "on this surface. It is ALREADY LOADED here — apply it in full; "
+            "you do NOT need to invoke any skill to use it.\n\n"
+            f"{body}\n"
+            "</design-system>"
+        )
     return (
         '<design-system name="pocketpaw-design-taste">\n'
         "Invoke the `pocketpaw-design-taste` skill and follow it in full.\n"
@@ -562,14 +602,57 @@ def _design_taste_system() -> str:
     )
 
 
-# The five on-demand design skills, added 2026-09-08. Unlike `_design_taste_system`
-# (embedded verbatim, because design quality IS the job here and skill invocation
-# is model-driven and probabilistic), these are NAMED with a one-line trigger and
-# left for the agent to load through the `Skill` tool. The asymmetry is a budget
-# decision, not an inconsistency: design-taste governs EVERY build so its bytes are
-# always earned, while these five each apply to a subset of briefs. Embedding all
-# six would add several times the design-taste payload to every create turn to
-# deliver material most turns never use.
+@functools.lru_cache(maxsize=1)
+def _craft_system() -> str:
+    """Return the ``sites-craft`` SKILL.md body wrapped as a ``<craft-system>`` block.
+
+    EMBEDDED rather than named, and for a different reason than the skills in
+    ``_SITES_DESIGN_SKILLS`` are named. Those each apply to a SUBSET of briefs, so
+    their bytes are only sometimes earned. Craft mechanics apply to every section
+    of every site on every turn — a type scale, a colour ramp, a grouping gap and a
+    nested radius exist whether or not the agent thought to ask for them — so there
+    is no turn on which loading this would have been wasted.
+
+    "Always" is also not something skill invocation can deliver: it is model-driven
+    and probabilistic, which is the finding already recorded in
+    ``_design_taste_system``. A skill invoked on four turns in five leaves one site
+    in five built from ad-hoc values, and that site looks assembled in exactly the
+    way this material exists to prevent.
+
+    It rides BOTH preambles. Create is the obvious half; refine is where craft
+    drift actually creeps in, because an edit lands new markup beside a system the
+    agent can no longer see.
+    """
+    body = _read_bundled_skill_body("sites-craft")
+    if body is not None:
+        return (
+            '<craft-system name="sites-craft">\n'
+            "The CRAFT MECHANICS for everything you build on this surface: how the "
+            "type scale, the colour ramp, the spacing rhythm and the surface "
+            "treatment are CONSTRUCTED. It is ALREADY LOADED here — apply it in "
+            "full; you do NOT need to invoke any skill to use it. The DESIGN SYSTEM "
+            "chooses WHICH face, WHICH palette family and WHICH composition and "
+            "OUTRANKS this on any such choice; this decides HOW whatever it chose "
+            "gets built.\n\n"
+            f"{body}\n"
+            "</craft-system>"
+        )
+    return (
+        '<craft-system name="sites-craft">\n'
+        "Invoke the `sites-craft` skill and follow it in full.\n"
+        "</craft-system>"
+    )
+
+
+# The five on-demand design skills, added 2026-09-08. Unlike the two blocks this
+# surface EMBEDS verbatim (`_design_taste_system` and `_craft_system`), these are
+# NAMED with a one-line trigger and left for the agent to load through the `Skill`
+# tool. The asymmetry is a budget decision, not an inconsistency: what is embedded
+# applies to EVERY build (design-taste governs the choices, craft governs how they
+# are constructed), so those bytes are earned on every turn, while these five each
+# apply to a subset of briefs. Embedding all seven would add several times the
+# design-taste payload to every create turn to deliver material most turns never
+# use.
 #
 # Naming them is load-bearing rather than decorative. On ripple/html create and on
 # refine the wholesale bundled plugin is available, so the agent COULD reach them —
@@ -667,14 +750,15 @@ def _design_skills_note(mode: str) -> str:
         return ""
     if mode == "create":
         frame = (
-            "Unlike the DESIGN SYSTEM at the end of this message (already in your "
-            "context), you reach these with the `Skill` tool at the moment a "
-            "trigger fires, then follow the skill in full."
+            "Unlike the DESIGN SYSTEM and the CRAFT SYSTEM at the end of this "
+            "message (both already in your context), you reach these with the "
+            "`Skill` tool at the moment a trigger fires, then follow the skill in "
+            "full."
         )
         precedence = (
-            "They COMPOSE with the DESIGN SYSTEM and never override it: where a "
-            "skill and the DESIGN SYSTEM disagree on a visual value, the DESIGN "
-            "SYSTEM wins.\n"
+            "They COMPOSE with the embedded systems and never override them: "
+            "where a skill and the DESIGN SYSTEM disagree on a visual value, the "
+            "DESIGN SYSTEM wins.\n"
         )
     else:
         frame = (
@@ -683,8 +767,11 @@ def _design_skills_note(mode: str) -> str:
         precedence = (
             "They COMPOSE with the site's existing design rather than replacing "
             "it: a refine changes what the user asked for and leaves the rest of "
-            "the page alone. If you need the full design system, invoke "
-            "`pocketpaw-design-taste`, which outranks these on any visual value.\n"
+            "the page alone. The CRAFT SYSTEM at the end of this message IS already "
+            "loaded and governs how anything you write here is built. If you need "
+            "the full design system on top of it, invoke `pocketpaw-design-taste`, "
+            "which outranks both these skills and the CRAFT SYSTEM on any visual "
+            "value.\n"
         )
     return (
         "<design-skills>\n"
@@ -1072,7 +1159,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "PHASE 1 — CREATIVE DIRECTION (infer, do NOT ask).\n"
         "Run the Creative Direction Engine from the DESIGN SYSTEM embedded at the "
         "end of this message (the 2026 Creative Director system is ALREADY in your "
-        "context — no invocation is needed to reach THE DESIGN SYSTEM ITSELF. That "
+        "context — no invocation is needed to reach THE DESIGN SYSTEM ITSELF, nor "
+        "the CRAFT SYSTEM that follows it. That "
         "is not a general instruction to avoid skills: the ones named in "
         "<design-skills> are NOT in your context and you DO invoke those): "
         "declare the Vision Ledger "
@@ -1083,7 +1171,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "the user already named a style or brand, honor it. Rotate the identity "
         "and palette so two similar briefs never look identical.\n"
         "\n"
-        "PHASE 2 — DESIGN + BUILD (apply the embedded DESIGN SYSTEM throughout).\n"
+        "PHASE 2 — DESIGN + BUILD (apply the embedded DESIGN SYSTEM and CRAFT "
+        "SYSTEM throughout).\n"
         "1. LOCK THE TOKENS. There is NO design-system library to pick from: "
         "you AUTHOR the token set for THIS business out of the identity you "
         "just committed to. Take the aesthetic direction family (2.E), the "
@@ -1092,7 +1181,11 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "write them out as concrete CSS custom properties (--bg, --ink, "
         "--accent, --radius, --shadow, the display + body faces) BEFORE you "
         "write any markup, then build every section from those variables "
-        "instead of sprinkling ad-hoc hex per section. The same rules GOVERN "
+        "instead of sprinkling ad-hoc hex per section. CONSTRUCT them with the "
+        "embedded CRAFT SYSTEM — a modular type scale with line-height by role, "
+        "a ramp whose every step has a job, the 2x grouping gap and concentric "
+        "radius — not as a handful of values picked one at a time. The same "
+        "rules GOVERN "
         "the build: a mandatory background architecture (never a plain "
         "#fff/#000 page), the ONE chosen visual identity, diverse section "
         "compositions (the default AI sequence and two consecutive "
@@ -1164,6 +1257,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         f"{_CONCIERGE_NOTE}\n"
         f"{_design_skills_note('create')}"
         f"{_design_taste_system()}"
+        f"{_craft_system()}"
     )
 
 
@@ -1629,6 +1723,7 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         "</sites-procedure>\n"
         f"{_CONCIERGE_NOTE}\n"
         f"{_design_skills_note('refine')}"
+        f"{_craft_system()}"
     )
 
 

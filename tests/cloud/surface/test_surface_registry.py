@@ -434,3 +434,73 @@ async def test_sites_refine_routes_a_review_request_away_from_editing():
     procedure = text[text.index("<sites-procedure>") : text.index("</sites-procedure>")]
     assert "sites-interface-review" in procedure
     assert "INSTEAD of editing" in procedure or "INSTEAD of" in procedure
+
+
+async def test_sites_craft_rides_every_authoring_turn_embedded_not_named():
+    """``sites-craft`` must arrive IN the preamble on every authoring turn.
+
+    It is the one design skill whose trigger is "every section of every site", so
+    it is the one that cannot be left to the ``Skill`` tool: invocation is
+    model-driven and probabilistic, and a skill that fires on four turns in five
+    leaves one site in five built from values picked one at a time — the exact
+    defect the material exists to remove. That is the same reasoning that got
+    ``pocketpaw-design-taste`` embedded in 2026-07-14, applied to the layer below
+    it (design-taste picks WHICH face and palette; craft is HOW they are built).
+
+    Both halves are asserted, because each without the other is a real bug:
+    embedded AND named would ship ~11.5 KB twice per turn, and named alone is the
+    probabilistic path this exists to avoid.
+
+    REFINE carries it too. That is not symmetry for its own sake — an edit lands
+    new markup beside a system the agent can no longer see, which is where craft
+    drift actually enters.
+
+    THE MUTATION THAT BREAKS THIS: drop ``f"{_craft_system()}"`` from
+    ``_create_preamble`` or from the refine preamble. Or re-add a ``sites-craft``
+    entry to ``_SITES_DESIGN_SKILLS``.
+    """
+    from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
+
+    authoring = {
+        "create/svelte": SurfaceMeta(engine="svelte"),
+        "create/html": SurfaceMeta(engine="html"),
+        "refine": SurfaceMeta(pocket_id="pkt_1", engine="svelte"),
+    }
+    for label, meta in authoring.items():
+        text = (await sites_handler.build_preamble("w", "u", meta)).text
+        assert '<craft-system name="sites-craft">' in text, label
+        # Real body, not the degraded one-line fallback: two values that only
+        # exist in the SKILL.md itself.
+        assert "concentric" in text.lower(), f"{label} carries the fallback, not the skill body"
+        assert "tabular-nums" in text, label
+
+    # Named as well as embedded would ship the same bytes twice every turn.
+    assert "sites-craft" not in {n for n, _, _ in sites_handler._SITES_DESIGN_SKILLS}
+    assert "sites-craft" not in sites_handler.create_design_skill_names()
+    assert "`sites-craft`" not in sites_handler._design_skills_note("create")
+    assert "`sites-craft`" not in sites_handler._design_skills_note("refine")
+
+    # Chat is read-only Q&A about an existing site — nothing is authored, so the
+    # craft mechanics are 11.5 KB of dead weight there.
+    chat = (
+        await sites_handler.build_preamble(
+            "w", "u", SurfaceMeta(pocket_id="pkt_1", engine="svelte", mode="chat")
+        )
+    ).text
+    assert "<craft-system" not in chat
+
+
+def test_sites_embedded_blocks_degrade_when_the_bundle_is_missing():
+    """A missing or unreadable bundle must cost the agent the skill, not the turn.
+
+    Both embedded blocks read from disk at first call. ``_read_bundled_skill_body``
+    is the shared reader and it returns ``None`` rather than raising, so each
+    caller falls back to a one-line "invoke it yourself" directive. Without that,
+    a packaging change that drops a skill dir takes the whole /sites preamble down.
+
+    THE MUTATION THAT BREAKS THIS: remove the ``try``/``except`` in
+    ``_read_bundled_skill_body`` and let the read raise.
+    """
+    from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
+
+    assert sites_handler._read_bundled_skill_body("no-such-skill-exists") is None
