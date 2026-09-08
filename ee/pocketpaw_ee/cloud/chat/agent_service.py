@@ -14,8 +14,11 @@ Changes: 2026-09-08 (fix/attachment-only-turns) — added
 that carried attachments and no typed text. The composer sends a zero-width
 space as the body so the row persists and renders blank, and that sentinel was
 being handed to the model as the user's whole message — a pasted brief reached
-the prompt but read as reference material, so the agent asked for a brief it
-already had. The inline-attachment caps moved with it (per-file 8000 -> 40000,
+the prompt, but under the "## Your Knowledge Base" wrapper, so it read as
+reference material and the agent asked for a brief it already had.
+``build_knowledge_context`` gained ``skip_attachments`` so such a turn can
+carry ``<uploaded-files>`` on the user message instead (moved, not copied);
+``build_attachments_block`` is the public name that seam needs. The inline-attachment caps moved with it (per-file 8000 -> 40000,
 total 30000 -> 100000): a bulky paste IS an attachment on this path, and the
 old per-file bound cut a normal landing-page brief in half.
 
@@ -2498,6 +2501,7 @@ async def build_knowledge_context(
     attachments: list[dict[str, Any]] | None = None,
     mentions: list[dict[str, Any]] | None = None,
     surface: str | None = None,
+    skip_attachments: bool = False,
 ) -> str:
     """Build the per-turn knowledge context — dynamic scope/participants
     tags + KB hits + inlined attachment text. Static behavioral rules are
@@ -2529,9 +2533,14 @@ async def build_knowledge_context(
     if briefing:
         sections.append(briefing)
 
-    attachments_block = await _build_attachments_block(ctx, attachments, surface=surface)
-    if attachments_block:
-        sections.append(attachments_block)
+    # ``skip_attachments`` is set by a caller that is putting the block on the
+    # USER turn instead (see ``is_attachment_only_turn``). It MOVES the block,
+    # it never duplicates it — the extraction is not run twice and the file's
+    # text appears in the prompt exactly once.
+    if not skip_attachments:
+        attachments_block = await _build_attachments_block(ctx, attachments, surface=surface)
+        if attachments_block:
+            sections.append(attachments_block)
 
     if query:
         kb_block = await _build_kb_snippets_block(ctx, query)
@@ -2654,6 +2663,14 @@ def visible_message_text(content: str | None) -> str:
     return (content or "").translate(_INVISIBLE_BODY_TABLE).strip()
 
 
+def is_attachment_only_turn(
+    content: str | None,
+    attachments: list[dict[str, Any]] | None,
+) -> bool:
+    """True when the user attached files and typed nothing at all."""
+    return bool(attachments) and not visible_message_text(content)
+
+
 def resolve_user_content(
     content: str | None,
     attachments: list[dict[str, Any]] | None,
@@ -2763,6 +2780,21 @@ async def _publish_media_attachment(
         f"Do not copy the file into the source map, do not rewrite the URL, and "
         f"do not substitute a stock asset for it."
     )
+
+
+async def build_attachments_block(
+    ctx: ScopeContext,
+    attachments: list[dict[str, Any]] | None,
+    *,
+    surface: str | None = None,
+) -> str:
+    """Public alias for :func:`_build_attachments_block`.
+
+    Exists so a caller can put the block on the user turn rather than in the
+    knowledge context — the private name is fine for one module, but this is
+    now a seam two modules share.
+    """
+    return await _build_attachments_block(ctx, attachments, surface=surface)
 
 
 async def _build_attachments_block(

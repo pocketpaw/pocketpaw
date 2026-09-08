@@ -6,10 +6,14 @@ Changes:
   anything reads it. A send with attachments and no typed text arrives as the
   composer's invisible sentinel, which the model reads as an empty turn while
   the attachment's text sits in the knowledge channel looking like reference
-  material; the resolver replaces that one case with a message saying the
-  files ARE the request. Placed at the top of the loop because three things
-  downstream consume the string — the KB query, the session titler, and the
-  prompt handed to ``pool.run``. A turn with real text is untouched.
+  material under a "## Your Knowledge Base" header. Two halves: the resolver
+  replaces that one empty turn with a message saying the files ARE the
+  request, and the ``<uploaded-files>`` block MOVES onto the user turn
+  (``skip_attachments``) instead of staying in the knowledge wrapper that
+  frames it as reference data. Moved, never copied — the file's text is in
+  the prompt exactly once. The KB query and the session titler keep the SHORT
+  substitute; only ``pool.run`` gets the augmented ``model_prompt``. A turn
+  with real text is untouched, block routing included.
 
 - 2026-09-01 (feat/byok-guest-backend) — the turn path finally CALLS
   ``byok.service.resolve_turn_credentials`` (the seam its own header always
@@ -367,11 +371,13 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     attach_agent_identity,
     attach_sse_event_sink,
     bind_pawbar_run,
+    build_attachments_block,
     build_behavior_instructions,
     build_knowledge_context,
     collect_delivered_artifacts,
     detach_agent_identity,
     detach_sse_event_sink,
+    is_attachment_only_turn,
     mark_cloud_chat_run,
     push_sse_event,
     register_stream_sink,
@@ -1318,11 +1324,14 @@ async def _drive_agent_loop(
     """Drive ``AgentPool.run`` and yield ``(event_name, event_data)`` tuples."""
     # A files-only send arrives as the composer's invisible sentinel — a turn
     # that persists and renders correctly but says nothing to the model, while
-    # the attachment's text sits in the knowledge channel looking like
-    # reference material. Resolve it HERE, before anything downstream reads it:
-    # the knowledge context uses this string as its KB query, the session
-    # titler names the thread from it, and the pool hands it to the model as
-    # the user's turn. A turn with real text passes through untouched.
+    # the attachment's text sits in the knowledge channel under a "## Your
+    # Knowledge Base ... use this to answer questions" header, which is exactly
+    # the wrong framing for a brief the user just wrote. Resolve it HERE,
+    # before anything downstream reads it: the knowledge context uses this
+    # string as its KB query and the session titler names the thread from it,
+    # so both want the SHORT substitute rather than the file itself. A turn
+    # with real text passes through untouched.
+    attachment_only = is_attachment_only_turn(user_content, attachments_in)
     user_content = resolve_user_content(user_content, attachments_in)
     pool = get_agent_pool()
     try:
@@ -1359,7 +1368,23 @@ async def _drive_agent_loop(
         attachments=attachments_in,
         mentions=mentions_in,
         surface=surface,
+        # On an attachment-only turn the block MOVES to the user message below
+        # rather than being copied there — the file's text is in the prompt
+        # exactly once either way.
+        skip_attachments=attachment_only,
     )
+
+    # The prompt the model actually receives. It differs from ``user_content``
+    # only on an attachment-only turn, and only by carrying the file's text on
+    # the user turn instead of inside the knowledge wrapper. That is the whole
+    # point: a brief someone pasted IS the request, and no header above it
+    # should be telling the model to treat it as reference data.
+    model_prompt = user_content
+    if attachment_only:
+        moved_block = await build_attachments_block(ctx, attachments_in, surface=surface)
+        if moved_block:
+            model_prompt = f"{user_content}\n\n{moved_block}"
+
     # Bail early if /agent/stop was called while knowledge context was
     # being built (another blocking point before the cancel-check loop).
     if await is_cancelled():
@@ -1743,7 +1768,7 @@ async def _drive_agent_loop(
                 run_kwargs.pop("on_client_built", None)
         agent_iter = pool.run(
             ctx.target_agent_id,
-            user_content,
+            model_prompt,
             session_key,
             **run_kwargs,
         ).__aiter__()

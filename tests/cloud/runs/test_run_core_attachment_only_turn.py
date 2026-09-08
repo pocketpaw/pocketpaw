@@ -18,7 +18,10 @@
 #
 # What these prove:
 #   * an attachment-only turn is given a user message that says the files ARE
-#     the message, so the model acts on the inlined text;
+#     the message, and the file's text rides that USER turn rather than the
+#     "## Your Knowledge Base — use this to answer questions" wrapper, which is
+#     the framing that made a pasted brief read as background reference;
+#   * the text is MOVED, not copied — it appears in the prompt exactly once;
 #   * the substitute reaches BOTH ``AgentPool.run`` and
 #     ``build_knowledge_context`` (the latter uses it as the KB query — a
 #     zero-width char is a useless one);
@@ -41,16 +44,21 @@ SENTINEL = "\u200b"
 
 ATTACHMENTS = [{"url": "upload://f1", "filename": "pasted-20260908-101500.txt"}]
 
+# Stands in for whatever ``build_attachments_block`` extracted from the paste.
+BLOCK = "<uploaded-files>\n\n### brief.txt\nSECTION 1. THE HERO\n\n</uploaded-files>"
+
 
 class _CapturingPool:
     def __init__(self) -> None:
         self.prompt: str | None = None
+        self.knowledge: str | None = None
 
     async def get(self, _agent_id):
         return type("Inst", (), {"config": {"backend": "claude_agent_sdk"}})()
 
-    def run(self, _agent_id, prompt, _session_key, **_kwargs):
+    def run(self, _agent_id, prompt, _session_key, **kwargs):
         self.prompt = prompt
+        self.knowledge = kwargs.get("knowledge_context")
 
         async def _empty():
             return
@@ -86,9 +94,16 @@ async def _drive(
 
     async def _fake_knowledge(_ctx, **kwargs):
         seen.update(kwargs)
-        return "KB"
+        if kwargs.get("skip_attachments"):
+            return "KB"
+        return f"KB\n\n{BLOCK}"
+
+    async def _fake_block(_ctx, _attachments, *, surface=None):  # noqa: ARG001
+        seen["block_built"] = seen.get("block_built", 0) + 1
+        return BLOCK
 
     monkeypatch.setattr(run_core, "build_knowledge_context", _fake_knowledge)
+    monkeypatch.setattr(run_core, "build_attachments_block", _fake_block)
     monkeypatch.setattr(run_core, "build_behavior_instructions", lambda *a, **k: "INSTR")
     monkeypatch.setattr(run_core, "attach_sse_event_sink", lambda *a, **k: None)
     monkeypatch.setattr(run_core, "attach_agent_identity", lambda **k: None)
@@ -119,12 +134,21 @@ async def test_an_attachment_only_turn_reaches_the_model_as_a_request(monkeypatc
 
     assert pool.prompt is not None
     assert SENTINEL not in pool.prompt
-    assert pool.prompt.strip() != ""
-    # It has to name the block the text was inlined into, or the instruction is
-    # just an assertion the model cannot check.
-    assert "<uploaded-files>" in pool.prompt
-    # And the KB query gets the same substitute, not a zero-width char.
-    assert seen["user_message"] == pool.prompt
+    # The file's own text is on the USER turn, not filed under the knowledge
+    # wrapper that tells the model to treat it as reference data.
+    assert "SECTION 1. THE HERO" in pool.prompt
+    # And the turn says WHY it is there, so the model does not have to guess
+    # whether a block of text is the ask or the background.
+    assert "no typed message" in pool.prompt
+    # Moved, not copied: the knowledge context does not also carry it.
+    assert pool.knowledge is not None
+    assert "SECTION 1. THE HERO" not in pool.knowledge
+    assert seen["skip_attachments"] is True
+    assert seen["block_built"] == 1
+    # The KB query and the session title get the SHORT substitute — handing a
+    # 40k-char brief to a KB search is not a search.
+    assert seen["user_message"] != pool.prompt
+    assert "SECTION 1. THE HERO" not in seen["user_message"]
 
 
 async def test_whitespace_only_content_with_attachments_is_treated_the_same(monkeypatch):
