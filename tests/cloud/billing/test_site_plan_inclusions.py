@@ -228,6 +228,4 @@ def test_the_wire_allowance_agrees_with_the_resolver():
     wrong.
     """
     dto = site_plan_tier_to_dto(catalog.get_site_plan(catalog.BASE_SITE_PLAN_KEY))
-    assert dto.max_domained_sites == site_domain_allowance(
-        plan_tier=None, subscription_status=None
-    )
+    assert dto.max_domained_sites == site_domain_allowance(plan_tier=None, subscription_status=None)
