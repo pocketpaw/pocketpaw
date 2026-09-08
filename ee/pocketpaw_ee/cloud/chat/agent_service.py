@@ -9,6 +9,16 @@ handles *what the agent sees*:
 * ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
   agent carries context across backend restarts and pool evictions.
 
+Changes: 2026-09-08 (fix/attachment-only-turns) — added
+``resolve_user_content`` / ``visible_message_text``: the model's copy of a turn
+that carried attachments and no typed text. The composer sends a zero-width
+space as the body so the row persists and renders blank, and that sentinel was
+being handed to the model as the user's whole message — a pasted brief reached
+the prompt but read as reference material, so the agent asked for a brief it
+already had. The inline-attachment caps moved with it (per-file 8000 -> 40000,
+total 30000 -> 100000): a bulky paste IS an attachment on this path, and the
+old per-file bound cut a normal landing-page brief in half.
+
 Changes: 2026-08-07 (fix/code-delegate-pooled-context) — added the session-keyed
 stream registry (``register_stream_sink`` / ``unregister_stream_sink`` /
 ``stream_sink_for_session``) alongside the ``_sse_event_sink`` ContextVar. The
@@ -2605,9 +2615,70 @@ async def _build_kb_snippets_block(ctx: ScopeContext, query: str) -> str:
 # from eating the budget; total cap keeps a batch of files from blowing the
 # context window. Image/binary attachments typically yield empty text and
 # get a stub entry so the agent at least knows they exist.
+#
+# THE SIZES ARE SET BY WHAT PEOPLE PASTE, not by what a document can weigh.
+# The composer turns any bulky paste into a ``pasted-*.txt`` attachment, so
+# "I pasted my brief into the chat" and "I uploaded a file" are one code path.
+# At the old 8000 (~1200 words) a real landing-page brief was cut in half and
+# the agent reported the paste as truncated and reconstructed the rest from
+# what was left — the user had truncated nothing, we had. 40k chars is roughly
+# 10k tokens: comfortably above any brief someone types, still far below the
+# window. The total cap matters more than ever now that one file may be this
+# large, and it is what keeps five of them from becoming the whole prompt.
 _ATTACHMENT_MAX_FILES = 5
-_ATTACHMENT_PER_FILE_CHARS = 8000
-_ATTACHMENT_TOTAL_CHARS = 30000
+_ATTACHMENT_PER_FILE_CHARS = 40000
+_ATTACHMENT_TOTAL_CHARS = 100000
+
+
+# The composer sends a zero-width space as the message body when the user
+# attaches files and types nothing. That is deliberate on both ends it was
+# written for: the row has to be non-empty or the backend drops the message,
+# and every renderer strips the character so no placeholder text shows in the
+# transcript. The model is the end nobody wrote it for.
+_INVISIBLE_BODY_CHARS = "\u200b\u200c\u200d\ufeff"
+_INVISIBLE_BODY_TABLE = {ord(c): None for c in _INVISIBLE_BODY_CHARS}
+
+# What the model is told instead. It names ``<uploaded-files>`` on purpose: the
+# instruction is only actionable if it points at the block the text landed in.
+_ATTACHMENT_ONLY_MESSAGE = (
+    "The user sent this turn with no typed message. The attached file(s) ARE "
+    "the message: their contents are inlined in the <uploaded-files> block of "
+    "your context. Read that block and act on it as the user's request. Do not "
+    "ask them what they want when the file already says, and do not treat it "
+    "as background reference for some other question."
+)
+
+
+def visible_message_text(content: str | None) -> str:
+    """``content`` with the composer's invisible sentinel removed, trimmed."""
+    return (content or "").translate(_INVISIBLE_BODY_TABLE).strip()
+
+
+def resolve_user_content(
+    content: str | None,
+    attachments: list[dict[str, Any]] | None,
+) -> str:
+    """The user's turn as the MODEL should receive it.
+
+    A files-only send reaches us as the invisible sentinel above, and handing
+    that to the model is handing it an empty turn: the attachment's text is
+    inlined into the knowledge/system channel, which reads as reference
+    material, so the model sees a system block it was given no reason to act on
+    and a user who said nothing. Its most reasonable move is to ask what they
+    wanted — which is what a user who pasted a full brief and pressed send got
+    back, with the brief already in the prompt. Typing one character alongside
+    the attachment made it work, and that asymmetry is the bug.
+
+    So substitute a real message for the empty one. Only for the empty one:
+    anything with visible text is returned BYTE-IDENTICALLY, sentinel included,
+    because rewriting what someone actually wrote is not this function's job.
+    With no attachments there is nothing to point at, so nothing is invented.
+    """
+    if visible_message_text(content):
+        return content or ""
+    if attachments:
+        return _ATTACHMENT_ONLY_MESSAGE
+    return content or ""
 
 
 # Surfaces whose attachments may be republished to the WORLD-READABLE bucket.
