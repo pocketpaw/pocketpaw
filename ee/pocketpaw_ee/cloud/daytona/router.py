@@ -16,19 +16,32 @@ Mounted at ``/api/v1/``. Endpoints:
   DELETE /cloud/projects/{name}/vm/files/delete            — Delete from project in VM
   PATCH  /cloud/projects/{name}/vm/files/rename            — Rename in project in VM
 
-Created: 2026-06-24.  Updated: 2026-07-10 — workspace VM replaces per-project sandbox.
-Updated: 2026-07-15 (fix/workspace-vm-map-to-db) — the store's workspace-VM
-    accessors are now async + Mongo-backed (``workspace_vms`` collection); every
-    call site here ``await``s them.
+Every route takes ``workspace_id`` from ``current_workspace_id``, which resolves
+it from the authenticated user. That is the security boundary of this file and
+not a convention: the sandbox a route reaches is chosen entirely by that value,
+and these routes provision VMs, open terminals into them, and read and write
+files that the VM then executes. The workspace must never come from anywhere the
+caller controls. It used to come from an ``X-Workspace-Id`` header with a
+``"default"`` fallback, and the router carried no auth at all, so an anonymous
+caller could write into any tenant's VM by naming it. Gated by
+tests/cloud/test_daytona_router_auth.py.
+
+``_require_daytona`` and ``_require_workspace_vm`` are NOT guards, despite the
+names. The first is a feature check that 501s when Daytona is unconfigured; the
+second takes ``workspace_id`` as an ordinary argument and resolves a sandbox from
+whatever it is handed. Both were read as authorisation once already.
+
+The store's workspace-VM accessors are async and Mongo-backed (the
+``workspace_vms`` collection), so every call site here awaits them.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
+import posixpath
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -41,6 +54,7 @@ from pocketpaw.api.v1.schemas.files import (
     RenameRequest,
     WriteFileRequest,
 )
+from pocketpaw_ee.cloud._core.deps import current_workspace_id
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
 from pocketpaw_ee.cloud.daytona.config import daytona_enabled
 
@@ -208,17 +222,9 @@ class ProvisionWorkspaceVmRequest(BaseModel):
     root_dir: str = "/workspace"
 
 
-def _resolve_workspace_id(http_request: Request) -> str:
-    """Extract workspace_id from the request context.
-
-    Reads ``X-Workspace-Id`` header, falling back to ``"default"``.
-    """
-    return http_request.headers.get("X-Workspace-Id", "default")
-
-
 @router.get("/workspace/vm")
 async def get_workspace_vm(
-    http_request: Request,
+    workspace_id: str = Depends(current_workspace_id),
 ) -> WorkspaceVmResponse:
     """Get workspace VM status — **auto-provisions** if no VM exists yet.
 
@@ -226,19 +232,6 @@ async def get_workspace_vm(
     workspace doesn't have a VM, one is created automatically with the
     default config. The frontend polls until ``state == "started"``.
     """
-    workspace_id = _resolve_workspace_id(http_request)
-
-    # Guard: never auto-provision for "default" — this means the frontend
-    # hasn't resolved the real workspace_id yet.  Returning no-VM here
-    # prevents creating a stray "paw-ws-default" sandbox that will never
-    # be used once the real workspace_id is known.
-    if workspace_id == "default":
-        return WorkspaceVmResponse(
-            ok=True,
-            has_vm=False,
-            state="pending",
-            state_detail="Waiting for workspace to be resolved…",
-        )
 
     from pocketpaw_ee.cloud.daytona.store import (
         get_workspace_vm_config,
@@ -341,13 +334,12 @@ async def _ensure_workspace_root(client: DaytonaClient, sandbox_id: str, root_di
 @router.post("/workspace/vm/provision")
 async def provision_workspace_vm(
     req: ProvisionWorkspaceVmRequest,
-    http_request: Request,
+    workspace_id: str = Depends(current_workspace_id),
 ) -> WorkspaceVmResponse:
     """Force (re)provision the workspace VM with the given config.
 
     If a VM already exists, it is destroyed first, then a new one is created.
     """
-    workspace_id = _resolve_workspace_id(http_request)
 
     from pocketpaw_ee.cloud.daytona.store import (
         get_workspace_vm_sandbox_id,
@@ -398,11 +390,10 @@ async def provision_workspace_vm(
 
 @router.get("/workspace/vm/config")
 async def get_workspace_vm_config(
-    http_request: Request,
+    workspace_id: str = Depends(current_workspace_id),
 ) -> dict:
     """Return the current workspace VM configuration (cpu, memory, disk, etc.)
     without touching the sandbox.  Returns defaults when no config exists."""
-    workspace_id = _resolve_workspace_id(http_request)
     from pocketpaw_ee.cloud.daytona.store import get_workspace_vm_config
 
     config = await get_workspace_vm_config(workspace_id)
@@ -422,14 +413,13 @@ class UpdateWorkspaceVmConfigRequest(BaseModel):
 @router.patch("/workspace/vm/config")
 async def update_workspace_vm_config(
     req: UpdateWorkspaceVmConfigRequest,
-    http_request: Request,
+    workspace_id: str = Depends(current_workspace_id),
 ) -> dict:
     """Update the workspace VM configuration WITHOUT re-provisioning.
 
     Changes take effect on the NEXT provision — the running VM is not
     resized.  To apply changes, stop and re-provision the VM.
     """
-    workspace_id = _resolve_workspace_id(http_request)
     from pocketpaw_ee.cloud.daytona.store import (
         get_workspace_vm_config,
         update_workspace_vm_config,
@@ -445,7 +435,7 @@ async def update_workspace_vm_config(
 
 @router.post("/workspace/vm/stop")
 async def stop_workspace_vm(
-    http_request: Request,
+    workspace_id: str = Depends(current_workspace_id),
 ) -> dict:
     """Stop the workspace VM without destroying it.
 
@@ -454,7 +444,6 @@ async def stop_workspace_vm(
     the auto-stop interval hasn't elapsed yet, or POST
     /workspace/vm/provision to force a fresh VM).
     """
-    workspace_id = _resolve_workspace_id(http_request)
 
     from pocketpaw_ee.cloud.daytona.store import get_workspace_vm_sandbox_id
 
@@ -474,13 +463,12 @@ async def stop_workspace_vm(
 
 @router.delete("/workspace/vm")
 async def delete_workspace_vm(
-    http_request: Request,
+    workspace_id: str = Depends(current_workspace_id),
 ) -> dict:
     """Destroy the workspace VM. All project data in the VM is lost.
 
     S3 storage is NOT affected — only the compute sandbox is destroyed.
     """
-    workspace_id = _resolve_workspace_id(http_request)
 
     from pocketpaw_ee.cloud.daytona.store import (
         get_workspace_vm_sandbox_id,
@@ -503,10 +491,9 @@ async def delete_workspace_vm(
 
 @router.get("/workspace/vm/terminal")
 async def get_workspace_vm_terminal(
-    http_request: Request,
+    workspace_id: str = Depends(current_workspace_id),
 ) -> WorkspaceTerminalResponse:
     """Get the web terminal URL for the workspace VM."""
-    workspace_id = _resolve_workspace_id(http_request)
 
     from pocketpaw_ee.cloud.daytona.store import get_workspace_vm_sandbox_id
 
@@ -556,7 +543,23 @@ async def _require_workspace_vm(
 
     Returns ``(client, sandbox_id, workspace_root, project_abs_path)``
     or raises HTTPException.
+
+    This is NOT an authorisation guard, despite the name — ``workspace_id`` is
+    an ordinary argument and it resolves whatever sandbox it is handed. The
+    caller must have obtained that value from ``current_workspace_id``.
     """
+    # Validated FIRST, ahead of every await below, and that ordering is the
+    # point rather than tidiness. ``project_name`` is a path parameter, and
+    # Starlette's default converter matches any run of non-slash characters —
+    # ``..`` among them. Left unchecked it walks the project root up out of the
+    # workspace BEFORE _vm_project_abs_path is ever called, so the containment
+    # check there would faithfully confine the caller to a root of the caller's
+    # own choosing. Validating up here also means the rejection cannot be
+    # mistaken for one of the 404/501/409 exits below, which is what lets the
+    # test assert a bare 403.
+    if project_name in {"", ".", ".."} or "/" in project_name or "\\" in project_name:
+        raise HTTPException(status_code=403, detail="Invalid project name")
+
     from pocketpaw_ee.cloud.daytona.store import (
         get_workspace_vm_config,
         get_workspace_vm_sandbox_id,
@@ -579,27 +582,49 @@ async def _require_workspace_vm(
 
     config = await get_workspace_vm_config(workspace_id)
     workspace_root = config.get("root_dir", "/workspace")
-    project_abs_path = f"{workspace_root}/{project_name}".replace("//", "/")
+    project_abs_path = posixpath.normpath(posixpath.join(workspace_root, project_name))
 
     return client, sandbox_id, workspace_root, project_abs_path
 
 
 def _vm_project_abs_path(project_abs: str, relative_path: str) -> str:
-    """Join the project absolute path with a relative path."""
+    """Join a caller-supplied relative path onto the project root, or refuse.
+
+    ``relative_path`` arrives straight off a query string or a request body and
+    names a file the VM will read, write, delete, or later execute. Stripping
+    slashes is not containment: ``strip("/")`` leaves ``..`` alone, so
+    ``../../../../root/.ssh/authorized_keys`` used to resolve outside the
+    project and outside the workspace root entirely.
+
+    Normalisation is ``posixpath``'s job and never ``os.path``'s. These paths
+    live inside a Linux sandbox; on a Windows host ``os.path.normpath`` would
+    rewrite the separators and the containment check below would then be
+    comparing two different path languages, passing anything.
+
+    Gated by tests/cloud/test_daytona_vm_path_containment.py.
+    """
+    root = posixpath.normpath(project_abs)
     clean = relative_path.strip("/")
     if not clean or clean == ".":
-        return project_abs
-    return f"{project_abs}/{clean}"
+        return root
+    # posixpath.join, not an f-string: with a root of "/" the f-string yields
+    # "//etc/passwd", and normpath PRESERVES exactly two leading slashes
+    # (POSIX leaves "//" implementation-defined), so the result would not
+    # match the path it names.
+    joined = posixpath.normpath(posixpath.join(root, clean))
+    prefix = root if root.endswith("/") else root + "/"
+    if joined != root and not joined.startswith(prefix):
+        raise HTTPException(status_code=403, detail="Path traversal denied")
+    return joined
 
 
 @router.get("/cloud/projects/{project_name}/vm/files/browse")
 async def browse_vm_project_files(
     project_name: str,
     path: str = Query("", description="Relative path within the project"),
-    http_request: Request = None,
+    workspace_id: str = Depends(current_workspace_id),
 ) -> BrowseResponse:
     """List directory contents inside a project subdirectory in the workspace VM."""
-    workspace_id = _resolve_workspace_id(http_request)
     client, sandbox_id, _, project_abs = await _require_workspace_vm(workspace_id, project_name)
 
     remote_path = _vm_project_abs_path(project_abs, path)
@@ -625,10 +650,9 @@ async def browse_vm_project_files(
 async def read_vm_project_file(
     project_name: str,
     path: str = Query(..., description="Relative file path within the project"),
-    http_request: Request = None,
+    workspace_id: str = Depends(current_workspace_id),
 ):
     """Read a file from a project subdirectory in the workspace VM."""
-    workspace_id = _resolve_workspace_id(http_request)
     client, sandbox_id, _, project_abs = await _require_workspace_vm(workspace_id, project_name)
 
     if not path or path.strip("/") == "":
@@ -654,10 +678,9 @@ async def read_vm_project_file(
 async def write_vm_project_file(
     project_name: str,
     req: WriteFileRequest,
-    http_request: Request = None,
+    workspace_id: str = Depends(current_workspace_id),
 ) -> FileActionResponse:
     """Create or overwrite a file in a project subdirectory in the workspace VM."""
-    workspace_id = _resolve_workspace_id(http_request)
     client, sandbox_id, _, project_abs = await _require_workspace_vm(workspace_id, project_name)
 
     relative = req.path.strip("/")
@@ -666,7 +689,7 @@ async def write_vm_project_file(
 
     remote_path = _vm_project_abs_path(project_abs, relative)
 
-    parent = os.path.dirname(remote_path)
+    parent = posixpath.dirname(remote_path)
     try:
         await client.create_folder(sandbox_id, parent)
     except Exception:
@@ -685,10 +708,9 @@ async def write_vm_project_file(
 async def mkdir_vm_project(
     project_name: str,
     req: MkdirRequest,
-    http_request: Request = None,
+    workspace_id: str = Depends(current_workspace_id),
 ) -> FileActionResponse:
     """Create a directory inside a project subdirectory in the workspace VM."""
-    workspace_id = _resolve_workspace_id(http_request)
     client, sandbox_id, _, project_abs = await _require_workspace_vm(workspace_id, project_name)
 
     relative = req.path.strip("/")
@@ -711,10 +733,9 @@ async def delete_vm_project_item(
     project_name: str,
     path: str = Query(..., description="Relative path to delete"),
     recursive: bool = Query(False, description="Delete directories recursively"),
-    http_request: Request = None,
+    workspace_id: str = Depends(current_workspace_id),
 ) -> FileActionResponse:
     """Delete a file or directory from a project subdirectory in the workspace VM."""
-    workspace_id = _resolve_workspace_id(http_request)
     client, sandbox_id, _, project_abs = await _require_workspace_vm(workspace_id, project_name)
 
     relative = path.strip("/")
@@ -736,10 +757,9 @@ async def delete_vm_project_item(
 async def rename_vm_project_item(
     project_name: str,
     req: RenameRequest,
-    http_request: Request = None,
+    workspace_id: str = Depends(current_workspace_id),
 ) -> FileActionResponse:
     """Rename or move a file/directory in a project subdirectory in the workspace VM."""
-    workspace_id = _resolve_workspace_id(http_request)
     client, sandbox_id, _, project_abs = await _require_workspace_vm(workspace_id, project_name)
 
     old_relative = req.path.strip("/")
@@ -752,7 +772,7 @@ async def rename_vm_project_item(
     old_remote = _vm_project_abs_path(project_abs, old_relative)
     new_remote = _vm_project_abs_path(project_abs, new_relative)
 
-    parent = os.path.dirname(new_remote)
+    parent = posixpath.dirname(new_remote)
     try:
         await client.create_folder(sandbox_id, parent)
     except Exception:
