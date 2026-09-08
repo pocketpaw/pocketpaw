@@ -27,6 +27,11 @@ _IMMUTABLE_FIELDS: frozenset[str] = frozenset(
         "guardian_enabled",
         "localhost_auth_bypass",
         "pii_scan_enabled",
+        # Gates the PTY terminal routes. Immutable here for the same reason
+        # the routes carry require_scope("admin"): if the settings API could
+        # flip it, any admin-scoped key could re-enable a host shell over
+        # HTTP, which is the hole one level up.
+        "terminal_enabled",
     }
 )
 
