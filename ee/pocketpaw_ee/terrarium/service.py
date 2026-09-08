@@ -21,13 +21,11 @@
 #   4. viewer-origin text never becomes soul fact (the episodic summary is
 #      built from citizen-origin events only — see world.episodic_summary).
 #   5. the Journal is truth; citizens/ledger/artifacts are projections.
-#   6. every say / write / moment body passes ``moderation.allowed`` at the
-#      write (``_append_event``); a failing one lands as ``[withheld]`` with
-#      ``data.withheld`` so seq and cost are unchanged. Viewer lines are checked
-#      BEFORE the write and rejected with a 422 instead.
-#   7. a ``paused`` universe never ticks (sweep and manual) and is a flat 404
-#      on the public surface; anonymous readers trail the live edge by
-#      ``TERRARIUM_PUBLIC_DELAY_EVENTS`` (default 20) Journal rows.
+#   6. say / write / moment text, charters and artifacts pass ``moderation`` at
+#      the write; a failing one lands as ``[withheld]`` (seq and cost intact).
+#      Viewer lines are checked BEFORE the write and rejected with a 422.
+#   7. ``paused`` never ticks and is a flat 404 in public; anonymous readers
+#      trail the edge by ``TERRARIUM_PUBLIC_DELAY_EVENTS`` (default 20) rows.
 
 """Terrarium service — persistence, souls, the gate and the bus."""
 
@@ -36,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -334,6 +332,8 @@ async def _append_event(
     data = dict(data or {})
     # Invariant 6. Withheld, not dropped: the seq is spent and the cost lands.
     if kind in moderation.MODERATED_KINDS and not moderation.allowed(body):
+        # ``data`` may echo the body (a moment's ``headline``); scrub it too.
+        data = {k: (moderation.WITHHELD if v == body else v) for k, v in data.items()}
         body = moderation.WITHHELD
         data["withheld"] = True
     uni.seq += 1
@@ -846,6 +846,10 @@ async def _persist_outcome(
 
     artifact_ids: list[str] = []
     for art in outcome.artifacts:
+        # Invariant 6: the name is on the public artifact wire and the body is
+        # a file a viewer opens. Withheld together, never trimmed.
+        if not (moderation.clean(art.name) and moderation.clean(art.body)):
+            art = replace(art, name=moderation.WITHHELD, body=moderation.WITHHELD)
         # A book, a law or a map is a FILE in the workspace's /files surface, so
         # a viewer opens it in the same inline viewer as any other file. The
         # body stays on the doc too (the contract keeps it); the file is how
@@ -898,7 +902,8 @@ async def _persist_outcome(
     )
     uni.pool += outcome.pool_delta
     if outcome.charter is not None:
-        doc.charter = outcome.charter
+        # Invariant 6: the charter is on the citizen wire, public included.
+        doc.charter = outcome.charter if moderation.clean(outcome.charter) else moderation.WITHHELD
     if outcome.unlocked:
         doc.unlocked = sorted({*doc.unlocked, *outcome.unlocked})
     if outcome.x is not None:

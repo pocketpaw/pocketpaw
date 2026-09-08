@@ -45,11 +45,16 @@ def _pattern(extra: str) -> re.Pattern[str]:
     return re.compile(r"\b(?:" + "|".join(re.escape(t) for t in terms) + r")\b", re.IGNORECASE)
 
 
+def clean(text: str) -> bool:
+    """True when nothing on the deny-list is in ``text``. No length cap — this
+    is the check for a charter or an artifact body, which may run long."""
+    return _pattern(os.environ.get("TERRARIUM_DENY_TERMS", "")).search(text or "") is None
+
+
 def allowed(text: str) -> bool:
-    """True when ``text`` may enter the Journal as written."""
-    if len(text) > MAX_LEN:
-        return False
-    return _pattern(os.environ.get("TERRARIUM_DENY_TERMS", "")).search(text) is None
+    """True when a LINE (a say, a headline, a viewer message) may enter the
+    Journal as written: clean and within ``MAX_LEN``."""
+    return len(text) <= MAX_LEN and clean(text)
 
 
-__all__ = ["MAX_LEN", "MODERATED_KINDS", "WITHHELD", "allowed"]
+__all__ = ["MAX_LEN", "MODERATED_KINDS", "WITHHELD", "allowed", "clean"]

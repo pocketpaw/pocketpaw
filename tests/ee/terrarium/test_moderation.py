@@ -81,3 +81,38 @@ async def test_the_eleventh_line_in_a_minute_is_refused(client):
         assert res.status_code == 200, (i, res.text)
     res = client.post(f"/terrarium/universes/{uni['id']}/speak", json={"text": "one more"})
     assert res.status_code == 429, res.text
+
+
+async def test_withheld_text_stays_withheld_on_every_public_projection(client, monkeypatch):
+    """The Journal row is not the only place a citizen's words land: a moment's
+    ``data.headline`` echoes its body, a first write becomes the charter on the
+    citizen wire, and any write becomes an artifact with a public name."""
+    monkeypatch.setenv("TERRARIUM_PUBLIC_ENABLED", "1")
+    monkeypatch.setenv("TERRARIUM_PUBLIC_DELAY_EVENTS", "0")
+    uni = create_universe(client, public=True, founders=2)
+    citizen_llm.set_mock_decision(
+        {
+            "thought": "spite",
+            "acts": [{"verb": "write", "name": f"{SLUR} tract", "text": f"page one: {SLUR}."}],
+        }
+    )
+    client.post(f"/terrarium/universes/{uni['id']}/tick")
+    base = f"/terrarium/public/universes/{uni['id']}"
+    assert SLUR not in client.get(f"{base}/events").text
+    assert SLUR not in client.get(f"{base}/artifacts").text
+    assert SLUR not in client.get(f"{base}/citizens").text
+    assert SLUR not in client.get(f"/terrarium/universes/{uni['id']}").text
+    citizens = client.get(f"{base}/citizens").json()["citizens"]
+    assert all(c["charter"] == moderation.WITHHELD for c in citizens)
+    arts = client.get(f"{base}/artifacts").json()["artifacts"]
+    assert arts and all(a["name"] == moderation.WITHHELD for a in arts)
+    # A moment's payload echoes its headline; the echo is scrubbed with it.
+    from pocketpaw_ee.terrarium.domain import UniverseDoc
+    from pocketpaw_ee.terrarium.service import _append_event
+
+    doc = await UniverseDoc.get(uni["id"])
+    row = await _append_event(
+        doc, kind="moment", actor="Nim", body=SLUR, cost=0, data={"headline": SLUR, "n": 2}
+    )
+    assert row.body == moderation.WITHHELD
+    assert row.data == {"headline": moderation.WITHHELD, "n": 2, "withheld": True}

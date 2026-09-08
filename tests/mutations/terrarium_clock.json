@@ -214,5 +214,32 @@
     "tests": [
       "tests/ee/terrarium/test_prompt_cache.py"
     ]
+  },
+  {
+    "label": "a moment's data still echoes the withheld headline",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        data = {k: (moderation.WITHHELD if v == body else v) for k, v in data.items()}\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/terrarium/test_moderation.py"
+    ]
+  },
+  {
+    "label": "the charter skips the check and lands on the public citizen wire as written",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "            outcome.charter if moderation.clean(outcome.charter) else moderation.WITHHELD",
+    "replace": "            outcome.charter",
+    "tests": [
+      "tests/ee/terrarium/test_moderation.py"
+    ]
+  },
+  {
+    "label": "an artifact's public name is served unchecked",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        if not (moderation.clean(art.name) and moderation.clean(art.body)):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/terrarium/test_moderation.py"
+    ]
   }
 ]
