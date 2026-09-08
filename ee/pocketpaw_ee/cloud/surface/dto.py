@@ -92,6 +92,10 @@ class SurfaceMetaRequest(BaseModel):
     # Concierge catalog hint (C1) — mirror SurfaceMeta. Set server-side from the
     # widget spec (capped) so the preamble can name real products.
     pawbar_catalog: list[dict[str, Any]] | None = None
+    # Studio editor hint — mirror SurfaceMeta. The open timeline, projected to
+    # ids + times. Carries state rather than an identifier because the document
+    # lives in the browser and there is no server copy to fetch.
+    timeline: dict[str, Any] | None = None
     # Otherhand hints — mirror SurfaceMeta. Stamped by the /other-hand page on
     # every turn. ``snapshot_path`` is the absolute path the snapshot endpoint
     # returned for this page's PNG (the client echoes it back, it never invents

@@ -907,6 +907,30 @@ class CloudSitesMcpProvider:
         return list(SITES_TOOL_IDS)
 
 
+class CloudTimelineMcpProvider:
+    """`pocketpaw.mcp_servers` — the /studio/editor timeline server
+    (``pocketpaw_timeline``). Hosts ``edit_timeline`` + ``export_timeline``.
+
+    Ambient like the media provider: the tools refuse on their own when no
+    editor is open (the timeline ContextVar is unset on every other surface),
+    so ambient registration costs nothing and the STUDIO_EDITOR profile is what
+    actually scopes them onto the surface.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.timeline import build_timeline_server
+
+            return build_timeline_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.timeline import TIMELINE_TOOL_IDS
+
+        return list(TIMELINE_TOOL_IDS)
+
+
 class CloudMediaMcpProvider:
     """`pocketpaw.mcp_servers` — the STUDIO media-generation in-process server
     (``pocketpaw_media``). Hosts ``image_generate`` + ``video_generate``.

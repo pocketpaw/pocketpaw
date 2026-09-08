@@ -373,6 +373,7 @@ def _meta_from_request(req: SurfaceMetaRequest) -> SurfaceMeta:
         workspace_vm=req.workspace_vm,
         pawbar_actions=req.pawbar_actions,
         pawbar_catalog=req.pawbar_catalog,
+        timeline=req.timeline,
         snapshot_path=req.snapshot_path,
         free_y=req.free_y,
         book_path=req.book_path,
