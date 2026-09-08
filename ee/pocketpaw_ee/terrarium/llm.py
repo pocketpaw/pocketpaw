@@ -1,46 +1,30 @@
 # ee/pocketpaw_ee/terrarium/llm.py
 #
 # The CITIZEN JUDGMENT SEAT — one LLM call per citizen per tick. In goes the
-# sense digest (ground truth, labelled viewer claims, soul recall, charter,
-# constitution, affordable verbs and unlockable tech); out comes strict JSON
-# naming the verbs the citizen chose.
+# sense digest; out comes strict JSON naming the verbs the citizen chose.
 #
-# Pluggable transport, selected by ``POCKETPAW_TERRARIUM_LLM``:
-#   * ``mock`` (DEFAULT) — deterministic, offline, free. Tick 1 writes the
-#     citizen's charter (the zero ritual); afterwards it speaks and builds the
-#     cheapest affordable unlockable node. Tests run on this; ``set_mock_decision``
-#     scripts a specific response.
-#   * ``claude`` — shells ``claude -p <prompt> --output-format json``, reading
-#     the ``result`` field. The prompt is ONE argv element, never interpolated
-#     into a shell string. Same transport shape as ``mandates.foreman``.
-#   * ``HttpLlm`` — NOT env-selected: used whenever the universe brought its own
-#     Anthropic key (service.tick decrypts it and passes it in). Messages API
-#     over httpx; the model comes from the physics ``models.founders`` tier.
-#
-# Mock is the default (foreman defaults to ``claude``) because a terrarium tick
-# fans out one call PER CITIZEN: an accidental real-model tick on a 50-citizen
-# universe is a bill, not a warning.
-#
-# A descendant's prompt carries ONE extra line: how its OCEAN differs from its
-# parent's, in drift widths, rendered by Foresight's ``OceanDrift``. The service
-# computes it (it needs the parent's document) and passes ``drift_line`` down.
-#
-# EVERY decide is metered. ``MeteredLlm`` wraps whichever transport the tick
-# resolved and counts tokens against ``PRICING``, which is what lets a universe
-# answer the only question a viewer actually asks about running cost: what does
-# an hour of watching this world cost?
+# Transports. ``POCKETPAW_TERRARIUM_LLM`` picks between ``mock`` (DEFAULT —
+# deterministic, offline, free: tick 1 writes the charter, then speak + build the
+# cheapest node; ``set_mock_decision`` scripts one) and ``claude`` (shells the
+# CLI, prompt as ONE argv element). A universe that brought its OWN key gets
+# ``HttpLlm`` (Messages API over httpx) instead — or, for a world nobody is
+# watching, ``BatchLlm``: one Message Batch holding every citizen, run
+# asynchronously at HALF price, submitted on one sweep and applied on a later
+# one. Mock is the default because a tick fans out one call PER CITIZEN.
 #
 # The prompt is TWO blocks. ``build_prompt_parts`` returns a STABLE PREFIX
-# (world brief, constitution, charter, values and OCEAN, drift line, verbs,
-# costs, tech tree, rules — byte-identical for one citizen across ticks while
-# nothing about the citizen or the physics changes) and a VOLATILE SUFFIX
-# (ground truth, what was heard and built, weather, outside voices, memories).
-# ``HttpLlm`` sends them as two content blocks and marks the prefix
-# ``cache_control: ephemeral`` ONLY when it clears that model's minimum
+# (world brief, constitution, charter, values and OCEAN, the drift line saying
+# how a descendant differs from its parent, verbs, costs, tech tree, rules) and a
+# VOLATILE SUFFIX (ground truth, speech, artifacts, weather, outside voices,
+# memories). Both HTTP transports send them as two content blocks and mark the
+# prefix ``cache_control: ephemeral`` ONLY when it clears that model's minimum
 # cacheable length (``MIN_CACHEABLE_TOKENS``) — under it the marker is a silent
-# no-op, so the same two blocks go unmarked and the meter records that no marker
-# was sent. Transports without ``decide_parts`` (the CLI, the mock, test fakes)
-# get the joined string through ``decide``.
+# no-op that caches nothing and says nothing about it. Transports without
+# ``decide_parts`` (the CLI, the mock, test fakes) get the joined string.
+#
+# EVERY decide is metered against ``PRICING`` — that is what makes running cost a
+# measurement rather than a guess. ``CostMeter`` prices a batched call at half,
+# and counts those calls so the saving is visible and not merely assumed.
 #
 # Nothing the model returns is trusted. ``world.apply_acts`` re-validates every
 # act against balance, allowed verbs and held tech before anything mutates.
@@ -54,6 +38,8 @@ import json
 import logging
 import os
 import re
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import httpx
@@ -128,7 +114,8 @@ class ClaudeCliLlm:
         return out
 
 
-_API_URL = "https://api.anthropic.com/v1/messages"
+_API_BASE = "https://api.anthropic.com"
+_API_URL = f"{_API_BASE}/v1/messages"
 _DEFAULT_MODEL = "claude-sonnet-5"
 # Physics tier -> model id. Unknown tiers fall back to the default.
 _MODEL_BY_TIER = {
@@ -251,6 +238,114 @@ class HttpLlm:
         return (await self.call(prefix, suffix))[0]
 
 
+# ---------------------------------------------------------------------------
+# THE SLEEPING WORLD'S TRANSPORT
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BatchEntry:
+    """One citizen's slot in a batch.
+
+    ``custom_id`` is the citizen's document id and is the ONLY thing a result is
+    matched back on. ``physics``/``citizen``/``digest`` ride along the way they
+    do on ``CitizenLlm.decide`` — a deterministic fake answers from them; the
+    real transport sends nothing but the two text blocks.
+    """
+
+    custom_id: str
+    prefix: str
+    suffix: str
+    physics: PhysicsFile
+    citizen: CitizenSnapshot
+    digest: SenseDigest
+
+
+@dataclass(frozen=True)
+class BatchResult:
+    """One entry as it came back.
+
+    ``status`` is the provider's own verdict — ``succeeded``, ``errored``,
+    ``canceled`` or ``expired`` — and it is what decides whether the text may be
+    used. Never the presence of the text: an entry that did not succeed is not
+    a decision, whatever it happens to carry.
+    """
+
+    status: str
+    text: str = ""
+    usage: dict[str, Any] = field(default_factory=dict)
+
+
+class BatchLlm:
+    """The dormant-world transport: every citizen in ONE Message Batch.
+
+    Nobody is waiting on a sleeping world's tick, so its judgment calls go
+    through ``/v1/messages/batches`` and cost half. The call is asynchronous by
+    design — ``submit`` returns a handle, ``ended`` polls it and ``results``
+    reads it — so the sweep that submits and the sweep that applies can be
+    separated by a process restart.
+
+    ``client`` is injectable so tests stub the SDK; the key is held only on this
+    instance and never logged. ``base_url`` is pinned for the same reason
+    ``HttpLlm`` hard-codes its URL: a gateway in the environment serves no
+    batches endpoint.
+    """
+
+    def __init__(self, api_key: str, model: str = _DEFAULT_MODEL, *, client: Any = None) -> None:
+        self._key = api_key
+        self.model = model
+        self._client = client
+        # The prompt goes out in the same two blocks a watched tick sends, cache
+        # marker and all, so batching changes the price and nothing else.
+        self._shape = HttpLlm(api_key, model)
+
+    def _sdk(self) -> Any:
+        if self._client is None:
+            from anthropic import AsyncAnthropic
+
+            self._client = AsyncAnthropic(api_key=self._key, base_url=_API_BASE)
+        return self._client
+
+    async def submit(self, entries: Sequence[BatchEntry]) -> str:
+        """File one batch holding every citizen. Returns the batch id."""
+        batch = await self._sdk().messages.batches.create(
+            requests=[
+                {
+                    "custom_id": e.custom_id,
+                    "params": {
+                        "model": self.model,
+                        "max_tokens": 1024,
+                        "messages": [
+                            {"role": "user", "content": self._shape._content(e.prefix, e.suffix)}
+                        ],
+                    },
+                }
+                for e in entries
+            ]
+        )
+        return str(batch.id)
+
+    async def ended(self, batch_id: str) -> bool:
+        batch = await self._sdk().messages.batches.retrieve(batch_id)
+        return str(batch.processing_status) == "ended"
+
+    async def results(self, batch_id: str) -> dict[str, BatchResult]:
+        """Every entry, KEYED BY ``custom_id``. Results stream back in any order
+        the provider likes, so position means nothing here."""
+        out: dict[str, BatchResult] = {}
+        async for row in await self._sdk().messages.batches.results(batch_id):
+            status = str(row.result.type)
+            if status != "succeeded":
+                out[str(row.custom_id)] = BatchResult(status=status)
+                continue
+            msg = row.result.message
+            text = "".join(b.text for b in msg.content if b.type == "text")
+            out[str(row.custom_id)] = BatchResult(
+                status=status, text=text, usage=dict(msg.usage.model_dump())
+            )
+        return out
+
+
 # Test hook — when set, MockLlm returns this verbatim (a dict is JSON-dumped).
 _MOCK_DECISION: dict[str, Any] | str | None = None
 
@@ -354,6 +449,11 @@ _FALLBACK_PRICING_MODEL = "claude-sonnet-4-6"
 # a bound, not a discount, so the number never flatters.
 _CACHE_READ_RATE = 0.1
 
+# The Message Batches API runs the SAME model asynchronously at half list price.
+# It is the one lever that fits a world nobody is watching: no viewer is waiting
+# on the answer, so the latency the discount buys costs the world nothing.
+_BATCH_RATE = 0.5
+
 
 class CostMeter:
     """What the model calls cost. Never raises on an unknown model name."""
@@ -369,6 +469,12 @@ class CostMeter:
         # visible: a prefix under the model minimum caches nothing and says
         # nothing about it.
         self.cache_marked_calls = 0
+        # The half-price subset. Counted INSIDE input_tokens/output_tokens (the
+        # summary's token counts stay grand totals) and subtracted back out in
+        # ``cost_usd``, so the saving is priced once and shown once.
+        self.batch_calls = 0
+        self.batch_input_tokens = 0
+        self.batch_output_tokens = 0
 
     def record(
         self,
@@ -377,9 +483,12 @@ class CostMeter:
         usage: dict[str, Any] | None = None,
         *,
         cache_marked: bool = False,
+        batch: bool = False,
     ) -> None:
         self.calls += 1
         self.cache_marked_calls += 1 if cache_marked else 0
+        self.batch_calls += 1 if batch else 0
+        was_in, was_out = self.input_tokens, self.output_tokens
         if usage and "input_tokens" in usage:
             cached = int(usage.get("cache_read_input_tokens") or 0)
             self.input_tokens += (
@@ -387,18 +496,28 @@ class CostMeter:
                 + int(usage.get("cache_creation_input_tokens") or 0)
                 + cached
             )
-            self.cache_read_tokens += cached
+            # A batched read is priced as plain input, at the batch rate. That
+            # over-states rather than flatters, and a terrarium prefix is far
+            # under every model's cacheable minimum anyway.
+            if not batch:
+                self.cache_read_tokens += cached
             self.output_tokens += int(usage.get("output_tokens") or 0)
-            return
-        self.input_tokens += len(prompt or "") // _CHARS_PER_TOKEN
-        self.output_tokens += len(output or "") // _CHARS_PER_TOKEN
+        else:
+            self.input_tokens += len(prompt or "") // _CHARS_PER_TOKEN
+            self.output_tokens += len(output or "") // _CHARS_PER_TOKEN
+        if batch:
+            self.batch_input_tokens += self.input_tokens - was_in
+            self.batch_output_tokens += self.output_tokens - was_out
 
     @property
     def cost_usd(self) -> float:
         rate_in, rate_out = PRICING[self.model]
-        fresh = self.input_tokens - self.cache_read_tokens
+        fresh = self.input_tokens - self.cache_read_tokens - self.batch_input_tokens
         cached = self.cache_read_tokens * _CACHE_READ_RATE
-        return ((fresh + cached) * rate_in + self.output_tokens * rate_out) / 1_000_000
+        live_out = self.output_tokens - self.batch_output_tokens
+        live = (fresh + cached) * rate_in + live_out * rate_out
+        batched = self.batch_input_tokens * rate_in + self.batch_output_tokens * rate_out
+        return (live + batched * _BATCH_RATE) / 1_000_000
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -408,6 +527,7 @@ class CostMeter:
             "output_tokens": self.output_tokens,
             "cache_read_tokens": self.cache_read_tokens,
             "cache_marked_calls": self.cache_marked_calls,
+            "batch_calls": self.batch_calls,
             "cost_usd": round(self.cost_usd, 6),
         }
 
@@ -417,6 +537,7 @@ class CostMeter:
         out = self.summary()
         self.calls = self.input_tokens = self.output_tokens = self.cache_read_tokens = 0
         self.cache_marked_calls = 0
+        self.batch_calls = self.batch_input_tokens = self.batch_output_tokens = 0
         return out
 
 
@@ -478,6 +599,16 @@ def resolve_llm(*, api_key: str | None = None, tier: str | None = None) -> Citiz
     if choice == "claude":
         return ClaudeCliLlm()
     return MockLlm()
+
+
+def resolve_batch_llm(*, api_key: str | None = None, tier: str | None = None) -> BatchLlm | None:
+    """The half-price transport for a sleeping world, or None when there is none.
+
+    Only a universe with its own key can batch: the mock and the CLI have no
+    batches endpoint, so such a world keeps ticking synchronously and the caller
+    falls back rather than failing.
+    """
+    return BatchLlm(api_key, model_for_tier(tier)) if api_key else None
 
 
 def build_prompt_parts(
@@ -651,10 +782,14 @@ __all__ = [
     "MIN_CACHEABLE_TOKENS",
     "PRICING",
     "Act",
+    "BatchEntry",
+    "BatchLlm",
+    "BatchResult",
     "ClaudeCliLlm",
     "CitizenLlm",
     "CostMeter",
     "Decision",
+    "HttpLlm",
     "MeteredLlm",
     "MockLlm",
     "build_prompt",
@@ -662,6 +797,7 @@ __all__ = [
     "cache_marker_fits",
     "decide_tick",
     "parse_decision",
+    "resolve_batch_llm",
     "resolve_llm",
     "set_mock_decision",
 ]

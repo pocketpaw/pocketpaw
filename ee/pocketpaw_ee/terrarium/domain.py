@@ -61,11 +61,16 @@ EVENT_KINDS: tuple[str, ...] = (
     "raid",
     "gain",
     "moment",
+    "batch",
 )
 
 # Contract invariant 2: every event costs or earns. ``cost: 0`` is legal only
 # for these kinds. The service asserts this before it writes an EventDoc.
-ZERO_COST_KINDS: frozenset[str] = frozenset({"gate", "weather", "hibernate", "arrive", "moment"})
+# ``batch`` is the clock speaking, not a citizen: it is written when a dormant
+# world's half-price batch is abandoned and the world goes back to thinking live.
+ZERO_COST_KINDS: frozenset[str] = frozenset(
+    {"gate", "weather", "hibernate", "arrive", "moment", "batch"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +107,13 @@ class UniverseDoc(TimestampedDocument):
     # read the Journal — a world nobody watches for a world-day goes dormant.
     last_tick_at: datetime | None = None
     last_viewed_at: datetime | None = None
+    # The open Message Batch a DORMANT world is waiting on (TERRARIUM_BATCH_DORMANT).
+    # ``batch_tick`` is the tick its entries were built for — a batch that no
+    # longer matches is stale — and ``batch_at`` is when it was filed, which is
+    # the age the sweep abandons it on. All three are None/0 on the watched path.
+    batch_id: str | None = None
+    batch_tick: int = 0
+    batch_at: datetime | None = None
     # What this world has cost to run: the running ``llm.CostMeter`` summary
     # (model, calls, tokens, cache_marked_calls, cost_usd, cost_per_call),
     # accrued once per tick.

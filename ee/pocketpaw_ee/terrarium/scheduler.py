@@ -8,6 +8,13 @@
 # nobody has read the Journal for a world day the universe is DORMANT and gets
 # ``time.dormant_ticks_per_day`` instead — slower, not dead.
 #
+# A dormant world may also think in a HALF-PRICE Message Batch
+# (TERRARIUM_BATCH_DORMANT, default off): the sweep marks such a row ``batch``
+# and ``service.dormant_batch_step`` moves it one phase — submit, wait, apply —
+# rather than firing a synchronous tick. Only ``applied`` (and the ordinary
+# synchronous path) counts as a tick; ``sync`` means the batch path declined and
+# the normal tick runs. A watched world never batches.
+#
 # Gated by POCKETPAW_CLOUD_SCHEDULER_ENABLED (pytest never spawns a loop);
 # interval from POCKETPAW_TERRARIUM_SCHEDULER_INTERVAL (seconds, default 60).
 # ``due_state`` is pure so the arithmetic is testable with a frozen clock; the
@@ -81,8 +88,19 @@ async def run_scheduler_tick(
     ticked: list[str] = []
     for row in due:
         try:
-            await fire(row["workspace_id"], row["user_id"], row["universe_id"], 1)
-            ticked.append(row["universe_id"])
+            # A dormant world routes through the batch path (submit on one sweep,
+            # apply on a later one). ``sync`` is its way of saying "not mine" —
+            # no key to batch with, the flag is off, or a batch was just written
+            # off — and the ordinary tick runs instead.
+            verdict = "sync"
+            if row.get("batch"):
+                verdict = await service.dormant_batch_step(
+                    row["workspace_id"], row["user_id"], row["universe_id"]
+                )
+            if verdict == "sync":
+                await fire(row["workspace_id"], row["user_id"], row["universe_id"], 1)
+            if verdict in ("sync", "applied"):
+                ticked.append(row["universe_id"])
         except Exception:  # noqa: BLE001 — one universe never blocks the next
             logger.warning("terrarium clock: tick failed for %s", row["universe_id"], exc_info=True)
     return ticked

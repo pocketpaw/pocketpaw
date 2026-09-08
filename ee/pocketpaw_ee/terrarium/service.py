@@ -15,8 +15,8 @@
 #
 # Invariants enforced at this seam:
 #   1. ``seq`` is monotonic per universe (assigned under a per-universe lock).
-#   2. ``cost: 0`` only for gate/weather/hibernate/arrive/moment (asserted on
-#      write).
+#   2. ``cost: 0`` only for gate/weather/hibernate/arrive/moment/batch (asserted
+#      on write).
 #   3. balance <= 0 at end of tick -> state ``hibernating``, soul file KEPT.
 #   4. viewer-origin text never becomes soul fact (the episodic summary is
 #      built from citizen-origin events only — see world.episodic_summary).
@@ -26,6 +26,11 @@
 #      Viewer lines are checked BEFORE the write and rejected with a 422.
 #   7. ``paused`` never ticks and is a flat 404 in public; anonymous readers
 #      trail the edge by ``TERRARIUM_PUBLIC_DELAY_EVENTS`` (default 20) rows.
+#   8. a DORMANT world may think in a half-price Message Batch when
+#      ``TERRARIUM_BATCH_DORMANT`` is on (DEFAULT OFF) — submitted on one sweep,
+#      applied on a later one, down the same landing path a watched tick uses.
+#      A watched world always thinks synchronously; a paused one's open batch is
+#      left alone. See ``dormant_batch_step``.
 
 """Terrarium service — persistence, souls, the gate and the bus."""
 
@@ -139,11 +144,8 @@ def caching_engaged(doc: UniverseDoc) -> bool:
     return bool(cost.get("cache_marked_calls")) and bool(cost.get("cache_read_tokens"))
 
 
-def _accrue_cost(uni: UniverseDoc, llm: Any) -> None:
+def _accrue_meter(uni: UniverseDoc, meter: Any) -> None:
     """Fold this tick's metering into the universe's running total."""
-    meter = getattr(llm, "meter", None)
-    if meter is None:
-        return
     tick_cost = meter.drain()
     total = dict(uni.cost or {})
     for key in (
@@ -152,6 +154,7 @@ def _accrue_cost(uni: UniverseDoc, llm: Any) -> None:
         "output_tokens",
         "cache_read_tokens",
         "cache_marked_calls",
+        "batch_calls",
     ):
         total[key] = int(total.get(key, 0)) + int(tick_cost.get(key, 0))
     total["cost_usd"] = round(float(total.get("cost_usd", 0.0)) + tick_cost["cost_usd"], 6)
@@ -258,6 +261,22 @@ def public_delay_events() -> int:
         return max(0, int(os.environ.get("TERRARIUM_PUBLIC_DELAY_EVENTS") or _DEFAULT_PUBLIC_DELAY))
     except ValueError:
         return _DEFAULT_PUBLIC_DELAY
+
+
+def batch_dormant_enabled() -> bool:
+    """Does a world nobody is watching think in a half-price batch? DEFAULT OFF.
+
+    Read on every call, never at import, so an operator can flip it without a
+    deploy — and fail-closed like ``router.public_enabled``: anything that is not
+    an explicit truthy value leaves today's synchronous behaviour exactly as it
+    was.
+    """
+    return (os.environ.get("TERRARIUM_BATCH_DORMANT") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def public_universe_wire(doc: UniverseDoc, *, pop: int = 0) -> dict[str, Any]:
@@ -675,11 +694,18 @@ def _concurrency(physics: PhysicsFile) -> int:
     return int(getattr(physics.models, "concurrency", _DEFAULT_CONCURRENCY))
 
 
-async def _one_tick(
-    uni: UniverseDoc, physics: PhysicsFile, llm: Any, user_id: str
-) -> list[dict[str, Any]]:
+SensedRow = tuple[CitizenDoc, "world.CitizenSnapshot", "world.SenseDigest"]
+
+
+async def _sense(uni: UniverseDoc, physics: PhysicsFile) -> list[SensedRow]:
+    """Every living citizen with its snapshot and its sense digest.
+
+    Sequential on purpose: building a digest reads the docs, the Journal and the
+    soul file. Both paths start here — the watched tick fans these rows out
+    through Foresight, the dormant one turns them into batch entries — so the
+    two see byte-identical prompts.
+    """
     universe_id = str(uni.id)
-    storm = uni.storm_ticks > 0
     citizens = await CitizenDoc.find(
         CitizenDoc.universe_id == universe_id, CitizenDoc.state == "alive"
     ).to_list()
@@ -706,9 +732,7 @@ async def _one_tick(
         ).to_list()
     ]
 
-    # Sense first, for everyone: building a digest reads the docs, the Journal
-    # and the soul file, so it stays sequential and lands before the fan-out.
-    rows: list[tuple[CitizenDoc, world.CitizenSnapshot, world.SenseDigest]] = []
+    rows: list[SensedRow] = []
     for doc in citizens:
         snap = _snapshot(doc)
         memories = await soul_link.recall_for_tick(doc.soul_path, f"{doc.name} {physics.universe}")
@@ -731,13 +755,27 @@ async def _one_tick(
                 ),
             )
         )
+    return rows
+
+
+async def _drift_lines(uni: UniverseDoc, rows: list[SensedRow]) -> dict[str, str]:
+    """Each citizen's lineage line, keyed by citizen id. Empty for a founder."""
+    drifts = await _lineage_drifts(str(uni.id), [doc for doc, _snap, _digest in rows])
+    return {cid: drift.as_prompt_block() for cid, drift in drifts.items()}
+
+
+async def _one_tick(
+    uni: UniverseDoc, physics: PhysicsFile, llm: Any, user_id: str
+) -> list[dict[str, Any]]:
+    """The watched tick: every citizen decides now, and the world lands now."""
+    rows = await _sense(uni, physics)
 
     # THE JUDGMENT CALLS FAN OUT; THE ARITHMETIC DOES NOT. Foresight gathers the
     # decides under its own semaphore and returns them in ``active_ids`` order,
     # so ``apply_acts`` and ``_persist_outcome`` still run one citizen at a time
     # in the order the docs came back — pool, ledger and ``seq`` keep exactly the
     # ordering the serial loop gave them.
-    drifts = await _lineage_drifts(universe_id, citizens)
+    drifts = await _lineage_drifts(str(uni.id), [doc for doc, _snap, _digest in rows])
     fw = ForesightWorld(max_concurrent=_concurrency(physics))
     ids = [
         fw.add_agent(CitizenPersona(doc, snap, digest, physics, llm, drift=drifts.get(str(doc.id))))
@@ -745,13 +783,34 @@ async def _one_tick(
     ]
     fanned = (await fw.tick(active_ids=ids)).last_tick_actions
 
-    written: list[dict[str, Any]] = []
-    placed: list[world.PlacedAct] = []
+    decisions: list[world.Decision] = []
     for (doc, snap, _digest), action in zip(rows, fanned):
         # ``decide_tick`` already degrades a bad transport to an empty Decision,
         # so ``ok: False`` only appears if the adapter itself blew up. Same
         # degrade either way: the citizen thinks, does nothing, and still pays.
         decision = world.Decision.model_validate(action) if action.get("ok") else world.Decision()
+        decisions.append(decision)
+    pairs = [(doc, snap) for doc, snap, _digest in rows]
+    return await _land_tick(uni, physics, pairs, decisions, user_id, getattr(llm, "meter", None))
+
+
+async def _land_tick(
+    uni: UniverseDoc,
+    physics: PhysicsFile,
+    pairs: list[tuple[CitizenDoc, world.CitizenSnapshot]],
+    decisions: list[world.Decision],
+    user_id: str,
+    meter: Any = None,
+) -> list[dict[str, Any]]:
+    """Everything after the judgment: apply, persist, cluster the moments, move
+    the clock. The watched fan-out and the dormant batch BOTH land here, which
+    is what makes the two paths write the same Journal for the same decisions.
+    """
+    universe_id = str(uni.id)
+    storm = uni.storm_ticks > 0
+    written: list[dict[str, Any]] = []
+    placed: list[world.PlacedAct] = []
+    for (doc, snap), decision in zip(pairs, decisions):
         outcome = world.apply_acts(physics, snap, decision, storm=storm)
         mine = await _persist_outcome(uni, physics, doc, outcome, user_id)
         written.extend(mine)
@@ -797,8 +856,9 @@ async def _one_tick(
         await _new_day(uni, physics)
     if uni.storm_ticks > 0:
         uni.storm_ticks -= 1
-    uni.rung = world.rung_for(len(citizens), len({u for c in citizens for u in c.unlocked}))
-    _accrue_cost(uni, llm)
+    uni.rung = world.rung_for(len(pairs), len({u for doc, _snap in pairs for u in doc.unlocked}))
+    if meter is not None:
+        _accrue_meter(uni, meter)
     await uni.save()
 
     try:
@@ -1014,6 +1074,151 @@ async def _file_spawn_action(
 
 
 # ---------------------------------------------------------------------------
+# The sleeping tick — one batch, half price, two sweeps
+# ---------------------------------------------------------------------------
+
+# How long an open batch is waited on before it is written off. The provider
+# expires a batch at 24 hours, so past that there is nothing left to collect.
+_BATCH_MAX_AGE_SECONDS = 24 * 3600
+
+
+async def dormant_batch_step(workspace_id: str, user_id: str, universe_id: str) -> str:
+    """One sweep's move on a world nobody is watching.
+
+    Two phases, so a restart between them costs nothing: the first builds every
+    citizen's prompt exactly as the watched tick does, files ONE Message Batch
+    and writes its id on the universe; a later sweep polls that id and, once the
+    batch has ended, lands the results through the same ``apply_acts`` and
+    ``_persist_outcome`` path — so the Journal, the ledger, moderation and the
+    moments step behave identically, at half the model bill.
+
+    Returns what it did: ``submitted``, ``waiting``, ``applied``, or ``sync``
+    when the caller should run the ordinary synchronous tick instead.
+    """
+    async with _lock(universe_id):
+        uni = await _universe(workspace_id, universe_id)
+        if uni.status == "paused":
+            # A paused world does not tick, and its open batch is left exactly
+            # where it is — resuming picks it back up.
+            return "waiting"
+        physics = physics_of(uni)
+        creds = await byok_service.resolve_turn_credentials(uni.workspace)
+        batch = citizen_llm.resolve_batch_llm(api_key=creds.api_key, tier=physics.models.founders)
+        if batch is None:
+            return "sync"
+        # An open batch is always resolved, even after the flag was turned off or
+        # somebody started watching — otherwise the id would strand the world.
+        if uni.batch_id:
+            return await _apply_batch(uni, physics, batch, user_id)
+        if not batch_dormant_enabled():
+            return "sync"
+        return await _submit_batch(uni, physics, batch)
+
+
+async def _submit_batch(uni: UniverseDoc, physics: PhysicsFile, batch: Any) -> str:
+    """Phase one: file the batch and stop. Nothing is written to the Journal —
+    the world has not thought yet, it has only asked."""
+    rows = await _sense(uni, physics)
+    if not rows:
+        return "sync"  # an empty batch is a 400; let the clock tick it normally
+    lines = await _drift_lines(uni, rows)
+    entries: list[citizen_llm.BatchEntry] = []
+    for doc, snap, digest in rows:
+        prefix, suffix = citizen_llm.build_prompt_parts(
+            physics, snap, digest, drift_line=lines.get(str(doc.id), "")
+        )
+        entries.append(
+            citizen_llm.BatchEntry(
+                custom_id=str(doc.id),
+                prefix=prefix,
+                suffix=suffix,
+                physics=physics,
+                citizen=snap,
+                digest=digest,
+            )
+        )
+    uni.batch_id = await batch.submit(entries)
+    uni.batch_tick = uni.tick
+    uni.batch_at = datetime.now(UTC)
+    await uni.save()
+    return "submitted"
+
+
+async def _apply_batch(uni: UniverseDoc, physics: PhysicsFile, batch: Any, user_id: str) -> str:
+    """Phase two: collect an ended batch and land the tick it belongs to."""
+    batch_id = uni.batch_id or ""
+    if uni.tick != uni.batch_tick or _batch_too_old(uni):
+        return await _abandon_batch(uni, batch_id)
+    if not await batch.ended(batch_id):
+        return "waiting"
+    landed = await batch.results(batch_id)
+    citizens = await CitizenDoc.find(
+        CitizenDoc.universe_id == str(uni.id), CitizenDoc.state == "alive"
+    ).to_list()
+    pairs = [(doc, _snapshot(doc)) for doc in citizens]
+    # Results come back in ANY order the provider likes, so every one is matched
+    # on the custom_id it was filed under. Position here means nothing.
+    ordered = [landed.get(str(doc.id)) for doc, _snap in pairs]
+    meter = citizen_llm.CostMeter(citizen_llm.model_for_tier(physics.models.founders))
+    decisions = [_batch_decision(res, meter) for res in ordered]
+    uni.batch_id = None
+    uni.batch_at = None
+    await _land_tick(uni, physics, pairs, decisions, user_id, meter)
+    uni.last_tick_at = datetime.now(UTC)
+    await uni.save()
+    return "applied"
+
+
+def _batch_decision(res: citizen_llm.BatchResult | None, meter: Any) -> world.Decision:
+    """One entry's judgment, and what it cost.
+
+    ONLY a ``succeeded`` entry is parsed and metered. An errored, canceled,
+    expired or missing one degrades to the empty Decision a failed synchronous
+    decide gives — the citizen thinks, does nothing, and still pays the in-world
+    think — and the world is NOT billed for a think the provider never ran. The
+    status decides that, never whether text happens to be attached.
+    """
+    if res is None or res.status != "succeeded":
+        return world.Decision(thought="(the thought did not form)", acts=[])
+    meter.record("", res.text, res.usage, batch=True)
+    try:
+        return citizen_llm.parse_decision(res.text)
+    except Exception:  # noqa: BLE001 — one bad citizen must not stop the world
+        logger.warning("terrarium: a batched decision did not parse", exc_info=True)
+        return world.Decision(thought="(the thought did not form)", acts=[])
+
+
+def _batch_too_old(uni: UniverseDoc) -> bool:
+    at = clock._aware(uni.batch_at)
+    if at is None:
+        return True
+    return (datetime.now(UTC) - at).total_seconds() > _BATCH_MAX_AGE_SECONDS
+
+
+async def _abandon_batch(uni: UniverseDoc, batch_id: str) -> str:
+    """A batch that outlived its window, or the tick it was built for, is written
+    off — said out loud in the Journal, because a world that quietly skipped a
+    day would read as a bug to whoever comes back to watch it."""
+    row = await _append_event(
+        uni,
+        kind="batch",
+        actor="the clock",
+        body=(
+            f"the batched thoughts for day {uni.day} never came back — "
+            "this world is thinking live again"
+        ),
+        cost=0,
+        origin="system",
+        data={"batch_id": batch_id},
+    )
+    await _publish(uni, row)
+    uni.batch_id = None
+    uni.batch_at = None
+    await uni.save()
+    return "sync"
+
+
+# ---------------------------------------------------------------------------
 # Reads
 # ---------------------------------------------------------------------------
 
@@ -1071,6 +1276,11 @@ async def scheduler_sweep(now: datetime) -> list[dict[str, Any]]:
                         "workspace_id": uni.workspace,
                         "universe_id": str(uni.id),
                         "user_id": uni.creator or "system:scheduler",
+                        # A world nobody is watching thinks in a batch when the
+                        # flag is on; one already holding a batch is drained
+                        # whatever the flag says, so no id is ever stranded.
+                        "batch": bool(uni.batch_id)
+                        or (status == "dormant" and batch_dormant_enabled()),
                     }
                 )
         except Exception:  # noqa: BLE001 — one bad universe never sinks the sweep
