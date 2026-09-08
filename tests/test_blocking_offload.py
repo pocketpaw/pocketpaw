@@ -56,14 +56,41 @@ _MIN_TICKS = 5
 # one ~0.5, so 0.75 has real margin in both directions.
 _MIN_TICK_COVERAGE = 0.75
 
+# Attempts a correct handler gets to clear that bar.
+#
+# The ratio compares two windows measured moments apart, so anything that
+# steals the loop during one but not the other moves it. Measured on Windows:
+# two failures in four runs of this file alongside its neighbours, and none
+# when it ran alone. That is a flaky gate, which is worse than a missing one.
+#
+# Retrying does not weaken it. A handler that still blocks scores ~0.5 on
+# EVERY attempt, because what is being measured is which half of its work sits
+# on the loop, not how busy the machine is. Both retried handlers are
+# read-only reads of a temp jail, so re-running one costs only the sleep.
+_MEASURE_ATTEMPTS = 3
 
-def _assert_loop_stayed_free(during: int, elapsed: float, rate: float, label: str) -> None:
-    """Assert the ticker ran for essentially the whole handler call."""
-    expected = rate * elapsed
-    assert during >= _MIN_TICKS, f"{label}: loop was blocked outright ({during} ticks)"
-    assert during >= expected * _MIN_TICK_COVERAGE, (
-        f"{label}: {during} ticks in {elapsed:.2f}s against an idle baseline of "
-        f"~{expected:.0f} — part of the handler is still on the event loop"
+
+async def _run_until_loop_stays_free(factory, label: str):
+    """Run the handler until one attempt proves the loop stayed free.
+
+    Returns that attempt's ``(result, ticks_during, elapsed)``. Fails at once,
+    without retrying, when the loop was blocked outright: that case is not
+    noise, and no number of retries should be allowed to look past it.
+    """
+    misses: list[str] = []
+    for _ in range(_MEASURE_ATTEMPTS):
+        rate = await _idle_tick_rate()
+        result, during, elapsed = await _run_with_ticker(factory)
+        if during < _MIN_TICKS:
+            pytest.fail(f"{label}: loop was blocked outright ({during} ticks)")
+        expected = rate * elapsed
+        if during >= expected * _MIN_TICK_COVERAGE:
+            return result, during, elapsed
+        misses.append(f"{during} ticks in {elapsed:.2f}s against a baseline of ~{expected:.0f}")
+    pytest.fail(
+        f"{label}: part of the handler is still on the event loop. "
+        f"{_MEASURE_ATTEMPTS} attempts, none reached {_MIN_TICK_COVERAGE:.0%} of the "
+        "idle tick rate: " + "; ".join(misses)
     )
 
 
@@ -140,15 +167,15 @@ def jail(tmp_path):
 
 
 async def test_git_status_keeps_the_loop_running(jail):
-    rate = await _idle_tick_rate()
     with patch.object(subprocess, "run", _blocking_run("main\n")):
-        response, during, elapsed = await _run_with_ticker(lambda: files.git_status(path=str(jail)))
+        response, during, elapsed = await _run_until_loop_stays_free(
+            lambda: files.git_status(path=str(jail)), "git_status"
+        )
 
     # Two git invocations (rev-parse + status), so the stub slept twice — and
     # BOTH have to be offloaded. Asserting only that some ticks landed passes
     # when just one of them is.
     assert elapsed >= _BLOCK_SECONDS * 2
-    _assert_loop_stayed_free(during, elapsed, rate, "git_status")
     assert response.is_git_repo is True
     assert response.branch == "main"
 
@@ -176,14 +203,13 @@ async def test_git_status_still_reports_a_subprocess_timeout(jail):
 
 async def test_git_diff_keeps_the_loop_running(jail):
     target = jail / "tracked.txt"
-    rate = await _idle_tick_rate()
-
     with patch.object(subprocess, "run", _blocking_run("")):
-        response, during, elapsed = await _run_with_ticker(lambda: files.git_diff(path=str(target)))
+        response, during, elapsed = await _run_until_loop_stays_free(
+            lambda: files.git_diff(path=str(target)), "git_diff"
+        )
 
     # Two git invocations (diff + rev-parse) — both must be offloaded.
     assert elapsed >= _BLOCK_SECONDS * 2
-    _assert_loop_stayed_free(during, elapsed, rate, "git_diff")
     assert response.is_git_repo is True
 
 
