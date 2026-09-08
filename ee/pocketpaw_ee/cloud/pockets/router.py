@@ -198,6 +198,7 @@ invocation has the same blast radius as a write binding.
 
 from __future__ import annotations
 
+import logging
 import secrets as _secrets
 from typing import Any
 from uuid import uuid4
@@ -256,6 +257,8 @@ from pocketpaw_ee.cloud.shared.deps import (
     require_pocket_edit,
     require_pocket_owner,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/pockets", tags=["Pockets"], dependencies=[Depends(require_license)])
 
@@ -562,6 +565,31 @@ def _loopback_bypass_active(
 
     Any missing factor → bypass denied; the caller falls through to
     the standard cookie/bearer auth dependency.
+
+    AND IT IS REFUSED OUTRIGHT IN MULTI-TENANT CLOUD.
+
+    The loopback half of this contract provides nothing behind a reverse
+    proxy. The docstring on ``_is_localhost`` says so itself: with nginx or
+    Caddy on the same box, ``request.client.host`` is ``127.0.0.1`` for every
+    external client, so factor 1 passes for the whole internet. That leaves
+    the process token as the entire gate — and the remaining factors are the
+    workspace id and the user id, both read from attacker-supplied headers.
+
+    So a leaked internal token is any-tenant, any-user impersonation across
+    pocket reads, spec merges and both reconcile routes. The token is minted
+    per process and never rotated within it, and the code that describes it
+    calls the arrangement "interim, dev-grade".
+
+    ``is_multi_tenant_cloud()`` is the signal, not an env flag anybody has to
+    remember to set: it is exactly "there is a cloud DB, so more than one
+    tenant lives here". A local desktop install, where this bypass is how the
+    agent talks to its own backend, has no cloud DB and is unaffected.
+
+    ``POCKETPAW_INTERNAL_BYPASS_ENABLED=1`` re-enables it in cloud for a
+    deployment that genuinely needs it, and says so in the log every time it
+    fires. Silence is safe; leniency is deliberate.
+
+    Gated by tests/cloud/test_pocket_loopback_bypass.py.
     """
     if not _is_localhost(request):
         return False
@@ -571,6 +599,46 @@ def _loopback_bypass_active(
         return False
     if not workspace_header or not user_header:
         return False
+    if not _bypass_allowed_here():
+        return False
+    return True
+
+
+def _bypass_allowed_here() -> bool:
+    """Whether the internal bypass may fire in THIS deployment at all.
+
+    Off in multi-tenant cloud unless explicitly re-enabled, because the
+    workspace and user it trusts both come from request headers — see
+    ``_loopback_bypass_active``.
+    """
+    import os
+
+    if os.environ.get("POCKETPAW_INTERNAL_BYPASS_ENABLED", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        logger.warning(
+            "POCKETPAW_INTERNAL_BYPASS_ENABLED is set — honouring the pocket "
+            "internal bypass, which takes its workspace and user from request "
+            "headers. Unset this unless a component genuinely needs it."
+        )
+        return True
+
+    try:
+        from pocketpaw_ee.cloud.shared.db import is_multi_tenant_cloud
+
+        if is_multi_tenant_cloud():
+            return False
+    except Exception:  # noqa: BLE001 — an unreadable signal must not open the gate
+        logger.warning(
+            "guards: could not determine whether this is multi-tenant cloud — "
+            "refusing the pocket internal bypass",
+            exc_info=True,
+        )
+        return False
+
     return True
 
 
