@@ -12,6 +12,12 @@
 # ``world.build_digest`` assembled from the Journal. Reading the stub would only
 # add a second, poorer view of the same tick.
 #
+# ``drift`` is how far this citizen's OCEAN sits from its parent's, in drift
+# widths. The service computes it — it needs the parent's document, and only
+# service.py may read those — and the persona speaks it into the prompt so a
+# lineage difference reaches the model instead of only the database. None for a
+# founder, and for a descendant whose parent is gone.
+#
 # ``doc`` is typed ``Any`` deliberately: ``service.py`` is the only module
 # allowed to import the Beanie document classes (the 4-file entity rule), and
 # this adapter needs nothing from the doc but ``soul_path``.
@@ -22,6 +28,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from pocketpaw_ee.foresight.persona import OceanDrift
 from pocketpaw_ee.terrarium import llm as citizen_llm
 from pocketpaw_ee.terrarium.physics import PhysicsFile
 from pocketpaw_ee.terrarium.world import CitizenSnapshot, SenseDigest
@@ -37,12 +44,14 @@ class CitizenPersona:
         digest: SenseDigest,
         physics: PhysicsFile,
         llm: citizen_llm.CitizenLlm,
+        drift: OceanDrift | None = None,
     ) -> None:
         self.doc = doc
         self.snap = snap
         self.digest = digest
         self.physics = physics
         self.llm = llm
+        self.drift = drift
 
     @property
     def has_fidelity(self) -> bool:
@@ -50,7 +59,13 @@ class CitizenPersona:
         return bool(getattr(self.doc, "soul_path", None))
 
     async def decide(self, observation: dict[str, Any]) -> dict[str, Any]:
-        decision = await citizen_llm.decide_tick(self.physics, self.snap, self.digest, llm=self.llm)
+        decision = await citizen_llm.decide_tick(
+            self.physics,
+            self.snap,
+            self.digest,
+            llm=self.llm,
+            drift_line=self.drift.as_prompt_block() if self.drift else "",
+        )
         return decision.model_dump()
 
 

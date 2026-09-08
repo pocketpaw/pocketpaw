@@ -36,6 +36,7 @@ from uuid import uuid4
 from pocketpaw_ee.cloud._core.errors import BadRequest, NotFound, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud.byok import service as byok_service
+from pocketpaw_ee.foresight.persona import OceanDrift
 from pocketpaw_ee.foresight.world import ForesightWorld
 from pocketpaw_ee.terrarium import events as world_events
 from pocketpaw_ee.terrarium import llm as citizen_llm
@@ -525,6 +526,46 @@ async def tick(workspace_id: str, user_id: str, universe_id: str, n: int = 1) ->
     return {"events": produced, "universe": universe_wire(uni, pop=await _pop(universe_id))}
 
 
+async def _lineage_drifts(universe_id: str, citizens: list[CitizenDoc]) -> dict[str, OceanDrift]:
+    """Each descendant's OCEAN distance from its parent, keyed by citizen id.
+
+    ``executor.child_ocean`` samples a child's ABSOLUTE traits once, at birth,
+    and persists them — that is the replayable half. This reads the difference
+    back at decide time and hands it to the prompt, so a lineage is spoken as
+    well as stored. Units are drift widths, which is what ``OceanDrift`` renders.
+
+    Parents are matched across every state: a hibernating parent is still the
+    lineage. A founder, and a descendant whose parent has been purged, get no
+    entry and therefore no prompt line.
+    """
+    wanted = {c.parent_did for c in citizens if c.parent_did}
+    if not wanted:
+        return {}
+    # Imported here, not at module scope: executor imports this module.
+    from pocketpaw_ee.terrarium.executor import DRIFT_WIDTH
+
+    parents = {
+        p.did: p.ocean
+        for p in await CitizenDoc.find(CitizenDoc.universe_id == universe_id).to_list()
+        if p.did in wanted
+    }
+    drifts: dict[str, OceanDrift] = {}
+    for c in citizens:
+        parent = parents.get(c.parent_did or "")
+        if not parent:
+            continue
+        deltas = {
+            soul_link.OCEAN_FIELDS[letter]: round(
+                (float(value) - float(parent[letter])) / DRIFT_WIDTH, 3
+            )
+            for letter, value in c.ocean.items()
+            if letter in soul_link.OCEAN_FIELDS and letter in parent
+        }
+        if deltas:
+            drifts[str(c.id)] = OceanDrift(**deltas)
+    return drifts
+
+
 # How many citizens may hold an in-flight model call at once. The physics
 # ``models`` block carries the per-tier model names today and no concurrency
 # key, so this reads one if a world ever declares it and otherwise caps at 8 —
@@ -599,9 +640,11 @@ async def _one_tick(
     # so ``apply_acts`` and ``_persist_outcome`` still run one citizen at a time
     # in the order the docs came back — pool, ledger and ``seq`` keep exactly the
     # ordering the serial loop gave them.
+    drifts = await _lineage_drifts(universe_id, citizens)
     fw = ForesightWorld(max_concurrent=_concurrency(physics))
     ids = [
-        fw.add_agent(CitizenPersona(doc, snap, digest, physics, llm)) for doc, snap, digest in rows
+        fw.add_agent(CitizenPersona(doc, snap, digest, physics, llm, drift=drifts.get(str(doc.id))))
+        for doc, snap, digest in rows
     ]
     fanned = (await fw.tick(active_ids=ids)).last_tick_actions
 

@@ -4,7 +4,8 @@
 # archive with the citizen's OCEAN and values, each tick recalls a few memories
 # before the judgment call, and each tick appends ONE episodic memory after it.
 #
-# Narrow on purpose (three functions) so the transport can be swapped without
+# Narrow on purpose (birth / awaken / recall / remember) so the transport can be
+# swapped without
 # touching world/service, and EVERYTHING is best-effort: a missing file, a
 # corrupt soul or a protocol error logs and degrades to a no-op. A soul failure
 # must never wedge a tick — the Journal is the truth, the soul is enrichment.
@@ -52,7 +53,7 @@ async def birth_soul(
             name=name,
             role=role,
             values=list(values or []),
-            ocean={_OCEAN_FIELDS.get(k, k): float(v) for k, v in (ocean or {}).items()},
+            ocean={OCEAN_FIELDS.get(k, k): float(v) for k, v in (ocean or {}).items()},
             **_EVOLUTION_KWARG,
         )
         _unfreeze_personality(soul)
@@ -92,13 +93,30 @@ def _unfreeze_personality(soul: object) -> None:
 
 
 # OCEAN letters (the contract's citizen shape) -> soul-protocol trait names.
-_OCEAN_FIELDS = {
+OCEAN_FIELDS = {
     "O": "openness",
     "C": "conscientiousness",
     "E": "extraversion",
     "A": "agreeableness",
     "N": "neuroticism",
 }
+
+
+async def awaken(path: Path) -> object:
+    """Open a citizen soul with its personality unfrozen.
+
+    EVERY path that opens a citizen soul goes through here, not through
+    ``Soul.awaken`` directly. ``birth_soul`` unfreezes what it mints, but a soul
+    minted anywhere else — an older archive, a kernel that called ``Soul.birth``
+    with the defaults — arrives with "personality" still immutable and would
+    fork into a clone. Repairing on the way in makes that impossible to forget,
+    and ``remember_tick`` saves the repair back to the file.
+    """
+    from soul_protocol import Soul
+
+    soul = await Soul.awaken(path)
+    _unfreeze_personality(soul)
+    return soul
 
 
 async def recall_for_tick(soul_path: str | None, query: str) -> list[str]:
@@ -109,9 +127,7 @@ async def recall_for_tick(soul_path: str | None, query: str) -> list[str]:
     if not path.exists():
         return []
     try:
-        from soul_protocol import Soul
-
-        soul = await Soul.awaken(path)
+        soul = await awaken(path)
         entries = await soul.recall(query, limit=_RECALL_LIMIT)
         return [str(e.content) for e in entries]
     except Exception:  # noqa: BLE001 — soul failures must never wedge a tick
@@ -130,9 +146,9 @@ async def remember_tick(soul_path: str | None, summary: str) -> bool:
     if not path.exists():
         return False
     try:
-        from soul_protocol import MemoryType, Soul
+        from soul_protocol import MemoryType
 
-        soul = await Soul.awaken(path)
+        soul = await awaken(path)
         await soul.remember(summary.strip(), type=MemoryType.EPISODIC, importance=6)
         await soul.save_local(path)
         return True
@@ -141,4 +157,4 @@ async def remember_tick(soul_path: str | None, summary: str) -> bool:
         return False
 
 
-__all__ = ["birth_soul", "recall_for_tick", "remember_tick"]
+__all__ = ["OCEAN_FIELDS", "awaken", "birth_soul", "recall_for_tick", "remember_tick"]

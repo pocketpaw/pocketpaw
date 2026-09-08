@@ -58,6 +58,50 @@ async def test_a_seeded_citizen_can_drift_when_it_forks(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_soul_born_by_the_seeding_path_is_unfrozen_on_disk(tmp_path):
+    """The end-to-end pin, and the one that runs today.
+
+    The fork test above is skipped until ``Soul.fork`` reaches the published
+    floor, so nothing was checking that the repair SURVIVES ``save_local`` — a
+    soul unfrozen only in memory would look identical here and fork into a clone
+    the moment fork lands. Mutation: drop the ``_unfreeze_personality(soul)``
+    call from ``birth_soul``.
+    """
+    did = await soul_link.birth_soul(
+        tmp_path / "orin.soul",
+        name="Orin",
+        role="the digger",
+        ocean={"O": 0.5, "C": 0.8, "E": 0.4, "A": 0.6, "N": 0.3},
+        values=["work"],
+        world_brief="You woke in the dust.",
+    )
+    assert did, "seeding a citizen must mint a soul"
+
+    # RAW awaken on purpose. soul_link.awaken repairs on the way in, so
+    # reading through it would pass on a soul that was saved frozen — this has to
+    # see the bytes birth left behind.
+    soul = await soul_protocol.Soul.awaken(tmp_path / "orin.soul")
+    assert "personality" not in soul._evolution.config.immutable_traits
+
+
+@pytest.mark.asyncio
+async def test_awaken_repairs_a_soul_that_was_born_frozen_elsewhere(tmp_path):
+    """``birth_soul`` is not the only way a citizen soul comes into being — a
+    kernel calling ``Soul.birth`` with the defaults produces a frozen one. Every
+    terrarium read and write opens souls through ``soul_link.awaken``, which
+    repairs on the way in. Mutation: drop the unfreeze call from ``awaken``.
+    """
+    soul = await soul_protocol.Soul.birth(name="Sabe", role="the keeper", values=["counts"])
+    await soul.save_local(tmp_path / "sabe.soul")
+    assert "personality" in soul._evolution.config.immutable_traits, (
+        "this test is only meaningful while soul-protocol freezes personality by default"
+    )
+
+    reopened = await soul_link.awaken(tmp_path / "sabe.soul")
+    assert "personality" not in reopened._evolution.config.immutable_traits
+
+
+@pytest.mark.asyncio
 async def test_unfreeze_is_repaired_even_when_birth_ignores_the_kwarg(tmp_path):
     """Older published soul-protocol WARNS on an unknown kwarg instead of raising,
     so passing ``evolution=`` is not enough on its own. The repair must stand alone."""

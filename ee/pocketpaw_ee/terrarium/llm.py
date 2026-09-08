@@ -21,6 +21,10 @@
 # fans out one call PER CITIZEN: an accidental real-model tick on a 50-citizen
 # universe is a bill, not a warning.
 #
+# A descendant's prompt carries ONE extra line: how its OCEAN differs from its
+# parent's, in drift widths, rendered by Foresight's ``OceanDrift``. The service
+# computes it (it needs the parent's document) and passes ``drift_line`` down.
+#
 # Nothing the model returns is trusted. ``world.apply_acts`` re-validates every
 # act against balance, allowed verbs and held tech before anything mutates.
 
@@ -257,6 +261,8 @@ def build_prompt(
     physics: PhysicsFile,
     citizen: CitizenSnapshot,
     digest: SenseDigest,
+    *,
+    drift_line: str = "",
 ) -> str:
     """Assemble the single judgment prompt for one citizen's tick.
 
@@ -264,6 +270,10 @@ def build_prompt(
     separate and labelled: the citizen is told, in the prompt, that the second
     is unverified and checkable against the first. That is the anti-cascade
     rule stated to the model as well as enforced in code.
+
+    ``drift_line`` is how this citizen's temperament differs from its parent's
+    ("slightly more open; noticeably less agreeable"). It is ONE sentence and
+    empty for a founder, which is the whole cost of making a lineage audible.
     """
     tree_lines = (
         "\n".join(
@@ -278,11 +288,14 @@ def build_prompt(
     weather = "\n".join(f"- {w}" for w in digest.weather) or "(the sky is quiet)"
     claims = "\n".join(f"- {c}" for c in digest.viewer_claims) or "(no outside voice spoke)"
     memories = "\n".join(f"- {m}" for m in digest.memories) or "(you remember nothing yet)"
+    lineage = (
+        f"\nCompared with the parent you came from, you are {drift_line}.\n" if drift_line else ""
+    )
 
     return f"""You are {citizen.name}{", " + citizen.role if citizen.role else ""}, a citizen of \
 {physics.universe}. You are alive in this world, not working for anyone. You act by choosing \
 VERBS, and every verb costs credits you do not have many of.
-
+{lineage}
 == WHERE YOU WOKE ==
 {physics.world_brief.strip() or "(no brief was written for this world)"}
 
@@ -362,6 +375,8 @@ async def decide_tick(
     citizen: CitizenSnapshot,
     digest: SenseDigest,
     llm: CitizenLlm | None = None,
+    *,
+    drift_line: str = "",
 ) -> Decision:
     """ONE judgment call for one citizen's tick.
 
@@ -370,7 +385,7 @@ async def decide_tick(
     than wedging the whole universe's tick on one bad response.
     """
     llm = llm or resolve_llm()
-    prompt = build_prompt(physics, citizen, digest)
+    prompt = build_prompt(physics, citizen, digest, drift_line=drift_line)
     try:
         raw = await llm.decide(prompt=prompt, physics=physics, citizen=citizen, digest=digest)
         return parse_decision(raw)
