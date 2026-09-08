@@ -1,7 +1,24 @@
 # ee/pocketpaw_ee/sites/cloudflare_client.py — async Cloudflare API client for
 # the Sites control plane. Six surfaces:
 #   * Workers for Platforms — PUT a user Worker into our dispatch namespace
-#     (one synchronous call per site; live on 200; no per-account script cap).
+#     (one synchronous call per site; live on 200; no per-account script cap),
+#     and DELETE it again on teardown; see put_worker / delete_worker.
+#
+# Updated 2026-09-08 (sites lifecycle, wave 1 chunk 1 — the teardown primitives):
+# added ``delete_worker``, ``delete_account_script`` and ``delete_database``. Deleting
+# a site had no way to remove the two most expensive things a publish creates: the
+# Worker that serves it and the D1 that holds its data. Only the custom hostname and
+# its route could be torn down, so every other resource was an orphan by construction.
+#
+# THERE ARE TWO WORKER DELETES BECAUSE THERE ARE TWO WORKER CREATES. ``wfp`` mode
+# uploads into the dispatch namespace through ``put_worker`` here; ``workers`` mode
+# deploys an account-level script through a ``bunx wrangler deploy`` SUBPROCESS in
+# ``workers_deploy.py``. They live at different API paths, so one delete cannot serve
+# both, and ``Site.deploy_target`` — which records what the last successful deploy
+# ACTUALLY used rather than what the env is configured for — is what picks between
+# them. Both are implemented against the HTTP API rather than ``wrangler delete``:
+# a teardown driven through a subprocess can only be proven against the real binary,
+# and an API call can be proven against the real resource.
 #   * Cloudflare for SaaS — create a custom hostname, return the single CNAME
 #     the client pastes, poll validation + TLS status, and delete it on teardown.
 #   * Worker routes — bind ``<custom hostname>/*`` to the site's Worker, and
@@ -374,6 +391,55 @@ class CloudflareClient:
         self._unwrap(resp)
         return True
 
+    async def delete_worker(self, script_name: str) -> None:
+        """Remove a user Worker from the dispatch namespace. Idempotent on a 404.
+
+        The inverse of ``put_worker``, and the step in a site teardown that actually
+        stops the page being served: the custom hostname and its route only decide
+        HOW a request reaches this script, so removing them leaves the site reachable
+        on its dispatch address. Nothing deleted a Worker before this existed, which
+        is why a site published under ``wfp`` kept serving after every other trace of
+        it was gone.
+
+        A 404 is SUCCESS, for the same reason it is in ``delete_custom_hostname``:
+        the goal is "this script is not in the namespace", and something already gone
+        satisfies it. Raising there would make a resumed teardown fail on the step it
+        had already completed — turning a recoverable partial teardown into a
+        permanent orphan, which is precisely what this method exists to prevent."""
+        url = (
+            f"{_CF_API}/accounts/{self._account_id}"
+            f"/workers/dispatch/namespaces/{self._namespace}/scripts/{script_name}"
+        )
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
+
+    async def delete_account_script(self, script_name: str) -> None:
+        """Remove an ACCOUNT-LEVEL Worker script (the ``workers`` deploy mode).
+
+        Sibling of ``delete_worker``, and the difference is the deploy mode, not the
+        caller's preference. ``wfp`` sites live in the dispatch namespace; ``workers``
+        sites were deployed by a ``bunx wrangler deploy`` subprocess to an
+        account-level script at a different API path. Read ``Site.deploy_target`` to
+        choose — it records what the last successful deploy actually did, and its own
+        field comment lists the several ways the configured mode and the deployed
+        reality drift apart.
+
+        Deliberately NOT implemented as ``wrangler delete``. The subprocess would need
+        a project directory that teardown does not have (the artifact may already be
+        purged), and a subprocess seam can only be honestly proven against the real
+        binary. One HTTP call has neither problem.
+
+        Idempotent on a 404, same reasoning as every other delete here."""
+        url = f"{_CF_API}/accounts/{self._account_id}/workers/scripts/{script_name}"
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
+
     async def create_custom_hostname(
         self, hostname: str, *, features: set[str] | None = None
     ) -> CustomHostname:
@@ -497,6 +563,31 @@ class CloudflareClient:
             resp = await client.post(url, json={"name": name})
         result = self._unwrap(resp)
         return result["uuid"]
+
+    async def delete_database(self, database_id: str) -> None:
+        """Destroy a per-tenant D1 database. Idempotent on a 404. IRREVERSIBLE.
+
+        The inverse of ``create_database``, and the only step in a site teardown that
+        destroys CUSTOMER DATA rather than infrastructure — a dynamic site's D1 holds
+        its bookings, submissions and orders alongside ``_paw_migrations`` /
+        ``_paw_handoffs`` / ``_paw_outbox``. There is no Cloudflare-side undelete and
+        no retention window, so the export that the delete cascade takes BEFORE
+        reaching this step is the only copy that survives it. Do not call this outside
+        that cascade, and do not reorder it ahead of the export.
+
+        Keyed on the database uuid rather than the name because the uuid is what
+        ``Site.d1_database_id`` stores and what the Worker binding points at; a name
+        lookup would be a second way to identify the same database, and the two can
+        disagree once a site is renamed.
+
+        A 404 is SUCCESS — the database is gone, which is the goal. A resumed teardown
+        re-running this step must not fail on it."""
+        url = f"{_CF_API}/accounts/{self._account_id}/d1/database/{database_id}"
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
 
     async def capture_screenshot(
         self,

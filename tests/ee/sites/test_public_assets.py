@@ -454,3 +454,93 @@ def test_the_video_cap_stays_under_the_adapters_in_memory_ceiling() -> None:
     from pocketpaw.uploads.s3 import _MEM_BUFFER_WARN_BYTES
 
     assert MAX_VIDEO_BYTES < _MEM_BUFFER_WARN_BYTES
+
+
+# ── purge: the teardown sweep (sites lifecycle, wave 1 chunk 1) ──────────
+
+
+async def _store_one(store, *, ws: str, pocket: str, name: str) -> str:
+    asset = await store.put(PNG, filename=name, workspace_id=ws, pocket_id=pocket)
+    return asset.key
+
+
+@pytest.mark.asyncio
+async def test_purge_removes_every_asset_for_the_site_and_counts_them(store) -> None:
+    st, adapter = store
+    await _store_one(st, ws="w1", pocket="p1", name="a.png")
+    await _store_one(st, ws="w1", pocket="p1", name="b.png")
+
+    assert await st.purge(workspace_id="w1", pocket_id="p1") == 2
+    assert adapter.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_purge_leaves_another_sites_assets_untouched(store) -> None:
+    st, adapter = store
+    await _store_one(st, ws="w1", pocket="p1", name="mine.png")
+    survivor = await _store_one(st, ws="w1", pocket="p2", name="theirs.png")
+
+    assert await st.purge(workspace_id="w1", pocket_id="p1") == 1
+    assert list(adapter.objects) == [survivor]
+
+
+@pytest.mark.asyncio
+async def test_purge_of_an_empty_prefix_is_a_no_op(store) -> None:
+    """A resumed teardown re-runs this step. Zero here means "already clean", and it
+    must not raise."""
+    st, _ = store
+    assert await st.purge(workspace_id="w1", pocket_id="never-published") == 0
+
+
+@pytest.mark.asyncio
+async def test_purge_removes_an_asset_even_when_it_has_no_public_url() -> None:
+    """``list`` skips items it cannot build a URL for. ``purge`` must not.
+
+    This is the whole reason purge does not reuse list: an object we cannot address
+    is exactly one that must still be removed, and skipping it would leave bytes on a
+    world-readable bucket that nothing can ever enumerate again.
+    """
+    adapter = FakePublicAdapter(base=None)
+    st = PublicAssetStore(adapter)
+    # Seeded past put(), which refuses an adapter with no public_url by design.
+    adapter.objects[f"{prefix_for('w1', 'p1')}deadbeef-orphan.png"] = (PNG, "image/png")
+
+    assert await st.purge(workspace_id="w1", pocket_id="p1") == 1
+    assert adapter.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_purge_refuses_an_adapter_that_cannot_list_instead_of_reporting_zero() -> None:
+    """THE SILENT ZERO THIS METHOD EXISTS TO AVOID.
+
+    ``StorageAdapter.browse`` is a base-class no-op returning ``[]``, not an abstract
+    method. An adapter that never overrides it therefore looks exactly like a site
+    with no assets — so a purge built on the listing alone would delete nothing,
+    return 0, and let the delete cascade record a completed teardown over a bucket
+    still holding every asset, permanently public and no longer enumerable.
+    """
+    from pocketpaw.uploads.adapter import StorageAdapter
+
+    class Unlistable(StorageAdapter):
+        async def delete(self, key: str) -> None:  # pragma: no cover - never reached
+            raise AssertionError("purge must refuse before deleting anything")
+
+        def public_url(self, key: str) -> str | None:
+            return f"{BASE}/{key}"
+
+    st = PublicAssetStore(Unlistable())
+    assert st.can_list() is False
+    with pytest.raises(PublicAssetError):
+        await st.purge(workspace_id="w1", pocket_id="p1")
+
+
+@pytest.mark.asyncio
+async def test_an_adapter_with_no_browse_attribute_also_cannot_list() -> None:
+    """A duck-typed adapter (not a StorageAdapter subclass) with no ``browse`` at all
+    must read as "cannot list" rather than crashing the capability check."""
+
+    class NoBrowse:
+        def public_url(self, key: str) -> str | None:
+            return None
+
+    assert PublicAssetStore(NoBrowse()).can_list() is False
