@@ -16,7 +16,7 @@ costs:
   build: 20
   explore: 6
   spawn: 150
-verbs: [speak, write, trade, craft, build, explore, spawn, vote]
+verbs: [speak, write, trade, craft, build, explore, spawn, vote, design]
 raids: false
 chat:
   open: true

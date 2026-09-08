@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 # The fixed verb set. A physics file may narrow it, never widen it.
 KNOWN_VERBS: tuple[str, ...] = (
@@ -38,6 +38,7 @@ KNOWN_VERBS: tuple[str, ...] = (
     "explore",
     "spawn",
     "vote",
+    "design",
 )
 
 Rung = Literal["camp", "town", "nation", "planet", "multiverse"]
@@ -67,6 +68,15 @@ class Costs(BaseModel):
     build: int = 20
     explore: int = 6
     spawn: int = 150
+    # ``design`` (a citizen drawing its own building) rides the craft price when
+    # a physics file predates the verb, so old files keep working unchanged.
+    design: int | None = None
+
+    @model_validator(mode="after")
+    def _design_defaults_to_craft(self) -> Costs:
+        if self.design is None:
+            self.design = self.craft
+        return self
 
 
 class ChatRules(BaseModel):

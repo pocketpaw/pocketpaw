@@ -20,18 +20,28 @@
 #   * ``apply_acts`` re-validates every act server-side against the citizen's
 #     balance, the physics verb list, and the tech tree. The model is never
 #     trusted: an act it cannot afford or has not unlocked is DROPPED, not run.
+#   * ``design`` is the first GRANTED verb: only a citizen holding ``workshop``
+#     may draw a building, the drawing is validated against ``design.py`` (the
+#     frontend's schema), and an invalid one is dropped unpaid. A later
+#     ``build`` may name a design it owns (``Act.design_id``) so the frontend
+#     draws the citizen's own building; the service checks the ownership.
 
 """The pure terrarium world engine: verbs, tech gating, and the write-policy."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from pocketpaw_ee.terrarium.design import DesignError, validate_design
 from pocketpaw_ee.terrarium.physics import PhysicsFile
+
+# The tech node that grants ``design``.
+DESIGN_TECH = "workshop"
 
 # Verb -> Journal event kind. ``speak`` reads as ``say`` on the wire (the
 # contract's kind list), so the mapping is explicit rather than implied.
@@ -44,6 +54,7 @@ VERB_TO_KIND: dict[str, str] = {
     "explore": "explore",
     "spawn": "gate",
     "vote": "vote",
+    "design": "design",
 }
 
 # Verbs that leave an Artifact behind, and the artifact kind each produces.
@@ -51,6 +62,7 @@ VERB_ARTIFACT_KIND: dict[str, str] = {
     "write": "book",
     "craft": "tool",
     "build": "structure",
+    "design": "design",
 }
 
 
@@ -68,6 +80,10 @@ class Act(BaseModel):
     node: str | None = None
     to: str | None = None
     amount: int = 0
+    # ``design``: the design JSON for a ``design`` act (a JSON string in ``text``
+    # is accepted too). ``design_id``: for ``build``, a design this citizen owns.
+    design: dict[str, Any] | None = None
+    design_id: str | None = None
 
 
 class Decision(BaseModel):
@@ -155,6 +171,7 @@ class NewArtifact:
     x: float | None = None
     y: float | None = None
     unlocks: list[str] = field(default_factory=list)
+    design_id: str | None = None
 
 
 @dataclass
@@ -349,20 +366,54 @@ def apply_acts(
                 continue
             outcome.transfers.append((str(act.to), cost))
 
+        design = None
+        if verb == "design":
+            # Granted, not merely allowed: the physics may list the verb, but
+            # only a citizen holding the workshop may use it.
+            if DESIGN_TECH not in held:
+                outcome.dropped.append(f"design: needs {DESIGN_TECH} first")
+                continue
+            raw: Any = act.design
+            if raw is None and act.text.strip():
+                try:
+                    raw = json.loads(act.text)
+                except ValueError:
+                    raw = act.text
+            checked = validate_design(raw)
+            if isinstance(checked, DesignError):
+                # Never persisted, never charged: a design that does not
+                # validate is not a design.
+                outcome.dropped.append(f"design: {checked}")
+                continue
+            design = checked
+
         artifact_index: int | None = None
         if verb in VERB_ARTIFACT_KIND:
             unlocks = [act.node] if (verb == "build" and act.node) else []
             outcome.artifacts.append(
                 NewArtifact(
                     kind=VERB_ARTIFACT_KIND[verb],
-                    name=(act.name or act.text[:40] or verb).strip()[:120],
+                    name=(
+                        design.name
+                        if design is not None
+                        else (act.name or act.text[:40] or verb).strip()[:120]
+                    ),
                     author=citizen.name,
                     cost=cost,
-                    body=act.text,
-                    mime="text/markdown" if verb in {"write"} else None,
+                    body=design.canonical() if design is not None else act.text,
+                    mime=(
+                        "text/markdown"
+                        if verb == "write"
+                        else "application/json"
+                        if verb == "design"
+                        else None
+                    ),
                     x=citizen.x if verb == "build" else None,
                     y=citizen.y if verb == "build" else None,
                     unlocks=unlocks,
+                    # The service verifies the design exists and is this
+                    # citizen's own; a foreign or missing one is cleared there.
+                    design_id=act.design_id if verb == "build" else None,
                 )
             )
             artifact_index = len(outcome.artifacts) - 1
@@ -401,6 +452,8 @@ def apply_acts(
             continue
 
         body = (act.text or act.name or verb).strip()[:600]
+        if design is not None:
+            body = f"{citizen.name} designed {design.name}"
         if verb == "build" and act.node:
             body = f"built {act.node}" + (f" — {body}" if body and body != verb else "")
         outcome.events.append(
@@ -605,6 +658,7 @@ def rung_for(pop: int, unlocked: int) -> str:
 
 
 __all__ = [
+    "DESIGN_TECH",
     "MOMENT_KIND_RANK",
     "MOMENT_RADIUS",
     "VERB_ARTIFACT_KIND",

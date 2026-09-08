@@ -40,7 +40,7 @@ UniverseStatus = Literal["running", "dormant", "paused", "archived"]
 CitizenState = Literal["alive", "hibernating"]
 Trend = Literal["up", "down", "flat"]
 EventOrigin = Literal["citizen", "viewer", "system"]
-ArtifactKind = Literal["structure", "tool", "book", "law", "map"]
+ArtifactKind = Literal["structure", "tool", "book", "law", "map", "design"]
 ArtifactStage = Literal["done", "building"]
 
 # Every kind the Journal projection can carry (the contract's ONE event shape).
@@ -53,6 +53,7 @@ EVENT_KINDS: tuple[str, ...] = (
     "build",
     "explore",
     "vote",
+    "design",
     "spawn",
     "gate",
     "hibernate",
@@ -194,7 +195,7 @@ class ArtifactDoc(TimestampedDocument):
     """What a write / craft / build verb left behind.
 
     ``file_id`` points into the /files surface for payload-bearing artifacts
-    (books, laws, maps); structures carry None. ``unlocks`` names the tech-tree
+    (books, laws, maps, designs); structures carry None. ``unlocks`` names the tech-tree
     node this artifact completed, if any.
     """
 
@@ -212,6 +213,8 @@ class ArtifactDoc(TimestampedDocument):
     unlocks: list[str] = Field(default_factory=list)
     stage: ArtifactStage = "done"
     body: str = ""
+    # A structure raised from a citizen's own ``design`` artifact; None otherwise.
+    design_id: str | None = None
 
     class Settings:
         name = "terrarium_artifacts"

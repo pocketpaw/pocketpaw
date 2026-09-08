@@ -237,6 +237,7 @@ def artifact_wire(doc: ArtifactDoc) -> dict[str, Any]:
         "y": doc.y,
         "unlocks": doc.unlocks,
         "stage": doc.stage,
+        "design_id": doc.design_id,
     }
 
 
@@ -906,7 +907,7 @@ async def _land_tick(
 
 # Artifact kinds that carry a readable payload. Structures and tools are things
 # on the map, not documents.
-_FILE_BEARING_KINDS = frozenset({"book", "law", "map"})
+_FILE_BEARING_KINDS = frozenset({"book", "law", "map", "design"})
 
 
 async def _land_artifact_file(uni: UniverseDoc, user_id: str, art: Any) -> str | None:
@@ -926,18 +927,42 @@ async def _land_artifact_file(uni: UniverseDoc, user_id: str, art: Any) -> str |
             "".join(ch if ch.isalnum() or ch in "-_ " else "-" for ch in art.name).strip()
             or "artifact"
         )
+        if art.kind == "design":
+            # The canonical JSON itself: the frontend's renderer reads it as-is.
+            filename, content, mime = f"{safe}.json", art.body, "application/json"
+        else:
+            filename = f"{safe}.md"
+            content = f"# {art.name}\n\n_{art.kind}, by {art.author}, day {uni.day}_\n\n{art.body}"
+            mime = "text/markdown"
         rec = await write_text_file(
             workspace_id=uni.workspace,
             owner_id=user_id,
             folder_path=f"/terrarium/{uni.name}",
-            filename=f"{safe}.md",
-            content=f"# {art.name}\n\n_{art.kind}, by {art.author}, day {uni.day}_\n\n{art.body}",
-            mime="text/markdown",
+            filename=filename,
+            content=content,
+            mime=mime,
         )
         return str(rec.id)
     except Exception:  # noqa: BLE001 — best-effort, the doc keeps the body inline
         logger.warning("terrarium: could not land artifact %r in /files", art.name, exc_info=True)
         return None
+
+
+async def _owned_design(universe_id: str, author: str, design_id: str | None) -> str | None:
+    """The ``design_id`` a structure may carry: only a ``design`` artifact in
+    this universe authored by this citizen. A foreign, missing or malformed id
+    is ignored and the structure is built plain — the reference is a courtesy
+    to the renderer, never a claim the model gets to make about another
+    citizen's work."""
+    if not design_id:
+        return None
+    try:
+        art = await ArtifactDoc.get(design_id)
+    except Exception:  # noqa: BLE001 — a non-ObjectId string is "no such design"
+        return None
+    if art is None or art.universe_id != universe_id or art.kind != "design":
+        return None
+    return design_id if art.author == author else None
 
 
 async def _persist_outcome(
@@ -962,6 +987,7 @@ async def _persist_outcome(
         # body stays on the doc too (the contract keeps it); the file is how
         # humans read it. Best-effort: a files failure must never wedge a tick.
         file_id = await _land_artifact_file(uni, user_id, art)
+        design_id = await _owned_design(universe_id, doc.name, art.design_id)
         a = ArtifactDoc(
             workspace=uni.workspace,
             universe_id=universe_id,
@@ -970,13 +996,14 @@ async def _persist_outcome(
             author=art.author,
             day=uni.day,
             cost=art.cost,
-            mime=art.mime if file_id is None else "text/markdown",
+            mime=art.mime if file_id is None else (art.mime or "text/markdown"),
             x=art.x,
             y=art.y,
             unlocks=art.unlocks,
             stage="done",
             body=art.body,
             file_id=file_id,
+            design_id=design_id,
         )
         await a.insert()
         artifact_ids.append(str(a.id))
@@ -996,6 +1023,7 @@ async def _persist_outcome(
             artifact_id=art_id,
             origin=ev.origin,
             viewer_origin=ev.viewer_origin,
+            data={"design_id": art_id} if ev.kind == "design" and art_id else None,
         )
         await _publish(uni, row)
         written.append(event_wire(row))

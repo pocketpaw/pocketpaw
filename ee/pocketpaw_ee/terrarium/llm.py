@@ -14,7 +14,8 @@
 #
 # The prompt is TWO blocks. ``build_prompt_parts`` returns a STABLE PREFIX
 # (world brief, constitution, charter, values and OCEAN, the drift line saying
-# how a descendant differs from its parent, verbs, costs, tech tree, rules) and a
+# how a descendant differs from its parent, verbs, costs, tech tree, rules, and
+# the DESIGN block a citizen sees only once it holds the workshop) and a
 # VOLATILE SUFFIX (ground truth, speech, artifacts, weather, outside voices,
 # memories). Both HTTP transports send them as two content blocks and mark the
 # prefix ``cache_control: ephemeral`` ONLY when it clears that model's minimum
@@ -43,8 +44,10 @@ from typing import Any, Protocol
 
 import httpx
 
+from pocketpaw_ee.terrarium.design import MAX_FEATURES, MAX_HEIGHT, MAX_PARTS, PALETTE
 from pocketpaw_ee.terrarium.physics import PhysicsFile
 from pocketpaw_ee.terrarium.world import (
+    DESIGN_TECH,
     Act,
     CitizenSnapshot,
     Decision,
@@ -642,6 +645,24 @@ def build_prompt_parts(
     lineage = (
         f"\nCompared with the parent you came from, you are {drift_line}.\n" if drift_line else ""
     )
+    # ``design`` is GRANTED by the workshop: a citizen without it never sees the
+    # verb, so the model cannot be tempted into an act the engine would drop.
+    may_design = "design" in physics.verbs and DESIGN_TECH in citizen.unlocked
+    verbs = [v for v in physics.verbs if v != "design" or may_design]
+    design_block = (
+        f"""
+== DESIGN (your workshop lets you draw a building of your own) ==
+Use verb "design" with "design" set to JSON: {{"version":1,"name":"<1-40 chars>",\
+"footprint":{{"w":1-3,"d":1-3}},"parts":[{{"kind":"box|prism|cylinder|cone","at":[x,y,z],\
+"size":[w,h,d],"color":"<palette name>","rotate":0|90|180|270,"features":[{{"kind":\
+"door|window|chimney|banner|lamp","face":"front|right","u":0-1,"v":0-1}}]}}]}}. Cells are \
+the unit; at most {MAX_PARTS} parts, {MAX_FEATURES} features per part, nothing taller than \
+{MAX_HEIGHT} cells, every part inside the footprint. Palette: {", ".join(PALETTE)}. A later \
+"build" may carry "design_id" of a design you own so the building is drawn your way.
+"""
+        if may_design
+        else ""
+    )
     prefix = f"""You are {citizen.name}{", " + citizen.role if citizen.role else ""}, a citizen of \
 {physics.universe}. You are alive in this world, not working for anyone. You act by choosing \
 VERBS, and every verb costs credits you do not have many of.
@@ -660,10 +681,10 @@ temperament (OCEAN): {json.dumps(citizen.ocean, sort_keys=True)}
 {json.dumps(list(physics.constitution), indent=2)}
 
 == VERBS THIS WORLD ALLOWS ==
-{json.dumps(physics.verbs)}
+{json.dumps(verbs)}
 costs: {json.dumps(physics.costs.model_dump())}
 Thinking already cost you {physics.costs.think} this tick.
-
+{design_block}
 == TECH TREE ==
 {tree_lines}
 To unlock a node, use verb "build" with "node" set to its name; you must already hold \
