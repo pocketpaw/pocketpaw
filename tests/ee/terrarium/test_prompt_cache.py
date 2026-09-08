@@ -61,7 +61,12 @@ def test_a_drift_line_lives_in_the_prefix():
     assert "slightly more open" in p
 
 
-async def _capture(model: str) -> dict:
+# Long enough to clear every model's minimum cacheable prefix, so a test about
+# the marker is not accidentally a test about the length gate.
+_LONG = "STABLE " * 3000
+
+
+async def _capture(model: str, prefix: str = _LONG) -> dict:
     seen: dict = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -81,7 +86,7 @@ async def _capture(model: str) -> dict:
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     llm = citizen_llm.MeteredLlm(citizen_llm.HttpLlm("k", model, client=client), model)
-    out = await llm.decide_parts("STABLE", "VOLATILE", physics=None, citizen=None, digest=None)  # type: ignore[arg-type]
+    out = await llm.decide_parts(prefix, "VOLATILE", physics=None, citizen=None, digest=None)  # type: ignore[arg-type]
     assert '"thought"' in out
     seen["meter"] = llm.meter.summary()
     return seen
@@ -90,7 +95,7 @@ async def _capture(model: str) -> dict:
 async def test_an_anthropic_model_marks_the_prefix_only():
     seen = await _capture("claude-sonnet-4-6")
     blocks = seen["body"]["messages"][0]["content"]
-    assert [b["text"] for b in blocks] == ["STABLE", "VOLATILE"]
+    assert [b["text"] for b in blocks] == [_LONG, "VOLATILE"]
     assert blocks[0]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in blocks[1]
 
@@ -98,7 +103,7 @@ async def test_an_anthropic_model_marks_the_prefix_only():
 async def test_a_non_anthropic_model_carries_no_marker():
     seen = await _capture("gpt-5-mini")
     blocks = seen["body"]["messages"][0]["content"]
-    assert [b["text"] for b in blocks] == ["STABLE", "VOLATILE"]
+    assert [b["text"] for b in blocks] == [_LONG, "VOLATILE"]
     assert not any("cache_control" in b for b in blocks)
 
 

@@ -35,10 +35,12 @@
 # costs, tech tree, rules — byte-identical for one citizen across ticks while
 # nothing about the citizen or the physics changes) and a VOLATILE SUFFIX
 # (ground truth, what was heard and built, weather, outside voices, memories).
-# ``HttpLlm`` sends them as two content blocks and, on a Claude model, marks
-# the prefix ``cache_control: ephemeral`` so the provider caches it; any other
-# model gets the same two blocks unmarked. Transports without ``decide_parts``
-# (the CLI, the mock, test fakes) get the joined string through ``decide``.
+# ``HttpLlm`` sends them as two content blocks and marks the prefix
+# ``cache_control: ephemeral`` ONLY when it clears that model's minimum
+# cacheable length (``MIN_CACHEABLE_TOKENS``) — under it the marker is a silent
+# no-op, so the same two blocks go unmarked and the meter records that no marker
+# was sent. Transports without ``decide_parts`` (the CLI, the mock, test fakes)
+# get the joined string through ``decide``.
 #
 # Nothing the model returns is trusted. ``world.apply_acts`` re-validates every
 # act against balance, allowed verbs and held tech before anything mutates.
@@ -127,17 +129,45 @@ class ClaudeCliLlm:
 
 
 _API_URL = "https://api.anthropic.com/v1/messages"
-_DEFAULT_MODEL = "claude-sonnet-4-6"
+_DEFAULT_MODEL = "claude-sonnet-5"
 # Physics tier -> model id. Unknown tiers fall back to the default.
 _MODEL_BY_TIER = {
-    "premium": "claude-sonnet-4-6",
-    "mid": "claude-sonnet-4-6",
+    "premium": "claude-opus-5",
+    "mid": "claude-sonnet-5",
     "tail": "claude-haiku-4-5",
 }
+
+# Characters per token — an APPROXIMATION, used wherever a real count would cost
+# a round trip: the cache-minimum check below, and the meter when a transport
+# reports no usage. Neither answer it feeds ("about $2 an hour", "is this prefix
+# long enough to cache") gets better for being exact.
+_CHARS_PER_TOKEN = 4
+
+# The shortest prefix each model will cache AT ALL, in tokens. Source: Anthropic
+# prompt-caching reference. The value is MODEL-DEPENDENT and NOT monotonic
+# across generations — the cheapest model has the LONGEST minimum, so a prefix
+# that caches on Opus can silently fail to cache on Haiku. Under the minimum the
+# provider does not error: ``cache_creation_input_tokens`` comes back 0 and the
+# whole prefix is billed at full input rate, every tick, forever.
+MIN_CACHEABLE_TOKENS: dict[str, int] = {
+    "claude-opus-5": 512,
+    "claude-sonnet-5": 1024,
+    "claude-sonnet-4-6": 1024,
+    "claude-haiku-4-5": 4096,
+}
+_DEFAULT_MIN_CACHEABLE_TOKENS = 1024  # a Claude model not in the table
 
 
 def model_for_tier(tier: str | None) -> str:
     return _MODEL_BY_TIER.get((tier or "").strip().lower(), _DEFAULT_MODEL)
+
+
+def cache_marker_fits(model: str, prefix: str) -> bool:
+    """Whether marking this prefix would actually buy a cache on this model."""
+    if not model.startswith("claude"):
+        return False
+    minimum = MIN_CACHEABLE_TOKENS.get(model, _DEFAULT_MIN_CACHEABLE_TOKENS)
+    return len(prefix) // _CHARS_PER_TOKEN >= minimum
 
 
 class HttpLlm:
@@ -154,11 +184,13 @@ class HttpLlm:
         self._client = client
 
     def _content(self, prefix: str, suffix: str) -> list[dict[str, Any]]:
-        """Two text blocks; the first carries the cache marker on Claude models."""
+        """Two text blocks; the first carries the cache marker only when it is
+        long enough for this model to cache. Under the minimum the marker buys
+        nothing, so the same two blocks go without it."""
         blocks: list[dict[str, Any]] = []
         if prefix:
             head: dict[str, Any] = {"type": "text", "text": prefix}
-            if self.model.startswith("claude"):
+            if cache_marker_fits(self.model, prefix):
                 head["cache_control"] = {"type": "ephemeral"}
             blocks.append(head)
         if suffix:
@@ -306,18 +338,20 @@ class MockLlm:
 # a wrong number rather than a missing one. Swap the import in when upstream
 # lands, keeping the fallback: this meter must never raise mid-tick.
 PRICING: dict[str, tuple[float, float]] = {
+    "claude-opus-5": (5.00, 25.00),
+    "claude-sonnet-5": (2.00, 10.00),
+    # Kept so a universe minted before the tier move still prices. Sonnet 4.6 is
+    # the DEARER Sonnet, which is why it also serves as the fallback: an
+    # unpriced model is over-stated, never flattered.
     "claude-sonnet-4-6": (3.00, 15.00),
     "claude-haiku-4-5": (1.00, 5.00),
 }
 _FALLBACK_PRICING_MODEL = "claude-sonnet-4-6"
 
-# Tokens are estimated from characters when the transport reports no usage: a
-# real count needs a round trip per call, and the answer this feeds ("about $2
-# an hour") does not improve for it. When the provider DOES report usage (the
-# Messages API does), its numbers win, and cached prefix reads are priced at
-# the cache-read rate. Cache writes (1.25x, once per prefix change) are priced
-# as plain input — a bound, not a discount, so the number never flatters.
-_CHARS_PER_TOKEN = 4
+# When the provider reports usage (the Messages API does), its numbers win over
+# the character estimate, and cached prefix reads are priced at the cache-read
+# rate. Cache writes (1.25x, once per prefix change) are priced as plain input —
+# a bound, not a discount, so the number never flatters.
 _CACHE_READ_RATE = 0.1
 
 
@@ -330,9 +364,22 @@ class CostMeter:
         self.input_tokens = 0
         self.output_tokens = 0
         self.cache_read_tokens = 0  # counted inside input_tokens, priced lower
+        # Was the prefix marked, and did the provider actually serve a cache?
+        # Marked calls with no reads is the failure this pair exists to make
+        # visible: a prefix under the model minimum caches nothing and says
+        # nothing about it.
+        self.cache_marked_calls = 0
 
-    def record(self, prompt: str, output: str, usage: dict[str, Any] | None = None) -> None:
+    def record(
+        self,
+        prompt: str,
+        output: str,
+        usage: dict[str, Any] | None = None,
+        *,
+        cache_marked: bool = False,
+    ) -> None:
         self.calls += 1
+        self.cache_marked_calls += 1 if cache_marked else 0
         if usage and "input_tokens" in usage:
             cached = int(usage.get("cache_read_input_tokens") or 0)
             self.input_tokens += (
@@ -360,6 +407,7 @@ class CostMeter:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cache_read_tokens": self.cache_read_tokens,
+            "cache_marked_calls": self.cache_marked_calls,
             "cost_usd": round(self.cost_usd, 6),
         }
 
@@ -368,6 +416,7 @@ class CostMeter:
         per tick over a multi-tick call never counts the same call twice."""
         out = self.summary()
         self.calls = self.input_tokens = self.output_tokens = self.cache_read_tokens = 0
+        self.cache_marked_calls = 0
         return out
 
 
@@ -412,7 +461,8 @@ class MeteredLlm:
         call = getattr(self.inner, "call", None)
         if call is not None:
             out, usage = await call(prefix, suffix)
-            self.meter.record(prefix + suffix, out, usage)
+            marked = cache_marker_fits(getattr(self.inner, "model", ""), prefix)
+            self.meter.record(prefix + suffix, out, usage, cache_marked=marked)
             return out
         return await self.decide(
             prompt=prefix + suffix, physics=physics, citizen=citizen, digest=digest
@@ -598,6 +648,7 @@ async def decide_tick(
 
 
 __all__ = [
+    "MIN_CACHEABLE_TOKENS",
     "PRICING",
     "Act",
     "ClaudeCliLlm",
@@ -608,6 +659,7 @@ __all__ = [
     "MockLlm",
     "build_prompt",
     "build_prompt_parts",
+    "cache_marker_fits",
     "decide_tick",
     "parse_decision",
     "resolve_llm",

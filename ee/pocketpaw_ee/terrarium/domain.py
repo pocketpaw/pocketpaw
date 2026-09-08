@@ -103,7 +103,8 @@ class UniverseDoc(TimestampedDocument):
     last_tick_at: datetime | None = None
     last_viewed_at: datetime | None = None
     # What this world has cost to run: the running ``llm.CostMeter`` summary
-    # (model, calls, tokens, cost_usd, cost_per_call), accrued once per tick.
+    # (model, calls, tokens, cache_marked_calls, cost_usd, cost_per_call),
+    # accrued once per tick.
     # It is NOT on the wire — the model name is internal, the same reason
     # ``public_universe_wire`` strips ``physics.models``. Only the derived
     # ``cost_per_watched_hour`` crosses.

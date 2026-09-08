@@ -126,6 +126,19 @@ def cost_per_watched_hour(doc: UniverseDoc, pop: int) -> float:
     return round(per_call * calls_per_hour, 2)
 
 
+def caching_engaged(doc: UniverseDoc) -> bool:
+    """Is the prompt cache actually doing anything for this world?
+
+    True only when a prefix was MARKED and the provider then served a cache
+    read. A prefix under the model's minimum cacheable length is not an error —
+    it silently caches nothing — so a world that marks every prefix and never
+    reads one back pays full input rate forever. This is that failure, on the
+    wire, instead of buried in the bill.
+    """
+    cost = doc.cost or {}
+    return bool(cost.get("cache_marked_calls")) and bool(cost.get("cache_read_tokens"))
+
+
 def _accrue_cost(uni: UniverseDoc, llm: Any) -> None:
     """Fold this tick's metering into the universe's running total."""
     meter = getattr(llm, "meter", None)
@@ -133,7 +146,13 @@ def _accrue_cost(uni: UniverseDoc, llm: Any) -> None:
         return
     tick_cost = meter.drain()
     total = dict(uni.cost or {})
-    for key in ("calls", "input_tokens", "output_tokens", "cache_read_tokens"):
+    for key in (
+        "calls",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_marked_calls",
+    ):
         total[key] = int(total.get(key, 0)) + int(tick_cost.get(key, 0))
     total["cost_usd"] = round(float(total.get("cost_usd", 0.0)) + tick_cost["cost_usd"], 6)
     total["model"] = tick_cost["model"]
@@ -157,6 +176,7 @@ def universe_wire(doc: UniverseDoc, *, pop: int = 0) -> dict[str, Any]:
         "created_at": doc.createdAt.isoformat() if doc.createdAt else None,
         "creator": doc.creator,
         "cost_per_watched_hour": cost_per_watched_hour(doc, pop),
+        "caching_engaged": caching_engaged(doc),
     }
 
 
