@@ -110,8 +110,8 @@
   {
     "label": "the meter is replaced each tick instead of accrued, so cost never adds up",
     "file": "ee/pocketpaw_ee/terrarium/service.py",
-    "find": "        total[key] = int(total.get(key, 0)) + int(tick_cost[key])",
-    "replace": "        total[key] = int(tick_cost[key])",
+    "find": "        total[key] = int(total.get(key, 0)) + int(tick_cost.get(key, 0))",
+    "replace": "        total[key] = int(tick_cost.get(key, 0))",
     "tests": [
       "tests/ee/terrarium/test_cost.py"
     ]
@@ -119,8 +119,8 @@
   {
     "label": "the public events route ignores the kind filter and hands back everything",
     "file": "ee/pocketpaw_ee/terrarium/service.py",
-    "find": "    return await _events_page(universe_id, since, limit, kind)",
-    "replace": "    return await _events_page(universe_id, since, limit)",
+    "find": "        universe_id, since, limit, kind, max_seq=uni.seq - public_delay_events()\n",
+    "replace": "        universe_id, since, limit, max_seq=uni.seq - public_delay_events()\n",
     "tests": [
       "tests/ee/terrarium/test_public_surface.py"
     ]
@@ -137,10 +137,82 @@
   {
     "label": "the kind is validated BEFORE the gates, so a 400 confirms a hidden universe",
     "file": "ee/pocketpaw_ee/terrarium/service.py",
-    "find": "    await _touch_viewed(await _public_universe(universe_id))\n    if kind is not None and kind not in EVENT_KINDS:\n        raise BadRequest(\"terrarium.bad_event_kind\", f\"no such event kind: {kind!r}\")",
-    "replace": "    if kind is not None and kind not in EVENT_KINDS:\n        raise BadRequest(\"terrarium.bad_event_kind\", f\"no such event kind: {kind!r}\")\n    await _touch_viewed(await _public_universe(universe_id))",
+    "find": "    uni = await _public_universe(universe_id)\n    await _touch_viewed(uni)\n    if kind is not None and kind not in EVENT_KINDS:\n        raise BadRequest(\"terrarium.bad_event_kind\", f\"no such event kind: {kind!r}\")",
+    "replace": "    if kind is not None and kind not in EVENT_KINDS:\n        raise BadRequest(\"terrarium.bad_event_kind\", f\"no such event kind: {kind!r}\")\n    uni = await _public_universe(universe_id)\n    await _touch_viewed(uni)",
     "tests": [
       "tests/ee/terrarium/test_public_surface.py"
+    ]
+  },
+  {
+    "label": "the inbound filter is bypassed, so a viewer slur lands in the Journal",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    if not moderation.allowed(body):\n        raise ValidationError(\"terrarium.line_rejected\"",
+    "replace": "    if False:\n        raise ValidationError(\"terrarium.line_rejected\"",
+    "tests": [
+      "tests/ee/terrarium/test_moderation.py"
+    ]
+  },
+  {
+    "label": "the outbound check is skipped, so a citizen slur is served as written",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    if kind in moderation.MODERATED_KINDS and not moderation.allowed(body):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/terrarium/test_moderation.py"
+    ]
+  },
+  {
+    "label": "the public buffer is zero, so a stranger reads the live edge",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        universe_id, since, limit, kind, max_seq=uni.seq - public_delay_events()\n",
+    "replace": "        universe_id, since, limit, kind, max_seq=uni.seq\n",
+    "tests": [
+      "tests/ee/terrarium/test_kill_switch.py"
+    ]
+  },
+  {
+    "label": "the sweep ignores pause and ticks a paused world",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    docs = await UniverseDoc.find({\"status\": {\"$in\": [\"running\", \"dormant\"]}}).to_list()",
+    "replace": "    docs = await UniverseDoc.find(\n        {\"status\": {\"$in\": [\"running\", \"dormant\", \"paused\"]}}\n    ).to_list()",
+    "tests": [
+      "tests/ee/terrarium/test_kill_switch.py"
+    ]
+  },
+  {
+    "label": "a paused world is still served on the public surface",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    if doc is None or not doc.public or doc.status == \"paused\":",
+    "replace": "    if doc is None or not doc.public:",
+    "tests": [
+      "tests/ee/terrarium/test_kill_switch.py"
+    ]
+  },
+  {
+    "label": "the prefix is rebuilt with the digest inside it, so nothing caches",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "    prefix = f\"\"\"You are {citizen.name}",
+    "replace": "    prefix = f\"\"\"day {digest.day}. You are {citizen.name}",
+    "tests": [
+      "tests/ee/terrarium/test_prompt_cache.py"
+    ]
+  },
+  {
+    "label": "the cache marker is put on every model, not just Claude",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "            if self.model.startswith(\"claude\"):",
+    "replace": "            if True:",
+    "tests": [
+      "tests/ee/terrarium/test_prompt_cache.py"
+    ]
+  },
+  {
+    "label": "cache reads are priced at the full input rate",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "_CACHE_READ_RATE = 0.1",
+    "replace": "_CACHE_READ_RATE = 1.0",
+    "tests": [
+      "tests/ee/terrarium/test_prompt_cache.py"
     ]
   }
 ]
