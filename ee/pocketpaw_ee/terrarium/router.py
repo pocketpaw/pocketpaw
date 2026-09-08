@@ -12,7 +12,14 @@
 #   public_router (prefix /terrarium/public) — ANONYMOUS, READ-ONLY. No auth, no
 #       license. This is a SECURITY BOUNDARY, so it is conservative on purpose:
 #         * it is dark unless ``TERRARIUM_PUBLIC_ENABLED`` is truthy. DEFAULT
-#           OFF — an operator has to turn it on deliberately.
+#           OFF — an operator has to turn it on deliberately. Read from the
+#           environment on EVERY request, so flipping it is live without a
+#           restart.
+#         * it serves the Journal ``TERRARIUM_PUBLIC_DELAY_EVENTS`` rows
+#           (default 20) behind the live edge; the universe wire reports the
+#           gap as ``public_lag``. Authenticated readers see everything.
+#         * a ``paused`` universe (``POST .../pause``, owner or admin) is the
+#           same flat 404 as a private one, and does not tick.
 #         * every route ALSO requires ``universe.public == true``, checked in
 #           the service at the lookup (``_public_universe``) so no handler can
 #           forget it. BOTH gates, never one.
@@ -38,6 +45,8 @@ from pocketpaw_ee.cloud._core.deps import (
 )
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.guards.deps import resolve_workspace_role
+from pocketpaw_ee.guards.rbac import WorkspaceRole
 from pocketpaw_ee.terrarium import service
 from pocketpaw_ee.terrarium.dto import CreateUniverseRequest, PledgeRequest, SpeakRequest
 
@@ -114,6 +123,36 @@ async def tick(
 ) -> dict[str, Any]:
     """Run N ticks. Manual trigger; a scheduler would use this same path."""
     return await service.tick(workspace_id, user_id, universe_id, n)
+
+
+def _is_admin(user: Any, workspace_id: str) -> bool:
+    return resolve_workspace_role(user, workspace_id).level >= WorkspaceRole.ADMIN.level
+
+
+@router.post("/universes/{universe_id}/pause")
+async def pause_universe(
+    universe_id: str,
+    user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """The kill switch. Owner (creator) or workspace admin: no ticks, dark in
+    public, until ``resume``."""
+    return await service.set_paused(
+        workspace_id, user_id, universe_id, paused=True, is_admin=_is_admin(user, workspace_id)
+    )
+
+
+@router.post("/universes/{universe_id}/resume")
+async def resume_universe(
+    universe_id: str,
+    user: Any = Depends(require_action_any_workspace("terrarium.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    return await service.set_paused(
+        workspace_id, user_id, universe_id, paused=False, is_admin=_is_admin(user, workspace_id)
+    )
 
 
 @router.get("/universes/{universe_id}/events")

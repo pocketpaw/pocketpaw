@@ -36,7 +36,7 @@ from pydantic import Field
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
-UniverseStatus = Literal["running", "dormant", "archived"]
+UniverseStatus = Literal["running", "dormant", "paused", "archived"]
 CitizenState = Literal["alive", "hibernating"]
 Trend = Literal["up", "down", "flat"]
 EventOrigin = Literal["citizen", "viewer", "system"]

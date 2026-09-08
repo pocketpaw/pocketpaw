@@ -70,6 +70,7 @@ async def test_flag_on_but_universe_private_is_still_a_404(client, monkeypatch):
 
 async def test_flag_on_and_universe_public_reads(client, monkeypatch):
     monkeypatch.setenv("TERRARIUM_PUBLIC_ENABLED", "1")
+    monkeypatch.setenv("TERRARIUM_PUBLIC_DELAY_EVENTS", "0")  # the buffer has its own test
     uni = create_universe(client, public=True, founders=2)
     client.post(f"/terrarium/universes/{uni['id']}/tick?n=1")
 
@@ -148,6 +149,7 @@ async def test_a_malformed_id_404s_rather_than_500s_on_the_public_surface(client
 
 async def test_the_moments_alias_returns_only_moments(client, monkeypatch):
     monkeypatch.setenv("TERRARIUM_PUBLIC_ENABLED", "1")
+    monkeypatch.setenv("TERRARIUM_PUBLIC_DELAY_EVENTS", "0")
     uni = create_universe(client, public=True, founders=3)
     client.post(f"/terrarium/universes/{uni['id']}/tick?n=2")
 

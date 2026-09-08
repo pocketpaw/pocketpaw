@@ -25,6 +25,9 @@
 #      write (``_append_event``); a failing one lands as ``[withheld]`` with
 #      ``data.withheld`` so seq and cost are unchanged. Viewer lines are checked
 #      BEFORE the write and rejected with a 422 instead.
+#   7. a ``paused`` universe never ticks (sweep and manual) and is a flat 404
+#      on the public surface; anonymous readers trail the live edge by
+#      ``TERRARIUM_PUBLIC_DELAY_EVENTS`` (default 20) Journal rows.
 
 """Terrarium service — persistence, souls, the gate and the bus."""
 
@@ -39,9 +42,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pocketpaw.security.rate_limiter import RateLimiter
+from pocketpaw.security.rate_limiter import RateLimiter  # type: ignore[import-untyped]
 from pocketpaw_ee.cloud._core.errors import (
     BadRequest,
+    Forbidden,
     NotFound,
     RateLimited,
     ValidationError,
@@ -226,8 +230,21 @@ _PUBLIC_UNIVERSE_DROP = {"creator", "physics"}
 _PUBLIC_CITIZEN_DROP = {"soul_path", "did", "parent_did"}
 
 
+_DEFAULT_PUBLIC_DELAY = 20
+
+
+def public_delay_events() -> int:
+    """How many Journal rows an anonymous reader trails the live edge by.
+    Read per request, so an operator can widen the gap without a restart."""
+    try:
+        return max(0, int(os.environ.get("TERRARIUM_PUBLIC_DELAY_EVENTS") or _DEFAULT_PUBLIC_DELAY))
+    except ValueError:
+        return _DEFAULT_PUBLIC_DELAY
+
+
 def public_universe_wire(doc: UniverseDoc, *, pop: int = 0) -> dict[str, Any]:
     wire = universe_wire(doc, pop=pop)
+    wire["public_lag"] = min(public_delay_events(), doc.seq)
     # The physics file is the universe's genome and is part of what makes a
     # public universe watchable, but the constitution + costs are all a viewer
     # needs — the model tiers are internal.
@@ -273,7 +290,7 @@ async def _public_universe(universe_id: str) -> UniverseDoc:
     """A universe on the anonymous surface. Fail-closed: the ``public`` flag is
     checked HERE, at the lookup, so no caller can forget it."""
     doc = await _get_universe_doc(universe_id)
-    if doc is None or not doc.public:
+    if doc is None or not doc.public or doc.status == "paused":
         raise NotFound("universe")
     return doc
 
@@ -565,8 +582,8 @@ async def tick(workspace_id: str, user_id: str, universe_id: str, n: int = 1) ->
     # which breaks ``?since=`` paging (contract invariant 1).
     async with _lock(universe_id):
         uni = await _universe(workspace_id, universe_id)
-        if uni.status == "archived":
-            raise BadRequest("terrarium.archived", "an archived universe does not tick")
+        if uni.status in ("archived", "paused"):
+            raise BadRequest(f"terrarium.{uni.status}", f"a {uni.status} universe does not tick")
         physics = physics_of(uni)
         # Bring-your-own-key: the workspace's key, via the ONE decrypting reader
         # in cloud.byok (the same store the rest of the product uses). No second
@@ -1037,10 +1054,16 @@ async def scheduler_sweep(now: datetime) -> list[dict[str, Any]]:
 
 
 async def _events_page(
-    universe_id: str, since: int, limit: int, kind: str | None = None
+    universe_id: str,
+    since: int,
+    limit: int,
+    kind: str | None = None,
+    max_seq: int | None = None,
 ) -> dict[str, Any]:
     limit = max(1, min(int(limit or 200), 500))
     query = [EventDoc.universe_id == universe_id, EventDoc.seq > int(since or 0)]
+    if max_seq is not None:
+        query.append(EventDoc.seq <= max_seq)
     if kind:
         query.append(EventDoc.kind == kind)
     docs = await EventDoc.find(*query).sort("+seq").limit(limit).to_list()
@@ -1183,6 +1206,27 @@ async def speak(workspace_id: str, user_id: str, universe_id: str, text: str) ->
     return {"event": event_wire(row)}
 
 
+async def set_paused(
+    workspace_id: str, user_id: str, universe_id: str, *, paused: bool, is_admin: bool
+) -> dict[str, Any]:
+    """The per-world kill switch. Owner (creator) or workspace admin only.
+
+    Paused: the sweep's status query never selects it, the manual tick
+    refuses, and ``_public_universe`` 404s it exactly like a private world.
+    Resume sets ``running``; the next sweep re-derives dormant if nobody is
+    watching.
+    """
+    async with _lock(universe_id):
+        uni = await _universe(workspace_id, universe_id)
+        if not is_admin and uni.creator != user_id:
+            raise Forbidden("terrarium.not_owner", "only the owner or an admin can do that")
+        if uni.status == "archived":
+            raise BadRequest("terrarium.archived", "an archived universe cannot be paused")
+        uni.status = "paused" if paused else "running"
+        await uni.save()
+    return {"universe": universe_wire(uni, pop=await _pop(universe_id))}
+
+
 async def get_weather(workspace_id: str, universe_id: str) -> dict[str, Any]:
     uni = await _universe(workspace_id, universe_id)
     return {"powers": weather.powers(uni.weather_pledges)}
@@ -1271,7 +1315,10 @@ async def _fire_weather(uni: UniverseDoc, kind: str, line: Any) -> None:
 
 
 async def public_list_universes() -> dict[str, Any]:
-    docs = await UniverseDoc.find(UniverseDoc.public == True).to_list()  # noqa: E712
+    docs = await UniverseDoc.find(
+        UniverseDoc.public == True,  # noqa: E712
+        UniverseDoc.status != "paused",
+    ).to_list()
     return {"universes": [public_universe_wire(d, pop=await _pop(str(d.id))) for d in docs]}
 
 
@@ -1295,10 +1342,16 @@ async def public_list_events(
     same flat 404 every other read is, or the error itself would confirm the
     universe exists.
     """
-    await _touch_viewed(await _public_universe(universe_id))
+    uni = await _public_universe(universe_id)
+    await _touch_viewed(uni)
     if kind is not None and kind not in EVENT_KINDS:
         raise BadRequest("terrarium.bad_event_kind", f"no such event kind: {kind!r}")
-    return await _events_page(universe_id, since, limit, kind)
+    # The delay buffer: a stranger reads ``buffer`` rows behind the live edge,
+    # which is the window an owner has to pause the world before a bad row is
+    # ever served anonymously.
+    return await _events_page(
+        universe_id, since, limit, kind, max_seq=uni.seq - public_delay_events()
+    )
 
 
 async def public_list_citizens(universe_id: str) -> dict[str, Any]:
@@ -1344,12 +1397,14 @@ __all__ = [
     "list_events",
     "list_universes",
     "pledge_weather",
+    "public_delay_events",
     "public_get_citizen",
     "public_get_universe",
     "public_list_artifacts",
     "public_list_citizens",
     "public_list_events",
     "public_list_universes",
+    "set_paused",
     "soul_root",
     "speak",
     "tick",
