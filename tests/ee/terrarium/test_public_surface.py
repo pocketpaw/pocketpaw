@@ -205,3 +205,18 @@ async def test_a_bad_kind_on_a_hidden_universe_is_still_a_flat_404(client, monke
         client.get(f"/terrarium/public/universes/{uni['id']}/events?kind=nonsense").status_code
         == 404
     )
+
+
+async def test_the_public_artifact_wire_carries_exactly_the_contract_fields(client, monkeypatch):
+    """Additive fields (``design_id``) are on the wire; nothing else may appear
+    without a contract amendment and a change to this list."""
+    monkeypatch.setenv("TERRARIUM_PUBLIC_ENABLED", "1")
+    uni = create_universe(client, public=True, founders=1)
+    client.post(f"/terrarium/universes/{uni['id']}/tick?n=1")
+    arts = client.get(f"/terrarium/public/universes/{uni['id']}/artifacts").json()["artifacts"]
+    assert arts
+    expected = {
+        "id", "universe_id", "kind", "name", "author", "day", "cost", "file_id", "mime",
+        "x", "y", "unlocks", "stage", "design_id",
+    }  # fmt: skip
+    assert all(set(a) == expected for a in arts), [sorted(a) for a in arts]

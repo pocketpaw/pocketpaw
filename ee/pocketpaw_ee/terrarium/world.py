@@ -81,8 +81,10 @@ class Act(BaseModel):
     to: str | None = None
     amount: int = 0
     # ``design``: the design JSON for a ``design`` act (a JSON string in ``text``
-    # is accepted too). ``design_id``: for ``build``, a design this citizen owns.
-    design: dict[str, Any] | None = None
+    # is accepted too). ``Any`` on purpose: a malformed design is the
+    # validator's verdict to give, not a reason to lose the whole decision.
+    # ``design_id``: for ``build``, a design this citizen owns.
+    design: Any = None
     design_id: str | None = None
 
 

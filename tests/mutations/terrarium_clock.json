@@ -340,5 +340,41 @@
     "tests": [
       "tests/ee/terrarium/test_founder_cards.py"
     ]
+  },
+  {
+    "label": "the workshop gate on design is gone, so any citizen may draw",
+    "file": "ee/pocketpaw_ee/terrarium/world.py",
+    "find": "            if DESIGN_TECH not in held:\n                outcome.dropped.append(f\"design: needs {DESIGN_TECH} first\")\n                continue\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/terrarium/test_design.py"
+    ]
+  },
+  {
+    "label": "an invalid design is charged and persisted instead of dropped",
+    "file": "ee/pocketpaw_ee/terrarium/world.py",
+    "find": "                outcome.dropped.append(f\"design: {checked}\")\n                continue\n",
+    "replace": "                outcome.dropped.append(f\"design: {checked}\")\n",
+    "tests": [
+      "tests/ee/terrarium/test_design.py"
+    ]
+  },
+  {
+    "label": "a build accepts another citizen's design_id",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    return design_id if art.author == author else None",
+    "replace": "    return design_id",
+    "tests": [
+      "tests/ee/terrarium/test_design.py"
+    ]
+  },
+  {
+    "label": "a design's name skips the outbound moderation a book gets",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        if not (moderation.clean(art.name) and moderation.clean(art.body)):",
+    "replace": "        if art.kind != \"design\" and not (moderation.clean(art.name) and moderation.clean(art.body)):",
+    "tests": [
+      "tests/ee/terrarium/test_design.py"
+    ]
   }
 ]
