@@ -1197,11 +1197,11 @@ def mount_cloud(app: FastAPI) -> None:
     if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
         from pocketpaw_ee.terrarium import scheduler as _terrarium_clock
 
-        @app.on_event("startup")
+        @on_startup
         async def _start_terrarium_clock() -> None:
             await _terrarium_clock.reconcile_scheduler()
 
-        @app.on_event("shutdown")
+        @on_shutdown
         async def _stop_terrarium_clock() -> None:
             await _terrarium_clock.shutdown_scheduler()
 

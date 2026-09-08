@@ -143,29 +143,48 @@ async def test_scheduler_sweep_skips_archived(client):
 
 # --- the wiring, not just the logic --------------------------------------
 #
-# The clock was registered with `@app.on_event("startup")` inside mount_cloud,
-# which FastAPI silently drops when the app is built with a custom lifespan=
-# (this host's default). Every unit test passed and no universe ever ticked:
-# a local run sat at tick 0 through three sweep intervals. So the gate is not
-# "does the loop work" but "does anything actually start it".
+# The clock was registered with `@app.on_event("startup")`, which FastAPI
+# silently drops when the app is built with a custom lifespan= (this host's
+# default). Every unit test passed and no universe ever ticked. pocketpaw#2097
+# then fixed that generally: mount_cloud collects hooks through its own
+# `on_startup`/`on_shutdown` decorators and the composed lifespan drains them.
+#
+# So the gate is not "does the loop work" but "is the clock registered through
+# the mechanism that is actually drained". Registering it the old way again
+# would look fine and start nothing — which is exactly what a rebase onto that
+# fix nearly shipped.
 
 
-def test_the_cloud_lifecycle_hook_starts_and_stops_the_clock():
-    """The hook the OSS host really calls on startup must reference the clock.
+def test_the_clock_registers_through_the_drained_hook_list() -> None:
+    """mount_cloud must wire the clock with `on_startup`, not `@app.on_event`.
 
-    Mutation that must fail this: delete the reconcile_scheduler call from
-    CloudLifecycleHook.on_startup.
+    Mutation that must fail this: change the terrarium block back to
+    `@app.on_event("startup")`.
     """
     import inspect
 
-    from pocketpaw_ee.extensions import CloudLifecycleHook
+    from pocketpaw_ee import cloud
 
-    started = inspect.getsource(CloudLifecycleHook.on_startup)
-    stopped = inspect.getsource(CloudLifecycleHook.on_shutdown)
+    src = inspect.getsource(cloud.mount_cloud)
+    start = src.index("_start_terrarium_clock")
+    block = src[max(0, start - 400) : start + 200]
 
-    assert "terrarium.scheduler" in started or "terrarium import scheduler" in started, (
-        "nothing in the lifecycle hook starts the terrarium clock — "
-        "mount_cloud's on_event registration is dropped under FastAPI(lifespan=...)"
+    assert "@on_startup" in block, (
+        "the terrarium clock is not on the drained hook list — "
+        "@app.on_event handlers are collected and never run under a custom lifespan"
     )
-    assert "reconcile_scheduler" in started
-    assert "shutdown_scheduler" in stopped
+    assert "@app.on_event" not in block
+    assert "reconcile_scheduler" in block
+
+
+def test_the_clock_is_stopped_through_the_same_mechanism() -> None:
+    import inspect
+
+    from pocketpaw_ee import cloud
+
+    src = inspect.getsource(cloud.mount_cloud)
+    stop = src.index("_stop_terrarium_clock")
+    block = src[max(0, stop - 200) : stop + 200]
+
+    assert "@on_shutdown" in block
+    assert "shutdown_scheduler" in block
