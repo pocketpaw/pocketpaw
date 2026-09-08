@@ -4,20 +4,80 @@
     "file": "ee/pocketpaw_ee/cloud/__init__.py",
     "find": "        @on_startup\n        async def _start_terrarium_clock() -> None:",
     "replace": "        @app.on_event(\"startup\")\n        async def _start_terrarium_clock() -> None:",
-    "tests": ["tests/ee/terrarium/test_scheduler.py"]
+    "tests": [
+      "tests/ee/terrarium/test_scheduler.py"
+    ]
   },
   {
     "label": "child OCEAN shifted by one shared delta instead of drifting per trait",
     "file": "ee/pocketpaw_ee/terrarium/executor.py",
     "find": "        delta = (h / 0xFFFFFFFF) * 2 * width - width",
     "replace": "        delta = width",
-    "tests": ["tests/ee/terrarium/test_spawn_gate.py"]
+    "tests": [
+      "tests/ee/terrarium/test_spawn_gate.py"
+    ]
   },
   {
     "label": "rung ignores population, the bug that printed town above 5 souls",
     "file": "ee/pocketpaw_ee/terrarium/world.py",
     "find": "        if pop >= _RUNG_POP[rung] and unlocked >= _RUNG_TECH[rung]:",
     "replace": "        if unlocked >= _RUNG_TECH[rung]:",
-    "tests": ["tests/ee/terrarium/test_world.py"]
+    "tests": [
+      "tests/ee/terrarium/test_world.py"
+    ]
+  },
+  {
+    "label": "the fan-out's decisions are zipped back onto the citizens out of order",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    for (doc, snap, _digest), action in zip(rows, fanned):",
+    "replace": "    for (doc, snap, _digest), action in zip(rows, list(reversed(fanned))):",
+    "tests": [
+      "tests/ee/terrarium/test_concurrent_tick.py"
+    ]
+  },
+  {
+    "label": "every decision degrades to empty, so the fan-out's answers are thrown away",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        decision = world.Decision.model_validate(action) if action.get(\"ok\") else world.Decision()",
+    "replace": "        decision = world.Decision()",
+    "tests": [
+      "tests/ee/terrarium/test_concurrent_tick.py"
+    ]
+  },
+  {
+    "label": "lineage drift reported in raw trait points instead of drift widths",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "                (float(value) - float(parent[letter])) / DRIFT_WIDTH, 3",
+    "replace": "                (float(value) - float(parent[letter])), 3",
+    "tests": [
+      "tests/ee/terrarium/test_concurrent_tick.py"
+    ]
+  },
+  {
+    "label": "the drift line is dropped, so a descendant's prompt reads like a founder's",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "        f\"\\nCompared with the parent you came from, you are {drift_line}.\\n\" if drift_line else \"\"",
+    "replace": "        \"\"",
+    "tests": [
+      "tests/ee/terrarium/test_concurrent_tick.py"
+    ]
+  },
+  {
+    "label": "birth leaves personality frozen, so every fork of a founder is a clone",
+    "file": "ee/pocketpaw_ee/terrarium/soul_link.py",
+    "find": "        _unfreeze_personality(soul)\n        if world_brief.strip():",
+    "replace": "        if world_brief.strip():",
+    "tests": [
+      "tests/ee/terrarium/test_soul_seeding.py"
+    ]
+  },
+  {
+    "label": "awaken stops repairing, so a soul born frozen elsewhere stays frozen",
+    "file": "ee/pocketpaw_ee/terrarium/soul_link.py",
+    "find": "    soul = await Soul.awaken(path)\n    _unfreeze_personality(soul)\n    return soul",
+    "replace": "    soul = await Soul.awaken(path)\n    return soul",
+    "tests": [
+      "tests/ee/terrarium/test_soul_seeding.py"
+    ]
   }
 ]
