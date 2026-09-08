@@ -1,0 +1,189 @@
+[
+  {
+    "label": "media goes back through the extraction chain — a video is slurped into replacement characters and indexed",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "        if is_transcribable(mime):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/uploads/test_transcription.py::TestTheListener::test_a_video_never_reaches_the_extraction_chain",
+      "tests/cloud/uploads/test_transcription.py::TestTheListener::test_a_recording_becomes_a_persisted_searchable_document"
+    ]
+  },
+  {
+    "label": "the language parameter is dropped — wizper defaults to English and transcribes every other language into confident nonsense",
+    "file": "ee/pocketpaw_ee/cloud/uploads/transcription.py",
+    "find": "        \"chunk_level\": \"segment\",\n        \"language\": None,",
+    "replace": "        \"chunk_level\": \"segment\",",
+    "tests": [
+      "tests/cloud/uploads/test_transcription.py::TestTheArguments::test_the_language_is_sent_as_an_explicit_null"
+    ]
+  },
+  {
+    "label": "the duration ceiling never fires — a three-hour recording is discovered mid-bill",
+    "file": "ee/pocketpaw_ee/cloud/uploads/transcription.py",
+    "find": "    if duration is not None and duration > limit_minutes * 60:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/uploads/test_transcription.py::TestTheCeiling::test_a_three_hour_recording_is_refused_from_its_own_header"
+    ]
+  },
+  {
+    "label": "the ceiling stops refusing and only warns — an over-long file falls through and burns a budget slot on its way to the endpoint",
+    "file": "ee/pocketpaw_ee/cloud/uploads/transcription.py",
+    "find": "        return _skipped(\n            \"too_long\",",
+    "replace": "        _skipped(\n            \"too_long\",",
+    "tests": [
+      "tests/cloud/uploads/test_transcription.py::TestTheCeiling::test_the_ceiling_is_checked_before_a_budget_slot_is_claimed",
+      "tests/cloud/uploads/test_transcription.py::TestTheCeiling::test_a_three_hour_recording_is_refused_from_its_own_header"
+    ]
+  },
+  {
+    "label": "the byte ceiling never fires — an ogg/webm with no readable length has no gate at all",
+    "file": "ee/pocketpaw_ee/cloud/uploads/transcription.py",
+    "find": "    if size > limit_bytes:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/uploads/test_transcription.py::TestTheCeiling::test_an_oversized_file_is_refused_when_the_length_is_unreadable"
+    ]
+  },
+  {
+    "label": "the daily budget is claimed and ignored — the cap counts but never stops anything",
+    "file": "ee/pocketpaw_ee/cloud/uploads/transcription.py",
+    "find": "    allowed, spent, cap = await try_spend(workspace_id)\n    if not allowed:",
+    "replace": "    allowed, spent, cap = await try_spend(workspace_id)\n    if False:",
+    "tests": [
+      "tests/cloud/uploads/test_transcription.py::TestTheDailyCap::test_an_exhausted_budget_stops_the_spend"
+    ]
+  },
+  {
+    "label": "the budget uses the beanie 1.x collection API — every claim lands in the fail-closed except and transcription reads as switched off",
+    "file": "ee/pocketpaw_ee/cloud/uploads/transcription_budget.py",
+    "find": "        coll = FileTranscriptionUsage.get_pymongo_collection()",
+    "replace": "        coll = FileTranscriptionUsage.get_motor_collection()",
+    "tests": [
+      "tests/cloud/uploads/test_transcription.py::TestTheDailyCap::test_the_counter_uses_the_beanie_2x_collection_api",
+      "tests/cloud/uploads/test_transcription.py::TestTheDailyCap::test_the_cap_refuses_the_next_claim",
+      "tests/cloud/uploads/test_transcription.py::TestTheCeiling::test_a_file_under_both_ceilings_is_transcribed"
+    ]
+  },
+  {
+    "label": "the budget fails OPEN — a degraded database becomes an unbounded tab",
+    "file": "ee/pocketpaw_ee/cloud/uploads/transcription_budget.py",
+    "find": "        return False, 0, cap\n\n    if spent > cap:",
+    "replace": "        return True, 0, cap\n\n    if spent > cap:",
+    "tests": [
+      "tests/cloud/uploads/test_transcription.py::TestTheDailyCap::test_an_unreadable_counter_fails_CLOSED"
+    ]
+  },
+  {
+    "label": "an over-cap claim is not rolled back — the counter runs away and the workspace stays refused long after midnight",
+    "file": "ee/pocketpaw_ee/cloud/uploads/transcription_budget.py",
+    "find": "            await coll.update_one({\"key\": key}, {\"$inc\": {\"used\": -1}})",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/uploads/test_transcription.py::TestTheDailyCap::test_a_refused_claim_does_not_consume_a_slot"
+    ]
+  },
+  {
+    "label": "no deadline on the fal call — a hung upstream pins the listener forever",
+    "file": "ee/pocketpaw_ee/cloud/uploads/transcription.py",
+    "find": "        raw = await asyncio.wait_for(_call_fal(path, model, key), timeout=timeout_seconds())",
+    "replace": "        raw = await _call_fal(path, model, key)",
+    "tests": [
+      "tests/cloud/uploads/test_transcription.py::TestRefusals::test_a_hung_endpoint_gives_up_rather_than_pinning_the_listener"
+    ]
+  },
+  {
+    "label": "a fal outage escapes transcribe_media — it takes the whole ingest with it",
+    "file": "ee/pocketpaw_ee/cloud/uploads/transcription.py",
+    "find": "    except Exception:\n        logger.warning(\n            \"transcription: %s failed for file_id=%s; a re-ingest will retry\",",
+    "replace": "    except ZeroDivisionError:\n        logger.warning(\n            \"transcription: %s failed for file_id=%s; a re-ingest will retry\",",
+    "tests": [
+      "tests/cloud/uploads/test_transcription.py::TestTheListener::test_a_transcription_failure_loses_nothing_else",
+      "tests/cloud/uploads/test_transcription.py::TestRefusals::test_a_fal_outage_persists_nothing"
+    ]
+  },
+  {
+    "label": "an outage is recorded as a result — the listener persists a transcript it never got",
+    "file": "ee/pocketpaw_ee/cloud/uploads/transcription.py",
+    "find": "            file_id,\n            exc_info=True,\n        )\n        return None\n\n    text, segments, languages = _extract_transcript(raw)",
+    "replace": "            file_id,\n            exc_info=True,\n        )\n        return _skipped(\"fal_error\")\n\n    text, segments, languages = _extract_transcript(raw)",
+    "tests": [
+      "tests/cloud/uploads/test_transcription.py::TestTheListener::test_a_transcription_failure_loses_nothing_else"
+    ]
+  },
+  {
+    "label": "silence is treated as an outage — we pay again on the next ingest for the same nothing",
+    "file": "ee/pocketpaw_ee/cloud/uploads/transcription.py",
+    "find": "        return _skipped(\n            \"no_speech\",",
+    "replace": "        return None or _skipped(\n            \"no_speech_MUTATED\",",
+    "tests": [
+      "tests/cloud/uploads/test_transcription.py::TestRefusals::test_silence_is_recorded_rather_than_retried",
+      "tests/cloud/uploads/test_transcription.py::TestRefusals::test_an_unexpected_response_shape_is_not_a_crash"
+    ]
+  },
+  {
+    "label": "the hide-from-AI gate is deleted — a recording the user marked private is uploaded to fal",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "    if getattr(doc, \"hide_from_ai\", False):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/uploads/test_transcription.py::TestTheListener::test_a_hidden_file_is_never_uploaded_to_fal"
+    ]
+  },
+  {
+    "label": "the top-level box walk stops seeking — a moov written after the mdat is never found, so every camera recording falls to the byte ceiling",
+    "file": "ee/pocketpaw_ee/cloud/uploads/media_duration.py",
+    "find": "            fh.seek(payload_at + payload_size)\n    return None",
+    "replace": "            pass\n    return None",
+    "tests": [
+      "tests/cloud/uploads/test_media_duration.py::TestIsoBaseMedia::test_finds_a_moov_written_after_the_mdat"
+    ]
+  },
+  {
+    "label": "the 64-bit mvhd is not read — long recordings, exactly where version 1 appears, become unmeasurable",
+    "file": "ee/pocketpaw_ee/cloud/uploads/media_duration.py",
+    "find": "    if version == 1:\n        # creation(8) modification(8) timescale(4) duration(8)",
+    "replace": "    if False:\n        # creation(8) modification(8) timescale(4) duration(8)",
+    "tests": [
+      "tests/cloud/uploads/test_media_duration.py::TestIsoBaseMedia::test_reads_a_64_bit_version_1_mvhd"
+    ]
+  },
+  {
+    "label": "a zero timescale is not guarded — the probe raises instead of answering 'unknown'",
+    "file": "ee/pocketpaw_ee/cloud/uploads/media_duration.py",
+    "find": "    if timescale <= 0 or duration <= 0:",
+    "replace": "    if duration <= 0:",
+    "tests": [
+      "tests/cloud/uploads/test_media_duration.py::TestTheGuardsAreRealGuards::test_a_zero_timescale_is_refused_rather_than_divided_by"
+    ]
+  },
+  {
+    "label": "the Xing frame count is ignored — a VBR mp3's length is guessed from one frame's bitrate",
+    "file": "ee/pocketpaw_ee/cloud/uploads/media_duration.py",
+    "find": "            if tag_at + 12 <= len(buf) and buf[tag_at : tag_at + 4] in (b\"Xing\", b\"Info\"):",
+    "replace": "            if False:",
+    "tests": [
+      "tests/cloud/uploads/test_media_duration.py::TestMp3::test_prefers_the_xing_frame_count_for_vbr"
+    ]
+  },
+  {
+    "label": "a box that claims to be larger than the file is trusted — a crafted header walks the parser off the end",
+    "file": "ee/pocketpaw_ee/cloud/uploads/media_duration.py",
+    "find": "    if size < header_len or start + size > limit:",
+    "replace": "    if size < header_len:",
+    "tests": [
+      "tests/cloud/uploads/test_media_duration.py::TestTheGuardsAreRealGuards::test_a_box_that_overruns_the_file_is_refused",
+      "tests/cloud/uploads/test_media_duration.py::TestTheGuardsAreRealGuards::test_a_size_smaller_than_its_own_header_is_refused"
+    ]
+  },
+  {
+    "label": "fal-client is allowed to leave the ee base dependencies — the image builds green and no media file is ever transcribed",
+    "file": "ee/pyproject.toml",
+    "find": "    \"fal-client>=0.3.0\",",
+    "replace": "    # \"fal-client>=0.3.0\",",
+    "tests": [
+      "tests/packaging/test_extraction_deps_reach_the_image.py::test_fal_client_is_a_BASE_dependency_of_ee_not_an_extra"
+    ]
+  }
+]

@@ -468,3 +468,70 @@ def test_dodo_secrets_are_in_secret_fields():
 
     assert "dodo_payments_api_key" in SECRET_FIELDS
     assert "dodo_webhook_secret" in SECRET_FIELDS
+
+
+# ---------------------------------------------------------------------------
+# A delivery carrying a ``site_id`` must never reach the workspace path.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_site_carrying_delivery_never_grants_workspace_credits(mongo_db, recording_bus):
+    """THE REASON THE ``site_id`` FORK SURVIVED THE DODO REMOVAL.
+
+    Paw Sites left Dodo on 2026-09-05: a paid site is charged to the workspace
+    credit balance and no site has a gateway subscription any more. Nothing we
+    create can produce a delivery like this — but a per-site subscription sold
+    before the cutover and not yet cancelled at the gateway still can, and the
+    OTHER side of that fork is the workspace-plan path, which grants credits and
+    rewrites ``Workspace.plan``.
+
+    So deleting the branch would not stop such a delivery arriving. It would send
+    it somewhere much worse: a subscription for one site topping up the wallet and
+    changing the workspace's plan every renewal.
+
+    Breaks on: ``handle_webhook`` losing its ``if event.site_id`` fork.
+    """
+    body = json.dumps(
+        {
+            "business_id": "biz_1",
+            "type": "subscription.active",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "data": {
+                "subscription_id": "sub_legacy_per_site",
+                "product_id": "prod_site_pro",
+                "metadata": {
+                    "workspace_id": WS,
+                    "site_id": "6512c1f0e4b0a1b2c3d4e5f6",
+                    # "free" ON PURPOSE, and this is the whole strength of the
+                    # test. It is a SITE tier key and also a WORKSPACE plan key —
+                    # the two catalogs share it — so the workspace path can act on
+                    # this delivery rather than bouncing off an unresolvable plan.
+                    # A site-tier key that happened not to collide (like "site")
+                    # would make this pass on an accident of naming instead of on
+                    # the fork, and the collision is real: every legacy per-site
+                    # subscription on the free floor carries exactly this value.
+                    "plan_key": "free",
+                },
+            },
+        }
+    )
+
+    result = await billing.handle_webhook(
+        payload=body.encode(),
+        headers=_sign(body, msg_id="evt_stray_site_sub"),
+        provider=_provider(),
+    )
+
+    # Acked so Dodo stops retrying...
+    assert result == {"ok": True, "granted": False}
+    # ...and nothing moved. Each of these is a separate way the workspace path
+    # would have shown up: a wallet top-up, a plan change, or a capture event.
+    assert await credits.balance(WS) == 0
+    assert [e for e in recording_bus.events if e.type == "billing.topup.captured"] == []
+
+    # No subscription row either. The workspace path records one for every
+    # subscription.* it acts on, so its absence is the cleanest proof that this
+    # delivery was never treated as a workspace subscription.
+    from pocketpaw_ee.cloud.models.subscription import Subscription
+
+    assert await Subscription.find_all().to_list() == []

@@ -1,5 +1,22 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-08-29 (T2 "Audio/video transcription at ingest") — added
+``FileTranscriptionUsage`` (one row per workspace per UTC day, the atomic
+counter behind the media-transcription daily cap) to the imports and
+``get_all_documents()`` so the ``file_transcription_usage`` collection is wired
+into ``init_beanie``. Kept out of ``__all__``: only
+``ee.cloud.uploads.transcription_budget`` imports the doc class directly.
+Registering it here is load-bearing — an unregistered document makes
+``get_pymongo_collection()`` raise inside that budget's fail-CLOSED except, so
+every transcription is refused and the feature reads as switched off.
+
+Updated: 2026-08-28 (FC-3 "File comprehension") — added
+``FileComprehensionUsage`` (one row per workspace per UTC day, the atomic
+counter behind the comprehension daily cap) to the imports and
+``get_all_documents()`` so the ``file_comprehension_usage`` collection is
+wired into ``init_beanie``. Kept out of ``__all__``: only
+``ee.cloud.uploads.comprehension_budget`` imports the doc class directly.
+
 Updated: 2026-09-04 (IR-2a, feat/sites-import-design-brief) — added
 ``SiteDesignBrief`` (the captured design brief a rebuild-mode site import
 generates from) to the imports, ``__all__`` and ``get_all_documents()`` so the
@@ -177,6 +194,7 @@ from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
 from pocketpaw_ee.cloud.models.auth_session import AuthSession
 from pocketpaw_ee.cloud.models.belt_workspace_config import BeltWorkspaceConfig
 from pocketpaw_ee.cloud.models.builtin_widget import BuiltInWidget, BuiltInWidgetPosition
+from pocketpaw_ee.cloud.models.byok_key import ByokProviderKey
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.code_connection import CodeConnection
 from pocketpaw_ee.cloud.models.code_project import CodeProject
@@ -192,6 +210,8 @@ from pocketpaw_ee.cloud.models.fabric_ingest_state import (
     FabricIngestState,
 )
 from pocketpaw_ee.cloud.models.file import FileObj
+from pocketpaw_ee.cloud.models.file_comprehension_usage import FileComprehensionUsage
+from pocketpaw_ee.cloud.models.file_transcription_usage import FileTranscriptionUsage
 from pocketpaw_ee.cloud.models.file_version import FileVersionDoc
 from pocketpaw_ee.cloud.models.foresight_backtest import ForesightBacktest
 from pocketpaw_ee.cloud.models.foresight_prediction_record import (
@@ -208,6 +228,7 @@ from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
     ForesightWorkspaceScenario,
 )
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
+from pocketpaw_ee.cloud.models.guest_turn_usage import GuestTurnUsage
 from pocketpaw_ee.cloud.models.icp import Icp
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
@@ -226,6 +247,7 @@ from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reac
 from pocketpaw_ee.cloud.models.message_log import MessageLog
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
+from pocketpaw_ee.cloud.models.other_hand_usage import IllustrationUsage
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
@@ -378,6 +400,8 @@ __all__ = [
     "MeetingInvite",
     "Lead",
     "LeadSource",
+    "ByokProviderKey",
+    "IllustrationUsage",
     "LiteLLMTenantKey",
     "ShipApp",
     "ShipBox",
@@ -464,6 +488,18 @@ def get_all_documents():
         # Public file share links (FL-12b). Only ``uploads.share_store``
         # writes these; the public GET /share/{token} route reads by token.
         ShareLink,
+        # Per-workspace/day file-comprehension spend counter (FC-3). Only
+        # ``ee.cloud.uploads.comprehension_budget`` reads/writes this.
+        FileComprehensionUsage,
+        # Per-guest-user/day turn counter (BYOK-first onboarding). Only
+        # ``ee.cloud.auth.guest_budget`` reads/writes this.
+        GuestTurnUsage,
+        # Per-workspace/day media-transcription spend counter (T2). Only
+        # ``ee.cloud.uploads.transcription_budget`` reads/writes this. Separate
+        # from the comprehension counter on purpose: the two meter different
+        # bills, and one shared row would let a bulk photo import exhaust the
+        # ceiling that exists to stop a podcast library.
+        FileTranscriptionUsage,
         # file_versions edit history (ART-1). Only ``file_versions.service``
         # imports this class (import-linter "FileVersions" contract).
         FileVersionDoc,
@@ -483,6 +519,8 @@ def get_all_documents():
         Subscription,
         # LiteLLM per-tenant virtual-key mapping (MCG-8). Only
         # ``ee.cloud.llm_provisioning.service`` writes this.
+        ByokProviderKey,
+        IllustrationUsage,
         LiteLLMTenantKey,
         # Managed-deploy boxes + their apps and deploy attempts (SHIP-2/SHIP-3).
         # Only ``ee.cloud.ship.store`` reads/writes these.

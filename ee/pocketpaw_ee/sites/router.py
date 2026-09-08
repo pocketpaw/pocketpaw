@@ -356,11 +356,6 @@ async def publish_site(
         site_plan_key=body.site_plan_key,
         purchase_authorized=_may_buy_site_plan(user, ctx.workspace_id),
         prewarm_origin=request.headers.get("origin") or None,
-        # Also the checkout's return base for a PAID publish. The frontend sends the
-        # whole page to ``checkout_url``, so with no return_url the buyer pays and
-        # has no route back into the app. Falls back to the
-        # ``dodo_checkout_return_base`` config inside the service when absent.
-        origin=request.headers.get("origin") or None,
     )
     return sites_service._to_response(doc)
 

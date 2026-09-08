@@ -85,6 +85,10 @@ class PlanTierResponse(BaseModel):
     max_pockets: int | None = None
     max_connectors: int | None = None
     max_storage_bytes: int | None = None
+    # How many Paw Sites this plan carries at ``staff`` quality. On the wire
+    # because the pricing page renders it as headline copy — "3 sites included" is
+    # what a buyer compares plans on now.
+    included_sites: int | None = None
 
 
 class PlanCatalogResponse(BaseModel):
@@ -107,6 +111,10 @@ class EntitlementsResponse(BaseModel):
     max_pockets: int | None = None
     max_connectors: int | None = None
     max_storage_bytes: int | None = None
+    # The site allowance the builder needs BEFORE a publish, to say whether the
+    # next site is covered or costs credits. Reading it from the plan catalog on
+    # the client would mean re-deriving the workspace's own tier there.
+    included_sites: int | None = None
 
 
 def plan_tier_to_dto(tier: PlanTier) -> PlanTierResponse:
@@ -127,6 +135,7 @@ def plan_tier_to_dto(tier: PlanTier) -> PlanTierResponse:
         max_pockets=tier.max_pockets,
         max_connectors=tier.max_connectors,
         max_storage_bytes=tier.max_storage_bytes,
+        included_sites=tier.included_sites,
     )
 
 
@@ -141,6 +150,7 @@ def entitlements_to_dto(ent: Entitlements) -> EntitlementsResponse:
         max_pockets=ent.max_pockets,
         max_connectors=ent.max_connectors,
         max_storage_bytes=ent.max_storage_bytes,
+        included_sites=ent.included_sites,
     )
 
 
@@ -150,7 +160,9 @@ class SitePlanTierResponse(BaseModel):
     ``monthly_price_usd`` is the recurring MONTHLY sticker (USD, whole dollars).
     ``cloudflare_features`` is the SORTED list of Cloudflare features the tier
     resells (deterministic JSON; BC-10 provisions these when a domain is added).
-    ``dodo_product_id`` is None until config populates it.
+    Carries NO gateway id: a per-site plan is paid from the workspace credit
+    balance, so there is no product for the card to reference and nothing the
+    frontend could do with one.
 
     ``purchasable`` is whether a customer can buy this tier at all: a $0 tier
     always can, a priced tier only once a Dodo recurring product is configured for
@@ -166,18 +178,24 @@ class SitePlanTierResponse(BaseModel):
     never be read as a per-site entitlement. They are here so a plan CARD can say
     what each tier includes and, by their absence, what it does not.
 
-    ``scope`` is ``"site"`` or ``"org"`` and tells the storefront which of two
-    completely different things a row is. A site-scoped row is bought one site at
-    a time and its key is a legal ``Site.plan_tier``; an org-scoped flat covers a
-    whole workspace and its key must never be sent back as a publish's
-    ``site_plan_key``. Org rows always arrive with ``purchasable: false`` because
-    no org checkout exists yet — render them as "talk to us", never as a buy
-    button.
+    ``scope`` is ``"site"`` on every tier the catalog ships, and is REQUIRED here
+    with no default. That is the point of it: the client filters the picker on this
+    field, so a tier arriving without one would be silently treated as per-site and
+    offered for sale. A default of ``"site"`` made exactly that failure invisible —
+    dropping ``scope=tier.scope`` from the mapper below was mutated in and ESCAPED
+    the suite, because every row still read "site" from the default. Required means
+    the omission is a construction error instead.
 
-    ``white_label``, ``included_sites``, ``conversation_allowance`` and
-    ``conversation_rate_cents`` describe the LADDER, not any site's permissions.
-    Nothing meters a conversation yet and nothing enforces white-label; they are
-    here so a card can state what a tier will sell. ``SiteEntitlementsResponse`` —
+    (It is the CLIENT's filter this protects, not the backend's. ``site_scoped_tier``
+    used to guard on scope too, but with the org flats retired it now returns
+    whatever the plain lookup returns — see its docstring. The field is load-bearing
+    for the picker and for whatever org-scoped tier the catalog grows next.)
+
+    ``conversation_allowance`` and ``conversation_rate_cents`` describe the
+    LADDER, not any site's permissions — they are here so a card can state what a
+    tier sells. (``white_label`` and ``included_sites`` sat beside them until
+    2026-09-06; both existed only for the retired org flats, and ``included_sites``
+    now means something real on the WORKSPACE plan catalog instead.) ``SiteEntitlementsResponse`` —
     the read that answers "what may THIS site do" — deliberately carries none of
     them.
 
@@ -194,11 +212,8 @@ class SitePlanTierResponse(BaseModel):
 
     key: str
     monthly_price_usd: int
-    dodo_product_id: str | None = None
     cloudflare_features: list[str] = Field(default_factory=list)
-    scope: str = "site"
-    white_label: bool = False
-    included_sites: int | None = None
+    scope: str
     conversation_allowance: int = 0
     conversation_rate_cents: int = 0
     display_name: str = ""
@@ -220,11 +235,8 @@ def site_plan_tier_to_dto(tier: SitePlanTier) -> SitePlanTierResponse:
     return SitePlanTierResponse(
         key=tier.key,
         monthly_price_usd=tier.monthly_price_usd,
-        dodo_product_id=tier.dodo_product_id,
         cloudflare_features=sorted(tier.cloudflare_features),
         scope=tier.scope,
-        white_label=tier.white_label,
-        included_sites=tier.included_sites,
         conversation_allowance=tier.conversation_allowance,
         conversation_rate_cents=tier.conversation_rate_cents,
         display_name=tier.display_name,

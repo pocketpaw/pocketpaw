@@ -21,24 +21,6 @@
     ]
   },
   {
-    "label": "_dodo_product_for stops looking through the alias — the deployed product map goes dead",
-    "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "        mapping = getattr(get_settings(), \"dodo_site_products\", None)\n    except Exception:\n        return None\n    if not isinstance(mapping, dict):\n        return None\n    candidates = [key] + [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key]",
-    "replace": "        mapping = getattr(get_settings(), \"dodo_site_products\", None)\n    except Exception:\n        return None\n    if not isinstance(mapping, dict):\n        return None\n    candidates = [key]",
-    "tests": [
-      "tests/cloud/billing/test_site_pricing_ladder.py::test_the_deployed_legacy_product_map_still_opens_a_checkout"
-    ]
-  },
-  {
-    "label": "the legacy key wins over the canonical one — re-keying the env var does nothing",
-    "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "        mapping = getattr(get_settings(), \"dodo_site_products\", None)\n    except Exception:\n        return None\n    if not isinstance(mapping, dict):\n        return None\n    candidates = [key] + [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key]",
-    "replace": "        mapping = getattr(get_settings(), \"dodo_site_products\", None)\n    except Exception:\n        return None\n    if not isinstance(mapping, dict):\n        return None\n    candidates = [old for old, new in _LEGACY_SITE_TIER_ALIASES.items() if new == key] + [key]",
-    "tests": [
-      "tests/cloud/billing/test_site_pricing_ladder.py::test_the_new_key_wins_over_a_legacy_one_for_the_same_tier"
-    ]
-  },
-  {
     "label": "site_scoped_tier stops refusing org flats — one site gets the whole org's allowance",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
     "find": "    tier = get_site_plan(key)\n    if tier is None or tier.is_org_scoped:\n        return None\n    return tier",
@@ -51,10 +33,10 @@
   {
     "label": "purchasable stops excluding org flats — the per-site checkout can charge $149",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "        if self.is_org_scoped:\n            return False\n        if self.monthly_price_usd == 0:",
-    "replace": "        if False:\n            return False\n        if self.monthly_price_usd == 0:",
+    "find": "        if self.is_org_scoped:\n            return False",
+    "replace": "        if False:  # noqa: SIM223\n            return False",
     "tests": [
-      "tests/cloud/billing/test_site_pricing_ladder.py::test_an_org_flat_is_never_purchasable_however_config_is_set"
+      "tests/cloud/billing/test_site_pricing_ladder.py::test_an_org_flat_is_never_purchasable"
     ]
   },
   {
@@ -80,8 +62,8 @@
   {
     "label": "the $7 rung is given the concierge — the $19 rung's only differentiator",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "    \"site\": False,\n    \"staff\": True,\n    \"studio\": False,\n    \"agency\": True,\n}",
-    "replace": "    \"site\": True,\n    \"staff\": True,\n    \"studio\": False,\n    \"agency\": True,\n}",
+    "find": "    \"site\": False,\n    \"staff\": True,\n}",
+    "replace": "    \"site\": True,\n    \"staff\": True,\n}",
     "tests": [
       "tests/cloud/billing/test_site_pricing_ladder.py::test_only_the_top_per_site_rung_sells_the_concierge",
       "tests/cloud/billing/test_site_plan_inclusions.py::test_only_the_top_per_site_rung_sells_the_concierge"
@@ -107,30 +89,22 @@
     ]
   },
   {
-    "label": "agency loses its half-price conversation rate — the reason the tier costs $149",
+    "label": "a tier that sells no concierge is given a 0 rate — the card offers free conversations",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "    \"studio\": _LIST_CONVERSATION_RATE_CENTS,\n    \"agency\": 5,",
-    "replace": "    \"studio\": _LIST_CONVERSATION_RATE_CENTS,\n    \"agency\": _LIST_CONVERSATION_RATE_CENTS,",
+    "find": "    \"site\": _LIST_CONVERSATION_RATE_CENTS,\n    \"staff\": _LIST_CONVERSATION_RATE_CENTS,\n}",
+    "replace": "    \"site\": 0,\n    \"staff\": _LIST_CONVERSATION_RATE_CENTS,\n}",
     "tests": [
-      "tests/cloud/billing/test_site_pricing_ladder.py::test_the_agency_rate_is_the_discount_it_is_sold_on"
+      "tests/cloud/billing/test_site_pricing_ladder.py::test_a_tier_that_sells_no_concierge_still_carries_the_list_rate",
+      "tests/cloud/billing/test_site_pricing_ladder.py::test_the_conversation_rate_is_cents_and_stays_an_int"
     ]
   },
   {
     "label": "staff loses its 200 included conversations — the tier bills from the first one",
     "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "    \"staff\": 200,\n    \"studio\": 0,",
-    "replace": "    \"staff\": 0,\n    \"studio\": 0,",
+    "find": "    \"site\": 0,\n    \"staff\": 200,\n}",
+    "replace": "    \"site\": 0,\n    \"staff\": 0,\n}",
     "tests": [
       "tests/cloud/billing/test_site_pricing_ladder.py::test_the_conversation_allowance_belongs_to_the_tier_that_sells_the_concierge"
-    ]
-  },
-  {
-    "label": "the org flats lose their included-site counts — the flats price nothing",
-    "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
-    "find": "    \"studio\": 5,\n    \"agency\": 25,\n}\n\n# Concierge conversations included per month",
-    "replace": "    \"studio\": None,\n    \"agency\": None,\n}\n\n# Concierge conversations included per month",
-    "tests": [
-      "tests/cloud/billing/test_site_pricing_ladder.py::test_only_the_org_flats_include_a_site_count"
     ]
   },
   {
@@ -216,12 +190,13 @@
     ]
   },
   {
-    "label": "add_domain provisions Cloudflare features off an unguarded tier lookup",
+    "label": "an unrecognised tier provisions the paid Cloudflare features instead of none",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    plan = site_plans.site_scoped_tier(site.plan_tier)\n    features = set(plan.cloudflare_features) if plan else set()",
-    "replace": "    plan = site_plans.get_site_plan(site.plan_tier)\n    features = set(plan.cloudflare_features) if plan else set()",
+    "find": "    features = set(plan.cloudflare_features) if plan else set()",
+    "replace": "    features = set(plan.cloudflare_features) if plan else {\"waf\", \"edge_cache\"}",
     "tests": [
-      "tests/cloud/sites/test_cloudflare_tiers.py"
+      "tests/cloud/sites/test_cloudflare_tiers.py::test_add_domain_unset_tier_passes_no_features",
+      "tests/cloud/sites/test_cloudflare_tiers.py::test_add_domain_provisions_nothing_for_a_retired_org_key_on_a_site"
     ]
   }
 ]

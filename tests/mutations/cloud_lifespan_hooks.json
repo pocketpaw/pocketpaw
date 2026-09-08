@@ -1,0 +1,107 @@
+[
+  {
+    "label": "the hooks go back on @app.on_event, which is the original bug",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "        @on_startup\n        async def _start_websandbox_reaper() -> None:",
+    "replace": "        @app.on_event(\"startup\")\n        async def _start_websandbox_reaper() -> None:",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  },
+  {
+    "label": "the composed lifespan is never installed, so every collected hook is dead again",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "    _install_cloud_lifespan(app, _startup_hooks, _shutdown_hooks)",
+    "replace": "    pass",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  },
+  {
+    "label": "the collectors collect nothing, so the lifespan runs an empty list",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "    def on_startup(fn: Callable[[], Awaitable[None]]) -> Callable[[], Awaitable[None]]:\n        _startup_hooks.append(fn)\n        return fn",
+    "replace": "    def on_startup(fn: Callable[[], Awaitable[None]]) -> Callable[[], Awaitable[None]]:\n        return fn",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  },
+  {
+    "label": "cloud hooks run BEFORE the host lifespan, so each loop ticks against an uninitialised Beanie",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "        async with host_lifespan(scoped_app) as maybe_state:\n            for hook in startup_hooks:",
+    "replace": "        for hook in startup_hooks:\n            await hook()\n        async with host_lifespan(scoped_app) as maybe_state:\n            for hook in []:",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  },
+  {
+    "label": "shutdown hooks run in registration order, so a dependency is torn down before its user",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "                for hook in reversed(shutdown_hooks):",
+    "replace": "                for hook in shutdown_hooks:",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  },
+  {
+    "label": "one failing startup hook propagates, so a dead sweep crash-loops the web process",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "                try:\n                    await hook()\n                except Exception:\n                    _logger.exception(\"Cloud startup hook %s failed\", name)\n                else:",
+    "replace": "                await hook()\n                if True:",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  },
+  {
+    "label": "the host lifespan is discarded rather than wrapped, so host startup never runs",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "    host_lifespan = app.router.lifespan_context",
+    "replace": "    from contextlib import nullcontext\n\n    def host_lifespan(_a):\n        return nullcontext(None)",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  },
+  {
+    "label": "installing twice stacks the wrapper, so every hook runs twice",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "    if getattr(app.state, \"_cloud_lifespan_installed\", False):\n        return\n    app.state._cloud_lifespan_installed = True",
+    "replace": "    app.state._cloud_lifespan_installed = True",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  },
+  {
+    "label": "a sweep is marked running whether or not its hook succeeded (the false green)",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "                except Exception:\n                    _logger.exception(\"Cloud startup hook %s failed\", name)\n                else:\n                    # Marked only on success",
+    "replace": "                except Exception:\n                    _logger.exception(\"Cloud startup hook %s failed\", name)\n                if True:\n                    # Marked only on success",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  },
+  {
+    "label": "the status registry reports running from the env flag again, not from what started",
+    "file": "ee/pocketpaw_ee/cloud/automations_status/service.py",
+    "find": "            running=sweep_runtime.is_running(start_hook),",
+    "replace": "            running=_env_flag_on(env_flag),",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  },
+  {
+    "label": "temporal_sweeps is listed under the cloud scheduler flag, which is not its gate",
+    "file": "ee/pocketpaw_ee/cloud/automations_status/service.py",
+    "find": "        \"Pocket temporal sweeps\",\n        \"temporal\",\n        _TEMPORAL_SWEEP_FLAG,",
+    "replace": "        \"Pocket temporal sweeps\",\n        \"temporal\",\n        _CLOUD_SCHEDULER_FLAG,",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  },
+  {
+    "label": "is_running answers yes for anything, so the endpoint cannot report a dead sweep",
+    "file": "ee/pocketpaw_ee/cloud/_core/sweep_runtime.py",
+    "find": "    return bool(name) and name in _STARTED",
+    "replace": "    return True",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  },
+  {
+    "label": "AgentPool.start loses its guard, so the second caller orphans the first GC loop",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "        if self._gc_task is not None and not self._gc_task.done():\n            return\n        self._gc_task = asyncio.create_task(self._gc_loop())",
+    "replace": "        self._gc_task = asyncio.create_task(self._gc_loop())",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  },
+  {
+    "label": "shutdown_event stops calling the lifecycle providers, so cloud teardown never runs",
+    "file": "src/pocketpaw/dashboard_lifecycle.py",
+    "find": "        for _hook in _ext_providers(\"pocketpaw.lifecycle\"):\n            await _bounded(\"lifecycle_shutdown\", _hook.on_shutdown(), timeout=10.0)",
+    "replace": "        pass",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  },
+  {
+    "label": "the comment claiming mount_cloud handles teardown comes back",
+    "file": "ee/pocketpaw_ee/extensions.py",
+    "find": "        # NOTE: this method runs only because the host lifecycle calls it --",
+    "replace": "        # Most cloud teardown is handled inside mount_cloud's own shutdown hook.\n        # NOTE: this method runs only because the host lifecycle calls it --",
+    "tests": "tests/cloud/test_cloud_lifespan_hooks.py"
+  }
+]

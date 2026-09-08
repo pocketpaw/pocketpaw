@@ -85,6 +85,21 @@ class Entitlements:
     STORAGE cap in bytes (integer, or None = uncapped for Enterprise) the
     uploads pipeline enforces at upload time; a no/unknown-plan workspace
     resolves to the Free value (5 GB), fail-closed, never None/uncapped.
+
+    ``included_sites`` is how many published Paw Sites this plan CARRIES at
+    ``staff`` quality — custom domain, no attribution badge, visitor concierge —
+    for no extra money and no credit debit (Free 0, Go 1, Pro 3, Pro Max 10,
+    Enterprise None = uncapped). It is unlike every other ceiling here: the rest
+    cap something the workspace is billed for anyway, while this one decides
+    whether a site is billed AT ALL. Sites beyond it fall back to the per-site
+    ladder and are bought from the credit wallet as before.
+
+    The concierge allowance that comes with those sites is NOT a field here. A
+    carried site is a ``staff`` site, and ``staff`` sells 200 conversations a month
+    to the site it covers — counted per widget by
+    ``billing.enforcement.concierge_conversation_quota_exceeded``. Three carried
+    sites are three private blocks of 200, not one shared pool, so there is no
+    workspace-level number to resolve.
     """
 
     workspace_id: str
@@ -96,6 +111,7 @@ class Entitlements:
     max_connectors: int | None
     max_call_seconds_per_day: int | None
     max_storage_bytes: int | None
+    included_sites: int | None
     features: frozenset[str] = field(default_factory=frozenset)
 
 

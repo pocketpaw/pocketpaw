@@ -303,12 +303,17 @@ class TestCreateSvelteSiteEndToEnd:
         pocket_id = body["pocket_id"]
 
         # The draft lists in the gallery read — exactly one card for this pocket,
-        # reading as a DRAFT (deployed False, no live url, no checkout).
+        # reading as a DRAFT: not deployed, no live url, and nothing paying for it.
+        #
+        # The last assertion was ``checkout_url is None`` until 2026-09-05. The
+        # hosted checkout went with the payment gateway, so that field no longer
+        # exists to be None; ``subscription_status`` is what says the same thing
+        # now, and says it about a state that still exists.
         cards = await sites_service.list_for_workspace(workspace_id)
         assert [c.pocket_id for c in cards] == [pocket_id]
         assert cards[0].deployed is False
         assert cards[0].url == ""
-        assert cards[0].checkout_url is None
+        assert cards[0].subscription_status == "none"
         # SR-9 resolves the engine from the source pocket for the card badge.
         assert cards[0].engine == "svelte"
 

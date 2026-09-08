@@ -1,0 +1,56 @@
+[
+  {
+    "label": "fit uses max instead of min \u2014 the drawing stretches to fill the box",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/svg_to_ink.py",
+    "find": "    scale = min(box.w / vw, box.h / vh)",
+    "replace": "    scale = max(box.w / vw, box.h / vh)",
+    "tests": [
+      "tests/cloud/other_hand/test_svg_to_ink.py::TestFittingIntoTheBox"
+    ]
+  },
+  {
+    "label": "viewBox origin ignored \u2014 a non-zero viewBox slides the drawing off its box",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/svg_to_ink.py",
+    "find": "            px = off_x + (sx - vx) * scale\n            py = off_y + (sy - vy) * scale",
+    "replace": "            px = off_x + sx * scale\n            py = off_y + sy * scale",
+    "tests": [
+      "tests/cloud/other_hand/test_svg_to_ink.py::TestFittingIntoTheBox"
+    ]
+  },
+  {
+    "label": "curves drawn as chords \u2014 beziers collapse to straight lines",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/svg_to_ink.py",
+    "find": "    n = int(max(2, min(MAX_SEGMENTS_PER_CURVE, 2 * math.sqrt(net / max(FLATNESS_PX, 0.01)))))",
+    "replace": "    n = 1",
+    "tests": [
+      "tests/cloud/other_hand/test_svg_to_ink.py::TestPathGrammar"
+    ]
+  },
+  {
+    "label": "budget loop removed \u2014 a pathological SVG hangs the renderer",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/svg_to_ink.py",
+    "find": "    tol = 0.5\n    while total > MAX_POINTS and tol <= 16:",
+    "replace": "    tol = 0.5\n    while False:",
+    "tests": [
+      "tests/cloud/other_hand/test_svg_to_ink.py::TestTheBugsARealGenerationFound"
+    ]
+  },
+  {
+    "label": "opt-in gate removed \u2014 any turn can spend $0.30 unasked",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/illustrate.py",
+    "find": "    if not allowed:\n        return []",
+    "replace": "    if False:\n        return []",
+    "tests": [
+      "tests/cloud/other_hand/test_illustrate_gate.py::TestNothingSpendsWithoutPermission"
+    ]
+  },
+  {
+    "label": "float segment count returns \u2014 the crash a real generation found",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/svg_to_ink.py",
+    "find": "    n = int(max(2, min(MAX_SEGMENTS_PER_CURVE, 2 * math.sqrt(net / max(FLATNESS_PX, 0.01)))))",
+    "replace": "    n = max(2, min(MAX_SEGMENTS_PER_CURVE, int(net / max(FLATNESS_PX, 0.01)) ** 0.5 * 2))",
+    "tests": [
+      "tests/cloud/other_hand/test_svg_to_ink.py::TestTheBugsARealGenerationFound"
+    ]
+  }
+]

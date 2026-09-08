@@ -1,5 +1,30 @@
 """EE /uploads router — workspace-scoped upload endpoints.
 
+Updated 2026-09-01 (feat/byok-guest-backend): POST "" (the upload route)
+refuses guest accounts with 403 {"code": "guest_upload_forbidden"} before any
+other processing — uploads are the signup hook for BYOK guests.
+
+2026-08-28 (FC-1 "File comprehension"): ``PATCH /uploads/{file_id}`` accepts
+``summary`` (str) so a person can correct or write what a file IS, and the
+response echoes it. This is the half of FC-1 that makes "never overwrite a
+human's edit" mean something — the ingest-time comprehension pass refuses to
+touch a row whose ``summary`` is already non-empty, so without a way for a
+human to SET one, that rule would only ever protect a previous machine
+summary. An explicit ``""`` erases it (and thereby re-opens the file to a
+future comprehension pass); omitting the field leaves it untouched.
+
+2026-08-29 (BA-3 "Make an agent of this book"): added
+``POST /uploads/{file_id}/agent`` — press once, get a dedicated co-reader
+agent that has read this file. All the provisioning logic lives in
+``uploads.book_agent``; the route is the tenant boundary and nothing else.
+PATH NOTE: the feature is pressed from the /files library, but the endpoint
+lives under this router's ``/uploads`` prefix because that is where the
+native ``file_id``, the tenant deps and the write ACL already are — the
+/files surface addresses the same row as ``uploads:<file_id>``. Unlike its
+neighbours here (which predate the rule), this route raises ``CloudError``
+subclasses, never ``HTTPException``, per the ee/cloud error convention;
+``_core.http.cloud_error_handler`` renders them.
+
 2026-07-03 (FL-11b "hide-from-AI purge"): ``PATCH /uploads/{file_id}`` now
 retroactively purges a file's KB content when ``hide_from_ai`` flips false→true
 AND the row tracks a kb-go article (``kb_article_id`` + ``kb_scope`` recorded on
@@ -89,6 +114,11 @@ _CFG = UploadSettings(local_root=_ROOT)
 _ADAPTER = build_adapter(_ROOT)
 _META = MongoFileStore()
 _FOLDERS = FolderStore()
+
+# FC-1: the longest summary PATCH will accept. A library subtitle, not a
+# document — the machine-written ones land well under this, and the ceiling
+# exists so a hand-crafted request cannot put a novel into every listing row.
+_MAX_SUMMARY_CHARS = 1000
 
 
 async def _is_chat_member(chat_id: str, user_id: str, _workspace: str) -> bool:
@@ -300,6 +330,17 @@ async def upload(
     workspace: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> dict:
+    # Guests cannot upload (BYOK-first onboarding, 2026-09-01): the upload
+    # affordance is the signup hook. Raised BEFORE any validation/side effect;
+    # ``GuestUploadForbidden`` is a 403 whose body carries the frozen
+    # top-level {"code": "guest_upload_forbidden"} contract. No-op (one
+    # indexed user read) for everyone else.
+    from pocketpaw_ee.cloud.auth import guest_budget
+
+    if await guest_budget.load_guest(user_id) is not None:
+        from pocketpaw_ee.cloud._core.errors import GuestUploadForbidden
+
+        raise GuestUploadForbidden()
     try:
         folder_path = normalize_path(path)
     except ValueError as e:
@@ -365,6 +406,7 @@ async def patch_upload(
     new_tags = body.get("tags")
     new_collections = body.get("collections")
     new_hide = body.get("hide_from_ai")
+    new_summary = body.get("summary")
 
     if new_filename is not None:
         if not isinstance(new_filename, str) or not new_filename.strip():
@@ -395,6 +437,20 @@ async def patch_upload(
         ):
             raise HTTPException(status_code=400, detail="collections must be a list of strings")
         doc.collections = new_collections
+
+    # FC-1: a human writing (or correcting, or erasing) what the file IS.
+    # Capped at _MAX_SUMMARY_CHARS — this is a library subtitle, not a place
+    # to paste a document, and an unbounded string here would be echoed into
+    # every /files listing row.
+    if new_summary is not None:
+        if not isinstance(new_summary, str):
+            raise HTTPException(status_code=400, detail="summary must be a string")
+        if len(new_summary) > _MAX_SUMMARY_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"summary must be at most {_MAX_SUMMARY_CHARS} characters",
+            )
+        doc.summary = new_summary
 
     # FL-11b: detect a false→true hide transition so we can retroactively
     # purge the file's KB article after the row is saved. Capture the pre-edit
@@ -452,6 +508,57 @@ async def patch_upload(
         "tags": list(doc.tags or []),
         "collections": list(doc.collections or []),
         "hide_from_ai": bool(doc.hide_from_ai),
+        "summary": doc.summary,
+    }
+
+
+@router.post(
+    "/{file_id}/agent",
+    dependencies=[Depends(require_action_any_workspace("uploads.write"))],
+)
+async def make_book_agent(
+    file_id: str,
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Make (or return) the dedicated co-reader agent for this file.
+
+    Idempotent — pressing twice returns the same agent with ``created:
+    false``. ``indexed`` reports whether the book's text is actually in the
+    agent's knowledge scope: ``false`` means the agent exists but the ingest
+    failed, and the caller should say so rather than presenting a co-reader
+    that has read nothing (pressing again retries the ingest against that
+    same agent).
+
+    Gated as a WRITE: it mutates the file row's ``agent_id`` bind, so it takes
+    the same ``uploads.write`` membership check as upload, plus the
+    owner-or-workspace-admin ACL the PATCH route uses. Everything below that
+    — tenancy, idempotency, failure policy — lives in ``book_agent``.
+    """
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud._core.errors import NotFound as CloudNotFound
+    from pocketpaw_ee.cloud.uploads.book_agent import ensure_book_agent
+
+    doc = await _META.get_doc_scoped(file_id, workspace=workspace)
+    if doc is None:
+        raise CloudNotFound("file", file_id)
+
+    # Write-side ACL — owner OR workspace admin, matching PATCH /uploads/{id}.
+    # Chat membership does NOT grant it: making an agent of someone's book is
+    # a write on their library row, not a read of a shared attachment.
+    if doc.owner != user_id:
+        try:
+            is_admin = await _is_workspace_admin(user_id, workspace)
+        except Exception:
+            is_admin = False
+        if not is_admin:
+            raise Forbidden("files.forbidden")
+
+    result = await ensure_book_agent(file_id, workspace, user_id)
+    return {
+        "agent_id": result.agent_id,
+        "created": result.created,
+        "indexed": result.indexed,
     }
 
 

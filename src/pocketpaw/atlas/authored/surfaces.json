@@ -298,8 +298,8 @@
       "id": "surface:files",
       "kind": "surface",
       "name": "Files",
-      "summary": "Workspace file browser panel.",
-      "narrative": "The Files surface is the workspace file browser. Point a user here to browse, inspect, or manage the files the workspace holds — including files that feed the knowledge base.",
+      "summary": "Workspace file browser and notes library: files, folders, markdown notes with [[wikilinks]], backlinks, tags, and a link graph.",
+      "narrative": "The Files surface is the workspace file browser and the place to write notes. Point a user here to browse, inspect, or manage the files the workspace holds (including files that feed the knowledge base), to make a markdown note or today's daily note, to link notes with [[wikilinks]] and see which notes link back, to tag files with #tags, or to view the whole library as a link graph. Behind it: GET /api/v1/files/{file_id}/links (outgoing links + backlinks) and GET /api/v1/files/graph (nodes, edges, ghost names for links with no file yet).",
       "how": "",
       "surface": "/files",
       "requires": [],
@@ -308,7 +308,18 @@
         "browser",
         "documents",
         "uploads",
-        "folders"
+        "folders",
+        "notes",
+        "note",
+        "daily note",
+        "wikilink",
+        "wikilinks",
+        "backlinks",
+        "linked mentions",
+        "link graph",
+        "graph view",
+        "tags",
+        "tag"
       ]
     },
     {

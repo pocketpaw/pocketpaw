@@ -188,6 +188,7 @@ async def _sweeper_loop() -> None:
     from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
+    from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
 
     interval = _sweep_interval_seconds()
     _run_sweeper_logger.info("sweeper loop started (interval=%ds)", interval)
@@ -232,6 +233,17 @@ async def _sweeper_loop() -> None:
             await sweep_pending_sites()
         except Exception:
             _run_sweeper_logger.exception("sweep_pending_sites tick failed")
+        # Credits site plans: charge the next month for every wallet-paid site
+        # whose renewal has come due. This is what makes a MONTHLY site plan
+        # actually recur — the gateway subscription used to do it, and a paid
+        # site no longer has one. Without this pass a customer pays once and
+        # keeps every paid capability for good. A site that cannot afford its
+        # renewal drops to the free floor and STAYS LIVE; nothing is ever taken
+        # down here. Own try so a failure cannot suppress the other sweeps.
+        try:
+            await sweep_site_renewals()
+        except Exception:
+            _run_sweeper_logger.exception("sweep_site_renewals tick failed")
         # M5 dunning: revoke the plan of any subscription still on hold past its
         # grace deadline. The webhook only stamps the deadline — nothing arrives
         # from the gateway when it passes, so this pass is what actually ends the
@@ -250,10 +262,12 @@ async def start_run_sweeper() -> None:
     metering sweep (bill any terminal runs left unbilled by the prior process), the
     WU-F LiteLLM billing-cutover sweep (no-op / shadow-compare / live-ingest per the
     cutover mode), the charge-first pending-site reconciliation sweep (surface paid
-    sites stuck pending), the M5 dunning grace sweep (revoke the plan of a
-    subscription left on hold past its deadline while this process was down), and
-    the ART-3 agent-jail GC (reclaim scratch left by a prior process's idle runs);
-    the 5-minute loop then ticks all of them.
+    sites stuck pending), the credits site-plan renewal sweep (charge the month for
+    every wallet-paid site that came due while this process was down — the pass
+    that makes a monthly site plan recur at all), the M5 dunning grace sweep
+    (revoke the plan of a subscription left on hold past its deadline while this
+    process was down), and the ART-3 agent-jail GC (reclaim scratch left by a
+    prior process's idle runs); the 5-minute loop then ticks all of them.
     """
     from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
     from pocketpaw_ee.cloud.billing.service import sweep_subscription_grace
@@ -261,6 +275,7 @@ async def start_run_sweeper() -> None:
     from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
+    from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
 
     global _sweeper_task
     with suppress(Exception):
@@ -271,6 +286,8 @@ async def start_run_sweeper() -> None:
         await run_cutover_sweep()
     with suppress(Exception):
         await sweep_pending_sites()
+    with suppress(Exception):
+        await sweep_site_renewals()
     with suppress(Exception):
         await sweep_subscription_grace()
     with suppress(Exception):
@@ -449,9 +466,15 @@ class CloudLifecycleHook:
         # exactly one replica). The task lives at module scope inside the
         # scheduler so this no-`app` lifecycle hook can still own it.
         try:
+            from pocketpaw_ee.cloud._core import sweep_runtime
             from pocketpaw_ee.cloud.pockets.refresh_scheduler import start_scheduler
 
             await start_scheduler()
+            # These two sweeps start HERE, not in mount_cloud, so the lifespan
+            # that records the rest never sees them. Marked by hand under the
+            # name /api/v1/automations/status looks them up by, so that endpoint
+            # cannot report them running when this call raised above.
+            sweep_runtime.mark_started("_start_pocket_refresh")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pocket interval-refresh scheduler start failed: %s", exc)
 
@@ -465,11 +488,13 @@ class CloudLifecycleHook:
         # scope inside the scheduler so this no-``app`` lifecycle hook
         # can still own it.
         try:
+            from pocketpaw_ee.cloud._core import sweep_runtime
             from pocketpaw_ee.cloud._core.temporal_scheduler import (
                 start_scheduler as start_temporal_scheduler,
             )
 
             await start_temporal_scheduler()
+            sweep_runtime.mark_started("_start_temporal_sweeps")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Temporal sweep scheduler start failed: %s", exc)
 
@@ -540,17 +565,26 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Meeting scheduler shutdown error: %s", exc)
 
-        # Most cloud teardown is handled inside mount_cloud's own shutdown
-        # hook. The interval-refresh scheduler is owned by this lifecycle
-        # hook (it was started in on_startup), so it is cancelled here so
-        # the background task does not outlive the process.
+        # NOTE: this method runs only because the host lifecycle calls it --
+        # see dashboard_lifecycle.shutdown_event. It was called by nothing at
+        # all until 2026-09-05, and the comment that used to sit here said
+        # "most cloud teardown is handled inside mount_cloud's own shutdown
+        # hook", which was wrong twice over: mount_cloud's shutdown hooks were
+        # themselves dropped, and a reader checking whether teardown was
+        # covered found a sentence saying yes.
+        #
+        # mount_cloud now owns its own teardown through the composed lifespan
+        # (_install_cloud_lifespan). What is cancelled below is what THIS hook
+        # started in on_startup.
         import logging
 
         logger = logging.getLogger(__name__)
         try:
+            from pocketpaw_ee.cloud._core import sweep_runtime
             from pocketpaw_ee.cloud.pockets.refresh_scheduler import stop_scheduler
 
             await stop_scheduler()
+            sweep_runtime.mark_stopped("_start_pocket_refresh")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pocket interval-refresh scheduler stop failed: %s", exc)
 
@@ -899,6 +933,31 @@ class CloudMediaMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.media import MEDIA_TOOL_IDS
 
         return list(MEDIA_TOOL_IDS)
+
+
+class CloudOtherHandMcpProvider:
+    """`pocketpaw.mcp_servers` — the Otherhand illustration server
+    (``pocketpaw_other_hand``). Hosts ``illustrate`` only.
+
+    Ambient like the media server, and gated where it matters instead: the
+    Otherhand surface allow-lists the tool id, so no other surface's agent can
+    reach it, and a per-workspace daily budget bounds what it can spend even
+    there. Registering it here rather than per-surface keeps one road for every
+    in-process server; the surface profile is the door.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.other_hand import build_other_hand_server
+
+            return build_other_hand_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.other_hand import OTHER_HAND_TOOL_IDS
+
+        return list(OTHER_HAND_TOOL_IDS)
 
 
 class CloudBrowserMcpProvider:

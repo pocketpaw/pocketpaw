@@ -1,5 +1,15 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-09-01 (integration/session-2026-08-29) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_other_hand`` (the notebook illustrate tool,
+  registered always-on via the ``other_hand`` mcp_servers entry point). Same
+  regime as ``pocketpaw_media`` / ``pocketpaw_code``: ambient registration,
+  scoped by the Otherhand SurfaceProfile allowlist rather than by being
+  withheld. Six external-config assertions counted it as external config and
+  dev went red, which is the failure mode the 2026-07-27 note below already
+  called out as needing somewhere more specific to fail. This is now the
+  fourteenth entry in that list.
+
 Updated: 2026-07-24 (feat/ship-17-databases) — ``_strip_builtin_servers`` now
   also drops ``pocketpaw_ship`` (the /ship managed-deploy verbs, registered
   always-on / ambient via the ``CloudShipMcpProvider`` mcp_servers entry point,
@@ -109,6 +119,9 @@ from pocketpaw_ee.agent.mcp_servers.instinct import SERVER_NAME as _INSTINCT_MCP
 from pocketpaw_ee.agent.mcp_servers.loom import SERVER_NAME as _LOOM_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.media import SERVER_NAME as _MEDIA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.meetings import SERVER_NAME as _MEETINGS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.other_hand import (
+    SERVER_NAME as _OTHER_HAND_MCP_SERVER_NAME,
+)
 from pocketpaw_ee.agent.mcp_servers.palette import SERVER_NAME as _PALETTE_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.planner import (
     POCKET_PLANNER_SERVER_NAME as _POCKET_PLANNER_MCP_SERVER_NAME,
@@ -168,6 +181,12 @@ def _strip_builtin_servers(result: dict) -> dict:
     # call search_stock_images for site imagery without an explicit opt-in.
     # Pure read (free Pexels + Unsplash photo search), no identity.
     out.pop(_STOCK_MCP_SERVER_NAME, None)
+    # ``pocketpaw_other_hand`` is always-on in the same sense as the servers
+    # above: it is REGISTERED for every agent so there is one road for every
+    # in-process server, and the Otherhand surface profile is the door that
+    # decides who may actually call `illustrate`. Stripping it here keeps the
+    # external-config assertions about EXTERNAL config.
+    out.pop(_OTHER_HAND_MCP_SERVER_NAME, None)
     # ``pocketpaw_icons`` / ``pocketpaw_palette`` / ``pocketpaw_ask`` are always-on
     # too — the /sites authoring toolbelt (icon search, palette derivation, and
     # the interactive ask_user question chips) is ambient, same regime as

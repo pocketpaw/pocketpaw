@@ -91,12 +91,13 @@
     ]
   },
   {
-    "label": "an org-scoped flat can be requested for one site — the card can only fail on approval",
+    "label": "the door stops refusing a key the ladder cannot sell — the card can only fail on approval",
     "file": "ee/pocketpaw_ee/cloud/site_plan_requests/propose.py",
-    "find": "    tier = site_plans.site_scoped_tier(canonical_key)",
-    "replace": "    tier = site_plans.get_site_plan(canonical_key)",
+    "find": "    if tier is None:\n        raise ValueError(f\"'{site_plan_key}' is not a plan a single site can be put on\")",
+    "replace": "    if tier is None:\n        tier = site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)",
     "tests": [
-      "tests/cloud/sites/test_site_plan_request_gate.py::test_an_org_scoped_flat_cannot_be_requested_for_one_site"
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_an_org_scoped_flat_cannot_be_requested_for_one_site",
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_an_unknown_tier_is_refused"
     ]
   },
   {
@@ -142,6 +143,15 @@
     "replace": "    pass",
     "tests": [
       "tests/cloud/sites/test_site_plan_request_gate.py::test_every_gated_kind_guard_runs_on_the_shared_chokepoint"
+    ]
+  },
+  {
+    "label": "a cancellation request is filed on the purchase copy, so the admin approves 'Put X on the Free plan ($0/month)'",
+    "file": "ee/pocketpaw_ee/cloud/site_plan_requests/propose.py",
+    "find": "    is_cancellation = monthly_price_usd <= 0",
+    "replace": "    is_cancellation = False",
+    "tests": [
+      "tests/cloud/sites/test_site_plan_request_gate.py::test_a_request_for_the_free_floor_reads_as_a_CANCELLATION"
     ]
   }
 ]

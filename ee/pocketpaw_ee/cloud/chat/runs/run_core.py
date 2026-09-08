@@ -1,6 +1,21 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-09-01 (feat/byok-guest-backend) — the turn path finally CALLS
+  ``byok.service.resolve_turn_credentials`` (the seam its own header always
+  promised): ``_iter_agent_events`` resolves the workspace's stored key per
+  turn and threads ``byok_api_key`` into ``pool.run`` (the pool swaps in an
+  isolated backend). Model pinning: a byok turn whose model does not belong to
+  the key's provider yields a clear ``byok.model_provider_mismatch`` error
+  instead of an upstream 401. Guests (``User.is_guest``) have NO platform
+  fallback — a missing/undecryptable key yields ``guest_key_required``. BYOK
+  turns also SKIP the session-supervisor warm-client wiring (a leased warm
+  client carries platform credentials; binding a byok client as the shared
+  warm slot would bleed the other way). ``execute_run`` gained
+  ``_reject_if_guest_over_limit`` beside the jail/credit gates — the single
+  atomic spend against the guest daily-turn budget (fail-closed; the HTTP
+  route fast-rejects check-only in ``agent_router``).
+
 - 2026-09-02 (fix/metering-partial-usage-capture) — the terminal states that
   could never carry usage now do, and latest-wins grew a floor.
 
@@ -1544,6 +1559,79 @@ async def _drive_agent_loop(
         # legacy path, byte-identical to today.
         if ctx.model_override:
             run_kwargs["model_override"] = ctx.model_override
+        # --- BYOK per-turn credentials (feat/byok-guest-backend, 2026-09-01) ----
+        # Resolve whose credential pays for THIS turn — the call the byok
+        # service's own header always said the turn path makes, wired at last.
+        # Applies to EVERY user with a stored workspace key (this un-inerts the
+        # /agents BYOK field), not just guests. Three outcomes:
+        #   * byok + model matches the key's provider -> thread ``byok_api_key``
+        #     into ``pool.run`` (the pool swaps in an ISOLATED backend; the
+        #     credential-bleed trap is closed there and by the pydantic_ai
+        #     fingerprint cache key).
+        #   * byok + model mismatch -> a CLEAR terminal error
+        #     (byok.model_provider_mismatch), never an upstream 401 that reads
+        #     as the product being broken.
+        #   * platform -> unchanged behaviour, EXCEPT for a guest: guests have
+        #     no platform fallback (the captain's "no keyless turns" v1 rule) —
+        #     a guest whose stored key vanished or stopped decrypting gets
+        #     ``guest_key_required``, never a silently platform-billed turn.
+        # A resolver crash degrades to platform for non-guests (matching
+        # ``resolve_turn_credentials``'s own philosophy) but NEVER silently for
+        # guests. The key itself is never logged — only source/provider are.
+        from pocketpaw_ee.cloud.byok import service as byok_service
+
+        try:
+            byok_creds = await byok_service.resolve_turn_credentials(ctx.workspace_id)
+        except Exception:
+            logger.exception(
+                "byok: resolve_turn_credentials failed for workspace=%s — "
+                "using platform credentials this turn",
+                ctx.workspace_id,
+            )
+            byok_creds = byok_service.TurnCredentials(source="platform")
+        if byok_creds.source == "byok" and byok_creds.api_key:
+            agent_model = (
+                str(instance.config.get("model") or "") if hasattr(instance, "config") else ""
+            )
+            turn_model = ctx.model_override or agent_model
+            if not byok_service.provider_allows_model(byok_creds.provider, turn_model):
+                yield (
+                    "error",
+                    {
+                        "code": "byok.model_provider_mismatch",
+                        "message": (
+                            f"Your stored {byok_creds.provider} key can't run the model "
+                            f"'{turn_model}'. Pick a {byok_creds.provider} model or "
+                            "update your key."
+                        ),
+                    },
+                )
+                return
+            run_kwargs["byok_api_key"] = byok_creds.api_key
+        else:
+            from pocketpaw_ee.cloud.auth import guest_budget
+
+            try:
+                _guest = await guest_budget.load_guest(ctx.user_id)
+            except Exception:
+                logger.warning(
+                    "guest lookup failed for user=%s — refusing keyless turn (fail closed)",
+                    ctx.user_id,
+                    exc_info=True,
+                )
+                _guest = True  # type: ignore[assignment] — any truthy value refuses below
+            if _guest is not None:
+                yield (
+                    "error",
+                    {
+                        "code": "guest_key_required",
+                        "message": (
+                            "Your API key is missing or no longer usable. "
+                            "Re-enter it to keep going."
+                        ),
+                    },
+                )
+                return
         # --- Supervised native-resume wiring (feat/session-supervisor SS-5) -----
         # Flag-gated (default OFF). When ON, route this turn through the
         # SessionSupervisor: recover any prior native ``cli_session_id`` from the
@@ -1557,7 +1645,20 @@ async def _drive_agent_loop(
         # ``(workspace, project_key, session_id)`` key from its ``SessionKey`` at
         # append/load time. Any failure degrades to the legacy path for THIS turn
         # (no handle threaded) — a supervisor hiccup never breaks a run.
-        if _session_supervisor_enabled() and sup_workspace_id and sup_session_id and sup_agent_id:
+        # BYOK turns SKIP the supervisor entirely (feat/byok-guest-backend):
+        # a leased warm client was built on PLATFORM credentials, and
+        # ``on_client_built`` would bind an isolated BYOK client as the shared
+        # warm slot for later platform turns — either direction is the warm-
+        # client credential-bleed this workspace has shipped before. Degrading
+        # a BYOK turn to cold-start is the safe trade; the pool's isolated
+        # backend is the real guarantee.
+        if (
+            _session_supervisor_enabled()
+            and sup_workspace_id
+            and sup_session_id
+            and sup_agent_id
+            and "byok_api_key" not in run_kwargs
+        ):
             try:
                 prior_cli = await runtime_service.get_cli_session_id(
                     sup_workspace_id, sup_session_id, sup_agent_id
@@ -2043,6 +2144,27 @@ async def _reject_if_over_credit_quota(spec: RunSpec, ctx: ScopeContext, transpo
     )
 
 
+async def _reject_if_guest_over_limit(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
+    """Guest daily-turn gate on the worker/executor path (feat/byok-guest-backend).
+
+    The guest sibling of ``_reject_if_over_credit_quota``: delegates to
+    ``auth.guest_gates.reject_if_guest_over_limit``, which is a no-op for
+    non-guest users, performs the ONE atomic increment-then-compare spend for
+    guests, refuses a guest with no usable stored key (``guest_key_required``
+    — the captain's no-keyless-turns rule), and on rejection emits the same
+    terminal ``error`` frame + ``mark_terminal(failed)`` + TTL shape the
+    billing reject emits. Returns True when the run was rejected.
+    """
+    from pocketpaw_ee.cloud.auth import guest_gates
+
+    return await guest_gates.reject_if_guest_over_limit(
+        ctx.user_id,
+        ctx.workspace_id,
+        run_id=spec.run_id,
+        transport=transport,
+    )
+
+
 async def execute_run(spec: RunSpec) -> None:
     """Run the agent for ``spec`` and write every event to the transport.
 
@@ -2147,6 +2269,17 @@ async def execute_run(spec: RunSpec) -> None:
     # ``billing_enforced`` is on, so OSS / self-host is unaffected and IN-FLIGHT
     # runs (already past this point) are never killed.
     if await _reject_if_over_credit_quota(spec, ctx, transport):
+        return
+
+    # Guest turn gate (feat/byok-guest-backend) — the SINGLE atomic spend
+    # against the guest's daily turn budget, sitting beside the jail/credit
+    # gates for the same reason they sit here: BEFORE prewarm, mark-running and
+    # any model work, covering every path into the executor (HTTP, WS, queued).
+    # The chat HTTP route also fast-rejects check-only in ``agent_router`` so
+    # the browser gets a clean pre-stream 402; only THIS seam increments, so a
+    # turn costs exactly one. No-op for non-guest users; fail-CLOSED for
+    # guests (an unreadable counter refuses the run).
+    if await _reject_if_guest_over_limit(spec, ctx, transport):
         return
 
     # Mark this dispatch as a live cloud CHAT run for the per-tenant cwd jail's

@@ -1,4 +1,7 @@
 # tests/atlas/test_eval.py — intent→capability ranking-regression eval
+# Updated: 2026-09-05 (feat/files-links) — baseline 43/44 → 45/46: two cases
+# pin surface:files on the backlinks and link-graph intents now that the
+# surface carries wikilink / backlink / graph vocabulary.
 # harness for the atlas OS self-model (AT-2). Created: 2026-07-02
 # (feat/atlas-eval). Loads real-user intents from eval_cases.json and,
 # per case, asserts the expected entry id appears within ``rank_within``
@@ -69,7 +72,7 @@ _CASES_PATH = Path(__file__).parent / "eval_cases.json"
 # gate" is still the single non-rank-1.
 # If a ranking change LOWERS the strict-hit count below this, the summary
 # test fails; if it raises it, bump the constant in the same PR.
-STRICT_HIT_BASELINE = 43
+STRICT_HIT_BASELINE = 45
 
 # Search depth for the eval: at least as deep as the largest rank_within,
 # generous enough that "not found at all" is a ranking fact, not a limit

@@ -246,8 +246,16 @@ async def test_dynamic_create_then_publish_yields_one_doc(beanie_test_db, monkey
 
 
 async def test_draft_carries_no_billing(beanie_test_db):
-    """BILLING-SAFE: a draft opens no checkout and carries no subscription — only
-    publish bills. The minted draft doc has no sub state and lists with no checkout."""
+    """BILLING-SAFE: a draft carries no subscription and nothing has been bought —
+    only publish bills. The minted draft doc has no sub state, no rail and no
+    period paid for.
+
+    It used to end on ``cards[0].checkout_url is None``, which stopped meaning
+    anything on 2026-09-05: the hosted checkout went with the gateway, so the
+    field is gone rather than empty. The assertions below are its replacement and
+    are strictly stronger — ``billing_rail`` and ``period_paid_usd`` are what
+    every seam now reads to decide whether a site has been paid for, and a draft
+    that acquired either would be a site being billed before it was published."""
     doc = await sites_service.create_draft_site(
         workspace_id="ws1", user_id="u1", pocket_id="pk_bill", name="Free Draft"
     )
@@ -256,9 +264,13 @@ async def test_draft_carries_no_billing(beanie_test_db):
     assert doc.subscription_id is None
     assert doc.plan_tier is None
     assert doc.pending_deploy_inputs == {}
+    assert doc.billing_rail == "", "a draft rides no rail — nothing is paying for it"
+    assert doc.period_paid_usd == 0
+    assert doc.renewal_date is None
 
     cards = await sites_service.list_for_workspace("ws1")
-    assert cards[0].checkout_url is None
+    assert cards[0].subscription_status == "none"
+    assert cards[0].period_paid_usd == 0
 
 
 # ---------------------------------------------------------------------------

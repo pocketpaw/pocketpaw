@@ -182,15 +182,14 @@ async def test_cancel_works_on_a_subscription_in_dunning(mongo_db, monkeypatch):
     fake_client.subscriptions.update.assert_awaited_once_with(SUB_ID, status="cancelled")
 
 
-async def test_site_addon_sync_targets_a_subscription_in_dunning(mongo_db, monkeypatch):
-    """Add-ons attach to the subscription the workspace HAS. Refusing while it is
-    on hold would push the caller toward opening a standalone one."""
-    ws = await _make_workspace(plan="pro")
-    await _seed_subscription(ws, status="on_hold", grace_until=datetime.now(UTC))
-    _fake_switch_client(monkeypatch)
-
-    result = await billing.sync_site_addons(workspace_id=ws, provider=_provider())
-    assert result["subscription_id"] == SUB_ID
+# REMOVED 2026-09-05 (fix/sites-plan-credits):
+# ``test_site_addon_sync_targets_a_subscription_in_dunning`` asserted that a site
+# add-on could still be attached while the workspace subscription was on hold.
+# Site plans no longer attach to that subscription at all — they are paid from
+# the workspace credit balance — and ``sync_site_addons`` is gone with the rest
+# of the rail. The dunning behaviour it leaned on (an on-hold subscription is
+# still the one the workspace HAS) is covered by the cancel and re-subscribe
+# cases above and below.
 
 
 async def test_a_suspended_subscription_is_still_cancelled_before_a_new_one_opens(

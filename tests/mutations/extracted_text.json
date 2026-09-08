@@ -1,0 +1,121 @@
+[
+  {
+    "label": "the listener never persists — every consumer re-extracts forever, and nothing else notices",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "        await persist_extracted_text(\n            file_id=file_id,\n            workspace_id=str(workspace_id),\n            result=result,\n            content_version=content_version,\n            adapter=adapter,\n        )",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/uploads/test_extracted_text.py::test_listener_persists_the_extraction"
+    ]
+  },
+  {
+    "label": "the persisted version is hardcoded to 0 — an already-edited file's text reads as fresh",
+    "file": "ee/pocketpaw_ee/cloud/uploads/listeners.py",
+    "find": "    content_version = getattr(doc, \"content_version\", 0) or 0",
+    "replace": "    content_version = 0",
+    "tests": [
+      "tests/cloud/uploads/test_extracted_text.py::test_listener_records_the_version_the_row_was_at"
+    ]
+  },
+  {
+    "label": "the staleness guard is deleted — an edited file serves the text of the document it replaced",
+    "file": "ee/pocketpaw_ee/cloud/uploads/extracted_text.py",
+    "find": "    if stored_version != current_version:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/uploads/test_extracted_text.py::test_reader_refuses_text_extracted_before_an_edit",
+      "tests/cloud/uploads/test_extracted_text.py::test_book_agent_re_extracts_after_the_file_was_edited"
+    ]
+  },
+  {
+    "label": "the hide-from-AI gate on the read door is deleted — a hidden file's text is served",
+    "file": "ee/pocketpaw_ee/cloud/uploads/extracted_text.py",
+    "find": "    if getattr(doc, \"hide_from_ai\", False):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/uploads/test_extracted_text.py::test_reader_refuses_a_file_hidden_from_ai"
+    ]
+  },
+  {
+    "label": "the persist fails CLOSED — a storage hiccup takes the KB ingest and the tags with it",
+    "file": "ee/pocketpaw_ee/cloud/uploads/extracted_text.py",
+    "find": "    try:\n        await store_adapter.put(key, _body(), _BLOB_MIME)\n    except Exception:",
+    "replace": "    try:\n        await store_adapter.put(key, _body(), _BLOB_MIME)\n    except ZeroDivisionError:",
+    "tests": [
+      "tests/cloud/uploads/test_extracted_text.py::test_persist_failure_loses_neither_the_ingest_nor_the_tags"
+    ]
+  },
+  {
+    "label": "the book agent stops reading the stored text — the re-extraction T0 removed comes back",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "    stored = await load_extracted_text(doc)\n    if stored is not None:",
+    "replace": "    stored = await load_extracted_text(doc)\n    if False:",
+    "tests": [
+      "tests/cloud/uploads/test_extracted_text.py::test_book_agent_reuses_stored_text_and_never_runs_the_chain"
+    ]
+  },
+  {
+    "label": "only the text is persisted — comprehension and the agent's name lose the title and captions",
+    "file": "ee/pocketpaw_ee/cloud/uploads/extracted_text.py",
+    "find": "        payload = result.model_dump_json().encode(\"utf-8\")",
+    "replace": "        payload = result.model_copy(update={\"title\": None, \"captions\": []}).model_dump_json().encode(\"utf-8\")",
+    "tests": [
+      "tests/cloud/uploads/test_extracted_text.py::test_persist_then_load_round_trips_the_whole_result",
+      "tests/cloud/uploads/test_extracted_text.py::test_book_agent_reuses_stored_text_and_never_runs_the_chain"
+    ]
+  },
+  {
+    "label": "the key is randomised — a re-ingest leaks a dead blob per upload event",
+    "file": "ee/pocketpaw_ee/cloud/uploads/extracted_text.py",
+    "find": "    return f\"{_KEY_PREFIX}/{fid}.json\"",
+    "replace": "    import uuid as _u\n\n    return f\"{_KEY_PREFIX}/{fid}-{_u.uuid4().hex}.json\"",
+    "tests": [
+      "tests/cloud/uploads/test_extracted_text.py::test_the_key_is_deterministic_so_a_reingest_overwrites"
+    ]
+  },
+  {
+    "label": "a traversing file_id is accepted — the key escapes the derived prefix",
+    "file": "ee/pocketpaw_ee/cloud/uploads/extracted_text.py",
+    "find": "    if \"/\" in fid or \"\\\\\" in fid or \"..\" in fid or any(ord(c) < 0x20 for c in fid):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/uploads/test_extracted_text.py::test_blob_key_refuses_a_traversing_file_id"
+    ]
+  },
+  {
+    "label": "a corrupt blob raises instead of falling back — an unreadable cache breaks the feature",
+    "file": "ee/pocketpaw_ee/cloud/uploads/extracted_text.py",
+    "find": "    try:\n        return ExtractionResult.model_validate_json(raw)\n    except Exception:",
+    "replace": "    try:\n        return ExtractionResult.model_validate_json(raw)\n    except ZeroDivisionError:",
+    "tests": [
+      "tests/cloud/uploads/test_extracted_text.py::test_reader_returns_none_on_a_corrupt_blob"
+    ]
+  },
+  {
+    "label": "the pointer is written even when the blob write failed — the row points at nothing",
+    "file": "ee/pocketpaw_ee/cloud/uploads/extracted_text.py",
+    "find": "    store_adapter = adapter if adapter is not None else _resolve_adapter()\n    if store_adapter is None:\n        logger.warning(\n            \"extracted-text: no storage adapter; file_id=%s keeps re-extracting\",\n            file_id,\n        )\n        return False",
+    "replace": "    store_adapter = adapter if adapter is not None else _resolve_adapter()\n    if store_adapter is None:\n        from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore\n\n        await MongoFileStore().set_extracted_text(\n            file_id, workspace_id, key=blob_key(file_id), content_version=content_version\n        )\n        return False",
+    "tests": [
+      "tests/cloud/uploads/test_extracted_text.py::test_persist_reports_failure_with_no_adapter"
+    ]
+  },
+  {
+    "label": "a stored-but-empty extraction makes a co-reader that has read nothing",
+    "file": "ee/pocketpaw_ee/cloud/uploads/book_agent.py",
+    "find": "        text = (stored.text or \"\").strip()\n        if text:",
+    "replace": "        text = (stored.text or \"\").strip()\n        if True:",
+    "tests": [
+      "tests/cloud/uploads/test_extracted_text.py::test_book_agent_refuses_a_stored_extraction_with_no_text"
+    ]
+  },
+  {
+    "label": "the derived blob outlives the file it was extracted from",
+    "file": "ee/pocketpaw_ee/cloud/uploads/service.py",
+    "find": "        await delete_extracted_text(file_id, adapter=self._adapter)",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/uploads/test_extracted_text.py::test_deleting_a_file_removes_its_derived_blob"
+    ]
+  }
+]
