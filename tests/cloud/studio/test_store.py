@@ -55,8 +55,8 @@ async def test_a_generation_is_invisible_to_another_workspace(mongo_db):
 
     await store.record_generation("w1", _generation("g1"))
 
-    assert [g.id for g in await store.list_stored_generations("w1")] == ["g1"]
-    assert await store.list_stored_generations("w2") == []
+    assert [g.id for g in await store.list_generations("w1")] == ["g1"]
+    assert await store.list_generations("w2") == []
 
 
 async def test_get_generation_is_scoped_to_the_owning_workspace(mongo_db):
@@ -64,9 +64,9 @@ async def test_get_generation_is_scoped_to_the_owning_workspace(mongo_db):
 
     await store.record_generation("w1", _generation("g1"))
 
-    assert (await store.get_stored_generation("w1", "g1")) is not None
+    assert (await store.get_generation("w1", "g1")) is not None
     # The id is guessable; the workspace is the boundary.
-    assert (await store.get_stored_generation("w2", "g1")) is None
+    assert (await store.get_generation("w2", "g1")) is None
 
 
 async def test_updating_from_a_foreign_workspace_does_not_touch_the_record(mongo_db):
@@ -76,7 +76,7 @@ async def test_updating_from_a_foreign_workspace_does_not_touch_the_record(mongo
 
     assert await store.update_generation("w2", "g1", status="succeeded") is False
 
-    still_mine = await store.get_stored_generation("w1", "g1")
+    still_mine = await store.get_generation("w1", "g1")
     assert still_mine is not None
     assert still_mine.status == "running"
 
@@ -91,7 +91,7 @@ async def test_a_queued_generation_is_persisted_before_it_completes(mongo_db):
 
     await store.record_generation("w1", _generation("vid1", status="queued", kind="video"))
 
-    listed = await store.list_stored_generations("w1")
+    listed = await store.list_generations("w1")
     assert [(g.id, g.status) for g in listed] == [("vid1", "queued")]
 
 
@@ -101,7 +101,7 @@ async def test_a_generation_transitions_queued_to_running_to_succeeded(mongo_db)
     await store.record_generation("w1", _generation("vid1", status="queued", kind="video"))
 
     assert await store.update_generation("w1", "vid1", status="running") is True
-    assert (await store.get_stored_generation("w1", "vid1")).status == "running"
+    assert (await store.get_generation("w1", "vid1")).status == "running"
 
     asset = schemas.GeneratedAsset(
         id="a1",
@@ -110,7 +110,7 @@ async def test_a_generation_transitions_queued_to_running_to_succeeded(mongo_db)
     )
     assert await store.update_generation("w1", "vid1", status="succeeded", assets=[asset]) is True
 
-    done = await store.get_stored_generation("w1", "vid1")
+    done = await store.get_generation("w1", "vid1")
     assert done.status == "succeeded"
     assert [a.url for a in done.assets] == [asset.url]
 
@@ -126,11 +126,11 @@ async def test_a_failed_generation_persists_with_its_error(mongo_db):
         is True
     )
 
-    failed = await store.get_stored_generation("w1", "g1")
+    failed = await store.get_generation("w1", "g1")
     assert failed.status == "failed"
     assert failed.error == "upstream quota exceeded"
     # A failure is still part of the workspace's history, not swallowed.
-    assert [g.id for g in await store.list_stored_generations("w1")] == ["g1"]
+    assert [g.id for g in await store.list_generations("w1")] == ["g1"]
 
 
 # ── 3. Provenance ───────────────────────────────────────────────────────────
@@ -144,13 +144,13 @@ async def test_source_and_pocket_round_trip_and_filter(mongo_db):
         "w1", _generation("site1"), source="sites", pocket_id="pocket-abc"
     )
 
-    from_sites = await store.list_stored_generations("w1", source="sites")
+    from_sites = await store.list_generations("w1", source="sites")
     assert [g.id for g in from_sites] == ["site1"]
 
-    for_pocket = await store.list_stored_generations("w1", pocket_id="pocket-abc")
+    for_pocket = await store.list_generations("w1", pocket_id="pocket-abc")
     assert [g.id for g in for_pocket] == ["site1"]
 
-    assert len(await store.list_stored_generations("w1")) == 2
+    assert len(await store.list_generations("w1")) == 2
 
 
 # ── 4. Listing shape ────────────────────────────────────────────────────────
@@ -164,14 +164,14 @@ async def test_list_is_newest_first_and_honours_limit(mongo_db):
         gen.createdAt = 1_757_000_000_000 + i
         await store.record_generation("w1", gen)
 
-    assert [g.id for g in await store.list_stored_generations("w1")] == [
+    assert [g.id for g in await store.list_generations("w1")] == [
         "g4",
         "g3",
         "g2",
         "g1",
         "g0",
     ]
-    assert [g.id for g in await store.list_stored_generations("w1", limit=2)] == ["g4", "g3"]
+    assert [g.id for g in await store.list_generations("w1", limit=2)] == ["g4", "g3"]
 
 
 async def test_recording_the_same_id_twice_does_not_duplicate(mongo_db):
@@ -181,5 +181,5 @@ async def test_recording_the_same_id_twice_does_not_duplicate(mongo_db):
     await store.record_generation("w1", _generation("g1", status="queued"))
     await store.record_generation("w1", _generation("g1", status="succeeded"))
 
-    listed = await store.list_stored_generations("w1")
+    listed = await store.list_generations("w1")
     assert [(g.id, g.status) for g in listed] == [("g1", "succeeded")]

@@ -163,15 +163,6 @@ _SIZE_MAP: dict[str, str] = {
 _MAX_GENERATED_ASSETS = 4
 
 
-def _history_path() -> Path:
-    """Get (and create) the generation-history JSONL path. History is persisted
-    per-deployment under ``~/.pocketpaw/studio/generations.jsonl`` so the /studio
-    gallery survives process restarts."""
-    d = get_config_dir() / "studio"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / "generations.jsonl"
-
-
 # ── Model catalog mapping ────────────────────────────────────────────────────
 
 
@@ -417,61 +408,6 @@ def list_styles() -> list[schemas.StudioStyle]:
     return quick + curated
 
 
-# ── Generation history (JSONL persistence) ──────────────────────────────────
-
-
-def _load_history() -> list[dict[str, Any]]:
-    """Read the persisted generation records (best-effort — a corrupt/missing
-    file degrades to an empty history, never a crash)."""
-    path = _history_path()
-    if not path.exists():
-        return []
-    records: list[dict[str, Any]] = []
-    try:
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except ValueError:
-                logger.warning("studio: skipping corrupt history line")
-    except OSError:
-        logger.warning("studio: could not read history file", exc_info=True)
-    return records
-
-
-def _append_history(record: dict[str, Any]) -> None:
-    """Append one record to the JSONL history (best-effort)."""
-    try:
-        with _history_path().open("a") as fh:
-            fh.write(json.dumps(record) + "\n")
-    except OSError:
-        logger.warning("studio: could not append history", exc_info=True)
-
-
-def list_generations(workspace_id: str) -> list[schemas.Generation]:
-    """Return the workspace's generation history, newest first. Records are
-    tagged with the owning workspace so multi-tenant deployments never leak."""
-    records = _load_history()
-    mine = [
-        r for r in records if r.get("_workspace") == workspace_id or r.get("_workspace") is None
-    ]
-    mine.sort(key=lambda r: r.get("createdAt", 0), reverse=True)
-    return [schemas.Generation.model_validate(r) for r in mine]
-
-
-def get_generation(gen_id: str, workspace_id: str) -> schemas.Generation | None:
-    """Return one generation by id (scoped to the workspace), or None."""
-    for r in _load_history():
-        if r.get("id") != gen_id:
-            continue
-        if r.get("_workspace") not in (None, workspace_id):
-            continue
-        return schemas.Generation.model_validate(r)
-    return None
-
-
 # ── Generation history (Mongo, workspace-scoped) ────────────────────────────
 #
 # House rule (ee/pocketpaw_ee/cloud CLAUDE.md #1/#2): the service IS the
@@ -572,7 +508,7 @@ async def update_generation(
     return True
 
 
-async def list_stored_generations(
+async def list_generations(
     workspace_id: str,
     *,
     limit: int = DEFAULT_GENERATION_LIMIT,
@@ -594,7 +530,7 @@ async def list_stored_generations(
     return [_to_schema(d) for d in docs]
 
 
-async def get_stored_generation(workspace_id: str, generation_id: str) -> schemas.Generation | None:
+async def get_generation(workspace_id: str, generation_id: str) -> schemas.Generation | None:
     """One generation, or None. The id is guessable; the workspace is the boundary."""
     doc = await StudioGeneration.find_one(
         StudioGeneration.workspace == workspace_id,
@@ -603,15 +539,25 @@ async def get_stored_generation(workspace_id: str, generation_id: str) -> schema
     return _to_schema(doc) if doc is not None else None
 
 
-def tracked_generation_filenames() -> set[str]:
+async def tracked_generation_filenames() -> set[str]:
     """The set of media filenames owned by direct /studio generations. The /media
     list router uses this to EXCLUDE generation outputs so the gallery doesn't
     show a direct generation twice (once via /studio/generations and once via the
     /media file list). Agent-side generated files (media MCP) are NOT tracked here
-    and therefore still surface through /media."""
+    and therefore still surface through /media.
+
+    # global-read: deliberately spans every workspace, and narrowing it would be a
+    # LEAK, not a fix. A generated file's name carries no owner (media_key is a flat
+    # ``generated/<name>``; only /browser captures get an owner prefix), so
+    # ``media.storage.visible_to`` returns True for one — "legacy, untagged". This
+    # global set is therefore the only thing keeping one tenant's studio output off
+    # another tenant's /media listing. Scope it per workspace and those files stop
+    # being excluded and start being shown.
+    """
     names: set[str] = set()
-    for r in _load_history():
-        for asset in r.get("assets") or []:
+    docs = await StudioGeneration.find_all().to_list()
+    for doc in docs:
+        for asset in doc.assets or []:
             url = asset.get("url") or ""
             if url.startswith("/api/v1/media/"):
                 names.add(url.rsplit("/", 1)[-1])
@@ -1135,7 +1081,7 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
         status="succeeded",
     )
     # Persist with the owning workspace tag (dropped by the wire model on read).
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation(workspace_id, record)
     return record
 
 
@@ -1193,7 +1139,7 @@ async def _generate_curated_image(
         assets=assets,
         status="succeeded",
     )
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation(workspace_id, record)
     return record
 
 
@@ -1259,7 +1205,7 @@ async def _generate_image_edit(
         assets=assets,
         status="succeeded",
     )
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation(workspace_id, record)
     return record
 
 
@@ -1325,7 +1271,7 @@ async def generate_music(req: schemas.MusicRequest, *, workspace_id: str) -> sch
         assets=assets,
         status="succeeded",
     )
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation(workspace_id, record)
     return record
 
 
@@ -1462,7 +1408,7 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
         assets=assets,
         status="succeeded",
     )
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation(workspace_id, record)
     return record
 
 
@@ -1738,7 +1684,7 @@ async def edit(req: schemas.EditRequest, *, workspace_id: str) -> schemas.Genera
         assets=assets,
         status="succeeded",
     )
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation(workspace_id, record)
     return record
 
 
@@ -1833,7 +1779,7 @@ async def generate_video_elements(
         assets=assets,
         status="succeeded",
     )
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation(workspace_id, record)
     return record
 
 
@@ -1921,7 +1867,7 @@ async def generate_video_motion(
         assets=assets,
         status="succeeded",
     )
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation(workspace_id, record)
     return record
 
 

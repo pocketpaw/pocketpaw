@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -339,7 +339,9 @@ async def test_captures_stay_out_of_the_studio_gallery(media_client, media_store
     (media_store / "1700000000000-abc123.png").write_bytes(_PNG)
     capture_url = _url_from(await _capture("ws-1"))
 
-    with patch.object(media_router_module, "tracked_generation_filenames", return_value=set()):
+    with patch.object(
+        media_router_module, "tracked_generation_filenames", AsyncMock(return_value=set())
+    ):
         media_client.as_workspace("ws-1")
         names = [e["name"] for e in media_client.get("/api/v1/media").json()["media"]]
 

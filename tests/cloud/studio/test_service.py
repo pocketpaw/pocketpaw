@@ -4,8 +4,8 @@
 # (``service._PROXY_TRANSPORT`` → httpx.MockTransport) so the full request
 # shape — path, model, prompt, size, count, the OpenAI ``user`` tenant tag, and
 # the Bearer key — is asserted end-to-end without a live proxy. The media
-# storage adapter and ``_history_path`` are redirected to tmp dirs so nothing
-# touches the developer's real ``~/.pocketpaw``. Coverage:
+# storage adapter is redirected to a tmp dir so nothing touches the developer's
+# real ``~/.pocketpaw``; generation history is Mongo (the ``mongo_db`` fixture). Coverage:
 #   * list_models — catalog image/video entries map onto StudioModel shapes,
 #     first image model is the catalog default, chat entries are excluded.
 #   * generate (image) — happy path (b64_json): POSTs the right payload, saves a
@@ -81,8 +81,8 @@ def proxy_env(monkeypatch):
 
 
 @pytest.fixture
-def studio_env(tmp_path, monkeypatch):
-    """Redirect media storage + history persistence + flow-project persistence
+def studio_env(tmp_path, monkeypatch, mongo_db):
+    """Redirect media storage + flow-project persistence
     into tmp dirs so tests never touch the real ~/.pocketpaw, and resolve the
     tenant key to a fixed value.
 
@@ -94,9 +94,10 @@ def studio_env(tmp_path, monkeypatch):
     generated = media_root / "generated"
     generated.mkdir(exist_ok=True)
     monkeypatch.setattr(media_storage, "_ADAPTER", LocalStorageAdapter(root=media_root))
+    # History is Mongo now (the ``mongo_db`` fixture inits Beanie); this path is
+    # kept only so callers can keep unpacking a 2-tuple.
     history = tmp_path / "studio" / "generations.jsonl"
     history.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(service, "_history_path", lambda: history)
     projects = tmp_path / "studio" / "flow-projects.jsonl"
     projects.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(service, "_projects_path", lambda: projects)
@@ -345,17 +346,16 @@ async def test_generate_image_happy_path(monkeypatch, proxy_env, studio_env) -> 
     assert len(captured["requests"]) == 1
 
     # History: one record, scoped to ws-1, re-readable as a wire Generation.
-    records = service._load_history()
+    records = await service.list_generations("ws-1")
     assert len(records) == 1
-    assert records[0]["_workspace"] == "ws-1"
-    listed = service.list_generations("ws-1")
+    listed = await service.list_generations("ws-1")
     assert [g.id for g in listed] == [gen.id]
-    assert service.get_generation(gen.id, "ws-1") is not None
+    assert await service.get_generation("ws-1", gen.id) is not None
     # A different workspace does not see it.
-    assert service.list_generations("ws-other") == []
-    assert service.get_generation(gen.id, "ws-other") is None
+    assert await service.list_generations("ws-other") == []
+    assert await service.get_generation("ws-other", gen.id) is None
     # The media router exclusion sees the saved file.
-    assert name in service.tracked_generation_filenames()
+    assert name in await service.tracked_generation_filenames()
 
 
 async def test_generate_image_url_path(monkeypatch, proxy_env, studio_env) -> None:
@@ -452,7 +452,7 @@ async def test_generate_video_happy_path(monkeypatch, studio_env) -> None:
     assert any(p.suffix == ".mp4" for p in saved)
     assert any(p.suffix == ".png" for p in saved)
     # The persisted record is scoped to the workspace.
-    assert service.list_generations("ws-1")[0].id == gen.id
+    assert (await service.list_generations("ws-1"))[0].id == gen.id
 
 
 async def test_generate_video_alias_resolves_endpoint(monkeypatch, studio_env) -> None:
@@ -510,7 +510,7 @@ async def test_generate_video_fal_failure_is_upstream_error(monkeypatch, studio_
     req = schemas.GenerateRequest(prompt="a clip", kind="video", model="m", aspectRatio="16:9")
     with pytest.raises(service.StudioUpstreamError, match="bad key"):
         await service.generate(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 async def test_generate_video_image_to_video_passes_all_images(monkeypatch, studio_env) -> None:
@@ -756,7 +756,7 @@ async def test_generate_music_happy_path(monkeypatch, studio_env) -> None:
     assert gen.assets and gen.assets[0].mime == "audio/mpeg"
     assert gen.assets[0].url.startswith("/api/v1/media/")
     assert any(p.suffix == ".mp3" for p in generated.iterdir())
-    assert service.list_generations("ws-1")[0].id == gen.id
+    assert (await service.list_generations("ws-1"))[0].id == gen.id
 
 
 async def test_generate_music_missing_prompt_is_valueerror(monkeypatch, studio_env) -> None:
@@ -778,7 +778,7 @@ async def test_generate_proxy_failure_is_upstream_error(monkeypatch, proxy_env, 
     req = schemas.GenerateRequest(prompt="x", model="fal_ai/fal-ai/flux/schnell", aspectRatio="1:1")
     with pytest.raises(service.StudioUpstreamError):
         await service.generate(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 # ── edit (direct fal.ai dispatch) ────────────────────────────────────────────
@@ -812,10 +812,9 @@ async def test_edit_happy_path(monkeypatch, studio_env) -> None:
     assert (generated / name).read_bytes() == png
 
     # History: one record, scoped to ws-1, excluded from the /media list.
-    records = service._load_history()
+    records = await service.list_generations("ws-1")
     assert len(records) == 1
-    assert records[0]["_workspace"] == "ws-1"
-    assert name in service.tracked_generation_filenames()
+    assert name in await service.tracked_generation_filenames()
 
 
 async def test_edit_op_routes_curated_model_through_fal_image(monkeypatch, studio_env) -> None:
@@ -953,7 +952,7 @@ async def test_edit_fal_failure_is_upstream_error(monkeypatch, studio_env) -> No
     req = schemas.EditRequest(op="upscale", sourceUrl=_DATA_URL)
     with pytest.raises(service.StudioUpstreamError):
         await service.edit(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 async def test_edit_missing_prompt_is_valueerror(monkeypatch, studio_env) -> None:
@@ -963,7 +962,7 @@ async def test_edit_missing_prompt_is_valueerror(monkeypatch, studio_env) -> Non
     req = schemas.EditRequest(op="edit", sourceUrl=_DATA_URL)
     with pytest.raises(ValueError, match="prompt is required"):
         await service.edit(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 async def test_edit_no_output_is_upstream_error(monkeypatch, studio_env) -> None:
@@ -977,7 +976,7 @@ async def test_edit_no_output_is_upstream_error(monkeypatch, studio_env) -> None
     req = schemas.EditRequest(op="upscale", sourceUrl=_DATA_URL)
     with pytest.raises(service.StudioUpstreamError, match="no output images"):
         await service.edit(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 # ── video elements (direct fal.ai Kling Elements dispatch) ───────────────────
@@ -1023,7 +1022,7 @@ async def test_generate_video_elements_happy_path(monkeypatch, studio_env) -> No
     assert seen["input_image_urls"] == [_DATA_URL, _DATA_URL]
     assert seen["video_url"] == _DATA_URL
     assert seen["duration_sec"] == 5
-    assert service.list_generations("ws-1")[0].id == gen.id
+    assert (await service.list_generations("ws-1"))[0].id == gen.id
 
 
 async def test_generate_video_elements_prompt_only(monkeypatch, studio_env) -> None:
@@ -1073,7 +1072,7 @@ async def test_generate_video_elements_fal_failure_is_upstream_error(
     req = schemas.VideoElementsRequest(prompt="a scene")
     with pytest.raises(service.StudioUpstreamError, match="bad key"):
         await service.generate_video_elements(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 # ── motion control (direct fal.ai Kling Motion Control dispatch) ─────────────
@@ -1112,7 +1111,7 @@ async def test_generate_video_motion_happy_path(monkeypatch, studio_env) -> None
     assert seen["image_url"] == _DATA_URL
     assert seen["video_url"] == _DATA_URL
     assert seen["character_orientation"] == "video"
-    assert service.list_generations("ws-1")[0].id == gen.id
+    assert (await service.list_generations("ws-1"))[0].id == gen.id
 
 
 async def test_generate_video_motion_requires_image(monkeypatch, studio_env) -> None:
@@ -1135,7 +1134,7 @@ async def test_generate_video_motion_fal_failure_is_upstream_error(monkeypatch, 
     req = schemas.VideoMotionRequest(imageUrl=_DATA_URL, videoUrl=_DATA_URL)
     with pytest.raises(service.StudioUpstreamError, match="bad key"):
         await service.generate_video_motion(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 async def test_generate_video_motion_validation_error_is_value_error(
@@ -1152,7 +1151,7 @@ async def test_generate_video_motion_validation_error_is_value_error(
     req = schemas.VideoMotionRequest(imageUrl=_DATA_URL, videoUrl=_DATA_URL)
     with pytest.raises(ValueError, match="dimensions are too small"):
         await service.generate_video_motion(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 async def test_generate_video_motion_passes_public_video_url_through(
