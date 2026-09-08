@@ -873,14 +873,45 @@ def mount_cloud(app: FastAPI) -> None:
             for u in users
         ]
 
-    # Serve uploaded avatars from ~/.pocketpaw/uploads/
+    # Serve agent avatars, and ONLY agent avatars.
+    #
+    # This mount used to be rooted at ~/.pocketpaw/uploads — the whole tree —
+    # while its comment said "avatars". Avatars are a subdirectory, so every
+    # other thing any subsystem writes under that root was served too, over a
+    # prefix the auth middleware exempts: the customer "My Files" store, file
+    # versions, websandbox durability, per-project build files, site
+    # screenshots, agent deliverables, meeting artifacts, the thumbnail cache,
+    # the remote-materialisation cache, and _idx.jsonl (an index listing id,
+    # storage_key, filename, mime, size, owner_id and chat_id for every
+    # OSS-path upload and agent-delivered artifact).
+    #
+    # Keys are uuid4 so the bulk of it was capability-based rather than
+    # enumerable, but _idx.jsonl turned that subset into a list, and every URL
+    # that ever leaked was a permanent unrevocable bearer token with no
+    # workspace attached — it ignored the soft-delete tombstone and survived the
+    # user leaving the workspace.
+    #
+    # The mount is now the avatars directory itself. Nothing else is reachable,
+    # and _idx.jsonl stops being served without moving it (which would strand
+    # the indexes on existing deployments). StaticFiles normalises "..' and
+    # compares the realpath against the root, so the narrowed mount cannot be
+    # walked back up.
+    #
+    # Agent avatars are the ONLY consumer: ee/pocketpaw_ee/cloud/agents/router.py
+    # is the one place that builds a root-level "/uploads/..." URL, and it builds
+    # exactly "{base}/uploads/avatars/{filename}". USER avatars are unaffected —
+    # they live in the sibling ~/.pocketpaw/avatars and are served by the
+    # authenticated GET /api/v1/auth/avatar/{filename}. Everything else addresses
+    # bytes through /api/v1/uploads/{id}, which enforces a signed 5-minute grant.
+    #
+    # Gated by tests/cloud/test_uploads_mount_scope.py.
     from pathlib import Path
 
     from fastapi.staticfiles import StaticFiles
 
-    uploads_dir = Path.home() / ".pocketpaw" / "uploads"
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-    app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
+    avatars_dir = Path.home() / ".pocketpaw" / "uploads" / "avatars"
+    avatars_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/uploads/avatars", StaticFiles(directory=str(avatars_dir)), name="uploads")
 
     # Paw Bar glass app (A1) — the iframe served by GET /api/v1/paw-bar/frame loads
     # pawbar.js + pawbar.css from THIS root-absolute mount. The dir is configurable

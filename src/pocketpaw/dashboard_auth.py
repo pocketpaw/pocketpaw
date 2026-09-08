@@ -126,10 +126,16 @@ async def verify_token(
     """
     from fastapi import HTTPException
 
-    # SKIP AUTH for static files, uploads, and health checks (if any)
+    # SKIP AUTH for static files, agent avatars, and health checks (if any).
+    #
+    # Narrowed from "/uploads" alongside the StaticFiles mount and the
+    # _auth_dispatch exemptions. This function is currently reachable from
+    # nothing — dashboard.py re-exports it for backward compatibility only — so
+    # the change is consistency rather than a live fix, and it means wiring it
+    # up later cannot reintroduce the broad prefix.
     if (
         request.url.path.startswith("/static")
-        or request.url.path.startswith("/uploads")
+        or request.url.path.startswith("/uploads/avatars")
         or request.url.path.startswith("/pawbar-app")
         or request.url.path == "/favicon.ico"
     ):
@@ -436,7 +442,13 @@ async def _auth_dispatch(request: Request) -> Response | None:
     # webhooks, OAuth callbacks).
     exempt_paths = [
         "/static",
-        "/uploads",
+        # NOT "/uploads" — that exempted the whole prefix while the StaticFiles
+        # mount was rooted at the entire ~/.pocketpaw/uploads tree, so every
+        # subsystem's files were served unauthenticated. The mount is now the
+        # avatars directory alone (ee/pocketpaw_ee/cloud/__init__.py), and this
+        # exemption is narrowed to match so re-widening the mount does not
+        # silently inherit an unauthenticated prefix.
+        "/uploads/avatars",
         "/favicon.ico",
         # Paw Bar glass app bundle (pawbar.js/css) — loaded by the public
         # concierge iframe on published sites; visitors have no session.
@@ -629,11 +641,12 @@ async def _auth_dispatch(request: Request) -> Response | None:
         if _verify_upload_grant(request, current_token):
             is_valid = True
 
-    # Allow frontend assets (/, /static/*, /uploads/*) through for SPA bootstrap.
+    # Allow frontend assets (/, /static/*, /uploads/avatars/*) through for SPA
+    # bootstrap. Narrowed from "/uploads/" for the reason given on exempt_paths.
     if (
         request.url.path == "/"
         or request.url.path.startswith("/static/")
-        or request.url.path.startswith("/uploads/")
+        or request.url.path.startswith("/uploads/avatars/")
     ):
         return None  # allow through
 
