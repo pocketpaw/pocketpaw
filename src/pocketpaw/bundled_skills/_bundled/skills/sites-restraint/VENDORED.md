@@ -1,31 +1,41 @@
 <!-- New file 2026-09-08: provenance + refresh recipe for the adapted sites-restraint skill.
-     CARRIES AN UNRESOLVED LICENSING QUESTION - see the blocker section below. -->
+     Updated 2026-09-08: the licensing question was put to the captain and answered
+     (option 2, keep as written). The section below is kept as the record of what was
+     checked and what was decided, not as an open blocker. -->
 # Vendored: sites-restraint
 
 - **Source:** https://github.com/ericzakariasson/scandinavian-design —
   `skills/scandinavian-design/SKILL.md`
 - **Vendored:** 2026-09-08 from commit `295742307b97`
 
-## BLOCKER — this source carries no license
+## License — no license upstream, decided 2026-09-08
 
 **Checked 2026-09-08 on commit `295742307b97`:** the repository has **no `LICENSE`
 file, no `COPYING` file, and no `license` field in `package.json`.** Under default
-copyright that is all-rights-reserved, not permissive.
+copyright that is all-rights-reserved, not permissive. The other four sources in this
+batch are MIT and carry attribution; this one does not have that footing.
 
-The other four skills in this batch are MIT and carry attribution. This one does not
-have that footing. **Do not merge this skill without a decision from the captain.**
-The options:
+**Decision: keep it as written** (option 2 of the three below). Put to the captain on
+2026-09-08 with the exposure spelled out, and cleared. Recorded here rather than
+deleted, because the reasoning is what a later reader needs and because the facts
+change the moment upstream adds a license.
 
-1. **Ask upstream to add a license** (an issue or a PR adding MIT). Cleanest.
-2. **Keep it as written.** The body was authored as a rewrite: the *structure* is
-   ours, and what is carried over is largely measured values and functional rules
-   (contrast ratios, alpha percentages, the channel-spread threshold), which are
-   facts rather than protected expression. Several judgment rules are close
-   paraphrases, though, and that is the exposed part.
+The options as they were put:
+
+1. **Ask upstream to add a license** (an issue or a PR adding MIT). Cleanest, and
+   still worth doing — it would move this from a judgement to a fact.
+2. **Keep it as written.** ← chosen. The body was authored as a rewrite: the
+   *structure* is ours, and what is carried over is largely measured values and
+   functional rules (contrast ratios, alpha percentages, the channel-spread
+   threshold), which are facts rather than protected expression. Several judgment
+   rules are close paraphrases, and that is the exposed part.
 3. **Drop the skill** and keep only the numeric ladder inside
    `pocketpaw-design-taste` MODULE 2.E family D.
 
-This file exists so that decision is made deliberately rather than discovered later.
+**What that decision does not do:** it does not make the source permissive. If this
+material is ever published outside the product — a docs site, a public skill
+marketplace, a blog post quoting it — re-open option 1 first. Attribution to
+ericzakariasson stays in this file either way.
 
 ## What was ported
 
@@ -83,4 +93,5 @@ re-measured** — re-measure before treating any of them as a compliance claim.
 ## To refresh
 
 Re-fetch upstream `skills/scandinavian-design/SKILL.md`. **Re-check the license
-status first** — if a LICENSE has appeared, record it here and clear the blocker.
+status first** — if a LICENSE has appeared, record it here and the section above
+becomes history rather than a judgement call.
