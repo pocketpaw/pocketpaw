@@ -8,6 +8,8 @@
 #   * verb rules, cost accounting, the write-policy  -> world.py (pure)
 #   * god powers and their effects                   -> weather.py (pure)
 #   * the judgment call                              -> llm.py
+#   * fanning those calls out across the citizens    -> foresight.ForesightWorld
+#     (this module keeps the clock, the arithmetic and the event writing)
 #   * everything that touches Mongo, a .soul file, an Instinct Action or the
 #     bus                                            -> here
 #
@@ -34,6 +36,7 @@ from uuid import uuid4
 from pocketpaw_ee.cloud._core.errors import BadRequest, NotFound, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud.byok import service as byok_service
+from pocketpaw_ee.foresight.world import ForesightWorld
 from pocketpaw_ee.terrarium import events as world_events
 from pocketpaw_ee.terrarium import llm as citizen_llm
 from pocketpaw_ee.terrarium import scheduler as clock
@@ -45,6 +48,7 @@ from pocketpaw_ee.terrarium.domain import (
     EventDoc,
     UniverseDoc,
 )
+from pocketpaw_ee.terrarium.persona import CitizenPersona
 from pocketpaw_ee.terrarium.physics import PhysicsError, PhysicsFile, parse_physics
 
 logger = logging.getLogger(__name__)
@@ -521,6 +525,18 @@ async def tick(workspace_id: str, user_id: str, universe_id: str, n: int = 1) ->
     return {"events": produced, "universe": universe_wire(uni, pop=await _pop(universe_id))}
 
 
+# How many citizens may hold an in-flight model call at once. The physics
+# ``models`` block carries the per-tier model names today and no concurrency
+# key, so this reads one if a world ever declares it and otherwise caps at 8 —
+# enough that a camp-sized universe finishes a tick in one round trip, low
+# enough that a crowd does not open fifty sockets at a provider.
+_DEFAULT_CONCURRENCY = 8
+
+
+def _concurrency(physics: PhysicsFile) -> int:
+    return int(getattr(physics.models, "concurrency", _DEFAULT_CONCURRENCY))
+
+
 async def _one_tick(
     uni: UniverseDoc, physics: PhysicsFile, llm: Any, user_id: str
 ) -> list[dict[str, Any]]:
@@ -552,24 +568,49 @@ async def _one_tick(
         ).to_list()
     ]
 
-    written: list[dict[str, Any]] = []
+    # Sense first, for everyone: building a digest reads the docs, the Journal
+    # and the soul file, so it stays sequential and lands before the fan-out.
+    rows: list[tuple[CitizenDoc, world.CitizenSnapshot, world.SenseDigest]] = []
     for doc in citizens:
         snap = _snapshot(doc)
         memories = await soul_link.recall_for_tick(doc.soul_path, f"{doc.name} {physics.universe}")
-        digest = world.build_digest(
-            day=uni.day,
-            tick=uni.tick,
-            pool=uni.pool,
-            citizen=snap,
-            ledger=ledger,
-            nearby_speech=speech,
-            new_artifacts=new_art,
-            weather=weather_lines,
-            viewer_messages=viewer_msgs,
-            memories=list(memories),
-            constitution=list(physics.constitution),
+        rows.append(
+            (
+                doc,
+                snap,
+                world.build_digest(
+                    day=uni.day,
+                    tick=uni.tick,
+                    pool=uni.pool,
+                    citizen=snap,
+                    ledger=ledger,
+                    nearby_speech=speech,
+                    new_artifacts=new_art,
+                    weather=weather_lines,
+                    viewer_messages=viewer_msgs,
+                    memories=list(memories),
+                    constitution=list(physics.constitution),
+                ),
+            )
         )
-        decision = await citizen_llm.decide_tick(physics, snap, digest, llm=llm)
+
+    # THE JUDGMENT CALLS FAN OUT; THE ARITHMETIC DOES NOT. Foresight gathers the
+    # decides under its own semaphore and returns them in ``active_ids`` order,
+    # so ``apply_acts`` and ``_persist_outcome`` still run one citizen at a time
+    # in the order the docs came back — pool, ledger and ``seq`` keep exactly the
+    # ordering the serial loop gave them.
+    fw = ForesightWorld(max_concurrent=_concurrency(physics))
+    ids = [
+        fw.add_agent(CitizenPersona(doc, snap, digest, physics, llm)) for doc, snap, digest in rows
+    ]
+    fanned = (await fw.tick(active_ids=ids)).last_tick_actions
+
+    written: list[dict[str, Any]] = []
+    for (doc, snap, _digest), action in zip(rows, fanned):
+        # ``decide_tick`` already degrades a bad transport to an empty Decision,
+        # so ``ok: False`` only appears if the adapter itself blew up. Same
+        # degrade either way: the citizen thinks, does nothing, and still pays.
+        decision = world.Decision.model_validate(action) if action.get("ok") else world.Decision()
         outcome = world.apply_acts(physics, snap, decision, storm=storm)
         written.extend(await _persist_outcome(uni, physics, doc, outcome, user_id))
 
