@@ -543,11 +543,25 @@ async def test_webhook_rejects_stale_timestamp(monkeypatch):
         await webhooks.recall_webhook(request)
 
 
-async def test_webhook_skips_verification_without_secret(monkeypatch):
-    """No RECALL_WEBHOOK_SECRET → accepted unsigned (dev convenience)."""
+async def test_webhook_without_a_secret_is_refused(monkeypatch):
+    """No RECALL_WEBHOOK_SECRET → 403, not "accepted unsigned (dev convenience)".
+
+    This test previously asserted the opposite, and the docstring above is the
+    one it shipped with. That is the interesting part: the fail-open was not an
+    oversight anybody had missed, it was pinned as intended behaviour, so the
+    suite would have failed if someone fixed it. This route has no auth in
+    front of it — the signature is the only trust boundary — and an accepted
+    event ingests transcript content.
+
+    The dev convenience it was written for still exists, but has to be asked
+    for: RECALL_WEBHOOK_ALLOW_UNSIGNED=1. Full reasoning and the rest of the
+    cases live in test_recall_webhook_fails_closed.py.
+    """
+    from pocketpaw_ee.cloud._core.errors import Forbidden
     from pocketpaw_ee.cloud.meetings.providers.recall import webhooks
 
     monkeypatch.delenv("RECALL_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("RECALL_WEBHOOK_ALLOW_UNSIGNED", raising=False)
 
     async def _fake_ingest(bot_id):
         return False
@@ -559,8 +573,8 @@ async def test_webhook_skips_verification_without_secret(monkeypatch):
     body = json.dumps({"event": "transcript.done", "data": {"bot": {"id": "bot-1"}}}).encode()
     request = _make_request(body, {})  # no svix headers at all
 
-    result = await webhooks.recall_webhook(request)
-    assert result["ok"] is True
+    with pytest.raises(Forbidden):
+        await webhooks.recall_webhook(request)
 
 
 # ---------------------------------------------------------------------------
