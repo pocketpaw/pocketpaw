@@ -1,5 +1,4 @@
 # ee/pocketpaw_ee/terrarium/domain.py
-# Updated: 2026-09-07 — UniverseDoc gains last_tick_at / last_viewed_at (the clock).
 #
 # Terrarium persistence + frozen read-path value objects.
 #
@@ -19,6 +18,10 @@
 # Invariant carried here: ``UniverseDoc.seq`` is the monotonic per-universe
 # event sequence the client pages with (``?since=``). It is assigned in-process
 # under the service's per-universe asyncio lock.
+#
+# EventDoc carries a free-form ``data`` payload so a story-layer row (a moment)
+# rides the same Journal as the acts it summarises rather than needing a second
+# collection and a second read path.
 
 """Terrarium documents (universe, citizen, event, artifact) + read-path views."""
 

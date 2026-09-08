@@ -15,6 +15,8 @@ pytest.importorskip("mongomock_motor")
 
 from pocketpaw_ee.terrarium import llm as citizen_llm  # noqa: E402
 from pocketpaw_ee.terrarium import service as svc  # noqa: E402
+from pocketpaw_ee.terrarium import world  # noqa: E402
+from pocketpaw_ee.terrarium.physics import load_physics, seed_physics_path  # noqa: E402
 
 from .conftest import create_universe  # noqa: E402
 
@@ -46,12 +48,31 @@ def test_an_unknown_model_name_falls_back_instead_of_raising():
     assert meter.summary()["calls"] == 1
 
 
-async def test_a_metered_llm_is_transparent_and_still_counts(client):
+async def test_a_metered_llm_is_transparent_and_still_counts():
     """The wrapper must not change what the citizen decides, only measure it."""
+    physics = load_physics(seed_physics_path("dust"))
+    snap = world.CitizenSnapshot(id="c1", name="Nim", balance=100)
+    digest = world.build_digest(
+        day=1,
+        tick=0,
+        pool=0,
+        citizen=snap,
+        ledger=[],
+        nearby_speech=[],
+        new_artifacts=[],
+        weather=[],
+        viewer_messages=[],
+        memories=[],
+        constitution=[],
+    )
     inner = citizen_llm.MockLlm()
     wrapped = citizen_llm.MeteredLlm(inner, "claude-haiku-4-5")
     assert wrapped.meter.model == "claude-haiku-4-5"
-    assert wrapped.meter.calls == 0
+
+    kwargs = {"prompt": "decide", "physics": physics, "citizen": snap, "digest": digest}
+    assert await wrapped.decide(**kwargs) == await inner.decide(**kwargs)
+    assert wrapped.meter.calls == 1
+    assert wrapped.meter.output_tokens > 0
 
 
 async def test_the_cost_per_watched_hour_is_on_both_wires_and_the_meter_is_on_neither(
