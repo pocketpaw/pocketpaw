@@ -2097,6 +2097,76 @@
     },
     {
       "gist": "",
+      "how": "a user invokes it as /sites-conversion-structure in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:sites-conversion-structure",
+      "keywords": [
+        "sites-conversion-structure"
+      ],
+      "kind": "skill",
+      "name": "sites-conversion-structure",
+      "narrative": "The STRATEGY layer for a Paw Site — what the page argues, in what order, and what single action it drives. Invoke it BEFORE writing any section markup on a marketing / landing site: \"build a dentist landing page\", \"a page for my SaaS\", \"why is this page not converting\", \"what sections should this have\". It decides the one offer / one audience / one action, runs the intake, picks a page archetype (A-D), orders the argument, writes headline + CTA + benefit copy to formula, handles objections, and sets the index / noindex + FAQ-schema call. It does NOT choose colors, type, or layout composition — `pocketpaw-design-taste` owns all of that and governs every visual decision. This skill owns the ARGUMENT; design-taste owns the LOOK. Use them together: structure first, then taste.",
+      "requires": [],
+      "summary": "The STRATEGY layer for a Paw Site — what the page argues, in what order, and what single action it drives.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /sites-interface-review in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:sites-interface-review",
+      "keywords": [
+        "sites-interface-review"
+      ],
+      "kind": "skill",
+      "name": "sites-interface-review",
+      "narrative": "Review a built Paw Site and report ranked, evidence-backed findings across six domains - typography, colour, layout, UI polish, accessibility and interface writing. Invoke when the user asks to review, critique, audit, or \"look over\" a page, when they ask why a page \"feels off\", or before handing a site back. It is READ-ONLY by default: it produces one ranked findings table with a measured value and a fix for each, and it marks anything it could not actually observe as NOT VERIFIED rather than asserting it. This is the corrective counterpart to `pocketpaw-design-taste`, which is generative - taste decides what to build, this decides whether what got built holds up. Do NOT use it to author sections.",
+      "requires": [],
+      "summary": "Review a built Paw Site and report ranked, evidence-backed findings across six domains - typography, colour, layout, UI polish, accessibility and interface writing.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /sites-restraint in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:sites-restraint",
+      "keywords": [
+        "sites-restraint"
+      ],
+      "kind": "skill",
+      "name": "sites-restraint",
+      "narrative": "The QUIET direction for a Paw Site, with real numbers behind it. Invoke when the brief asks for calm, minimal, monochrome, Nordic, Scandinavian, restrained, editorial-quiet, \"clean and spacious\", or when a page is loud and the fix is subtraction rather than addition. It supplies a measured alpha-ink ladder, the correct DARK-CANVAS INVERSION (the light percentages do not carry across, and reusing them makes a dark page louder), and the judgment rules for what must NOT be neutralized - brand marks, signature data colours, third-party marks acting as row headers, and legally-placed disclosures. Use it as the token system for `pocketpaw-design-taste`'s Warm-Minimalist (D) and Editorial-Luxury (C) families. Do NOT reach for it when the brief wants loud, brutalist, atmospheric or high-energy - restraint is a direction, not a default.",
+      "requires": [],
+      "summary": "The QUIET direction for a Paw Site, with real numbers behind it.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /sites-ship-fixes in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:sites-ship-fixes",
+      "keywords": [
+        "sites-ship-fixes"
+      ],
+      "kind": "skill",
+      "name": "sites-ship-fixes",
+      "narrative": "The catalogue of defects that come back as the FIRST revision on a Paw Site. Invoke it after authoring sections and before showing a draft, or when the user says a page is \"off\", \"cramped\", \"the button is cut off\", \"the sticky thing overlaps\", \"there is a huge gap\", \"the nav is unreadable over the hero\". Each entry is a concrete, measurable failure with the fix: the hero not fitting the fold, a sticky element bleeding into the next section, a transparent fixed nav with headings behind it, screenshots dropped as flat rows, dead gutters in two-column blocks, and motion that only exists when JavaScript runs. This is a BUILD-DEFECT skill, not a taste skill - `pocketpaw-design-taste` decides how the page should look, this decides whether what you built actually holds up.",
+      "requires": [],
+      "summary": "The catalogue of defects that come back as the FIRST revision on a Paw Site.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /sites-theme-system in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:sites-theme-system",
+      "keywords": [
+        "sites-theme-system"
+      ],
+      "kind": "skill",
+      "name": "sites-theme-system",
+      "narrative": "Makes two Paw Sites built by the same agent look like DIFFERENT SITES, not colour-swaps of one template. Invoke when building a second (or fifth) site, when a page \"looks like the last one\", or whenever you are about to pick a theme, a nav, or a footer. It supplies the three things `pocketpaw-design-taste` asserts but cannot check: a THEME-DIFFERENCE TEST on three measurable axes (paper band / display style / accent hue), a NAV + FOOTER archetype catalogue to rotate through, and a LOCKED-TOKEN rule that forbids mid-render colour and font improvisation. It also carries the honest-copy and pre-emit self-critique gates. It does NOT replace design-taste's palettes, families or layout rules — it is the diversification and token-discipline layer on top of them.",
+      "requires": [],
+      "summary": "Makes two Paw Sites built by the same agent look like DIFFERENT SITES, not colour-swaps of one template.",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "a user invokes it as /studio in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:studio",
       "keywords": [
