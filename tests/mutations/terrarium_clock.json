@@ -1,0 +1,23 @@
+[
+  {
+    "label": "clock registered with the dead @app.on_event instead of the drained hook list",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "        @on_startup\n        async def _start_terrarium_clock() -> None:",
+    "replace": "        @app.on_event(\"startup\")\n        async def _start_terrarium_clock() -> None:",
+    "tests": ["tests/ee/terrarium/test_scheduler.py"]
+  },
+  {
+    "label": "child OCEAN shifted by one shared delta instead of drifting per trait",
+    "file": "ee/pocketpaw_ee/terrarium/executor.py",
+    "find": "        delta = (h / 0xFFFFFFFF) * 2 * width - width",
+    "replace": "        delta = width",
+    "tests": ["tests/ee/terrarium/test_spawn_gate.py"]
+  },
+  {
+    "label": "rung ignores population, the bug that printed town above 5 souls",
+    "file": "ee/pocketpaw_ee/terrarium/world.py",
+    "find": "        if pop >= _RUNG_POP[rung] and unlocked >= _RUNG_TECH[rung]:",
+    "replace": "        if unlocked >= _RUNG_TECH[rung]:",
+    "tests": ["tests/ee/terrarium/test_world.py"]
+  }
+]
