@@ -99,6 +99,12 @@ class UniverseDoc(TimestampedDocument):
     # read the Journal — a world nobody watches for a world-day goes dormant.
     last_tick_at: datetime | None = None
     last_viewed_at: datetime | None = None
+    # What this world has cost to run: the running ``llm.CostMeter`` summary
+    # (model, calls, tokens, cost_usd, cost_per_call), accrued once per tick.
+    # It is NOT on the wire — the model name is internal, the same reason
+    # ``public_universe_wire`` strips ``physics.models``. Only the derived
+    # ``cost_per_watched_hour`` crosses.
+    cost: dict[str, Any] = Field(default_factory=dict)
 
     class Settings:
         name = "terrarium_universes"

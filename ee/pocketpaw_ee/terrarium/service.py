@@ -96,6 +96,38 @@ def soul_root() -> Path:
 # ---------------------------------------------------------------------------
 
 
+def cost_per_watched_hour(doc: UniverseDoc, pop: int) -> float:
+    """USD an hour of watching this world costs, in cents, from ITS OWN clock.
+
+    A world-day is ``time.world_day_seconds`` of wall clock and holds
+    ``time.ticks_per_day`` ticks, and every living citizen spends one model call
+    per tick — so an hour of watching is ``pop * ticks_per_day * 3600 /
+    world_day_seconds`` calls. Zero until the world has actually ticked: an
+    estimate off no measurement is a guess wearing a dollar sign.
+    """
+    per_call = float((doc.cost or {}).get("cost_per_call") or 0.0)
+    time_block = (doc.physics or {}).get("time") or {}
+    ticks_per_day = max(1, int(time_block.get("ticks_per_day") or 12))
+    day_seconds = max(1, int(time_block.get("world_day_seconds") or 3600))
+    calls_per_hour = max(0, pop) * ticks_per_day * 3600.0 / day_seconds
+    return round(per_call * calls_per_hour, 2)
+
+
+def _accrue_cost(uni: UniverseDoc, llm: Any) -> None:
+    """Fold this tick's metering into the universe's running total."""
+    meter = getattr(llm, "meter", None)
+    if meter is None:
+        return
+    tick_cost = meter.drain()
+    total = dict(uni.cost or {})
+    for key in ("calls", "input_tokens", "output_tokens"):
+        total[key] = int(total.get(key, 0)) + int(tick_cost[key])
+    total["cost_usd"] = round(float(total.get("cost_usd", 0.0)) + tick_cost["cost_usd"], 6)
+    total["model"] = tick_cost["model"]
+    total["cost_per_call"] = round(total["cost_usd"] / total["calls"], 8) if total["calls"] else 0.0
+    uni.cost = total
+
+
 def universe_wire(doc: UniverseDoc, *, pop: int = 0) -> dict[str, Any]:
     return {
         "id": str(doc.id),
@@ -111,6 +143,7 @@ def universe_wire(doc: UniverseDoc, *, pop: int = 0) -> dict[str, Any]:
         "public": doc.public,
         "created_at": doc.createdAt.isoformat() if doc.createdAt else None,
         "creator": doc.creator,
+        "cost_per_watched_hour": cost_per_watched_hour(doc, pop),
     }
 
 
@@ -523,7 +556,13 @@ async def tick(workspace_id: str, user_id: str, universe_id: str, n: int = 1) ->
         # in cloud.byok (the same store the rest of the product uses). No second
         # copy of a key lives on the universe. Platform credentials otherwise.
         creds = await byok_service.resolve_turn_credentials(uni.workspace)
-        llm = citizen_llm.resolve_llm(api_key=creds.api_key, tier=physics.models.founders)
+        # Metered, always: the meter is what makes ``cost_per_watched_hour`` a
+        # measurement instead of a guess, and a universe that skipped it would
+        # report zero rather than report nothing.
+        llm = citizen_llm.MeteredLlm(
+            citizen_llm.resolve_llm(api_key=creds.api_key, tier=physics.models.founders),
+            citizen_llm.model_for_tier(physics.models.founders),
+        )
         for _ in range(n):
             produced.extend(await _one_tick(uni, physics, llm, user_id))
         uni.last_tick_at = datetime.now(UTC)
@@ -706,6 +745,7 @@ async def _one_tick(
     if uni.storm_ticks > 0:
         uni.storm_ticks -= 1
     uni.rung = world.rung_for(len(citizens), len({u for c in citizens for u in c.unlocked}))
+    _accrue_cost(uni, llm)
     await uni.save()
 
     try:

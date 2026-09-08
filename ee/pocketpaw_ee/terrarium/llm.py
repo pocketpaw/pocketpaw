@@ -25,6 +25,11 @@
 # parent's, in drift widths, rendered by Foresight's ``OceanDrift``. The service
 # computes it (it needs the parent's document) and passes ``drift_line`` down.
 #
+# EVERY decide is metered. ``MeteredLlm`` wraps whichever transport the tick
+# resolved and counts tokens against ``PRICING``, which is what lets a universe
+# answer the only question a viewer actually asks about running cost: what does
+# an hour of watching this world cost?
+#
 # Nothing the model returns is trusted. ``world.apply_acts`` re-validates every
 # act against balance, allowed verbs and held tech before anything mutates.
 
@@ -246,6 +251,96 @@ class MockLlm:
         return json.dumps({"thought": "another day by the spring", "acts": acts})
 
 
+# ---------------------------------------------------------------------------
+# METERING
+# ---------------------------------------------------------------------------
+
+# USD per 1M tokens, (input, output). Anthropic list prices as of 2026-09.
+#
+# MIRRORS ``soul_protocol.profiles.game.costmeter.CostMeter`` and its ``PRICING``
+# table. That module is NOT importable from the soul-protocol installed here
+# (0.4.0 ships no ``soul_protocol.profiles`` package at all), so this is a local
+# stand-in with the same shape — construct with a model name, call ``record``
+# per generation, read ``summary()`` — and it keys on OUR model ids rather than
+# upstream's (``claude-cli``, ``deepseek-v3.2``, ``gemini-flash-lite``,
+# ``gemini-nano``), because aliasing a Haiku call onto a Gemini price would give
+# a wrong number rather than a missing one. Swap the import in when upstream
+# lands, keeping the fallback: this meter must never raise mid-tick.
+PRICING: dict[str, tuple[float, float]] = {
+    "claude-sonnet-4-6": (3.00, 15.00),
+    "claude-haiku-4-5": (1.00, 5.00),
+}
+_FALLBACK_PRICING_MODEL = "claude-sonnet-4-6"
+
+# Tokens are estimated from characters rather than tokenized: a real count needs
+# a round trip per call, and the answer this feeds ("about $2 an hour") does not
+# improve for it.
+_CHARS_PER_TOKEN = 4
+
+
+class CostMeter:
+    """What the model calls cost. Never raises on an unknown model name."""
+
+    def __init__(self, model: str) -> None:
+        self.model = model if model in PRICING else _FALLBACK_PRICING_MODEL
+        self.calls = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+
+    def record(self, prompt: str, output: str) -> None:
+        self.calls += 1
+        self.input_tokens += len(prompt or "") // _CHARS_PER_TOKEN
+        self.output_tokens += len(output or "") // _CHARS_PER_TOKEN
+
+    @property
+    def cost_usd(self) -> float:
+        rate_in, rate_out = PRICING[self.model]
+        return (self.input_tokens * rate_in + self.output_tokens * rate_out) / 1_000_000
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "calls": self.calls,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cost_usd": round(self.cost_usd, 6),
+        }
+
+    def drain(self) -> dict[str, Any]:
+        """Return the summary and zero the counters, so a caller that accrues
+        per tick over a multi-tick call never counts the same call twice."""
+        out = self.summary()
+        self.calls = self.input_tokens = self.output_tokens = 0
+        return out
+
+
+class MeteredLlm:
+    """Any ``CitizenLlm``, measured. Transparent otherwise.
+
+    The meter is updated AFTER the inner call returns, on the calling task's own
+    stack — the tick fans citizens out eight wide, so anything stashed on this
+    instance across an ``await`` would be read by the wrong citizen.
+    """
+
+    def __init__(self, inner: CitizenLlm, model: str) -> None:
+        self.inner = inner
+        self.meter = CostMeter(model)
+
+    async def decide(
+        self,
+        *,
+        prompt: str,
+        physics: PhysicsFile,
+        citizen: CitizenSnapshot,
+        digest: SenseDigest,
+    ) -> str:
+        out = await self.inner.decide(
+            prompt=prompt, physics=physics, citizen=citizen, digest=digest
+        )
+        self.meter.record(prompt, out)
+        return out
+
+
 def resolve_llm(*, api_key: str | None = None, tier: str | None = None) -> CitizenLlm:
     """A universe with its own key gets ``HttpLlm``; otherwise the transport
     from ``POCKETPAW_TERRARIUM_LLM``. DEFAULT ``mock``."""
@@ -397,10 +492,13 @@ async def decide_tick(
 
 
 __all__ = [
+    "PRICING",
     "Act",
     "ClaudeCliLlm",
     "CitizenLlm",
+    "CostMeter",
     "Decision",
+    "MeteredLlm",
     "MockLlm",
     "build_prompt",
     "decide_tick",
