@@ -21,6 +21,10 @@
 #   4. viewer-origin text never becomes soul fact (the episodic summary is
 #      built from citizen-origin events only — see world.episodic_summary).
 #   5. the Journal is truth; citizens/ledger/artifacts are projections.
+#   6. every say / write / moment body passes ``moderation.allowed`` at the
+#      write (``_append_event``); a failing one lands as ``[withheld]`` with
+#      ``data.withheld`` so seq and cost are unchanged. Viewer lines are checked
+#      BEFORE the write and rejected with a 422 instead.
 
 """Terrarium service — persistence, souls, the gate and the bus."""
 
@@ -35,15 +39,21 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pocketpaw_ee.cloud._core.errors import BadRequest, NotFound, ValidationError
+from pocketpaw.security.rate_limiter import RateLimiter
+from pocketpaw_ee.cloud._core.errors import (
+    BadRequest,
+    NotFound,
+    RateLimited,
+    ValidationError,
+)
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud.byok import service as byok_service
 from pocketpaw_ee.foresight.persona import OceanDrift
 from pocketpaw_ee.foresight.world import ForesightWorld
 from pocketpaw_ee.terrarium import events as world_events
 from pocketpaw_ee.terrarium import llm as citizen_llm
+from pocketpaw_ee.terrarium import moderation, soul_link, weather, world
 from pocketpaw_ee.terrarium import scheduler as clock
-from pocketpaw_ee.terrarium import soul_link, weather, world
 from pocketpaw_ee.terrarium.domain import (
     EVENT_KINDS,
     ZERO_COST_KINDS,
@@ -304,6 +314,11 @@ async def _append_event(
             "terrarium.zero_cost_event",
             f"event kind {kind!r} must carry a non-zero cost",
         )
+    data = dict(data or {})
+    # Invariant 6. Withheld, not dropped: the seq is spent and the cost lands.
+    if kind in moderation.MODERATED_KINDS and not moderation.allowed(body):
+        body = moderation.WITHHELD
+        data["withheld"] = True
     uni.seq += 1
     doc = EventDoc(
         workspace=uni.workspace,
@@ -319,7 +334,7 @@ async def _append_event(
         artifact_id=artifact_id,
         origin=origin,
         viewer_origin=viewer_origin,
-        data=data or {},
+        data=data,
     )
     await doc.insert()
     return doc
@@ -1121,13 +1136,28 @@ async def list_gates(workspace_id: str, universe_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# Ten viewer lines a minute per person, in memory. The same limiter the rest of
+# cloud uses; per-process, like every other bucket in ``_core.rate_limit``.
+_speak_limiter = RateLimiter(rate=10.0 / 60.0, capacity=10)
+
+
+def _check_viewer_line(text: str) -> str:
+    """The inbound gate. Returns the normalised line or raises; writes nothing."""
+    body = " ".join(str(text or "").split())[: moderation.MAX_LEN]
+    if not body:
+        raise BadRequest("terrarium.empty_message", "a message is required")
+    if not moderation.allowed(body):
+        raise ValidationError("terrarium.line_rejected", "That line was not accepted")
+    return body
+
+
 async def speak(workspace_id: str, user_id: str, universe_id: str, text: str) -> dict[str, Any]:
     """A human speaks into the world. The line lands as an Event tagged
     ``viewer_origin: true`` and reaches citizens ONLY through the write-policy
     label — it is never stored in a soul as fact."""
-    body = " ".join(str(text or "").split())[:500]
-    if not body:
-        raise BadRequest("terrarium.empty_message", "a message is required")
+    body = _check_viewer_line(text)
+    if not _speak_limiter.allow(f"terrarium-speak:{user_id}"):
+        raise RateLimited("terrarium.speak_rate_limited", "Too many lines — wait a minute.")
     # Loaded inside the lock — see the note in ``tick``.
     async with _lock(universe_id):
         uni = await _universe(workspace_id, universe_id)
@@ -1170,6 +1200,8 @@ async def pledge_weather(
     kind = str(body.get("kind") or "").strip().lower()
     tokens = int(body.get("tokens") or 0)
     line = body.get("line")
+    if line:
+        line = _check_viewer_line(line)
 
     # Loaded inside the lock — see the note in ``tick``.
     async with _lock(universe_id):

@@ -27,6 +27,7 @@ from pocketpaw_ee.cloud._core.http import add_error_handler  # noqa: E402
 from pocketpaw_ee.cloud.auth import current_active_user  # noqa: E402
 from pocketpaw_ee.cloud.license import require_license  # noqa: E402
 from pocketpaw_ee.terrarium import llm as citizen_llm  # noqa: E402
+from pocketpaw_ee.terrarium import service  # noqa: E402
 from pocketpaw_ee.terrarium.physics import load_physics, seed_physics_path  # noqa: E402
 from pocketpaw_ee.terrarium.router import (  # noqa: E402
     public_router as terrarium_public_router,
@@ -60,6 +61,9 @@ def mock_citizen_llm(monkeypatch, tmp_path):
     monkeypatch.setenv("POCKETPAW_TERRARIUM_LLM", "mock")
     monkeypatch.setenv("POCKETPAW_TERRARIUM_SOUL_ROOT", str(tmp_path / "souls"))
     citizen_llm.set_mock_decision(None)
+    # The speak limiter is process-wide; a suite that speaks a lot must not
+    # trip it across tests.
+    service._speak_limiter._buckets.clear()
     yield
     citizen_llm.set_mock_decision(None)
 
