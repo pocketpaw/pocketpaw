@@ -461,12 +461,8 @@ async def test_sites_craft_rides_every_authoring_turn_embedded_not_named():
     """
     from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
 
-    authoring = {
-        "create/svelte": SurfaceMeta(engine="svelte"),
-        "create/html": SurfaceMeta(engine="html"),
-        "refine": SurfaceMeta(pocket_id="pkt_1", engine="svelte"),
-    }
-    for label, meta in authoring.items():
+    for label in ("create/svelte", "create/html"):
+        meta = SurfaceMeta(engine=label.split("/")[1])
         text = (await sites_handler.build_preamble("w", "u", meta)).text
         assert '<craft-system name="sites-craft">' in text, label
         # Real body, not the degraded one-line fallback: two values that only
@@ -474,11 +470,9 @@ async def test_sites_craft_rides_every_authoring_turn_embedded_not_named():
         assert "concentric" in text.lower(), f"{label} carries the fallback, not the skill body"
         assert "tabular-nums" in text, label
 
-    # Named as well as embedded would ship the same bytes twice every turn.
-    assert "sites-craft" not in {n for n, _, _ in sites_handler._SITES_DESIGN_SKILLS}
+    # Create embeds it whole, so naming it there would ship the same bytes twice.
     assert "sites-craft" not in sites_handler.create_design_skill_names()
     assert "`sites-craft`" not in sites_handler._design_skills_note("create")
-    assert "`sites-craft`" not in sites_handler._design_skills_note("refine")
 
     # Chat is read-only Q&A about an existing site — nothing is authored, so the
     # craft mechanics are 11.5 KB of dead weight there.
@@ -504,3 +498,55 @@ def test_sites_embedded_blocks_degrade_when_the_bundle_is_missing():
     from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
 
     assert sites_handler._read_bundled_skill_body("no-such-skill-exists") is None
+
+
+async def test_sites_craft_refine_carries_the_floor_and_names_the_rest():
+    """Refine gets the accessibility FLOOR embedded and the method by name.
+
+    Until 2026-09-08 refine carried the whole of ``sites-craft``: 2,868 tokens on
+    a 4,418-token turn, so a request to shorten one headline paid for the full
+    ramp-construction method. SD-2 in the sites prompt diet splits it. What stays
+    embedded is the part that is not a design judgement at all — hit areas, focus,
+    reduced motion, real elements — because that has to hold on any markup that
+    reaches a public page, including markup added by a copy edit. What leaves is
+    the construction method, which is now named in ``<design-skills>`` for the
+    edits that actually build something.
+
+    The slice is keyed on a HEADING, not a line number, so re-ordering the skill
+    file cannot silently change what refine receives.
+
+    THE MUTATION THAT BREAKS THIS: change ``_craft_system('floor')`` back to
+    ``_craft_system()`` in the refine preamble (refine pays 2,868 again), or point
+    ``_CRAFT_FLOOR_HEADING`` at a heading that does not exist (the slice silently
+    degrades to the whole file).
+    """
+    from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
+
+    text = (
+        await sites_handler.build_preamble(
+            "w", "u", SurfaceMeta(pocket_id="pkt_1", engine="svelte")
+        )
+    ).text
+    assert '<craft-system name="sites-craft" scope="floor">' in text
+
+    # The floor itself, verbatim from the skill file.
+    for rule in ("44x44px", "prefers-reduced-motion", "visible focus ring"):
+        assert rule in text, rule
+
+    # And NOT the construction method it replaced.
+    for method in ("modular scale", "perceived lightness", "Two token tiers"):
+        assert method not in text, f"refine still carries the full method: {method}"
+
+    # The method is reachable, by name, with a trigger that says when.
+    note = sites_handler._design_skills_note("refine")
+    assert "`sites-craft`" in note
+    assert "sites-craft" in {n for n, scope, _ in sites_handler._SITES_DESIGN_SKILLS}
+
+    # Refine-scoped only: create embeds it whole and must not also name it.
+    scopes = {n: scope for n, scope, _ in sites_handler._SITES_DESIGN_SKILLS}
+    assert scopes["sites-craft"] == "refine"
+
+    # The floor slice must be a real cut, not the whole file with a new tag.
+    floor = sites_handler._craft_system("floor")
+    full = sites_handler._craft_system("full")
+    assert len(floor) < len(full) / 3, (len(floor), len(full))

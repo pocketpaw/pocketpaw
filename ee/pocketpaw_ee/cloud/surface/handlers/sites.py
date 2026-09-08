@@ -361,6 +361,30 @@
 # disagree about - the precedence line exists for the case where the agent thinks
 # they do.
 
+# Updated: 2026-09-08 (feat/sites-design-skills, third pass) - the paragraph above
+# says the craft block rides BOTH preambles. It rides them at different weights now,
+# and the reason is a measurement taken right after it shipped: a /sites create turn
+# is 14,094 tokens and a refine turn was 4,418, of which the craft block was 2,868.
+# Two thirds of a refine turn was ramp-construction method, on a surface where most
+# refines change a line of copy.
+#
+# So refine takes `_craft_system("floor")` - section 5 plus the symptom index, 448
+# tokens - and the full method returns to `_SITES_DESIGN_SKILLS` as a REFINE-scoped
+# named skill with the trigger "when an edit ADDS or restructures a section". Refine
+# is now 2,204 tokens. Create is untouched at 14,094: there the every-turn argument
+# still holds, and naming it there as well would ship the same bytes twice.
+#
+# The floor is the part that stays embedded because it is not a design judgement.
+# Hit areas, focus, reduced motion, real elements - those have to hold on any markup
+# that reaches a public page, including markup added by a copy edit, so leaving them
+# to an invocation is the one thing that cannot be allowed to miss.
+#
+# The slice is keyed on `_CRAFT_FLOOR_HEADING`, a heading rather than a line number,
+# so re-ordering the skill file cannot silently change what refine receives - and
+# renaming that heading IS a silent degrade to the whole file, which is why it has
+# its own mutation. Full reasoning and what is still gated:
+# docs/design/drafts/2026-09-08-sites-system-prompt-diet.md (paw-workspace), SD-2.
+
 from __future__ import annotations
 
 import functools
@@ -612,9 +636,21 @@ def _design_taste_system() -> str:
     )
 
 
-@functools.lru_cache(maxsize=1)
-def _craft_system() -> str:
+# Where the refine slice starts inside ``sites-craft``'s SKILL.md. Everything from
+# here down is the accessibility FLOOR plus the symptom index — the two parts that
+# apply to any markup that lands, including a one-line copy edit. Everything above
+# it is construction method, which only earns its bytes when the edit is actually
+# building something. A heading, not a line number, so re-ordering the file cannot
+# silently change what refine receives; ``test_sites_craft_refine_carries_the_floor``
+# fails if the heading is renamed.
+_CRAFT_FLOOR_HEADING = "## 5. The floor"
+
+
+@functools.lru_cache(maxsize=2)
+def _craft_system(scope: str = "full") -> str:
     """Return the ``sites-craft`` SKILL.md body wrapped as a ``<craft-system>`` block.
+
+    ``scope`` is ``"full"`` (create) or ``"floor"`` (refine).
 
     EMBEDDED rather than named, and for a different reason than the skills in
     ``_SITES_DESIGN_SKILLS`` are named. Those each apply to a SUBSET of briefs, so
@@ -629,12 +665,34 @@ def _craft_system() -> str:
     in five built from ad-hoc values, and that site looks assembled in exactly the
     way this material exists to prevent.
 
-    It rides BOTH preambles. Create is the obvious half; refine is where craft
-    drift actually creeps in, because an edit lands new markup beside a system the
-    agent can no longer see.
+    It rides BOTH preambles, at different weights. Create is the obvious half.
+    Refine was carrying the whole file until the 2026-09-08 measurement showed it
+    was 65% of a refine turn — 2,868 tokens of ramp construction on a request to
+    shorten one headline. So refine now gets the FLOOR (hit areas, focus, reduced
+    motion, real elements) plus the symptom index, ~448 tokens, and the full method
+    is named in ``<design-skills>`` for the edits that actually build something.
+    That is SD-2 in ``docs/design/drafts/2026-09-08-sites-system-prompt-diet.md``.
+
+    The floor is the part that cannot be left to an invocation: it is not a design
+    judgement, it is the thing that must hold on any markup that reaches a public
+    page, including markup added by a copy edit.
     """
     body = _read_bundled_skill_body("sites-craft")
     if body is not None:
+        if scope == "floor":
+            cut = body.find(_CRAFT_FLOOR_HEADING)
+            if cut != -1:
+                return (
+                    '<craft-system name="sites-craft" scope="floor">\n'
+                    "The FLOOR every edit has to hold, plus the symptom index for "
+                    f"the rest. {_EMBEDDED_BLOCK_FRAMING} When an edit ADDS or "
+                    "restructures a section rather than changing copy, invoke "
+                    "`sites-craft` for the full construction method — the type "
+                    "scale, the ramp, the grouping gap and the radius rules the "
+                    "index below only names.\n\n"
+                    f"{body[cut:].strip()}\n"
+                    "</craft-system>"
+                )
         return (
             '<craft-system name="sites-craft">\n'
             "The CRAFT MECHANICS for everything you build on this surface: how the "
@@ -683,6 +741,15 @@ _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
         "ONE action, the page archetype, the order the page argues in, the "
         "headline + CTA copy, and index/noindex. The DESIGN SYSTEM below owns how "
         "the page LOOKS; this owns what it SAYS.",
+    ),
+    (
+        "sites-craft",
+        "refine",
+        "When an edit ADDS a section or restructures one, rather than changing "
+        "copy or a single value. The block above carries only the floor and the "
+        "symptom index; this is the full construction method behind them — the "
+        "type scale, how a ramp is built, the 2x grouping gap, concentric radius. "
+        "On a create turn it is already embedded in full and needs no invocation.",
     ),
     (
         "sites-theme-system",
@@ -1732,7 +1799,7 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         "</sites-procedure>\n"
         f"{_CONCIERGE_NOTE}\n"
         f"{_design_skills_note('refine')}"
-        f"{_craft_system()}"
+        f"{_craft_system('floor')}"
     )
 
 

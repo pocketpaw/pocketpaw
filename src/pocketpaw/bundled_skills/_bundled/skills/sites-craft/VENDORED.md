@@ -56,10 +56,17 @@ they are values and not ranges:
 ## Deliberate overlap with `sites-interface-review`
 
 Some rules appear in both files. That is a considered duplication rather than an
-oversight: both are loaded ON DEMAND and rarely in the same turn, so the cost is
-paid only when one is actually used, while the alternative — making the review
-skill reference this one for its criteria — adds a second invocation hop on a
-path where a miss silently degrades the review into an opinion.
+oversight: the alternative — making the review skill reference this one for its
+criteria — adds an invocation hop on a path where a miss silently degrades the
+review into an opinion.
+
+**The original wording here said "both are loaded ON DEMAND and rarely in the same
+turn, so the cost is paid only when one is actually used". That stopped being true
+the same day it was written**, when this file was embedded in the /sites preamble.
+It is now unconditional on create, so the overlap with `sites-interface-review` is
+paid on every create turn where a review is also requested. Measured: the two files
+share the 62ch measure cap, `prefers-reduced-motion`, and tabular figures. Three
+rules, small, and worth knowing before someone adds a fourth.
 
 If the two ever disagree on a value, **this file is the one to correct**: the
 review skill was written first and compressed harder.
@@ -81,6 +88,24 @@ is installed in this workspace as the `interfaces` marketplace plugin
 (`/plugin install interfaces@interfaces`), which has all 11 skills and all 35
 reference files at full depth and updates with upstream. This bundled copy exists
 for the cloud sites agent, which has no filesystem and cannot reach a plugin.
+
+## How it ships
+
+Not as an on-demand skill on /sites, which is where it matters most.
+
+- **create** — EMBEDDED whole in the preamble (`_craft_system("full")`), because its
+  trigger is every section of every site and that is not something a probabilistic
+  `Skill` call delivers. 2,868 tokens.
+- **refine** — only §5 (the floor) and the symptom index are embedded
+  (`_craft_system("floor")`, 448 tokens). The full method is NAMED in
+  `<design-skills>` with the trigger "when an edit adds or restructures a section".
+  Measured 2026-09-08: shipping it whole made it 65% of a refine turn, on a surface
+  where most refines are a copy change. See SD-2 in
+  `docs/design/drafts/2026-09-08-sites-system-prompt-diet.md` (paw-workspace).
+- **everywhere else** — an ordinary bundled skill, loaded on demand.
+
+The refine slice is keyed on the `## 5. The floor` HEADING, so **re-ordering or
+renaming that heading changes what a refine agent receives.** A mutation covers it.
 
 ## Not verified
 
