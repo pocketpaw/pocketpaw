@@ -227,8 +227,8 @@
   {
     "label": "the charter skips the check and lands on the public citizen wire as written",
     "file": "ee/pocketpaw_ee/terrarium/service.py",
-    "find": "            outcome.charter if moderation.clean(outcome.charter) else moderation.WITHHELD",
-    "replace": "            outcome.charter",
+    "find": "        doc.charter = outcome.charter if moderation.clean(outcome.charter) else moderation.WITHHELD",
+    "replace": "        doc.charter = outcome.charter",
     "tests": [
       "tests/ee/terrarium/test_moderation.py"
     ]
