@@ -229,9 +229,26 @@ async def public_list_events(
     universe_id: str,
     since: int = Query(0, ge=0),
     limit: int = Query(200, ge=1, le=500),
+    kind: str | None = None,
 ) -> dict[str, Any]:
+    # ``kind`` is a bare string on purpose. Typed as an enum, FastAPI would 422
+    # an unknown value BEFORE the gate below runs, and a 422 where every other
+    # answer is 404 tells an anonymous caller the route is live. The service
+    # validates it after both gates instead.
     _require_public_surface()
-    return await service.public_list_events(universe_id, since, limit)
+    return await service.public_list_events(universe_id, since, limit, kind)
+
+
+@public_router.get("/universes/{universe_id}/moments")
+async def public_list_moments(
+    universe_id: str,
+    since: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=500),
+) -> dict[str, Any]:
+    """The story feed: the same Journal page, moments only. A thin alias so a
+    stranger's client does not have to know the kind vocabulary."""
+    _require_public_surface()
+    return await service.public_list_events(universe_id, since, limit, kind="moment")
 
 
 @public_router.get("/universes/{universe_id}/citizens")

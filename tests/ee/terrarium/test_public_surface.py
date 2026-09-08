@@ -22,6 +22,7 @@ PUBLIC_PATHS = (
     "/terrarium/public/universes",
     "/terrarium/public/universes/{id}",
     "/terrarium/public/universes/{id}/events",
+    "/terrarium/public/universes/{id}/moments",
     "/terrarium/public/universes/{id}/citizens",
     "/terrarium/public/universes/{id}/artifacts",
 )
@@ -138,3 +139,67 @@ async def test_a_malformed_id_404s_rather_than_500s_on_the_public_surface(client
         assert res.status_code == 404, (path, res.status_code)
     res = client.get(f"/terrarium/public/universes/{uni['id']}/citizens/not-an-object-id")
     assert res.status_code == 404, res.text
+
+
+# ---------------------------------------------------------------------------
+# Moments — the story feed a stranger reads
+# ---------------------------------------------------------------------------
+
+
+async def test_the_moments_alias_returns_only_moments(client, monkeypatch):
+    monkeypatch.setenv("TERRARIUM_PUBLIC_ENABLED", "1")
+    uni = create_universe(client, public=True, founders=3)
+    client.post(f"/terrarium/universes/{uni['id']}/tick?n=2")
+
+    everything = client.get(f"/terrarium/public/universes/{uni['id']}/events").json()["events"]
+    moments = client.get(f"/terrarium/public/universes/{uni['id']}/moments").json()["events"]
+    assert moments, "three founders acting together should have made a moment"
+    assert {e["kind"] for e in moments} == {"moment"}
+    assert len(moments) < len(everything)
+    # The alias and the filter are the same read.
+    filtered = client.get(f"/terrarium/public/universes/{uni['id']}/events?kind=moment").json()[
+        "events"
+    ]
+    assert [e["seq"] for e in filtered] == [e["seq"] for e in moments]
+    assert moments[0]["data"]["actors"] and moments[0]["body"]
+
+
+async def test_the_moment_payload_names_citizens_and_never_a_soul_path(client, monkeypatch):
+    """The moment carries a structured payload, which is a NEW field on the
+    public wire: it must name citizens the way the map does and nothing else."""
+    monkeypatch.setenv("TERRARIUM_PUBLIC_ENABLED", "1")
+    uni = create_universe(client, public=True, founders=3)
+    client.post(f"/terrarium/universes/{uni['id']}/tick?n=2")
+
+    blob = str(client.get(f"/terrarium/public/universes/{uni['id']}/moments").json())
+    assert "soul_path" not in blob
+    assert ".soul" not in blob
+    assert "did" not in blob
+    assert "/" not in blob, "no server path may reach the anonymous surface"
+    assert uni["creator"] not in blob if uni.get("creator") else True
+
+
+async def test_an_unknown_kind_is_rejected_cleanly(client, monkeypatch):
+    """A bad filter is a 400 with a stable code, not a 500 and not silence."""
+    monkeypatch.setenv("TERRARIUM_PUBLIC_ENABLED", "1")
+    uni = create_universe(client, public=True, founders=1)
+    res = client.get(f"/terrarium/public/universes/{uni['id']}/events?kind=../../etc")
+    assert res.status_code == 400, res.text
+    assert res.json()["error"]["code"] == "terrarium.bad_event_kind"
+    # A KNOWN kind with nothing to show is an empty page, not an error.
+    ok = client.get(f"/terrarium/public/universes/{uni['id']}/events?kind=raid")
+    assert ok.status_code == 200 and ok.json()["events"] == []
+
+
+async def test_a_bad_kind_on_a_hidden_universe_is_still_a_flat_404(client, monkeypatch):
+    """Gate first, validate second. Otherwise the 400 confirms the universe."""
+    uni = create_universe(client, public=False)
+    assert (
+        client.get(f"/terrarium/public/universes/{uni['id']}/events?kind=nonsense").status_code
+        == 404
+    )
+    monkeypatch.setenv("TERRARIUM_PUBLIC_ENABLED", "1")
+    assert (
+        client.get(f"/terrarium/public/universes/{uni['id']}/events?kind=nonsense").status_code
+        == 404
+    )

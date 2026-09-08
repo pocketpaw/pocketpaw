@@ -45,6 +45,7 @@ from pocketpaw_ee.terrarium import llm as citizen_llm
 from pocketpaw_ee.terrarium import scheduler as clock
 from pocketpaw_ee.terrarium import soul_link, weather, world
 from pocketpaw_ee.terrarium.domain import (
+    EVENT_KINDS,
     ZERO_COST_KINDS,
     ArtifactDoc,
     CitizenDoc,
@@ -1020,14 +1021,14 @@ async def scheduler_sweep(now: datetime) -> list[dict[str, Any]]:
     return due_rows
 
 
-async def _events_page(universe_id: str, since: int, limit: int) -> dict[str, Any]:
+async def _events_page(
+    universe_id: str, since: int, limit: int, kind: str | None = None
+) -> dict[str, Any]:
     limit = max(1, min(int(limit or 200), 500))
-    docs = (
-        await EventDoc.find(EventDoc.universe_id == universe_id, EventDoc.seq > int(since or 0))
-        .sort("+seq")
-        .limit(limit)
-        .to_list()
-    )
+    query = [EventDoc.universe_id == universe_id, EventDoc.seq > int(since or 0)]
+    if kind:
+        query.append(EventDoc.kind == kind)
+    docs = await EventDoc.find(*query).sort("+seq").limit(limit).to_list()
     return {
         "events": [event_wire(d) for d in docs],
         "next_seq": docs[-1].seq if docs else int(since or 0),
@@ -1252,9 +1253,20 @@ async def public_get_universe(universe_id: str) -> dict[str, Any]:
     }
 
 
-async def public_list_events(universe_id: str, since: int = 0, limit: int = 200) -> dict[str, Any]:
+async def public_list_events(
+    universe_id: str, since: int = 0, limit: int = 200, kind: str | None = None
+) -> dict[str, Any]:
+    """The anonymous Journal page, optionally one kind only (``moment``).
+
+    The kind is validated AFTER the double gate, never before: a bad kind on a
+    universe that is private or on a server with the flag off must still be the
+    same flat 404 every other read is, or the error itself would confirm the
+    universe exists.
+    """
     await _touch_viewed(await _public_universe(universe_id))
-    return await _events_page(universe_id, since, limit)
+    if kind is not None and kind not in EVENT_KINDS:
+        raise BadRequest("terrarium.bad_event_kind", f"no such event kind: {kind!r}")
+    return await _events_page(universe_id, since, limit, kind)
 
 
 async def public_list_citizens(universe_id: str) -> dict[str, Any]:
