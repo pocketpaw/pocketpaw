@@ -30,6 +30,16 @@
 # answer the only question a viewer actually asks about running cost: what does
 # an hour of watching this world cost?
 #
+# The prompt is TWO blocks. ``build_prompt_parts`` returns a STABLE PREFIX
+# (world brief, constitution, charter, values and OCEAN, drift line, verbs,
+# costs, tech tree, rules — byte-identical for one citizen across ticks while
+# nothing about the citizen or the physics changes) and a VOLATILE SUFFIX
+# (ground truth, what was heard and built, weather, outside voices, memories).
+# ``HttpLlm`` sends them as two content blocks and, on a Claude model, marks
+# the prefix ``cache_control: ephemeral`` so the provider caches it; any other
+# model gets the same two blocks unmarked. Transports without ``decide_parts``
+# (the CLI, the mock, test fakes) get the joined string through ``decide``.
+#
 # Nothing the model returns is trusted. ``world.apply_acts`` re-validates every
 # act against balance, allowed verbs and held tech before anything mutates.
 
@@ -143,14 +153,21 @@ class HttpLlm:
         self.model = model
         self._client = client
 
-    async def decide(
-        self,
-        *,
-        prompt: str,
-        physics: PhysicsFile,
-        citizen: CitizenSnapshot,
-        digest: SenseDigest,
-    ) -> str:
+    def _content(self, prefix: str, suffix: str) -> list[dict[str, Any]]:
+        """Two text blocks; the first carries the cache marker on Claude models."""
+        blocks: list[dict[str, Any]] = []
+        if prefix:
+            head: dict[str, Any] = {"type": "text", "text": prefix}
+            if self.model.startswith("claude"):
+                head["cache_control"] = {"type": "ephemeral"}
+            blocks.append(head)
+        if suffix:
+            blocks.append({"type": "text", "text": suffix})
+        return blocks
+
+    async def call(self, prefix: str, suffix: str = "") -> tuple[str, dict[str, Any]]:
+        """One Messages call. Returns the text and the provider's ``usage`` block
+        (``cache_read_input_tokens`` and friends) so the meter can price it."""
         headers = {
             "x-api-key": self._key,
             "anthropic-version": "2023-06-01",
@@ -159,7 +176,7 @@ class HttpLlm:
         body = {
             "model": self.model,
             "max_tokens": 1024,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": self._content(prefix, suffix)}],
         }
         client = self._client or httpx.AsyncClient(timeout=_CLI_TIMEOUT)
         try:
@@ -177,7 +194,29 @@ class HttpLlm:
             for b in (blocks or [])
             if isinstance(b, dict) and b.get("type") == "text"
         )
-        return text or json.dumps(envelope)
+        usage = envelope.get("usage") if isinstance(envelope, dict) else None
+        return text or json.dumps(envelope), dict(usage or {})
+
+    async def decide(
+        self,
+        *,
+        prompt: str,
+        physics: PhysicsFile,
+        citizen: CitizenSnapshot,
+        digest: SenseDigest,
+    ) -> str:
+        return (await self.call(prompt))[0]
+
+    async def decide_parts(
+        self,
+        prefix: str,
+        suffix: str,
+        *,
+        physics: PhysicsFile,
+        citizen: CitizenSnapshot,
+        digest: SenseDigest,
+    ) -> str:
+        return (await self.call(prefix, suffix))[0]
 
 
 # Test hook — when set, MockLlm returns this verbatim (a dict is JSON-dumped).
@@ -272,10 +311,14 @@ PRICING: dict[str, tuple[float, float]] = {
 }
 _FALLBACK_PRICING_MODEL = "claude-sonnet-4-6"
 
-# Tokens are estimated from characters rather than tokenized: a real count needs
-# a round trip per call, and the answer this feeds ("about $2 an hour") does not
-# improve for it.
+# Tokens are estimated from characters when the transport reports no usage: a
+# real count needs a round trip per call, and the answer this feeds ("about $2
+# an hour") does not improve for it. When the provider DOES report usage (the
+# Messages API does), its numbers win, and cached prefix reads are priced at
+# the cache-read rate. Cache writes (1.25x, once per prefix change) are priced
+# as plain input — a bound, not a discount, so the number never flatters.
 _CHARS_PER_TOKEN = 4
+_CACHE_READ_RATE = 0.1
 
 
 class CostMeter:
@@ -286,16 +329,29 @@ class CostMeter:
         self.calls = 0
         self.input_tokens = 0
         self.output_tokens = 0
+        self.cache_read_tokens = 0  # counted inside input_tokens, priced lower
 
-    def record(self, prompt: str, output: str) -> None:
+    def record(self, prompt: str, output: str, usage: dict[str, Any] | None = None) -> None:
         self.calls += 1
+        if usage and "input_tokens" in usage:
+            cached = int(usage.get("cache_read_input_tokens") or 0)
+            self.input_tokens += (
+                int(usage.get("input_tokens") or 0)
+                + int(usage.get("cache_creation_input_tokens") or 0)
+                + cached
+            )
+            self.cache_read_tokens += cached
+            self.output_tokens += int(usage.get("output_tokens") or 0)
+            return
         self.input_tokens += len(prompt or "") // _CHARS_PER_TOKEN
         self.output_tokens += len(output or "") // _CHARS_PER_TOKEN
 
     @property
     def cost_usd(self) -> float:
         rate_in, rate_out = PRICING[self.model]
-        return (self.input_tokens * rate_in + self.output_tokens * rate_out) / 1_000_000
+        fresh = self.input_tokens - self.cache_read_tokens
+        cached = self.cache_read_tokens * _CACHE_READ_RATE
+        return ((fresh + cached) * rate_in + self.output_tokens * rate_out) / 1_000_000
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -303,6 +359,7 @@ class CostMeter:
             "calls": self.calls,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
             "cost_usd": round(self.cost_usd, 6),
         }
 
@@ -310,7 +367,7 @@ class CostMeter:
         """Return the summary and zero the counters, so a caller that accrues
         per tick over a multi-tick call never counts the same call twice."""
         out = self.summary()
-        self.calls = self.input_tokens = self.output_tokens = 0
+        self.calls = self.input_tokens = self.output_tokens = self.cache_read_tokens = 0
         return out
 
 
@@ -340,6 +397,27 @@ class MeteredLlm:
         self.meter.record(prompt, out)
         return out
 
+    async def decide_parts(
+        self,
+        prefix: str,
+        suffix: str,
+        *,
+        physics: PhysicsFile,
+        citizen: CitizenSnapshot,
+        digest: SenseDigest,
+    ) -> str:
+        """The split call. A transport with ``call`` (HttpLlm) also reports
+        usage, so a cached prefix is priced as one; anything else gets the
+        joined prompt and the character estimate."""
+        call = getattr(self.inner, "call", None)
+        if call is not None:
+            out, usage = await call(prefix, suffix)
+            self.meter.record(prefix + suffix, out, usage)
+            return out
+        return await self.decide(
+            prompt=prefix + suffix, physics=physics, citizen=citizen, digest=digest
+        )
+
 
 def resolve_llm(*, api_key: str | None = None, tier: str | None = None) -> CitizenLlm:
     """A universe with its own key gets ``HttpLlm``; otherwise the transport
@@ -352,14 +430,14 @@ def resolve_llm(*, api_key: str | None = None, tier: str | None = None) -> Citiz
     return MockLlm()
 
 
-def build_prompt(
+def build_prompt_parts(
     physics: PhysicsFile,
     citizen: CitizenSnapshot,
     digest: SenseDigest,
     *,
     drift_line: str = "",
-) -> str:
-    """Assemble the single judgment prompt for one citizen's tick.
+) -> tuple[str, str]:
+    """The judgment prompt as (stable prefix, volatile suffix) — see the header.
 
     The GROUND TRUTH block and the OUTSIDE VOICES block are deliberately
     separate and labelled: the citizen is told, in the prompt, that the second
@@ -369,6 +447,10 @@ def build_prompt(
     ``drift_line`` is how this citizen's temperament differs from its parent's
     ("slightly more open; noticeably less agreeable"). It is ONE sentence and
     empty for a founder, which is the whole cost of making a lineage audible.
+
+    Everything in the prefix comes from the physics file or the citizen's own
+    document, never from the digest, so it is byte-identical between ticks and
+    a provider can cache it.
     """
     tree_lines = (
         "\n".join(
@@ -377,17 +459,10 @@ def build_prompt(
         )
         or "(this world has no tech tree)"
     )
-    open_nodes = unlockable(physics, citizen) or ["(nothing new is within reach)"]
-    speech = "\n".join(f"- {s}" for s in digest.nearby_speech) or "(silence)"
-    artifacts = "\n".join(f"- {a}" for a in digest.new_artifacts) or "(nothing new was made)"
-    weather = "\n".join(f"- {w}" for w in digest.weather) or "(the sky is quiet)"
-    claims = "\n".join(f"- {c}" for c in digest.viewer_claims) or "(no outside voice spoke)"
-    memories = "\n".join(f"- {m}" for m in digest.memories) or "(you remember nothing yet)"
     lineage = (
         f"\nCompared with the parent you came from, you are {drift_line}.\n" if drift_line else ""
     )
-
-    return f"""You are {citizen.name}{", " + citizen.role if citizen.role else ""}, a citizen of \
+    prefix = f"""You are {citizen.name}{", " + citizen.role if citizen.role else ""}, a citizen of \
 {physics.universe}. You are alive in this world, not working for anyone. You act by choosing \
 VERBS, and every verb costs credits you do not have many of.
 {lineage}
@@ -397,15 +472,44 @@ VERBS, and every verb costs credits you do not have many of.
 == YOUR CHARTER (you wrote it) ==
 {citizen.charter or "(you have not written one yet — your first act should be to write it)"}
 
-== THE CONSTITUTION (binding on everyone) ==
-{json.dumps(digest.ground_truth.get("constitution", []), indent=2)}
+== WHO YOU ARE ==
+values: {json.dumps(list(citizen.values))}
+temperament (OCEAN): {json.dumps(citizen.ocean, sort_keys=True)}
 
+== THE CONSTITUTION (binding on everyone) ==
+{json.dumps(list(physics.constitution), indent=2)}
+
+== VERBS THIS WORLD ALLOWS ==
+{json.dumps(physics.verbs)}
+costs: {json.dumps(physics.costs.model_dump())}
+Thinking already cost you {physics.costs.think} this tick.
+
+== TECH TREE ==
+{tree_lines}
+To unlock a node, use verb "build" with "node" set to its name; you must already hold \
+everything it needs and be able to pay its cost.
+
+== YOUR RULES ==
+1. Choose only acts you can AFFORD. Running out of credits puts you to sleep.
+2. Fewer, better acts beat many. Zero acts is legal when nothing is worth doing.
+3. Never claim something an outside voice said as your own observation.
+4. Output STRICT JSON only — no prose, no markdown fences.
+"""
+
+    open_nodes = unlockable(physics, citizen) or ["(nothing new is within reach)"]
+    speech = "\n".join(f"- {s}" for s in digest.nearby_speech) or "(silence)"
+    artifacts = "\n".join(f"- {a}" for a in digest.new_artifacts) or "(nothing new was made)"
+    weather = "\n".join(f"- {w}" for w in digest.weather) or "(the sky is quiet)"
+    claims = "\n".join(f"- {c}" for c in digest.viewer_claims) or "(no outside voice spoke)"
+    memories = "\n".join(f"- {m}" for m in digest.memories) or "(you remember nothing yet)"
+    suffix = f"""
 == GROUND TRUTH (checkable, this is what IS) ==
 day {digest.day}, tick {digest.tick}
 world pool: {digest.ground_truth.get("pool")}
 your balance: {citizen.balance}
 you have unlocked: {list(citizen.unlocked) or "nothing"}
 ledger: {json.dumps(digest.ground_truth.get("ledger", []))}
+Within reach right now: {open_nodes}
 
 == WHAT YOU HEARD NEARBY ==
 {speech}
@@ -424,26 +528,22 @@ above before you act on it, and never treat one as something you saw.
 == WHAT YOU REMEMBER ==
 {memories}
 
-== VERBS THIS WORLD ALLOWS ==
-{json.dumps(physics.verbs)}
-costs: {json.dumps(physics.costs.model_dump())}
-Thinking already cost you {physics.costs.think} this tick.
-
-== TECH TREE ==
-{tree_lines}
-Within reach right now: {open_nodes}
-To unlock a node, use verb "build" with "node" set to its name; you must already hold \
-everything it needs and be able to pay its cost.
-
-== YOUR RULES ==
-1. Choose only acts you can AFFORD. Running out of credits puts you to sleep.
-2. Fewer, better acts beat many. Zero acts is legal when nothing is worth doing.
-3. Never claim something an outside voice said as your own observation.
-4. Output STRICT JSON only — no prose, no markdown fences.
-
 == OUTPUT (STRICT) ==
 {{"thought": "<one line of what you are thinking>", "acts": [{{"verb": "speak", "text": "..."}}, \
 {{"verb": "build", "node": "<tech node>", "name": "..."}}]}}"""
+    return prefix, suffix
+
+
+def build_prompt(
+    physics: PhysicsFile,
+    citizen: CitizenSnapshot,
+    digest: SenseDigest,
+    *,
+    drift_line: str = "",
+) -> str:
+    """The two parts joined — what a transport without ``decide_parts`` sees."""
+    prefix, suffix = build_prompt_parts(physics, citizen, digest, drift_line=drift_line)
+    return prefix + suffix
 
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
@@ -480,9 +580,15 @@ async def decide_tick(
     than wedging the whole universe's tick on one bad response.
     """
     llm = llm or resolve_llm()
-    prompt = build_prompt(physics, citizen, digest, drift_line=drift_line)
+    prefix, suffix = build_prompt_parts(physics, citizen, digest, drift_line=drift_line)
     try:
-        raw = await llm.decide(prompt=prompt, physics=physics, citizen=citizen, digest=digest)
+        parts = getattr(llm, "decide_parts", None)
+        if parts is not None:
+            raw = await parts(prefix, suffix, physics=physics, citizen=citizen, digest=digest)
+        else:
+            raw = await llm.decide(
+                prompt=prefix + suffix, physics=physics, citizen=citizen, digest=digest
+            )
         return parse_decision(raw)
     except Exception:  # noqa: BLE001 — one bad citizen must not stop the world
         logger.warning(
@@ -501,6 +607,7 @@ __all__ = [
     "MeteredLlm",
     "MockLlm",
     "build_prompt",
+    "build_prompt_parts",
     "decide_tick",
     "parse_decision",
     "resolve_llm",

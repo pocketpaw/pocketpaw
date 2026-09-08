@@ -135,8 +135,8 @@ def _accrue_cost(uni: UniverseDoc, llm: Any) -> None:
         return
     tick_cost = meter.drain()
     total = dict(uni.cost or {})
-    for key in ("calls", "input_tokens", "output_tokens"):
-        total[key] = int(total.get(key, 0)) + int(tick_cost[key])
+    for key in ("calls", "input_tokens", "output_tokens", "cache_read_tokens"):
+        total[key] = int(total.get(key, 0)) + int(tick_cost.get(key, 0))
     total["cost_usd"] = round(float(total.get("cost_usd", 0.0)) + tick_cost["cost_usd"], 6)
     total["model"] = tick_cost["model"]
     total["cost_per_call"] = round(total["cost_usd"] / total["calls"], 8) if total["calls"] else 0.0
