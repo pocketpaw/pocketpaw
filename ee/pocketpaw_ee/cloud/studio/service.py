@@ -53,6 +53,7 @@ from pocketpaw_ee.catalog import config as catalog_config
 from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
 from pocketpaw_ee.cloud.media import storage as media_storage
+from pocketpaw_ee.cloud.models.studio_generation import StudioGeneration
 
 from . import (
     camera_catalog,
@@ -469,6 +470,137 @@ def get_generation(gen_id: str, workspace_id: str) -> schemas.Generation | None:
             continue
         return schemas.Generation.model_validate(r)
     return None
+
+
+# ── Generation history (Mongo, workspace-scoped) ────────────────────────────
+#
+# House rule (ee/pocketpaw_ee/cloud CLAUDE.md #1/#2): the service IS the
+# repository — there is no repositories.py, and ``models.studio_generation`` is
+# imported HERE and nowhere else in this package.
+#
+# These replace the ``~/.pocketpaw/studio/generations.jsonl`` helpers above.
+# The gallery's default page — the JSONL had no limit and decoded every record
+# every tenant had ever generated on every request.
+DEFAULT_GENERATION_LIMIT = 50
+
+
+def _to_schema(doc: StudioGeneration) -> schemas.Generation:
+    """Document → wire record. The wire shape is what the frontend already reads,
+    so it is deliberately unchanged by the store move."""
+    return schemas.Generation(
+        id=doc.generation_id,
+        prompt=doc.prompt,
+        status=doc.status,
+        kind=doc.kind,
+        model=doc.model,
+        params=schemas.GenerationParams.model_validate(doc.params),
+        assets=[schemas.GeneratedAsset.model_validate(a) for a in doc.assets],
+        createdAt=doc.created_at_ms,
+        error=doc.error,
+        sourceGenerationId=doc.sourceGenerationId,
+    )
+
+
+async def record_generation(
+    workspace_id: str,
+    generation: schemas.Generation,
+    *,
+    source: str = "studio",
+    pocket_id: str | None = None,
+) -> None:
+    """Persist a generation, or replace the record already under its id.
+
+    Upserting on (workspace, generation_id) rather than appending is what stops a
+    retry — or the ordinary queued→succeeded rewrite — from fanning out into
+    duplicate gallery tiles, which an append-only file could not prevent.
+    """
+    existing = await StudioGeneration.find_one(
+        StudioGeneration.workspace == workspace_id,
+        StudioGeneration.generation_id == generation.id,
+    )
+
+    fields = {
+        "prompt": generation.prompt,
+        "status": generation.status,
+        "kind": generation.kind,
+        "model": generation.model,
+        "params": generation.params.model_dump(),
+        "assets": [a.model_dump() for a in generation.assets],
+        "created_at_ms": generation.createdAt,
+        "error": generation.error,
+        "sourceGenerationId": generation.sourceGenerationId,
+        "source": source,
+        "pocket_id": pocket_id,
+    }
+
+    if existing is not None:
+        for key, value in fields.items():
+            setattr(existing, key, value)
+        await existing.save()
+        return
+
+    await StudioGeneration(
+        workspace=workspace_id,
+        generation_id=generation.id,
+        **fields,
+    ).insert()
+
+
+async def update_generation(
+    workspace_id: str,
+    generation_id: str,
+    *,
+    status: str,
+    assets: list[schemas.GeneratedAsset] | None = None,
+    error: str | None = None,
+) -> bool:
+    """Move a generation along its lifecycle. Returns False when the workspace
+    does not own it — a miss, never a cross-tenant write."""
+    doc = await StudioGeneration.find_one(
+        StudioGeneration.workspace == workspace_id,
+        StudioGeneration.generation_id == generation_id,
+    )
+    if doc is None:
+        return False
+
+    doc.status = status
+    if assets is not None:
+        doc.assets = [a.model_dump() for a in assets]
+    if error is not None:
+        doc.error = error
+    await doc.save()
+    return True
+
+
+async def list_stored_generations(
+    workspace_id: str,
+    *,
+    limit: int = DEFAULT_GENERATION_LIMIT,
+    source: str | None = None,
+    pocket_id: str | None = None,
+) -> list[schemas.Generation]:
+    """The workspace's history, newest first.
+
+    ``source`` / ``pocket_id`` are what let the gallery separate a person's own
+    generations from the ones a site agent made while building a page.
+    """
+    query = [StudioGeneration.workspace == workspace_id]
+    if source is not None:
+        query.append(StudioGeneration.source == source)
+    if pocket_id is not None:
+        query.append(StudioGeneration.pocket_id == pocket_id)
+
+    docs = await StudioGeneration.find(*query).sort("-created_at_ms").limit(limit).to_list()
+    return [_to_schema(d) for d in docs]
+
+
+async def get_stored_generation(workspace_id: str, generation_id: str) -> schemas.Generation | None:
+    """One generation, or None. The id is guessable; the workspace is the boundary."""
+    doc = await StudioGeneration.find_one(
+        StudioGeneration.workspace == workspace_id,
+        StudioGeneration.generation_id == generation_id,
+    )
+    return _to_schema(doc) if doc is not None else None
 
 
 def tracked_generation_filenames() -> set[str]:

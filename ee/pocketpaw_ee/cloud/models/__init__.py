@@ -266,6 +266,7 @@ from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
 from pocketpaw_ee.cloud.models.site_export import SiteExport
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
+from pocketpaw_ee.cloud.models.studio_generation import StudioGeneration
 from pocketpaw_ee.cloud.models.subscription import Subscription
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
 from pocketpaw_ee.cloud.models.task_attachment import TaskAttachment
@@ -436,6 +437,7 @@ __all__ = [
     "SiteDomain",
     "SiteRateCounter",
     "SpendReconciliation",
+    "StudioGeneration",
     "Subscription",
     "WorkspaceSensePreference",
     "Task",
@@ -549,6 +551,7 @@ def get_all_documents():
         # Shadow-compare reconciliation rows (WU-F). One per tenant per window
         # during shadow mode. Only ``ee.cloud.llm_provisioning.service`` writes it.
         SpendReconciliation,
+        StudioGeneration,
         Task,
         TaskAttachment,
         TemporalSweepStateDoc,
