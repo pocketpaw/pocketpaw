@@ -126,6 +126,32 @@
 # placeholder BR-1 parked there. The profile (``_browser_profile``, ripple
 # "trim" + the browser tool allow-list) is unchanged.
 
+# Changes: 2026-09-08 (feat/sites-design-skills) — ``_sites_profile``'s
+# svelte/react-create branch now names the four create-scoped design skills
+# alongside the engine's authoring brain, via ``_SITES_CREATE_DESIGN_SKILLS``.
+#
+# This branch is the ONLY /sites mode where the addition was needed, and the
+# reason is the one property of ``skill_names`` that is easy to read backwards:
+# it is an exact ALLOWLIST, not an addition. ``_should_load_bundled_plugin``
+# returns ``enabled and not skill_names``, so a non-empty set SUPPRESSES the
+# wholesale bundled plugin and the run gets exactly what is named here (each
+# resolved by ``materialize_run_skills``, whose packaged fallback finds bundled
+# names even with the ``~/.claude/skills`` mirror off). Ripple-create and refine
+# leave ``skill_names`` unset, so they already reach every bundled skill and
+# needed no change — there, the create/refine preamble's ``<design-skills>`` block
+# is what makes the agent USE them, not what makes them available.
+#
+# The suppression is deliberately NOT relaxed. It is what keeps
+# ``pocketpaw-create-pocket`` — whose description matches "build an app with
+# components and nice design" almost word for word — from firing in the middle of
+# a site build. Widening this branch back to the full bundled set to pick up four
+# skills would re-open that, so the four are named instead.
+#
+# Sourced from ``handlers/sites.py::create_design_skill_names`` rather than
+# re-listed, because the create preamble ADVERTISES the same names and a name
+# advertised but not allowed is an instruction the agent cannot follow. Pinned by
+# ``test_sites_create_skill_names_cover_the_advertised_skills``.
+
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
@@ -797,6 +823,24 @@ _SITES_AUTHORING_SKILL: dict[str, str] = {
     "react": "pocketpaw-create-react-site",
 }
 
+# 2026-09-08 — the create-scoped design skills the svelte/react branch must ALSO
+# name. ``skill_names`` is an exact allowlist, not an addition: a non-empty set
+# suppresses the wholesale bundled plugin (``claude_sdk._should_load_bundled_plugin``
+# returns ``enabled and not skill_names``), so this branch has always run with
+# exactly ONE skill and every other bundled skill withheld. That suppression is
+# the feature — it is what stops ``pocketpaw-create-pocket`` firing on "build an
+# app with components and nice design" mid-site-build — so widening it back to the
+# full bundled set is NOT the fix. Naming the four create-scoped design skills
+# takes this branch from one skill to five and leaves the other bundled skills
+# withheld, which is the intent.
+#
+# It is sourced from ``handlers/sites.py`` rather than re-listed here because the
+# create preamble ADVERTISES these same names, and a preamble naming a skill this
+# set omits would point the agent at something it cannot load. One list, two
+# readers, pinned by
+# ``test_sites_create_skill_names_cover_the_advertised_skills``.
+_SITES_CREATE_DESIGN_SKILLS: frozenset[str] = sites.create_design_skill_names()
+
 
 def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
     """/sites is META-AWARE — three modes; only the hand-authored component
@@ -834,7 +878,12 @@ def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
             # surface ran with ZERO skills and the agent authored sites by hand
             # instead of through the sites tools. Guarded by
             # test_every_surface_skill_name_resolves_to_a_real_skill.
-            skill_names=frozenset({authoring_skill}),
+            #
+            # UNION the create-scoped design skills (2026-09-08): because the set
+            # is an exact allowlist, the authoring skill alone would leave the
+            # create preamble's <design-skills> block naming four skills this
+            # branch cannot load. The other bundled skills stay withheld.
+            skill_names=frozenset({authoring_skill}) | _SITES_CREATE_DESIGN_SKILLS,
         )
     # Ripple-create + refine: keep ripple + the sites tool scope, but still drop the
     # file/shell built-ins — no /sites mode authors on disk (refine edits the ripple

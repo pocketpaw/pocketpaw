@@ -1,0 +1,74 @@
+[
+  {
+    "label": "the create profile stops naming the design skills — svelte/react create advertises four skills in <design-skills> that a non-empty skill_names allowlist makes unloadable, so every trigger fires into nothing",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "            skill_names=frozenset({authoring_skill}) | _SITES_CREATE_DESIGN_SKILLS,",
+    "replace": "            skill_names=frozenset({authoring_skill}),",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_create_skill_names_cover_the_advertised_skills"
+    ]
+  },
+  {
+    "label": "PHASE 0 stops routing into the conversion skill — the strategy layer is still installed and still advertised, and the agent walks the whole procedure without ever settling the offer or the section order",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        \"Invoke the `sites-conversion-structure` skill and follow it: the ONE \"",
+    "replace": "        \"Settle the following yourself: the ONE \"",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_procedure_steps_invoke_the_design_skills"
+    ]
+  },
+  {
+    "label": "the 5b self-check stops invoking the defect list — the draft still gets shown, just without the pass that catches the first-revision defects",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        \"5b. SELF-CHECK BEFORE YOU SHOW IT. Invoke `sites-ship-fixes` and run its \"",
+    "replace": "        \"5b. SELF-CHECK BEFORE YOU SHOW IT. Re-read the page and run its \"",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_procedure_steps_invoke_the_design_skills"
+    ]
+  },
+  {
+    "label": "the craft mechanics stop riding the CREATE preamble — every new site is built from values picked one at a time, and the block is still installed so nothing looks missing",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        f\"{_design_taste_system()}\"\r\n        f\"{_craft_system()}\"\r\n",
+    "replace": "        f\"{_design_taste_system()}\"\r\n",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_craft_rides_every_authoring_turn_embedded_not_named"
+    ]
+  },
+  {
+    "label": "the shared bundled-skill reader re-raises instead of degrading — a packaging change that drops one skill dir takes the entire /sites preamble down instead of costing the agent that one block",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        logger.debug(\"sites_handler: bundled skill %s unreadable\", name, exc_info=True)\r\n        return None",
+    "replace": "        raise",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_embedded_blocks_degrade_when_the_bundle_is_missing"
+    ]
+  },
+  {
+    "label": "refine goes back to embedding the whole craft file - a request to shorten one headline pays 2,868 tokens of ramp construction again, and nothing looks wrong because the block is still there",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        f\"{_craft_system('floor')}\"",
+    "replace": "        f\"{_craft_system()}\"",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_craft_refine_carries_the_floor_and_names_the_rest"
+    ]
+  },
+  {
+    "label": "the floor heading stops resolving - the slice silently degrades to the whole file, so refine pays full price while the scope attribute still says floor",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "_CRAFT_FLOOR_HEADING = \"## 5. The floor\"",
+    "replace": "_CRAFT_FLOOR_HEADING = \"## 5. The Floor\"",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_craft_refine_carries_the_floor_and_names_the_rest"
+    ]
+  },
+  {
+    "label": "the full construction method stops being reachable from refine - the floor is embedded, the symptom index names rules the agent can no longer read, and every structural edit is made without them",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        \"sites-craft\",\r\n        \"refine\",",
+    "replace": "        \"sites-craft\",\r\n        \"create\",",
+    "tests": [
+      "tests/cloud/surface/test_surface_registry.py::test_sites_craft_refine_carries_the_floor_and_names_the_rest"
+    ]
+  }
+]

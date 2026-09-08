@@ -297,12 +297,101 @@
 # skill that GOVERNS the build was never the problem, and it is now the only
 # design authority on this surface.
 
+# Updated: 2026-09-08 (feat/sites-design-skills) - design-taste is no longer the
+# only design authority here, and the sentence above is now half true: it remains
+# the only EMBEDDED one, and the only one that governs every build. Five bundled
+# design skills join it, NAMED rather than embedded (`_SITES_DESIGN_SKILLS` +
+# `_design_skills_note`), each with the one-line trigger that says when to load it:
+# `sites-conversion-structure` (what the page ARGUES - the layer design-taste has
+# never had, since it governs look and not offer/action/section-order),
+# `sites-theme-system` (the measurable difference test behind design-taste's
+# repetition ban), `sites-restraint` (the quiet direction with real numbers -
+# family D of 2.E is four lines and carries none), `sites-ship-fixes` (the
+# first-revision defect list) and `sites-interface-review` (read-only ranked
+# findings, refine-only).
+#
+# NAMED, not embedded, on purpose. Embedding is what `_design_taste_system` does
+# because design quality IS the job and skill invocation is probabilistic - but
+# that reasoning is about a system governing EVERY build. These five each apply to
+# a subset of briefs, and embedding all of them would add several times the
+# design-taste payload to every create turn to ship material most turns never use.
+# Naming them is still load-bearing: the wholesale bundled plugin makes them
+# REACHABLE on ripple/html create and on refine, but a skill whose trigger the
+# agent was never told is one it does not invoke - the same failure that made
+# design-taste get embedded.
+#
+# The note is MODE-AWARE because the two preambles do not carry the same thing:
+# create appends `_design_taste_system()`, refine does not, so the create framing
+# ("already in your context") would be a false statement about what a refine agent
+# is holding. Rows render through `unaddressed_line("skill", ...)` rather than a
+# hand-rolled f-string: a skill is addressed BY NAME, and that literal is
+# re-checked against the MCP tool schemas every run.
+#
+# `surface_registry._sites_profile` MUST move with this block. `skill_names` is an
+# exact allowlist (a non-empty set suppresses the wholesale bundled plugin), so on
+# svelte/react create the four create-scoped names have to be in it or this
+# preamble advertises skills that surface cannot load. `create_design_skill_names`
+# is the single source both read; the two are pinned together by
+# `test_sites_create_skill_names_cover_the_advertised_skills`.
+
+# Updated: 2026-09-08 (feat/sites-design-skills, second pass) - a SIXTH skill,
+# `sites-craft`, ships EMBEDDED rather than named, so there are now two embedded
+# blocks and five named ones. It carries the craft MECHANICS - how a type scale, a
+# colour ramp, a spacing rhythm and a surface treatment are CONSTRUCTED - which
+# design-taste does not: measured on this commit, design-taste contains none of
+# ramp construction, perceived lightness, the primitive/semantic token seam, the
+# concentric-radius formula, `text-wrap`, line-height by role, `oklab`, or hit-area
+# minimums. It picks the ingredient; craft is the method.
+#
+# Embedded because the trigger is "every section of every site", which is the same
+# test `_design_taste_system` passes and the five named skills fail. A subset-of-
+# briefs skill can be left to a probabilistic invocation and cost nothing on the
+# turns it does not fire; an every-turn one cannot - invoked four turns in five it
+# leaves one site in five built from ad-hoc values, which is the exact defect the
+# material exists to remove. It rides BOTH preambles: create is obvious, and refine
+# is where craft drift actually enters, because an edit lands new markup beside a
+# system the agent can no longer see.
+#
+# The two embedded blocks share `_read_bundled_skill_body`, which returns None
+# rather than raising, so a missing bundle degrades each block to its own one-line
+# directive instead of taking the preamble down. Precedence is stated in the block
+# itself and in PHASE 2: DESIGN SYSTEM outranks CRAFT SYSTEM on any CHOICE (which
+# face, which palette family, which composition); craft governs the construction of
+# whatever was chosen. They do not overlap, so there is no value for them to
+# disagree about - the precedence line exists for the case where the agent thinks
+# they do.
+
+# Updated: 2026-09-08 (feat/sites-design-skills, third pass) - the paragraph above
+# says the craft block rides BOTH preambles. It rides them at different weights now,
+# and the reason is a measurement taken right after it shipped: a /sites create turn
+# is 14,094 tokens and a refine turn was 4,418, of which the craft block was 2,868.
+# Two thirds of a refine turn was ramp-construction method, on a surface where most
+# refines change a line of copy.
+#
+# So refine takes `_craft_system("floor")` - section 5 plus the symptom index, 448
+# tokens - and the full method returns to `_SITES_DESIGN_SKILLS` as a REFINE-scoped
+# named skill with the trigger "when an edit ADDS or restructures a section". Refine
+# is now 2,204 tokens. Create is untouched at 14,094: there the every-turn argument
+# still holds, and naming it there as well would ship the same bytes twice.
+#
+# The floor is the part that stays embedded because it is not a design judgement.
+# Hit areas, focus, reduced motion, real elements - those have to hold on any markup
+# that reaches a public page, including markup added by a copy edit, so leaving them
+# to an invocation is the one thing that cannot be allowed to miss.
+#
+# The slice is keyed on `_CRAFT_FLOOR_HEADING`, a heading rather than a line number,
+# so re-ordering the skill file cannot silently change what refine receives - and
+# renaming that heading IS a silent degrade to the whole file, which is why it has
+# its own mutation. Full reasoning and what is still gated:
+# docs/design/drafts/2026-09-08-sites-system-prompt-diet.md (paw-workspace), SD-2.
+
 from __future__ import annotations
 
 import functools
 import logging
 from typing import Any
 
+from pocketpaw.prompt.entity import unaddressed_line
 from pocketpaw.sites_capture import contact_form
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import content_key, meta_key
@@ -480,6 +569,43 @@ def _publish_runs_async(engine: str) -> bool:
         return True
 
 
+# Both embedded blocks close their framing with the same sentence, and PHASE 1
+# opens with a third statement of it. Three copies of one instruction in one
+# message is what the 2026-09-08 sites prompt diet calls SD-1: the only cut on
+# that list that needs no behavioral eval, because the surviving copies are
+# equally prominent and the wording is verbatim. PHASE 1 keeps its own (it is read
+# first, and a routing test pins it); the two wrappers share this one.
+_EMBEDDED_BLOCK_FRAMING = (
+    "It is ALREADY LOADED here — apply it in full; you do NOT need to invoke any skill to use it."
+)
+
+
+def _read_bundled_skill_body(name: str) -> str | None:
+    """Return a bundled skill's ``SKILL.md`` with its YAML frontmatter stripped.
+
+    Shared by the two blocks this surface EMBEDS rather than names
+    (``_design_taste_system``, ``_craft_system``). Returns ``None`` — it never
+    raises — when the bundle is missing or the file is unreadable, so each caller
+    degrades to its own short inline directive instead of taking the whole preamble
+    down with it.
+    """
+    try:
+        from pocketpaw.bundled_skills import bundled_skills_plugin_dir
+
+        base = bundled_skills_plugin_dir()
+        if base is None:
+            return None
+        md = (base / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001 — never let a read error break the preamble
+        logger.debug("sites_handler: bundled skill %s unreadable", name, exc_info=True)
+        return None
+    if md.startswith("---"):
+        parts = md.split("---", 2)
+        if len(parts) == 3:
+            return parts[2].strip()
+    return md
+
+
 @functools.lru_cache(maxsize=1)
 def _design_taste_system() -> str:
     """Return the ``pocketpaw-design-taste`` SKILL.md body (frontmatter stripped)
@@ -494,33 +620,242 @@ def _design_taste_system() -> str:
     skill file (the SKILL.md stays the single source of truth) and cached. A
     missing file degrades to a short inline directive, never a crash.
     """
-    try:
-        from pocketpaw.bundled_skills import bundled_skills_plugin_dir
-
-        base = bundled_skills_plugin_dir()
-        if base is not None:
-            md = (base / "skills" / "pocketpaw-design-taste" / "SKILL.md").read_text(
-                encoding="utf-8"
-            )
-            body = md
-            if md.startswith("---"):
-                parts = md.split("---", 2)
-                if len(parts) == 3:
-                    body = parts[2].strip()
-            return (
-                '<design-system name="pocketpaw-design-taste">\n'
-                "This 2026 Creative Director system GOVERNS every site you build "
-                "on this surface. It is ALREADY LOADED here — apply it in full; "
-                "you do NOT need to invoke any skill to use it.\n\n"
-                f"{body}\n"
-                "</design-system>"
-            )
-    except Exception:  # noqa: BLE001 — never let a read error break the preamble
-        pass
+    body = _read_bundled_skill_body("pocketpaw-design-taste")
+    if body is not None:
+        return (
+            '<design-system name="pocketpaw-design-taste">\n'
+            "This 2026 Creative Director system GOVERNS every site you build "
+            f"on this surface. {_EMBEDDED_BLOCK_FRAMING}\n\n"
+            f"{body}\n"
+            "</design-system>"
+        )
     return (
         '<design-system name="pocketpaw-design-taste">\n'
         "Invoke the `pocketpaw-design-taste` skill and follow it in full.\n"
         "</design-system>"
+    )
+
+
+# Where the refine slice starts inside ``sites-craft``'s SKILL.md. Everything from
+# here down is the accessibility FLOOR plus the symptom index — the two parts that
+# apply to any markup that lands, including a one-line copy edit. Everything above
+# it is construction method, which only earns its bytes when the edit is actually
+# building something. A heading, not a line number, so re-ordering the file cannot
+# silently change what refine receives; ``test_sites_craft_refine_carries_the_floor``
+# fails if the heading is renamed.
+_CRAFT_FLOOR_HEADING = "## 5. The floor"
+
+
+@functools.lru_cache(maxsize=2)
+def _craft_system(scope: str = "full") -> str:
+    """Return the ``sites-craft`` SKILL.md body wrapped as a ``<craft-system>`` block.
+
+    ``scope`` is ``"full"`` (create) or ``"floor"`` (refine).
+
+    EMBEDDED rather than named, and for a different reason than the skills in
+    ``_SITES_DESIGN_SKILLS`` are named. Those each apply to a SUBSET of briefs, so
+    their bytes are only sometimes earned. Craft mechanics apply to every section
+    of every site on every turn — a type scale, a colour ramp, a grouping gap and a
+    nested radius exist whether or not the agent thought to ask for them — so there
+    is no turn on which loading this would have been wasted.
+
+    "Always" is also not something skill invocation can deliver: it is model-driven
+    and probabilistic, which is the finding already recorded in
+    ``_design_taste_system``. A skill invoked on four turns in five leaves one site
+    in five built from ad-hoc values, and that site looks assembled in exactly the
+    way this material exists to prevent.
+
+    It rides BOTH preambles, at different weights. Create is the obvious half.
+    Refine was carrying the whole file until the 2026-09-08 measurement showed it
+    was 65% of a refine turn — 2,868 tokens of ramp construction on a request to
+    shorten one headline. So refine now gets the FLOOR (hit areas, focus, reduced
+    motion, real elements) plus the symptom index, ~448 tokens, and the full method
+    is named in ``<design-skills>`` for the edits that actually build something.
+    That is SD-2 in ``docs/design/drafts/2026-09-08-sites-system-prompt-diet.md``.
+
+    The floor is the part that cannot be left to an invocation: it is not a design
+    judgement, it is the thing that must hold on any markup that reaches a public
+    page, including markup added by a copy edit.
+    """
+    body = _read_bundled_skill_body("sites-craft")
+    if body is not None:
+        if scope == "floor":
+            cut = body.find(_CRAFT_FLOOR_HEADING)
+            if cut != -1:
+                return (
+                    '<craft-system name="sites-craft" scope="floor">\n'
+                    "The FLOOR every edit has to hold, plus the symptom index for "
+                    f"the rest. {_EMBEDDED_BLOCK_FRAMING} When an edit ADDS or "
+                    "restructures a section rather than changing copy, invoke "
+                    "`sites-craft` for the full construction method — the type "
+                    "scale, the ramp, the grouping gap and the radius rules the "
+                    "index below only names.\n\n"
+                    f"{body[cut:].strip()}\n"
+                    "</craft-system>"
+                )
+        return (
+            '<craft-system name="sites-craft">\n'
+            "The CRAFT MECHANICS for everything you build on this surface: how the "
+            "type scale, the colour ramp, the spacing rhythm and the surface "
+            f"treatment are CONSTRUCTED. {_EMBEDDED_BLOCK_FRAMING} The DESIGN SYSTEM "
+            "chooses WHICH face, WHICH palette family and WHICH composition and "
+            "OUTRANKS this on any such choice; this decides HOW whatever it chose "
+            "gets built.\n\n"
+            f"{body}\n"
+            "</craft-system>"
+        )
+    return (
+        '<craft-system name="sites-craft">\n'
+        "Invoke the `sites-craft` skill and follow it in full.\n"
+        "</craft-system>"
+    )
+
+
+# The five on-demand design skills, added 2026-09-08. Unlike the two blocks this
+# surface EMBEDS verbatim (`_design_taste_system` and `_craft_system`), these are
+# NAMED with a one-line trigger and left for the agent to load through the `Skill`
+# tool. The asymmetry is a budget decision, not an inconsistency: what is embedded
+# applies to EVERY build (design-taste governs the choices, craft governs how they
+# are constructed), so those bytes are earned on every turn, while these five each
+# apply to a subset of briefs. Embedding all seven would add several times the
+# design-taste payload to every create turn to deliver material most turns never
+# use.
+#
+# Naming them is load-bearing rather than decorative. On ripple/html create and on
+# refine the wholesale bundled plugin is available, so the agent COULD reach them —
+# but a skill it has never been told the trigger for is a skill it does not invoke,
+# which is the exact failure `_design_taste_system` exists to fix. On svelte/react
+# create it is stronger: `_sites_profile` pins `skill_names` to the one authoring
+# skill, and a NON-EMPTY `skill_names` suppresses the wholesale plugin, so these
+# are invisible there until the registry names them too. Both halves have to move
+# together or this block advertises skills that surface cannot load.
+#
+# Scope values: "create", "refine", or "both" — which preamble the trigger can fire
+# in. `sites-interface-review` is refine-only on purpose: there is nothing to review
+# before the page exists.
+_SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
+    (
+        "sites-conversion-structure",
+        "create",
+        "BEFORE Phase 2 on any marketing / landing brief. Fixes the ONE offer and "
+        "ONE action, the page archetype, the order the page argues in, the "
+        "headline + CTA copy, and index/noindex. The DESIGN SYSTEM below owns how "
+        "the page LOOKS; this owns what it SAYS.",
+    ),
+    (
+        "sites-craft",
+        "refine",
+        "When an edit ADDS a section or restructures one, rather than changing "
+        "copy or a single value. The block above carries only the floor and the "
+        "symptom index; this is the full construction method behind them — the "
+        "type scale, how a ramp is built, the 2x grouping gap, concentric radius. "
+        "On a create turn it is already embedded in full and needs no invocation.",
+    ),
+    (
+        "sites-theme-system",
+        "create",
+        "Before locking tokens on your SECOND or later site in a conversation, or "
+        "whenever a page risks resembling the last one. Carries the three-axis "
+        "difference test and the nav / footer rotation the repetition ban needs.",
+    ),
+    (
+        "sites-restraint",
+        "both",
+        "When the brief reads calm, minimal, monochrome, Nordic or "
+        "editorial-quiet, or when the fix is subtraction. Measured ink ladder, the "
+        "dark-canvas inversion, and what must NOT be neutralized.",
+    ),
+    (
+        "sites-ship-fixes",
+        "both",
+        "AFTER authoring the sections and BEFORE showing the draft. The "
+        "first-revision defect list: hero fits the fold, sticky bleed, nav "
+        "bleed-through, dead gutters, the mobile floor.",
+    ),
+    (
+        "sites-interface-review",
+        "refine",
+        "When the user asks to review, critique or audit the page, or asks why it "
+        "feels off. Read-only ranked findings with evidence.",
+    ),
+)
+
+
+def create_design_skill_names() -> frozenset[str]:
+    """The design skills whose triggers can fire on a CREATE turn.
+
+    Public because ``surface_registry._sites_profile`` needs it: on svelte/react
+    create it pins ``skill_names``, and a NON-EMPTY ``skill_names`` suppresses the
+    wholesale bundled plugin — so every skill `_design_skills_note("create")`
+    advertises has to be named there too, or the preamble points the agent at
+    skills that surface physically cannot load.
+
+    Deriving both from ``_SITES_DESIGN_SKILLS`` is what keeps them in sync;
+    ``test_sites_create_skill_names_cover_the_advertised_skills`` is what proves
+    it. ``pocketpaw-design-taste`` is deliberately NOT here — it arrives embedded
+    in the preamble, and naming it would ship the same bytes twice per turn.
+    """
+    return frozenset(name for name, scope, _ in _SITES_DESIGN_SKILLS if scope in ("create", "both"))
+
+
+def _design_skills_note(mode: str) -> str:
+    """Name the on-demand design skills whose triggers can fire in ``mode``.
+
+    ``mode`` is ``"create"`` or ``"refine"``; entries scoped ``"both"`` appear in
+    each. Returns ``""`` when nothing applies, so a caller can interpolate it
+    blind without an ``if``.
+
+    The framing sentence differs by mode because the two preambles do not carry
+    the same thing: create appends `_design_taste_system()` (the full system,
+    inline), refine does NOT. Telling a refine agent the design system is
+    "already in your context" would be false, and a preamble that misdescribes
+    what the agent is holding is how it learns to ignore the preamble.
+    """
+    # `unaddressed_line`, not a hand-rolled f-string row: a skill is invoked BY
+    # NAME (the loader keys them in a dict, so the name is unique by construction
+    # and IS the address), and the "skill" literal is re-checked against the MCP
+    # tool schemas on every run — the day a tool ships a required `skill_id`, this
+    # fails instead of quietly rendering rows the agent now needs ids for. CLAUDE.md
+    # prefers this over growing `_HANDROLLED_ALLOWED`, whose counts may only go down.
+    rows = "".join(
+        unaddressed_line("skill", f"`{name}`", use=why) + "\n"
+        for name, scope, why in _SITES_DESIGN_SKILLS
+        if scope in (mode, "both")
+    )
+    if not rows:
+        return ""
+    if mode == "create":
+        frame = (
+            "Unlike the DESIGN SYSTEM and the CRAFT SYSTEM at the end of this "
+            "message (both already in your context), you reach these with the "
+            "`Skill` tool at the moment a trigger fires, then follow the skill in "
+            "full."
+        )
+        precedence = (
+            "They COMPOSE with the embedded systems and never override them: "
+            "where a skill and the DESIGN SYSTEM disagree on a visual value, the "
+            "DESIGN SYSTEM wins.\n"
+        )
+    else:
+        frame = (
+            "Reach one with the `Skill` tool at the moment a trigger fires, then follow it in full."
+        )
+        precedence = (
+            "They COMPOSE with the site's existing design rather than replacing "
+            "it: a refine changes what the user asked for and leaves the rest of "
+            "the page alone. The CRAFT SYSTEM at the end of this message IS already "
+            "loaded and governs how anything you write here is built. If you need "
+            "the full design system on top of it, invoke `pocketpaw-design-taste`, "
+            "which outranks both these skills and the CRAFT SYSTEM on any visual "
+            "value.\n"
+        )
+    return (
+        "<design-skills>\n"
+        f"These design skills are INSTALLED but NOT loaded. {frame}\n"
+        f"{rows}"
+        "Load ONLY the ones whose trigger actually fired — not all of them. "
+        f"{precedence}"
+        "</design-skills>\n"
     )
 
 
@@ -890,10 +1225,21 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "facts (invented testimonials, precise stats, prices, addresses, phone "
         "numbers) — use an obviously-generic placeholder and flag it instead.\n"
         "\n"
+        "PHASE 0 — THE ARGUMENT (settle this before any design decision).\n"
+        "Invoke the `sites-conversion-structure` skill and follow it: the ONE "
+        "offer, the ONE action, the page archetype, and the order the page argues "
+        "in. Do this FIRST. A page that looks right and argues nothing does not "
+        "convert, and the section list is the most expensive thing to change once "
+        "the markup exists.\n"
+        "\n"
         "PHASE 1 — CREATIVE DIRECTION (infer, do NOT ask).\n"
         "Run the Creative Direction Engine from the DESIGN SYSTEM embedded at the "
         "end of this message (the 2026 Creative Director system is ALREADY in your "
-        "context — you do NOT need to invoke a skill): declare the Vision Ledger "
+        "context — no invocation is needed to reach THE DESIGN SYSTEM ITSELF, nor "
+        "the CRAFT SYSTEM that follows it. That "
+        "is not a general instruction to avoid skills: the ones named in "
+        "<design-skills> are NOT in your context and you DO invoke those): "
+        "declare the Vision Ledger "
         "and a one-line Visual DNA Token (the Design Read), then commit to ONE "
         "visual identity from its Trend Engine (Dark Kinetic, Tactile Brutalism, "
         "Immersive WebGL, Aurora Mesh, Liquid Glass, Frosted Editorial). State the "
@@ -901,7 +1247,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "the user already named a style or brand, honor it. Rotate the identity "
         "and palette so two similar briefs never look identical.\n"
         "\n"
-        "PHASE 2 — DESIGN + BUILD (apply the embedded DESIGN SYSTEM throughout).\n"
+        "PHASE 2 — DESIGN + BUILD (apply the embedded DESIGN SYSTEM and CRAFT "
+        "SYSTEM throughout).\n"
         "1. LOCK THE TOKENS. There is NO design-system library to pick from: "
         "you AUTHOR the token set for THIS business out of the identity you "
         "just committed to. Take the aesthetic direction family (2.E), the "
@@ -910,7 +1257,11 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "write them out as concrete CSS custom properties (--bg, --ink, "
         "--accent, --radius, --shadow, the display + body faces) BEFORE you "
         "write any markup, then build every section from those variables "
-        "instead of sprinkling ad-hoc hex per section. The same rules GOVERN "
+        "instead of sprinkling ad-hoc hex per section. CONSTRUCT them with the "
+        "embedded CRAFT SYSTEM — a modular type scale with line-height by role, "
+        "a ramp whose every step has a job, the 2x grouping gap and concentric "
+        "radius — not as a handful of values picked one at a time. The same "
+        "rules GOVERN "
         "the build: a mandatory background architecture (never a plain "
         "#fff/#000 page), the ONE chosen visual identity, diverse section "
         "compositions (the default AI sequence and two consecutive "
@@ -920,7 +1271,10 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "has: do NOT default to the warm / earthy family just because the "
         "business is a cafe, salon, or shop, pick the less-obvious fit, and "
         "reseed the accent so two similar briefs never resolve to the same "
-        "palette.\n"
+        "palette. If this is the SECOND or later site you have built in this "
+        "conversation, invoke `sites-theme-system` BEFORE you write the tokens "
+        "and run its three-axis difference test — 'rotate' is an instruction you "
+        "cannot check, and that skill is how you check it.\n"
         "2. CUSTOM COLORS. If the user gave a brand color, call "
         "`mcp__pocketpaw_palette__scale_from_color` with the hex to get a full "
         "scale and OVERRIDE the accent you chose with it. If they gave "
@@ -940,6 +1294,13 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "sections "
         "[…], palette [primary].' Then build.\n"
         f"5. {build_step}\n"
+        "5b. SELF-CHECK BEFORE YOU SHOW IT. Invoke `sites-ship-fixes` and run its "
+        "list against what you just built. These are the defects that come back as "
+        "the first revision — the CTA under the fold, a sticky section bleeding "
+        "into the next, headings unreadable behind the nav, a mobile horizontal "
+        "scroll — and every one of them is cheaper to fix now than after the user "
+        "sees it. If a preview is not reachable, say the page was not previewed "
+        "rather than implying it was checked.\n"
         "6. DRAFT-FIRST — STOP at the draft; do NOT publish by default. The create "
         "tool persists a reviewable DRAFT the user previews IN-APP (open /sites → "
         "the site's Preview tab). Publishing deploys the site to the public edge "
@@ -970,7 +1331,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "- Keep the 'site' / 'page' vocabulary throughout; never say 'pocket'.\n"
         "</sites-procedure>\n"
         f"{_CONCIERGE_NOTE}\n"
+        f"{_design_skills_note('create')}"
         f"{_design_taste_system()}"
+        f"{_craft_system()}"
     )
 
 
@@ -1421,13 +1784,22 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         "ASK with an `ask-user-questions` ripple widget (include a 'you decide' "
         "option) instead of guessing — and NEVER fabricate real-world facts "
         "(testimonials, stats, prices, addresses, contact details).\n"
+        "WHEN THE ASK IS A JUDGEMENT, NOT AN EDIT: if the user asks you to review "
+        "or critique the page, or says it feels off without naming what, invoke "
+        "`sites-interface-review` and report its ranked findings INSTEAD of "
+        "editing — a review request is read-only until they ask for the fixes. If "
+        "they ask you to make the page calmer, quieter or more minimal, invoke "
+        "`sites-restraint`. After any edit that moves layout, run "
+        "`sites-ship-fixes` over what you changed.\n"
         f"{edit_step}"
         f"{rules}"
         f"{publish_step}"
         'Keep `type="site"` + `pattern="landing"` on the pocket. Keep talking '
         "'site' / 'page', never 'pocket'.\n"
         "</sites-procedure>\n"
-        f"{_CONCIERGE_NOTE}"
+        f"{_CONCIERGE_NOTE}\n"
+        f"{_design_skills_note('refine')}"
+        f"{_craft_system('floor')}"
     )
 
 
