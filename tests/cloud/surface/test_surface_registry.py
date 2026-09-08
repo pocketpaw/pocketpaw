@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 from pocketpaw_ee.cloud.surface import SurfaceKind, SurfaceMeta, SurfaceProfile, resolve_profile
 from pocketpaw_ee.cloud.surface.surface_registry import (
+    _SITES_CREATE_DESIGN_SKILLS,
     SURFACES,
     SurfaceSpec,
     _assert_registry_complete,
@@ -125,19 +126,71 @@ def test_sites_react_create_drops_ripple_and_denies():
 
 
 def test_sites_component_engines_get_exactly_one_authoring_skill():
-    """Each hand-authored engine surfaces its OWN skill and only that one.
+    """Each hand-authored engine surfaces its OWN authoring brain and only that one.
 
     ``skill_names`` is not additive in effect: a non-empty set SUPPRESSES the
-    wholesale bundled plugin, so every name here is the complete skill surface for
-    that run. Two brains would be contradictory instructions; the engine-agnostic
-    design-taste system deliberately is NOT here because it reaches the agent
-    EMBEDDED in the preamble, and naming it would ship the same bytes twice."""
-    for engine, expected in (
-        ("svelte", "pocketpaw-create-svelte-site"),
-        ("react", "pocketpaw-create-react-site"),
+    wholesale bundled plugin, so this set is the COMPLETE skill surface for that
+    run. Two authoring brains would be contradictory instructions; the
+    engine-agnostic design-taste system deliberately is NOT here because it reaches
+    the agent EMBEDDED in the preamble, and naming it would ship the same bytes
+    twice.
+
+    Widened 2026-09-08: the set is now the one authoring brain UNION the
+    create-scoped design skills. The invariant this test protects did not change —
+    exactly one AUTHORING brain, and the rest of the bundled set still withheld.
+    The design skills are not authoring brains: they carry no build procedure and
+    no tool sequence, so they cannot contradict the engine's."""
+    for engine, expected, other in (
+        ("svelte", "pocketpaw-create-svelte-site", "pocketpaw-create-react-site"),
+        ("react", "pocketpaw-create-react-site", "pocketpaw-create-svelte-site"),
     ):
         profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine=engine))
-        assert profile.skill_names == frozenset({expected}), f"engine={engine}"
+        assert profile.skill_names == frozenset({expected}) | _SITES_CREATE_DESIGN_SKILLS, (
+            f"engine={engine}"
+        )
+        # The other engine's brain must never leak in.
+        assert other not in profile.skill_names, f"engine={engine}"
+        # The suppression is the point: naming a narrow set is what keeps
+        # pocketpaw-create-pocket from firing on "build an app with components
+        # and nice design" in the middle of a site build.
+        assert "pocketpaw-create-pocket" not in profile.skill_names, f"engine={engine}"
+        assert "pocketpaw-design-taste" not in profile.skill_names, f"engine={engine}"
+
+
+def test_sites_create_skill_names_cover_the_advertised_skills():
+    """Every skill the CREATE preamble advertises must be loadable on that surface.
+
+    Two halves have to agree. ``handlers/sites.py::_design_skills_note("create")``
+    NAMES design skills in the preamble and tells the agent to reach them with the
+    ``Skill`` tool; ``_sites_profile`` decides which skills the run can actually
+    materialize. On svelte/react create the second half is an exact allowlist, so a
+    name advertised but not allowed is an instruction the agent cannot follow — the
+    failure mode the whole ``skill_names`` mechanism exists to prevent, pointed the
+    other way.
+
+    Mutation that must fail this: drop ``| _SITES_CREATE_DESIGN_SKILLS`` from
+    ``_sites_profile``, or add a create-scoped entry to ``_SITES_DESIGN_SKILLS``
+    without re-deriving the frozenset.
+    """
+    from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
+
+    advertised = {
+        name for name, scope, _ in sites_handler._SITES_DESIGN_SKILLS if scope in ("create", "both")
+    }
+    assert advertised, "the create preamble must advertise at least one design skill"
+
+    for engine in ("svelte", "react"):
+        profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine=engine))
+        missing = advertised - profile.skill_names
+        assert not missing, f"engine={engine} advertises unloadable skills: {sorted(missing)}"
+
+    # And the note the agent actually reads names exactly those.
+    note = sites_handler._design_skills_note("create")
+    for name in advertised:
+        assert f"`{name}`" in note, name
+    # A refine-only skill must not be advertised on create — there is nothing to
+    # review before the page exists.
+    assert "sites-interface-review" not in note
 
 
 def test_sites_refine_wins_over_react_engine():

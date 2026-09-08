@@ -363,11 +363,19 @@ class TestUnaddressedClaimsStayTrue:
 
         THE MUTATION THAT BREAKS THIS: add ``unaddressed_line("widget", ...)``
         anywhere in the scan. Run: reported as unexpected and this failed.
+
+        ``skill`` added 2026-09-08 (sites.py ``_design_skills_note``): a skill is
+        invoked BY NAME through the ``Skill`` tool — the loader keys them in a
+        dict, so the name is unique by construction and IS the address. No MCP
+        tool takes a ``skill_id``, which is not asserted here but by
+        ``test_nothing_claims_unaddressed_for_a_kind_a_tool_addresses``, which
+        re-derives the addressable kinds from the tool schemas every run. If one
+        ever ships, that test fails and this claim has to come out.
         """
         found = {
             kind for path in _scanned_files() for kind, _ln in _unaddressed_claims(path) if kind
         }
-        assert found == {"agent", "calendar_event", "file", "kb_scope"}, (
+        assert found == {"agent", "calendar_event", "file", "kb_scope", "skill"}, (
             f"the set of unaddressed-entity claims moved: {sorted(found)}"
         )
 

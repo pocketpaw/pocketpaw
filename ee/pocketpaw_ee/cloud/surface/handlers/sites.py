@@ -297,12 +297,50 @@
 # skill that GOVERNS the build was never the problem, and it is now the only
 # design authority on this surface.
 
+# Updated: 2026-09-08 (feat/sites-design-skills) - design-taste is no longer the
+# only design authority here, and the sentence above is now half true: it remains
+# the only EMBEDDED one, and the only one that governs every build. Five bundled
+# design skills join it, NAMED rather than embedded (`_SITES_DESIGN_SKILLS` +
+# `_design_skills_note`), each with the one-line trigger that says when to load it:
+# `sites-conversion-structure` (what the page ARGUES - the layer design-taste has
+# never had, since it governs look and not offer/action/section-order),
+# `sites-theme-system` (the measurable difference test behind design-taste's
+# repetition ban), `sites-restraint` (the quiet direction with real numbers -
+# family D of 2.E is four lines and carries none), `sites-ship-fixes` (the
+# first-revision defect list) and `sites-interface-review` (read-only ranked
+# findings, refine-only).
+#
+# NAMED, not embedded, on purpose. Embedding is what `_design_taste_system` does
+# because design quality IS the job and skill invocation is probabilistic - but
+# that reasoning is about a system governing EVERY build. These five each apply to
+# a subset of briefs, and embedding all of them would add several times the
+# design-taste payload to every create turn to ship material most turns never use.
+# Naming them is still load-bearing: the wholesale bundled plugin makes them
+# REACHABLE on ripple/html create and on refine, but a skill whose trigger the
+# agent was never told is one it does not invoke - the same failure that made
+# design-taste get embedded.
+#
+# The note is MODE-AWARE because the two preambles do not carry the same thing:
+# create appends `_design_taste_system()`, refine does not, so the create framing
+# ("already in your context") would be a false statement about what a refine agent
+# is holding. Rows render through `unaddressed_line("skill", ...)` rather than a
+# hand-rolled f-string: a skill is addressed BY NAME, and that literal is
+# re-checked against the MCP tool schemas every run.
+#
+# `surface_registry._sites_profile` MUST move with this block. `skill_names` is an
+# exact allowlist (a non-empty set suppresses the wholesale bundled plugin), so on
+# svelte/react create the four create-scoped names have to be in it or this
+# preamble advertises skills that surface cannot load. `create_design_skill_names`
+# is the single source both read; the two are pinned together by
+# `test_sites_create_skill_names_cover_the_advertised_skills`.
+
 from __future__ import annotations
 
 import functools
 import logging
 from typing import Any
 
+from pocketpaw.prompt.entity import unaddressed_line
 from pocketpaw.sites_capture import contact_form
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import content_key, meta_key
@@ -521,6 +559,140 @@ def _design_taste_system() -> str:
         '<design-system name="pocketpaw-design-taste">\n'
         "Invoke the `pocketpaw-design-taste` skill and follow it in full.\n"
         "</design-system>"
+    )
+
+
+# The five on-demand design skills, added 2026-09-08. Unlike `_design_taste_system`
+# (embedded verbatim, because design quality IS the job here and skill invocation
+# is model-driven and probabilistic), these are NAMED with a one-line trigger and
+# left for the agent to load through the `Skill` tool. The asymmetry is a budget
+# decision, not an inconsistency: design-taste governs EVERY build so its bytes are
+# always earned, while these five each apply to a subset of briefs. Embedding all
+# six would add several times the design-taste payload to every create turn to
+# deliver material most turns never use.
+#
+# Naming them is load-bearing rather than decorative. On ripple/html create and on
+# refine the wholesale bundled plugin is available, so the agent COULD reach them —
+# but a skill it has never been told the trigger for is a skill it does not invoke,
+# which is the exact failure `_design_taste_system` exists to fix. On svelte/react
+# create it is stronger: `_sites_profile` pins `skill_names` to the one authoring
+# skill, and a NON-EMPTY `skill_names` suppresses the wholesale plugin, so these
+# are invisible there until the registry names them too. Both halves have to move
+# together or this block advertises skills that surface cannot load.
+#
+# Scope values: "create", "refine", or "both" — which preamble the trigger can fire
+# in. `sites-interface-review` is refine-only on purpose: there is nothing to review
+# before the page exists.
+_SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
+    (
+        "sites-conversion-structure",
+        "create",
+        "BEFORE Phase 2 on any marketing / landing brief. Fixes the ONE offer and "
+        "ONE action, the page archetype, the order the page argues in, the "
+        "headline + CTA copy, and index/noindex. The DESIGN SYSTEM below owns how "
+        "the page LOOKS; this owns what it SAYS.",
+    ),
+    (
+        "sites-theme-system",
+        "create",
+        "Before locking tokens on your SECOND or later site in a conversation, or "
+        "whenever a page risks resembling the last one. Carries the three-axis "
+        "difference test and the nav / footer rotation the repetition ban needs.",
+    ),
+    (
+        "sites-restraint",
+        "both",
+        "When the brief reads calm, minimal, monochrome, Nordic or "
+        "editorial-quiet, or when the fix is subtraction. Measured ink ladder, the "
+        "dark-canvas inversion, and what must NOT be neutralized.",
+    ),
+    (
+        "sites-ship-fixes",
+        "both",
+        "AFTER authoring the sections and BEFORE showing the draft. The "
+        "first-revision defect list: hero fits the fold, sticky bleed, nav "
+        "bleed-through, dead gutters, the mobile floor.",
+    ),
+    (
+        "sites-interface-review",
+        "refine",
+        "When the user asks to review, critique or audit the page, or asks why it "
+        "feels off. Read-only ranked findings with evidence.",
+    ),
+)
+
+
+def create_design_skill_names() -> frozenset[str]:
+    """The design skills whose triggers can fire on a CREATE turn.
+
+    Public because ``surface_registry._sites_profile`` needs it: on svelte/react
+    create it pins ``skill_names``, and a NON-EMPTY ``skill_names`` suppresses the
+    wholesale bundled plugin — so every skill `_design_skills_note("create")`
+    advertises has to be named there too, or the preamble points the agent at
+    skills that surface physically cannot load.
+
+    Deriving both from ``_SITES_DESIGN_SKILLS`` is what keeps them in sync;
+    ``test_sites_create_skill_names_cover_the_advertised_skills`` is what proves
+    it. ``pocketpaw-design-taste`` is deliberately NOT here — it arrives embedded
+    in the preamble, and naming it would ship the same bytes twice per turn.
+    """
+    return frozenset(name for name, scope, _ in _SITES_DESIGN_SKILLS if scope in ("create", "both"))
+
+
+def _design_skills_note(mode: str) -> str:
+    """Name the on-demand design skills whose triggers can fire in ``mode``.
+
+    ``mode`` is ``"create"`` or ``"refine"``; entries scoped ``"both"`` appear in
+    each. Returns ``""`` when nothing applies, so a caller can interpolate it
+    blind without an ``if``.
+
+    The framing sentence differs by mode because the two preambles do not carry
+    the same thing: create appends `_design_taste_system()` (the full system,
+    inline), refine does NOT. Telling a refine agent the design system is
+    "already in your context" would be false, and a preamble that misdescribes
+    what the agent is holding is how it learns to ignore the preamble.
+    """
+    # `unaddressed_line`, not a hand-rolled f-string row: a skill is invoked BY
+    # NAME (the loader keys them in a dict, so the name is unique by construction
+    # and IS the address), and the "skill" literal is re-checked against the MCP
+    # tool schemas on every run — the day a tool ships a required `skill_id`, this
+    # fails instead of quietly rendering rows the agent now needs ids for. CLAUDE.md
+    # prefers this over growing `_HANDROLLED_ALLOWED`, whose counts may only go down.
+    rows = "".join(
+        unaddressed_line("skill", f"`{name}`", use=why) + "\n"
+        for name, scope, why in _SITES_DESIGN_SKILLS
+        if scope in (mode, "both")
+    )
+    if not rows:
+        return ""
+    if mode == "create":
+        frame = (
+            "Unlike the DESIGN SYSTEM at the end of this message (already in your "
+            "context), you reach these with the `Skill` tool at the moment a "
+            "trigger fires, then follow the skill in full."
+        )
+        precedence = (
+            "They COMPOSE with the DESIGN SYSTEM and never override it: where a "
+            "skill and the DESIGN SYSTEM disagree on a visual value, the DESIGN "
+            "SYSTEM wins.\n"
+        )
+    else:
+        frame = (
+            "Reach one with the `Skill` tool at the moment a trigger fires, then follow it in full."
+        )
+        precedence = (
+            "They COMPOSE with the site's existing design rather than replacing "
+            "it: a refine changes what the user asked for and leaves the rest of "
+            "the page alone. If you need the full design system, invoke "
+            "`pocketpaw-design-taste`, which outranks these on any visual value.\n"
+        )
+    return (
+        "<design-skills>\n"
+        f"These design skills are INSTALLED but NOT loaded. {frame}\n"
+        f"{rows}"
+        "Load ONLY the ones whose trigger actually fired — not all of them. "
+        f"{precedence}"
+        "</design-skills>\n"
     )
 
 
@@ -970,6 +1142,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "- Keep the 'site' / 'page' vocabulary throughout; never say 'pocket'.\n"
         "</sites-procedure>\n"
         f"{_CONCIERGE_NOTE}\n"
+        f"{_design_skills_note('create')}"
         f"{_design_taste_system()}"
     )
 
@@ -1427,7 +1600,8 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
         'Keep `type="site"` + `pattern="landing"` on the pocket. Keep talking '
         "'site' / 'page', never 'pocket'.\n"
         "</sites-procedure>\n"
-        f"{_CONCIERGE_NOTE}"
+        f"{_CONCIERGE_NOTE}\n"
+        f"{_design_skills_note('refine')}"
     )
 
 
