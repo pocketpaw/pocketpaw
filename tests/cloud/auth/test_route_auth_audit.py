@@ -102,6 +102,13 @@ ROUTER_MODULES = [
     ("audit", "pocketpaw_ee.cloud.audit.router"),
     ("auth", "pocketpaw_ee.cloud.auth.router"),
     ("billing", "pocketpaw_ee.cloud.billing.router"),
+    # Added 2026-09-08. Both mounted while the coverage pin was being
+    # written against an older base, so dev merged at 50 unaudited
+    # routers against a pin of 48. Every route on both carries a session
+    # guard, so auditing them brings the count back down rather than
+    # raising the pin — which is the point of the pin.
+    ("byok", "pocketpaw_ee.cloud.byok.router"),
+    ("other_hand", "pocketpaw_ee.cloud.other_hand.router"),
     ("chat", "pocketpaw_ee.cloud.chat.router"),
     ("chat_runs", "pocketpaw_ee.cloud.chat.runs.router"),
     ("codeagent", "pocketpaw_ee.cloud.codeagent.router"),
