@@ -380,3 +380,57 @@ def test_every_surface_skill_name_resolves_to_a_real_skill():
             f"{expected} is no longer reachable from any resolved profile — either "
             "the surface stopped surfacing it, or this scan stopped seeing it"
         )
+
+
+async def test_sites_procedure_steps_invoke_the_design_skills():
+    """The numbered procedure must ROUTE INTO the design skills, not just list them.
+
+    ``<design-skills>`` is an inventory. The numbered PHASE steps are the thing the
+    agent actually walks. Until 2026-09-08 the block sat entirely AFTER
+    ``</sites-procedure>`` and no step named a skill or the ``Skill`` tool, so the
+    agent could follow the whole procedure correctly and never load one — the same
+    shape of failure that got ``pocketpaw-design-taste`` embedded rather than
+    invoked (see ``_design_taste_system``: "the sites build agent was not reliably
+    INVOKING the design-taste skill").
+
+    Availability is necessary and not sufficient. This pins the sufficient half.
+
+    THE MUTATION THAT BREAKS THIS: delete the "PHASE 0 — THE ARGUMENT" step, or
+    drop the ``5b. SELF-CHECK`` step. Run: the skill is still advertised in the
+    block, still loadable, and this fails because no step tells the agent to use
+    it.
+    """
+    from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
+
+    text = (await sites_handler.build_preamble("w", "u", SurfaceMeta(engine="svelte"))).text
+    procedure = text[text.index("<sites-procedure>") : text.index("</sites-procedure>")]
+
+    # The two skills with mechanical, non-judgement triggers must be named in the
+    # steps themselves. The judgement-y ones (theme-system, restraint) may live in
+    # the block alone.
+    for name in ("sites-conversion-structure", "sites-ship-fixes"):
+        assert name in procedure, f"{name} is advertised but no procedure step invokes it"
+
+    # PHASE 1 tells the agent no invocation is needed to reach the DESIGN SYSTEM.
+    # That sentence must stay scoped to the design system: read as a general
+    # "don't invoke skills" it suppresses every skill this surface just shipped.
+    assert "no invocation is needed to reach THE DESIGN SYSTEM ITSELF" in procedure
+    assert "you DO invoke those" in procedure
+
+
+async def test_sites_refine_routes_a_review_request_away_from_editing():
+    """A "review this" ask must reach the review skill, not the edit tools.
+
+    Refine's whole procedure is written around applying an edit, so an unguarded
+    review request gets answered with a mutation the user did not ask for.
+    """
+    from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
+
+    text = (
+        await sites_handler.build_preamble(
+            "w", "u", SurfaceMeta(pocket_id="pkt_1", engine="svelte")
+        )
+    ).text
+    procedure = text[text.index("<sites-procedure>") : text.index("</sites-procedure>")]
+    assert "sites-interface-review" in procedure
+    assert "INSTEAD of editing" in procedure or "INSTEAD of" in procedure
