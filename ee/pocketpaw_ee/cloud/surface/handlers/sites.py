@@ -545,6 +545,17 @@ def _publish_runs_async(engine: str) -> bool:
         return True
 
 
+# Both embedded blocks close their framing with the same sentence, and PHASE 1
+# opens with a third statement of it. Three copies of one instruction in one
+# message is what the 2026-09-08 sites prompt diet calls SD-1: the only cut on
+# that list that needs no behavioral eval, because the surviving copies are
+# equally prominent and the wording is verbatim. PHASE 1 keeps its own (it is read
+# first, and a routing test pins it); the two wrappers share this one.
+_EMBEDDED_BLOCK_FRAMING = (
+    "It is ALREADY LOADED here — apply it in full; you do NOT need to invoke any skill to use it."
+)
+
+
 def _read_bundled_skill_body(name: str) -> str | None:
     """Return a bundled skill's ``SKILL.md`` with its YAML frontmatter stripped.
 
@@ -590,8 +601,7 @@ def _design_taste_system() -> str:
         return (
             '<design-system name="pocketpaw-design-taste">\n'
             "This 2026 Creative Director system GOVERNS every site you build "
-            "on this surface. It is ALREADY LOADED here — apply it in full; "
-            "you do NOT need to invoke any skill to use it.\n\n"
+            f"on this surface. {_EMBEDDED_BLOCK_FRAMING}\n\n"
             f"{body}\n"
             "</design-system>"
         )
@@ -629,8 +639,7 @@ def _craft_system() -> str:
             '<craft-system name="sites-craft">\n'
             "The CRAFT MECHANICS for everything you build on this surface: how the "
             "type scale, the colour ramp, the spacing rhythm and the surface "
-            "treatment are CONSTRUCTED. It is ALREADY LOADED here — apply it in "
-            "full; you do NOT need to invoke any skill to use it. The DESIGN SYSTEM "
+            f"treatment are CONSTRUCTED. {_EMBEDDED_BLOCK_FRAMING} The DESIGN SYSTEM "
             "chooses WHICH face, WHICH palette family and WHICH composition and "
             "OUTRANKS this on any such choice; this decides HOW whatever it chose "
             "gets built.\n\n"
