@@ -18,12 +18,26 @@
 #
 # The second is the one worth having. A hand-written "pro is True" assertion
 # passes just as well against a mapper that hardcodes the answer.
+#
+# Updated 2026-09-08 (fix/sites-plan-domain-allowance): added the
+# ``max_domained_sites`` section at the bottom, and corrected a docstring that had
+# gone stale. Same failure as the original, one field later: custom-domain
+# entitlement moved to ``max_domained_sites`` on 2026-08-21 and never reached the
+# wire, so the cards kept answering "custom domain?" from ``cloudflare_features``.
+# The two disagree on the FREE FLOOR — one domained site, zero resold Cloudflare
+# features — so the tier a buyer reads first is the tier the card got wrong. The
+# last test asserts the DTO against ``site_domain_allowance`` rather than a
+# literal, because a card promising what the gate refuses is the real thing to
+# prevent.
 
 from __future__ import annotations
 
 from pocketpaw_ee.cloud.billing import site_plans as catalog
 from pocketpaw_ee.cloud.entitlements.dto import site_plan_tier_to_dto
-from pocketpaw_ee.cloud.entitlements.service import resolve_site_entitlements
+from pocketpaw_ee.cloud.entitlements.service import (
+    resolve_site_entitlements,
+    site_domain_allowance,
+)
 
 # --------------------------------------------------------------------------- #
 # sells_concierge — derived from the floor, not a per-tier mapping
@@ -131,11 +145,16 @@ def test_the_dto_mirrors_every_catalog_row():
 
 
 def test_the_free_tier_card_can_say_what_it_omits():
-    """The free tier's row carries three explicit Falses, not an empty payload.
+    """The free tier's row carries explicit Falses, not an empty payload.
 
-    Its card is the one that has to render "badge shown", "no concierge", "no
-    custom domain" — omissions are only renderable if they arrive as False rather
-    than as absent keys.
+    Its card is the one that has to render "badge shown" and "no concierge" —
+    omissions are only renderable if they arrive as False rather than as absent
+    keys.
+
+    IT DOES NOT OMIT THE CUSTOM DOMAIN, and this docstring used to say it did.
+    That was written on 2026-08-19, two days before the floor grant landed. An
+    empty ``cloudflare_features`` is not that claim: see
+    ``test_the_free_tier_ships_its_domain_grant_on_the_wire`` below.
     """
     dto = site_plan_tier_to_dto(catalog.get_site_plan(catalog.BASE_SITE_PLAN_KEY))
     assert dto.badge_removal is False
@@ -155,3 +174,58 @@ def test_the_top_tier_card_is_the_one_carrying_the_concierge():
     dto = site_plan_tier_to_dto(catalog.get_site_plan("business"))
     assert dto.sells_concierge is True
     assert dto.badge_removal is True
+
+
+# --------------------------------------------------------------------------- #
+# max_domained_sites — the floor grant the wire could not express
+# --------------------------------------------------------------------------- #
+
+
+def test_the_dto_mirrors_the_domain_allowance_for_every_tier():
+    """A sweep, for the same reason the badge sweep above is one.
+
+    Breaks on: a mapper that drops the field, or one that reintroduces the card's
+    old derivation by sending ``"custom_domain" in cloudflare_features`` instead.
+    """
+    for tier in catalog.list_site_plans():
+        dto = site_plan_tier_to_dto(tier)
+        assert dto.max_domained_sites == tier.max_domained_sites, tier.key
+
+
+def test_the_free_tier_ships_its_domain_grant_on_the_wire():
+    """FREE INCLUDES A CUSTOM DOMAIN, and its card has to be able to say so.
+
+    This is the assertion the storefront was missing a field for. The floor grants
+    one domained site with no subscription (captain, 2026-08-21) while reselling no
+    Cloudflare features at all, because that collection means only RESOLD
+    Cloudflare capability. A card reading the feature list to answer "custom
+    domain?" therefore printed an X on the one tier that gets one for nothing.
+
+    The two assertions together are the point: an empty feature list AND a
+    non-zero allowance, on the same row.
+    """
+    dto = site_plan_tier_to_dto(catalog.get_site_plan(catalog.BASE_SITE_PLAN_KEY))
+    assert dto.cloudflare_features == []
+    assert dto.max_domained_sites == 1
+
+
+def test_a_paid_rung_ships_an_uncapped_allowance():
+    """``None`` is uncapped, and it must survive the mapper as ``None``.
+
+    Coerced to 0 on the way out it would read as "no domains" — the opposite
+    claim — on the cheapest tier that actually sells them.
+    """
+    dto = site_plan_tier_to_dto(catalog.get_site_plan("site"))
+    assert dto.max_domained_sites is None
+
+
+def test_the_wire_allowance_agrees_with_the_resolver():
+    """The card and the gate must not answer the same question differently.
+
+    ``site_domain_allowance`` is what actually decides whether a site may attach a
+    domain. A card built off this DTO promises what that resolves — checked here
+    for the floor with no subscription at all, which is the case the old card got
+    wrong.
+    """
+    dto = site_plan_tier_to_dto(catalog.get_site_plan(catalog.BASE_SITE_PLAN_KEY))
+    assert dto.max_domained_sites == site_domain_allowance(plan_tier=None, subscription_status=None)
