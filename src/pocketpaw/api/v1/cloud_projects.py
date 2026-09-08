@@ -18,6 +18,12 @@ Updated: 2026-09-04 — ``_upload_directory`` no longer walks the cloned tree on
     the event loop. The ``os.walk`` moved into ``_walk_repo_files`` and is
     reached through ``asyncio.to_thread``; the uploads themselves stay in the
     coroutine because each one awaits the storage adapter.
+Updated: 2026-09-07 — the router had no auth dependency and took its tenant
+    from an ``X-Workspace-Id`` header defaulting to ``"default"``, so an
+    anonymous caller could read, write and enumerate any workspace's project
+    storage by naming it. Every route now depends on ``resolve_project_scope``,
+    which trusts the session the EE auth bridge resolved and otherwise refuses.
+    See that function for why ``require_scope`` is the wrong gate here.
 """
 
 from __future__ import annotations
@@ -31,7 +37,7 @@ import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -86,23 +92,62 @@ async def _empty_stream() -> AsyncIterator[bytes]:
         yield b""
 
 
-def _resolve_ids(http_request: Request) -> tuple[str, str]:
-    """Extract workspace_id and user_id from the request context.
+# The middle segment of the storage key. It has always been the constant
+# "local" for every caller that reaches this router in practice — cloud callers
+# authenticate with a session cookie, which set neither api_key nor oauth_token,
+# so the old _resolve_ids fell through to its default on every cloud request.
+# It is kept as a constant deliberately: the workspace segment is the tenancy
+# boundary, and changing this one would orphan every project already stored
+# under projects/<workspace>/local/. Treat it as a vestigial path component,
+# not as an owner.
+_USER_SEGMENT = "local"
 
-    ``workspace_id`` is read from the ``X-Workspace-Id`` request header.
-    ``user_id`` is extracted from the authenticated request context
-    (API key or OAuth token), falling back to ``"local"`` in self-hosted
-    single-user mode.
+# The workspace for a deployment with no cloud session — a local install, or an
+# OSS caller holding a master token or an API key. Matches the value the old
+# header default produced, so existing local projects keep resolving.
+_LOCAL_WORKSPACE = "default"
+
+
+async def resolve_project_scope(request: Request) -> tuple[str, str]:
+    """Resolve (workspace_id, user_segment), or refuse the request.
+
+    THIS IS THE TENANCY BOUNDARY OF THIS ROUTER. Every route stores and reads
+    under ``projects/{workspace_id}/...``, so whatever this returns decides
+    which tenant's files a caller reaches.
+
+    It used to be ``http_request.headers.get("X-Workspace-Id", "default")``.
+    A header is chosen by the caller, and the router carried no auth
+    dependency, so an anonymous request could read, write and enumerate any
+    tenant's project storage by naming the workspace — and workspace ids are
+    not secret, the frontend sends one on every request.
+
+    Two sources are trusted, in order, and nothing else is:
+
+    1. ``request.state.workspace_id``, stamped by the EE auth bridge middleware
+       from the caller's own JWT session. This is the cloud path. The OSS
+       package cannot import pocketpaw_ee, so a plain request-state attribute
+       is the seam; see ee/pocketpaw_ee/cloud/_core/ee_auth_bridge.py.
+    2. An OSS-authenticated caller with no cloud session — master token,
+       dashboard cookie, genuine localhost, a pp_ API key, or an OAuth token.
+       That is a single-tenant install, and it gets the local workspace.
+
+    Anything else is anonymous and gets a 401. Note this router cannot use
+    require_scope: the cloud frontend calls it as an ordinary workspace member,
+    and the EE bridge grants OSS full_access only to platform superusers, so a
+    scope gate would 403 every legitimate cloud user.
     """
-    workspace_id = http_request.headers.get("X-Workspace-Id", "default")
-    user_id: str = "local"
-    api_key = getattr(http_request.state, "api_key", None)
-    if api_key is not None:
-        user_id = getattr(api_key, "user_id", "local")
-    oauth_token = getattr(http_request.state, "oauth_token", None)
-    if oauth_token is not None:
-        user_id = getattr(oauth_token, "sub", str(oauth_token.get("sub", "local")))
-    return workspace_id, user_id
+    workspace_id = getattr(request.state, "workspace_id", None)
+    if workspace_id:
+        return str(workspace_id), _USER_SEGMENT
+
+    if (
+        getattr(request.state, "full_access", False)
+        or getattr(request.state, "api_key", None) is not None
+        or getattr(request.state, "oauth_token", None) is not None
+    ):
+        return _LOCAL_WORKSPACE, _USER_SEGMENT
+
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 async def _require_project(workspace_id: str, user_id: str, project_name: str) -> str:
@@ -355,7 +400,7 @@ async def _clone_into_vm(
 @router.post("/cloud/projects")
 async def create_cloud_project(
     req: CreateCloudProjectRequest,
-    http_request: Request,
+    scope: tuple[str, str] = Depends(resolve_project_scope),
 ) -> CreateCloudProjectResponse:
     """Create a new project folder in cloud storage.
 
@@ -363,11 +408,9 @@ async def create_cloud_project(
 
         projects/{workspace_id}/{user_id}/{project_name}/
 
-    ``workspace_id`` is read from the ``X-Workspace-Id`` request header
-    (set automatically by the frontend's ``api.*`` client helpers).
-    ``user_id`` is extracted from the authenticated request context
-    (API key or OAuth token), falling back to ``"local"`` in self-hosted
-    single-user mode.
+    ``workspace_id`` comes from ``resolve_project_scope`` — the caller's own
+    session, never a request header. ``user_id`` is the constant path segment
+    described there.
 
     When ``provision_workspace`` is true and Daytona is configured, a
     sandbox VM is provisioned for the project and files are synced from
@@ -375,6 +418,7 @@ async def create_cloud_project(
 
     Returns 409 if a project with the same name already exists.
     """
+    workspace_id, user_id = scope
     name = req.project_name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="project_name must not be empty")
@@ -383,7 +427,6 @@ async def create_cloud_project(
     if len(name) > 128:
         raise HTTPException(status_code=400, detail="project_name too long (max 128 chars)")
 
-    workspace_id, user_id = _resolve_ids(http_request)
     project_key = f"projects/{workspace_id}/{user_id}/{name}/"
 
     # Idempotency check — skip creation if the marker already exists.
@@ -430,7 +473,7 @@ async def create_cloud_project(
 @router.post("/cloud/projects/clone")
 async def clone_git_repo(
     req: CloneGitRepoRequest,
-    http_request: Request,
+    scope: tuple[str, str] = Depends(resolve_project_scope),
 ) -> CreateCloudProjectResponse:
     """Clone a git repository into a new cloud project.
 
@@ -442,13 +485,13 @@ async def clone_git_repo(
     (e.g. ``https://github.com/user/repo.git`` → ``user-repo``).
     Returns 409 if a project with the same derived name already exists.
     """
+    workspace_id, user_id = scope
     url = req.repo_url.strip()
     if not url:
         raise HTTPException(status_code=400, detail="repo_url must not be empty")
 
     project_name = _extract_project_name(url)
 
-    workspace_id, user_id = _resolve_ids(http_request)
     project_key = f"projects/{workspace_id}/{user_id}/{project_name}/"
 
     # Idempotency check — reject if a project with this derived name exists.
@@ -539,7 +582,7 @@ async def clone_git_repo(
 
 @router.get("/cloud/projects")
 async def list_cloud_projects(
-    http_request: Request,
+    scope: tuple[str, str] = Depends(resolve_project_scope),
 ) -> list[dict]:
     """List all cloud projects for the current workspace + user.
 
@@ -550,7 +593,7 @@ async def list_cloud_projects(
     keys with a prefix. S3 adapters do; the local adapter implements
     ``local_path()`` and we fall back to filesystem ``iterdir``.
     """
-    workspace_id, user_id = _resolve_ids(http_request)
+    workspace_id, user_id = scope
     prefix = f"projects/{workspace_id}/{user_id}/"
 
     projects: list[dict] = []
@@ -603,14 +646,14 @@ def _adapter_key(project_key: str, relative_path: str) -> str:
 async def browse_cloud_project_files(
     project_name: str,
     path: str = Query("", description="Relative path within the project"),
-    http_request: Request = None,
+    scope: tuple[str, str] = Depends(resolve_project_scope),
 ) -> BrowseResponse:
     """List the contents of a directory within a cloud project.
 
     ``path`` is relative to the project root. Empty string or ``"."``
     lists the project root.
     """
-    workspace_id, user_id = _resolve_ids(http_request)
+    workspace_id, user_id = scope
     project_key = await _require_project(workspace_id, user_id, project_name)
     key = _adapter_key(project_key, path)
 
@@ -635,14 +678,14 @@ async def browse_cloud_project_files(
 async def read_cloud_project_file(
     project_name: str,
     path: str = Query(..., description="Relative file path within the project"),
-    http_request: Request = None,
+    scope: tuple[str, str] = Depends(resolve_project_scope),
 ):
     """Read a file from a cloud project and return its raw content.
 
     The path is relative to the project root. The response uses the
     file's MIME type for syntax highlighting in the browser.
     """
-    workspace_id, user_id = _resolve_ids(http_request)
+    workspace_id, user_id = scope
     project_key = await _require_project(workspace_id, user_id, project_name)
 
     if not path or path.strip("/") == "":
@@ -678,14 +721,14 @@ async def read_cloud_project_file(
 async def write_cloud_project_file(
     project_name: str,
     req: WriteFileRequest,
-    http_request: Request = None,
+    scope: tuple[str, str] = Depends(resolve_project_scope),
 ) -> FileActionResponse:
     """Create or overwrite a file within a cloud project.
 
     The body ``path`` is relative to the project root. Parent directories
     are created automatically.
     """
-    workspace_id, user_id = _resolve_ids(http_request)
+    workspace_id, user_id = scope
     project_key = await _require_project(workspace_id, user_id, project_name)
 
     relative = req.path.strip("/")
@@ -712,13 +755,13 @@ async def write_cloud_project_file(
 async def create_cloud_project_file(
     project_name: str,
     req: CreateFileRequest,
-    http_request: Request = None,
+    scope: tuple[str, str] = Depends(resolve_project_scope),
 ) -> FileActionResponse:
     """Create a new file within a cloud project.
 
     Returns 409 if the file already exists.
     """
-    workspace_id, user_id = _resolve_ids(http_request)
+    workspace_id, user_id = scope
     project_key = await _require_project(workspace_id, user_id, project_name)
 
     relative = req.path.strip("/")
@@ -757,14 +800,14 @@ async def create_cloud_project_file(
 async def mkdir_cloud_project(
     project_name: str,
     req: MkdirRequest,
-    http_request: Request = None,
+    scope: tuple[str, str] = Depends(resolve_project_scope),
 ) -> FileActionResponse:
     """Create a directory within a cloud project.
 
     The directory is a zero-byte marker object at the corresponding key
     prefix. Returns 409 if the directory already exists.
     """
-    workspace_id, user_id = _resolve_ids(http_request)
+    workspace_id, user_id = scope
     project_key = await _require_project(workspace_id, user_id, project_name)
 
     relative = req.path.strip("/")
@@ -797,13 +840,13 @@ async def mkdir_cloud_project(
 async def rename_cloud_project_item(
     project_name: str,
     req: RenameRequest,
-    http_request: Request = None,
+    scope: tuple[str, str] = Depends(resolve_project_scope),
 ) -> FileActionResponse:
     """Rename or move a file/directory within a cloud project.
 
     Both ``path`` and ``new_path`` are relative to the project root.
     """
-    workspace_id, user_id = _resolve_ids(http_request)
+    workspace_id, user_id = scope
     project_key = await _require_project(workspace_id, user_id, project_name)
 
     old_relative = req.path.strip("/")
@@ -831,10 +874,10 @@ async def rename_cloud_project_item(
 async def delete_cloud_project_item(
     project_name: str,
     path: str = Query(..., description="Relative path to delete"),
-    http_request: Request = None,
+    scope: tuple[str, str] = Depends(resolve_project_scope),
 ) -> FileActionResponse:
     """Delete a file or empty directory within a cloud project."""
-    workspace_id, user_id = _resolve_ids(http_request)
+    workspace_id, user_id = scope
     project_key = await _require_project(workspace_id, user_id, project_name)
 
     relative = path.strip("/")
