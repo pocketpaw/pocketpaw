@@ -79,5 +79,68 @@
     "tests": [
       "tests/ee/terrarium/test_soul_seeding.py"
     ]
+  },
+  {
+    "label": "a moment needs only one citizen, so every solo act becomes a story",
+    "file": "ee/pocketpaw_ee/terrarium/world.py",
+    "find": "        if len(actors) < 2:",
+    "replace": "        if len(actors) < 1:",
+    "tests": [
+      "tests/ee/terrarium/test_world.py"
+    ]
+  },
+  {
+    "label": "the cluster takes the FIRST kind it saw instead of the loudest one",
+    "file": "ee/pocketpaw_ee/terrarium/world.py",
+    "find": "        kind = max(group, key=lambda a: MOMENT_KIND_RANK[a.kind]).kind",
+    "replace": "        kind = group[0].kind",
+    "tests": [
+      "tests/ee/terrarium/test_world.py"
+    ]
+  },
+  {
+    "label": "the watched hour DIVIDES by the world's clock instead of scaling by it",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    calls_per_hour = max(0, pop) * ticks_per_day * 3600.0 / day_seconds",
+    "replace": "    calls_per_hour = max(0, pop) * ticks_per_day * day_seconds / 3600.0",
+    "tests": [
+      "tests/ee/terrarium/test_cost.py"
+    ]
+  },
+  {
+    "label": "the meter is replaced each tick instead of accrued, so cost never adds up",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        total[key] = int(total.get(key, 0)) + int(tick_cost[key])",
+    "replace": "        total[key] = int(tick_cost[key])",
+    "tests": [
+      "tests/ee/terrarium/test_cost.py"
+    ]
+  },
+  {
+    "label": "the public events route ignores the kind filter and hands back everything",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    return await _events_page(universe_id, since, limit, kind)",
+    "replace": "    return await _events_page(universe_id, since, limit)",
+    "tests": [
+      "tests/ee/terrarium/test_public_surface.py"
+    ]
+  },
+  {
+    "label": "an unknown public event kind is accepted instead of rejected",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    if kind is not None and kind not in EVENT_KINDS:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/terrarium/test_public_surface.py"
+    ]
+  },
+  {
+    "label": "the kind is validated BEFORE the gates, so a 400 confirms a hidden universe",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    await _touch_viewed(await _public_universe(universe_id))\n    if kind is not None and kind not in EVENT_KINDS:\n        raise BadRequest(\"terrarium.bad_event_kind\", f\"no such event kind: {kind!r}\")",
+    "replace": "    if kind is not None and kind not in EVENT_KINDS:\n        raise BadRequest(\"terrarium.bad_event_kind\", f\"no such event kind: {kind!r}\")\n    await _touch_viewed(await _public_universe(universe_id))",
+    "tests": [
+      "tests/ee/terrarium/test_public_surface.py"
+    ]
   }
 ]
