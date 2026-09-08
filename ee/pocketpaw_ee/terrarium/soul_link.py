@@ -36,14 +36,16 @@ async def birth_soul(
     ocean: dict[str, float],
     values: list[str],
     world_brief: str,
+    charter: str = "",
 ) -> str | None:
     """Mint a citizen's ``.soul`` file. Returns its DID, or None on any failure.
 
     Best-effort: a universe whose souls fail to mint still runs (citizens keep
     their OCEAN + values on the CitizenDoc), it just has no long-lived memory.
     The world brief lands as the citizen's first memory — its only knowledge of
-    where it woke up. Its charter is NOT written here: the citizen writes that
-    itself on its first tick (the zero ritual).
+    where it woke up. ``charter`` is empty for a generated founder, which writes
+    its own on tick 1 (the zero ritual); a founder named from a card is born
+    with the charter its creator gave it, seeded here as a day-one memory.
     """
     path = Path(soul_path).expanduser()
     try:
@@ -60,6 +62,8 @@ async def birth_soul(
         _unfreeze_personality(soul)
         if world_brief.strip():
             await soul.remember(world_brief.strip(), importance=9)
+        if charter.strip():
+            await soul.remember(charter.strip(), importance=9)
         await soul.save_local(path)
         return str(soul.did or "")
     except Exception:  # noqa: BLE001 — a soul failure must never wedge creation

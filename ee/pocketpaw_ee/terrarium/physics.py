@@ -12,6 +12,9 @@
 #   * every tech-tree ``needs`` entry names an existing node, and the graph
 #     is acyclic (a cycle can never unlock, so it is a broken world)
 #   * ``founders >= 1`` — a universe with nobody in it has no first tick
+#   * ``founder_cards`` (optional) — when a creator names the founders, the
+#     list length must equal ``founders``, at most 12, each with a non-empty
+#     name and role, a bounded charter and at most four values
 #
 # Wire shape matches the frozen v0 contract exactly (YAML in, JSON out).
 
@@ -38,6 +41,11 @@ KNOWN_VERBS: tuple[str, ...] = (
 )
 
 Rung = Literal["camp", "town", "nation", "planet", "multiverse"]
+
+# Founder-card limits (the contract's "Founder cards" amendment).
+MAX_FOUNDER_CARDS = 12
+MAX_CHARTER_LEN = 400
+MAX_CARD_VALUES = 4
 
 
 class PhysicsError(ValueError):
@@ -85,6 +93,21 @@ class ModelTiers(BaseModel):
     crowd: str = "tail"
 
 
+class FounderCard(BaseModel):
+    """A founder a creator named in the create flow (contract: FounderCard).
+
+    Optional widening of the physics file. When ``PhysicsFile.founder_cards`` is
+    present, the runtime seeds each founder from a card — its name, role, day-one
+    charter and core values — instead of generating one generically. A card
+    carries no OCEAN; the deterministic spread still supplies personality.
+    """
+
+    name: str
+    role: str
+    charter: str = ""
+    values: list[str] = Field(default_factory=list)
+
+
 class PhysicsFile(BaseModel):
     """The universe genome. Field-for-field the contract's PhysicsFile."""
 
@@ -100,6 +123,7 @@ class PhysicsFile(BaseModel):
     tech_tree: dict[str, TechNode] = Field(default_factory=dict)
     models: ModelTiers = Field(default_factory=ModelTiers)
     founders: int = 5
+    founder_cards: list[FounderCard] | None = None
     world_brief: str = ""
 
 
@@ -163,6 +187,41 @@ def _check_tech_tree(physics: PhysicsFile) -> None:
                 stack_names.add(nxt)
 
 
+def _check_founder_cards(physics: PhysicsFile) -> None:
+    """A creator-named founder list must match ``founders`` and be well-formed.
+
+    Absent cards leave the generic seeding path untouched; present cards must
+    number ``founders``, cap at 12, and each carry a non-empty name and role, a
+    bounded charter and at most four values.
+    """
+    cards = physics.founder_cards
+    if cards is None:
+        return
+    if len(cards) > MAX_FOUNDER_CARDS:
+        raise PhysicsError(
+            f"founder_cards has {len(cards)} cards; at most {MAX_FOUNDER_CARDS} are allowed"
+        )
+    if len(cards) != physics.founders:
+        raise PhysicsError(
+            f"founders is {physics.founders} but founder_cards has {len(cards)}; they must match"
+        )
+    for i, card in enumerate(cards):
+        if not card.name.strip():
+            raise PhysicsError(f"founder_cards[{i}].name must be a non-empty name")
+        if not card.role.strip():
+            raise PhysicsError(f"founder_cards[{i}].role must be a non-empty role")
+        if len(card.charter) > MAX_CHARTER_LEN:
+            raise PhysicsError(
+                f"founder_cards[{i}].charter is {len(card.charter)} chars; "
+                f"at most {MAX_CHARTER_LEN} are allowed"
+            )
+        if len(card.values) > MAX_CARD_VALUES:
+            raise PhysicsError(
+                f"founder_cards[{i}].values has {len(card.values)} entries; "
+                f"at most {MAX_CARD_VALUES} are allowed"
+            )
+
+
 def validate_physics(physics: PhysicsFile) -> PhysicsFile:
     """Run every hard rule. Raises ``PhysicsError`` on the first violation."""
     if physics.founders < 1:
@@ -174,6 +233,7 @@ def validate_physics(physics: PhysicsFile) -> PhysicsFile:
     _check_costs(physics)
     _check_verbs(physics)
     _check_tech_tree(physics)
+    _check_founder_cards(physics)
     return physics
 
 
@@ -210,6 +270,7 @@ __all__ = [
     "ChatRules",
     "Costs",
     "Endowment",
+    "FounderCard",
     "ModelTiers",
     "PhysicsError",
     "PhysicsFile",

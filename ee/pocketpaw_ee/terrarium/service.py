@@ -22,7 +22,8 @@
 #   5. the Journal is truth; citizens/ledger/artifacts are projections.
 #   6. say / write / moment text, charters and artifacts pass ``moderation`` at
 #      the write; a failing one lands as ``[withheld]`` (seq and cost intact).
-#      Viewer lines are checked BEFORE the write and rejected with a 422.
+#      Viewer lines are checked BEFORE the write and rejected with a 422;
+#      founder-card text is checked the same way at creation.
 #   7. ``paused`` never ticks and is a flat 404 in public; anonymous readers
 #      trail the edge by ``TERRARIUM_PUBLIC_DELAY_EVENTS`` (default 20) rows.
 #   8. a DORMANT world thinks in a half-price Message Batch when
@@ -427,6 +428,20 @@ def _ocean_for(index: int) -> dict[str, float]:
     }
 
 
+def _reject_unmoderated_founder_cards(physics: PhysicsFile) -> None:
+    """A named founder is creator-supplied text on the public citizen wire, so
+    its name, role, charter and values pass the same inbound check a viewer line
+    does — a founder must not be a moderation bypass. Checked BEFORE anything is
+    written: the whole creation fails, exactly like a rejected viewer line."""
+    for card in physics.founder_cards or []:
+        for text in (card.name, card.role, card.charter, *card.values):
+            if not moderation.allowed(text):
+                raise ValidationError(
+                    "terrarium.founder_card_rejected",
+                    f"founder card {card.name!r} contains text that was not accepted",
+                )
+
+
 async def create_universe(workspace_id: str, user_id: str, body: dict[str, Any]) -> dict[str, Any]:
     """Create a universe from a physics file and seed its founders.
 
@@ -442,6 +457,7 @@ async def create_universe(workspace_id: str, user_id: str, body: dict[str, Any])
         physics = parse_physics(raw)
     except PhysicsError as exc:
         raise ValidationError("terrarium.bad_physics", str(exc)) from exc
+    _reject_unmoderated_founder_cards(physics)
 
     uni = UniverseDoc(
         workspace=workspace_id,
@@ -460,9 +476,21 @@ async def create_universe(workspace_id: str, user_id: str, body: dict[str, Any])
     await uni.insert()
 
     endowment = physics.endowment.daily
+    cards = physics.founder_cards
     for i in range(physics.founders):
-        name = _FOUNDER_NAMES[i % len(_FOUNDER_NAMES)] + ("" if i < len(_FOUNDER_NAMES) else str(i))
-        role = _FOUNDER_ROLES[i % len(_FOUNDER_ROLES)]
+        card = cards[i] if cards else None
+        if card is None:
+            name = _FOUNDER_NAMES[i % len(_FOUNDER_NAMES)] + (
+                "" if i < len(_FOUNDER_NAMES) else str(i)
+            )
+            role = _FOUNDER_ROLES[i % len(_FOUNDER_ROLES)]
+            values = ["survival", "fairness"]
+            charter = ""
+        else:
+            name = card.name
+            role = card.role
+            values = list(card.values)
+            charter = card.charter
         ocean = _ocean_for(i)
         path = soul_root() / str(uni.id) / f"{name.lower()}.soul"
         did = await soul_link.birth_soul(
@@ -470,8 +498,9 @@ async def create_universe(workspace_id: str, user_id: str, body: dict[str, Any])
             name=name,
             role=role,
             ocean=ocean,
-            values=["survival", "fairness"],
+            values=values,
             world_brief=physics.world_brief,
+            charter=charter,
         )
         citizen = CitizenDoc(
             workspace=workspace_id,
@@ -482,8 +511,10 @@ async def create_universe(workspace_id: str, user_id: str, body: dict[str, Any])
             generation=1,
             soul_path=str(path) if did else None,
             ocean=ocean,
-            values=["survival", "fairness"],
-            charter=None,  # written by the citizen on its FIRST tick (zero ritual)
+            values=values,
+            # A card seeds the day-one charter; a generated founder writes its
+            # own on tick 1 (the zero ritual gates on ``charter is None``).
+            charter=charter or None,
             balance=endowment,
             state="alive",
             x=round(20.0 + (i * 13) % 60, 2),
