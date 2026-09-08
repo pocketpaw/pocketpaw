@@ -49,6 +49,17 @@
 #   conversation meter and white-label are unenforced claims today and appear only
 #   here, never there.
 
+# Updated 2026-09-08 (fix/sites-plan-domain-allowance): ``SitePlanTierResponse``
+#   now also carries ``max_domained_sites``. It is the field custom-domain
+#   entitlement has actually been resolved from since 2026-08-21
+#   (``site_domain_allowance``), and it was the one capability on the ladder the
+#   wire could not express — so the plan cards answered "does this tier get a
+#   custom domain?" from ``cloudflare_features``. That is a different question:
+#   RESOLD Cloudflare capability BC-10 provisions. The two disagree on exactly the
+#   tier a buyer reads first. FREE grants one domained site and resells no
+#   Cloudflare features, so its card printed "Custom domain ✗" while the backend
+#   was granting it. A card cannot stop guessing until the field ships.
+
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -191,6 +202,20 @@ class SitePlanTierResponse(BaseModel):
     whatever the plain lookup returns — see its docstring. The field is load-bearing
     for the picker and for whatever org-scoped tier the catalog grows next.)
 
+    ``max_domained_sites`` is how many SITES in the workspace may carry a custom
+    domain on this tier (``None`` = uncapped, ``0`` = none at all). THE UNIT IS
+    THE SITE, NOT THE HOSTNAME — apex + ``www`` on one site spend one. READ THIS,
+    not ``cloudflare_features``, to answer "does this tier get a custom domain".
+    The two disagree on the FREE FLOOR and always will: free carries
+    ``max_domained_sites=1`` (the captain's grant of 2026-08-21) beside an empty
+    ``cloudflare_features``, because that collection means only RESOLD Cloudflare
+    capability. ``site_domain_allowance`` — the gate that actually decides whether
+    an attach succeeds — reads this field, so a card reading the other one
+    promises something different from what the gate enforces.
+
+    Unlike the two above it, this is NOT merely a ladder claim: it is the input to
+    a live entitlement, which is why it is worth shipping rather than deriving.
+
     ``conversation_allowance`` and ``conversation_rate_cents`` describe the
     LADDER, not any site's permissions — they are here so a card can state what a
     tier sells. (``white_label`` and ``included_sites`` sat beside them until
@@ -213,6 +238,11 @@ class SitePlanTierResponse(BaseModel):
     key: str
     monthly_price_usd: int
     cloudflare_features: list[str] = Field(default_factory=list)
+    # Defaults to 0 — "no domained sites" — matching ``SitePlanTier``'s own
+    # default and failing closed the same way. A DTO built without the field (a
+    # fixture, an older test) then claims nothing, rather than the "uncapped" a
+    # ``None`` default would claim.
+    max_domained_sites: int | None = 0
     scope: str
     conversation_allowance: int = 0
     conversation_rate_cents: int = 0
@@ -236,6 +266,7 @@ def site_plan_tier_to_dto(tier: SitePlanTier) -> SitePlanTierResponse:
         key=tier.key,
         monthly_price_usd=tier.monthly_price_usd,
         cloudflare_features=sorted(tier.cloudflare_features),
+        max_domained_sites=tier.max_domained_sites,
         scope=tier.scope,
         conversation_allowance=tier.conversation_allowance,
         conversation_rate_cents=tier.conversation_rate_cents,
