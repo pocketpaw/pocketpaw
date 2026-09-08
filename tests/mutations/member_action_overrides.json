@@ -1,0 +1,44 @@
+[
+  {
+    "label": "restore the run_until_complete lookup, the shipped bug",
+    "file": "ee/pocketpaw_ee/guards/deps.py",
+    "find": "    try:\n        overrides = await get_member_action_overrides(workspace_id, user_id)\n    except Exception:",
+    "replace": "    try:\n        import asyncio\n\n        overrides = asyncio.get_event_loop().run_until_complete(\n            get_member_action_overrides(workspace_id, user_id)\n        )\n    except Exception:",
+    "tests": ["tests/cloud/test_member_action_overrides.py"]
+  },
+  {
+    "label": "put membership and the action check back in one try",
+    "file": "ee/pocketpaw_ee/guards/deps.py",
+    "find": "    try:\n        role = resolve_workspace_role(user, workspace_id)\n    except Forbidden as exc:",
+    "replace": "    try:\n        role = resolve_workspace_role(user, workspace_id)\n        check_action(action, role)\n    except Forbidden as exc:\n        if user_id and await _has_action_override(workspace_id, user_id, action):\n            return role",
+    "tests": ["tests/cloud/test_member_action_overrides.py"]
+  },
+  {
+    "label": "cache a failed read, pinning the member for the process lifetime",
+    "file": "ee/pocketpaw_ee/guards/deps.py",
+    "find": "            exc_info=True,\n        )\n        return False\n\n    _ACTION_OVERRIDE_CACHE[cache_key] = (now + _ACTION_OVERRIDE_TTL_SECONDS, overrides)",
+    "replace": "            exc_info=True,\n        )\n        _ACTION_OVERRIDE_CACHE[cache_key] = (now + _ACTION_OVERRIDE_TTL_SECONDS, [])\n        return False\n\n    _ACTION_OVERRIDE_CACHE[cache_key] = (now + _ACTION_OVERRIDE_TTL_SECONDS, overrides)",
+    "tests": ["tests/cloud/test_member_action_overrides.py"]
+  },
+  {
+    "label": "make invalidation a no-op so an admin grant waits out the TTL",
+    "file": "ee/pocketpaw_ee/guards/deps.py",
+    "find": "    if user_id is not None:\n        _ACTION_OVERRIDE_CACHE.pop((workspace_id, user_id), None)\n        return",
+    "replace": "    if user_id is not None:\n        return",
+    "tests": ["tests/cloud/test_member_action_overrides.py"]
+  },
+  {
+    "label": "drop the await at the require_action dependency call site",
+    "file": "ee/pocketpaw_ee/cloud/_core/deps.py",
+    "find": "            await check_workspace_action(user, workspace_id, action)",
+    "replace": "            check_workspace_action(user, workspace_id, action)",
+    "tests": ["tests/cloud/test_member_action_overrides.py::test_every_call_site_awaits_the_guard"]
+  },
+  {
+    "label": "drop the await in the fleet install guard",
+    "file": "ee/pocketpaw_ee/fleet/router.py",
+    "find": "        await check_workspace_action(user, workspace_id, \"fleet.install\")",
+    "replace": "        check_workspace_action(user, workspace_id, \"fleet.install\")",
+    "tests": ["tests/cloud/test_member_action_overrides.py::test_every_call_site_awaits_the_guard"]
+  }
+]

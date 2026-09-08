@@ -144,7 +144,7 @@ def _resolve_actor(spec: ActorSpec | None) -> Any | None:
     return Actor(kind=spec.kind, id=spec.id, scope_context=list(spec.scope_context))
 
 
-def _require_fleet_install(user: User, workspace_id: str) -> None:
+async def _require_fleet_install(user: User, workspace_id: str) -> None:
     """Raise ``HTTPException(403)`` unless ``user`` is allowed to run
     ``fleet.install`` in ``workspace_id``.
 
@@ -161,7 +161,7 @@ def _require_fleet_install(user: User, workspace_id: str) -> None:
     """
 
     try:
-        check_workspace_action(user, workspace_id, "fleet.install")
+        await check_workspace_action(user, workspace_id, "fleet.install")
     except GuardForbidden as exc:
         raise HTTPException(status_code=403, detail=exc.code) from exc
 
@@ -211,7 +211,7 @@ async def post_install(
     # Authz first — never touch the filesystem or the installer before
     # the caller has proven admin+ on the target workspace. A 403 from
     # here does not leak template-loading errors or soul-protocol state.
-    _require_fleet_install(user, req.workspace_id)
+    await _require_fleet_install(user, req.workspace_id)
 
     try:
         fleet = load_fleet(req.template_name)

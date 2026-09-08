@@ -146,7 +146,7 @@ async def _proposer_still_authorized(workspace_id: str, user_id: str) -> bool:
         if proposer is None:
             return False
         # Raises Forbidden when the CURRENT role is below the action minimum.
-        check_workspace_action(proposer, workspace_id, _GROWTH_RBAC_ACTION)
+        await check_workspace_action(proposer, workspace_id, _GROWTH_RBAC_ACTION)
         return True
     except Exception:  # noqa: BLE001 — denial OR unresolvable proposer fails closed
         logger.warning(

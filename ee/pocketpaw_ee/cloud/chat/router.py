@@ -118,7 +118,7 @@ async def create_group(
     # are available to any workspace member.
     action = "channel.create" if body.type in ("channel", "public") else "group.create"
     try:
-        check_workspace_action(user, workspace_id, action)
+        await check_workspace_action(user, workspace_id, action)
     except GuardForbidden as exc:
         raise CloudForbidden(exc.code, exc.detail or "Access denied") from exc
     return await group_service.create_group(workspace_id, str(user.id), body)

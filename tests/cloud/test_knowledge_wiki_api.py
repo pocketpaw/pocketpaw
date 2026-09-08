@@ -108,7 +108,7 @@ def client(monkeypatch) -> TestClient:
     # Stub RBAC (see test_knowledge_router.py for why this seam works here).
     from pocketpaw_ee.guards import deps as guards_deps
 
-    monkeypatch.setattr(guards_deps, "check_workspace_action", lambda *a, **k: None)
+    monkeypatch.setattr(guards_deps, "check_workspace_action", AsyncMock(return_value=None))
 
     fake_user = SimpleNamespace(
         id="user-1",

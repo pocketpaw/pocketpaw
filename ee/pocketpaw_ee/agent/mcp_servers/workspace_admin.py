@@ -379,7 +379,7 @@ async def _gate_read(tool: str, action: str, deny_message: str) -> tuple[str, st
         return _error_response("could not resolve the calling user for the RBAC check.")
 
     try:
-        check_workspace_action(user, workspace_id, action)
+        await check_workspace_action(user, workspace_id, action)
     except Forbidden as exc:
         logger.info(
             "%s denied: user=%s workspace=%s code=%s",
@@ -500,7 +500,7 @@ async def _members_list_handler(args: dict) -> dict:  # noqa: ARG001 — no args
     # as a structured deny envelope (never raised out of the tool). The gate
     # already audits the denial via guards/audit.log_denial.
     try:
-        check_workspace_action(user, workspace_id, _READ_ACTION)
+        await check_workspace_action(user, workspace_id, _READ_ACTION)
     except Forbidden as exc:
         logger.info(
             "members_list denied: user=%s workspace=%s code=%s",
@@ -584,7 +584,7 @@ async def _member_update_role_handler(args: dict) -> dict:
     # deny is enforced BEFORE any proposal/mutation path — a member never
     # reaches the write.
     try:
-        check_workspace_action(user, workspace_id, _ROLE_CHANGE_ACTION)
+        await check_workspace_action(user, workspace_id, _ROLE_CHANGE_ACTION)
     except Forbidden as exc:
         logger.info(
             "member_update_role denied: actor=%s workspace=%s target=%s code=%s",

@@ -294,7 +294,7 @@ router = APIRouter(
 )
 
 
-def _may_buy_site_plan(user: object, workspace_id: str) -> bool:
+async def _may_buy_site_plan(user: object, workspace_id: str) -> bool:
     """May this caller commit the workspace to a recurring site charge?
 
     Asked as a QUESTION rather than enforced as a dependency, because the answer
@@ -311,7 +311,7 @@ def _may_buy_site_plan(user: object, workspace_id: str) -> bool:
     from pocketpaw_ee.guards.deps import check_workspace_action
 
     try:
-        check_workspace_action(user, workspace_id, "sites.buy_plan")
+        await check_workspace_action(user, workspace_id, "sites.buy_plan")
     except CloudError:
         return False
     except Exception:  # noqa: BLE001 — a broken role read must not sell a plan
@@ -354,7 +354,7 @@ async def publish_site(
         user_id=ctx.user_id,
         pocket_id=body.pocket_id,
         site_plan_key=body.site_plan_key,
-        purchase_authorized=_may_buy_site_plan(user, ctx.workspace_id),
+        purchase_authorized=await _may_buy_site_plan(user, ctx.workspace_id),
         prewarm_origin=request.headers.get("origin") or None,
     )
     return sites_service._to_response(doc)

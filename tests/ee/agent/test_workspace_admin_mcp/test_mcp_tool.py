@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -200,7 +201,8 @@ def test_provider_exposes_server_and_tool_ids():
 async def test_members_list_member_allowed_returns_roster(monkeypatch, _patch_user):
     """A MEMBER may read the roster — gate passes, service returns members."""
     monkeypatch.setattr(
-        "pocketpaw_ee.guards.deps.check_workspace_action", lambda *a, **k: WorkspaceRole.MEMBER
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        AsyncMock(return_value=WorkspaceRole.MEMBER),
     )
 
     called = {}
@@ -275,7 +277,8 @@ async def test_member_update_role_admin_files_proposal_not_inline(monkeypatch, _
     envelope carrying the action id. The ``update_member_role`` service call is
     spied and asserted NOT called inline (an admin write is human-gated)."""
     monkeypatch.setattr(
-        "pocketpaw_ee.guards.deps.check_workspace_action", lambda *a, **k: WorkspaceRole.ADMIN
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        AsyncMock(return_value=WorkspaceRole.ADMIN),
     )
 
     # Spy the propose helper (the tool imports it function-locally).
@@ -355,7 +358,8 @@ async def test_member_update_role_member_denied_no_service_call(monkeypatch, _pa
 async def test_member_update_role_rejects_bad_role(monkeypatch, _patch_user):
     """An out-of-set role is refused before any gate/mutation."""
     monkeypatch.setattr(
-        "pocketpaw_ee.guards.deps.check_workspace_action", lambda *a, **k: WorkspaceRole.ADMIN
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        AsyncMock(return_value=WorkspaceRole.ADMIN),
     )
     with _identity(workspace="w1", user="admin1"):
         res = await wa_mcp._member_update_role_handler({"user_id": "u2", "role": "superuser"})
@@ -379,8 +383,13 @@ from types import SimpleNamespace  # noqa: E402
 
 
 def _allow(role=WorkspaceRole.MEMBER):
-    """Patch factory: check_workspace_action passes, returning ``role``."""
-    return lambda *a, **k: role
+    """Patch factory: check_workspace_action passes, returning ``role``.
+
+    Returns a COROUTINE function: check_workspace_action is async (it awaits
+    the per-member override read), so a sync stub makes the production
+    ``await`` raise "object NoneType can't be used in 'await' expression".
+    """
+    return AsyncMock(return_value=role)
 
 
 def _deny_forbidden(code="workspace.insufficient_role", detail="nope"):
@@ -714,7 +723,9 @@ async def test_billing_usage_read_gates_on_the_billing_action(monkeypatch, _patc
     """
     seen: dict = {}
 
-    def _record(user, workspace_id, action):  # noqa: ANN001
+    async def _record(user, workspace_id, action):  # noqa: ANN001
+        # async because check_workspace_action is: it awaits the per-member
+        # override read. A sync stub makes the production await raise.
         seen["action"] = action
         return WorkspaceRole.ADMIN
 
@@ -856,7 +867,8 @@ def _spy_propose(monkeypatch):
 def _admin(monkeypatch):
     """check_workspace_action passes as ADMIN."""
     monkeypatch.setattr(
-        "pocketpaw_ee.guards.deps.check_workspace_action", lambda *a, **k: WorkspaceRole.ADMIN
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        AsyncMock(return_value=WorkspaceRole.ADMIN),
     )
 
 
@@ -1177,7 +1189,8 @@ async def test_write_tools_outside_stream_error():
 def _owner(monkeypatch):
     """check_workspace_action passes as OWNER."""
     monkeypatch.setattr(
-        "pocketpaw_ee.guards.deps.check_workspace_action", lambda *a, **k: WorkspaceRole.OWNER
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        AsyncMock(return_value=WorkspaceRole.OWNER),
     )
 
 

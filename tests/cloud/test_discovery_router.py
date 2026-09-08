@@ -53,7 +53,7 @@ def _build_app(monkeypatch, *, allow: bool = True) -> FastAPI:
     from pocketpaw_ee.guards.rbac import Forbidden as GuardForbidden
 
     if allow:
-        monkeypatch.setattr(core_deps, "check_workspace_action", lambda *a, **k: None)
+        monkeypatch.setattr(core_deps, "check_workspace_action", AsyncMock(return_value=None))
     else:
 
         def _deny(*_a, **_k):
