@@ -74,6 +74,13 @@ def public_off(monkeypatch):
     monkeypatch.delenv("TERRARIUM_PUBLIC_ENABLED", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def batch_off(monkeypatch):
+    """Dormant batching is OFF unless a test turns it on — the same default the
+    server runs, so a developer with the flag in their shell gets this suite."""
+    monkeypatch.delenv("TERRARIUM_BATCH_DORMANT", raising=False)
+
+
 def make_client(monkeypatch, *, workspace_id: str = WS, user_id: str = USER, role: str = "admin"):
     """One app holding both terrarium routers with the real RBAC guard."""
     from unittest.mock import AsyncMock

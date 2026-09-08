@@ -19,12 +19,11 @@
 # memories). Both HTTP transports send them as two content blocks and mark the
 # prefix ``cache_control: ephemeral`` ONLY when it clears that model's minimum
 # cacheable length (``MIN_CACHEABLE_TOKENS``) — under it the marker is a silent
-# no-op that caches nothing and says nothing about it. Transports without
-# ``decide_parts`` (the CLI, the mock, test fakes) get the joined string.
+# no-op. Transports without ``decide_parts`` (CLI, mock, fakes) get it joined.
 #
-# EVERY decide is metered against ``PRICING`` — that is what makes running cost a
-# measurement rather than a guess. ``CostMeter`` prices a batched call at half,
-# and counts those calls so the saving is visible and not merely assumed.
+# EVERY decide is metered against ``PRICING``, which makes running cost a
+# measurement. ``CostMeter`` halves a batched call and counts those calls, so the
+# saving is visible rather than assumed.
 #
 # Nothing the model returns is trusted. ``world.apply_acts`` re-validates every
 # act against balance, allowed verbs and held tech before anything mutates.

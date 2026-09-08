@@ -15,8 +15,7 @@
 #
 # Invariants enforced at this seam:
 #   1. ``seq`` is monotonic per universe (assigned under a per-universe lock).
-#   2. ``cost: 0`` only for gate/weather/hibernate/arrive/moment/batch (asserted
-#      on write).
+#   2. ``cost: 0`` only for ``domain.ZERO_COST_KINDS`` (asserted on write).
 #   3. balance <= 0 at end of tick -> state ``hibernating``, soul file KEPT.
 #   4. viewer-origin text never becomes soul fact (the episodic summary is
 #      built from citizen-origin events only — see world.episodic_summary).
@@ -26,11 +25,8 @@
 #      Viewer lines are checked BEFORE the write and rejected with a 422.
 #   7. ``paused`` never ticks and is a flat 404 in public; anonymous readers
 #      trail the edge by ``TERRARIUM_PUBLIC_DELAY_EVENTS`` (default 20) rows.
-#   8. a DORMANT world may think in a half-price Message Batch when
-#      ``TERRARIUM_BATCH_DORMANT`` is on (DEFAULT OFF) — submitted on one sweep,
-#      applied on a later one, down the same landing path a watched tick uses.
-#      A watched world always thinks synchronously; a paused one's open batch is
-#      left alone. See ``dormant_batch_step``.
+#   8. a DORMANT world thinks in a half-price Message Batch when
+#      ``TERRARIUM_BATCH_DORMANT`` is on (DEFAULT OFF) — ``dormant_batch_step``.
 
 """Terrarium service — persistence, souls, the gate and the bus."""
 

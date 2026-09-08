@@ -277,5 +277,41 @@
     "tests": [
       "tests/ee/terrarium/test_prompt_cache.py"
     ]
+  },
+  {
+    "label": "the batch's results are applied by position instead of by custom_id",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    ordered = [landed.get(str(doc.id)) for doc, _snap in pairs]",
+    "replace": "    ordered = list(landed.values())",
+    "tests": [
+      "tests/ee/terrarium/test_dormant_batch.py"
+    ]
+  },
+  {
+    "label": "the half-price discount is applied to the watched path as well",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "        return (live + batched * _BATCH_RATE) / 1_000_000",
+    "replace": "        return (live + batched) * _BATCH_RATE / 1_000_000",
+    "tests": [
+      "tests/ee/terrarium/test_dormant_batch.py"
+    ]
+  },
+  {
+    "label": "TERRARIUM_BATCH_DORMANT is ignored, so every dormant world batches",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    return (os.environ.get(\"TERRARIUM_BATCH_DORMANT\") or \"\").strip().lower() in {",
+    "replace": "    return (os.environ.get(\"TERRARIUM_BATCH_DORMANT\") or \"on\").strip().lower() in {",
+    "tests": [
+      "tests/ee/terrarium/test_dormant_batch.py"
+    ]
+  },
+  {
+    "label": "an expired entry is treated as a success and its text is acted on",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    if res is None or res.status != \"succeeded\":",
+    "replace": "    if res is None or res.status in (\"errored\", \"canceled\"):",
+    "tests": [
+      "tests/ee/terrarium/test_dormant_batch.py"
+    ]
   }
 ]
