@@ -1,6 +1,16 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-09-08 (fix/attachment-only-turns) — ``_drive_agent_loop`` now runs its
+  ``user_content`` through ``agent_service.resolve_user_content`` before
+  anything reads it. A send with attachments and no typed text arrives as the
+  composer's invisible sentinel, which the model reads as an empty turn while
+  the attachment's text sits in the knowledge channel looking like reference
+  material; the resolver replaces that one case with a message saying the
+  files ARE the request. Placed at the top of the loop because three things
+  downstream consume the string — the KB query, the session titler, and the
+  prompt handed to ``pool.run``. A turn with real text is untouched.
+
 - 2026-09-01 (feat/byok-guest-backend) — the turn path finally CALLS
   ``byok.service.resolve_turn_credentials`` (the seam its own header always
   promised): ``_iter_agent_events`` resolves the workspace's stored key per
@@ -365,6 +375,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     mark_cloud_chat_run,
     push_sse_event,
     register_stream_sink,
+    resolve_user_content,
     session_key_for,
     unbind_pawbar_run,
     unregister_stream_sink,
@@ -1305,6 +1316,14 @@ async def _drive_agent_loop(
     surface: str | None = None,
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     """Drive ``AgentPool.run`` and yield ``(event_name, event_data)`` tuples."""
+    # A files-only send arrives as the composer's invisible sentinel — a turn
+    # that persists and renders correctly but says nothing to the model, while
+    # the attachment's text sits in the knowledge channel looking like
+    # reference material. Resolve it HERE, before anything downstream reads it:
+    # the knowledge context uses this string as its KB query, the session
+    # titler names the thread from it, and the pool hands it to the model as
+    # the user's turn. A turn with real text passes through untouched.
+    user_content = resolve_user_content(user_content, attachments_in)
     pool = get_agent_pool()
     try:
         instance = await pool.get(ctx.target_agent_id)
