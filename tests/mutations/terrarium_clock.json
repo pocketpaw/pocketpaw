@@ -313,5 +313,32 @@
     "tests": [
       "tests/ee/terrarium/test_dormant_batch.py"
     ]
+  },
+  {
+    "label": "the founder card is ignored, so a named founder is seeded generically anyway",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        card = cards[i] if cards else None",
+    "replace": "        card = None",
+    "tests": [
+      "tests/ee/terrarium/test_founder_cards.py"
+    ]
+  },
+  {
+    "label": "the founders-equals-cards count check is dropped",
+    "file": "ee/pocketpaw_ee/terrarium/physics.py",
+    "find": "    if len(cards) != physics.founders:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/terrarium/test_founder_cards.py"
+    ]
+  },
+  {
+    "label": "a founder card's text skips moderation, so a slur founds a world",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "            if not moderation.allowed(text):",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/terrarium/test_founder_cards.py"
+    ]
   }
 ]
