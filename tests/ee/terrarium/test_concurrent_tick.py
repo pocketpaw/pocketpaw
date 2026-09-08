@@ -66,9 +66,8 @@ async def test_one_broken_citizen_still_pays_and_leaves_the_others_alone(client,
 
 # The Journal the SERIAL ``for doc in citizens`` loop wrote for this seed,
 # captured by running this same case against service.py at 36d93edbc (the commit
-# before the fan-out landed). If a rewiring ever misaligns the zip between
-# ``rows`` and ``last_tick_actions``, an act lands on the wrong citizen and this
-# list is what notices.
+# before the fan-out landed). Kinds, costs, count and order, which is everything
+# a viewer pages through.
 _SERIAL_JOURNAL = [
     ("think", "Vela", -2),
     ("write", "Vela", -4),
@@ -91,8 +90,15 @@ _SERIAL_JOURNAL = [
 async def test_a_concurrent_tick_writes_the_journal_the_serial_loop_wrote(client):
     uni = create_universe(client, founders=3)
     res = client.post(f"/terrarium/universes/{uni['id']}/tick?n=2")
-    rows = [(e["kind"], e["actor"], e["cost"]) for e in res.json()["events"]]
+    events = res.json()["events"]
+    rows = [(e["kind"], e["actor"], e["cost"]) for e in events]
     assert rows == _SERIAL_JOURNAL
+
+    # The actor comes off the doc and the body off the decision, so this is the
+    # one row where a misaligned zip between ``rows`` and ``last_tick_actions``
+    # shows: a charter reading "I am Sabe" filed under Vela.
+    charters = [e for e in events if e["kind"] == "write"]
+    assert charters and all(e["actor"] in e["body"] for e in charters)
 
 
 async def test_a_descendants_prompt_says_how_it_differs_from_its_parent():

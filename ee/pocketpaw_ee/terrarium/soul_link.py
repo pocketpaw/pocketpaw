@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,7 @@ OCEAN_FIELDS = {
 }
 
 
-async def awaken(path: Path) -> object:
+async def awaken(path: Path) -> Any:
     """Open a citizen soul with its personality unfrozen.
 
     EVERY path that opens a citizen soul goes through here, not through
