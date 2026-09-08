@@ -1,6 +1,8 @@
 # tests/ee/terrarium/test_prompt_cache.py — the citizen prompt splits into a
-# stable prefix (cacheable at the provider) and a volatile suffix, HttpLlm marks
-# the prefix on Claude models only, and cache reads reach the cost meter.
+# stable prefix (cacheable at the provider) and a volatile suffix; HttpLlm marks
+# that prefix ONLY on a Claude model whose minimum cacheable length it clears,
+# the meter records whether it was marked, and cache reads reach the cost meter.
+# The last test measures the shipped Dust seed against those minimums.
 
 from __future__ import annotations
 
@@ -119,3 +121,97 @@ async def test_cache_reads_reach_the_meter_at_the_cached_rate():
     uncached = citizen_llm.CostMeter("claude-sonnet-4-6")
     uncached.record("", "", {"input_tokens": 1000, "output_tokens": 10})
     assert uncached.cost_usd > meter["cost_usd"]
+
+
+# --------------------------------------------------------------------------
+# The length gate. A marker on a prefix under the model's minimum is not an
+# error and not a saving — it is a no-op the provider never mentions.
+# --------------------------------------------------------------------------
+
+
+def test_the_minimums_are_the_published_ones_and_are_not_monotonic():
+    assert citizen_llm.MIN_CACHEABLE_TOKENS == {
+        "claude-opus-5": 512,
+        "claude-sonnet-5": 1024,
+        "claude-sonnet-4-6": 1024,
+        "claude-haiku-4-5": 4096,
+    }
+    # The cheap model has the LONGEST minimum. Anything that assumes cheaper
+    # means laxer gets this backwards.
+    mins = citizen_llm.MIN_CACHEABLE_TOKENS
+    assert mins["claude-haiku-4-5"] > mins["claude-sonnet-5"] > mins["claude-opus-5"]
+
+
+def test_a_prefix_under_the_minimum_is_not_marked_and_one_over_it_is():
+    # ~1200 approximate tokens: over opus and the sonnets, well under haiku.
+    prefix = "x" * (1200 * 4)
+    assert citizen_llm.cache_marker_fits("claude-opus-5", prefix)
+    assert citizen_llm.cache_marker_fits("claude-sonnet-5", prefix)
+    assert not citizen_llm.cache_marker_fits("claude-haiku-4-5", prefix)
+    # Right at the boundary, and one token under it.
+    assert citizen_llm.cache_marker_fits("claude-opus-5", "x" * (512 * 4))
+    assert not citizen_llm.cache_marker_fits("claude-opus-5", "x" * (511 * 4))
+
+
+async def test_the_cheap_tier_sends_the_same_two_blocks_without_the_marker():
+    """Behaviour under the minimum is identical minus a marker that buys
+    nothing — not a dropped block, not a joined prompt."""
+    short = "x" * (1200 * 4)
+    seen = await _capture("claude-haiku-4-5", short)
+    blocks = seen["body"]["messages"][0]["content"]
+    assert [b["text"] for b in blocks] == [short, "VOLATILE"]
+    assert not any("cache_control" in b for b in blocks)
+    assert seen["meter"]["cache_marked_calls"] == 0
+
+    marked = await _capture("claude-opus-5", short)
+    assert marked["body"]["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert marked["meter"]["cache_marked_calls"] == 1
+
+
+def test_the_tiers_run_on_the_current_generation():
+    assert citizen_llm.model_for_tier("premium") == "claude-opus-5"
+    assert citizen_llm.model_for_tier("mid") == "claude-sonnet-5"
+    assert citizen_llm.model_for_tier("tail") == "claude-haiku-4-5"
+    assert citizen_llm.model_for_tier("nonsense") == citizen_llm.model_for_tier(None)
+
+
+def test_sonnet_5_is_cheaper_than_the_model_it_replaces():
+    assert citizen_llm.PRICING["claude-sonnet-5"] == (2.00, 10.00)
+    assert citizen_llm.PRICING["claude-opus-5"] == (5.00, 25.00)
+    # The previous generation stays priced so an older universe still costs out.
+    assert citizen_llm.PRICING["claude-sonnet-4-6"] == (3.00, 15.00)
+    assert citizen_llm.PRICING["claude-haiku-4-5"] == (1.00, 5.00)
+    assert citizen_llm.PRICING["claude-sonnet-5"] < citizen_llm.PRICING["claude-sonnet-4-6"]
+    # An unpriced model still prices instead of raising (see test_cost.py).
+    assert citizen_llm.CostMeter("no-such-model").model in citizen_llm.PRICING
+
+
+def test_the_dust_prefix_is_too_short_to_cache_on_any_tier():
+    """THE NUMBER. This citizen's stable prefix measures 1822 chars = 455
+    approximate tokens — under opus-5's 512, under half the sonnets' 1024, an
+    ninth of haiku-4-5's 4096. Caching engages on NOTHING at Dust size, which is
+    why the marker is gated rather than trusted. The charter is the growable
+    part: it is one sentence here, and ~230 more chars would clear opus-5."""
+    physics = load_physics(seed_physics_path("dust"))
+    nim = world.CitizenSnapshot(
+        id="c1",
+        name="Nim",
+        role="wellkeeper",
+        balance=100,
+        charter="I am Nim, wellkeeper. I will keep what I say and pay what I owe.",
+        ocean={
+            "openness": 0.62,
+            "conscientiousness": 0.51,
+            "extraversion": 0.44,
+            "agreeableness": 0.58,
+            "neuroticism": 0.37,
+        },
+        values=("care", "fairness", "curiosity"),
+    )
+    prefix, _ = citizen_llm.build_prompt_parts(
+        physics, nim, _digest(nim, day=3, speech=[]), drift_line="slightly more open"
+    )
+    approx_tokens = len(prefix) // 4
+    assert 400 < approx_tokens < 512, approx_tokens
+    for model in citizen_llm.MIN_CACHEABLE_TOKENS:
+        assert not citizen_llm.cache_marker_fits(model, prefix), model

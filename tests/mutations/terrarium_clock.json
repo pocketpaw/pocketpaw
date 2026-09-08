@@ -200,7 +200,7 @@
   {
     "label": "the cache marker is put on every model, not just Claude",
     "file": "ee/pocketpaw_ee/terrarium/llm.py",
-    "find": "            if self.model.startswith(\"claude\"):",
+    "find": "            if cache_marker_fits(self.model, prefix):",
     "replace": "            if True:",
     "tests": [
       "tests/ee/terrarium/test_prompt_cache.py"
@@ -240,6 +240,42 @@
     "replace": "        if False:",
     "tests": [
       "tests/ee/terrarium/test_moderation.py"
+    ]
+  },
+  {
+    "label": "the minimum cacheable prefix is halved for every model",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "MIN_CACHEABLE_TOKENS: dict[str, int] = {\n    \"claude-opus-5\": 512,\n    \"claude-sonnet-5\": 1024,\n    \"claude-sonnet-4-6\": 1024,\n    \"claude-haiku-4-5\": 4096,\n}",
+    "replace": "MIN_CACHEABLE_TOKENS: dict[str, int] = {\n    \"claude-opus-5\": 256,\n    \"claude-sonnet-5\": 512,\n    \"claude-sonnet-4-6\": 512,\n    \"claude-haiku-4-5\": 2048,\n}",
+    "tests": [
+      "tests/ee/terrarium/test_prompt_cache.py"
+    ]
+  },
+  {
+    "label": "the cache marker goes out on every Claude model regardless of length",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "            if cache_marker_fits(self.model, prefix):",
+    "replace": "            if self.model.startswith(\"claude\"):",
+    "tests": [
+      "tests/ee/terrarium/test_prompt_cache.py"
+    ]
+  },
+  {
+    "label": "the meter never records that a prefix was marked",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "            self.meter.record(prefix + suffix, out, usage, cache_marked=marked)",
+    "replace": "            self.meter.record(prefix + suffix, out, usage, cache_marked=False)",
+    "tests": [
+      "tests/ee/terrarium/test_prompt_cache.py"
+    ]
+  },
+  {
+    "label": "sonnet-5 is priced as the dearer model it replaced",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "    \"claude-sonnet-5\": (2.00, 10.00),",
+    "replace": "    \"claude-sonnet-5\": (3.00, 15.00),",
+    "tests": [
+      "tests/ee/terrarium/test_prompt_cache.py"
     ]
   }
 ]

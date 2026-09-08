@@ -1,10 +1,11 @@
 # tests/ee/terrarium/test_cost.py — what an hour of watching costs.
 #
-# Three things have to hold for that number to mean anything: every citizen's
+# Four things have to hold for that number to mean anything: every citizen's
 # decide is actually measured (one call per living citizen per tick), an
-# unknown model name degrades to a price instead of killing the tick, and the
+# unknown model name degrades to a price instead of killing the tick, the
 # derived figure reaches BOTH wires while the raw meter summary — which names
-# the model tier — reaches neither.
+# the model tier — reaches neither, and the wire says whether prompt caching is
+# actually engaging rather than letting a dead marker bill at full rate.
 
 from __future__ import annotations
 
@@ -107,3 +108,27 @@ async def test_the_watched_hour_scales_with_the_worlds_own_clock():
     doc.physics = {"time": {"ticks_per_day": 12, "world_day_seconds": 1800}}
     assert svc.cost_per_watched_hour(doc, 5) == 1.20
     assert svc.cost_per_watched_hour(doc, 0) == 0.0
+
+
+async def test_the_wire_says_whether_caching_actually_engaged(client):
+    """Marked prefixes with no cache reads is the silent failure: full input
+    rate, every tick, and nothing in the bill says why."""
+
+    class _Doc:
+        cost: dict = {}
+
+    doc = _Doc()
+    assert svc.caching_engaged(doc) is False  # type: ignore[arg-type]
+    doc.cost = {"cache_marked_calls": 12, "cache_read_tokens": 0}
+    assert svc.caching_engaged(doc) is False  # type: ignore[arg-type]
+    doc.cost = {"cache_marked_calls": 0, "cache_read_tokens": 900}
+    assert svc.caching_engaged(doc) is False  # type: ignore[arg-type]
+    doc.cost = {"cache_marked_calls": 12, "cache_read_tokens": 900}
+    assert svc.caching_engaged(doc) is True  # type: ignore[arg-type]
+
+    # And it reaches the wire, next to the cost figure it explains.
+    uni = create_universe(client, founders=1)
+    client.post(f"/terrarium/universes/{uni['id']}/tick?n=1")
+    wire = client.get(f"/terrarium/universes/{uni['id']}").json()["universe"]
+    assert wire["caching_engaged"] is False  # the mock transport caches nothing
+    assert wire["cost_per_watched_hour"] > 0
