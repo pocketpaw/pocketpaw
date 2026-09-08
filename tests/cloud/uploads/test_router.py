@@ -38,6 +38,9 @@ def ee_client(tmp_path: Path, beanie_upload_db, monkeypatch):
 
     app = FastAPI()
     # Override the license + identity dependencies so tests don't need auth plumbing.
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.auth import current_active_user
     from pocketpaw_ee.cloud.license import require_license
     from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 
@@ -52,8 +55,25 @@ def ee_client(tmp_path: Path, beanie_upload_db, monkeypatch):
     async def _workspace_dep(x_workspace: str = Header(default="w1")) -> str:
         return x_workspace
 
+    # The POST routes gate on require_action_any_workspace("uploads.write"),
+    # which resolves the caller via current_active_user and checks their role
+    # in the active workspace. Override it with a duck-typed user that owns the
+    # header-named workspace so the RBAC gate passes without real JWT/User
+    # plumbing — the role resolver only reads .id / .active_workspace /
+    # .workspaces[].{workspace,role} (see guards/deps.resolve_workspace_role).
+    async def _active_user_dep(
+        x_user: str = Header(default="u1"),
+        x_workspace: str = Header(default="w1"),
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=x_user,
+            active_workspace=x_workspace,
+            workspaces=[SimpleNamespace(workspace=x_workspace, role="owner")],
+        )
+
     app.dependency_overrides[current_user_id] = _user_dep
     app.dependency_overrides[current_workspace_id] = _workspace_dep
+    app.dependency_overrides[current_active_user] = _active_user_dep
 
     app.include_router(uploads_module.router, prefix="/api/v1")
     return TestClient(app)
@@ -240,11 +260,12 @@ async def test_patch_rejects_bad_hide_type(ee_client: TestClient):
 
 
 def test_bulk_partial_success(ee_client: TestClient):
+    # image/tiff is a real image type that is NOT on the allow-list.
     r = ee_client.post(
         "/api/v1/uploads",
         files=[
             ("files", ("good.png", PNG, "image/png")),
-            ("files", ("bad.svg", b"<svg/>", "image/svg+xml")),
+            ("files", ("bad.tiff", b"II*\x00rest", "image/tiff")),
         ],
         headers={"x-user": "u1", "x-workspace": "w1"},
     )
@@ -253,3 +274,54 @@ def test_bulk_partial_success(ee_client: TestClient):
     assert len(data["uploaded"]) == 1
     assert len(data["failed"]) == 1
     assert data["failed"][0]["code"] == "unsupported_mime"
+
+
+SVG = b'<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>'
+
+
+def test_svg_logo_roundtrip_served_safely(ee_client: TestClient):
+    # The white-label Branding logo upload path: an SVG is accepted, and the
+    # workspace download endpoint serves it with the XSS-safe headers
+    # (attachment + nosniff + script-blocking CSP), never inline.
+    r = ee_client.post(
+        "/api/v1/uploads",
+        files=[("files", ("logo.svg", SVG, "image/svg+xml"))],
+        headers={"x-user": "u1", "x-workspace": "w1"},
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert len(data["uploaded"]) == 1
+    assert data["uploaded"][0]["mime"] == "image/svg+xml"
+    fid = data["uploaded"][0]["id"]
+
+    r2 = ee_client.get(
+        f"/api/v1/uploads/{fid}",
+        headers={"x-user": "u1", "x-workspace": "w1"},
+    )
+    assert r2.status_code == 200
+    assert "attachment" in r2.headers["content-disposition"]
+    assert "inline" not in r2.headers["content-disposition"]
+    assert r2.headers["x-content-type-options"] == "nosniff"
+    csp = r2.headers["content-security-policy"]
+    assert "default-src 'none'" in csp
+    assert "sandbox" in csp
+
+
+def test_svg_with_script_sanitized_on_serve(ee_client: TestClient):
+    dirty = (
+        b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)">'
+        b"<script>alert(document.cookie)</script><rect/></svg>"
+    )
+    r = ee_client.post(
+        "/api/v1/uploads",
+        files=[("files", ("evil.svg", dirty, "image/svg+xml"))],
+        headers={"x-user": "u1", "x-workspace": "w1"},
+    )
+    fid = r.json()["uploaded"][0]["id"]
+    r2 = ee_client.get(
+        f"/api/v1/uploads/{fid}",
+        headers={"x-user": "u1", "x-workspace": "w1"},
+    )
+    body = r2.content.lower()
+    assert b"<script" not in body
+    assert b"onload" not in body
