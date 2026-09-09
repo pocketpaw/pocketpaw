@@ -50,7 +50,17 @@
     "find": "        return \"images\" in inspect.signature(func).parameters",
     "replace": "        return True",
     "tests": [
-      "tests/test_pydantic_ai_backend.py::test_the_seven_backends_that_cannot_take_images_are_never_handed_one"
+      "tests/test_pydantic_ai_backend.py::test_the_seven_backends_that_cannot_take_images_are_never_handed_one",
+      "tests/test_agent_pool_turn_images.py::test_a_blind_backend_is_never_handed_one"
+    ]
+  },
+  {
+    "label": "the pool never forwards the pictures \u2014 the backend can see and is handed nothing",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            if images and _accepts_images_kwarg(run_backend.run):",
+    "replace": "            if False:",
+    "tests": [
+      "tests/test_agent_pool_turn_images.py::test_a_seeing_backend_gets_the_pictures"
     ]
   }
 ]
