@@ -1,0 +1,83 @@
+[
+  {
+    "label": "the cascade stops skipping steps the ledger already records, so a resumed delete re-cancels a subscription and re-runs purges that already ran",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "        if step in ledger:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_delete_cascade.py"
+    ]
+  },
+  {
+    "label": "the ledger is only persisted once the whole cascade finishes, so a crash records nothing about the steps it already ran and the resume repeats every destructive one",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "        ledger[step] = outcome\n        site.delete_ledger = dict(ledger)\n        await save(site)",
+    "replace": "        ledger[step] = outcome\n        site.delete_ledger = dict(ledger)",
+    "tests": [
+      "tests/ee/sites/test_delete_cascade.py"
+    ]
+  },
+  {
+    "label": "billing is cancelled last instead of first, so every teardown that fails partway keeps charging the customer for a site that no longer serves",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "CASCADE_STEPS: tuple[str, ...] = (\n    STEP_SUBSCRIPTION,\n    STEP_REVOKE,",
+    "replace": "CASCADE_STEPS: tuple[str, ...] = (\n    STEP_REVOKE,",
+    "tests": [
+      "tests/ee/sites/test_delete_cascade.py"
+    ]
+  },
+  {
+    "label": "the D1 is destroyed before the site stops serving, so a failure leaves a live page reading a database that no longer exists",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "    STEP_SCRIPT,\n    STEP_D1,",
+    "replace": "    STEP_D1,\n    STEP_SCRIPT,",
+    "tests": [
+      "tests/ee/sites/test_delete_cascade.py"
+    ]
+  },
+  {
+    "label": "the signed key is revoked last, so a cascade that fails early leaves a public lead-ingest surface open on a site being torn down",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "    STEP_SUBSCRIPTION,\n    STEP_REVOKE,\n    STEP_ROUTES,",
+    "replace": "    STEP_SUBSCRIPTION,\n    STEP_ROUTES,",
+    "tests": [
+      "tests/ee/sites/test_delete_cascade.py"
+    ]
+  },
+  {
+    "label": "the worker delete ignores deploy_target and always uses the dispatch path, so a workers-mode site 404s (which is success here) and the cascade records a completed teardown over a Worker still serving",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "    if target == \"wfp\":\n        await deps.cloudflare.delete_worker(script)\n    else:\n        await deps.cloudflare.delete_account_script(script)",
+    "replace": "    await deps.cloudflare.delete_worker(script)",
+    "tests": [
+      "tests/ee/sites/test_delete_cascade.py"
+    ]
+  },
+  {
+    "label": "an uncancellable checkout-session subscription raises instead of being recorded, trapping the customer's site permanently over a subscription nothing can cancel",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "        return OUTCOME_UNCANCELLABLE",
+    "replace": "        raise CascadeStepFailed(STEP_SUBSCRIPTION, \"uncancellable\")",
+    "tests": [
+      "tests/ee/sites/test_delete_cascade.py"
+    ]
+  },
+  {
+    "label": "a step that had nothing to do is recorded as done, so an operator reading a stalled cascade cannot tell an absent D1 from one we claim to have deleted",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "OUTCOME_SKIPPED = \"nothing-to-do\"",
+    "replace": "OUTCOME_SKIPPED = \"done\"",
+    "tests": [
+      "tests/ee/sites/test_delete_cascade.py"
+    ]
+  },
+  {
+    "label": "the failure reason carries the provider's own exception text, putting a raw Cloudflare or driver sentence into a field that is surfaced to the customer",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "    name = type(exc).__name__\n    return \"\".join(c.lower() if c.isalnum() else \"_\" for c in name).strip(\"_\") or \"error\"",
+    "replace": "    return str(exc)",
+    "tests": [
+      "tests/ee/sites/test_delete_cascade.py"
+    ]
+  }
+]
