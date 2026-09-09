@@ -208,6 +208,45 @@ class TestMintGuest:
             await guest_service.mint_guest(_KEY, provider="openai")
         assert exc.value.code == "byok.provider_unsupported"
 
+    async def test_a_gateway_mint_hands_validation_the_address_and_the_model(
+        self, mongo_db, monkeypatch
+    ):
+        # Drop the kwargs from mint_guest's validate_key call and validation
+        # silently runs as anthropic: an xpl_ key 401s at api.anthropic.com and
+        # the user is told "Anthropic rejected that key" about a key that never
+        # belonged to Anthropic. Nothing else in this file would notice.
+        seen: dict = {}
+
+        async def _capture(api_key, **kw):
+            seen["api_key"] = api_key
+            seen.update(kw)
+            # Stop here: what is under test is the call, not the mint that
+            # follows it, and the mint needs a provisioned realtime bus.
+            raise ValidationError("byok.key_rejected", "stop after capture")
+
+        monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.validate_key", _capture)
+        with pytest.raises(ValidationError):
+            await guest_service.mint_guest(
+                "xpl_" + "a" * 40,
+                provider="openai_compatible",
+                base_url="https://api.experientiallabs.ai/v1",
+                model="claude-opus-5",
+            )
+        assert seen["provider"] == "openai_compatible"
+        assert seen["base_url"] == "https://api.experientiallabs.ai/v1"
+        assert seen["model"] == "claude-opus-5"
+
+    async def test_a_gateway_mint_without_an_address_never_reaches_the_provider(
+        self, mongo_db, monkeypatch
+    ):
+        async def _must_not_run(api_key, **_kw):
+            raise AssertionError("validate_key must not run without a gateway address")
+
+        monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.validate_key", _must_not_run)
+        with pytest.raises(ValidationError) as exc:
+            await guest_service.mint_guest("xpl_" + "a" * 40, provider="openai_compatible")
+        assert exc.value.code == "byok.base_url_required"
+
     async def test_a_dead_key_mints_NOTHING(self, mongo_db, monkeypatch):
         async def _dead(api_key, **_kw):
             raise ValidationError("byok.key_rejected", "Anthropic rejected that key.")

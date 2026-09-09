@@ -52,5 +52,14 @@
     "tests": [
       "tests/cloud/byok/test_byok_service.py::TestGatewayRequestValidation"
     ]
+  },
+  {
+    "label": "mint drops the gateway kwargs \u2014 an xpl_ key is validated against Anthropic and reads as a bad key",
+    "file": "ee/pocketpaw_ee/cloud/auth/guest.py",
+    "find": "    await byok_service.validate_key(api_key, provider=provider, base_url=base_url, model=model)",
+    "replace": "    await byok_service.validate_key(api_key)",
+    "tests": [
+      "tests/cloud/auth/test_guest.py::TestMintGuest"
+    ]
   }
 ]
