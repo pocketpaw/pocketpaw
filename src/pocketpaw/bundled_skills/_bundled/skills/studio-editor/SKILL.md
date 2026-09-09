@@ -79,6 +79,60 @@ tracks and different jobs.
 **Trims are absolute source points.** `trim_clip` takes `inMs`/`outMs`
 within the source, not a delta, so asking twice is safe.
 
+## Styling titles and captions
+
+The Inspector's panel is fully reachable: the nine looks, size, colour,
+alignment, motion in and out, and the transform.
+
+**Restyle what exists, don't re-add it.** "Make that title bigger" is
+`style_text` on the clip already there. `add_text` would leave the original
+in place and stack a second one on top of it.
+
+**A preset sets the whole look; fields passed with it win.** So "Neon but
+90px" is one op, not two:
+
+```json
+{"op":"style_text","clipId":"…a1","presetId":"neon","fontSize":90}
+```
+
+The looks are `clean`, `pop`, `boxed`, `subtitle`, `neon`, `typewriter`,
+`impact`, `sticker`, `editorial`. Each carries its own colour, weight,
+tracking, case and motion — reach for the one that matches the intent
+("make it pop", "broadcast subtitles", "big opening card") rather than
+hand-assembling a look out of fields.
+
+**Two style vocabularies, and `boxed` is in both.** The nine above are
+TITLES. Captions take `plain`, `boxed` or `outlined`, and are styled as a
+SET through `style_captions` — never one cue at a time, because that is how
+captions are edited everywhere else in the editor.
+
+**Motion is in / out / one duration.** `animIn` and `animOut` take `none`,
+`fade`, `pop`, `slide`, `typewriter` or `bounce`. `animDurationMs` covers
+both ends and is capped at half the clip, so the text is always seen at
+rest. Passing only `animOut` keeps whatever entrance the preset gave it.
+
+## Position and animation
+
+`set_transform` moves any clip, not just text: `x` and `y` are pixel offsets
+from the frame **centre** (negative is left and up), `scale` 1 is original
+size, `opacity` runs 0 to 1.
+
+**To animate, pin two values.** A keyframe is a value at a moment; the
+property moves between them.
+
+```json
+[{"op":"add_keyframe","clipId":"…a1","prop":"scale","atMs":0,"value":1},
+ {"op":"add_keyframe","clipId":"…a1","prop":"scale","atMs":3000,"value":1.3,"ease":"easeOut"}]
+```
+
+`atMs` is timeline time and must fall **inside** the clip — a time outside it
+is refused rather than snapped to an edge, because a keyframe pinned
+somewhere nobody asked for is worse than none.
+
+Animatable: `x`, `y`, `scale`, `rotation`, `opacity`, `volume`. Font size,
+colour and the preset are not — say so rather than reaching for a keyframe
+that would silently do nothing.
+
 ## When the timeline is empty
 
 Say so plainly and ask what they want to build from. Do not place anything

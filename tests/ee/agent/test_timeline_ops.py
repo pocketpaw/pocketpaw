@@ -118,6 +118,11 @@ def test_every_contract_op_is_reachable(summary: TimelineSummary) -> None:
         "place_audio": {"assetId": "asset_music"},
         "set_volume": {"target": "master", "volume": 1},
         "set_project": {"aspectRatio": "9:16"},
+        "style_text": {"clipId": "clip_aaa", "presetId": "neon", "fontSize": 90},
+        "style_captions": {"style": "boxed", "fontSize": 54},
+        "set_transform": {"clipId": "clip_aaa", "x": 384, "y": 389, "scale": 1.2},
+        "add_keyframe": {"clipId": "clip_aaa", "prop": "opacity", "atMs": 500, "value": 0.5},
+        "clear_keyframes": {"clipId": "clip_aaa", "prop": "opacity"},
     }
     assert set(minimal) == set(OP_KINDS), "a verb was added without a case here"
     for kind, args in minimal.items():
@@ -315,6 +320,102 @@ def test_split_without_a_cut_point_is_rejected(summary: TimelineSummary) -> None
 def test_negative_time_is_rejected(summary: TimelineSummary) -> None:
     _, error = validate_ops([{"op": "move_clip", "clipId": "clip_aaa", "atMs": -500}], summary)
     assert error is not None
+
+
+# ── 5b. The styling surface ────────────────────────────────────────────────
+
+
+def test_unknown_text_preset_is_rejected(summary: TimelineSummary) -> None:
+    """applyTextPreset returns the style UNCHANGED for an unknown id, so a typo
+    would report a restyle that never happened — the silent no-op again.
+
+    Mutation: drop the _TEXT_PRESETS membership check."""
+    _, error = validate_ops(
+        [{"op": "style_text", "clipId": "clip_aaa", "presetId": "neons"}], summary
+    )
+    assert error is not None
+    assert "Did you mean 'neon'?" in error
+
+
+def test_caption_style_and_text_preset_are_different_axes(summary: TimelineSummary) -> None:
+    """'boxed' is BOTH a caption box model and a title look. The two sets must
+    not be interchangeable: a title look on a caption set silently does nothing.
+
+    Mutation: validate style_captions.style against _TEXT_PRESETS."""
+    ok_op, error = validate_ops([{"op": "style_captions", "style": "boxed"}], summary)
+    assert error is None and ok_op is not None
+    _, error = validate_ops([{"op": "style_captions", "style": "neon"}], summary)
+    assert error is not None
+    assert "not a caption style" in error
+
+
+def test_unknown_motion_is_rejected(summary: TimelineSummary) -> None:
+    _, error = validate_ops(
+        [{"op": "style_text", "clipId": "clip_aaa", "animIn": "typewrite"}], summary
+    )
+    assert error is not None
+    assert "Did you mean 'typewriter'?" in error
+
+
+def test_unanimatable_property_is_rejected(summary: TimelineSummary) -> None:
+    """Only Transform's fields and volume can carry keyframes. fontSize cannot,
+    and asking for it would otherwise write a track the sampler never reads."""
+    _, error = validate_ops(
+        [{"op": "add_keyframe", "clipId": "clip_aaa", "prop": "fontSize", "atMs": 0}], summary
+    )
+    assert error is not None
+    assert "cannot be animated" in error
+
+
+def test_unknown_easing_is_rejected(summary: TimelineSummary) -> None:
+    _, error = validate_ops(
+        [
+            {
+                "op": "add_keyframe",
+                "clipId": "clip_aaa",
+                "prop": "opacity",
+                "atMs": 0,
+                "ease": "easeout",
+            }
+        ],
+        summary,
+    )
+    assert error is not None
+    assert "Did you mean 'easeOut'?" in error
+
+
+def test_transform_opacity_and_scale_are_range_checked(summary: TimelineSummary) -> None:
+    _, error = validate_ops([{"op": "set_transform", "clipId": "clip_aaa", "opacity": 4}], summary)
+    assert error is not None
+    _, error = validate_ops([{"op": "set_transform", "clipId": "clip_aaa", "scale": 0}], summary)
+    assert error is not None
+
+
+def test_negative_transform_position_is_allowed(summary: TimelineSummary) -> None:
+    """x/y are offsets from centre, so negative is the left/top half of the
+    frame — the default nonnegative rule would ban half the canvas."""
+    clean, error = validate_ops(
+        [{"op": "set_transform", "clipId": "clip_aaa", "x": -480, "y": -270}], summary
+    )
+    assert error is None, error
+    assert clean is not None
+
+
+def test_an_empty_transform_is_rejected(summary: TimelineSummary) -> None:
+    """An op that changes nothing would report success and move nothing."""
+    _, error = validate_ops([{"op": "set_transform", "clipId": "clip_aaa"}], summary)
+    assert error is not None
+    assert "changes nothing" in error
+
+
+def test_style_text_needs_no_span(summary: TimelineSummary) -> None:
+    """It patches a clip that exists; requiring fromMs/toMs (as add_text does)
+    would make "make that bigger" impossible to express."""
+    clean, error = validate_ops(
+        [{"op": "style_text", "clipId": "clip_aaa", "fontSize": 90}], summary
+    )
+    assert error is None, error
+    assert clean is not None
 
 
 # ── 6. Batch shape ─────────────────────────────────────────────────────────

@@ -145,11 +145,24 @@ Operations (this list is closed — an invented verb is rejected):
 - split_clip    {clipId, atMs}
 - remove_clip   {clipId}
 - set_transition{clipId, kind, durationMs?, direction?, color?, softness?}
-- add_text      {text, fromMs, toMs, presetId?, fontSize?, color?, align?}
+- add_text      {text, fromMs, toMs, + any style field below}
+- style_text    {clipId, text?, + any style field below}   restyle what exists
 - add_caption   {text, fromMs, toMs, anchorClip?, style?}
+- style_captions{style?, fontSize?, y?}                    the whole cue set
 - place_audio   {assetId, atMs|after, track?, volume?, muted?}
 - set_volume    {target: clipId|'master', volume}
+- set_transform {clipId, x?, y?, scale?, rotation?, opacity?}
+- add_keyframe  {clipId, prop, atMs, value?, ease?}
+- clear_keyframes {clipId, prop, atMs?}
 - set_project   {name?, aspectRatio?, fps?, fit?, background?}
+
+Style fields (add_text and style_text both take these):
+  presetId   clean | pop | boxed | subtitle | neon | typewriter | impact |
+             sticker | editorial — a whole designed look
+  fontSize   pixels          color   any CSS colour     align  left|center|right
+  animIn / animOut   none | fade | pop | slide | typewriter | bounce
+  animDurationMs     how long each end runs, capped at half the clip
+  animDirection      slide only: the edge the text travels FROM
 
 Rules that matter:
 - TO ARRANGE NEW CLIPS END TO END, PLACE THEM WITH NO POSITION. Omit both atMs
@@ -171,6 +184,21 @@ Rules that matter:
 - A TRANSITION IS EXPLICIT. Clips touching or overlapping does not create one.
   Use set_transition, and only when the user asked for one.
 - COPY IDS EXACTLY as they appear above (the `…` prefix and all).
+- RESTYLE, DO NOT RE-ADD. "make that title bigger" is style_text on the clip
+  that exists. add_text would leave the original in place and put a second one
+  on top of it.
+- A PRESET SETS THE WHOLE LOOK, and any style field you pass alongside wins over
+  it — "Neon but 90px" is ONE style_text with presetId and fontSize together.
+- TWO DIFFERENT STYLE VOCABULARIES, and 'boxed' is in both. The nine named looks
+  above are for TITLES (add_text / style_text). Captions take plain | boxed |
+  outlined, and are styled as a SET with style_captions — never one cue at a
+  time.
+- TRANSFORM IS ABSOLUTE, not a nudge. x and y are pixel offsets from the frame
+  CENTRE, so negative is left and up; scale 1 is original size; opacity 0-1.
+- TO ANIMATE, PIN TWO VALUES. add_keyframe at the start time and again at the
+  end time, and the property moves between them. atMs is TIMELINE time and must
+  fall inside the clip. Animatable: x, y, scale, rotation, opacity, volume —
+  nothing else (font size and colour cannot be animated).
 
 Honesty (this surface has burned people before):
 - edit_timeline returns when the batch is VALIDATED AND DISPATCHED — not when

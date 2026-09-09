@@ -30,15 +30,30 @@ OP_KINDS: frozenset[str] = frozenset(
         "remove_clip",
         "set_project",
         "set_transition",
+        "set_transform",
         "set_volume",
         "split_clip",
+        "style_captions",
+        "style_text",
         "trim_clip",
+        "add_keyframe",
+        "clear_keyframes",
     }
 )
 
 # Ops carrying a ``clipId`` that must resolve in the summary.
 _CLIP_OPS: frozenset[str] = frozenset(
-    {"move_clip", "trim_clip", "split_clip", "remove_clip", "set_transition"}
+    {
+        "move_clip",
+        "trim_clip",
+        "split_clip",
+        "remove_clip",
+        "set_transition",
+        "style_text",
+        "set_transform",
+        "add_keyframe",
+        "clear_keyframes",
+    }
 )
 
 # Ops that bring an asset onto the timeline.
@@ -54,6 +69,36 @@ _TRANSITION_KINDS: frozenset[str] = frozenset(
 _ASPECT_RATIOS: frozenset[str] = frozenset(
     {"16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "4:5", "1.91:1"}
 )
+
+# The nine designed looks in text-presets.ts. Closed for the same reason the
+# verbs are: applyTextPreset returns the style UNCHANGED for an unknown id, so
+# a typo would report a restyle that never happened.
+_TEXT_PRESETS: frozenset[str] = frozenset(
+    {
+        "clean",
+        "pop",
+        "boxed",
+        "subtitle",
+        "neon",
+        "typewriter",
+        "impact",
+        "sticker",
+        "editorial",
+    }
+)
+
+# TextAnimKind in schema.ts — how a title arrives and leaves.
+_ANIM_KINDS: frozenset[str] = frozenset({"none", "fade", "pop", "slide", "typewriter", "bounce"})
+
+# CaptionStyleId — the CUE BOX model, a different axis from _TEXT_PRESETS.
+_CAPTION_STYLES: frozenset[str] = frozenset({"plain", "boxed", "outlined"})
+
+# AnimatableProp in schema.ts.
+_ANIM_PROPS: frozenset[str] = frozenset({"x", "y", "scale", "rotation", "opacity", "volume"})
+
+# Named easings. The tuple form (cubic bezier) is deliberately not offered: it
+# is four numbers with a throwing domain and nothing an agent can reason about.
+_EASINGS: frozenset[str] = frozenset({"linear", "easeIn", "easeOut", "easeInOut", "hold"})
 
 
 class TimelineSummary:
@@ -318,7 +363,7 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
             if not 0 <= softness <= 1:
                 return f"ops[{i}].softness must be between 0 and 1."
 
-    elif kind in ("add_text", "add_caption"):
+    elif kind == "add_caption":
         text = raw.get("text")
         if not isinstance(text, str) or not text.strip():
             return f"ops[{i}].text must be a non-empty string."
@@ -329,6 +374,13 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
         # the user as the caption having been dropped.
         if raw["toMs"] <= raw["fromMs"]:
             return f"ops[{i}].toMs must be greater than fromMs."
+        cue_style = raw.get("style")
+        if cue_style is not None and cue_style not in _CAPTION_STYLES:
+            hint = _suggest(str(cue_style), set(_CAPTION_STYLES))
+            return (
+                f"ops[{i}].style {cue_style!r} is not a caption style.{hint} "
+                f"Valid styles: {', '.join(sorted(_CAPTION_STYLES))}."
+            )
         if raw.get("anchorClip") is not None:
             full, err = _resolve(
                 raw["anchorClip"],
@@ -340,6 +392,103 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
             if err:
                 return err
             raw["anchorClip"] = full
+
+    elif kind in ("add_text", "style_text"):
+        # add_text mints a clip and needs words + a span; style_text patches one
+        # that exists, where every field is optional.
+        if kind == "add_text":
+            for key in ("fromMs", "toMs"):
+                if key not in raw or raw[key] is None:
+                    return f"ops[{i}].{key} is required for add_text."
+            if raw["toMs"] <= raw["fromMs"]:
+                return f"ops[{i}].toMs must be greater than fromMs."
+        if "text" in raw and raw["text"] is not None:
+            if not isinstance(raw["text"], str) or not raw["text"].strip():
+                return f"ops[{i}].text must be a non-empty string."
+        elif kind == "add_text":
+            return f"ops[{i}].text must be a non-empty string."
+
+        preset = raw.get("presetId")
+        if preset is not None and preset not in _TEXT_PRESETS:
+            hint = _suggest(str(preset), set(_TEXT_PRESETS))
+            return (
+                f"ops[{i}].presetId {preset!r} is not a text style.{hint} "
+                f"Valid styles: {', '.join(sorted(_TEXT_PRESETS))}."
+            )
+        for key in ("animIn", "animOut"):
+            value = raw.get(key)
+            if value is not None and value not in _ANIM_KINDS:
+                hint = _suggest(str(value), set(_ANIM_KINDS))
+                return (
+                    f"ops[{i}].{key} {value!r} is not a motion.{hint} "
+                    f"Valid motions: {', '.join(sorted(_ANIM_KINDS))}."
+                )
+        err = _check_number(raw, "fontSize", i)
+        if err:
+            return err
+        err = _check_number(raw, "animDurationMs", i)
+        if err:
+            return err
+        align = raw.get("align")
+        if align is not None and align not in ("left", "center", "right"):
+            return f"ops[{i}].align must be 'left', 'center' or 'right'."
+
+    elif kind == "style_captions":
+        style = raw.get("style")
+        if style is not None and style not in _CAPTION_STYLES:
+            hint = _suggest(str(style), set(_CAPTION_STYLES))
+            return (
+                f"ops[{i}].style {style!r} is not a caption style.{hint} "
+                f"Valid styles: {', '.join(sorted(_CAPTION_STYLES))}. "
+                "(The nine named looks are for titles, not captions.)"
+            )
+        err = _check_number(raw, "fontSize", i)
+        if err:
+            return err
+        if not any(raw.get(k) is not None for k in ("style", "fontSize", "y")):
+            return f"ops[{i}] changes nothing — give style, fontSize or y."
+
+    elif kind == "set_transform":
+        for key in ("x", "y", "rotation"):
+            err = _check_number(raw, key, i, minimum=None)
+            if err:
+                return err
+        err = _check_number(raw, "scale", i, minimum=None)
+        if err:
+            return err
+        scale = raw.get("scale")
+        if scale is not None and scale <= 0:
+            return f"ops[{i}].scale must be greater than 0."
+        err = _check_number(raw, "opacity", i)
+        if err:
+            return err
+        opacity = raw.get("opacity")
+        if opacity is not None and not 0 <= opacity <= 1:
+            return f"ops[{i}].opacity must be between 0 and 1."
+        if not any(raw.get(k) is not None for k in ("x", "y", "scale", "rotation", "opacity")):
+            return f"ops[{i}] changes nothing — give x, y, scale, rotation or opacity."
+
+    elif kind in ("add_keyframe", "clear_keyframes"):
+        prop = raw.get("prop")
+        if prop not in _ANIM_PROPS:
+            hint = _suggest(str(prop), set(_ANIM_PROPS))
+            return (
+                f"ops[{i}].prop {prop!r} cannot be animated.{hint} "
+                f"Animatable: {', '.join(sorted(_ANIM_PROPS))}."
+            )
+        if kind == "add_keyframe":
+            if "atMs" not in raw or raw["atMs"] is None:
+                return f"ops[{i}].atMs is required for add_keyframe."
+            err = _check_number(raw, "value", i, minimum=None)
+            if err:
+                return err
+            ease = raw.get("ease")
+            if ease is not None and ease not in _EASINGS:
+                hint = _suggest(str(ease), set(_EASINGS))
+                return (
+                    f"ops[{i}].ease {ease!r} is not an easing.{hint} "
+                    f"Valid easings: {', '.join(sorted(_EASINGS))}."
+                )
 
     elif kind == "set_volume":
         target, err = _require_str(raw, "target", i)
