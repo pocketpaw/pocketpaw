@@ -314,6 +314,11 @@ async def revoke_other_sessions(
 class _GuestMintRequest(BaseModel):
     api_key: str
     provider: str = "anthropic"
+    # Only meaningful for provider "openai_compatible". The URL is checked
+    # against the strict SSRF guard inside ``mint_guest``'s validation call,
+    # not here, so that one guard covers both the guest route and /byok/key.
+    base_url: str | None = None
+    model: str | None = None
 
 
 class _GuestUpgradeRequest(BaseModel):
@@ -334,7 +339,12 @@ async def guest_mint(
     """
     if not guest_mint_limiter.allow(_client_ip(request)):
         raise HTTPException(status_code=429, detail="guest_mint_rate_limited")
-    user = await guest_service.mint_guest(body.api_key, provider=body.provider)
+    user = await guest_service.mint_guest(
+        body.api_key,
+        provider=body.provider,
+        base_url=body.base_url,
+        model=body.model,
+    )
     response = await _mint_and_record(cookie_backend, user, request)
     return response
 

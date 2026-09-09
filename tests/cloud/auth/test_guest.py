@@ -200,7 +200,7 @@ class TestMintGuest:
     async def test_an_unsupported_provider_is_rejected_before_any_provider_call(
         self, mongo_db, monkeypatch
     ):
-        async def _must_not_run(api_key):
+        async def _must_not_run(api_key, **_kw):
             raise AssertionError("validate_key must not be called for an unsupported provider")
 
         monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.validate_key", _must_not_run)
@@ -209,7 +209,7 @@ class TestMintGuest:
         assert exc.value.code == "byok.provider_unsupported"
 
     async def test_a_dead_key_mints_NOTHING(self, mongo_db, monkeypatch):
-        async def _dead(api_key):
+        async def _dead(api_key, **_kw):
             raise ValidationError("byok.key_rejected", "Anthropic rejected that key.")
 
         monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.validate_key", _dead)
@@ -223,7 +223,7 @@ class TestMintGuest:
     ):
         calls: list[str] = []
 
-        async def _ok(api_key):
+        async def _ok(api_key, **_kw):
             calls.append("validated")
 
         monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.validate_key", _ok)
@@ -258,7 +258,7 @@ class TestMintGuest:
         capture and sweep every record. Break any logger call into including
         the key and this goes red."""
 
-        async def _ok(api_key):
+        async def _ok(api_key, **_kw):
             return None
 
         monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.validate_key", _ok)

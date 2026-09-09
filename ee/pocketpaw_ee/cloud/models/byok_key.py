@@ -28,6 +28,13 @@
 # Created 2026-08-28 (feat/other-hand-byok): new entity. Registered in
 # ``cloud.models.__init__`` (``get_all_documents()`` + ``__all__``) so
 # ``init_beanie`` wires the ``byok_provider_keys`` collection.
+#
+# Updated 2026-09-09 (feat/byok-custom-gateway): two nullable columns,
+# ``base_url`` and ``model``, so a key can belong to an OpenAI-compatible
+# gateway (Experiential Labs, OpenRouter, LiteLLM, vLLM) instead of Anthropic.
+# Both are NON-SECRET and are safe to return in ``ByokStatus`` — the whole
+# point of a gateway is that its address is public. Existing anthropic rows
+# read back as None on both, so no migration.
 
 from __future__ import annotations
 
@@ -55,6 +62,15 @@ class ByokProviderKey(TimestampedDocument):
     # Which provider the key belongs to. Only "anthropic" is accepted today; the
     # column exists so adding a second provider is a value, not a migration.
     provider: str = "anthropic"
+    # Where the key spends, for an ``openai_compatible`` provider only. Always
+    # None for anthropic (the endpoint is api.anthropic.com by definition).
+    # Validated at the DTO edge with ``validate_external_url_strict`` — https
+    # only, no loopback or private ranges — because this URL is a stranger's
+    # input that our server then makes requests to.
+    base_url: str | None = None
+    # The gateway's own model id, e.g. "claude-opus-5" on Experiential Labs.
+    # A gateway's ids are its own, so there is no list to pick from.
+    model: str | None = None
     # Fernet token from cloud._core.crypto.encrypt(). Never returned by the API.
     encrypted_key: str
     # Display-only provenance so status calls never decrypt:
