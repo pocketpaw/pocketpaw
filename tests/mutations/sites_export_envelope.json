@@ -1,0 +1,29 @@
+[
+  {
+    "label": "a failed export re-raises the plain exception again, so the CloudError-only handler lets it escape as a bare 500 and the safe sentence never reaches the caller",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if isinstance(exc, CloudError):\n        return exc",
+    "replace": "    if False:\n        return exc",
+    "tests": [
+      "tests/ee/sites/test_export_error_envelope.py"
+    ]
+  },
+  {
+    "label": "the converter forwards the provider's own exception text, putting a driver or Cloudflare string in front of every site reader in the workspace",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    message = (\n        str(exc)\n        if isinstance(exc, ExportUnavailable)\n        else \"This site's data could not be exported.\"\n    )",
+    "replace": "    message = str(exc)",
+    "tests": [
+      "tests/ee/sites/test_export_error_envelope.py"
+    ]
+  },
+  {
+    "label": "the converter swallows our own ExportUnavailable sentence too, so the panel is told nothing more useful than that something went wrong",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    message = (\n        str(exc)\n        if isinstance(exc, ExportUnavailable)\n        else \"This site's data could not be exported.\"\n    )",
+    "replace": "    message = \"This site's data could not be exported.\"",
+    "tests": [
+      "tests/ee/sites/test_export_error_envelope.py"
+    ]
+  }
+]
