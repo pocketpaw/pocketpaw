@@ -14,6 +14,14 @@ transcripts derive from ``ChatRunDoc`` instead, so
 the caller keeps the id and timestamp it needs. Consequence for anything built
 later: a message-id-addressable feature (reactions, thumbs writeback) must key
 off the RUN doc for concierge, because that id has no row behind it.
+
+Updated 2026-09-09: ``MessageReaction`` now carries the post-toggle
+``reactions`` array. The event used to ship only the delta (emoji + user_id),
+which is enough to know something changed but not enough to draw the chips —
+so peers in the room got the event and rendered nothing until they reloaded
+the page. The array is serialized in the same shape as
+``dto.message_to_wire_dict`` so the realtime path and the REST response patch
+a client's message row identically.
 """
 
 from __future__ import annotations
@@ -642,6 +650,9 @@ async def toggle_reaction(message_id: str, user_id: str, emoji: str) -> dict:
                 "group_id": cast(str, domain_msg.group),
                 "emoji": emoji,
                 "user_id": user_id,
+                "reactions": [
+                    {"emoji": r.emoji, "users": list(r.users)} for r in domain_msg.reactions
+                ],
             }
         )
     )
