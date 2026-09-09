@@ -177,7 +177,11 @@ from typing import TYPE_CHECKING, Any
 # protocol. Re-imported (not re-implemented) so ``AgentPool``'s own call sites
 # below and the existing ``from pocketpaw.agents.pool import ...`` importers
 # resolve to the ONE definition.
-from pocketpaw.agents.backend import _accepts_prompt_digest, _accepts_prompt_digest_kwarg
+from pocketpaw.agents.backend import (
+    _accepts_images_kwarg,
+    _accepts_prompt_digest,
+    _accepts_prompt_digest_kwarg,
+)
 from pocketpaw.agents.errors import (
     AgentBackendUnavailable,
     AgentDisabled,
@@ -681,6 +685,7 @@ class AgentPool:
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
         byok_api_key: str | None = None,
+        images: tuple[tuple[bytes, str], ...] = (),
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -756,6 +761,11 @@ class AgentPool:
         signature and only the Claude SDK backend acts on it (there it CAPS the MCP
         surface to ``allow_mcp_tool_ids`` alone — no universal grant). ``False``
         (the default) = the unchanged grant-union path.
+
+        ``images`` are the pictures THIS turn should look at, already read into
+        memory as (bytes, media_type). The caller reads them, because the caller
+        is the layer that can prove a path belongs to the tenant asking; nothing
+        below this line touches a filesystem on their behalf.
 
         ``byok_api_key`` is the caller's OWN provider key for this one turn
         (2026-08-28). It does NOT get forwarded to the cached backend — it
@@ -891,6 +901,15 @@ class AgentPool:
             # False = legacy grant-union path, unchanged for every existing run.
             if exclusive_mcp_tools:
                 run_kwargs["exclusive_mcp_tools"] = exclusive_mcp_tools
+            # Images for THIS turn, as (bytes, media_type). Forwarded further
+            # down, once the run's real backend is known — and only to a backend
+            # that DECLARES the parameter. Withhold-when-empty is not enough on
+            # its own here: seven of the eight backends have a narrower
+            # signature with no ``**kwargs``, and the Otherhand surface sends
+            # images on every turn, so an unconditional forward would end each
+            # of those turns in ``TypeError: run() got an unexpected keyword
+            # argument 'images'``. That is the /sites failure this file already
+            # records, one line above, with a different kwarg.
             # BYOK: swap the SHARED backend for a private one, built for this
             # run alone. Anything that fails here (an unregistered backend, a
             # bad settings key) falls back to the shared instance rather than
@@ -918,6 +937,13 @@ class AgentPool:
                         exc_info=True,
                     )
                     run_backend = instance.backend
+
+            # Asked of the signature for the same reason ``_accepts_policy``
+            # and ``_accepts_prompt_digest_kwarg`` are: a backend opts in by
+            # taking the argument. Asked of ``run_backend`` rather than the
+            # cached one because a BYOK run is served by a different object.
+            if images and _accepts_images_kwarg(run_backend.run):
+                run_kwargs["images"] = images
 
             async for event in run_backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
