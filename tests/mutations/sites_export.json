@@ -1,0 +1,56 @@
+[
+  {
+    "label": "an unreadable D1 is swallowed and the table comes back empty, so the delete cascade sees a satisfied export precondition and destroys the database it could not read",
+    "file": "ee/pocketpaw_ee/sites/export.py",
+    "find": "            except Exception as exc:  # noqa: BLE001 - re-raised as the honest failure\n                raise ExportUnavailable(\n                    f\"Could not read table {table!r} from this site's database.\"\n                ) from exc",
+    "replace": "            except Exception:\n                page = []",
+    "tests": [
+      "tests/ee/sites/test_site_export.py"
+    ]
+  },
+  {
+    "label": "the export stops paging after the first round trip, so a site with more than 500 rows is silently truncated and the owner keeps a partial copy of their own bookings",
+    "file": "ee/pocketpaw_ee/sites/export.py",
+    "find": "            rows.extend(page)\n            if len(page) < _PAGE:\n                break\n            offset += _PAGE",
+    "replace": "            rows.extend(page)\n            break",
+    "tests": [
+      "tests/ee/sites/test_site_export.py"
+    ]
+  },
+  {
+    "label": "the table-name gate stops rejecting, so the one token interpolated into the export's SQL is no longer constrained to a plain identifier",
+    "file": "ee/pocketpaw_ee/sites/export.py",
+    "find": "    if not _SAFE_TABLE.match(name or \"\"):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_export.py"
+    ]
+  },
+  {
+    "label": "the identifier pattern loosens to allow anything non-empty, which readmits quotes and semicolons into the FROM clause",
+    "file": "ee/pocketpaw_ee/sites/export.py",
+    "find": "_SAFE_TABLE = re.compile(r\"^[A-Za-z_][A-Za-z0-9_]*$\")",
+    "replace": "_SAFE_TABLE = re.compile(r\"^.+$\")",
+    "tests": [
+      "tests/ee/sites/test_site_export.py"
+    ]
+  },
+  {
+    "label": "the leads query drops its site_id filter, so a site's data export hands its owner every other site's form submissions in the same workspace",
+    "file": "ee/pocketpaw_ee/sites/export.py",
+    "find": "    docs = (\n        await lead_model.find({\"workspace\": workspace_id, \"site_id\": site_id})\n        .sort(\"+createdAt\")",
+    "replace": "    docs = (\n        await lead_model.find({\"workspace\": workspace_id})\n        .sort(\"+createdAt\")",
+    "tests": [
+      "tests/ee/sites/test_site_export.py"
+    ]
+  },
+  {
+    "label": "the bundle stops declaring what it omits, so an owner opening the file months later cannot tell that analytics and internal tables were never in it",
+    "file": "ee/pocketpaw_ee/sites/export.py",
+    "find": "        \"notes\": notes\n        or [",
+    "replace": "        \"notes\": notes or [],\n        \"_unused\": [",
+    "tests": [
+      "tests/ee/sites/test_site_export.py"
+    ]
+  }
+]

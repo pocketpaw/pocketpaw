@@ -1059,9 +1059,11 @@ from pocketpaw_ee.cloud._core.errors import (
     ValidationError,
     with_cause,
 )
+from pocketpaw_ee.cloud.models.lead import Lead as _LeadDoc
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.cloud.models.site import SiteInvoice as _SiteInvoiceDoc
+from pocketpaw_ee.cloud.models.site_export import SiteExport as _SiteExportDoc
 from pocketpaw_ee.sites.build_state import claim_precondition
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
@@ -1083,6 +1085,7 @@ from pocketpaw_ee.sites.dto import (
     SiteDataTableInfo,
     SiteDataTablesResponse,
     SiteEntitlementsResponse,
+    SiteExportResponse,
     SiteInvoiceCreate,
     SiteInvoiceOut,
     SitePreviewRefreshResponse,
@@ -1091,6 +1094,16 @@ from pocketpaw_ee.sites.dto import (
     SiteStatusResponse,
 )
 from pocketpaw_ee.sites.engines import content_key, is_source_engine, normalize_engine
+from pocketpaw_ee.sites.export import (
+    ExportUnavailable,
+    collect_leads,
+    dump_tables,
+    export_filename,
+    export_key,
+    render_bundle,
+    retention_days,
+    store_export,
+)
 from pocketpaw_ee.sites.generator_client import (
     BuildResult,
     GeneratorClient,
@@ -9432,6 +9445,205 @@ async def revert_pocket_version(
     )
 
 
+# ---------------------------------------------------------------------------
+# Site data export (sites lifecycle wave 1 chunk 2)
+# ---------------------------------------------------------------------------
+#
+# The delete cascade is gated on a READY export. Everything here exists to make
+# that gate mean something, which mostly means refusing to produce a bundle we
+# cannot vouch for: a dynamic site whose D1 is unreachable must FAIL here rather
+# than export zero tables, because an empty bundle satisfies the gate exactly as
+# well as a real one and the destroy proceeds either way.
+
+
+def _export_response(doc: _SiteExportDoc) -> SiteExportResponse:
+    return SiteExportResponse(
+        id=str(doc.id),
+        site_id=doc.site_id,
+        pocket_id=doc.pocket_id,
+        site_name=doc.site_name,
+        status=doc.status,
+        error=doc.error,
+        size_bytes=doc.size_bytes,
+        table_counts=dict(doc.table_counts or {}),
+        lead_count=doc.lead_count,
+        created_at=doc.created_at.isoformat() if doc.created_at else None,
+        expires_at=doc.expires_at.isoformat() if doc.expires_at else None,
+    )
+
+
+def _export_adapter() -> Any:
+    """The PRIVATE blob adapter the export bytes are written to."""
+    from pocketpaw.uploads.factory import build_adapter
+    from pocketpaw_ee.sites.artifact_store_s3 import LOCAL_ADAPTER_ROOT
+
+    return build_adapter(LOCAL_ADAPTER_ROOT)
+
+
+async def create_site_export(
+    *, workspace_id: str, user_id: str, site_id: str, _cloudflare: Any | None = None
+) -> SiteExportResponse:
+    """Capture a site's data to private storage. Raises rather than half-succeeding.
+
+    The row is minted BEFORE the build so a crash leaves a visible ``pending`` /
+    ``failed`` export rather than nothing at all — the cascade reads this row, and
+    an absent row and a failed one must not look the same to it.
+    """
+    # ``_load`` carries the tenant scope AND the malformed-id guard (a bad site_id
+    # is a 404, not an unhandled InvalidId 500).
+    doc = await _load(workspace_id, site_id)
+
+    export = _SiteExportDoc(
+        workspace=workspace_id,
+        owner=user_id,
+        site_id=site_id,
+        pocket_id=doc.pocket_id,
+        site_name=doc.name or doc.script_name,
+        site_url=doc.url,
+        status="pending",
+    )
+    await export.insert()
+
+    tables: dict[str, list[dict[str, Any]]] = {}
+    leads: list[dict[str, Any]] = []
+    try:
+        _spec, objects = await _dynamic_pocket_objects(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=doc.pocket_id
+        )
+        cf = _cloudflare or (None if _local_mode() else _cf_client())
+        if cf is None:
+            # The honest refusal. There is no live D1 to read here, so the only
+            # truthful outcomes are "fail" or "lie about an empty site".
+            raise ExportUnavailable(
+                "This site's live data cannot be read from this deployment, so its "
+                "data cannot be exported."
+            )
+        db_id = getattr(doc, "d1_database_id", "") or _derive_d1_database_id(
+            workspace_id, doc.pocket_id
+        )
+        tables = await dump_tables(
+            cloudflare=cf,
+            database_id=db_id,
+            tables=[str(o.get("name") or "") for o in objects if o.get("name")],
+        )
+    except ValidationError as exc:
+        # A STATIC site has no declared objects, which ``_dynamic_pocket_objects``
+        # reports as ``sites.not_dynamic``. That is the legitimate empty — no D1
+        # exists, so exporting no tables is the truth rather than a failure. Any
+        # other ValidationError is a real problem and falls through below.
+        if getattr(exc, "code", "") != "sites.not_dynamic":
+            await _fail_export(export, exc, site_id)
+            raise
+    except Exception as exc:
+        await _fail_export(export, exc, site_id)
+        raise
+
+    try:
+        leads = await collect_leads(workspace_id=workspace_id, site_id=site_id, lead_model=_LeadDoc)
+        payload = render_bundle(
+            site={
+                "id": site_id,
+                "name": doc.name,
+                "pocket_id": doc.pocket_id,
+                "workspace": workspace_id,
+                "url": doc.url,
+                "script_name": doc.script_name,
+            },
+            tables=tables,
+            leads=leads,
+        )
+        key = export_key(workspace_id, str(export.id))
+        size = await store_export(adapter=_export_adapter(), key=key, payload=payload)
+    except Exception as exc:
+        await _fail_export(export, exc, site_id)
+        raise
+
+    export.status = "ready"
+    export.storage_key = key
+    export.size_bytes = size
+    export.table_counts = {name: len(rows) for name, rows in tables.items()}
+    export.lead_count = len(leads)
+    export.expires_at = datetime.now(UTC) + timedelta(days=retention_days())
+    await export.save()
+    return _export_response(export)
+
+
+async def _fail_export(export: _SiteExportDoc, exc: Exception, site_id: str) -> None:
+    """Mark an export failed with a SAFE message and keep the row.
+
+    The row survives on purpose: the cascade reads it, and "no export was ever
+    attempted" must not look the same as "the export failed".
+    """
+    export.status = "failed"
+    # ExportUnavailable messages are ours to show. Anything else is reduced to a
+    # generic line so a driver or Cloudflare string never reaches a site reader.
+    export.error = (
+        str(exc)
+        if isinstance(exc, ExportUnavailable)
+        else "This site's data could not be exported."
+    )
+    await export.save()
+    logger.warning("sites.export failed for site=%s: %s", site_id, exc, exc_info=True)
+
+
+async def list_site_exports(*, workspace_id: str, site_id: str = "") -> list[SiteExportResponse]:
+    """This workspace's exports, newest first. Optionally narrowed to one site."""
+    query: dict[str, Any] = {"workspace": workspace_id}
+    if site_id:
+        query["site_id"] = site_id
+    docs = await _SiteExportDoc.find(query).sort("-createdAt").to_list()
+    return [_export_response(d) for d in docs]
+
+
+async def open_site_export(*, workspace_id: str, export_id: str) -> tuple[str, Any]:
+    """Return ``(filename, byte-iterator)`` for a READY export.
+
+    Tenant-scoped on every request: the storage key is never handed to a client, so
+    reaching an export always goes through this workspace check rather than through
+    possession of a URL.
+    """
+    try:
+        oid = ObjectId(export_id)
+    except (InvalidId, TypeError):
+        # Same guard _load applies to a site id: a malformed, caller-supplied id
+        # means "no such export", not a 500.
+        raise NotFound("site_export", export_id) from None
+    doc = await _SiteExportDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        raise NotFound("site_export", export_id)
+    if doc.status != "ready" or not doc.storage_key:
+        # A pending or failed export has no bytes. Serving an empty download here
+        # would look like a site that had no data.
+        raise ValidationError("sites.export_not_ready", "This export is not ready to download.")
+    return export_filename(doc.site_name, doc.site_id), _export_adapter().open(doc.storage_key)
+
+
+async def sweep_expired_site_exports() -> int:
+    """Purge exports past their retention stamp. Returns how many were removed.
+
+    We hold a customer's data after they asked us to destroy their site, which is
+    only defensible for a bounded window — this is the half that makes the window
+    real rather than aspirational.
+    """
+    now = datetime.now(UTC)
+    # global-read: the sweeper is deployment-wide by design, not tenant-scoped.
+    docs = await _SiteExportDoc.find({"expires_at": {"$lte": now}}).to_list()
+    adapter = _export_adapter()
+    removed = 0
+    for doc in docs:
+        if doc.storage_key:
+            try:
+                await adapter.delete(doc.storage_key)
+            except Exception:  # noqa: BLE001
+                # Leave the row so the next sweep retries. Deleting it here would
+                # strand the bytes with nothing left pointing at them.
+                logger.warning("sites.export sweep could not delete %s", doc.storage_key)
+                continue
+        await doc.delete()
+        removed += 1
+    return removed
+
+
 __all__ = [
     "apply_edits",
     "create_draft_site",
@@ -9455,4 +9667,8 @@ __all__ = [
     "list_for_workspace",
     "site_pocket_ids",
     "reserve_local_sites",
+    "create_site_export",
+    "list_site_exports",
+    "open_site_export",
+    "sweep_expired_site_exports",
 ]

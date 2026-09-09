@@ -263,6 +263,7 @@ from pocketpaw_ee.cloud.models.session_transcript import SessionTranscriptDoc
 from pocketpaw_ee.cloud.models.ship import ShipApp, ShipBox, ShipDeploy
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
+from pocketpaw_ee.cloud.models.site_export import SiteExport
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
 from pocketpaw_ee.cloud.models.subscription import Subscription
@@ -431,6 +432,7 @@ __all__ = [
     "AgentSessionRuntimeDoc",
     "Site",
     "SiteDesignBrief",
+    "SiteExport",
     "SiteDomain",
     "SiteRateCounter",
     "SpendReconciliation",
@@ -573,6 +575,7 @@ def get_all_documents():
         Lead,
         Site,
         SiteDesignBrief,
+        SiteExport,
         SiteRateCounter,
         # Growth prospect store (G-1) — the /growth outbound engine's
         # workspace-scoped, domain-deduped prospect record. Only
