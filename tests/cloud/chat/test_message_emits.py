@@ -133,6 +133,36 @@ async def test_toggle_reaction_emits_message_reaction(mongo_db, recording_bus):
     assert reacts[0].data["user_id"] == "u1"
 
 
+@pytest.mark.asyncio
+async def test_reaction_event_carries_full_reactions_array(mongo_db, recording_bus):
+    """The event must carry the post-toggle reactions, not just the delta.
+
+    Peers render reaction chips straight off this payload — a delta-only
+    event leaves them with nothing to paint, so the chip only appeared
+    after a manual reload. Shape matches the REST wire dict
+    (``dto.message_to_wire_dict``) so both paths patch identically.
+    """
+    group = await _make_group(owner="u1", members=["u1", "u2"])
+    msg = await _make_message(group_id=str(group.id), sender="u1")
+
+    await message_service.toggle_reaction(str(msg.id), "u2", "\U0001f44d")
+
+    reacts = [e for e in recording_bus.events if isinstance(e, MessageReaction)]
+    assert reacts[-1].data["reactions"] == [{"emoji": "\U0001f44d", "users": ["u2"]}]
+
+    # A second reactor is additive on the same emoji.
+    await message_service.toggle_reaction(str(msg.id), "u1", "\U0001f44d")
+    reacts = [e for e in recording_bus.events if isinstance(e, MessageReaction)]
+    assert reacts[-1].data["reactions"] == [{"emoji": "\U0001f44d", "users": ["u2", "u1"]}]
+
+    # Un-reacting empties the array rather than omitting the key — peers
+    # need the empty list to clear the chip.
+    await message_service.toggle_reaction(str(msg.id), "u2", "\U0001f44d")
+    await message_service.toggle_reaction(str(msg.id), "u1", "\U0001f44d")
+    reacts = [e for e in recording_bus.events if isinstance(e, MessageReaction)]
+    assert reacts[-1].data["reactions"] == []
+
+
 def test_router_no_longer_broadcasts_message_events():
     """Regression guard: the four _ws_message_* handlers must not call manager.broadcast/send."""
     from pathlib import Path
