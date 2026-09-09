@@ -1,0 +1,47 @@
+[
+  {
+    "label": "pocket deletion stops checking for a published site, so deleting the pocket strands a live Worker, its D1, the custom hostname and a valid signed key with nothing in the product able to reach them",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if live_site is not None:\n        site_id, site_name = live_site\n        raise ConflictError(",
+    "replace": "    if False:\n        site_id, site_name = live_site\n        raise ConflictError(",
+    "tests": [
+      "tests/ee/sites/test_pocket_delete_orphan.py"
+    ]
+  },
+  {
+    "label": "the site lookup reads a workspace supplied by the caller rather than the pocket's own, making the guard cross-tenant",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    live_site = await sites_service.live_site_for_pocket(\n        workspace_id=doc.workspace, pocket_id=pocket_id\n    )",
+    "replace": "    live_site = await sites_service.live_site_for_pocket(\n        workspace_id=\"\", pocket_id=pocket_id\n    )",
+    "tests": [
+      "tests/ee/sites/test_pocket_delete_orphan.py"
+    ]
+  },
+  {
+    "label": "the guard moves ahead of the ownership check, so a non-owner's refusal names a site in a workspace they cannot see",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    doc = await _fetch_pocket(pocket_id)\n    if doc.owner != user_id:",
+    "replace": "    doc = await _fetch_pocket(pocket_id)\n    if False:",
+    "tests": [
+      "tests/ee/sites/test_pocket_delete_orphan.py"
+    ]
+  },
+  {
+    "label": "the refusal loses the site name and the way out, leaving a 409 the owner cannot act on",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "                f\"This pocket is published as the site {site_name or site_id!r}. \"\n                \"Delete the site first — deleting the pocket would leave it running \"\n                \"with no way to reach it.\"",
+    "replace": "                \"This pocket cannot be deleted.\"",
+    "tests": [
+      "tests/ee/sites/test_pocket_delete_orphan.py"
+    ]
+  },
+  {
+    "label": "the Site lookup stops excluding archived dedupe tombstones, so a pocket whose only Site rows are archived duplicates can never be deleted again",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    doc = await _SiteDoc.find_one(\n        {\"workspace\": workspace_id, \"pocket_id\": pocket_id, \"archived\": {\"$ne\": True}}\n    )",
+    "replace": "    doc = await _SiteDoc.find_one({\"workspace\": workspace_id, \"pocket_id\": pocket_id})",
+    "tests": [
+      "tests/ee/sites/test_live_site_for_pocket.py"
+    ]
+  }
+]

@@ -302,7 +302,7 @@ from bson.errors import InvalidId
 from pydantic import ValidationError as PydanticValidationError
 
 from pocketpaw.bundled_templates.schema import RippleSpec
-from pocketpaw_ee.cloud._core.errors import PocketLimitError
+from pocketpaw_ee.cloud._core.errors import ConflictError, PocketLimitError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     PocketCreated,
@@ -2726,6 +2726,43 @@ async def delete(pocket_id: str, user_id: str) -> None:
             resource_id=str(doc.id),
         )
         raise Forbidden("pocket.not_owner", "Only the pocket owner can perform this action")
+    # A pocket may not be deleted out from under a published site.
+    #
+    # Deleting the pocket does not stop the site: architecture-sites Invariant 1 says
+    # a site worker never depends on the box, so the Worker, its D1, the custom
+    # hostname, the R2 assets and the live signed key all keep working with nothing
+    # in the product able to reach them. That is an unreachable site still serving and
+    # still accepting lead ingest against a valid key, and — if it is on a paid plan —
+    # still billing.
+    #
+    # This REFUSES rather than cascading, which is the deliberate half. A cascade from
+    # here would bypass the data export that the sites delete flow takes first, so the
+    # one path that can destroy a site stays the one path that preserves its data
+    # first. Deleting the site is a prerequisite, not an alternative.
+    #
+    # The Site read goes through the sites SERVICE, not the Site model, to respect
+    # entity isolation — and the import is function-local because sites.service reads
+    # pockets, so a module-level import would be a cycle.
+    #
+    # The guard lives in the SERVICE rather than the router on purpose: the router is
+    # not the only caller (bus handlers, MCP tools, CLI and jobs reach this directly),
+    # and a guard they can walk past is not a guard.
+    from pocketpaw_ee.sites import service as sites_service
+
+    live_site = await sites_service.live_site_for_pocket(
+        workspace_id=doc.workspace, pocket_id=pocket_id
+    )
+    if live_site is not None:
+        site_id, site_name = live_site
+        raise ConflictError(
+            "pocket.has_site",
+            (
+                f"This pocket is published as the site {site_name or site_id!r}. "
+                "Delete the site first — deleting the pocket would leave it running "
+                "with no way to reach it."
+            ),
+        )
+
     # Capture audience before delete so receivers can drop the pocket from
     # their list. The wire dict isn't useful here — only the id is.
     delete_payload = {
