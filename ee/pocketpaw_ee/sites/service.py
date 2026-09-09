@@ -9322,6 +9322,31 @@ async def site_pocket_ids(workspace_id: str) -> set[str]:
     return {doc.pocket_id async for doc in cursor}
 
 
+async def live_site_for_pocket(*, workspace_id: str, pocket_id: str) -> tuple[str, str] | None:
+    """The ACTIVE Site published from this pocket as ``(site_id, name)``, else None.
+
+    The sibling of :func:`site_pocket_ids`, narrowed to one pocket, and it exists for
+    the same entity-isolation reason: the pockets service must be able to ask whether
+    a pocket still has a site WITHOUT importing the Site model, so the Site read stays
+    on this side.
+
+    ``archived: {"$ne": True}`` matches every other gallery read — an archived dedupe
+    tombstone is not a live site, and pre-field docs (no ``archived`` key) still count
+    as active.
+
+    Deliberately does NOT filter on ``deployed``. A Site row that never reached a live
+    deploy can still own a provisioned D1 and a reserved script name, and once the
+    pocket is gone nothing can reach that row to clean it up. "Has a Site at all" is
+    the honest question here; whether it is currently serving is a different one.
+    """
+    doc = await _SiteDoc.find_one(
+        {"workspace": workspace_id, "pocket_id": pocket_id, "archived": {"$ne": True}}
+    )
+    if doc is None:
+        return None
+    return str(doc.id), (doc.name or doc.script_name or "")
+
+
 async def reserve_local_sites(workspace_id: str | None = None) -> int:
     """Re-serve locally-deployed Paw Sites after a backend restart.
 
@@ -9666,6 +9691,7 @@ __all__ = [
     "list_domains",
     "list_for_workspace",
     "site_pocket_ids",
+    "live_site_for_pocket",
     "reserve_local_sites",
     "create_site_export",
     "list_site_exports",
