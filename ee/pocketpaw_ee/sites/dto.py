@@ -273,6 +273,10 @@ class SiteResponse(BaseModel):
     id: str
     pocket_id: str
     name: str
+    # SM-1: the owner's blurb, or "" when they have not written one. The card
+    # falls back to the host / script name, so empty is a normal state and not a
+    # missing value.
+    description: str = ""
     script_name: str
     deployed: bool
     signed_key: str
@@ -464,6 +468,42 @@ class SiteExportResponse(BaseModel):
     # When the sweeper will purge these bytes. Surfaced so the UI can say how long
     # the owner has to download it rather than implying it is kept forever.
     expires_at: str | None = None
+
+
+class SiteMetadataUpdate(BaseModel):
+    """PATCH body for a site's own title and blurb.
+
+    THREE-WAY, exactly like ``SiteClientUpdate``: a field absent from the body is
+    left alone, while an explicitly-sent empty string clears it. ``model_fields_set``
+    is what tells the two apart, so the service must read the un-dumped model — a
+    caller editing only the description cannot blank the name it never sent.
+
+    A name of only whitespace is refused rather than accepted-and-trimmed-to-empty.
+    The name is the site's identity in the gallery AND the string the delete
+    confirmation asks the owner to type back; a site that renders as "" there would
+    make the type-to-confirm gate unsatisfiable.
+    """
+
+    name: str | None = None
+    description: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not v.strip():
+            raise ValueError("name cannot be empty")
+        if len(v) > 200:
+            raise ValueError("name must be 200 characters or fewer")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def _cap_description(cls, v: str | None) -> str | None:
+        if v is not None and len(v) > 500:
+            raise ValueError("description must be 500 characters or fewer")
+        return v
 
 
 class SitePreviewRefreshResponse(BaseModel):

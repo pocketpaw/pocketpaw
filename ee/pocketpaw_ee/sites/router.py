@@ -279,6 +279,7 @@ from pocketpaw_ee.sites.dto import (
     SiteEntitlementsResponse,
     SiteExportResponse,
     SiteInvoiceCreate,
+    SiteMetadataUpdate,
     SitePlanRequestBody,
     SitePlanRequestResponse,
     SitePreviewRefreshResponse,
@@ -1091,6 +1092,29 @@ async def site_analytics(
     """
     return await sites_service.site_analytics(
         workspace_id=ctx.workspace_id, site_id=site_id, window=window
+    )
+
+
+@router.patch("/sites/{site_id}/metadata", response_model=SiteResponse)
+async def update_site_metadata(
+    site_id: str,
+    body: SiteMetadataUpdate,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteResponse:
+    """Rename a site or edit its one-line description.
+
+    Three-way: a field the caller omits is left alone, and an explicit empty string
+    clears it — which is how the form deletes a description without a second
+    endpoint. A blank NAME is refused (422) rather than accepted, because the name is
+    both the site's identity in the gallery and the string the delete confirmation
+    asks the owner to type back.
+
+    Tenant-scoped like every sibling per-site write; a missing or cross-tenant site
+    is a 404.
+    """
+    return await sites_service.update_site_metadata(
+        workspace_id=ctx.workspace_id, site_id=site_id, body=body
     )
 
 
