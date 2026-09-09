@@ -9561,7 +9561,7 @@ async def create_site_export(
             raise
     except Exception as exc:
         await _fail_export(export, exc, site_id)
-        raise
+        raise _export_error(exc) from exc
 
     try:
         leads = await collect_leads(workspace_id=workspace_id, site_id=site_id, lead_model=_LeadDoc)
@@ -9581,7 +9581,7 @@ async def create_site_export(
         size = await store_export(adapter=_export_adapter(), key=key, payload=payload)
     except Exception as exc:
         await _fail_export(export, exc, site_id)
-        raise
+        raise _export_error(exc) from exc
 
     export.status = "ready"
     export.storage_key = key
@@ -9591,6 +9591,30 @@ async def create_site_export(
     export.expires_at = datetime.now(UTC) + timedelta(days=retention_days())
     await export.save()
     return _export_response(export)
+
+
+def _export_error(exc: Exception) -> Exception:
+    """Turn a failed export into something the HTTP layer can actually render.
+
+    ``ExportUnavailable`` is a plain ``Exception``, and the cloud error handler maps
+    ``CloudError`` only — so re-raising it unchanged answered the request with a bare
+    500 and the safe sentence we had just written to the export row never reached the
+    caller at all. That is the same shape as the ``InvalidId`` cast this module
+    already guards: an ordinary exception escaping a CloudError-only handler.
+
+    A ``CloudError`` (including the ``sites.not_dynamic`` path above) is already
+    renderable and passes through untouched, so this only ever promotes the plain
+    ones. The message is the same safe text ``_fail_export`` records, never a driver
+    or Cloudflare string — every site reader in the workspace can see it.
+    """
+    if isinstance(exc, CloudError):
+        return exc
+    message = (
+        str(exc)
+        if isinstance(exc, ExportUnavailable)
+        else "This site's data could not be exported."
+    )
+    return ValidationError("sites.export_unavailable", message)
 
 
 async def _fail_export(export: _SiteExportDoc, exc: Exception, site_id: str) -> None:
