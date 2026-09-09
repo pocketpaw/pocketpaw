@@ -1,0 +1,47 @@
+[
+  {
+    "label": "a blank site name is accepted and trimmed to empty, leaving a site whose delete confirmation asks the owner to type a name that renders as nothing",
+    "file": "ee/pocketpaw_ee/sites/dto.py",
+    "find": "        if not v.strip():\n            raise ValueError(\"name cannot be empty\")",
+    "replace": "        if False:\n            raise ValueError(\"name cannot be empty\")",
+    "tests": [
+      "tests/ee/sites/test_site_metadata.py"
+    ]
+  },
+  {
+    "label": "the description cap stops rejecting, so an over-long blurb is silently truncated by Mongo instead of surfacing as a 422 the form can show",
+    "file": "ee/pocketpaw_ee/sites/dto.py",
+    "find": "        if v is not None and len(v) > 500:\n            raise ValueError(\"description must be 500 characters or fewer\")",
+    "replace": "        if False:\n            raise ValueError(\"description must be 500 characters or fewer\")",
+    "tests": [
+      "tests/ee/sites/test_site_metadata.py"
+    ]
+  },
+  {
+    "label": "the name cap stops rejecting, same silent-truncation failure on the field the gallery and the delete gate both read",
+    "file": "ee/pocketpaw_ee/sites/dto.py",
+    "find": "        if len(v) > 200:\n            raise ValueError(\"name must be 200 characters or fewer\")",
+    "replace": "        if False:\n            raise ValueError(\"name must be 200 characters or fewer\")",
+    "tests": [
+      "tests/ee/sites/test_site_metadata.py"
+    ]
+  },
+  {
+    "label": "the metadata write goes back to a whole-document save, so an owner renaming a site mid-publish pushes a stale snapshot over build_status and delete_status",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if updates:\n        await site.set(updates)\n        site = await _load(workspace_id, site_id)\n    return _to_response(site)",
+    "replace": "    if updates:\n        for k, v in updates.items():\n            setattr(site, k, v)\n        await site.save()\n    return _to_response(site)",
+    "tests": [
+      "tests/ee/sites/test_site_metadata.py"
+    ]
+  },
+  {
+    "label": "the response declares description but never passes it, so every site reads the field default forever -- the exact SG-9i failure this field's comment names",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        description=getattr(doc, \"description\", \"\") or \"\",",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_site_metadata.py"
+    ]
+  }
+]

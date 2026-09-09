@@ -1088,6 +1088,7 @@ from pocketpaw_ee.sites.dto import (
     SiteExportResponse,
     SiteInvoiceCreate,
     SiteInvoiceOut,
+    SiteMetadataUpdate,
     SitePreviewRefreshResponse,
     SitePreviewResponse,
     SiteResponse,
@@ -2128,6 +2129,11 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         id=str(doc.id),
         pocket_id=doc.pocket_id,
         name=doc.name,
+        # Populated HERE and not only declared on the DTO. SG-9i shipped
+        # ``build_status`` / ``build_job_id`` on the response with nothing ever
+        # passing them, so every site read the field default forever; this builds
+        # the DTO field by field, which is exactly how that gap survived review.
+        description=getattr(doc, "description", "") or "",
         script_name=doc.script_name,
         deployed=doc.deployed,
         signed_key=doc.signed_key,
@@ -5922,6 +5928,38 @@ async def get_site_client(*, workspace_id: str, site_id: str) -> SiteClientRespo
     return _client_response(site)
 
 
+async def update_site_metadata(
+    *, workspace_id: str, site_id: str, body: SiteMetadataUpdate
+) -> SiteResponse:
+    """Patch a site's own title and blurb. THREE-WAY, like the client record.
+
+    Writes through a targeted ``set()`` rather than ``save()``, for the reason
+    ``update_site_client`` documents and which applies harder here: this is a
+    human-paced edit against a document a BUILD also writes to. An owner renaming a
+    site while a publish settles would, under ``save()``, push their whole stale
+    snapshot back and silently roll ``build_status`` — and now ``delete_status`` —
+    backwards. A field-scoped update cannot.
+
+    An empty PATCH is a no-op read rather than an error, so a form that autosaves on
+    blur does not surface a spurious failure.
+    """
+    body = SiteMetadataUpdate.model_validate(body)
+    site = await _load(workspace_id, site_id)
+
+    updates: dict[str, Any] = {}
+    if "name" in body.model_fields_set:
+        # The validator has already refused a blank name, so this strip cannot
+        # produce one.
+        updates["name"] = (body.name or "").strip()
+    if "description" in body.model_fields_set:
+        updates["description"] = (body.description or "").strip()
+
+    if updates:
+        await site.set(updates)
+        site = await _load(workspace_id, site_id)
+    return _to_response(site)
+
+
 async def update_site_client(
     *, workspace_id: str, site_id: str, body: SiteClientUpdate
 ) -> SiteClientResponse:
@@ -9693,6 +9731,7 @@ __all__ = [
     "site_pocket_ids",
     "live_site_for_pocket",
     "reserve_local_sites",
+    "update_site_metadata",
     "create_site_export",
     "list_site_exports",
     "open_site_export",

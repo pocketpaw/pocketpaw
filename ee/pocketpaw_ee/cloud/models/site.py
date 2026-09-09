@@ -285,6 +285,16 @@ class Site(TimestampedDocument):
     pocket_id: str
     owner: str
     name: str = ""
+    # SM-1: the owner's own one-line blurb for this site, shown as the gallery card's
+    # sublabel. EMPTY on every existing row, which reads as "no description" — the
+    # card already falls back to the host or the script name, so there is no
+    # migration and nothing changes for a site nobody has described.
+    #
+    # The frontend has carried a typed ``description`` placeholder since the card was
+    # written, with a comment saying nothing populated it; this is the field it was
+    # waiting for. Capped at the DTO edge rather than here, so an over-long value is
+    # a 422 the form can show instead of a record that silently lost its tail.
+    description: str = ""
     # Workers-for-Platforms script name (== site id) once deployed.
     script_name: str = ""
     deployed: bool = False
