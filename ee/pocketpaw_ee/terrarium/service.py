@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections import Counter
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1558,16 +1559,47 @@ async def pledge_weather(
     }
 
 
+async def _weather_snapshot(uni: UniverseDoc, sleeping: list[CitizenDoc]) -> weather.Snapshot:
+    """Positions only, as plain values, for ``weather.weather_place``.
+
+    A farm's ``yield_`` is how many recent Journal rows point at it — the
+    cheapest honest reading of "recent yield" the ledger can give.
+    """
+    universe_id = str(uni.id)
+    citizens = await CitizenDoc.find(CitizenDoc.universe_id == universe_id).to_list()
+    structures = [
+        a
+        for a in await ArtifactDoc.find(ArtifactDoc.universe_id == universe_id).to_list()
+        if a.kind == "structure" and a.x is not None and a.y is not None
+    ]
+    # ponytail: last 300 rows; an aggregate if worlds outgrow the scan.
+    recent = await EventDoc.find(
+        EventDoc.universe_id == universe_id, EventDoc.seq > uni.seq - 300
+    ).to_list()
+    hits = Counter(e.artifact_id for e in recent if e.artifact_id)
+    woken = min(sleeping, key=lambda c: c.name) if sleeping else None
+    return weather.Snapshot(
+        citizens=[weather.Spot(c.name, c.x, c.y) for c in citizens],
+        structures=[
+            weather.Spot(a.name, float(a.x or 0), float(a.y or 0), hits.get(str(a.id), 0))
+            for a in structures
+        ],
+        revived=weather.Spot(woken.name, woken.x, woken.y) if woken else None,
+    )
+
+
 async def _fire_weather(uni: UniverseDoc, kind: str, line: Any) -> None:
     """Apply a fired power. The ONLY caller of ``weather.effect``."""
     universe_id = str(uni.id)
     sleeping = await CitizenDoc.find(
         CitizenDoc.universe_id == universe_id, CitizenDoc.state == "hibernating"
     ).to_list()
+    place = weather.weather_place(kind, await _weather_snapshot(uni, sleeping))
     fx = weather.effect(
         kind,
         line=str(line) if line is not None else None,
         hibernating_ids=[str(c.id) for c in sleeping],
+        place=place,
     )
     uni.pool = max(0, uni.pool + fx.pool_delta)
     if fx.storm_ticks:
@@ -1578,7 +1610,10 @@ async def _fire_weather(uni: UniverseDoc, kind: str, line: Any) -> None:
             c.balance = physics.endowment.daily
             c.state = "alive"
             await c.save()
-    row = await _append_event(uni, kind="weather", actor="GOD", body=fx.body, cost=0)
+    at = {"x": place.x, "y": place.y, "radius": place.radius} if place else None
+    row = await _append_event(
+        uni, kind="weather", actor="GOD", body=fx.body, cost=0, data={"at": at} if at else None
+    )
     await _publish(uni, row)
     if fx.broadcast_line:
         # An omen enters the world as an outside voice — tagged viewer_origin

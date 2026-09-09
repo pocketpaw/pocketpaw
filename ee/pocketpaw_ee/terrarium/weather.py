@@ -14,6 +14,12 @@
 # which a god could edit a soul, DNA, a charter, or force a citizen's action.
 # ``tests/ee/terrarium/test_weather.py`` asserts the absence of those imports,
 # so adding one is a test failure and not merely a review comment.
+#
+# WEATHER HAPPENS SOMEWHERE. ``weather_place`` picks a cell of the 120x80 tile
+# map for a fired power from plain positions the service hands over (rain on
+# the lowest-yield farm, drought at the well, storm on the densest houses,
+# revive on the woken citizen, omen nowhere). The body names the same region
+# the cell sits in, so text and ``data.at`` never disagree.
 
 """Weather — collective viewer powers that act on the world, never on a mind."""
 
@@ -39,9 +45,130 @@ RAIN_POOL_DELTA = 200
 DROUGHT_POOL_DELTA = -200
 STORM_TICKS = 6
 
+# The map, in tiles, and how far each power reaches from its centre.
+MAP_W = 120.0
+MAP_H = 80.0
+RADIUS: dict[str, float] = {"rain": 18.0, "storm": 28.0, "drought": 22.0, "revive": 6.0}
+
+# Which structures count as what, by name. Citizens name their own buildings.
+_FARM_WORDS = ("farm", "field", "orchard", "garden")
+_HOUSE_WORDS = ("house", "home", "hut", "cabin", "hall")
+# Houses within this many tiles of each other are one cluster.
+_CLUSTER_TILES = 20.0
+
 
 class WeatherError(ValueError):
     """An unknown power, or one this universe's physics forbids."""
+
+
+@dataclass(frozen=True)
+class Spot:
+    """A named point in tile space. ``yield_`` is a farm's recent take."""
+
+    name: str
+    x: float
+    y: float
+    yield_: int = 0
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """The plain-value view of a world that ``weather_place`` reads.
+
+    The service reads the docs and hands over positions only — no ids, no
+    souls. ``revived`` is the Spot of the citizen a revive wakes, if any.
+    """
+
+    citizens: list[Spot] = field(default_factory=list)
+    structures: list[Spot] = field(default_factory=list)
+    revived: Spot | None = None
+
+
+@dataclass(frozen=True)
+class Place:
+    """Where a power lands: a cell of the map, plus the region word for the body."""
+
+    x: float
+    y: float
+    radius: float
+    label: str
+
+
+def region(x: float, y: float) -> str:
+    """The region a tile sits in, in the words the map and the body share.
+
+    Thirds of the map: north and south by height first, then east and the
+    shore (west) by width; what is left is the commons around the well.
+    """
+    if y < MAP_H / 3:
+        return "the north field"
+    if y >= MAP_H * 2 / 3:
+        return "the south field"
+    if x >= MAP_W * 2 / 3:
+        return "the east towns"
+    if x < MAP_W / 3:
+        return "the shore"
+    return "the commons"
+
+
+def _centroid(spots: list[Spot]) -> tuple[float, float]:
+    if not spots:
+        return MAP_W / 2, MAP_H / 2
+    return (
+        sum(s.x for s in spots) / len(spots),
+        sum(s.y for s in spots) / len(spots),
+    )
+
+
+def _named(spots: list[Spot], words: tuple[str, ...]) -> list[Spot]:
+    return [s for s in spots if any(w in s.name.lower() for w in words)]
+
+
+def weather_place(kind: str, snapshot: Snapshot) -> Place | None:
+    """Pick the cell a fired power lands on. Pure and deterministic.
+
+    rain: the farm with the lowest recent yield, else the well. drought: the
+    well. storm: the densest cluster of houses. revive: the woken citizen.
+    omen: nowhere. Every fallback is the centre of the named citizens.
+    """
+    if kind not in WEATHER_KINDS:
+        raise WeatherError(f"unknown weather kind {kind!r}; known: {list(WEATHER_KINDS)}")
+    if kind == "omen":
+        return None
+    wells = _named(snapshot.structures, ("well",))
+    well = min(wells, key=lambda s: s.name) if wells else None
+    label: str | None = None
+    if kind == "rain":
+        farms = _named(snapshot.structures, _FARM_WORDS)
+        if farms:
+            target = min(farms, key=lambda s: (s.yield_, s.name))
+            x, y = target.x, target.y
+        elif well is not None:
+            x, y, label = well.x, well.y, "the well"
+        else:
+            x, y = _centroid(snapshot.citizens)
+    elif kind == "drought":
+        if well is not None:
+            x, y, label = well.x, well.y, "the well"
+        else:
+            x, y = _centroid(snapshot.citizens)
+    elif kind == "storm":
+        houses = _named(snapshot.structures, _HOUSE_WORDS)
+        if houses:
+            # ponytail: O(n^2) neighbour count; a grid if towns pass ~1k houses.
+            def near(h: Spot) -> list[Spot]:
+                return [o for o in houses if abs(o.x - h.x) + abs(o.y - h.y) <= _CLUSTER_TILES]
+
+            seed = max(houses, key=lambda h: (len(near(h)), h.name))
+            x, y = _centroid(near(seed))
+        else:
+            x, y = _centroid(snapshot.citizens)
+    else:  # revive
+        if snapshot.revived is not None:
+            x, y = snapshot.revived.x, snapshot.revived.y
+        else:
+            x, y = _centroid(snapshot.citizens)
+    return Place(float(x), float(y), RADIUS[kind], label or region(x, y))
 
 
 @dataclass(frozen=True)
@@ -120,6 +247,7 @@ def effect(
     *,
     line: str | None = None,
     hibernating_ids: list[str] | None = None,
+    place: Place | None = None,
 ) -> WeatherEffect:
     """Build the effect of a fired power. This is the FULL extent of a god's reach.
 
@@ -132,35 +260,47 @@ def effect(
     if kind not in WEATHER_KINDS:
         raise WeatherError(f"unknown weather kind {kind!r}; known: {list(WEATHER_KINDS)}")
 
+    where = place.label if place is not None else "the world"
     if kind == "rain":
-        return WeatherEffect(kind, "rain fell on the world", pool_delta=RAIN_POOL_DELTA)
+        return WeatherEffect(kind, f"RAIN · {where} drinks", pool_delta=RAIN_POOL_DELTA)
     if kind == "drought":
-        return WeatherEffect(kind, "the spring ran low", pool_delta=DROUGHT_POOL_DELTA)
+        body = "the well drops a hand" if where == "the well" else f"{where} runs dry"
+        return WeatherEffect(kind, f"DROUGHT · {body}", pool_delta=DROUGHT_POOL_DELTA)
     if kind == "storm":
         return WeatherEffect(
-            kind, "a storm rolled in — thinking costs double", storm_ticks=STORM_TICKS
+            kind,
+            f"STORM · a storm rolls over {where} — thinking costs double",
+            storm_ticks=STORM_TICKS,
         )
     if kind == "omen":
         text = " ".join(str(line or "").split())[:280] or "something is coming"
-        return WeatherEffect(kind, "an omen was spoken", broadcast_line=text)
+        return WeatherEffect(kind, "OMEN · an omen was spoken", broadcast_line=text)
     # revive
     ids = list(hibernating_ids or [])
     return WeatherEffect(
         kind,
-        f"{len(ids)} hibernating soul(s) had their debt cleared",
+        f"REVIVE · {len(ids)} hibernating soul(s) wake at {where}, debt cleared",
         clear_debt_for=ids,
     )
 
 
 __all__ = [
     "DROUGHT_POOL_DELTA",
+    "MAP_H",
+    "MAP_W",
     "POWER_COSTS",
+    "RADIUS",
     "RAIN_POOL_DELTA",
     "STORM_TICKS",
     "WEATHER_KINDS",
+    "Place",
+    "Snapshot",
+    "Spot",
     "WeatherEffect",
     "WeatherError",
     "effect",
     "pledge",
     "powers",
+    "region",
+    "weather_place",
 ]

@@ -220,3 +220,22 @@ async def test_the_public_artifact_wire_carries_exactly_the_contract_fields(clie
         "x", "y", "unlocks", "stage", "design_id",
     }  # fmt: skip
     assert all(set(a) == expected for a in arts), [sorted(a) for a in arts]
+
+
+async def test_a_weather_event_carries_its_place_on_the_public_wire(client, monkeypatch):
+    """``data.at`` is three numbers in tile space and nothing else: the map draws
+    the cell from it, and a stranger learns no more than where it rained."""
+    monkeypatch.setenv("TERRARIUM_PUBLIC_ENABLED", "1")
+    monkeypatch.setenv("TERRARIUM_PUBLIC_DELAY_EVENTS", "0")
+    uni = create_universe(client, public=True, founders=1)
+    client.post(
+        f"/terrarium/universes/{uni['id']}/weather/pledge", json={"kind": "rain", "tokens": 20}
+    )
+    events = client.get(f"/terrarium/public/universes/{uni['id']}/events?kind=weather").json()[
+        "events"
+    ]
+    assert len(events) == 1
+    at = events[0]["data"]["at"]
+    assert set(at) == {"x", "y", "radius"}
+    assert all(isinstance(v, float) for v in at.values())
+    assert events[0]["body"].startswith("RAIN · ")
