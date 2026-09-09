@@ -681,6 +681,7 @@ class AgentPool:
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
         byok_api_key: str | None = None,
+        images: tuple[tuple[bytes, str], ...] = (),
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -756,6 +757,11 @@ class AgentPool:
         signature and only the Claude SDK backend acts on it (there it CAPS the MCP
         surface to ``allow_mcp_tool_ids`` alone — no universal grant). ``False``
         (the default) = the unchanged grant-union path.
+
+        ``images`` are the pictures THIS turn should look at, already read into
+        memory as (bytes, media_type). The caller reads them, because the caller
+        is the layer that can prove a path belongs to the tenant asking; nothing
+        below this line touches a filesystem on their behalf.
 
         ``byok_api_key`` is the caller's OWN provider key for this one turn
         (2026-08-28). It does NOT get forwarded to the cached backend — it
@@ -891,6 +897,12 @@ class AgentPool:
             # False = legacy grant-union path, unchanged for every existing run.
             if exclusive_mcp_tools:
                 run_kwargs["exclusive_mcp_tools"] = exclusive_mcp_tools
+            # Images for THIS turn, as (bytes, media_type). Same
+            # withhold-when-empty rule as everything above: only the backends
+            # that declare the parameter can take it, so a turn that sends none
+            # is byte-identical for every backend and every surface.
+            if images:
+                run_kwargs["images"] = images
             # BYOK: swap the SHARED backend for a private one, built for this
             # run alone. Anything that fails here (an unregistered backend, a
             # bad settings key) falls back to the shared instance rather than

@@ -3193,3 +3193,64 @@ def test_a_broken_logfire_does_not_break_the_run():
         mod._CONFIGURED = original_flag
 
     assert "Instrumentation" in caps, "a dead exporter must not drop instrumentation"
+
+
+# ── Images on the turn (2026-09-09, feat/other-hand-vision) ─────────────────
+#
+# pydantic-ai has taken image input for a long time — ``user_prompt`` is typed
+# ``str | Sequence[UserContent]``. What was missing is that this backend never
+# passed one, so on the Otherhand surface the page never reached the model and
+# the agent answered about an OCR transcript of a drawing.
+#
+# The assertion that earns its space is the NEGATIVE one: a turn with no images
+# must still send a bare string. Every other surface has always sent one, and a
+# single-element parts list is not the same thing on every provider.
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+
+
+def test_a_turn_with_no_images_sends_a_plain_string():
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    assert _user_prompt("draw me a cat", ()) == "draw me a cat"
+
+
+def test_a_turn_with_an_image_sends_the_text_and_the_picture():
+    from pydantic_ai import BinaryContent
+
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    prompt = _user_prompt("what did I write?", ((_PNG, "image/png"),))
+    assert isinstance(prompt, list)
+    assert prompt[0] == "what did I write?"
+    assert isinstance(prompt[1], BinaryContent)
+    assert prompt[1].data == _PNG
+    assert prompt[1].media_type == "image/png"
+
+
+def test_every_image_rides_the_same_turn():
+    # Book mode shows three pictures. Dropping the tail would leave the agent
+    # reading about a source page it was never shown.
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    prompt = _user_prompt("x", ((_PNG, "image/png"), (_PNG, "image/jpeg")))
+    assert len(prompt) == 3
+    assert [p.media_type for p in prompt[1:]] == ["image/png", "image/jpeg"]
+
+
+def test_an_empty_image_is_dropped_rather_than_sent():
+    # Some providers answer a zero-byte part with an opaque 400, which reads as
+    # the model being broken rather than the attachment being empty.
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    assert _user_prompt("x", ((b"", "image/png"),)) == "x"
+
+
+def test_the_backend_accepts_the_images_kwarg_the_pool_forwards():
+    import inspect
+
+    from pocketpaw.agents.pool import AgentPool
+    from pocketpaw.agents.pydantic_ai import PydanticAIBackend
+
+    assert "images" in inspect.signature(AgentPool.run).parameters
+    assert "images" in inspect.signature(PydanticAIBackend.run).parameters

@@ -1,0 +1,37 @@
+[
+  {
+    "label": "the jail check is dropped — a client-supplied path reads any file the server can",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        if not path.is_relative_to(jail):",
+    "replace": "        if False:",
+    "tests": ["tests/cloud/chat/test_turn_images.py::TestTheJailIsTheBoundary"]
+  },
+  {
+    "label": "a missing image raises instead of being skipped — one stale path kills every turn",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            size = path.stat().st_size\n            if size == 0 or size > budget:",
+    "replace": "            size = path.stat().st_size\n            if size > budget:",
+    "tests": ["tests/cloud/chat/test_turn_images.py::TestALostPictureNeverCostsTheTurn"]
+  },
+  {
+    "label": "the image never reaches the prompt — the model answers about a page it cannot see",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "    parts.extend(BinaryContent(data=data, media_type=media_type) for data, media_type in usable)",
+    "replace": "    pass",
+    "tests": ["tests/test_pydantic_ai_backend.py::test_a_turn_with_an_image_sends_the_text_and_the_picture"]
+  },
+  {
+    "label": "an imageless turn sends a parts list — every other surface changes shape on the wire",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "    if not usable:\n        return message",
+    "replace": "    if False:\n        return message",
+    "tests": ["tests/test_pydantic_ai_backend.py::test_a_turn_with_no_images_sends_a_plain_string"]
+  },
+  {
+    "label": "the handler stops declaring its images — the attachment path goes dark and OCR comes back",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/other_hand.py",
+    "find": "            images=tuple(p for p in (snapshot_path, book_path, mark_image_path) if p),",
+    "replace": "            images=(),",
+    "tests": ["tests/cloud/surface/test_other_hand_handler.py"]
+  }
+]
