@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import pathlib
 from dataclasses import dataclass
 
 import pytest
@@ -245,3 +246,44 @@ async def test_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     await _generate_site_image_handler({"pocket_id": "pk1", "prompt": "a hero", "count": 50})
 
     assert len(store.seen) == site_media._MAX_IMAGES_PER_CALL
+
+
+# ── The ladder must not drift across the four places that teach it ──────
+
+
+def test_every_place_that_teaches_the_stock_rung_also_teaches_generation() -> None:
+    """The sourcing ladder is written out in the /sites preamble AND in three
+    bundled skills, and ``_design_system_block`` reads design-taste's SKILL.md at
+    REQUEST TIME — so a skill that stops short at stock silently overrides the
+    preamble for that turn.
+
+    Checked PER PARAGRAPH, not per file, and that distinction is the whole test:
+    design-taste names the tool twice (the ladder and the pre-flight checklist),
+    so a whole-file `in` check stays green while the LADDER itself quietly loses
+    its last rung. The mutation plan proved exactly that — the first version of
+    this test let it through.
+
+    MUTATION: delete the generate_site_image clause from design-taste's ladder
+    sentence, leaving the checklist mention intact. This must fail.
+    """
+    root = pathlib.Path(__file__).resolve().parents[3]
+    skills = root / "src/pocketpaw/bundled_skills/_bundled/skills"
+    teaches_ladder = [
+        root / "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+        skills / "pocketpaw-create-svelte-site/SKILL.md",
+        skills / "pocketpaw-create-react-site/SKILL.md",
+        skills / "pocketpaw-design-taste/SKILL.md",
+    ]
+
+    orphaned: list[str] = []
+    for path in teaches_ladder:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for block in text.split("\n\n"):
+            # A LADDER paragraph is one that names stock AND the gradient fallback.
+            # Without that second condition this also flags a changelog comment and a
+            # bare tool-reference list, neither of which owes a generation rung.
+            teaches_the_ladder = "search_stock_images" in block and "gradient" in block.lower()
+            if teaches_the_ladder and "generate_site_image" not in block:
+                orphaned.append(f"{path.name}: {block.strip()[:90]}...")
+
+    assert not orphaned, "the ladder ends at stock here:\n" + "\n".join(orphaned)

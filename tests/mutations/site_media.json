@@ -4,41 +4,71 @@
     "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
     "find": "assets.append({\"url\": asset.url, \"mime\": asset.mime, \"size\": asset.size})",
     "replace": "assets.append({\"url\": \"/api/v1/media/x.png\", \"mime\": asset.mime, \"size\": asset.size})",
-    "tests": ["tests/ee/sites/test_site_media_tool.py::test_the_returned_url_is_public_and_absolute"]
+    "tests": [
+      "tests/ee/sites/test_site_media_tool.py::test_the_returned_url_is_public_and_absolute"
+    ]
   },
   {
     "label": "trust the workspace_id in the tool args (prompt-injection guard)",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
     "find": "    workspace_id, _user_id = _identity()",
     "replace": "    workspace_id, _user_id = (args.get(\"workspace_id\") or _identity()[0]), None",
-    "tests": ["tests/ee/sites/test_site_media_tool.py::test_a_workspace_id_in_the_args_is_ignored"]
+    "tests": [
+      "tests/ee/sites/test_site_media_tool.py::test_a_workspace_id_in_the_args_is_ignored"
+    ]
   },
   {
     "label": "drop the site tag from the history record",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
     "find": "            source=\"sites\",",
     "replace": "            source=\"studio\",",
-    "tests": ["tests/ee/sites/test_site_media_tool.py::test_the_generation_is_recorded_against_the_site"]
+    "tests": [
+      "tests/ee/sites/test_site_media_tool.py::test_the_generation_is_recorded_against_the_site"
+    ]
   },
   {
     "label": "report success when nothing was generated",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
     "find": "    if not assets:",
     "replace": "    if False:",
-    "tests": ["tests/ee/sites/test_site_media_tool.py::test_a_generation_failure_never_returns_a_phantom_asset"]
+    "tests": [
+      "tests/ee/sites/test_site_media_tool.py::test_a_generation_failure_never_returns_a_phantom_asset"
+    ]
   },
   {
     "label": "remove the per-call image ceiling",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
     "find": "    count = max(1, min(int(args.get(\"count\") or 1), _MAX_IMAGES_PER_CALL))",
     "replace": "    count = max(1, int(args.get(\"count\") or 1))",
-    "tests": ["tests/ee/sites/test_site_media_tool.py::test_count_is_bounded"]
+    "tests": [
+      "tests/ee/sites/test_site_media_tool.py::test_count_is_bounded"
+    ]
   },
   {
     "label": "drop site_media from the /sites allow-list (silent unreachability)",
     "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
     "find": "            | frozenset(SITE_MEDIA_TOOL_IDS)\n",
     "replace": "",
-    "tests": ["tests/ee/sites/test_site_media_tool.py::test_the_tool_is_actually_reachable_on_the_sites_surface"]
+    "tests": [
+      "tests/ee/sites/test_site_media_tool.py::test_the_tool_is_actually_reachable_on_the_sites_surface"
+    ]
+  },
+  {
+    "label": "design-taste teaches stock but drops the generation rung",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/pocketpaw-design-taste/SKILL.md",
+    "find": "then `generate_site_image` for what stock cannot supply",
+    "replace": "then nothing further",
+    "tests": [
+      "tests/ee/sites/test_site_media_tool.py::test_every_place_that_teaches_the_stock_rung_also_teaches_generation"
+    ]
+  },
+  {
+    "label": "the /sites preamble drops the generation rung",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "mcp__pocketpaw_site_media__generate_site_image",
+    "replace": "mcp__pocketpaw_stock__search_stock_images",
+    "tests": [
+      "tests/ee/sites/test_site_media_tool.py::test_every_place_that_teaches_the_stock_rung_also_teaches_generation"
+    ]
   }
 ]

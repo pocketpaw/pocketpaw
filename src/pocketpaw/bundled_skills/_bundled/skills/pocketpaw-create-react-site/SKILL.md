@@ -207,9 +207,16 @@ ship a photo-free wireframe when the page calls for imagery.
    build — no upload step.
 3. **Always set `alt`** from the returned `alt`, and **render the `credit`**
    line near the image or in the footer. The providers' terms require it.
-4. If it returns an **empty list**, fall back to a tasteful gradient/solid
+4. **For what stock cannot supply, GENERATE it** — call
+   **`mcp__pocketpaw_site_media__generate_site_image`** with the `pocket_id` and
+   a concrete visual `prompt` (subject, composition, lighting, mood): a bespoke
+   hero, a product or concept shot, a brand texture. It **costs money per
+   image** — deliberate use only, never for photography stock already covers.
+   Returns a permanent public `url`; embed it verbatim. On an error, relay it
+   and drop to the fallback below.
+5. If it returns an **empty list**, fall back to a tasteful gradient/solid
    treatment rather than a broken `<img>`. Never fabricate a photo URL.
-5. Set `width`/`height` (or `aspect-ratio`) on every image so the page does not
+6. Set `width`/`height` (or `aspect-ratio`) on every image so the page does not
    jump as assets load.
 
 **Video and other media are allowed.** If the brief's asset manifest carries a

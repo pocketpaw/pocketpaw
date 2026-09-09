@@ -256,7 +256,17 @@ free stock photos:
 3. **Always set `alt`** from the returned `alt`, and **render the `credit`**
    line somewhere near the image or in the footer (e.g. a small muted
    "Photos by … on Unsplash" line). This is required by the providers' terms.
-4. If `search_stock_images` returns an **empty list** (no provider key
+4. **For what stock cannot supply, GENERATE it** — call
+   **`generate_site_image`** (MCP tool
+   `mcp__pocketpaw_site_media__generate_site_image`) with the `pocket_id` and a
+   concrete visual `prompt`: subject, composition, lighting, mood. This is the
+   rung for a bespoke hero, a product or concept shot, an abstract brand
+   texture — the things a stock library does not hold. It **costs money per
+   image**, so reach for it deliberately and never for ordinary photography
+   stock already covers. It returns a permanent public `url` — embed it
+   verbatim, exactly like an owner asset. On an error, relay the reason and drop
+   to the fallback below; never invent a URL.
+5. If `search_stock_images` returns an **empty list** (no provider key
    configured, or no match), fall back gracefully to the copy-and-color
    treatment — a tasteful gradient/solid hero — rather than a broken `<img>`.
    Never fabricate a photo URL.
