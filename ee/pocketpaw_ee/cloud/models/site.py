@@ -529,6 +529,48 @@ class Site(TimestampedDocument):
     # canonical doc per (workspace, pocket_id) active and sets this True on the
     # rest (never deletes). The gallery read filters it so each pocket shows once.
     archived: bool = False
+    # ── The delete cascade's own lifecycle (sites lifecycle wave 1) ────────
+    # Deliberately SEPARATE from build_* and provision_*, for the same reason those
+    # two are separate from each other: a site is provisioned once, rebuilt many
+    # times, and deleted exactly once, so collapsing them would let one overwrite
+    # another's status and make a delete look like a failed build.
+    #
+    # ``delete_status`` — none | queued | exporting | tearing_down | failed.
+    # There is NO terminal success value, because success deletes this row. A reader
+    # that finds no Site has found a completed delete; a reader that finds one of
+    # these has found an unfinished one.
+    delete_status: str = "none"
+    # When the CURRENT delete attempt entered queued (UTC). Same bounded
+    # single-flight reasoning as ``build_started_at`` and ``provision_started_at``,
+    # and the same asymmetry: a row with no stamp reads as STALE, because a
+    # redundant re-enqueue costs one idempotent pass over a ledger that skips
+    # finished steps, while a stuck guard makes a site undeletable forever.
+    delete_started_at: datetime | None = None
+    # PERSISTED, like ``build_job_id`` and unlike the transient provision one. A
+    # delete is exactly the case where the user reloads the page — it is the longest
+    # irreversible thing the product does — and on reload a transient id is gone.
+    delete_job_id: str | None = None
+    # ── THE LEDGER: what makes a partial teardown resumable ────────────────
+    # Step name -> outcome, written as each step completes. A re-entered job SKIPS
+    # every step already recorded here, which is what turns a resume into a skip
+    # rather than a retry — and several of these steps are not safely repeatable in
+    # spirit even where they are idempotent in fact (cancelling a subscription
+    # twice, re-charging a purge over a bucket).
+    #
+    # THIS IS WHY THE SITE DOCUMENT IS DELETED LAST. The ledger lives on the very
+    # row the cascade is destroying, so deleting the row first would make every
+    # later failure both unresumable and invisible. The ordering is a consequence of
+    # where this field lives, not a convention someone has to remember.
+    delete_ledger: dict[str, str] = Field(default_factory=dict)
+    # The SiteExport document holding the customer's data, captured before anything
+    # was destroyed. Its own row outlives this one — see cloud/models/site_export.py
+    # for why it is not stored the other way round.
+    delete_export_id: str = ""
+    # WHY the delete reached ``failed``, as ``"<step>:<cause>"`` — the SAME two-part
+    # shape ``build_reason`` uses, reused verbatim rather than re-minted so a
+    # consumer parses once and can always split on the colon to group by step. A
+    # failure with no reason is not a smaller error, it is an unactionable one.
+    delete_reason: str | None = None
     # SE-2b: the builder origin this site was published with, or "" when it was
     # published as a normal (non-editable) site. When set, the generated page
     # carries the gated edit-bridge keyed on this origin. Persisted so a
