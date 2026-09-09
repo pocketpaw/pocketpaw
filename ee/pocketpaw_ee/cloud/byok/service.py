@@ -19,6 +19,18 @@
 # x-api-key forward, claude model set) is Anthropic-only today, and accepting
 # another provider's key would mint accounts whose every turn dead-ends.
 #
+# Updated 2026-09-09 (feat/byok-custom-gateway): ``openai_compatible`` joins
+# ``anthropic`` in ``SUPPORTED_PROVIDERS``. All three things the old comment
+# said had to widen together did widen: ``validate_key`` now calls the
+# gateway's own ``/chat/completions`` instead of Anthropic, the override
+# builder points the runtime's ``openai_compatible`` provider at the gateway
+# instead of forwarding an ``x-api-key`` through LiteLLM, and
+# ``provider_allows_model`` stops second-guessing model names it cannot know.
+#
+# A gateway turn therefore does NOT go through the LiteLLM proxy: the runtime
+# talks to the user's base URL directly. That is the price of accepting any
+# base URL, and it costs the proxy's spend log and guardrails for those turns.
+#
 # Created 2026-08-28 (feat/other-hand-byok).
 #
 # Two audiences, deliberately separated:
@@ -60,10 +72,11 @@ _VALIDATE_TIMEOUT_S = 15.0
 _VALIDATE_MODEL = "claude-haiku-4-5-20251001"
 
 # The providers this deployment can actually spend a key against, end to end.
-# v1 is Anthropic-only: ``validate_key`` calls Anthropic, the LiteLLM forward
-# targets Anthropic upstreams, and the model set is claude-*. Widening this set
-# means widening ALL THREE, not just this constant.
-SUPPORTED_PROVIDERS = frozenset({"anthropic"})
+# Each entry needs all three of: a ``validate_key`` branch that proves the
+# credential, a ``build_settings_override`` branch that points the runtime at
+# it, and a ``provider_allows_model`` rule. Adding a name here without those is
+# how you mint accounts whose every turn dead-ends.
+SUPPORTED_PROVIDERS = frozenset({"anthropic", "openai_compatible"})
 
 
 @dataclass(frozen=True)
@@ -87,6 +100,10 @@ class TurnCredentials:
     source: Literal["platform", "byok"]
     api_key: str | None = None
     provider: str = "anthropic"
+    #: Only set for ``provider="openai_compatible"`` — where the key spends,
+    #: and which model id that gateway knows it by.
+    base_url: str | None = None
+    model: str | None = None
 
 
 async def get_status(workspace_id: str) -> ByokStatus:
@@ -97,6 +114,8 @@ async def get_status(workspace_id: str) -> ByokStatus:
     return ByokStatus(
         configured=bool(doc.encrypted_key),
         provider=doc.provider,
+        base_url=doc.base_url,
+        model=doc.model,
         last4=doc.last4,
         key_hint=doc.key_hint,
         last_verified_at=doc.last_verified_at,
@@ -108,12 +127,28 @@ async def get_status(workspace_id: str) -> ByokStatus:
     )
 
 
-async def validate_key(api_key: str) -> None:
+async def validate_key(
+    api_key: str,
+    *,
+    provider: str = "anthropic",
+    base_url: str | None = None,
+    model: str | None = None,
+) -> None:
     """Prove the key works, or raise ValidationError naming why.
 
     Network trouble is NOT a bad key: a timeout raises the transport error so
     the caller can decide, rather than telling the user their good key is bad.
+
+    A gateway (``provider="openai_compatible"``) is checked against its own
+    ``/chat/completions`` with the model the user gave, because that pair is
+    what a turn will actually use. Checking only the key would let a wrong
+    model id through to fail on the first turn, which is the failure mode this
+    whole function exists to move earlier.
     """
+    if provider == "openai_compatible":
+        await _validate_gateway_key(api_key, base_url or "", model or "")
+        return
+
     payload = {
         "model": _VALIDATE_MODEL,
         "max_tokens": 1,
@@ -147,11 +182,83 @@ async def validate_key(api_key: str) -> None:
     # was accepted and the request was understood. That is what we are testing.
 
 
+async def _validate_gateway_key(api_key: str, base_url: str, model: str) -> None:
+    """Same proof, against an OpenAI-compatible gateway the user named.
+
+    The URL has already passed ``validate_external_url_strict`` at the DTO
+    edge (https, no internal hosts). It is re-checked here because this
+    function is also reachable from ``set_key``, and a guard that only runs on
+    one of two paths is not a guard.
+    """
+    from pocketpaw.security.url_validators import validate_external_url_strict
+
+    try:
+        base = validate_external_url_strict(base_url.strip().rstrip("/"))
+    except ValueError as exc:
+        raise ValidationError("byok.base_url_rejected", str(exc)) from exc
+
+    payload = {
+        "model": model,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    headers = {
+        "authorization": f"Bearer {api_key}",
+        "content-type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=_VALIDATE_TIMEOUT_S) as client:
+        resp = await client.post(f"{base}/chat/completions", json=payload, headers=headers)
+
+    if resp.status_code == 401:
+        # Measured against api.experientiallabs.ai on 2026-09-09: a base URL
+        # missing its version path answers 401, not 404, because auth runs
+        # before routing. So the honest 404 hint below never fires for the
+        # single most likely mistake, and it has to be said here instead.
+        if not base.rstrip("/").rpartition("//")[2].partition("/")[2]:
+            raise ValidationError(
+                "byok.base_url_rejected",
+                f"{base} rejected the key, and it has no path — most gateways "
+                "serve this at /v1. Try adding it before re-checking the key.",
+            )
+        raise ValidationError(
+            "byok.key_rejected",
+            "That gateway rejected the key. Check you copied the whole key, and "
+            "that it has not been revoked.",
+        )
+    if resp.status_code == 403:
+        # A gateway commonly answers 403 for a model the key may not use, or a
+        # model id in the wrong shape. Saying "bad key" here sends the user to
+        # re-copy a key that was fine.
+        raise ValidationError(
+            "byok.key_rejected",
+            f"The gateway refused '{model}' with that key. Check the model id is "
+            "one your gateway serves and that your key is allowed to use it.",
+        )
+    if resp.status_code == 404:
+        raise ValidationError(
+            "byok.base_url_rejected",
+            f"Nothing answered at {base}/chat/completions. The base URL usually "
+            "needs to end in /v1.",
+        )
+    if resp.status_code == 429:
+        raise ValidationError(
+            "byok.key_rate_limited",
+            "That key is rate-limited right now, so we could not verify it. Try again in a minute.",
+        )
+    if resp.status_code >= 500:
+        raise ValidationError(
+            "byok.provider_unavailable",
+            "The gateway did not respond. Your key was not saved — try again shortly.",
+        )
+
+
 async def set_key(
     workspace_id: str,
     api_key: str,
     *,
     provider: str = "anthropic",
+    base_url: str | None = None,
+    model: str | None = None,
     user_id: str | None = None,
     validate: bool = True,
 ) -> ByokStatus:
@@ -172,19 +279,30 @@ async def set_key(
         )
 
     if validate:
-        await validate_key(api_key)
+        await validate_key(api_key, provider=provider, base_url=base_url, model=model)
+
+    # An anthropic row never carries a gateway address. Writing one through
+    # would leave a stale URL behind after a switch back, and the resolver
+    # reads both columns.
+    if provider != "openai_compatible":
+        base_url = None
+        model = None
 
     doc = await ByokProviderKey.find_one(ByokProviderKey.workspace == workspace_id)
     if doc is None:
         doc = ByokProviderKey(
             workspace=workspace_id,
             provider=provider,
+            base_url=base_url,
+            model=model,
             encrypted_key=crypto.encrypt(api_key),
             last4=api_key[-4:],
             key_hint=_hint(api_key),
         )
     else:
         doc.provider = provider
+        doc.base_url = base_url
+        doc.model = model
         doc.encrypted_key = crypto.encrypt(api_key)
         doc.last4 = api_key[-4:]
         doc.key_hint = _hint(api_key)
@@ -295,7 +413,13 @@ async def resolve_turn_credentials(workspace_id: str | None) -> TurnCredentials:
 
     if not plaintext:
         return TurnCredentials(source="platform")
-    return TurnCredentials(source="byok", api_key=plaintext, provider=doc.provider)
+    return TurnCredentials(
+        source="byok",
+        api_key=plaintext,
+        provider=doc.provider,
+        base_url=doc.base_url,
+        model=doc.model,
+    )
 
 
 # ── The illustration credential (fal.ai) ────────────────────────────────────
@@ -445,15 +569,23 @@ def provider_allows_model(provider: str, model: str | None) -> bool:
     being broken. Sentinel names ("default" etc.) always pass: the backend's
     own default is provider-correct by construction.
 
-    Anything but ``anthropic`` returns False for every real model name — the
-    pipeline cannot serve another provider end to end today (see
-    ``SUPPORTED_PROVIDERS``), and a loud mismatch beats a silent dead turn.
+    ``openai_compatible`` always passes, and deliberately: a gateway's model
+    ids are its own namespace, so there is no name shape we could check
+    against. The gateway's own refusal is the only honest judge, and the turn
+    is pinned to the stored model anyway (see ``build_settings_override``), so
+    the model asked for here is not the one that runs.
+
+    Any other provider returns False for every real model name — the pipeline
+    cannot serve it end to end (see ``SUPPORTED_PROVIDERS``), and a loud
+    mismatch beats a silent dead turn.
     """
     m = (model or "").strip().lower()
     if m in _MODEL_SENTINELS:
         return True
     if provider == "anthropic":
         return m.startswith("claude") or m.startswith("anthropic/")
+    if provider == "openai_compatible":
+        return True
     return False
 
 
@@ -493,7 +625,31 @@ def build_settings_override(creds: TurnCredentials) -> dict[str, object]:
 
     Returns an EMPTY dict for platform credentials, so the caller can pass it
     unconditionally and get today's behaviour when no key is configured.
+
+    A GATEWAY key (``provider="openai_compatible"``, 2026-09-09) takes the
+    other road. There is no LiteLLM model group pointing at a URL one guest
+    typed, so forwarding a header would send the turn to whatever LiteLLM was
+    already configured for and bill the wrong account. Instead the override
+    points the runtime's own ``openai_compatible`` provider straight at the
+    gateway. Both ``pydantic_ai_provider`` and ``pydantic_ai_model`` are
+    pinned: the provider setting alone leaves ``pydantic_ai_model`` naming
+    whatever the agent was configured with, and that name wins over
+    ``openai_compatible_model`` in ``_parse_provider_model``.
+
+    The cost, stated plainly: a gateway turn does not pass through the LiteLLM
+    proxy, so it produces no spend-log row and skips the proxy's guardrails.
+    The isolation requirement is unchanged and matters just as much — these
+    settings are as tenant-specific as the key.
     """
     if creds.source != "byok" or not creds.api_key:
         return {}
+    if creds.provider == "openai_compatible":
+        return {
+            "pydantic_ai_provider": "openai_compatible",
+            "pydantic_ai_model": creds.model or "",
+            "llm_provider": "openai_compatible",
+            "openai_compatible_base_url": creds.base_url or "",
+            "openai_compatible_api_key": creds.api_key,
+            "openai_compatible_model": creds.model or "",
+        }
     return {"byok_provider_api_key": creds.api_key}

@@ -70,6 +70,11 @@ class TestStatusNeverCarriesTheKey:
         allowed = {
             "configured",
             "provider",
+            # A gateway's address and model id (2026-09-09). Both are public by
+            # construction and neither needs a decrypt to read, which is the
+            # bar this allow-list exists to make people clear.
+            "base_url",
+            "model",
             "last4",
             "key_hint",
             "last_verified_at",
@@ -446,3 +451,146 @@ class TestImageKeyResolution:
 
         monkeypatch.setattr(byok, "ByokProviderKey", _Exploding)
         assert await byok.resolve_image_key(None) is None
+
+# ── Custom OpenAI-compatible gateway (2026-09-09, feat/byok-custom-gateway) ──
+#
+# A gateway key is a stranger's URL that our server then makes requests to, so
+# the tests that matter are the two that stop it being an SSRF, plus the one
+# that proves a gateway turn is actually pointed at the gateway rather than
+# quietly running on the platform's own credentials.
+
+_GATEWAY_KEY = "xpl_" + "a" * 40
+_GATEWAY_URL = "https://api.experientiallabs.ai/v1"
+
+
+class TestGatewayRequestValidation:
+    """The DTO edge is where a bad gateway shape must die."""
+
+    def test_accepts_a_gateway_key_with_a_url_and_a_model(self):
+        req = ByokSetRequest(
+            provider="openai_compatible",
+            api_key=_GATEWAY_KEY,
+            base_url=_GATEWAY_URL,
+            model="claude-opus-5",
+        )
+        assert req.base_url == _GATEWAY_URL
+        assert req.model == "claude-opus-5"
+
+    def test_a_gateway_key_needs_no_anthropic_prefix(self):
+        # The whole point: a gateway mints its own key format.
+        req = ByokSetRequest(
+            provider="openai_compatible",
+            api_key=_GATEWAY_KEY,
+            base_url=_GATEWAY_URL,
+            model="gpt-5.5",
+        )
+        assert req.api_key == _GATEWAY_KEY
+
+    def test_rejects_a_gateway_key_with_no_base_url(self):
+        with pytest.raises(ValueError, match="base_url"):
+            ByokSetRequest(
+                provider="openai_compatible", api_key=_GATEWAY_KEY, model="claude-opus-5"
+            )
+
+    def test_rejects_a_gateway_key_with_no_model(self):
+        with pytest.raises(ValueError, match="model"):
+            ByokSetRequest(
+                provider="openai_compatible", api_key=_GATEWAY_KEY, base_url=_GATEWAY_URL
+            )
+
+    def test_rejects_an_anthropic_key_carrying_a_base_url(self):
+        # A URL that would be silently ignored is worse than a refusal: the
+        # user believes they configured a gateway and every turn goes elsewhere.
+        with pytest.raises(ValueError, match="openai_compatible"):
+            ByokSetRequest(api_key=_REAL_KEY, base_url=_GATEWAY_URL)
+
+    def test_rejects_an_unknown_provider(self):
+        with pytest.raises(ValueError, match="provider must be"):
+            ByokSetRequest(provider="cohere", api_key=_GATEWAY_KEY)
+
+
+class TestGatewayUrlIsAnSsrfBoundary:
+    """The base URL is typed input from a signed-out stranger, and the server
+    dials it. Every one of these is a real target somebody would try."""
+
+    def _with_url(self, url: str):
+        return ByokSetRequest(
+            provider="openai_compatible",
+            api_key=_GATEWAY_KEY,
+            base_url=url,
+            model="claude-opus-5",
+        )
+
+    def test_rejects_the_cloud_metadata_address(self):
+        # 169.254.169.254 hands out instance credentials on most clouds.
+        with pytest.raises(ValueError):
+            self._with_url("https://169.254.169.254/v1")
+
+    def test_rejects_loopback(self):
+        with pytest.raises(ValueError):
+            self._with_url("https://127.0.0.1:8000/v1")
+
+    def test_rejects_a_private_network_address(self):
+        with pytest.raises(ValueError):
+            self._with_url("https://10.0.0.5/v1")
+
+    def test_rejects_plain_http(self):
+        # A key in a header over http is a key on the wire.
+        with pytest.raises(ValueError):
+            self._with_url("http://api.experientiallabs.ai/v1")
+
+    def test_strips_a_trailing_slash_so_the_path_join_is_predictable(self):
+        assert self._with_url(_GATEWAY_URL + "/").base_url == _GATEWAY_URL
+
+
+class TestGatewayTurnIsPointedAtTheGateway:
+    """The override IS the feature. If it is empty or partial the turn runs on
+    platform credentials and the user's key is never spent — a billing
+    surprise for us, and silence for them."""
+
+    def _creds(self):
+        return byok.TurnCredentials(
+            source="byok",
+            api_key=_GATEWAY_KEY,
+            provider="openai_compatible",
+            base_url=_GATEWAY_URL,
+            model="claude-opus-5",
+        )
+
+    def test_the_override_carries_url_key_and_model(self):
+        o = byok.build_settings_override(self._creds())
+        assert o["openai_compatible_base_url"] == _GATEWAY_URL
+        assert o["openai_compatible_api_key"] == _GATEWAY_KEY
+        assert o["openai_compatible_model"] == "claude-opus-5"
+
+    def test_the_override_pins_the_provider_and_the_model(self):
+        # pydantic_ai reads pydantic_ai_model FIRST; leaving it alone lets the
+        # agent's configured claude-* name win and the gateway 404s on a model
+        # it never heard of.
+        o = byok.build_settings_override(self._creds())
+        assert o["pydantic_ai_provider"] == "openai_compatible"
+        assert o["pydantic_ai_model"] == "claude-opus-5"
+
+    def test_a_gateway_turn_does_not_forward_an_x_api_key(self):
+        # That header is the LiteLLM path. Sending both would let the proxy
+        # bill the user for a call that never reached their gateway.
+        assert "byok_provider_api_key" not in byok.build_settings_override(self._creds())
+
+    def test_an_anthropic_turn_is_unchanged(self):
+        creds = byok.TurnCredentials(source="byok", api_key=_REAL_KEY, provider="anthropic")
+        assert byok.build_settings_override(creds) == {"byok_provider_api_key": _REAL_KEY}
+
+    def test_the_settings_the_override_names_all_exist(self):
+        # A typo'd key in the override dict is silently dropped by
+        # create_isolated_backend, and the turn runs on platform credentials.
+        from pocketpaw.config import Settings
+
+        for field in byok.build_settings_override(self._creds()):
+            assert field in Settings.model_fields, field
+
+    def test_a_gateway_model_is_never_second_guessed(self):
+        # A gateway's ids are its own namespace; refusing "gpt-5.5" because it
+        # is not claude-* would dead-end every non-Anthropic gateway.
+        assert byok.provider_allows_model("openai_compatible", "gpt-5.5")
+        assert byok.provider_allows_model("openai_compatible", "claude-opus-5")
+        assert not byok.provider_allows_model("cohere", "command-r")

@@ -1740,6 +1740,13 @@ async def _drive_agent_loop(
                 )
                 return
             run_kwargs["byok_api_key"] = byok_creds.api_key
+            # What to substitute, when the answer is more than one key. A
+            # gateway key also carries the address and the model id; the pool
+            # falls back to the key alone when this is empty, so anthropic keys
+            # take exactly the path they took before (2026-09-09).
+            override = byok_service.build_settings_override(byok_creds)
+            if override:
+                run_kwargs["byok_settings_override"] = override
         else:
             from pocketpaw_ee.cloud.auth import guest_budget
 

@@ -1,23 +1,56 @@
 [
   {
-    "label": "credential fingerprint ignores the key — two BYOK tenants share one cached agent",
+    "label": "credential fingerprint ignores the key \u2014 two BYOK tenants share one cached agent",
     "file": "src/pocketpaw/agents/pydantic_ai.py",
     "find": "        if raw == \"|\":\n            return \"none\"\n        return hashlib.sha256(raw.encode()).hexdigest()[:16]",
     "replace": "        return \"none\"",
-    "tests": ["tests/cloud/byok/test_byok_service.py::TestNoCredentialBleedBetweenTenants"]
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestNoCredentialBleedBetweenTenants"
+    ]
   },
   {
-    "label": "x-api-key attached unconditionally — a platform run carries a stale BYOK header",
+    "label": "x-api-key attached unconditionally \u2014 a platform run carries a stale BYOK header",
     "file": "src/pocketpaw/agents/pydantic_ai.py",
     "find": "headers = {\"x-api-key\": byok_key} if byok_key else None",
     "replace": "headers = {\"x-api-key\": byok_key}",
-    "tests": ["tests/cloud/byok/test_byok_service.py::TestTheHeaderThatCarriesTheKey"]
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestTheHeaderThatCarriesTheKey"
+    ]
   },
   {
-    "label": "undecryptable stored key raises instead of degrading — every turn fails after a key rotation",
+    "label": "undecryptable stored key raises instead of degrading \u2014 every turn fails after a key rotation",
     "file": "ee/pocketpaw_ee/cloud/byok/service.py",
     "find": "        return TurnCredentials(source=\"platform\")\n\n    if not plaintext:",
     "replace": "        raise\n\n    if not plaintext:",
-    "tests": ["tests/cloud/byok/test_byok_service.py::TestEncryptionEnvelope"]
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestEncryptionEnvelope"
+    ]
+  },
+  {
+    "label": "gateway base_url skips the SSRF guard \u2014 a stranger points our server at cloud metadata",
+    "file": "ee/pocketpaw_ee/cloud/byok/dto.py",
+    "find": "        return validate_external_url_strict(v)",
+    "replace": "        return v",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestGatewayUrlIsAnSsrfBoundary"
+    ]
+  },
+  {
+    "label": "gateway override drops the model pin \u2014 the agent's claude-* name wins and every gateway turn 404s",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "            \"pydantic_ai_model\": creds.model or \"\",",
+    "replace": "",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestGatewayTurnIsPointedAtTheGateway"
+    ]
+  },
+  {
+    "label": "gateway shape check dropped \u2014 a key with no base_url is stored and every turn dead-ends",
+    "file": "ee/pocketpaw_ee/cloud/byok/dto.py",
+    "find": "            if not self.base_url:\n                raise ValueError(\"a gateway key needs a base_url, e.g. https://host/v1\")",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestGatewayRequestValidation"
+    ]
   }
 ]
