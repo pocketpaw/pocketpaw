@@ -1,4 +1,14 @@
 # ee/pocketpaw_ee/sites/public_assets.py — the PUBLIC asset rail for Paw Sites.
+#
+# Updated 2026-09-08 (sites lifecycle, wave 1 chunk 1): added ``purge`` — delete every
+# asset under one site's prefix, for the delete cascade — and ``can_list``. A site's
+# assets outlive the record that lists them: once the Site document is gone nothing can
+# enumerate what it left on a world-readable bucket, and these objects are served from
+# bucket origin with an immutable year-long cache, so an orphan is public forever.
+# ``can_list`` exists because ``StorageAdapter.browse`` DEFAULTS to returning ``[]``
+# rather than raising, which makes an adapter that cannot list look identical to a site
+# with no assets — harmless in ``list``, and in ``purge`` the difference between a
+# completed teardown and a merely reported one.
 # Created 2026-08-31 (feat/sites-public-asset-uploads).
 #
 # WHY THIS EXISTS. A site we publish is read by anonymous visitors, so an image it
@@ -302,6 +312,62 @@ class PublicAssetStore:
             # arbitrary-object delete against the whole bucket, across tenants.
             raise PublicAssetError("That asset does not belong to this site.")
         await self._adapter.delete(key)
+
+    def can_list(self) -> bool:
+        """Whether the underlying adapter actually implements prefix listing.
+
+        ``StorageAdapter.browse`` DEFAULTS TO RETURNING ``[]`` — it is a base-class
+        no-op that adapters override, not an abstract method that fails loudly. So an
+        adapter without listing is indistinguishable, from the outside, from a site
+        that has no assets. That ambiguity is harmless in :meth:`list`, which is
+        rendering a panel, and dangerous in :meth:`purge`, which reports what it
+        destroyed: an unlistable adapter would purge nothing, return zero, and the
+        caller would record a completed teardown over a bucket still holding every
+        asset. Checking the override is the only way to tell the two apart, so the
+        distinction lives here rather than in each caller's head."""
+        impl = getattr(type(self._adapter), "browse", None)
+        # Three cases, and only one of them can list: no ``browse`` at all (a
+        # duck-typed adapter), the base class no-op, or a real override.
+        return impl is not None and impl is not StorageAdapter.browse
+
+    async def purge(self, *, workspace_id: str, pocket_id: str) -> int:
+        """Delete EVERY asset under one site's prefix. Returns the number removed.
+
+        The teardown counterpart of :meth:`put`, and the reason it exists separately
+        from :meth:`delete` is that a site's assets outlive the record that lists
+        them: deleting a site removes the Site document, after which nothing can
+        enumerate what it left on a world-readable bucket. Those objects are served
+        with an immutable year-long cache from the bucket origin with no backend hop,
+        so an orphan here is public forever.
+
+        RAISES rather than returning 0 when the adapter cannot list. A silent zero is
+        the specific failure this method must not have — see :meth:`can_list`.
+
+        Deliberately does NOT reuse :meth:`list`. That method skips any item whose
+        ``public_url`` is falsy, which is correct when rendering a panel of openable
+        assets and wrong here: an object we cannot build a URL for is exactly one a
+        purge still has to remove. It also drops the per-key prefix guard, which stays
+        enforced because every key is rebuilt from ``prefix`` rather than taken from
+        the listing.
+
+        Idempotent: a prefix that is already empty returns 0 without erroring, so a
+        resumed teardown can re-run this step safely."""
+        if not self.can_list():
+            raise PublicAssetError(
+                "This deployment's storage adapter cannot list objects, so a site's "
+                "assets cannot be enumerated or removed. Purging would report success "
+                "over a bucket it never touched."
+            )
+        prefix = prefix_for(workspace_id, pocket_id)
+        removed = 0
+        for item in await self._adapter.browse(prefix):
+            if item.is_dir:
+                continue
+            # Rebuilt from the trusted prefix, never taken from the listing, so this
+            # cannot walk outside the site even if the adapter returns odd names.
+            await self._adapter.delete(f"{prefix}{item.name}")
+            removed += 1
+        return removed
 
 
 _MEDIA_EXT: dict[str, str] = {

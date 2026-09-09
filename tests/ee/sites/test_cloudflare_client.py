@@ -696,3 +696,102 @@ async def test_analytics_sql_fails_closed_on_a_2xx_with_no_data_array():
         with pytest.raises(ValidationError) as exc:
             await client.query_analytics_sql("SELECT 1")
         assert exc.value.code == "sites.cloudflare_error", body
+
+
+# ── Teardown primitives (sites lifecycle, wave 1 chunk 1) ────────────────
+#
+# These assert the two things a teardown call can get wrong in a way nothing else
+# notices: the PATH (a delete aimed at the wrong surface silently removes nothing and
+# reports success) and the 404 CONTRACT (a resumed cascade re-runs completed steps, so
+# "already gone" must not raise). The house rule for every delete here is that 404 is
+# success — a teardown that cannot finish leaves exactly the orphan it was called to
+# remove.
+
+
+@pytest.mark.asyncio
+async def test_delete_worker_targets_the_dispatch_namespace_script():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    await _client(handler).delete_worker("site_abc")
+    assert seen["method"] == "DELETE"
+    assert seen["path"] == (
+        "/client/v4/accounts/acct_1/workers/dispatch/namespaces/paw-sites/scripts/site_abc"
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_account_script_targets_the_account_level_path():
+    """The ``workers`` deploy mode's script does NOT live in the dispatch namespace.
+
+    Sending this delete to the namespace path would 404 — and because 404 is success,
+    the cascade would record a completed teardown over a Worker still serving.
+    """
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    await _client(handler).delete_account_script("site_abc")
+    assert seen["path"] == "/client/v4/accounts/acct_1/workers/scripts/site_abc"
+
+
+@pytest.mark.asyncio
+async def test_delete_database_targets_the_d1_uuid():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    await _client(handler).delete_database("db-uuid-1")
+    assert seen["method"] == "DELETE"
+    assert seen["path"] == "/client/v4/accounts/acct_1/d1/database/db-uuid-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.delete_worker("gone"),
+        lambda c: c.delete_account_script("gone"),
+        lambda c: c.delete_database("gone"),
+    ],
+)
+async def test_a_404_is_success_for_every_teardown_delete(call):
+    """A resumed cascade re-runs steps it already finished. If "already gone" raised,
+    a partial teardown could never be completed — the exact orphan these exist to stop.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"success": False, "errors": [{"message": "nope"}]})
+
+    await call(_client(handler))  # must not raise
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.delete_worker("x"),
+        lambda c: c.delete_account_script("x"),
+        lambda c: c.delete_database("x"),
+    ],
+)
+async def test_a_real_failure_still_raises(call):
+    """404 is the ONLY forgiven status. A 500 means the resource may still exist, and
+    swallowing it would mark the step done while the orphan survives."""
+
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"success": False, "errors": [{"message": "boom"}]})
+
+    with pytest.raises(ValidationError):
+        await call(_client(handler))
