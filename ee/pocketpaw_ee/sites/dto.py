@@ -222,7 +222,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class PublishRequest(BaseModel):
@@ -436,6 +436,34 @@ class SiteResponse(BaseModel):
     # not be read, or the icon was over the cap; the card falls back to the globe,
     # which is exactly the pre-existing card, so this is never a gate on anything.
     favicon_url: str | None = None
+
+
+class SiteExportResponse(BaseModel):
+    """One export of a site's data — the copy its owner keeps after a delete.
+
+    ``status`` is the field to read first and the only one the delete cascade acts
+    on: it treats ONLY ``ready`` as satisfying its precondition, so a ``failed``
+    export blocks the destroy rather than letting it proceed over data nobody kept.
+    ``size_bytes`` and the counts come from the export itself, not from a re-read of
+    a database that is about to be deleted.
+    """
+
+    id: str
+    site_id: str
+    pocket_id: str = ""
+    site_name: str = ""
+    # pending | ready | failed. An unrecognised value must be treated as NOT ready.
+    status: str = "pending"
+    # A sentence we wrote, never a raw driver or Cloudflare error — every site
+    # reader in the workspace can see it.
+    error: str = ""
+    size_bytes: int = 0
+    table_counts: dict[str, int] = Field(default_factory=dict)
+    lead_count: int = 0
+    created_at: str | None = None
+    # When the sweeper will purge these bytes. Surfaced so the UI can say how long
+    # the owner has to download it rather than implying it is kept forever.
+    expires_at: str | None = None
 
 
 class SitePreviewRefreshResponse(BaseModel):

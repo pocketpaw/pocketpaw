@@ -246,6 +246,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
+from fastapi.responses import StreamingResponse
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
@@ -276,6 +277,7 @@ from pocketpaw_ee.sites.dto import (
     SiteDataRowsResponse,
     SiteDataTablesResponse,
     SiteEntitlementsResponse,
+    SiteExportResponse,
     SiteInvoiceCreate,
     SitePlanRequestBody,
     SitePlanRequestResponse,
@@ -975,6 +977,73 @@ async def domain_status(
 ) -> DomainStatusResponse:
     return await sites_service.domain_status(
         workspace_id=ctx.workspace_id, site_id=site_id, hostname=hostname
+    )
+
+
+# ── Site data exports ────────────────────────────────────────────────────
+#
+# Declared BEFORE the "/sites/{site_id}/..." reads below so a literal "exports"
+# segment can never be captured as a site id by a future route of that shape.
+#
+# The download is a STREAM, not a URL. Sites has no durable public address worth
+# using for this — presigns expire, and the public asset rail is world-readable
+# with an immutable year-long cache, which is right for a hero image and wrong for
+# someone's booking records. So the bytes are re-authorised on every request
+# instead: the storage key never leaves the backend and possession of a link grants
+# nothing. Same shape as the workspace audit export.
+
+
+@router.post("/sites/{site_id}/export", response_model=SiteExportResponse)
+async def create_site_export(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteExportResponse:
+    """Capture this site's data (its D1 tables and captured leads) for download.
+
+    This is the precondition the delete cascade is gated on, so it either produces a
+    bundle we can vouch for or FAILS — a dynamic site whose live data cannot be read
+    is an error here, never an export reporting zero rows. The row is written before
+    the build, so a crash leaves a visible failed export rather than nothing.
+    """
+    return await sites_service.create_site_export(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, site_id=site_id
+    )
+
+
+@router.get("/sites/exports", response_model=list[SiteExportResponse])
+async def list_site_exports(
+    site_id: str = Query(default=""),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> list[SiteExportResponse]:
+    """This workspace's data exports, newest first; optionally one site's.
+
+    Exports OUTLIVE the sites they came from — that is the point of them — so this
+    lists rows whose ``site_id`` may no longer resolve to anything.
+    """
+    return await sites_service.list_site_exports(workspace_id=ctx.workspace_id, site_id=site_id)
+
+
+@router.get("/sites/exports/{export_id}/download")
+async def download_site_export(
+    export_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> StreamingResponse:
+    """Stream one READY export as a file attachment.
+
+    A pending or failed export is a 400, never an empty download — zero bytes here
+    would read as a site that had no data, which is the one thing this whole path
+    exists to never say.
+    """
+    filename, chunks = await sites_service.open_site_export(
+        workspace_id=ctx.workspace_id, export_id=export_id
+    )
+    return StreamingResponse(
+        chunks,
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="' + filename + '"'},
     )
 
 

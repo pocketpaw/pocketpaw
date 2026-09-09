@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -43,6 +44,54 @@ _SAFE_TABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Rows per D1 round trip. D1 caps response size, so a site with thousands of rows
 # has to be walked rather than asked for at once.
 _PAGE = 500
+
+
+# Where an export's bytes live. Tenant-scoped so two workspaces can never collide on
+# a key, and deliberately on the PRIVATE adapter: the public asset rail is
+# world-readable with an immutable year-long cache, which is right for a hero image
+# and catastrophic for a customer's booking records. Nothing hands this key out — the
+# download endpoint re-checks the workspace on every request, so the key is not a
+# bearer token and a leaked one grants nothing.
+_KEY_PREFIX = "site-exports"
+
+# How long we keep a customer's data after they asked us to destroy their site. This
+# is the only reason keeping it is defensible at all, so it is bounded rather than
+# indefinite. Overridable for a deployment with a different retention policy.
+_DEFAULT_RETENTION_DAYS = 30
+
+
+def retention_days() -> int:
+    """Days an export is kept before the sweeper purges it."""
+    raw = (os.environ.get("POCKETPAW_SITE_EXPORT_RETENTION_DAYS") or "").strip()
+    try:
+        days = int(raw) if raw else _DEFAULT_RETENTION_DAYS
+    except ValueError:
+        return _DEFAULT_RETENTION_DAYS
+    # A zero or negative window would delete the export before anyone could download
+    # it, which is worse than no export at all — it satisfies the cascade's gate and
+    # then destroys the copy. Refuse to honour it.
+    return days if days > 0 else _DEFAULT_RETENTION_DAYS
+
+
+def export_key(workspace_id: str, export_id: str) -> str:
+    """The private storage key holding one export's bytes."""
+    return f"{_KEY_PREFIX}/{workspace_id}/{export_id}.json"
+
+
+def export_filename(site_name: str, site_id: str) -> str:
+    """A download name a human can recognise months later."""
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", site_name or "").strip("-.") or f"site-{site_id}"
+    return f"{stem[:60]}-export.json"
+
+
+async def store_export(*, adapter: Any, key: str, payload: bytes) -> int:
+    """Write the bundle to private storage and return its size in bytes."""
+
+    async def _body():
+        yield payload
+
+    await adapter.put(key, _body(), "application/json")
+    return len(payload)
 
 
 class ExportUnavailable(Exception):
