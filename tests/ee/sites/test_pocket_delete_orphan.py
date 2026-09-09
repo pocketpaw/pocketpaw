@@ -87,9 +87,7 @@ async def test_a_pocket_with_no_site_still_deletes(wired, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_site_lookup_is_scoped_to_the_pockets_own_workspace(
-    wired, monkeypatch
-) -> None:
+async def test_the_site_lookup_is_scoped_to_the_pockets_own_workspace(wired, monkeypatch) -> None:
     """A cross-tenant lookup would let one workspace's site block another's delete —
     and, worse, leak that the site exists."""
     pockets_service, sites_service, pocket, _ = wired
