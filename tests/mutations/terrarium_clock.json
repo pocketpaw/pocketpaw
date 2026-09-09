@@ -376,5 +376,32 @@
     "tests": [
       "tests/ee/terrarium/test_design.py"
     ]
+  },
+  {
+    "label": "weather always lands at the centre of the map",
+    "file": "ee/pocketpaw_ee/terrarium/weather.py",
+    "find": "    return Place(float(x), float(y), RADIUS[kind], label or region(x, y))",
+    "replace": "    return Place(MAP_W / 2, MAP_H / 2, RADIUS[kind], label or region(x, y))",
+    "tests": [
+      "tests/ee/terrarium/test_weather.py"
+    ]
+  },
+  {
+    "label": "the body says south when the cell is in the north third",
+    "file": "ee/pocketpaw_ee/terrarium/weather.py",
+    "find": "    if y < MAP_H / 3:\n        return \"the north field\"",
+    "replace": "    if y < MAP_H / 3:\n        return \"the south field\"",
+    "tests": [
+      "tests/ee/terrarium/test_weather.py"
+    ]
+  },
+  {
+    "label": "a storm's radius is halved",
+    "file": "ee/pocketpaw_ee/terrarium/weather.py",
+    "find": "\"storm\": 28.0,",
+    "replace": "\"storm\": 14.0,",
+    "tests": [
+      "tests/ee/terrarium/test_weather.py"
+    ]
   }
 ]
