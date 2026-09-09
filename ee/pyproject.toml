@@ -312,6 +312,7 @@ meetings = "pocketpaw_ee.extensions:CloudMeetingsMcpProvider"
 sites = "pocketpaw_ee.extensions:CloudSitesMcpProvider"
 media = "pocketpaw_ee.extensions:CloudMediaMcpProvider"
 timeline = "pocketpaw_ee.extensions:CloudTimelineMcpProvider"
+site_media = "pocketpaw_ee.extensions:CloudSiteMediaMcpProvider"
 other_hand = "pocketpaw_ee.extensions:CloudOtherHandMcpProvider"
 
 browser = "pocketpaw_ee.extensions:CloudBrowserMcpProvider"

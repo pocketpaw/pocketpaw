@@ -502,6 +502,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
         from pocketpaw_ee.agent.mcp_servers.media import MEDIA_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.palette import PALETTE_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.ship import SHIP_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.site_media import SITE_MEDIA_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.stock_images import STOCK_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.timeline import TIMELINE_TOOL_IDS
@@ -512,11 +513,19 @@ def _load_mcp_tool_ids() -> _McpToolIds:
         # servers, but the per-surface allow-list is a hard
         # whitelist (claude_sdk `allow_mcp_tool_ids`), so an id absent here is
         # FILTERED OUT on /sites — the tool would be silently unreachable. Named
-        # here so authoring can actually call them. MEDIA (image/video gen) stays
-        # scoped to /studio, not added here (site imagery leans on stock first).
+        # here so authoring can actually call them.
+        #
+        # MEDIA (``MEDIA_TOOL_IDS``) still does NOT belong here, and adding it would
+        # not work anyway: media.py sinks to the PRIVATE adapter and returns a
+        # backend-relative /api/v1/media/<name>, which resolves against the PUBLISHED
+        # site's own domain and 404s. SITE_MEDIA is the sibling with the right sink
+        # (sites.public_assets — absolute, unsigned, tenant-scoped, immutable) and no
+        # chat-canvas gallery pocket. Stock stays FIRST in the sourcing ladder because
+        # it is free and instant; generation is for what stock cannot supply.
         sites_allow = (
             frozenset(SITES_TOOL_IDS)
             | frozenset(STOCK_TOOL_IDS)
+            | frozenset(SITE_MEDIA_TOOL_IDS)
             | frozenset(ICON_TOOL_IDS)
             | frozenset(PALETTE_TOOL_IDS)
             # ask_user: interactive question chips. Needed most on svelte-create
