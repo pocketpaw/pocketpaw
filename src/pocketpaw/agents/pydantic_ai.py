@@ -660,6 +660,28 @@ _TENANT_SAFE_TOOLS = frozenset(
 # that removed shell access would run with the full tool set and report success.
 
 
+def _user_prompt(message: str, images: tuple[tuple[bytes, str], ...]) -> Any:
+    """The turn's user prompt: a bare string, or parts when images ride along.
+
+    Returning the STRING when there is nothing to attach is the contract every
+    other surface depends on — a parts list of one text element is not what
+    those runs have been sending, and this file has been bitten before by a
+    change that was "equivalent" on paper.
+
+    An image whose bytes are empty is dropped rather than sent: some providers
+    answer a zero-byte part with an opaque 400, which reads as the model being
+    broken rather than the attachment being empty.
+    """
+    usable = [(data, media_type) for data, media_type in images if data]
+    if not usable:
+        return message
+    from pydantic_ai import BinaryContent
+
+    parts: list[Any] = [message]
+    parts.extend(BinaryContent(data=data, media_type=media_type) for data, media_type in usable)
+    return parts
+
+
 def _normalize_tool_id(tool_id: str) -> str:
     """``mcp__srv__do_thing`` -> ``srv_do_thing``. Other spellings pass through."""
     if tool_id.startswith("mcp__"):
@@ -2276,6 +2298,22 @@ class PydanticAIBackend:
         # ``AgentPool.run`` forwards it only when non-empty, so an empty set
         # means "no per-entity narrowing" and every bundled skill is offered.
         skill_names: frozenset[str] = frozenset(),
+        # Images the caller wants THIS turn to look at, already read into
+        # memory: (bytes, media_type) pairs. Same withhold-when-empty contract
+        # as the kwargs below, so a turn that sends none takes the byte-
+        # identical string path every other surface has always taken.
+        #
+        # Bytes rather than paths, deliberately. The caller is the cloud, which
+        # is the layer that knows a tenant's jail and can prove a path sits
+        # inside it; this backend is OSS and reads no path it was handed. It
+        # also cannot import the cloud to ask.
+        #
+        # pydantic-ai has taken image input for a long time — ``user_prompt``
+        # is ``str | Sequence[UserContent]``. What was missing was anything
+        # here ever passing one, so on the Otherhand surface the page image
+        # never reached the model and the agent fell back to an OCR tool call
+        # that flattens a drawing to bad text.
+        images: tuple[tuple[bytes, str], ...] = (),
         # -- per-surface tool gating (see ``_gate_mcp_toolsets``) ------------
         # These ride the same withhold-when-empty contract, which is why their
         # absence was invisible: the pool forwards them ONLY when a surface
@@ -2481,7 +2519,16 @@ class PydanticAIBackend:
             # a run's accounting cannot live on it.
             kwargs["usage"] = run_usage
 
-            async with agent.run_stream_events(message, **kwargs) as stream:
+            # The user prompt is a plain string unless this turn carries
+            # images, in which case it becomes the parts list pydantic-ai wants.
+            # The images ride the PROMPT, never ``message_history``: history is
+            # replayed from stored text, so an attached page would either be
+            # dropped on the next turn or, worse, serialized into the store.
+            # A fresh snapshot every turn is also the right semantics — the
+            # agent should see the page as it is now, not as it was.
+            prompt = _user_prompt(message, images)
+
+            async with agent.run_stream_events(prompt, **kwargs) as stream:
                 async for event in stream:
                     if handle.stopped:
                         break

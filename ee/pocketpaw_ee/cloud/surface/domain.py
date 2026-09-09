@@ -360,6 +360,15 @@ class SurfacePreamble:
 
     text: str
     cache_key: str | None
+    #: Absolute paths of images this preamble talks about, in the order the
+    #: text mentions them. The chat path reads them and attaches them to the
+    #: turn, so a model that can see gets the picture instead of a path.
+    #:
+    #: The handler owns this because the handler is what knows which files
+    #: carry meaning; nothing downstream can tell a page snapshot from a
+    #: temporary file. Empty for every surface that has no images, which is
+    #: all of them but Otherhand today.
+    images: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.cache_key == "":
@@ -401,6 +410,11 @@ class SurfaceContext:
     meta: SurfaceMeta
     preamble: str
     preamble_cache_key: str | None = None
+    #: Absolute image paths the handler declared (see ``SurfacePreamble``).
+    #: The chat path reads these and attaches them to the turn. Paths, not
+    #: bytes: this object is built per request and may be cached or logged,
+    #: and a page PNG has no business in either.
+    preamble_images: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

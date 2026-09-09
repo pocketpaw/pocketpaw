@@ -3423,3 +3423,79 @@ def test_a_colon_in_a_model_name_is_still_allowed():
 
     assert [e for e in events if e.type == "error"] == []
     assert specs == ["minimax/minimax-m3:free"]
+
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+
+
+def test_a_turn_with_no_images_sends_a_plain_string():
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    assert _user_prompt("draw me a cat", ()) == "draw me a cat"
+
+
+def test_a_turn_with_an_image_sends_the_text_and_the_picture():
+    from pydantic_ai import BinaryContent
+
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    prompt = _user_prompt("what did I write?", ((_PNG, "image/png"),))
+    assert isinstance(prompt, list)
+    assert prompt[0] == "what did I write?"
+    assert isinstance(prompt[1], BinaryContent)
+    assert prompt[1].data == _PNG
+    assert prompt[1].media_type == "image/png"
+
+
+def test_every_image_rides_the_same_turn():
+    # Book mode shows three pictures. Dropping the tail would leave the agent
+    # reading about a source page it was never shown.
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    prompt = _user_prompt("x", ((_PNG, "image/png"), (_PNG, "image/jpeg")))
+    assert len(prompt) == 3
+    assert [p.media_type for p in prompt[1:]] == ["image/png", "image/jpeg"]
+
+
+def test_an_empty_image_is_dropped_rather_than_sent():
+    # Some providers answer a zero-byte part with an opaque 400, which reads as
+    # the model being broken rather than the attachment being empty.
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    assert _user_prompt("x", ((b"", "image/png"),)) == "x"
+
+
+def test_the_backend_accepts_the_images_kwarg_the_pool_forwards():
+    import inspect
+
+    from pocketpaw.agents.pool import AgentPool
+    from pocketpaw.agents.pydantic_ai import PydanticAIBackend
+
+    assert "images" in inspect.signature(AgentPool.run).parameters
+    assert "images" in inspect.signature(PydanticAIBackend.run).parameters
+
+
+def test_the_seven_backends_that_cannot_take_images_are_never_handed_one():
+    """The forward is gated on the SIGNATURE, not on truthiness alone.
+
+    Seven backends take a narrower ``run`` with no ``**kwargs``, and the surface
+    that sends images sends them on EVERY turn. An unconditional forward would
+    not be a rare edge — it would be every Otherhand turn on a self-hosted
+    install (whose default backend is the Claude SDK) ending in ``TypeError:
+    run() got an unexpected keyword argument 'images'``. This file already
+    records that exact failure with a different kwarg and a different surface.
+    """
+    import inspect
+
+    from pocketpaw.agents.backend import _accepts_images_kwarg
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+    from pocketpaw.agents.pydantic_ai import PydanticAIBackend
+
+    assert _accepts_images_kwarg(PydanticAIBackend.run)
+    # The one that would break: the OSS/self-hosted default.
+    assert not _accepts_images_kwarg(ClaudeSDKBackend.run)
+    assert "images" not in inspect.signature(ClaudeSDKBackend.run).parameters
+    assert not any(
+        p.kind is inspect.Parameter.VAR_KEYWORD
+        for p in inspect.signature(ClaudeSDKBackend.run).parameters.values()
+    ), "no **kwargs to absorb it, which is why the gate has to exist"

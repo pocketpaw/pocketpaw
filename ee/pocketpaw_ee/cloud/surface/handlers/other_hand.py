@@ -7,13 +7,22 @@
 # The preamble's whole job is to hand over two facts the agent cannot obtain any
 # other way, and both arrive on ``SurfaceMeta``:
 #
-#   * ``snapshot_path`` — where the page image is. The agent cannot SEE the page
-#     otherwise: attachments on this pipeline are text-extracted (an image upload
-#     yields an empty stub), and the SDK is invoked with a plain ``prompt: str``,
-#     so there are no content blocks and no vision call. What there IS is
-#     ``Read``, which is in the agent's default SDK tool set and reads images
-#     natively. So the page is written to disk by the snapshot endpoint and the
-#     agent reads it off disk. That is the entire vision path.
+#   * ``snapshot_path`` — where the page image is, and now also WHICH image the
+#     turn carries. The preamble declares it on ``SurfacePreamble.images``; the
+#     chat path reads the file and attaches it to the turn, so a model that can
+#     see gets the picture (2026-09-09, feat/other-hand-vision).
+#
+#     Until then this was Claude-SDK-only by accident. That backend takes a
+#     plain ``prompt: str`` with no content blocks, so the vision path was the
+#     ``Read`` tool in its default set reading the PNG off disk — and the cloud
+#     does not run that backend. Its default is ``pydantic_ai``, which withholds
+#     file tools from tenants, so the only route left was the ``ocr`` tool: a
+#     separate vision call to another provider, on the platform's key, that
+#     flattens a drawing to bad text. The agent was answering about a
+#     transcript of a page it had never seen.
+#
+#     The path is still named in the text, because the SDK backend cannot take
+#     an attachment and reads it off disk exactly as before.
 #   * ``free_y`` — the y below which the page is empty. The one rule that makes
 #     the surface usable rather than destructive: the agent must never write over
 #     the user's own ink. The frontend re-checks this with a placement guard, so
@@ -153,9 +162,9 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
                     )
                 if mark_image_path:
                     parts.append(
-                        "A high-resolution image of just that region is at: "
-                        f"{mark_image_path}\n"
-                        "Read it when the passage is a figure, an equation, a "
+                        "A high-resolution image of just that region is "
+                        f"attached, and on disk at: {mark_image_path}\n"
+                        "Use it when the passage is a figure, an equation, a "
                         "table, or a scan — anything the text above does not "
                         "capture.\n"
                     )
@@ -168,8 +177,9 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
                 # agent should describe what it actually sees rather than
                 # calling a photograph a book page.
                 f"The user has a SOURCE open beside the notebook — a document "
-                f"page or an image — at: {book_path}\n"
-                "Read it too. It is READ-ONLY.\n"
+                f"page or an image. It is attached, and on disk at: "
+                f"{book_path}\n"
+                "Look at it too. It is READ-ONLY.\n"
                 "Everything drawn in RED on that page is the READER'S mark, "
                 "not part of the document: a loop means 'this passage', a line "
                 "under text means 'this line', a line through text means 'I do "
@@ -199,9 +209,11 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
                 f'<surface kind="other_hand" route="{route}" />\n'
                 "You are writing on the user's notebook page with them. "
                 "This is not a chat.\n"
-                f"The page image is at: {snapshot_path}\n"
-                "Read it to see what the user has written and drawn. The image "
-                "is EXACTLY the 1240x1754 coordinate space: a thing at pixel "
+                "The page image is attached to this message, and on disk at: "
+                f"{snapshot_path}\n"
+                "Look at it to see what the user has written and drawn — read "
+                "it off that path if you cannot see attachments. The image is "
+                "EXACTLY the 1240x1754 coordinate space: a thing at pixel "
                 "(x,y) in it is at coordinate (x,y) on the page.\n"
                 f"{book_block}"
                 f"The page below y={free_y} is empty. "
@@ -233,6 +245,11 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
                 mode or "teach",
                 hashlib.md5(scene.encode()).hexdigest()[:8] if scene else "no-scene",
             ),
+            # What the text above says is attached, in the order it says it.
+            # The chat path reads these and puts them on the turn; a path it
+            # cannot read is dropped there, and the sentence naming the path
+            # still stands for a backend that reads files itself.
+            images=tuple(p for p in (snapshot_path, book_path, mark_image_path) if p),
         )
     except Exception:
         # No upstream to fail, so this catch is for the unforeseen only. The

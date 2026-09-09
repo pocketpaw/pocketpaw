@@ -367,6 +367,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from pocketpaw.agents.backend import (  # type: ignore[import-untyped]
@@ -1487,6 +1488,77 @@ async def _model_is_unknown_to_gateway(model_id: str) -> bool:
     return not any(entry.id == model_id for entry in entries)
 
 
+#: How much of one turn's attachments we are willing to put on the wire. A page
+#: snapshot is tens of kilobytes; a high-resolution mark crop can be much more,
+#: and every byte is billed to whoever is paying for the turn.
+_MAX_TURN_IMAGE_BYTES = 6 * 1024 * 1024
+_MAX_TURN_IMAGES = 3
+_IMAGE_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
+def _read_turn_images(ctx: ScopeContext) -> tuple[tuple[bytes, str], ...]:
+    """Read the images the surface handler declared, for THIS turn.
+
+    Reading happens here, in the cloud, and not in the agent backend, for one
+    reason: this is the layer that knows which directory belongs to the tenant
+    asking. The paths come back from the client, which echoes what the snapshot
+    endpoint returned — so they are not secret, and a hostile client can name
+    any string it likes. Every path is therefore resolved and confirmed to sit
+    inside THIS workspace's jail before a byte is read. The OSS backend then
+    receives bytes it cannot use to reach anything.
+
+    Never raises. A missing file, an unreadable one, an oversized one, or one
+    outside the jail is skipped with a warning: the preamble still names the
+    path, so a backend that reads files itself is unaffected, and a turn that
+    loses its picture is far better than a turn that fails.
+    """
+    surface = ctx.surface_context
+    paths = getattr(surface, "preamble_images", ()) if surface else ()
+    if not paths:
+        return ()
+    from pocketpaw_ee.cloud.agent_jail import workspace_jail_root
+
+    try:
+        jail = (workspace_jail_root() / str(ctx.workspace_id)).resolve()
+    except Exception:
+        logger.warning("could not resolve the workspace jail; sending no images this turn")
+        return ()
+
+    out: list[tuple[bytes, str]] = []
+    budget = _MAX_TURN_IMAGE_BYTES
+    for raw in paths[:_MAX_TURN_IMAGES]:
+        try:
+            path = Path(raw).resolve()
+        except Exception:
+            logger.warning("surface image path could not be resolved; skipping it")
+            continue
+        if not path.is_relative_to(jail):
+            # The one case worth a loud line: a path pointing outside the
+            # tenant's own scratch dir is either a bug or an attempt.
+            logger.warning("surface image path is outside the workspace jail; refusing to read it")
+            continue
+        media_type = _IMAGE_MEDIA_TYPES.get(path.suffix.lower())
+        if media_type is None:
+            logger.warning("surface image %s is not an image type we send; skipping", path.suffix)
+            continue
+        try:
+            size = path.stat().st_size
+            if size == 0 or size > budget:
+                logger.warning("surface image is empty or over the turn budget; skipping it")
+                continue
+            out.append((path.read_bytes(), media_type))
+            budget -= size
+        except OSError:
+            logger.warning("surface image could not be read; skipping it", exc_info=True)
+    return tuple(out)
+
+
 async def _drive_agent_loop(
     ctx: ScopeContext,
     *,
@@ -1788,6 +1860,14 @@ async def _drive_agent_loop(
         # older one) produces a byte-identical run.
         if ctx.tools_enabled is False:
             run_kwargs["tools_enabled"] = False
+        # --- Images this turn should LOOK at (feat/other-hand-vision) ----------
+        # The surface handler said which files its preamble is talking about;
+        # read them here, where the tenant's jail is known, and hand the pool
+        # bytes. Withhold-when-empty, so every surface that declares none takes
+        # the identical string path it always has.
+        turn_images = _read_turn_images(ctx)
+        if turn_images:
+            run_kwargs["images"] = turn_images
         # --- BYOK per-turn credentials (feat/byok-guest-backend, 2026-09-01) ----
         # Resolve whose credential pays for THIS turn — the call the byok
         # service's own header always said the turn path makes, wired at last.

@@ -148,6 +148,22 @@ def _accepts_prompt_digest_kwarg(func: Any) -> bool:
         return False
 
 
+def _accepts_images_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``images`` in its signature?
+
+    The same question ``_accepts_prompt_digest_kwarg`` asks, for the per-turn
+    picture attachments (2026-09-09, feat/other-hand-vision). It has to be
+    asked, not assumed: seven of the eight backends take a narrower signature
+    with no ``**kwargs``, and the surface that sends images sends them on EVERY
+    turn — so an unconditional forward would not be a rare edge, it would be
+    every Otherhand turn on a self-hosted install dying in a TypeError.
+    """
+    try:
+        return "images" in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
 def _accepts_tools_enabled_kwarg(func: Any) -> bool:
     """Does ``func`` name ``tools_enabled`` in its signature?
 
