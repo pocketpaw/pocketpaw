@@ -390,6 +390,19 @@ are now the same object the parser consults, so the three cannot drift.
 ``deep_agents`` has the identical split and is deliberately NOT touched here.
 The claim in ``_parse_provider_model`` that the two mirror each other no longer
 holds, and fixing it there is its own change.
+
+Updated 2026-09-10 (feat/pydantic-ai-model-override) — **the per-send model was
+accepted and thrown away.** ``run`` declared ``model_override`` with a
+``noqa: ARG002`` and a comment saying only the Claude SDK backend consumed it.
+The cloud's default backend is this one, so a model picker in the composer was
+a dead control: the user chose a model, the turn ran on the configured one, and
+nothing said so. ``model_override`` is now the spec ``_build_model`` parses. A
+bare name keeps the configured provider, which is what makes it safe on a BYOK
+gateway — ``build_settings_override`` pins ``pydantic_ai_model`` to the STORED
+gateway model, and the per-send choice beats that name while the gateway's base
+URL and key stay put. It also rides the agent cache key and the per-run model
+settings: the cache is ONE slot, so a key that still read the setting would
+hand turn two the agent built for turn one, model and output cap included.
 """
 
 from __future__ import annotations
@@ -1021,7 +1034,7 @@ class PydanticAIBackend:
             provider = "litellm"
         return provider, model_str
 
-    def _resolve_max_output_tokens(self) -> int | None:
+    def _resolve_max_output_tokens(self, model_spec: str | None = None) -> int | None:
         """The ``max_tokens`` this run should send, or None to send none.
 
         Resolved from the SAME ``_parse_provider_model`` output that built the
@@ -1032,13 +1045,13 @@ class PydanticAIBackend:
         try:
             from pocketpaw.agents.model_limits import resolve_max_output_tokens
 
-            provider, model = self._parse_provider_model()
+            provider, model = self._parse_provider_model(model_spec)
             return resolve_max_output_tokens(provider, model, self.settings)
         except Exception:  # noqa: BLE001 — a token cap must never break a run
             logger.debug("Could not resolve a max output token cap", exc_info=True)
             return None
 
-    def _run_model_settings(self) -> Any:
+    def _run_model_settings(self, model_spec: str | None = None) -> Any:
         """The ``model_settings`` for THIS run, or None to send none.
 
         Two per-run values live here, both of which the cached agent must not
@@ -1058,14 +1071,14 @@ class PydanticAIBackend:
         """
         settings: dict[str, Any] = {}
 
-        max_output = self._resolve_max_output_tokens()
+        max_output = self._resolve_max_output_tokens(model_spec)
         if max_output:
             settings["max_tokens"] = max_output
 
         # The provider is re-parsed rather than threaded down because
         # ``_resolve_max_output_tokens`` already parses it the same way; the two
         # cannot disagree about which model this run resolved.
-        provider, _model = self._parse_provider_model()
+        provider, _model = self._parse_provider_model(model_spec)
         end_user = end_user_id_for(provider)
         if end_user:
             settings["openai_user"] = end_user
@@ -2032,6 +2045,7 @@ class PydanticAIBackend:
         allow_mcp_tool_ids: frozenset[str] | None = None,
         exclusive_mcp_tools: bool = False,
         system_prompt_digest: str = "",
+        model_spec: str | None = None,
         tools_enabled: bool = True,
     ) -> Any:
         """Build (and cache) the pydantic-ai ``Agent``.
@@ -2072,7 +2086,11 @@ class PydanticAIBackend:
         tools = list(self._build_custom_tools()) if tools_enabled else []
 
         agent_key = (
-            self.settings.pydantic_ai_model,
+            # The spec that BUILT ``model``, not the configured default: a
+            # per-send ``model_override`` builds a different model object, and a
+            # key that still read the setting would serve the cached agent —
+            # holding the previous model — to a turn that asked for another one.
+            model_spec or self.settings.pydantic_ai_model,
             is_pocket_session,
             len(mcp_toolsets),
             self._tools_version,
@@ -2288,13 +2306,16 @@ class PydanticAIBackend:
         #                         SDK built-ins on this backend, so there is
         #                         nothing to grant; ignoring it removes tools,
         #                         never adds them.
-        #   ``model_override``    per-send model choice, consumed only by the
-        #                         Claude SDK backend (as on the other six).
         #   ``session_handle`` /  native CLI-session resume and warm-client
         #   ``warm_client`` /     reuse — this backend has no subprocess to
         #   ``on_client_built``   resume or lease.
         allow_sdk_tools: frozenset[str] = frozenset(),  # noqa: ARG002
-        model_override: str | None = None,  # noqa: ARG002
+        # The per-send model choice. HONOURED here since 2026-09-10: it is the
+        # spec ``_build_model`` parses, so a bare name keeps the configured
+        # provider (and, on a BYOK gateway, its base URL and key) and only the
+        # model changes. It also keys the agent cache — see
+        # ``_get_or_create_agent``.
+        model_override: str | None = None,
         session_handle: Any = None,  # noqa: ARG002
         warm_client: Any = None,  # noqa: ARG002
         on_client_built: Any = None,  # noqa: ARG002
@@ -2370,7 +2391,7 @@ class PydanticAIBackend:
             return self._usage_event_from(run_usage, model_name=getattr(model, "model_name", None))
 
         try:
-            model = self._build_model()
+            model = self._build_model(model_override)
 
             # A gated surface is one where WHICH tools the agent has is part of
             # the contract. The agentapi model cannot be part of that contract —
@@ -2399,6 +2420,7 @@ class PydanticAIBackend:
                 allow_mcp_tool_ids=allow_mcp_tool_ids,
                 exclusive_mcp_tools=exclusive_mcp_tools,
                 system_prompt_digest=system_prompt_digest,
+                model_spec=model_override,
                 tools_enabled=tools_enabled,
             )
 
@@ -2420,7 +2442,7 @@ class PydanticAIBackend:
             # the model and the tenant THIS run resolved. The fast-model path
             # swaps the model but reuses these settings, which is what keeps a
             # run that downshifts mid-flight attributed to the same workspace.
-            run_settings = self._run_model_settings()
+            run_settings = self._run_model_settings(model_override)
             if run_settings:
                 kwargs["model_settings"] = run_settings
 

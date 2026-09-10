@@ -1689,10 +1689,12 @@ async def _drive_agent_loop(
         if surface_skills:
             run_kwargs["skill_names"] = surface_skills
         # CS-13 — per-send model override. Same withhold-when-empty idiom as the
-        # kwargs above: only the Claude SDK backend accepts ``model_override``
-        # (the 7 other backends keep the narrower signature), so it is forwarded
-        # ONLY when the client actually chose a model for this turn. ``None`` =
-        # legacy path, byte-identical to today.
+        # kwargs above: the Claude SDK and pydantic_ai backends accept
+        # ``model_override`` (2026-09-10 — the cloud default is pydantic_ai, so
+        # before that a composer model picker was a dead control there), the
+        # rest keep the narrower signature, so it is forwarded ONLY when the
+        # client actually chose a model for this turn. ``None`` = legacy path,
+        # byte-identical to today.
         if ctx.model_override:
             run_kwargs["model_override"] = ctx.model_override
         # Per-send tool switch. Same withhold-when-empty idiom: only an explicit

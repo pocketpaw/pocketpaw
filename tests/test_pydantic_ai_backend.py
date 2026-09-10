@@ -89,7 +89,7 @@ def _backend_with_model(model, **overrides) -> PydanticAIBackend:
     """
     overrides.setdefault("pydantic_ai_skills_enabled", False)
     backend = PydanticAIBackend(_settings(**overrides))
-    backend._build_model = lambda: model  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: model  # type: ignore[method-assign]
     backend._mcp_tools = []
     backend._custom_tools = []
     return backend
@@ -477,7 +477,7 @@ async def test_missing_sdk_yields_error_not_crash():
 
 
 async def test_model_failure_yields_error_then_done():
-    def boom():
+    def boom(*_a, **_k):
         raise RuntimeError("proxy unreachable")
 
     backend = PydanticAIBackend(_settings())
@@ -610,7 +610,7 @@ async def test_run_handle_is_released_on_completion():
 
 
 async def test_run_handle_is_released_on_error():
-    def boom():
+    def boom(*_a, **_k):
         raise RuntimeError("nope")
 
     backend = PydanticAIBackend(_settings())
@@ -727,7 +727,7 @@ async def test_mcp_servers_spawn_once_across_many_runs(monkeypatch):
     backend = PydanticAIBackend(
         _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
     )
-    backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     backend._custom_tools = []
     _drive_real_mcp(monkeypatch, [server])
 
@@ -759,7 +759,7 @@ async def test_concurrent_first_runs_do_not_double_spawn(monkeypatch):
     backend = PydanticAIBackend(
         _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
     )
-    backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     backend._custom_tools = []
     _drive_real_mcp(monkeypatch, servers)
 
@@ -784,7 +784,7 @@ async def test_mcp_server_that_fails_to_start_is_dropped_not_fatal(monkeypatch):
     backend = PydanticAIBackend(
         _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
     )
-    backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     backend._custom_tools = []
     broken = _Broken()
     _drive_real_mcp(monkeypatch, [broken])
@@ -815,7 +815,7 @@ async def test_one_broken_server_does_not_take_down_a_healthy_one(monkeypatch):
     backend = PydanticAIBackend(
         _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
     )
-    backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     backend._custom_tools = []
     broken = _Broken()
     _drive_real_mcp(monkeypatch, [broken, healthy], n_configs=2)
@@ -875,7 +875,7 @@ async def test_mcp_loading_is_cached_per_instance_not_per_run(monkeypatch):
     backend = PydanticAIBackend(
         _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
     )
-    backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     # Not _backend_with_model: this test needs MCP loading live, so it pins the
     # builtin tool surface itself (TestModel would otherwise execute all 49).
     backend._custom_tools = []
@@ -1975,7 +1975,7 @@ async def _tool_surface(backend: PydanticAIBackend, **run_kwargs) -> set[str]:
         yield "ok"
 
     model = FunctionModel(stream_function=capture)
-    backend._build_model = lambda: model  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: model  # type: ignore[method-assign]
     await _collect(backend, "hi", **run_kwargs)
     return seen
 
@@ -2263,7 +2263,7 @@ async def _draft_turn(backend: PydanticAIBackend, session_key: str | None) -> st
         else:
             yield "Draft ready. Preview it at /sites."
 
-    backend._build_model = lambda: FunctionModel(stream_function=stream_fn)  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: FunctionModel(stream_function=stream_fn)  # type: ignore[method-assign]
     backend._cached_agent = None
     events = await _collect(backend, "Build an HTML bakery site", session_key=session_key)
     return "".join(e.content for e in events if e.type == "message")
@@ -2279,7 +2279,7 @@ async def _what_turn_two_sees(
         seen["messages"] = str(messages)
         yield "ok"
 
-    backend._build_model = lambda: FunctionModel(stream_function=stream_fn)  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: FunctionModel(stream_function=stream_fn)  # type: ignore[method-assign]
     backend._cached_agent = None
     history = [
         {"role": "user", "content": "Build an HTML bakery site"},
@@ -2410,7 +2410,7 @@ async def _deferred_surface(backend: PydanticAIBackend, **run_kwargs) -> set[str
         yield "ok"
 
     model = _local_only(FunctionModel(stream_function=capture))
-    backend._build_model = lambda: model  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: model  # type: ignore[method-assign]
     await _collect(backend, "hi", **run_kwargs)
     return seen
 
@@ -2499,7 +2499,7 @@ async def test_a_denied_tool_cannot_be_discovered_by_searching_for_it():
             revealed.extend(t.name for t in info.function_tools)
             yield "done"
 
-    backend._build_model = lambda: _local_only(FunctionModel(stream_function=script))
+    backend._build_model = lambda *_a, **_k: _local_only(FunctionModel(stream_function=script))
     await _collect(
         backend,
         "make a landing page",
@@ -2539,7 +2539,7 @@ async def test_searching_makes_the_tool_callable_by_its_real_name():
         else:
             yield "done"
 
-    backend._build_model = lambda: _local_only(FunctionModel(stream_function=script))
+    backend._build_model = lambda *_a, **_k: _local_only(FunctionModel(stream_function=script))
     events = await _collect(backend, "build me a website")
     called = [
         (ev.metadata or {}).get("name") for ev in events if ev.type in ("tool_use", "tool_result")
@@ -2639,7 +2639,7 @@ async def test_the_backend_really_runs_our_ranking_not_the_built_in_one():
             revealed.extend(t.name for t in info.function_tools)
             yield "done"
 
-    backend._build_model = lambda: _local_only(FunctionModel(stream_function=script))
+    backend._build_model = lambda *_a, **_k: _local_only(FunctionModel(stream_function=script))
     await _collect(backend, "build me a webpage")
 
     assert "srv_create_html_site" in revealed, (
@@ -3306,3 +3306,77 @@ def test_tools_default_to_on():
     asyncio.run(_collect(backend, "hi", session_key="s1"))
 
     assert built == ["built"]
+
+
+def test_model_override_builds_the_model_it_names():
+    """The override is a model SPEC, so a bare name keeps the configured
+    provider — and on a BYOK gateway that means its base URL and its key are
+    kept while only the model changes. This is the trap the whole feature turns
+    on: ``build_settings_override`` pins ``pydantic_ai_model`` to the STORED
+    gateway model, and the per-send choice has to beat it without taking the
+    endpoint with it."""
+    backend = PydanticAIBackend(
+        _settings(
+            pydantic_ai_provider="openai_compatible",
+            pydantic_ai_model="stored/gpt-5.5",
+            openai_compatible_base_url="https://gateway.example/v1",
+            openai_compatible_api_key="sk-tenant",
+            openai_compatible_model="stored/gpt-5.5",
+        )
+    )
+    picked = backend._build_model("vendor/claude-opus-5")
+
+    assert picked.model_name == "vendor/claude-opus-5"
+    assert "gateway.example" in str(picked.base_url)
+
+
+def test_model_override_reaches_the_model_factory_and_the_agent_key():
+    """Two halves of one bug. Building the right model is not enough: the agent
+    cache holds ONE slot keyed on the configured model name, so a second turn
+    asking for a different model would have been served the first turn's agent
+    — with the first turn's model baked in."""
+    specs: list[str | None] = []
+
+    def _spy(spec=None):
+        specs.append(spec)
+        return TestModel(custom_output_text="ok")
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    backend._build_model = _spy  # type: ignore[method-assign]
+
+    keys: list[tuple] = []
+    real = backend._get_or_create_agent
+
+    def _watch(*args, **kwargs):
+        agent = real(*args, **kwargs)
+        keys.append(backend._cached_agent_key)
+        return agent
+
+    backend._get_or_create_agent = _watch  # type: ignore[method-assign]
+
+    async def _go():
+        await _collect(backend, "hi", session_key="s1", model_override="alpha-1")
+        await _collect(backend, "hi", session_key="s1", model_override="beta-2")
+
+    asyncio.run(_go())
+
+    assert specs == ["alpha-1", "beta-2"]
+    assert keys[0] != keys[1], "the agent cache served one model's agent to the other"
+    assert keys[0][0] == "alpha-1"
+
+
+def test_no_model_override_still_builds_the_configured_model():
+    """The legacy path, byte-identical: no override means no spec, so the
+    factory falls back to ``pydantic_ai_model`` exactly as before."""
+    specs: list[str | None] = []
+
+    def _spy(spec=None):
+        specs.append(spec)
+        return TestModel(custom_output_text="ok")
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    backend._build_model = _spy  # type: ignore[method-assign]
+
+    asyncio.run(_collect(backend, "hi", session_key="s1"))
+
+    assert specs == [None]
