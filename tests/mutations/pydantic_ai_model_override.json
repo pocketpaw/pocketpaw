@@ -1,0 +1,29 @@
+[
+  {
+    "label": "the override is dropped again \u2014 the composer picker silently runs the configured model",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            model = self._build_model(model_override)",
+    "replace": "            model = self._build_model()",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_model_override_reaches_the_model_factory_and_the_agent_key"
+    ]
+  },
+  {
+    "label": "the agent key ignores the spec \u2014 turn two is served turn one's agent, holding turn one's model",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            model_spec or self.settings.pydantic_ai_model,",
+    "replace": "            self.settings.pydantic_ai_model,",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_model_override_reaches_the_model_factory_and_the_agent_key"
+    ]
+  },
+  {
+    "label": "the spec stops reaching the parser \u2014 the override takes the gateway's endpoint with it or loses it",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        provider, model = self._parse_provider_model(model_spec)\n\n        if provider == \"agentapi\":",
+    "replace": "        provider, model = self._parse_provider_model()\n\n        if provider == \"agentapi\":",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_model_override_builds_the_model_it_names"
+    ]
+  }
+]

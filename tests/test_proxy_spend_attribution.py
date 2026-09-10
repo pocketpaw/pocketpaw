@@ -172,7 +172,7 @@ def test_pydantic_ai_keeps_the_output_cap_alongside_the_tenant_id(bound_workspac
     have dropped it on every model without a cap."""
     bound_workspace("ws_alpha")
     backend = PydanticAIBackend(_settings(pydantic_ai_model="litellm:gpt-5.2"))
-    backend._resolve_max_output_tokens = lambda: 4096  # type: ignore[method-assign]
+    backend._resolve_max_output_tokens = lambda *_a, **_k: 4096  # type: ignore[method-assign]
 
     out = dict(backend._run_model_settings() or {})
 
@@ -185,7 +185,7 @@ def test_pydantic_ai_sends_no_settings_at_all_when_neither_applies(bound_workspa
     # ``model_settings`` key on the run rather than an empty dict.
     bound_workspace(None)
     backend = PydanticAIBackend(_settings(pydantic_ai_model="litellm:gpt-5.2"))
-    backend._resolve_max_output_tokens = lambda: None  # type: ignore[method-assign]
+    backend._resolve_max_output_tokens = lambda *_a, **_k: None  # type: ignore[method-assign]
 
     assert backend._run_model_settings() is None
 
