@@ -93,6 +93,17 @@ def _patch_history(monkeypatch) -> list[dict]:
     return recorded
 
 
+def _patch_owner(monkeypatch, owner: str | None = "ws1"):
+    """Stub the pocket-ownership lookup, which is the tool's REAL guard."""
+
+    async def _owner(_pocket_id):
+        return owner
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get_pocket_workspace", _owner, raising=False
+    )
+
+
 # ── Registration and reachability are two different facts ───────────────
 
 
@@ -109,13 +120,72 @@ def test_the_tool_is_actually_reachable_on_the_sites_surface() -> None:
     assert GENERATE_SITE_IMAGE_TOOL_ID in (ids.sites_allow or frozenset())
 
 
-def test_the_tool_is_not_reachable_on_an_unrelated_surface() -> None:
-    """Generation costs money; it belongs to /sites, not to every surface."""
+def test_the_sites_allowlist_is_not_a_boundary() -> None:
+    """States the truth this tool has to be built around, because the previous
+    version of this test asserted the opposite and passed while doing it.
+
+    It read:
+
+        allow = resolve_profile(SurfaceKind.CHAT, SurfaceMeta()).allow_mcp_tool_ids
+        if allow is not None:
+            assert TOOL_ID not in allow
+
+    ``allow_mcp_tool_ids`` is None (= NO restriction) for CHAT, so the guarded
+    assert never ran. A green test, proving nothing, next to a docstring claiming
+    "no other surface's agent can reach it".
+
+    Listing the id under ``sites_allow`` makes the tool reachable where it is
+    WANTED. It does not make it unreachable anywhere else. The ownership check in
+    the handler is the only thing that confines it — see the tests below.
+    """
     from pocketpaw_ee.cloud.surface import SurfaceKind, SurfaceMeta, resolve_profile
 
-    allow = resolve_profile(SurfaceKind.CHAT, SurfaceMeta()).allow_mcp_tool_ids
-    if allow is not None:
-        assert GENERATE_SITE_IMAGE_TOOL_ID not in allow
+    assert resolve_profile(SurfaceKind.CHAT, SurfaceMeta()).allow_mcp_tool_ids is None
+
+
+# ── The real boundary: the pocket has to be the caller's ────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_pocket_owned_by_another_workspace_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Since the allow-list does not confine this tool, a /chat agent can call it.
+    What stops it spending against someone else's site is ownership.
+
+    MUTATION: drop the owner != workspace check.
+    """
+    store = FakeStore()
+    monkeypatch.setattr(site_media, "_identity", lambda: ("ws1", "u1"))
+    _patch_owner(monkeypatch, "someone-elses-ws")
+    monkeypatch.setattr(
+        "pocketpaw_ee.sites.public_assets.public_asset_store", lambda: store, raising=False
+    )
+    _patch_generation(monkeypatch)
+    _patch_history(monkeypatch)
+
+    resp = await _generate_site_image_handler({"pocket_id": "pk1", "prompt": "a hero"})
+
+    assert resp.get("is_error") is True
+    assert store.seen == [], "nothing may be generated or stored for a foreign pocket"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_pocket_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A made-up id must not spend either — the lookup returns None."""
+    store = FakeStore()
+    monkeypatch.setattr(site_media, "_identity", lambda: ("ws1", "u1"))
+    _patch_owner(monkeypatch, None)
+    monkeypatch.setattr(
+        "pocketpaw_ee.sites.public_assets.public_asset_store", lambda: store, raising=False
+    )
+    _patch_generation(monkeypatch)
+    _patch_history(monkeypatch)
+
+    resp = await _generate_site_image_handler({"pocket_id": "nope", "prompt": "a hero"})
+
+    assert resp.get("is_error") is True
+    assert store.seen == []
 
 
 # ── Tenancy: identity comes from the stream, never from the args ────────
@@ -126,6 +196,7 @@ async def test_a_workspace_id_in_the_args_is_ignored(monkeypatch: pytest.MonkeyP
     """THE injection guard: args are model-controlled, ContextVars are not."""
     store = FakeStore()
     monkeypatch.setattr(site_media, "_identity", lambda: ("real-ws", "u1"))
+    _patch_owner(monkeypatch, "real-ws")
     monkeypatch.setattr(
         "pocketpaw_ee.sites.public_assets.public_asset_store", lambda: store, raising=False
     )
@@ -156,6 +227,7 @@ async def test_the_returned_url_is_public_and_absolute(monkeypatch: pytest.Monke
     domain and 404s, so returning one would break every generated image."""
     store = FakeStore()
     monkeypatch.setattr(site_media, "_identity", lambda: ("ws1", "u1"))
+    _patch_owner(monkeypatch, "ws1")
     monkeypatch.setattr(
         "pocketpaw_ee.sites.public_assets.public_asset_store", lambda: store, raising=False
     )
@@ -176,6 +248,7 @@ async def test_an_unconfigured_store_names_the_fallback(monkeypatch: pytest.Monk
     """Fail with a reason the agent can act on, so it uses stock instead of
     retrying or inventing a URL."""
     monkeypatch.setattr(site_media, "_identity", lambda: ("ws1", "u1"))
+    _patch_owner(monkeypatch, "ws1")
     monkeypatch.setattr(
         "pocketpaw_ee.sites.public_assets.public_asset_store", lambda: None, raising=False
     )
@@ -192,6 +265,7 @@ async def test_a_generation_failure_never_returns_a_phantom_asset(
 ) -> None:
     store = FakeStore()
     monkeypatch.setattr(site_media, "_identity", lambda: ("ws1", "u1"))
+    _patch_owner(monkeypatch, "ws1")
     monkeypatch.setattr(
         "pocketpaw_ee.sites.public_assets.public_asset_store", lambda: store, raising=False
     )
@@ -205,6 +279,46 @@ async def test_a_generation_failure_never_returns_a_phantom_asset(
     assert store.seen == [], "nothing should have been stored"
 
 
+@pytest.mark.asyncio
+async def test_a_storage_failure_does_not_discard_the_images_already_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """StorageFailure and the S3 client errors are NOT PublicAssetError. If one
+    escapes the loop it takes the handler with it, so images already generated,
+    billed and stored in this same call are never returned and no history row is
+    written for them.
+
+    MUTATION: narrow the except back to PublicAssetError only.
+    """
+    monkeypatch.setattr(site_media, "_identity", lambda: ("ws1", "u1"))
+    _patch_owner(monkeypatch, "ws1")
+    _patch_generation(monkeypatch)
+    _patch_history(monkeypatch)
+
+    class _FlakyStore(FakeStore):
+        calls = 0
+
+        async def put(self, data, *, filename, workspace_id, pocket_id):  # noqa: ANN001
+            type(self).calls += 1
+            if type(self).calls == 2:  # only the SECOND image blows up
+                raise RuntimeError("bucket unavailable")
+            return await super().put(
+                data, filename=filename, workspace_id=workspace_id, pocket_id=pocket_id
+            )
+
+    store = _FlakyStore()
+    monkeypatch.setattr(
+        "pocketpaw_ee.sites.public_assets.public_asset_store", lambda: store, raising=False
+    )
+
+    resp = await _generate_site_image_handler({"pocket_id": "pk1", "prompt": "a hero", "count": 3})
+    body = _body(resp)
+
+    assert body["ok"] is True
+    assert body["count"] == 2, "the two that stored fine must still come back"
+    assert "bucket unavailable" in body["message"]
+
+
 # ── Provenance: the asset shows up in /studio, tagged ───────────────────
 
 
@@ -216,6 +330,7 @@ async def test_the_generation_is_recorded_against_the_site(
     tell a site agent's output from the user's own."""
     store = FakeStore()
     monkeypatch.setattr(site_media, "_identity", lambda: ("ws1", "u1"))
+    _patch_owner(monkeypatch, "ws1")
     monkeypatch.setattr(
         "pocketpaw_ee.sites.public_assets.public_asset_store", lambda: store, raising=False
     )
@@ -237,6 +352,7 @@ async def test_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each image costs money; an agent asking for 50 gets the ceiling."""
     store = FakeStore()
     monkeypatch.setattr(site_media, "_identity", lambda: ("ws1", "u1"))
+    _patch_owner(monkeypatch, "ws1")
     monkeypatch.setattr(
         "pocketpaw_ee.sites.public_assets.public_asset_store", lambda: store, raising=False
     )
@@ -252,38 +368,41 @@ async def test_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_every_place_that_teaches_the_stock_rung_also_teaches_generation() -> None:
-    """The sourcing ladder is written out in the /sites preamble AND in three
-    bundled skills, and ``_design_system_block`` reads design-taste's SKILL.md at
-    REQUEST TIME — so a skill that stops short at stock silently overrides the
-    preamble for that turn.
+    """The sourcing ladder is written out in several places, and
+    ``_design_system_block`` reads design-taste's SKILL.md at REQUEST TIME — so a
+    file that stops at stock silently overrides the preamble for that turn.
 
-    Checked PER PARAGRAPH, not per file, and that distinction is the whole test:
-    design-taste names the tool twice (the ladder and the pre-flight checklist),
-    so a whole-file `in` check stays green while the LADDER itself quietly loses
-    its last rung. The mutation plan proved exactly that — the first version of
-    this test let it through.
+    DISCOVERED, not enumerated, and that is the point. The first version of this
+    test carried a hand-written list of four files and therefore could not see
+    ``pocketpaw-edit-react-site``, which teaches the ladder and had been missed —
+    while the commit that added it claimed the rung was taught "everywhere the
+    ladder is written". A guard against drift that itself needs manual updating
+    drifts in exactly the way it exists to prevent.
 
-    MUTATION: delete the generate_site_image clause from design-taste's ladder
-    sentence, leaving the checklist mention intact. This must fail.
+    Checked PER PARAGRAPH, because design-taste names the tool twice (ladder and
+    pre-flight checklist) and a whole-file check stays green while the LADDER
+    loses its last rung. A ladder paragraph is one naming stock AND the gradient
+    fallback — matching on stock alone also flags changelog comments and bare
+    tool-reference lists, which owe nothing.
+
+    MUTATION: delete the generate_site_image clause from any ladder paragraph.
     """
     root = pathlib.Path(__file__).resolve().parents[3]
-    skills = root / "src/pocketpaw/bundled_skills/_bundled/skills"
-    teaches_ladder = [
+    candidates = [
         root / "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-        skills / "pocketpaw-create-svelte-site/SKILL.md",
-        skills / "pocketpaw-create-react-site/SKILL.md",
-        skills / "pocketpaw-design-taste/SKILL.md",
+        *(root / "src/pocketpaw/bundled_skills/_bundled/skills").glob("*/SKILL.md"),
     ]
 
     orphaned: list[str] = []
-    for path in teaches_ladder:
+    checked = 0
+    for path in candidates:
         text = path.read_text(encoding="utf-8", errors="replace")
         for block in text.split("\n\n"):
-            # A LADDER paragraph is one that names stock AND the gradient fallback.
-            # Without that second condition this also flags a changelog comment and a
-            # bare tool-reference list, neither of which owes a generation rung.
-            teaches_the_ladder = "search_stock_images" in block and "gradient" in block.lower()
-            if teaches_the_ladder and "generate_site_image" not in block:
-                orphaned.append(f"{path.name}: {block.strip()[:90]}...")
+            if "search_stock_images" not in block or "gradient" not in block.lower():
+                continue
+            checked += 1
+            if "generate_site_image" not in block:
+                orphaned.append(f"{path.parent.name}/{path.name}: {block.strip()[:90]}...")
 
+    assert checked, "found no ladder paragraphs at all — the discovery glob is wrong"
     assert not orphaned, "the ladder ends at stock here:\n" + "\n".join(orphaned)

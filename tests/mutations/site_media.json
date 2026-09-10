@@ -38,8 +38,8 @@
   {
     "label": "remove the per-call image ceiling",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
-    "find": "    count = max(1, min(int(args.get(\"count\") or 1), _MAX_IMAGES_PER_CALL))",
-    "replace": "    count = max(1, int(args.get(\"count\") or 1))",
+    "find": "    count = max(1, min(requested, _MAX_IMAGES_PER_CALL))",
+    "replace": "    count = max(1, requested)",
     "tests": [
       "tests/ee/sites/test_site_media_tool.py::test_count_is_bounded"
     ]
@@ -67,6 +67,42 @@
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
     "find": "mcp__pocketpaw_site_media__generate_site_image",
     "replace": "mcp__pocketpaw_stock__search_stock_images",
+    "tests": [
+      "tests/ee/sites/test_site_media_tool.py::test_every_place_that_teaches_the_stock_rung_also_teaches_generation"
+    ]
+  },
+  {
+    "label": "trust any pocket id (the tool's only real boundary)",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
+    "find": "    if owner != workspace_id:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_media_tool.py::test_a_pocket_owned_by_another_workspace_is_refused"
+    ]
+  },
+  {
+    "label": "treat an unknown pocket as ownable",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
+    "find": "    owner = await pockets_service.get_pocket_workspace(pocket_id)",
+    "replace": "    owner = workspace_id",
+    "tests": [
+      "tests/ee/sites/test_site_media_tool.py::test_an_unknown_pocket_is_refused"
+    ]
+  },
+  {
+    "label": "let a storage failure discard already-paid-for images",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
+    "find": "        except Exception as exc:  # noqa: BLE001",
+    "replace": "        except _NeverRaised as exc:  # noqa: BLE001",
+    "tests": [
+      "tests/ee/sites/test_site_media_tool.py::test_a_storage_failure_does_not_discard_the_images_already_stored"
+    ]
+  },
+  {
+    "label": "edit-react-site teaches stock but drops the generation rung",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/pocketpaw-edit-react-site/SKILL.md",
+    "find": "  `mcp__pocketpaw_site_media__generate_site_image` (pass the `pocket_id` and a",
+    "replace": "  the stock tool again (pass the `pocket_id` and a",
     "tests": [
       "tests/ee/sites/test_site_media_tool.py::test_every_place_that_teaches_the_stock_rung_also_teaches_generation"
     ]

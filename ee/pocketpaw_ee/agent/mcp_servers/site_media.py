@@ -21,7 +21,12 @@
 #   3. TENANCY. ``pocket_id`` comes from the args because the agent chooses which
 #      site it is building, but ``workspace_id`` comes from the per-stream
 #      ContextVars and NEVER from the args — the same rule ``list_site_assets``
-#      follows, so a prompt-injected pocket id cannot reach another tenant.
+#      follows. The handler then checks the pocket actually belongs to that
+#      workspace, because the /sites allow-list does NOT confine this tool:
+#      ``allow_mcp_tool_ids`` is None (= unrestricted) on every surface spec that
+#      sets no profile, so an ambient server is reachable from /chat too. Listing
+#      the id under ``sites_allow`` makes it reachable where it is wanted; it does
+#      not make it unreachable anywhere else. Only the ownership check does that.
 #
 # WHAT IT SHARES WITH STUDIO. The generation itself is ``studio.service``
 # verbatim (same proxy call, same per-tenant virtual key, same spend attribution),
@@ -111,6 +116,18 @@ async def _generate_site_image_handler(args: dict) -> dict:
     if not workspace_id:
         return _error_response("No active workspace — cannot generate site media.")
 
+    # THE ACTUAL GUARD, and it is not the surface allow-list. ``allow_mcp_tool_ids``
+    # defaults to None = NO restriction, and most surface specs set no profile at
+    # all — so an ambient tool is callable from /chat and elsewhere, whatever this
+    # module's allow-list entry suggests. Authorisation has to be intrinsic:
+    # the pocket must belong to the caller's workspace, so a made-up or another
+    # tenant's id cannot be used to spend against someone else's site.
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    owner = await pockets_service.get_pocket_workspace(pocket_id)
+    if owner != workspace_id:
+        return _error_response(f"No site {pocket_id!r} in this workspace — nothing was generated.")
+
     store = public_asset_store()
     if store is None:
         # A deployment fact, not a failure of this call. Say so plainly and name
@@ -121,13 +138,25 @@ async def _generate_site_image_handler(args: dict) -> dict:
             "`mcp__pocketpaw_stock__search_stock_images` instead."
         )
 
-    count = max(1, min(int(args.get("count") or 1), _MAX_IMAGES_PER_CALL))
+    # MCP input schemas are ADVISORY for in-process SDK tools, so a model that
+    # emits {"count": "two"} would otherwise raise ValueError straight out of the
+    # handler instead of the structured error every other path here returns.
+    try:
+        requested = int(args.get("count") or 1)
+    except (TypeError, ValueError):
+        requested = 1
+    count = max(1, min(requested, _MAX_IMAGES_PER_CALL))
     aspect_ratio = str(args.get("aspect_ratio") or "16:9")
     size = service._SIZE_MAP.get(aspect_ratio)
 
     from pocketpaw_ee.agent.mcp_servers.media import _default_image_model
 
-    model = str(args.get("model") or "").strip() or _default_image_model()
+    # NO caller-supplied model, deliberately. ``service.generate`` routes a curated
+    # id (``fal_image.IMAGE_MODEL_IDS``) to fal's own endpoint, while this handler
+    # dispatches through the LiteLLM proxy — so advertising `model` as 'a catalog
+    # id' would hand the agent ids that work on /studio and 400 here. Choosing the
+    # generator belongs with the generation work, not with this integration.
+    model = _default_image_model()
     auth_key = await service._resolve_auth_key(workspace_id)
 
     assets: list[dict[str, Any]] = []
@@ -154,6 +183,14 @@ async def _generate_site_image_handler(args: dict) -> dict:
             )
         except PublicAssetError as exc:
             errors.append(str(exc))
+            continue
+        except Exception as exc:  # noqa: BLE001
+            # A StorageFailure or an S3 client error is not a PublicAssetError. If
+            # one escapes here it takes the whole handler with it, so the images
+            # ALREADY generated, paid for and stored in this loop are never
+            # returned and no history row is written for them.
+            logger.warning("site_media: could not store a generated image", exc_info=True)
+            errors.append(f"could not store the image: {exc}")
             continue
 
         assets.append({"url": asset.url, "mime": asset.mime, "size": asset.size})
@@ -241,7 +278,7 @@ def build_site_media_server() -> tuple[str, Any] | None:
             "`prompt` (required — describe the image in concrete visual terms: "
             "subject, composition, lighting, mood, style), optional `aspect_ratio` "
             "('16:9' default, '1:1', '9:16', '4:3', '3:2'), `count` (1-4, default 1) "
-            "and `model`. Returns {ok, count, assets:[{url, mime, size}], message}. "
+            "Returns {ok, count, assets:[{url, mime, size}], message}. "
             "On failure it returns an error — relay it and fall back to stock or a "
             "gradient. NEVER invent an image URL."
         ),
@@ -270,10 +307,6 @@ def build_site_media_server() -> tuple[str, Any] | None:
                     "minimum": 1,
                     "maximum": _MAX_IMAGES_PER_CALL,
                     "description": "How many images to generate (1-4). Each one costs money.",
-                },
-                "model": {
-                    "type": "string",
-                    "description": "Catalog image-model id (optional; default = deployment model).",
                 },
             },
             "required": ["pocket_id", "prompt"],

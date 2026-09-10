@@ -970,9 +970,11 @@ class CloudSiteMediaMcpProvider:
     and returns an absolute public URL, skips the chat-canvas gallery pocket, and
     records the generation in the /studio history tagged ``source="sites"``.
 
-    Ambient like the media server, and gated where it matters: only the /sites
-    surface allow-lists ``SITE_MEDIA_TOOL_IDS``, so no other surface's agent can
-    reach it.
+    Ambient like the media server. NOTE that the /sites allow-list entry does not
+    confine it: ``allow_mcp_tool_ids`` is None (= unrestricted) on every surface
+    spec that sets no profile, so this is reachable from /chat as well. The tool
+    guards itself instead, by refusing a pocket the caller's workspace does not
+    own. Do not read the allow-list entry as a boundary.
     """
 
     def build_server(self) -> tuple[str, Any] | None:
