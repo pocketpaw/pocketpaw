@@ -23,6 +23,13 @@
 #
 #     The path is still named in the text, because the SDK backend cannot take
 #     an attachment and reads it off disk exactly as before.
+#
+#     The preamble also names the INK CONVENTION (2026-09-10): the user's
+#     strokes are blue and the agent's are dark, so an attached page image
+#     carries whose-hand-wrote-this and the agent is told rather than left
+#     to infer it. The other half is paw-enterprise's USER_INK in
+#     src/lib/core/other-hand/types.ts; the word here is "blue", not a hex,
+#     so a shade tweak cannot drift the prompt.
 #   * ``free_y`` — the y below which the page is empty. The one rule that makes
 #     the surface usable rather than destructive: the agent must never write over
 #     the user's own ink. The frontend re-checks this with a placement guard, so
@@ -215,6 +222,11 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
                 "it off that path if you cannot see attachments. The image is "
                 "EXACTLY the 1240x1754 coordinate space: a thing at pixel "
                 "(x,y) in it is at coordinate (x,y) on the page.\n"
+                "Two hands write on this page and they use different pens: "
+                "YOUR ink is dark, the user's is BLUE. Anything blue is theirs "
+                "— their question, their working, their answer to your last "
+                "check-question. Never read your own earlier writing as "
+                "something they said.\n"
                 f"{book_block}"
                 f"The page below y={free_y} is empty. "
                 f"Put everything you add at y >= {free_y}.\n"
