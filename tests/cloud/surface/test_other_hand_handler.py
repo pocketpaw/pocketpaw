@@ -55,10 +55,9 @@ async def test_preamble_carries_snapshot_path_and_free_y() -> None:
     text = preamble.text
 
     assert '<surface kind="other_hand"' in text
-    # The path, for a backend that reads files itself (the Claude SDK's own
-    # ``Read``). It is no longer the ONLY route: see the attachment tests below.
+    # The path — the agent's only route to seeing the page.
     assert SNAPSHOT in text
-    assert "attached" in text
+    assert "Read it" in text
     # free_y, as the rule the agent must respect.
     assert "y=820" in text
     assert "y >= 820" in text
@@ -69,39 +68,6 @@ async def test_preamble_carries_snapshot_path_and_free_y() -> None:
     # A key was claimed, and it names what the preamble depends on.
     assert preamble.cache_key
     assert "820" in preamble.cache_key
-    # The page is DECLARED as an attachment. This is the whole vision path on
-    # every backend but the Claude SDK: the cloud reads these and puts them on
-    # the turn. Empty here meant the model got a path it could not open and
-    # fell back to an OCR tool that flattens a drawing to bad text.
-    assert preamble.images == (SNAPSHOT,)
-
-
-async def test_preamble_declares_every_image_it_talks_about() -> None:
-    """Book mode shows three pictures. Naming two of them in the text and
-    attaching one is how an agent ends up describing a page it cannot see."""
-    preamble = await handler.build_preamble(
-        WORKSPACE,
-        USER,
-        SurfaceMeta(
-            route_path="/other-hand",
-            snapshot_path=SNAPSHOT,
-            free_y="820",
-            book_path="/jail/book.png",
-            mark_box="10,10,90,90",
-            mark_image_path="/jail/mark.png",
-        ),
-    )
-    # In the order the text mentions them: the notebook, the source, the crop.
-    assert preamble.images == (SNAPSHOT, "/jail/book.png", "/jail/mark.png")
-    for path in preamble.images:
-        assert path in preamble.text
-
-
-async def test_a_preamble_with_no_page_attaches_nothing() -> None:
-    """The no-snapshot fall-back talks about no images, so it must claim none —
-    an empty tuple is what keeps every other surface on the plain string path."""
-    preamble = await handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/other-hand"))
-    assert preamble.images == ()
 
 
 async def test_preamble_key_moves_when_the_page_does() -> None:
@@ -264,7 +230,19 @@ def test_profile_carries_the_page_ops_output_contract() -> None:
     # The reply shape and the free_y rule.
     assert "page-ops" in override
     assert "free_y" in override
-    assert "size: 20" in override
+    # The size ladder, in full. This is half a decision: the other half is
+    # paw-enterprise's TEXT_SIZE_DEFAULT / TEXT_SIZE_MIN and the CHAR_ADVANCE
+    # the per-line counts are derived from. Pinning one rung (this used to
+    # check "size: 20" alone) let the body and heading move without a word.
+    assert "size: 40 (small) | 55 (body, the DEFAULT) | 78 (heading)" in override
+    # The counts the agent budgets its layout from. Wrong counts do not fail
+    # anything at runtime — the text just wraps where the agent did not plan
+    # and the next block lands on top of it.
+    assert "43 characters fit on a size-40 line" in override
+    assert "31 at size 55" in override
+    assert "21 at size 78" in override
+    # The pointer to the other half, so whoever changes a number finds it.
+    assert "other-hand/types.ts" in override
 
 
 def test_profile_keeps_read_available() -> None:
