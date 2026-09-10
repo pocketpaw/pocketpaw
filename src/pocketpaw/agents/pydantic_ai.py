@@ -403,6 +403,12 @@ gateway model, and the per-send choice beats that name while the gateway's base
 URL and key stay put. It also rides the agent cache key and the per-run model
 settings: the cache is ONE slot, so a key that still read the setting would
 hand turn two the agent built for turn one, model and output cap included.
+
+The override names a MODEL, never a provider, and ``run`` refuses a
+provider-prefixed one. A spec like ``litellm:anything`` would otherwise resolve
+the deployment's proxy key on a turn that is supposed to run on the tenant's —
+a credential switch wearing a model id, which ``provider_allows_model`` cannot
+catch because a gateway's model ids are its own namespace.
 """
 
 from __future__ import annotations
@@ -2391,6 +2397,30 @@ class PydanticAIBackend:
             return self._usage_event_from(run_usage, model_name=getattr(model, "model_name", None))
 
         try:
+            # A per-send model picks a model WITHIN the configured provider,
+            # never a provider. ``_parse_provider_model`` splits on a colon when
+            # the prefix names a known provider, so an unguarded override is a
+            # CREDENTIAL switch wearing a model id: a BYOK gateway turn runs on
+            # an isolated backend holding the tenant's key but still carrying
+            # the deployment's ``litellm_api_key``, and ``litellm:anything``
+            # from the composer's free-text field would resolve the proxy's own
+            # credential. ``provider_allows_model`` cannot catch it — on a
+            # gateway it passes every name, because a gateway's ids are its own
+            # namespace. The PREFIX is what is checked, not the colon: a model
+            # name may legitimately carry one (``minimax/minimax-m3:free``,
+            # ``llama3.2:latest``).
+            if (model_override or "").partition(":")[0].strip() in _KNOWN_PROVIDERS:
+                yield AgentEvent(
+                    type="error",
+                    content=(
+                        f"Model {model_override!r} names a provider. A per-send "
+                        "model can only pick a model on the provider this agent "
+                        "is already configured for — drop the prefix."
+                    ),
+                )
+                yield AgentEvent(type="done", content="")
+                return
+
             model = self._build_model(model_override)
 
             # A gated surface is one where WHICH tools the agent has is part of

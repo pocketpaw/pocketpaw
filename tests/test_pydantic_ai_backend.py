@@ -3380,3 +3380,46 @@ def test_no_model_override_still_builds_the_configured_model():
     asyncio.run(_collect(backend, "hi", session_key="s1"))
 
     assert specs == [None]
+
+
+def test_model_override_cannot_switch_provider():
+    """A per-send model picks a model WITHIN the configured provider, never a
+    provider.
+
+    ``_parse_provider_model`` splits on a colon when the prefix names a known
+    provider, so an unguarded override is a credential switch dressed as a
+    model id. The live case: a BYOK gateway turn runs on an isolated backend
+    holding the tenant's key, but it still carries the deployment's
+    ``litellm_api_key`` — a guest typing ``litellm:anything`` into the composer's
+    free-text field would resolve the proxy's own credential and bill the
+    platform for a turn the "no keyless turns" rule says cannot happen.
+    ``provider_allows_model`` does not catch it: on a gateway it passes
+    everything, because a gateway's model ids are its own namespace.
+    """
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    events = asyncio.run(_collect(backend, "hi", session_key="s1", model_override="litellm:sneaky"))
+
+    errors = [e for e in events if e.type == "error"]
+    assert errors, "a provider-prefixed override ran instead of being refused"
+    assert "provider" in errors[0].content.lower()
+
+
+def test_a_colon_in_a_model_name_is_still_allowed():
+    """The guard checks the PREFIX against known providers, not the colon.
+    OpenRouter spells variants ``:free``/``:nitro`` and Ollama spells tags
+    ``llama3.2:latest`` — banning the character would ban those."""
+    specs: list[str | None] = []
+
+    def _spy(spec=None):
+        specs.append(spec)
+        return TestModel(custom_output_text="ok")
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    backend._build_model = _spy  # type: ignore[method-assign]
+
+    events = asyncio.run(
+        _collect(backend, "hi", session_key="s1", model_override="minimax/minimax-m3:free")
+    )
+
+    assert [e for e in events if e.type == "error"] == []
+    assert specs == ["minimax/minimax-m3:free"]
