@@ -257,8 +257,15 @@ def media_client(media_store):
 
     def _as(workspace_id: str | None):
         app.dependency_overrides[media_router_module.optional_workspace_id] = lambda: workspace_id
+        # list_media takes the STRICT dep (#2114); without this it 401s before it
+        # reaches the capture-exclusion logic these tests are about. serve_media
+        # keeps the optional one, so the anonymous-read tests still mean something.
+        app.dependency_overrides[media_router_module.current_workspace_id] = lambda: (
+            workspace_id or "ws-anon"
+        )
 
     app.dependency_overrides[media_router_module.optional_workspace_id] = lambda: None
+    app.dependency_overrides[media_router_module.current_workspace_id] = lambda: "ws-anon"
     client = TestClient(app)
     client.as_workspace = _as  # type: ignore[attr-defined]
     return client

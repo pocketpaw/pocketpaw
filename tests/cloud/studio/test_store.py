@@ -183,3 +183,68 @@ async def test_recording_the_same_id_twice_does_not_duplicate(mongo_db):
 
     listed = await store.list_generations("w1")
     assert [(g.id, g.status) for g in listed] == [("g1", "succeeded")]
+
+
+# ── 5. The gallery must not silently lose the older half ────────────────────
+
+
+async def test_the_gallery_is_not_silently_capped(mongo_db):
+    """REGRESSION. The reader briefly defaulted to a 50-row cap. The /studio page
+    fetches this once with NO cursor and renders whatever comes back, so a
+    workspace with more history than the cap would simply stop seeing the older
+    part of its own gallery — data present in Mongo, unreachable in the product,
+    and invisible to every test that used fewer rows than the cap.
+
+    MUTATION: give ``list_generations`` a non-None default ``limit``.
+    """
+    from pocketpaw_ee.cloud.studio import service as store
+
+    for i in range(60):
+        gen = _generation(f"g{i:02d}")
+        gen.createdAt = 1_757_000_000_000 + i
+        await store.record_generation("w1", gen)
+
+    assert len(await store.list_generations("w1")) == 60
+
+
+async def test_a_caller_that_can_page_may_still_ask_for_one(mongo_db):
+    """The cap is opt-in, for callers that can actually page."""
+    from pocketpaw_ee.cloud.studio import service as store
+
+    for i in range(10):
+        gen = _generation(f"g{i:02d}")
+        gen.createdAt = 1_757_000_000_000 + i
+        await store.record_generation("w1", gen)
+
+    assert len(await store.list_generations("w1", limit=3)) == 3
+
+
+# ── 6. The dedupe key is a constraint, not just a lookup ────────────────────
+
+
+def test_the_dedupe_key_is_declared_unique():
+    """``record_generation`` does find-then-insert with no lock, and `backend` and
+    `worker` both run it — so the application check alone makes duplicate tiles
+    merely unlikely. The UNIQUE index is what makes them impossible.
+
+    Asserted on the DECLARATION, not the behaviour, because mongomock does not
+    enforce unique indexes — a behavioural test would pass whether or not the
+    constraint shipped, which is worse than no test.
+
+    KNOWN GAP: the ``DuplicateKeyError`` recovery in ``record_generation`` is
+    therefore NOT covered here. It cannot be exercised without a real mongod, and
+    faking the error only proves the fake raises. Verify it against a real
+    instance before trusting the recovery, and do not read this test as coverage
+    of it.
+
+    MUTATION: drop unique=True from the index.
+    """
+    from pocketpaw_ee.cloud.models.studio_generation import StudioGeneration
+    from pymongo import IndexModel
+
+    unique_keys = [
+        tuple(k for k, _ in idx.document["key"].items())
+        for idx in StudioGeneration.Settings.indexes
+        if isinstance(idx, IndexModel) and idx.document.get("unique")
+    ]
+    assert ("workspace", "generation_id") in unique_keys

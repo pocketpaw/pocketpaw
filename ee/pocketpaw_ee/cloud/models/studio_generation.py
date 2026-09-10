@@ -33,6 +33,7 @@ from typing import Any
 
 from beanie import Indexed
 from pydantic import Field
+from pymongo import IndexModel
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
@@ -69,8 +70,17 @@ class StudioGeneration(TimestampedDocument):
         indexes = [
             # The gallery: a workspace's history, newest first.
             [("workspace", 1), ("created_at_ms", -1)],
-            # Point lookup + the upsert key, so a retry cannot duplicate a tile.
-            [("workspace", 1), ("generation_id", 1)],
+            # Point lookup AND the dedupe key. UNIQUE deliberately: without it the
+            # find-then-insert in ``record_generation`` is a read-modify-write with
+            # no lock, and `backend` and `worker` both run that code — two concurrent
+            # calls carrying one generation id can both miss and both insert. The
+            # constraint is what actually makes 'a retry cannot duplicate a tile'
+            # true; the application-level check alone only makes it usually true.
+            IndexModel(
+                [("workspace", 1), ("generation_id", 1)],
+                unique=True,
+                name="workspace_generation_id_unique",
+            ),
             # "everything the site agent made", and "everything for this site".
             [("workspace", 1), ("source", 1), ("created_at_ms", -1)],
             [("workspace", 1), ("pocket_id", 1), ("created_at_ms", -1)],

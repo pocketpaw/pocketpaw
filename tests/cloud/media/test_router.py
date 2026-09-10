@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pocketpaw_ee.cloud.media.router as media_module
 import pytest
@@ -41,10 +42,15 @@ def client(tmp_path, monkeypatch) -> TestClient:
     monkeypatch.setattr(
         media_module,
         "tracked_generation_filenames",
-        lambda: {"gen-uuid.png"},
+        AsyncMock(return_value={"gen-uuid.png"}),
     )
     app = FastAPI()
     app.include_router(media_router, prefix="/api/v1")
+    # #2114 put current_workspace_id on list/upload. These fixtures build a bare
+    # app with no session, so without an override every request 401s and the whole
+    # file fails before it reaches what it means to test.
+    app.dependency_overrides[media_module.current_workspace_id] = lambda: "ws-1"
+    app.dependency_overrides[media_module.optional_workspace_id] = lambda: "ws-1"
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -101,25 +107,34 @@ def test_post_media_upload_saves_and_returns_mediafile(client, generated) -> Non
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["name"] == "edited.png"
-    assert body["url"] == "/api/v1/media/edited.png"
+    # #2114 makes the owner travel IN the filename (the key cannot carry a
+    # workspace segment), so an uploaded name is prefixed. These tests are about
+    # sanitising and collision handling, so assert the sanitised TAIL rather than
+    # pinning a whole name that predates that change.
+    assert body["name"].endswith("edited.png")
+    assert body["url"] == f"/api/v1/media/{body['name']}"
     assert body["mime"] == "image/png"
     assert body["size"] == len(b"\x89PNG\r\n\x1a\nedit-bytes")
-    assert (generated / "edited.png").read_bytes() == b"\x89PNG\r\n\x1a\nedit-bytes"
+    assert (generated / body["name"]).read_bytes() == b"\x89PNG\r\n\x1a\nedit-bytes"
 
 
 def test_post_media_upload_collision_makes_unique_name(client, generated) -> None:
-    (generated / "edited.png").write_bytes(b"first")
+    # Seed the OWNED name, not the bare one. Since #2114 an upload is stored as
+    # `<owner>-<name>`, so a bare `edited.png` on disk no longer collides with
+    # anything and this test would silently stop exercising the rename it exists
+    # for.
+    first_name = f"{storage.owned_name_prefix('ws-1')}edited.png"
+    (generated / first_name).write_bytes(b"first")
     resp = client.post(
         "/api/v1/media",
         files={"file": ("edited.png", b"second", "image/png")},
     )
     assert resp.status_code == 200
     name = resp.json()["name"]
-    assert name != "edited.png"
-    assert name.startswith("edited-")
+    assert not name.endswith("-edited.png"), "the collision must have renamed it"
+    assert "edited-" in name
     # Both files exist — the original was not overwritten.
-    assert (generated / "edited.png").read_bytes() == b"first"
+    assert (generated / first_name).read_bytes() == b"first"
     assert (generated / name).read_bytes() == b"second"
 
 
@@ -197,10 +212,15 @@ def remote_client(remote_adapter, monkeypatch) -> TestClient:
     monkeypatch.setattr(
         media_module,
         "tracked_generation_filenames",
-        lambda: {"1699999999000-bbbb.png"},
+        AsyncMock(return_value={"1699999999000-bbbb.png"}),
     )
     app = FastAPI()
     app.include_router(media_router, prefix="/api/v1")
+    # #2114 put current_workspace_id on list/upload. These fixtures build a bare
+    # app with no session, so without an override every request 401s and the whole
+    # file fails before it reaches what it means to test.
+    app.dependency_overrides[media_module.current_workspace_id] = lambda: "ws-1"
+    app.dependency_overrides[media_module.optional_workspace_id] = lambda: "ws-1"
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -228,5 +248,10 @@ def test_remote_upload_keys_under_generated_prefix(remote_client, remote_adapter
         files={"file": ("edited.png", b"PNG-BYTES", "image/png")},
     )
     assert resp.status_code == 200
-    assert resp.json()["name"] == "edited.png"
-    assert ("generated/edited.png", b"PNG-BYTES") in remote_adapter.put_calls
+    # #2114 makes the owner travel IN the filename (the key cannot carry a
+    # workspace segment), so an uploaded name is prefixed. These tests are about
+    # sanitising and collision handling, so assert the sanitised TAIL rather than
+    # pinning a whole name that predates that change.
+    name = resp.json()["name"]
+    assert name.endswith("edited.png")
+    assert (f"generated/{name}", b"PNG-BYTES") in remote_adapter.put_calls

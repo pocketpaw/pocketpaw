@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from pymongo.errors import DuplicateKeyError
 
 from pocketpaw.config import get_config_dir
 from pocketpaw_ee.catalog import config as catalog_config
@@ -415,8 +416,13 @@ def list_styles() -> list[schemas.StudioStyle]:
 # imported HERE and nowhere else in this package.
 #
 # These replace the ``~/.pocketpaw/studio/generations.jsonl`` helpers above.
-# The gallery's default page — the JSONL had no limit and decoded every record
-# every tenant had ever generated on every request.
+#
+# ``limit=None`` MEANS NO CAP, and that is the default ON PURPOSE. The JSONL's
+# problem was not the absence of a limit — it was decoding EVERY TENANT's entire
+# history out of one file on every request. A Mongo query filtered on an indexed
+# ``workspace`` already fixes that. Capping on top of it would silently drop the
+# older half of a real gallery, because the /studio page fetches this endpoint
+# once with no cursor and renders whatever comes back.
 DEFAULT_GENERATION_LIMIT = 50
 
 
@@ -475,11 +481,27 @@ async def record_generation(
         await existing.save()
         return
 
-    await StudioGeneration(
-        workspace=workspace_id,
-        generation_id=generation.id,
-        **fields,
-    ).insert()
+    try:
+        await StudioGeneration(
+            workspace=workspace_id,
+            generation_id=generation.id,
+            **fields,
+        ).insert()
+    except DuplicateKeyError:
+        # Lost the race: another process inserted this id between our find and
+        # our insert. The unique index is what turned that into a catchable error
+        # instead of a second tile, and the caller's intent was 'this generation
+        # should be recorded in this state' either way — so apply it to the row
+        # that won rather than failing a write the user already paid for.
+        winner = await StudioGeneration.find_one(
+            StudioGeneration.workspace == workspace_id,
+            StudioGeneration.generation_id == generation.id,
+        )
+        if winner is None:  # pragma: no cover — only if the row vanished again
+            raise
+        for key, value in fields.items():
+            setattr(winner, key, value)
+        await winner.save()
 
 
 async def update_generation(
@@ -508,14 +530,47 @@ async def update_generation(
     return True
 
 
+async def record_generation_best_effort(
+    workspace_id: str,
+    generation: schemas.Generation,
+    *,
+    source: str = "studio",
+    pocket_id: str | None = None,
+) -> None:
+    """Record a generation, but never fail the caller over it.
+
+    The JSONL appender swallowed ``OSError``, so a history failure could not lose
+    a generation the user had already paid for. Swapping it for a bare Mongo write
+    quietly removed that property: a write error would now raise AFTER the image
+    was generated, billed and stored, 500 the request, and orphan the asset with
+    no gallery row. The generation paths want the old semantics back.
+
+    Use this from the generation paths. Use ``record_generation`` where the caller
+    genuinely needs to know the write landed.
+    """
+    try:
+        await record_generation(workspace_id, generation, source=source, pocket_id=pocket_id)
+    except Exception:  # noqa: BLE001 — a history miss must not cost a paid asset
+        logger.warning(
+            "studio: could not record generation %s for workspace %s",
+            generation.id,
+            workspace_id,
+            exc_info=True,
+        )
+
+
 async def list_generations(
     workspace_id: str,
     *,
-    limit: int = DEFAULT_GENERATION_LIMIT,
+    limit: int | None = None,
     source: str | None = None,
     pocket_id: str | None = None,
 ) -> list[schemas.Generation]:
     """The workspace's history, newest first.
+
+    ``limit=None`` returns everything the workspace has. Pass a number only when
+    the caller can actually page — the /studio gallery cannot, so a default cap
+    there would quietly hide the older half of someone's work.
 
     ``source`` / ``pocket_id`` are what let the gallery separate a person's own
     generations from the ones a site agent made while building a page.
@@ -526,7 +581,10 @@ async def list_generations(
     if pocket_id is not None:
         query.append(StudioGeneration.pocket_id == pocket_id)
 
-    docs = await StudioGeneration.find(*query).sort("-created_at_ms").limit(limit).to_list()
+    cursor = StudioGeneration.find(*query).sort("-created_at_ms")
+    if limit is not None:
+        cursor = cursor.limit(limit)
+    docs = await cursor.to_list()
     return [_to_schema(d) for d in docs]
 
 
@@ -555,10 +613,17 @@ async def tracked_generation_filenames() -> set[str]:
     # being excluded and start being shown.
     """
     names: set[str] = set()
-    docs = await StudioGeneration.find_all().to_list()
-    for doc in docs:
-        for asset in doc.assets or []:
-            url = asset.get("url") or ""
+    # PROJECTION, not find_all(): this runs on every GET /api/v1/media, and the
+    # only field it reads is assets[].url. Hydrating whole documents here would
+    # reproduce failure #1 of the JSONL this store replaced — decoding every
+    # tenant's entire history on every request — against Mongo instead of a file.
+    cursor = StudioGeneration.get_pymongo_collection().find(
+        {"assets.url": {"$regex": "^/api/v1/media/"}},
+        {"assets.url": 1, "_id": 0},
+    )
+    async for row in cursor:
+        for asset in row.get("assets") or []:
+            url = (asset or {}).get("url") or ""
             if url.startswith("/api/v1/media/"):
                 names.add(url.rsplit("/", 1)[-1])
     return names
@@ -1081,7 +1146,7 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
         status="succeeded",
     )
     # Persist with the owning workspace tag (dropped by the wire model on read).
-    await record_generation(workspace_id, record)
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
@@ -1139,7 +1204,7 @@ async def _generate_curated_image(
         assets=assets,
         status="succeeded",
     )
-    await record_generation(workspace_id, record)
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
@@ -1205,7 +1270,7 @@ async def _generate_image_edit(
         assets=assets,
         status="succeeded",
     )
-    await record_generation(workspace_id, record)
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
@@ -1271,7 +1336,7 @@ async def generate_music(req: schemas.MusicRequest, *, workspace_id: str) -> sch
         assets=assets,
         status="succeeded",
     )
-    await record_generation(workspace_id, record)
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
@@ -1408,7 +1473,7 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
         assets=assets,
         status="succeeded",
     )
-    await record_generation(workspace_id, record)
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
@@ -1684,7 +1749,7 @@ async def edit(req: schemas.EditRequest, *, workspace_id: str) -> schemas.Genera
         assets=assets,
         status="succeeded",
     )
-    await record_generation(workspace_id, record)
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
@@ -1779,7 +1844,7 @@ async def generate_video_elements(
         assets=assets,
         status="succeeded",
     )
-    await record_generation(workspace_id, record)
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
@@ -1867,7 +1932,7 @@ async def generate_video_motion(
         assets=assets,
         status="succeeded",
     )
-    await record_generation(workspace_id, record)
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
