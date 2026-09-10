@@ -143,6 +143,7 @@ class SurfaceKind(StrEnum):
     FORESIGHT = "foresight"  # /foresight + /foresight/scenarios/* routes
     SITES = "sites"  # /sites — describe-to-create + manage published Paw Sites
     STUDIO = "studio"  # /studio — describe→generate media (image + video)
+    STUDIO_EDITOR = "studio_editor"  # /studio/editor — arrange clips on a timeline
     CODE = "code"  # /code — agent edits + runs code in the workspace
     BELT = "belt"  # /belt — the develop station (orient→develop→propose via gate)
     SHIP = "ship"  # /ship — the managed-deploy control plane (drive deploys via ship MCP verbs)
@@ -271,6 +272,14 @@ class SurfaceMeta:
     # and the agent emits pawbar-card fences with real ids. Only for the preamble;
     # the tools re-load the live widget, so this never feeds an effect.
     pawbar_catalog: list[dict[str, Any]] | None = None
+    # Studio editor hint — the open timeline, projected. The ONE meta field that
+    # carries real state rather than an identifier, because the document lives in
+    # the browser (IndexedDB + OPFS) and there is no server copy to fetch. Capped
+    # and id-only: {project_id, name, duration_ms, tracks[], clips[], assets[],
+    # last_edit}. ``run_core`` binds it onto the ContextVar the timeline MCP
+    # server validates ops against, so the tool can only accept ids the agent was
+    # actually shown. Absent = no editor open.
+    timeline: dict[str, Any] | None = None
     # Otherhand hints — stamped by the /other-hand page on EVERY turn (the page
     # changes every time the user lifts the pen, so neither hint is stable).
     #

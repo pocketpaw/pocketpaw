@@ -343,6 +343,31 @@
       ]
     },
     {
+      "id": "surface:studio_editor",
+      "kind": "surface",
+      "name": "Timeline Editor",
+      "summary": "Video timeline editor: arrange clips on tracks, trim them, add captions and titles, set transitions, and export the cut.",
+      "narrative": "The timeline editor is where generated or uploaded media is ASSEMBLED into one finished video. Tracks hold clips; the agent can arrange, trim, split and order them, place captions at given timings, lay audio into lanes and set transitions, all in one batch that lands as a single undo step. It does NOT generate footage — that is /studio. Point a user here when they have media and want to cut it together, caption it, or export it.",
+      "how": "",
+      "surface": "/studio/editor",
+      "requires": [],
+      "keywords": [
+        "timeline",
+        "editor",
+        "clip",
+        "arrange",
+        "trim",
+        "split",
+        "caption",
+        "subtitle",
+        "transition",
+        "cut",
+        "track",
+        "lane",
+        "sequence"
+      ]
+    },
+    {
       "id": "surface:code",
       "kind": "surface",
       "name": "Code",

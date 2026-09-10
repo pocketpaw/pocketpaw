@@ -441,6 +441,28 @@ def current_pawbar_run() -> dict[str, Any] | None:
     return _active_pawbar_run.get()
 
 
+# Per-stream /studio/editor timeline context. Set by ``run_core`` from
+# ``surface_meta.timeline``; read by the ``pocketpaw_timeline`` MCP server so
+# ``edit_timeline`` can check every clip/asset/track id against the SAME
+# projection the preamble showed the agent. ``None`` (every non-editor run)
+# means no timeline is open and the tools refuse.
+_active_timeline: ContextVar[dict[str, Any] | None] = ContextVar("agent_timeline", default=None)
+
+
+def bind_timeline(timeline: dict[str, Any] | None) -> Token:
+    """Bind (or clear) the active stream's timeline. Returns a reset token —
+    the caller resets it in a finally so it never leaks past a run."""
+    return _active_timeline.set(timeline)
+
+
+def unbind_timeline(token: Token) -> None:
+    _active_timeline.reset(token)
+
+
+def current_timeline() -> dict[str, Any] | None:
+    return _active_timeline.get()
+
+
 def current_cloud_chat_run() -> bool:
     """True when the active context is a live cloud CHAT run dispatch.
 

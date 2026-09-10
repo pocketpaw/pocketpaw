@@ -82,6 +82,7 @@ EXPECTED_SURFACE_IDS = {
     "surface:knowledge",
     "surface:files",
     "surface:studio",
+    "surface:studio_editor",
     "surface:code",
     "surface:foresight",
     "surface:calendar",

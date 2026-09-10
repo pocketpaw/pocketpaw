@@ -1,0 +1,198 @@
+[
+  {
+    "label": "unknown verb falls through instead of erroring (the Ripple action-verb bug)",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        if kind not in OP_KINDS:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_unknown_verb_is_rejected_with_the_valid_set"
+    ]
+  },
+  {
+    "label": "drop the difflib suggestion, leaving the agent nothing to retry with",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "    close = difflib.get_close_matches(value, sorted(known), n=1, cutoff=0.6)",
+    "replace": "    close = []",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_near_miss_verb_gets_a_suggestion",
+      "tests/ee/agent/test_timeline_ops.py::test_mistyped_clip_id_gets_a_suggestion"
+    ]
+  },
+  {
+    "label": "treat a missing timeline as an empty one instead of refusing",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "    if not summary.has_timeline:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_no_timeline_open_is_a_clear_refusal"
+    ]
+  },
+  {
+    "label": "malformed surface_meta reads as a present-but-empty timeline",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        if not isinstance(timeline, dict):\n            return cls(has_timeline=False)",
+    "replace": "        if not isinstance(timeline, dict):\n            return cls(has_timeline=True)",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_from_meta_treats_malformed_meta_as_no_timeline"
+    ]
+  },
+  {
+    "label": "accept a zero-length caption cue (renders as nothing; reads as a dropped caption)",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        # the user as the caption having been dropped.\n        if raw[\"toMs\"] <= raw[\"fromMs\"]:",
+    "replace": "        # the user as the caption having been dropped.\n        if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_zero_length_caption_is_rejected"
+    ]
+  },
+  {
+    "label": "let bool through as a number, so {\"volume\": true} silently means full volume",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "    if isinstance(value, bool) or not isinstance(value, (int, float)):",
+    "replace": "    if not isinstance(value, (int, float)):",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_boolean_is_not_accepted_as_a_number"
+    ]
+  },
+  {
+    "label": "stop range-checking volume",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        if not 0 <= volume <= 2:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_volume_out_of_range_is_rejected"
+    ]
+  },
+  {
+    "label": "accept a raw pixel aspect ratio (the 4:5-vs-9:16 conflation)",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        if aspect is not None and aspect not in _ASPECT_RATIOS:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_unknown_aspect_ratio_is_rejected"
+    ]
+  },
+  {
+    "label": "raise the batch cap past the contract",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "MAX_OPS_PER_BATCH = 50",
+    "replace": "MAX_OPS_PER_BATCH = 5000",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_batch_cap_matches_the_committed_contract",
+      "tests/ee/agent/test_timeline_ops.py::test_oversized_batch_is_rejected"
+    ]
+  },
+  {
+    "label": "return the valid prefix alongside the error instead of all-or-nothing",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        clean.append(op)\n\n    return clean, None",
+    "replace": "        clean.append(op)\n        return clean, None\n\n    return clean, None",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_one_bad_op_rejects_the_whole_batch"
+    ]
+  },
+  {
+    "label": "drop a verb from OP_KINDS without touching the manifest",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        \"trim_clip\",\n        \"add_keyframe\",",
+    "replace": "        \"add_keyframe\",",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_op_kinds_matches_the_committed_contract"
+    ]
+  },
+  {
+    "label": "_resolve waves every id through, so invented ids reach the browser",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        return resolve_id(raw, [{\"id\": i} for i in known]), None",
+    "replace": "        return str(raw), None",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_invented_clip_id_is_rejected",
+      "tests/ee/agent/test_timeline_ops.py::test_invented_asset_id_is_rejected",
+      "tests/ee/agent/test_timeline_ops.py::test_after_must_name_a_real_clip",
+      "tests/ee/agent/test_timeline_ops.py::test_unknown_track_is_rejected",
+      "tests/ee/agent/test_timeline_ops.py::test_anchor_clip_must_name_a_real_clip",
+      "tests/ee/agent/test_timeline_ops.py::test_an_ambiguous_tail_errors_rather_than_guessing"
+    ]
+  },
+  {
+    "label": "an ambiguous id tail picks the first match instead of erroring",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "    except AmbiguousId:",
+    "replace": "    except _NeverRaised:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_an_ambiguous_tail_errors_rather_than_guessing"
+    ]
+  },
+  {
+    "label": "the cleaned op keeps the agent's tail instead of the full id the store needs",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        clean.append(op)",
+    "replace": "        clean.append(dict(raw))",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_an_id_tail_resolves_to_the_full_id"
+    ]
+  },
+  {
+    "label": "accept an unknown text preset (applyTextPreset would no-op silently)",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        if preset is not None and preset not in _TEXT_PRESETS:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_unknown_text_preset_is_rejected"
+    ]
+  },
+  {
+    "label": "let a title look through as a caption style (different axes)",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        if style is not None and style not in _CAPTION_STYLES:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_caption_style_and_text_preset_are_different_axes"
+    ]
+  },
+  {
+    "label": "accept an unknown motion kind",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "            if value is not None and value not in _ANIM_KINDS:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_unknown_motion_is_rejected"
+    ]
+  },
+  {
+    "label": "allow keyframes on a property the sampler never reads",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        if prop not in _ANIM_PROPS:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_unanimatable_property_is_rejected"
+    ]
+  },
+  {
+    "label": "accept an unknown easing",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "            if ease is not None and ease not in _EASINGS:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_unknown_easing_is_rejected"
+    ]
+  },
+  {
+    "label": "stop range-checking transform opacity",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        if opacity is not None and not 0 <= opacity <= 1:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_transform_opacity_and_scale_are_range_checked"
+    ]
+  },
+  {
+    "label": "accept a transform op that changes nothing",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        if not any(raw.get(k) is not None for k in (\"x\", \"y\", \"scale\", \"rotation\", \"opacity\")):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_an_empty_transform_is_rejected"
+    ]
+  }
+]

@@ -98,7 +98,7 @@ class TestAuthoredFiles:
         assert {e.kind for e in prims.entries} == {"primitive"}
         assert {e.kind for e in surfs.entries} == {"surface"}
         assert len(prims.entries) == 12
-        assert len(surfs.entries) == 23
+        assert len(surfs.entries) == 24
 
     def test_authored_entries_survive_compile_unchanged(self):
         """Every authored entry appears in the compiled model identical

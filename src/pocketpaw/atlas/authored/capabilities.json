@@ -390,6 +390,65 @@
         "steward",
         "competing sources"
       ]
+    },
+    {
+      "id": "capability:timeline.edit",
+      "kind": "capability",
+      "name": "Arrange clips on a timeline",
+      "summary": "Order, trim, split and remove clips; place and restyle titles and captions; set position, scale and opacity; animate with keyframes — as one batch, one undo step.",
+      "narrative": "Changes the video timeline the user has open in the editor. Takes a BATCH of typed operations applied together, so 'arrange these three clips, caption the opening line and drop the music underneath' is a single call and a single undo. Covers the whole Inspector surface: the nine named title looks, size, colour, alignment, motion in and out, the caption cue styles, position/scale/rotation/opacity, and keyframes on any of those. Operates only on media already on the project's media rail — it cannot generate or import footage. Returns once the batch is validated and dispatched to the browser holding the document, not once it is applied.",
+      "how": "mcp__pocketpaw_timeline__edit_timeline (ops: place_clip / move_clip / trim_clip / split_clip / remove_clip / set_transition / add_text / style_text / add_caption / style_captions / place_audio / set_volume / set_transform / add_keyframe / clear_keyframes / set_project)",
+      "surface": "/studio/editor",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "arrange clips",
+        "trim",
+        "split clip",
+        "caption",
+        "subtitle",
+        "transition",
+        "timeline",
+        "cut",
+        "sequence",
+        "title card",
+        "audio lane",
+        "reorder clips",
+        "restyle text",
+        "font size",
+        "text colour",
+        "motion",
+        "keyframe",
+        "animate",
+        "position",
+        "opacity",
+        "scale"
+      ]
+    },
+    {
+      "id": "capability:timeline.export",
+      "kind": "capability",
+      "name": "Export the finished cut",
+      "summary": "Render the open timeline to a video file, optionally reframing it for a platform first.",
+      "narrative": "Renders the open timeline to an mp4 or webm. The render runs in the user's browser and can take minutes on a long timeline. An optional platform preset sets the frame size and frame rate first — note that instagram-reel is 9:16 and meta-feed-portrait is 4:5, which get conflated constantly. Never called in the same turn as an edit, which would render a half-built timeline.",
+      "how": "mcp__pocketpaw_timeline__export_timeline (preset: optional platform preset; format: mp4 or webm)",
+      "surface": "/studio/editor",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "export",
+        "render the cut",
+        "mp4",
+        "webm",
+        "reel",
+        "tiktok",
+        "youtube",
+        "download the cut",
+        "finish the cut",
+        "publish the cut"
+      ]
     }
   ]
 }

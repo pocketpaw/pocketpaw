@@ -1,0 +1,43 @@
+{
+  "_comment": [
+    "The timeline op vocabulary — the wire contract between the edit_timeline MCP",
+    "tool (pocketpaw) and the editor's op applier (paw-enterprise).",
+    "",
+    "This file is committed BYTE-IDENTICAL in both repos:",
+    "  pocketpaw/ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.contract.json",
+    "  paw-enterprise/src/lib/core/studio/editor/timeline-ops.contract.json",
+    "",
+    "Each side has a test asserting its own literal matches this file, so drift",
+    "fails that repo's suite with no cross-repo checkout — which is the point.",
+    "A test that read the other repo's source would be skipped in every CI that",
+    "matters, since neither repo checks the other one out.",
+    "",
+    "Changing the vocabulary means editing this file in BOTH repos in the same",
+    "wave, and the diff of the ops array is the review signal that the wire",
+    "format moved. Design: docs/design/drafts/2026-09-08-agentic-studio-editor.md",
+    "",
+    "v2 (2026-09-08): the styling surface the Inspector exposes — text presets,",
+    "colour, align, motion in/out, transform and keyframes — so the agent can do",
+    "what a person can do in that panel, not just place and trim."
+  ],
+  "version": 2,
+  "maxOpsPerBatch": 50,
+  "ops": [
+    "add_caption",
+    "add_keyframe",
+    "add_text",
+    "clear_keyframes",
+    "move_clip",
+    "place_audio",
+    "place_clip",
+    "remove_clip",
+    "set_project",
+    "set_transform",
+    "set_transition",
+    "set_volume",
+    "split_clip",
+    "style_captions",
+    "style_text",
+    "trim_clip"
+  ]
+}

@@ -410,6 +410,67 @@
     },
     {
       "gist": "",
+      "how": "mcp__pocketpaw_timeline__edit_timeline (ops: place_clip / move_clip / trim_clip / split_clip / remove_clip / set_transition / add_text / style_text / add_caption / style_captions / place_audio / set_volume / set_transform / add_keyframe / clear_keyframes / set_project)",
+      "id": "capability:timeline.edit",
+      "keywords": [
+        "arrange clips",
+        "trim",
+        "split clip",
+        "caption",
+        "subtitle",
+        "transition",
+        "timeline",
+        "cut",
+        "sequence",
+        "title card",
+        "audio lane",
+        "reorder clips",
+        "restyle text",
+        "font size",
+        "text colour",
+        "motion",
+        "keyframe",
+        "animate",
+        "position",
+        "opacity",
+        "scale"
+      ],
+      "kind": "capability",
+      "name": "Arrange clips on a timeline",
+      "narrative": "Changes the video timeline the user has open in the editor. Takes a BATCH of typed operations applied together, so 'arrange these three clips, caption the opening line and drop the music underneath' is a single call and a single undo. Covers the whole Inspector surface: the nine named title looks, size, colour, alignment, motion in and out, the caption cue styles, position/scale/rotation/opacity, and keyframes on any of those. Operates only on media already on the project's media rail — it cannot generate or import footage. Returns once the batch is validated and dispatched to the browser holding the document, not once it is applied.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Order, trim, split and remove clips; place and restyle titles and captions; set position, scale and opacity; animate with keyframes — as one batch, one undo step.",
+      "surface": "/studio/editor"
+    },
+    {
+      "gist": "",
+      "how": "mcp__pocketpaw_timeline__export_timeline (preset: optional platform preset; format: mp4 or webm)",
+      "id": "capability:timeline.export",
+      "keywords": [
+        "export",
+        "render the cut",
+        "mp4",
+        "webm",
+        "reel",
+        "tiktok",
+        "youtube",
+        "download the cut",
+        "finish the cut",
+        "publish the cut"
+      ],
+      "kind": "capability",
+      "name": "Export the finished cut",
+      "narrative": "Renders the open timeline to an mp4 or webm. The render runs in the user's browser and can take minutes on a long timeline. An optional platform preset sets the frame size and frame rate first — note that instagram-reel is 9:16 and meta-feed-portrait is 4:5, which get conflated constantly. Never called in the same turn as an edit, which would render a half-built timeline.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Render the open timeline to a video file, optionally reframing it for a platform first.",
+      "surface": "/studio/editor"
+    },
+    {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'airtable' connector once it is bound",
       "id": "connector:airtable",
       "keywords": [
@@ -2195,6 +2256,20 @@
     },
     {
       "gist": "",
+      "how": "a user invokes it as /studio-editor in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:studio-editor",
+      "keywords": [
+        "studio-editor"
+      ],
+      "kind": "skill",
+      "name": "studio-editor",
+      "narrative": "Arrange a video timeline from a natural-language instruction — order and trim clips, place titles and captions at given timings, and lay audio into lanes. Invoke when the user asks to change what is on the /studio/editor timeline: \"arrange these three clips\", \"put a caption on this at 4 seconds\", \"trim the intro\", \"drop the music underneath\", \"cut this in half\", \"cross-dissolve between these two\", \"make this a Reel\". You do NOT generate media here and you do NOT build a dashboard or a ui-spec — you call one deterministic tool with a BATCH of typed operations against clips that already exist. This is the timeline-editing brain: read the timeline summary in your context, translate the request into one batch, and be honest that the edit was dispatched rather than confirmed.",
+      "requires": [],
+      "summary": "Arrange a video timeline from a natural-language instruction — order and trim clips, place titles and captions at given timings, and lay audio into lanes.",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "a user invokes it as /webgl-components in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:webgl-components",
       "keywords": [
@@ -2683,6 +2758,32 @@
       "requires": [],
       "summary": "Media generation gallery: describe an image or short video in the rail and the agent generates it into the gallery.",
       "surface": "/studio"
+    },
+    {
+      "gist": "",
+      "how": "",
+      "id": "surface:studio_editor",
+      "keywords": [
+        "timeline",
+        "editor",
+        "clip",
+        "arrange",
+        "trim",
+        "split",
+        "caption",
+        "subtitle",
+        "transition",
+        "cut",
+        "track",
+        "lane",
+        "sequence"
+      ],
+      "kind": "surface",
+      "name": "Timeline Editor",
+      "narrative": "The timeline editor is where generated or uploaded media is ASSEMBLED into one finished video. Tracks hold clips; the agent can arrange, trim, split and order them, place captions at given timings, lay audio into lanes and set transitions, all in one batch that lands as a single undo step. It does NOT generate footage — that is /studio. Point a user here when they have media and want to cut it together, caption it, or export it.",
+      "requires": [],
+      "summary": "Video timeline editor: arrange clips on tracks, trim them, add captions and titles, set transitions, and export the cut.",
+      "surface": "/studio/editor"
     },
     {
       "gist": "",

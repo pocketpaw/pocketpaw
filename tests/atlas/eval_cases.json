@@ -264,6 +264,36 @@
       "expected_id": "surface:files",
       "rank_within": 1,
       "note": "Added 2026-09-05 (feat/files-links): pins the Files surface on the link-graph intent."
+    },
+    {
+      "intent": "arrange these clips on the timeline",
+      "expected_id": "capability:timeline.edit",
+      "rank_within": 1,
+      "note": "Added 2026-09-08 (feat/agentic-studio-editor): the timeline editor's own intents, plus the reverse direction — generation intents must STAY with skill:studio, since 'video' appears in both worlds."
+    },
+    {
+      "intent": "put a caption on this clip",
+      "expected_id": "capability:timeline.edit",
+      "rank_within": 2,
+      "note": "Added 2026-09-08 (feat/agentic-studio-editor): the timeline editor's own intents, plus the reverse direction — generation intents must STAY with skill:studio, since 'video' appears in both worlds."
+    },
+    {
+      "intent": "trim the start of this clip",
+      "expected_id": "capability:timeline.edit",
+      "rank_within": 2,
+      "note": "Added 2026-09-08 (feat/agentic-studio-editor): the timeline editor's own intents, plus the reverse direction — generation intents must STAY with skill:studio, since 'video' appears in both worlds."
+    },
+    {
+      "intent": "export the finished cut",
+      "expected_id": "capability:timeline.export",
+      "rank_within": 2,
+      "note": "Added 2026-09-08 (feat/agentic-studio-editor): the timeline editor's own intents, plus the reverse direction — generation intents must STAY with skill:studio, since 'video' appears in both worlds."
+    },
+    {
+      "intent": "generate an image of a sunset",
+      "expected_id": "surface:studio",
+      "rank_within": 1,
+      "note": "Added 2026-09-08 (feat/agentic-studio-editor): the timeline editor's own intents, plus the reverse direction — generation intents must STAY with skill:studio, since 'video' appears in both worlds."
     }
   ]
 }

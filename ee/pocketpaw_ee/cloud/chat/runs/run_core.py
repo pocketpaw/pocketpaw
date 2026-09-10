@@ -367,6 +367,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     attach_agent_identity,
     attach_sse_event_sink,
     bind_pawbar_run,
+    bind_timeline,
     build_behavior_instructions,
     build_knowledge_context,
     collect_delivered_artifacts,
@@ -378,6 +379,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     resolve_user_content,
     session_key_for,
     unbind_pawbar_run,
+    unbind_timeline,
     unregister_stream_sink,
 )
 from pocketpaw_ee.cloud.chat.agent_service import (
@@ -625,6 +627,21 @@ def _pawbar_run_from_ctx(ctx: ScopeContext) -> dict[str, Any] | None:
     return {"widget_id": widget_id, "actions": actions, "handoff": handoff}
 
 
+def _timeline_from_ctx(ctx: ScopeContext) -> dict[str, Any] | None:
+    """The open /studio/editor timeline, or None.
+
+    The editor page stamps its projection onto ``surface_meta.timeline`` on every
+    send. Binding it lets the timeline MCP tools validate ids against the exact
+    projection the preamble showed the agent — validating against anything else
+    would accept an id the agent was never told about, or reject one it was.
+    """
+    sc = ctx.surface_context
+    if sc is None:
+        return None
+    timeline = getattr(sc.meta, "timeline", None)
+    return timeline if isinstance(timeline, dict) else None
+
+
 async def _persist_assistant_message(
     ctx: ScopeContext, content: str, attachments: list[dict[str, Any]]
 ) -> Any:
@@ -845,6 +862,32 @@ def _studio_flow_payload(output: Any) -> dict[str, Any] | None:
         text = output["result"]
     if not isinstance(text, str) or '"studio_flow"' not in text:
         return None
+    data = _first_json_object(text)
+    if isinstance(data, dict):
+        spec = data.get("studio_flow")
+        if not isinstance(spec, dict):
+            return None
+        payload: dict[str, Any] = {"spec": spec}
+        spec_fid = spec.get("flow_id")
+        if spec_fid:
+            payload["flow_id"] = str(spec_fid)
+        logger.info(
+            "studio_flow event detected: nodes=%d edges=%d goal=%r flow_id=%r",
+            len(spec.get("nodes") or []),
+            len(spec.get("edges") or []),
+            spec.get("goal"),
+            payload.get("flow_id"),
+        )
+        return payload
+    return None
+
+
+def _first_json_object(text: str) -> Any:
+    """The first balanced ``{...}`` in a string, parsed. None when there isn't one.
+
+    Brace-counting rather than find/rfind because the payload contains JSON
+    strings that themselves contain braces, and it has to skip escapes.
+    """
     start = text.find("{")
     if start == -1:
         return None
@@ -870,25 +913,34 @@ def _studio_flow_payload(output: Any) -> dict[str, Any] | None:
             depth -= 1
             if depth == 0:
                 try:
-                    data = json.loads(text[start : i + 1])
+                    return json.loads(text[start : i + 1])
                 except (json.JSONDecodeError, ValueError):
                     return None
-                spec = data.get("studio_flow")
-                if not isinstance(spec, dict):
-                    return None
-                payload: dict[str, Any] = {"spec": spec}
-                spec_fid = spec.get("flow_id")
-                if spec_fid:
-                    payload["flow_id"] = str(spec_fid)
-                logger.info(
-                    "studio_flow event detected: nodes=%d edges=%d goal=%r flow_id=%r",
-                    len(spec.get("nodes") or []),
-                    len(spec.get("edges") or []),
-                    spec.get("goal"),
-                    payload.get("flow_id"),
-                )
-                return payload
     return None
+
+
+def _timeline_payload(output: Any, marker: str) -> dict[str, Any] | None:
+    """Extract a ``timeline_edit`` / ``timeline_export`` envelope from a tool result.
+
+    Same job as ``_studio_flow_payload`` and the same reason: ``tool_result``
+    fans to the client as a 200-char chip, which a 50-op batch does not fit in.
+    The editor tools return their payload in a marker envelope and this promotes
+    it to a dedicated SSE frame the /studio/editor route applies.
+
+    Reuses that function's brace scanner rather than re-deriving it — the parse
+    has to survive a JSON string containing braces, which a naive find/rfind
+    does not.
+    """
+    text = output if isinstance(output, str) else ""
+    if isinstance(output, dict) and isinstance(output.get("result"), str):
+        text = output["result"]
+    if not isinstance(text, str) or f'"{marker}"' not in text:
+        return None
+    data = _first_json_object(text)
+    if not isinstance(data, dict):
+        return None
+    payload = data.get(marker)
+    return payload if isinstance(payload, dict) else None
 
 
 _DEFAULT_TITLES = ("", "New Chat", "Chat")
@@ -1271,6 +1323,7 @@ async def _prewarm_session(ctx: ScopeContext, flow_context: dict[str, Any] | Non
         # C1 — bind the concierge action context so the warm subprocess builds the
         # same pawbar_actions tool set turn 1 will resolve (None for every other run).
         pawbar_token = bind_pawbar_run(_pawbar_run_from_ctx(ctx))
+        timeline_token = bind_timeline(_timeline_from_ctx(ctx))
         try:
             await pool.prewarm(
                 ctx.target_agent_id,
@@ -1297,6 +1350,7 @@ async def _prewarm_session(ctx: ScopeContext, flow_context: dict[str, Any] | Non
                 ),
             )
         finally:
+            unbind_timeline(timeline_token)
             unbind_pawbar_run(pawbar_token)
             detach_agent_identity(identity_tokens)
     except Exception as exc:  # noqa: BLE001 — prewarm must NEVER break a run
@@ -1427,6 +1481,8 @@ async def _drive_agent_loop(
     # or no-actions run). The pawbar_actions MCP server + tool handlers read it;
     # reset in the same finally as the identity tokens so it never leaks.
     pawbar_token = bind_pawbar_run(_pawbar_run_from_ctx(ctx))
+    # Same lifetime as the pawbar context: bound here, reset in the same finally.
+    timeline_token = bind_timeline(_timeline_from_ctx(ctx))
 
     if not history and ctx.session_id:
         asyncio.create_task(_generate_session_title(ctx, user_content))
@@ -1883,6 +1939,13 @@ async def _drive_agent_loop(
                 _sf_payload = _studio_flow_payload(output)
                 if _sf_payload is not None:
                     yield ("studio_flow", _sf_payload)
+                # Same treatment for the /studio/editor tools: the op batch is
+                # far past the tool_result chip's 200 chars, and the browser tab
+                # holding the document is the only thing that can apply it.
+                for _marker in ("timeline_edit", "timeline_export"):
+                    _tl_payload = _timeline_payload(output, _marker)
+                    if _tl_payload is not None:
+                        yield (_marker, _tl_payload)
                 # The ask_user ack is internal (the question UI already rendered
                 # from the tool_use); don't surface a tool_result chip for it.
                 if name != _ASK_USER_TOOL_ID:
@@ -2002,6 +2065,10 @@ async def _drive_agent_loop(
             # second concurrent run on the same session may already own the
             # entry. Popping it here would break the run still streaming.
             unregister_stream_sink(session_mongo_id, side_channel_queue)
+        except Exception:
+            pass
+        try:
+            unbind_timeline(timeline_token)
         except Exception:
             pass
         try:
