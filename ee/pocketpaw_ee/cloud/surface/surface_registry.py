@@ -158,6 +158,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import NamedTuple
 
+from pocketpaw.agents.pydantic_ai import _TENANT_SAFE_TOOLS
 from pocketpaw_ee.agent.mcp_servers.other_hand import ILLUSTRATE_TOOL_ID
 from pocketpaw_ee.cloud.surface.domain import (
     SurfaceKind,
@@ -314,6 +315,30 @@ _OTHER_HAND_POCKET_DENY: frozenset[str] = frozenset(
         "mcp__pocketpaw_pocket_planner__plan_pocket",
     }
 )
+
+# Every BRIDGED builtin the Otherhand agent is never told about (2026-09-10).
+#
+# The notebook prompt names exactly two tools, ``illustrate`` and
+# ``image_generate``. The pydantic_ai backend nonetheless offered every
+# tenant-safe builtin the bridge could build — 34 on a dev box, ~26.5k chars of
+# JSON schema, about 6.6k tokens — on every turn. Tool schemas are the one part
+# of the request the upstream prompt cache has been measured NOT to cover
+# (``agents/pydantic_ai.py``, module header: same prompt, tools attached,
+# ``cache_read_tokens`` of zero on every turn). So this was the largest
+# uncacheable block in an Otherhand request, and every byte of it was a tool
+# the prompt never mentions.
+#
+# DERIVED from the backend's own classification rather than written out, so
+# a newly classified tool is denied here by default instead of leaking in
+# until someone notices. The two names kept are the two the prompt commands.
+#
+# Bare names, not ``mcp__`` ids, on purpose: the backend's deny filter
+# subtracts ANY matching name from the bridged list before the agent is built
+# (the route ``_SITES_BUILTIN_DENY`` takes to remove Bash). An allow-list would
+# be the cleaner shape, but the backend applies its allow to MCP toolsets only
+# and says why; a deny is the lever that exists.
+_OTHER_HAND_TOOLS: frozenset[str] = frozenset({"illustrate", "image_generate"})
+_OTHER_HAND_BRIDGED_DENY: frozenset[str] = _TENANT_SAFE_TOOLS - _OTHER_HAND_TOOLS
 
 # Built-in SDK tools the /sites agent never needs. It authors sites through the
 # sites_manager + design MCP tools (the source map / copy is a tool ARGUMENT), so
@@ -1070,7 +1095,10 @@ SURFACES: list[SurfaceSpec] = [
         # Static profile: no lazily-loaded ids, not meta-aware.
         profile=SurfaceProfile(
             ripple_mode="off",
-            deny_mcp_tool_ids=_OTHER_HAND_POCKET_DENY,
+            # Two deny sets, one field: the pocket MCP ids that make a pocket
+            # unreachable, and the bridged builtins the prompt never names
+            # (``_OTHER_HAND_BRIDGED_DENY`` — the token cut).
+            deny_mcp_tool_ids=_OTHER_HAND_POCKET_DENY | _OTHER_HAND_BRIDGED_DENY,
             allow_mcp_tool_ids=frozenset({ILLUSTRATE_TOOL_ID}),
             system_message_override=OTHER_HAND_SYSTEM_PROMPT,
         ),
