@@ -234,13 +234,13 @@ def test_profile_carries_the_page_ops_output_contract() -> None:
     # paw-enterprise's TEXT_SIZE_DEFAULT / TEXT_SIZE_MIN and the CHAR_ADVANCE
     # the per-line counts are derived from. Pinning one rung (this used to
     # check "size: 20" alone) let the body and heading move without a word.
-    assert "size: 28 (small) | 38 (body, the DEFAULT) | 54 (heading)" in override
+    assert "size: 40 (small) | 55 (body, the DEFAULT) | 78 (heading)" in override
     # The counts the agent budgets its layout from. Wrong counts do not fail
     # anything at runtime — the text just wraps where the agent did not plan
     # and the next block lands on top of it.
-    assert "63 characters fit on a size-28 line" in override
-    assert "47 at size 38" in override
-    assert "33 at size 54" in override
+    assert "43 characters fit on a size-40 line" in override
+    assert "31 at size 55" in override
+    assert "21 at size 78" in override
     # The pointer to the other half, so whoever changes a number finds it.
     assert "other-hand/types.ts" in override
 

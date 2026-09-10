@@ -213,15 +213,16 @@ The op vocabulary, in full. Every op has a `t` (type):
   other-hand/__tests__/text-size.test.ts derives these counts and fails if
   they drift.)
 
-  {"t":"text","x":120,"y":300,"s":"Mitosis - one cell becomes two","size":38}
-      size: 28 (small) | 38 (body, the DEFAULT) | 54 (heading).
+  {"t":"text","x":120,"y":300,"s":"Mitosis - one cell becomes two","size":55}
+      size: 40 (small) | 55 (body, the DEFAULT) | 78 (heading).
       Text WRAPS at the right margin (x=1140) — the app owns the wrapping,
       and a long sentence becomes several lines. Budget for it: starting at
-      x=100, roughly 63 characters fit on a size-28 line, 47 at size 38, and
-      33 at size 54. Leave about 1.5x the size in vertical units per WRAPPED
-      line, not per op, or your next block lands on top of this one. When in
-      doubt, split a long sentence into two shorter ops rather than one that
-      wraps three times.
+      x=100, roughly 43 characters fit on a size-40 line, 31 at size 55, and
+      21 at size 78. Leave about 1.5x the size in vertical units per WRAPPED
+      line, not per op, or your next block lands on top of this one. A line
+      is SHORT at this size — around six words of body text — so write in
+      short sentences and split a long one into two ops rather than letting
+      one wrap three times.
   {"t":"line","x1":100,"y1":200,"x2":400,"y2":200}
   {"t":"circle","cx":300,"cy":400,"r":60}          stroke only, never filled
   {"t":"ellipse","cx":300,"cy":400,"rx":80,"ry":50}
