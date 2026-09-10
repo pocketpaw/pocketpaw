@@ -1,5 +1,17 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-09-10 (feat/agentic-studio-editor) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_timeline`` (the /studio/editor timeline verbs
+  edit_timeline / export_timeline, registered always-on via the
+  ``CloudTimelineMcpProvider`` mcp_servers entry point, NOT in
+  ``OPT_IN_MCP_SERVERS``). Same regime as ``pocketpaw_media`` /
+  ``pocketpaw_studio``: ambient registration, scoped by the STUDIO_EDITOR
+  SurfaceProfile — and the tools refuse on their own off-surface, since the
+  timeline ContextVar they read is unset everywhere but the editor. Six
+  external-config assertions counted it as external config and CI went red.
+  Fifteenth entry in this list; see the 2026-07-27 note on why that count is
+  itself the finding.
+
 Updated: 2026-09-01 (integration/session-2026-08-29) — ``_strip_builtin_servers``
   now also drops ``pocketpaw_other_hand`` (the notebook illustrate tool,
   registered always-on via the ``other_hand`` mcp_servers entry point). Same
@@ -132,6 +144,7 @@ from pocketpaw_ee.agent.mcp_servers.ship import SERVER_NAME as _SHIP_MCP_SERVER_
 from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME as _SITES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.stock_images import SERVER_NAME as _STOCK_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.timeline import SERVER_NAME as _TIMELINE_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.workspace_admin import (
     SERVER_NAME as _WORKSPACE_ADMIN_MCP_SERVER_NAME,
 )
@@ -259,6 +272,15 @@ def _strip_builtin_servers(result: dict) -> dict:
     # same regime as code / ship / studio. Stripped so this file measures
     # EXTERNAL config only.
     out.pop(_BROWSER_MCP_SERVER_NAME, None)
+    # ``pocketpaw_timeline`` is always-on too — the /studio/editor timeline
+    # verbs (edit_timeline / export_timeline) are registered unconditionally via
+    # the ``CloudTimelineMcpProvider`` entry point, NOT in
+    # ``OPT_IN_MCP_SERVERS``. Registration could not be the boundary anyway:
+    # both tools read a timeline ContextVar that is unset on every surface but
+    # the editor, so they refuse on their own everywhere else, and the
+    # STUDIO_EDITOR profile is what scopes them on. Same regime as its sibling
+    # ``pocketpaw_media`` / ``pocketpaw_studio``.
+    out.pop(_TIMELINE_MCP_SERVER_NAME, None)
     return out
 
 
