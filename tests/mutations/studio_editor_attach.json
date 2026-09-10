@@ -1,0 +1,47 @@
+[
+  {
+    "label": "rail row drops the attached marker",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
+    "find": "    if asset.get(\"attached\"):\n        facts[\"attached\"] = \"yes\"",
+    "replace": "    if False:\n        facts[\"attached\"] = \"yes\"",
+    "tests": ["tests/cloud/surface/test_studio_editor_preamble.py::test_an_attached_asset_is_marked_on_the_rail_and_listed_below"]
+  },
+  {
+    "label": "every rail row claims it was attached",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
+    "find": "    if asset.get(\"attached\"):\n        facts[\"attached\"] = \"yes\"",
+    "replace": "    if True:\n        facts[\"attached\"] = \"yes\"",
+    "tests": ["tests/cloud/surface/test_studio_editor_preamble.py::test_a_non_attached_asset_gains_no_marker"]
+  },
+  {
+    "label": "attached block renders in rail order, not pick order",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
+    "find": "                [by_id.get(aid, {\"id\": aid}) for aid in attached],",
+    "replace": "                [a for a in assets if a.get(\"attached\")],",
+    "tests": [
+      "tests/cloud/surface/test_studio_editor_preamble.py::test_the_attached_block_keeps_the_users_pick_order",
+      "tests/cloud/surface/test_studio_editor_preamble.py::test_an_attached_id_with_no_rail_row_is_still_listed"
+    ]
+  },
+  {
+    "label": "failed attaches are swallowed",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
+    "find": "    failed = [str(f) for f in (timeline.get(\"attach_failed\") or []) if f]",
+    "replace": "    failed: list[str] = []",
+    "tests": ["tests/cloud/surface/test_studio_editor_preamble.py::test_a_failed_attach_is_reported_rather_than_swallowed"]
+  },
+  {
+    "label": "failure list is uncapped",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
+    "find": "        lines.extend(f\"  • {f}\" for f in failed[:_MAX_FAILURES])",
+    "replace": "        lines.extend(f\"  • {f}\" for f in failed)",
+    "tests": ["tests/cloud/surface/test_studio_editor_preamble.py::test_failed_attaches_are_capped_like_last_edit_failures"]
+  },
+  {
+    "label": "the procedure goes back to claiming media cannot be imported",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
+    "find": "- ONLY PLACE WHAT EXISTS. assetId must come from the MEDIA RAIL above;",
+    "replace": "- ONLY PLACE WHAT EXISTS. You cannot import media. assetId must come from the MEDIA RAIL above;",
+    "tests": ["tests/cloud/surface/test_studio_editor_preamble.py::test_preamble_no_longer_claims_media_cannot_be_imported"]
+  }
+]

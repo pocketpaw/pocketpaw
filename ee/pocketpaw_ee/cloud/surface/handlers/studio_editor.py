@@ -16,6 +16,31 @@
 # derives addressable kinds from the MCP tool schemas). Ids therefore render as
 # ``…tail``, and the tool's validator resolves tails back through
 # ``pockets.id_resolve``.
+#
+# Changes: 2026-09-10 (feat/studio-editor-gallery-attach) — the user can now type
+# ``@`` in the editor's chat rail and pick an item from their /studio gallery,
+# and the page IMPORTS it into the media rail before the message is even sent.
+# So the preamble grew three things and lost one claim:
+#
+#   * rail rows carry ``attached=yes`` when the asset arrived this turn, so the
+#     agent can tell which of forty rail items the user just pointed at;
+#   * an ATTACHED THIS TURN block (``timeline["attached"]``, a list of asset ids)
+#     names them in the order the user picked, because "add these" resolves to
+#     that list and nothing else;
+#   * an ATTACHMENTS THAT FAILED block (``timeline["attach_failed"]``, already
+#     formatted "<name>: <reason>") — the honesty floor. An import that failed
+#     leaves no asset to place, and the agent must say so rather than place
+#     nothing and describe an arrangement.
+#
+# The claim that went: "You cannot import or generate media from here". Half of
+# it is still true (generation is /studio) and half is now false — attach IS
+# import, so the right answer to "the rail doesn't have that" is to tell the user
+# how to attach it, not to refuse.
+#
+# NO new op, and deliberately so. An attached asset is an ordinary rail asset
+# with a real assetId by the time the agent sees the turn, so ``place_clip`` /
+# ``place_audio`` already place it. The op vocabulary, the contract JSON and the
+# validator are untouched.
 
 from __future__ import annotations
 
@@ -29,6 +54,11 @@ from pocketpaw_ee.cloud.surface.handlers._helpers import content_key
 # otherwise crowd out the procedure block that tells the agent what to do with
 # it. The tail line keeps the agent honest about what it cannot see.
 _MAX_ROWS = 40
+
+# Failure lines are capped harder than rows: they are prose, not entities, and a
+# hundred failed attaches say nothing the first ten do not. Same number the
+# ``last_edit.failures`` block has used since it shipped.
+_MAX_FAILURES = 10
 
 
 def _fmt_ms(value: Any) -> str:
@@ -47,6 +77,66 @@ def _rows(items: list[dict[str, Any]], render) -> list[str]:
         # agent can address.
         out.append(f"  …and {len(items) - _MAX_ROWS} more (ask the user to narrow the request)")
     return out
+
+
+def _asset_row(asset: dict[str, Any]) -> str:
+    """One MEDIA RAIL row.
+
+    ``attached`` is rendered only when it is true. A row carrying ``attached=no``
+    would be a fact about forty items to mark two of them, and the whole point of
+    the marker is that it is scannable.
+    """
+    facts: dict[str, Any] = {
+        "kind": asset.get("kind"),
+        "duration": _fmt_ms(asset.get("duration_ms")),
+        "used": ("yes" if asset.get("in_use") else "no"),
+    }
+    if asset.get("attached"):
+        facts["attached"] = "yes"
+    return entity_line(asset.get("name"), asset.get("id"), **facts)
+
+
+def _attached_block(timeline: dict[str, Any], assets: list[dict[str, Any]]) -> list[str]:
+    """The two attach blocks: what arrived this turn, and what did not.
+
+    ``timeline["attached"]`` is a list of asset ids in the order the user picked
+    them, which is the order they should be placed in — so this renders from that
+    list rather than filtering ``assets``, whose order is the rail's.
+    """
+    lines: list[str] = []
+    by_id = {str(a.get("id")): a for a in assets if a.get("id")}
+
+    attached = [str(a) for a in (timeline.get("attached") or []) if a]
+    if attached:
+        lines.append("")
+        lines.append(
+            "ATTACHED THIS TURN (the user just attached these from their gallery "
+            "and they are already on the rail above):"
+        )
+        lines.extend(
+            _rows(
+                # A picked id with no rail row is not dropped: the id is still
+                # placeable, and silently shortening this list would make "add
+                # all three" quietly arrange two.
+                [by_id.get(aid, {"id": aid}) for aid in attached],
+                lambda a: entity_line(a.get("name"), a.get("id"), kind=a.get("kind")),
+            )
+        )
+        lines.append(
+            "  When the user says 'these clips', 'this' or 'it', they almost "
+            "certainly mean these — place them in the order listed."
+        )
+
+    failed = [str(f) for f in (timeline.get("attach_failed") or []) if f]
+    if failed:
+        lines.append("")
+        lines.append("ATTACHMENTS THAT FAILED (these did NOT reach the rail):")
+        lines.extend(f"  • {f}" for f in failed[:_MAX_FAILURES])
+        if len(failed) > _MAX_FAILURES:
+            lines.append(f"  …and {len(failed) - _MAX_FAILURES} more")
+        lines.append("  Tell the user which ones failed before you arrange anything.")
+
+    return lines
 
 
 def _timeline_block(timeline: dict[str, Any]) -> str:
@@ -80,23 +170,15 @@ def _timeline_block(timeline: dict[str, Any]) -> str:
     lines.append("")
     if assets:
         lines.append("MEDIA RAIL (what can be placed — nothing else exists):")
-        lines.extend(
-            _rows(
-                assets,
-                lambda a: entity_line(
-                    a.get("name"),
-                    a.get("id"),
-                    kind=a.get("kind"),
-                    duration=_fmt_ms(a.get("duration_ms")),
-                    used=("yes" if a.get("in_use") else "no"),
-                ),
-            )
-        )
+        lines.extend(_rows(assets, _asset_row))
     else:
         lines.append(
-            "MEDIA RAIL: empty. Nothing can be placed until the user imports "
-            "media (drag files onto the rail, or 'Add files')."
+            "MEDIA RAIL: empty. Nothing can be placed until the user adds media — "
+            "they can attach it from their /studio gallery with `@` in the "
+            "composer, or drag files onto the rail."
         )
+
+    lines.extend(_attached_block(timeline, assets))
 
     clips = [c for c in (timeline.get("clips") or []) if isinstance(c, dict)]
     lines.append("")
@@ -178,9 +260,17 @@ Rules that matter:
   clip moves. If a caption belongs to a clip's dialogue, pass
   `anchorClip: <clipId>` and give fromMs/toMs as offsets from that clip's start.
   Absolute times are only right for captions that belong to the timeline itself.
-- ONLY PLACE WHAT EXISTS. assetId must come from the MEDIA RAIL above. You
-  cannot import or generate media from here; if the rail lacks what the user
-  described, say so and ask them to add it.
+- ONLY PLACE WHAT EXISTS. assetId must come from the MEDIA RAIL above;
+  never invent one, and never claim to have generated footage (generation is
+  the /studio surface, not this one). But the rail is not fixed: the user attaches
+  media from their /studio gallery by typing `@` in the composer, and it is
+  imported onto the rail before they even send. So when the rail lacks what they
+  described, tell them to attach it with `@` (or drag the file onto the rail) —
+  do not tell them media cannot be brought in here.
+- WHAT THEY JUST ATTACHED IS WHAT THEY MEAN. When ATTACHED THIS TURN appears
+  above and the user says "add these", "put this on the timeline" or "use it",
+  those assets are the ones — place them in the ORDER LISTED, and place all of
+  them unless the user narrowed it.
 - A TRANSITION IS EXPLICIT. Clips touching or overlapping does not create one.
   Use set_transition, and only when the user asked for one.
 - COPY IDS EXACTLY as they appear above (the `…` prefix and all).
@@ -207,6 +297,9 @@ Honesty (this surface has burned people before):
   edit that did not go through, and never invent a clip, asset or timing.
 - If "YOUR LAST EDIT DID NOT FULLY APPLY" appears above, tell the user which
   parts the editor declined before doing anything else.
+- If "ATTACHMENTS THAT FAILED" appears above, name those files and say they did
+  not make it onto the rail. Placing the ones that worked and staying quiet about
+  the rest looks like the whole request went through.
 
 To render the finished video, call `mcp__pocketpaw_timeline__export_timeline`.
 Never batch an export with edits — it would render a half-built timeline.
