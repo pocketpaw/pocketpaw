@@ -67,6 +67,13 @@ async def test_preamble_carries_snapshot_path_and_free_y() -> None:
     assert "page-ops" in text
     # The page is the surface, not a chat.
     assert "not a chat" in text.lower()
+    # The ink convention. Now that the page image is attached, the two pens are
+    # the agent's only reliable way to tell its own earlier writing from the
+    # user's — and an agent that reads its own check-question as the student's
+    # answer marks itself correct. The other half is paw-enterprise's USER_INK
+    # (src/lib/core/other-hand/types.ts); the word is "blue", never a hex.
+    assert "BLUE" in text
+    assert "YOUR ink is dark" in text
     # A key was claimed, and it names what the preamble depends on.
     assert preamble.cache_key
     assert "820" in preamble.cache_key
