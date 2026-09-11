@@ -17,19 +17,25 @@
 # re-plans against current disk and only writes when the fresh plan matches.
 #
 # Launch line (verified against pulley/mcp/server.ts ``parseArgs`` and
-# pulley/mcp/lib/belt.ts): ``bun <pulley_path>/mcp/server.ts [--app <dir>]``.
-# ``--registry`` is deliberately NOT passed — BeltRunner defaults ``pulleyRoot``
-# to the server file's own checkout and the registry falls back to
-# ``<pulley-root>/registry``, both derived from the absolute server.ts path this
-# module already passes. A second setting would buy no behaviour.
+# pulley/mcp/lib/belt.ts): ``bun <pulley_path>/mcp/server.ts``. Two flags the
+# server accepts and this module deliberately does NOT pass:
 #
-# FOLLOW-UP — per-run app scoping. ``--app`` is the client repo blocks install
-# INTO, and a real belt run is bound to one repo per run. This slice reads it
-# from the static ``pulley_app_path`` setting and omits the flag when unset (the
-# tools then require an explicit ``app`` argument per call, which is what the
-# server advertises in that mode). Threading the run's bound repo into the
-# server config — the way the belt gate already carries ``meta.repo`` — is the
-# follow-up.
+#   ``--registry`` — BeltRunner defaults ``pulleyRoot`` to the server file's own
+#   checkout and the registry falls back to ``<pulley-root>/registry``, both
+#   derived from the absolute server.ts path already passed. A setting for it
+#   would buy no behaviour.
+#
+#   ``--app`` — the client repo blocks install INTO. Omitting it is the per-run
+#   scoping, not a gap in it. ``PulleyTools.definitions`` builds the schema from
+#   the running deployment (``appRequired = this.defaultApp ? [] : ["app"]``), so
+#   a server started WITHOUT a default app advertises ``app`` as REQUIRED on
+#   every tool, and ``#app()`` returns a usage error if a call omits it. A belt
+#   run develops in a per-run station worktree and proposes the diff of THAT
+#   repo, so a fixed default would install blocks into a directory the station's
+#   diff never sees — silently, since the tools would still succeed. Making the
+#   agent name the repo per call is what keeps the two in step; the preamble
+#   tells it to pass the same repo it hands ``belt_propose_change``.
+# (A1 shipped a ``pulley_app_path`` setting for this; A1b removed it.)
 #
 # Graceful-by-default: ``build_pulley_server`` returns None — never raising —
 # when ``pulley_path`` is unset, the server.ts is missing, or bun cannot be
@@ -128,11 +134,7 @@ def build_pulley_server() -> tuple[str, Any] | None:
         )
         return None
 
-    args = [str(server_ts)]
-    app_path = settings.pulley_app_path
-    if app_path:
-        args += ["--app", str(Path(app_path).expanduser())]
-
-    config: dict[str, Any] = {"type": "stdio", "command": bun_bin, "args": args}
-    logger.info("pulley MCP server registered — server %s, app %s", server_ts, app_path or "<none>")
+    # No ``--app``: the omission IS the per-run scoping. See the module docstring.
+    config: dict[str, Any] = {"type": "stdio", "command": bun_bin, "args": [str(server_ts)]}
+    logger.info("pulley MCP server registered — server %s, app per call", server_ts)
     return SERVER_NAME, config

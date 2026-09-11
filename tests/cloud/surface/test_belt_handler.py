@@ -127,6 +127,13 @@ async def test_belt_handler_sends_the_agent_to_blocks_before_writing_code() -> N
     # ``pulley_path`` is optional, so the rule must degrade rather than command a
     # tool a deploy may not have.
     assert "not available in this run" in lower
+    # The app argument is per-call and has no server default, so the preamble is
+    # the only thing that points the install at THIS run's repo — without it the
+    # blocks land where the station's diff never looks (or the call just fails).
+    assert "`app` argument" in preamble
+    assert "belt_propose_change" in preamble
+    # ...and installed blocks still leave through the gate like any other change.
+    assert "do not bypass the gate" in lower
 
     # ...and the three-stage station loop is untouched.
     assert "1. orient first" in lower

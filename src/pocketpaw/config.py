@@ -225,14 +225,19 @@ Changes:
     the same-box shield daemon's control-API UNIX socket + Bearer token. The
     cloud ``/api/v1/security/*`` proxy reads these to reach shield; the token
     is never logged. Env: POCKETPAW_SHIELD_API_SOCKET / POCKETPAW_SHIELD_API_TOKEN.
-  - 2026-09-12: Added ``pulley_bin`` + ``pulley_path`` + ``pulley_app_path``
-    — the pulley block-engine MCP server settings (A1, belt factory).
-    ``pulley_path`` defaults to None, which disables the server; set it to a
-    pulley checkout to give the /belt develop station search_catalog /
-    describe_block / plan_install / apply_plan / doctor. ``pulley_app_path``
-    is the default ``--app`` target and is omitted from the launch line when
-    unset. Env: POCKETPAW_PULLEY_BIN / POCKETPAW_PULLEY_PATH /
-    POCKETPAW_PULLEY_APP_PATH.
+  - 2026-09-12: Added ``pulley_bin`` + ``pulley_path`` — the pulley
+    block-engine MCP server settings (A1, belt factory). ``pulley_path``
+    defaults to None, which disables the server; set it to a pulley checkout
+    to give the /belt develop station search_catalog / describe_block /
+    plan_install / apply_plan / doctor. Env: POCKETPAW_PULLEY_BIN /
+    POCKETPAW_PULLEY_PATH.
+  - 2026-09-12 (A1b): REMOVED ``pulley_app_path``, which A1 shipped as the
+    default ``--app`` target. There is deliberately no server-level default
+    app: pulley's tool schema makes ``app`` REQUIRED on every call when the
+    server starts without ``--app`` (``PulleyTools.definitions`` builds
+    ``appRequired`` from ``defaultApp``), and a belt run installs into the
+    repo IT bound, not into a fixed directory. A default would have landed
+    blocks somewhere the station's diff never sees.
   - 2026-06-10: Added ``loom_bin`` + ``loom_model_path`` — the codebase
     orientation (loom) MCP server settings. ``loom_model_path`` defaults
     to None, which disables the loom MCP server; set it to a built
@@ -1666,7 +1671,7 @@ class Settings(BaseSettings):
     # the agent installs reviewed blocks instead of hand-writing auth, org,
     # roles, notify, files and audit code. Wired into the claude_agent_sdk
     # backend via CloudPulleyMcpProvider. Env auto-derives POCKETPAW_PULLEY_PATH
-    # / POCKETPAW_PULLEY_BIN / POCKETPAW_PULLEY_APP_PATH.
+    # / POCKETPAW_PULLEY_BIN.
     pulley_bin: str = Field(
         default="bun",
         description=(
@@ -1684,15 +1689,8 @@ class Settings(BaseSettings):
             "<this path>/registry."
         ),
     )
-    pulley_app_path: str | None = Field(
-        default=None,
-        description=(
-            "Default client app directory blocks install INTO, passed as "
-            "`--app`. When unset the flag is omitted and every pulley tool "
-            "requires an explicit `app` argument. Per-run app scoping (binding "
-            "this to the repo a belt run targets) is a follow-up."
-        ),
-    )
+    # No ``pulley_app_path``: see the A1b note in this module's changelog. The
+    # app directory is a PER-CALL argument, never a server default.
 
     # Belt & Pulley — the develop station's code-change gate. The
     # ``belt_propose_change`` MCP tool proposes a unified diff through Instinct

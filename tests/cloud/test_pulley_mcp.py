@@ -7,7 +7,7 @@
 #   * build_pulley_server() — None when pulley_path is unset, None when the
 #     server.ts is missing, None when bun can't be resolved, and the correct
 #     ("pulley", <stdio config dict>) when both resolve.
-#   * The --app flag is present only when pulley_app_path is set.
+#   * The launch line never carries --app (see the A1b note below).
 #   * _resolve_bun_bin — explicit path → PATH → ~/.bun/bin/bun discovery order.
 #   * The BELT surface profile's allow_mcp_tool_ids carries the pulley ids and a
 #     non-BELT surface's does not (apply_plan writes to disk).
@@ -22,6 +22,14 @@
 # every named surface, the surviving browser floor, and the independent
 # ``pulley_tool_ids()`` load that keeps an unrelated ImportError from emptying
 # the deny.
+#
+# Updated: 2026-09-12 (A1b) — A1's ``pulley_app_path`` setting and the ``--app``
+# flag it fed are GONE, and two tests pin their absence. pulley makes ``app``
+# REQUIRED on every tool call when the server starts without a default
+# (``appRequired = this.defaultApp ? [] : ["app"]`` in PulleyTools.definitions),
+# and a belt run installs into the repo IT bound and proposes THAT repo's diff.
+# A fixed default app would have put blocks where the station's diff never looks,
+# with the tool call still reporting success.
 #
 # build_pulley_server reads its config through pocketpaw.config.get_settings (a
 # cached singleton, the same pattern loom / media / sites use), so every test
@@ -43,18 +51,13 @@ from pocketpaw_ee.cloud.surface.service import resolve_profile
 from pocketpaw_ee.extensions import CloudPulleyMcpProvider
 
 
-def _settings(
-    *,
-    pulley_path: str | None,
-    pulley_bin: str = "bun",
-    pulley_app_path: str | None = None,
-) -> MagicMock:
-    """A stand-in for get_settings() carrying only the fields the server reads."""
-    return MagicMock(
-        pulley_path=pulley_path,
-        pulley_bin=pulley_bin,
-        pulley_app_path=pulley_app_path,
-    )
+def _settings(*, pulley_path: str | None, pulley_bin: str = "bun") -> MagicMock:
+    """A stand-in for get_settings() carrying only the fields the server reads.
+
+    A MagicMock answers ANY attribute, so this double cannot prove a setting is
+    gone — ``test_no_default_app_setting_exists`` reads the real Settings class.
+    """
+    return MagicMock(pulley_path=pulley_path, pulley_bin=pulley_bin)
 
 
 def _fake_checkout(tmp_path) -> tuple[str, str]:
@@ -158,29 +161,45 @@ def test_build_server_returns_stdio_config(tmp_path) -> None:
     }
 
 
-def test_app_flag_only_when_app_path_set(tmp_path) -> None:
-    """pulley_app_path set → ``--app <dir>`` rides the launch line; unset → the
-    flag is omitted entirely (the tools then require an explicit ``app`` arg,
-    which is what the server advertises in that mode)."""
+def test_launch_line_never_carries_a_default_app(tmp_path) -> None:
+    """``--app`` must NEVER ride the launch line — the omission is the per-run
+    scoping.
+
+    pulley builds its tool schema from the running deployment
+    (``appRequired = this.defaultApp ? [] : ["app"]``), so a server started with
+    no default app advertises ``app`` as REQUIRED on every tool and errors on a
+    call that omits it. A belt run develops in a per-run station worktree and
+    proposes the diff of THAT repo, so a fixed default would install blocks into
+    a directory the station's diff never sees — and the tool call would still
+    report success.
+
+    THE MUTATION THAT BREAKS THIS: append ``["--app", <dir>]`` to the args.
+    """
     pulley_path, bun = _fake_checkout(tmp_path)
-    app = tmp_path / "client-app"
-    app.mkdir()
-
-    with patch(
-        "pocketpaw.config.get_settings",
-        return_value=_settings(pulley_path=pulley_path, pulley_bin=bun, pulley_app_path=str(app)),
-    ):
-        built = pulley.build_pulley_server()
-    assert built is not None
-    assert built[1]["args"] == [f"{pulley_path}/mcp/server.ts", "--app", str(app)]
-
     with patch(
         "pocketpaw.config.get_settings",
         return_value=_settings(pulley_path=pulley_path, pulley_bin=bun),
     ):
-        built_no_app = pulley.build_pulley_server()
-    assert built_no_app is not None
-    assert "--app" not in built_no_app[1]["args"]
+        built = pulley.build_pulley_server()
+
+    assert built is not None
+    assert built[1]["args"] == [f"{pulley_path}/mcp/server.ts"]
+    assert not any(arg.startswith("--app") for arg in built[1]["args"])
+
+
+def test_no_default_app_setting_exists() -> None:
+    """There must be no ``pulley_app_path`` setting to reintroduce the default.
+
+    Read off the real Settings class, not the MagicMock double above — a mock
+    answers any attribute and would pass whether or not the field exists.
+    """
+    from pocketpaw.config import Settings
+
+    assert "pulley_app_path" not in Settings.model_fields
+    # The two that DO remain, so this test fails loudly if the pair is renamed
+    # rather than quietly passing on an empty model.
+    assert "pulley_path" in Settings.model_fields
+    assert "pulley_bin" in Settings.model_fields
 
 
 # --- bun resolution order ---------------------------------------------------
