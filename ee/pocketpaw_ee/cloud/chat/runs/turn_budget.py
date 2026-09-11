@@ -74,6 +74,32 @@ def _today() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
+async def is_over_cap(workspace_id: str | None) -> bool:
+    """Is this workspace already at today's ceiling? READ-ONLY.
+
+    The check-only half, for the synchronous HTTP route. It deliberately does
+    NOT increment: ``try_spend`` in the executor owns the single atomic spend,
+    so a turn costs exactly one however many seams look at the counter first.
+
+    Fails OPEN, which is the opposite of ``try_spend`` and is right for the
+    same reason the guest fast-reject is check-only: this is an optimisation
+    that saves a capped account a run doc, a Redis stream and a TTL, and the
+    executor still refuses the run. A database blip must cost latency, not
+    correctness, and correctness lives in ``try_spend``.
+    """
+    cap = daily_cap()
+    if cap <= 0 or not workspace_id:
+        return False
+    try:
+        doc = await WorkspaceTurnUsage.get_pymongo_collection().find_one(
+            {"key": f"{workspace_id}:{_today()}"}
+        )
+    except Exception:
+        logger.debug("turn budget pre-check unavailable for %s", workspace_id, exc_info=True)
+        return False
+    return int((doc or {}).get("used", 0)) >= cap
+
+
 async def try_spend(workspace_id: str | None) -> tuple[bool, int, int]:
     """Claim one agent run against today's budget for ``workspace_id``.
 
@@ -133,4 +159,4 @@ async def try_spend(workspace_id: str | None) -> tuple[bool, int, int]:
     return True, spent, cap
 
 
-__all__ = ["daily_cap", "try_spend"]
+__all__ = ["daily_cap", "is_over_cap", "try_spend"]

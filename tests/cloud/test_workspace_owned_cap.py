@@ -13,10 +13,38 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
+from mongomock_motor import AsyncMongoMockClient
 
 from pocketpaw_ee.cloud._core.errors import WorkspaceLimitError
+from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
 from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+
+@pytest.fixture
+async def workspace_db():
+    from beanie import init_beanie
+
+    client = AsyncMongoMockClient()
+    db = client[f"test_ws_cap_{uuid.uuid4().hex[:8]}"]
+    original = db.list_collection_names
+
+    async def _safe(*_a, **_kw):
+        return await original()
+
+    db.list_collection_names = _safe  # type: ignore[method-assign]
+    await init_beanie(database=db, document_models=[_WorkspaceDoc])
+    try:
+        yield db
+    finally:
+        for attr in ("_document_settings", "_settings"):
+            if hasattr(_WorkspaceDoc, attr):
+                try:
+                    delattr(_WorkspaceDoc, attr)
+                except Exception:
+                    pass
 
 
 def test_the_cap_reads_from_the_environment(monkeypatch):
@@ -112,3 +140,89 @@ async def test_an_account_under_the_cap_proceeds(monkeypatch):
         await workspace_service.create(_Ctx(), _Body())
 
     assert reached == ["slug"], "an account under its cap was refused"
+
+
+# ── against a real collection ────────────────────────────────────────────
+
+
+async def test_the_count_query_matches_real_rows(workspace_db, monkeypatch):
+    """The one test that does NOT stub the database.
+
+    Every test above hands ``create`` a fake count, which proves the branch
+    and proves nothing about the QUERY. If ``owner`` were stored as an
+    ObjectId while ``ctx.user_id`` is a string, the find would match zero rows
+    forever, the cap would never fire, and all of those tests plus their
+    mutations would stay green. That is the over-mocking failure mode, on the
+    gate that makes the other two ceilings bind.
+
+    Covers three things at once: the owner filter matches, another account's
+    workspaces are not counted, and a soft-deleted one frees its slot.
+
+    Mutation that must break this: drop ``"deleted_at": None`` from the query.
+    """
+    monkeypatch.setenv("POCKETPAW_MAX_OWNED_WORKSPACES", "2")
+
+    await _WorkspaceDoc(name="A", slug="a", owner="u1").insert()
+    await _WorkspaceDoc(name="B", slug="b", owner="u1").insert()
+    await _WorkspaceDoc(name="C", slug="c", owner="u2").insert()
+
+    reached: list[str] = []
+
+    async def _slug(_s):
+        reached.append("slug")
+        raise RuntimeError("stop here — past the cap is all this test needs")
+
+    monkeypatch.setattr(workspace_service, "slug_reason", _slug)
+
+    class _Ctx:
+        user_id = "u1"
+
+    class _Body:
+        name = "New"
+        slug = "new"
+
+    with pytest.raises(WorkspaceLimitError):
+        await workspace_service.create(_Ctx(), _Body())
+    assert reached == [], "u1 owns two workspaces and was let through"
+
+    # u2 owns one of the three rows and is well under the cap.
+    class _Ctx2:
+        user_id = "u2"
+
+    with pytest.raises(RuntimeError):
+        await workspace_service.create(_Ctx2(), _Body())
+    assert reached == ["slug"], "another account's workspaces were counted against u2"
+
+
+async def test_a_soft_deleted_workspace_frees_its_slot(workspace_db, monkeypatch):
+    """Deleting a workspace has to give the slot back, or the cap becomes a
+    lifetime quota nobody can recover from.
+    """
+    from datetime import UTC, datetime
+
+    monkeypatch.setenv("POCKETPAW_MAX_OWNED_WORKSPACES", "2")
+
+    await _WorkspaceDoc(name="A", slug="a", owner="u1").insert()
+    await _WorkspaceDoc(
+        name="B", slug="b", owner="u1", deleted_at=datetime.now(UTC)
+    ).insert()
+
+    reached: list[str] = []
+
+    async def _slug(_s):
+        reached.append("slug")
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(workspace_service, "slug_reason", _slug)
+
+    class _Ctx:
+        user_id = "u1"
+
+    class _Body:
+        name = "New"
+        slug = "new"
+
+    with pytest.raises(RuntimeError):
+        await workspace_service.create(_Ctx(), _Body())
+
+    assert reached == ["slug"], "a deleted workspace still held its slot"
