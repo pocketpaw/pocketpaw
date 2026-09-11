@@ -11,8 +11,9 @@
 # .execute_approved_plan``, and tested without one.
 #
 # Re-validation at approval time, not propose time: the parent may have gone
-# broke or hibernated while the Action sat in the tray, so the spawn cost and
-# the parent's state are checked HERE before anything is minted.
+# broke or hibernated while the Action sat in the tray, so the spawn cost, the
+# parent's state and the child's name (unique per universe — citizens resolve
+# by name inside a tick) are checked HERE before anything is minted.
 
 """Approve-side executor for the gated ``world_spawn`` Action."""
 
@@ -107,6 +108,10 @@ async def execute_approved_spawn(action: Any) -> dict[str, Any]:
             return {"ok": False, "reason": f"{parent.name} cannot afford {cost}"}
 
         name = str(blob.get("child_name") or "child")[:40]
+        # Names resolve citizens inside a tick (service invariant 12); the
+        # filing side checked too, but a founder may have arrived since.
+        if await service._name_taken(str(uni.id), name):
+            return {"ok": False, "reason": f"{name} is already a citizen of {uni.name}"}
         ocean = child_ocean(parent.ocean or {}, parent_did=parent.did, child_name=name)
         path = service.soul_root() / str(uni.id) / f"{name.lower()}-{uuid4().hex[:6]}.soul"
         did = await soul_link.birth_soul(

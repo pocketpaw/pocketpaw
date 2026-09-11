@@ -8,10 +8,14 @@
 # settled by the service under the lock — both bundles move and the offer is
 # claimed with ``data.taken_by``; an expired, taken, own or short-giver offer
 # lands as a zero-cost gate with ``data.reason`` and nothing moves, fee
-# refunded; a failing second write un-claims the offer (atomicity); the digest
-# lists open offers and the suffix prints them only when there are any; every
-# trade body (offer, accept, spring) is engine-templated even when the model
-# supplied text.
+# refunded; a failing second write un-claims the offer (atomicity); the giver's
+# stock moves on the tick's own instance, so a giver persisted AFTER the
+# acceptor (Ann accepts Zed) still loses the bundle, and a gift to a giver
+# persisted BEFORE the settle (Bob pays Ann, Cal accepts Ann) survives the
+# settle's save with Journal == ledger; the digest lists open offers — never the
+# reader's own, never a sleeper's — and the suffix prints them only when there
+# are any; give and want must name different resources; every trade body
+# (offer, accept, spring) is engine-templated even when the model supplied text.
 #
 # Mutation anchors live in tests/mutations/terrarium_resources.json.
 
@@ -73,6 +77,7 @@ def test_an_offer_without_the_stock_is_a_gate_row():
         {"verb": "trade", "want": {"stone": 1}},
         {"verb": "trade", "give": {"gold": 3}, "want": {"stone": 1}},
         {"verb": "trade", "give": {"grain": 0}, "want": {"stone": 1}},
+        {"verb": "trade", "give": {"grain": 3}, "want": {"grain": 1}},
     ],
 )
 def test_a_malformed_offer_is_dropped_unpaid(act):
@@ -117,15 +122,12 @@ def test_every_trade_body_is_engine_templated_even_when_the_model_wrote_text():
 # ---------------------------------------------------------------------------
 
 
-def _world(client):
-    return create_universe(
-        client,
-        founders=2,
-        founder_cards=[
-            _card(name="Mira", stock={"grain": 3}),
-            _card(name="Nim", stock={"stone": 2, "water": 1}),
-        ],
+def _world(client, *cards: dict):
+    cards = cards or (
+        _card(name="Mira", stock={"grain": 3}),
+        _card(name="Nim", stock={"stone": 2, "water": 1}),
     )
+    return create_universe(client, founders=len(cards), founder_cards=list(cards))
 
 
 async def _land(universe_id: str, by_name: dict[str, list[dict]]):
@@ -272,6 +274,60 @@ async def test_a_failing_second_write_un_claims_the_offer(client, monkeypatch):
     assert await _stocks(uni["id"]) == {"Mira": {"grain": 3}, "Nim": {"stone": 2, "water": 1}}
 
 
+async def test_a_giver_landing_after_the_acceptor_still_loses_the_bundle(client):
+    """Ann sorts before Zed, so Zed's own persist runs AFTER Ann's accept
+    moved his stock. Settle must move the tick's own Zed instance, or Zed's
+    later save restores the grain and both sides hold it."""
+    uni = _world(
+        client, _card(name="Ann", stock={"stone": 2}), _card(name="Zed", stock={"grain": 3})
+    )
+    await _land(uni["id"], {"Zed": [OFFER]})
+    offer = await _offer(uni["id"])
+    await _land(uni["id"], {"Ann": [{"verb": "trade", "offer_seq": offer.seq}]})
+    assert await _stocks(uni["id"]) == {"Ann": {"grain": 3, "stone": 1}, "Zed": {"stone": 1}}
+    assert (await _offer(uni["id"])).data["taken_by"] == "Ann"
+
+
+async def test_a_gift_to_a_giver_earlier_in_the_tick_survives_the_settle(client):
+    """Ann persists first; Bob then gifts her 5; Cal then accepts her offer and
+    settle saves Ann's tick instance. The gift must ride that instance or the
+    settle's save overwrites it and the Journal's ``gain`` row lies."""
+    uni = _world(
+        client,
+        _card(name="Ann", stock={"grain": 3}),
+        _card(name="Bob"),
+        _card(name="Cal", stock={"stone": 2}),
+    )
+    await _land(uni["id"], {"Ann": [OFFER]})
+    offer = await _offer(uni["id"])
+    ann = await CitizenDoc.find_one(CitizenDoc.name == "Ann")
+    before = ann.balance
+    ledger_before = sum(e.cost for e in await _rows(uni["id"], "Ann"))
+
+    await _land(
+        uni["id"],
+        {
+            "Bob": [{"verb": "trade", "to": "Ann", "amount": 5}],
+            "Cal": [{"verb": "trade", "offer_seq": offer.seq}],
+        },
+    )
+    ann = await CitizenDoc.find_one(CitizenDoc.name == "Ann")
+    assert ann.balance == before - physics().costs.think + 5
+    assert ann.stock == {"stone": 1}
+    (gain,) = await _events(uni["id"], "gain")
+    assert gain.actor == "Ann" and gain.cost == 5
+    # The Journal is truth: Ann's rows sum to Ann's balance move.
+    assert (
+        sum(e.cost for e in await _rows(uni["id"], "Ann")) - ledger_before == ann.balance - before
+    )
+
+
+async def _rows(universe_id: str, actor: str) -> list[EventDoc]:
+    return await EventDoc.find(
+        EventDoc.universe_id == universe_id, EventDoc.actor == actor
+    ).to_list()
+
+
 async def test_an_expired_offer_is_acceptable_through_its_last_day(client):
     uni, offer = await _post(client)
     u = await UniverseDoc.get(uni["id"])
@@ -314,13 +370,21 @@ async def test_open_offers_ride_the_digest_and_the_suffix_only_when_there_are_an
     assert f'- #{offer.seq} Mira gives {{"grain": 3}} for {{"stone": 1}}, until day 3' in suffix
     assert suffix.count("== OPEN OFFERS ==") == 1
 
+    # Never the reader's own offer: accepting it could only gate.
+    _doc, _snap, mira_digest = next(r for r in rows if r[1].name == "Mira")
+    assert mira_digest.open_offers == ()
+
+    # A sleeper's offer is not open either.
+    assert await service._open_offers(u, {"Mira", "Nim"}) != []
+    assert await service._open_offers(u, {"Nim"}) == []
+
     # Taken or expired: gone from the digest without any row being deleted.
     offer.data = {**offer.data, "taken_by": "Nim"}
     await offer.save()
-    assert await service._open_offers(u) == []
+    assert await service._open_offers(u, {"Mira", "Nim"}) == []
     offer.data = {"give": {"grain": 3}, "want": {"stone": 1}, "expires_day": 0}
     await offer.save()
-    assert await service._open_offers(u) == []
+    assert await service._open_offers(u, {"Mira", "Nim"}) == []
 
 
 def test_the_prefix_names_the_offer_shapes_only_with_resources():

@@ -4,6 +4,8 @@
 # Event and NO child; the approve side (``executor.execute_approved_spawn``)
 # mints the child, charges the parent, and re-validates the parent's balance and
 # state AT APPROVAL TIME — the Action can sit in the tray while the world moves.
+# A child's name must be unique in its universe (citizens resolve by name inside
+# a tick): refused at filing (a zero-cost gate, no Action) and again at approval.
 
 from __future__ import annotations
 
@@ -117,6 +119,40 @@ async def test_a_sleeping_parent_cannot_spawn(client):
 
     result = await executor.execute_approved_spawn(_action(blob))
     assert result["ok"] is False and "hibernating" in result["reason"]
+
+
+async def test_a_child_named_after_a_citizen_is_refused_at_filing(client, instinct_store):
+    """Settle and the transfers loop resolve citizens by name, so a second
+    "Mira" would be paid for the first one's offers. Filing side."""
+    uni = create_universe(client, founders=2, endowment=RICH)
+    taken = client.get(f"/terrarium/universes/{uni['id']}/citizens").json()["citizens"][1]["name"]
+    citizen_llm.set_mock_decision({"thought": "twins", "acts": [{"verb": "spawn", "name": taken}]})
+    res = client.post(f"/terrarium/universes/{uni['id']}/tick?n=1")
+    assert res.status_code == 200, res.text
+
+    reasons = [
+        e["data"]["reason"] for e in res.json()["events"] if (e.get("data") or {}).get("reason")
+    ]
+    assert reasons.count("name taken") == 2, "both citizens asked, both were refused"
+    pending = await instinct_store.list_actions()
+    assert not [
+        a
+        for a in pending
+        if isinstance(a.parameters, dict) and service.WORLD_SPAWN_PARAM_KEY in a.parameters
+    ], "no Action is filed for a taken name"
+
+
+async def test_a_child_named_after_a_citizen_is_refused_at_approval(client):
+    """Approval side: the Action may predate a founder or child of that name."""
+    uni = create_universe(client, founders=2, endowment=RICH)
+    blob = await _spawn_blob(client, uni["id"])
+    blob["child_name"] = client.get(f"/terrarium/universes/{uni['id']}/citizens").json()[
+        "citizens"
+    ][1]["name"]
+
+    result = await executor.execute_approved_spawn(_action(blob))
+    assert result["ok"] is False and "already a citizen" in result["reason"]
+    assert len(client.get(f"/terrarium/universes/{uni['id']}/citizens").json()["citizens"]) == 2
 
 
 async def test_a_cross_workspace_blob_is_refused(client):

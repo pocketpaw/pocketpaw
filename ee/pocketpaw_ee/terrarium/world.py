@@ -36,8 +36,9 @@
 #     fee (``costs.trade``, else the speak price: a ``trade`` row must cost).
 #     Stock moves land in ``stock_delta``.
 #   * OFFERS are citizen-to-citizen trade. ``trade`` with ``give`` and ``want``
-#     and no ``to`` posts an ``offer`` (the giver must hold ``give`` now; it is
-#     not escrowed); ``trade`` with ``offer_seq`` posts an ``accept``, checked
+#     (naming different resources) and no ``to`` posts an ``offer`` (the giver
+#     must hold ``give`` now; it is not escrowed); ``trade`` with ``offer_seq``
+#     posts an ``accept``, checked
 #     here against the open-offer map the service passes in (``offers``) and
 #     settled by the service under the universe lock. Offer, accept and spring
 #     bodies are ENGINE-TEMPLATED, never citizen text, which is why none of
@@ -380,9 +381,11 @@ def bundle_text(bundle: dict[str, int]) -> str:
 
 
 def _offer_error(physics: PhysicsFile, act: Act) -> str | None:
-    """Why this offer is malformed, or None: both sides named, declared, positive."""
+    """Why this offer is malformed, or None: both sides named, declared, positive, distinct."""
     if not act.give or not act.want:
         return "an offer names what you give and what you want"
+    if set(act.give) & set(act.want):
+        return "an offer gives one thing for another"
     for side in (act.give, act.want):
         for name, amount in side.items():
             if name not in physics.resources:

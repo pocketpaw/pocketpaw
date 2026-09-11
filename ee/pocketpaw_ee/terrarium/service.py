@@ -37,14 +37,19 @@
 #      through ``_land_tick``, so the two paths harvest identically.
 #  10. the rung is a projection, but a CHANGE of rung is a Journal row: one
 #      zero-cost ``era`` (actor GATE, ``data.from`` / ``data.to``).
-#  11. trade offers: ``_open_offers`` (ONE query) feeds both the digest and
-#      ``apply_acts``; an ``accept`` is SETTLED in ``_persist_outcome`` under
+#  11. trade offers: ``_open_offers`` (ONE query; drops sleepers' offers, and
+#      the digest drops the reader's own) feeds the digest; ``_recent_offers``
+#      feeds ``apply_acts``; an ``accept`` is SETTLED in ``_persist_outcome`` under
 #      the universe lock — the offer is re-read by seq, must be open, unexpired
 #      and its giver alive and still holding ``give``; the offer is claimed
 #      (``data.taken_by``) before the giver's stock moves and un-claimed if
 #      that write fails, so a failing second write moves nothing. A failed
 #      accept lands as a zero-cost ``gate`` (``data.reason`` / ``data.short``)
 #      and its fee and stock are refunded before the ledger applies.
+#  12. citizens resolve BY NAME inside a tick (``_land_tick``'s ``docs`` map:
+#      accept's giver, a gift's recipient), so a name is unique per universe:
+#      a spawn naming an existing citizen is refused at filing (``_name_taken``,
+#      a zero-cost ``gate``) and again at approval (``executor``).
 
 """Terrarium service — persistence, souls, the gate and the bus."""
 
@@ -782,7 +787,7 @@ async def _sense(uni: UniverseDoc, physics: PhysicsFile) -> list[SensedRow]:
         ).to_list()
     ]
 
-    open_offers = await _open_offers(uni) if physics.resources else []
+    open_offers = await _open_offers(uni, {c.name for c in citizens}) if physics.resources else []
 
     rows: list[SensedRow] = []
     for doc in citizens:
@@ -804,7 +809,8 @@ async def _sense(uni: UniverseDoc, physics: PhysicsFile) -> list[SensedRow]:
                     viewer_messages=viewer_msgs,
                     memories=list(memories),
                     constitution=list(physics.constitution),
-                    open_offers=open_offers,
+                    # Never the reader's own: accepting it only gates.
+                    open_offers=[o for o in open_offers if o["who"] != doc.name],
                 ),
             )
         )
@@ -840,10 +846,13 @@ async def _recent_offers(uni: UniverseDoc) -> list[dict[str, Any]]:
     ]
 
 
-async def _open_offers(uni: UniverseDoc) -> list[dict[str, Any]]:
-    """The offers a citizen may accept today: unclaimed and not past ``expires_day``."""
+async def _open_offers(uni: UniverseDoc, alive: set[str]) -> list[dict[str, Any]]:
+    """The offers a citizen may accept today: unclaimed, not past ``expires_day``
+    and from a giver still awake. A sleeper's offer would only gate."""
     offers = await _recent_offers(uni)
-    return [o for o in offers if not o["taken_by"] and o["expires_day"] >= uni.day]
+    return [
+        o for o in offers if not o["taken_by"] and o["expires_day"] >= uni.day and o["who"] in alive
+    ]
 
 
 async def _drift_lines(uni: UniverseDoc, rows: list[SensedRow]) -> dict[str, str]:
@@ -1222,7 +1231,9 @@ async def _persist_outcome(
         doc.stock = {k: v for k, v in stock.items() if v > 0}
 
     for to_name, amount in outcome.transfers:
-        other = await CitizenDoc.find_one(
+        # The tick's own instance first: a fresh doc would be overwritten by
+        # the recipient's own save later in the loop (or an accept's giver save).
+        other = (docs or {}).get(to_name) or await CitizenDoc.find_one(
             CitizenDoc.universe_id == universe_id, CitizenDoc.name == to_name
         )
         if other is None:
@@ -1241,6 +1252,23 @@ async def _persist_outcome(
         written.append(event_wire(gain))
 
     for req in outcome.spawn_requests:
+        child = str(req.get("child_name") or "child")[:40]
+        if await _name_taken(universe_id, child):
+            # Names are how settle and the transfers loop find a citizen, so a
+            # second "Mira" would be paid for the first one's offers. The
+            # engine's "awaiting approval" gate is already written; this row
+            # says why no Action follows it.
+            row = await _append_event(
+                uni,
+                kind="gate",
+                actor=doc.name,
+                body=f"could not ask for {child}: that name is already taken",
+                cost=0,
+                data={"reason": "name taken", "child_name": child},
+            )
+            await _publish(uni, row)
+            written.append(event_wire(row))
+            continue
         await _file_spawn_action(uni, doc, req, user_id)
 
     # Contract invariant 3 — broke at the end of the tick means hibernating.
@@ -1343,6 +1371,14 @@ async def _new_day(uni: UniverseDoc, physics: PhysicsFile) -> None:
             )
             await _publish(uni, row)
         await c.save()
+
+
+async def _name_taken(universe_id: str, name: str) -> bool:
+    """Is ``name`` already a citizen of this universe? Exact match: ``docs`` and
+    the transfers lookup resolve citizens by exact name. Hibernating counts —
+    sleep is not death."""
+    doc = await CitizenDoc.find_one(CitizenDoc.universe_id == universe_id, CitizenDoc.name == name)
+    return doc is not None
 
 
 async def _file_spawn_action(

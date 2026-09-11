@@ -82,5 +82,23 @@
       "tests/ee/terrarium/test_resources.py",
       "tests/ee/terrarium/test_trade_offers.py"
     ]
+  },
+  {
+    "label": "a gift's recipient is read fresh, so the settle's save of the tick instance overwrites the gain",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        other = (docs or {}).get(to_name) or await CitizenDoc.find_one(\n",
+    "replace": "        other = await CitizenDoc.find_one(\n",
+    "tests": [
+      "tests/ee/terrarium/test_trade_offers.py"
+    ]
+  },
+  {
+    "label": "the giver is read fresh instead of the tick's own instance, so a giver persisted after the acceptor keeps the bundle",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    giver = docs.get(offer.actor) if offer is not None else None\n",
+    "replace": "    giver = (\n        await CitizenDoc.find_one(\n            CitizenDoc.universe_id == str(uni.id), CitizenDoc.name == offer.actor\n        )\n        if offer is not None\n        else None\n    )\n",
+    "tests": [
+      "tests/ee/terrarium/test_trade_offers.py"
+    ]
   }
 ]
