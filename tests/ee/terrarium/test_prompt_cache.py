@@ -186,12 +186,14 @@ def test_sonnet_5_is_cheaper_than_the_model_it_replaces():
     assert citizen_llm.CostMeter("no-such-model").model in citizen_llm.PRICING
 
 
-def test_the_dust_prefix_is_too_short_to_cache_on_any_tier():
-    """THE NUMBER. This citizen's stable prefix measures 1822 chars = 455
-    approximate tokens — under opus-5's 512, under half the sonnets' 1024, an
-    ninth of haiku-4-5's 4096. Caching engages on NOTHING at Dust size, which is
-    why the marker is gated rather than trusted. The charter is the growable
-    part: it is one sentence here, and ~230 more chars would clear opus-5."""
+def test_the_dust_prefix_caches_on_the_founders_tier_only():
+    """THE NUMBER. This citizen's stable prefix measures ~2660 chars = ~665
+    approximate tokens. Before the resource layer it was 1822 chars = 455
+    tokens and cached on NOTHING; Dust's RESOURCES block (five names, eight
+    node bundles, two verb bundles, the spring rate) pushed it over opus-5's
+    512, so the premium tier — the founders — now gets a cached prefix, while
+    the sonnets' 1024 and haiku-4-5's 4096 are still far off. The marker
+    stays gated rather than trusted for exactly that reason."""
     physics = load_physics(seed_physics_path("dust"))
     nim = world.CitizenSnapshot(
         id="c1",
@@ -212,6 +214,8 @@ def test_the_dust_prefix_is_too_short_to_cache_on_any_tier():
         physics, nim, _digest(nim, day=3, speech=[]), drift_line="slightly more open"
     )
     approx_tokens = len(prefix) // 4
-    assert 400 < approx_tokens < 512, approx_tokens
+    assert 600 < approx_tokens < 1024, approx_tokens
+    assert citizen_llm.cache_marker_fits("claude-opus-5", prefix)
     for model in citizen_llm.MIN_CACHEABLE_TOKENS:
-        assert not citizen_llm.cache_marker_fits(model, prefix), model
+        if model != "claude-opus-5":
+            assert not citizen_llm.cache_marker_fits(model, prefix), model

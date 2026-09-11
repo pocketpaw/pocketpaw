@@ -29,6 +29,8 @@
 #     (``TechNode.stock_cost`` / ``physics.stock_costs[verb]``) is dropped when
 #     the citizen's stock is short, and the drop is written as a zero-cost
 #     ``gate`` row with ``data.short`` so the paper can name the bottleneck.
+#     The zero-ritual charter (a citizen's first ``write``) is exempt: nobody
+#     is born holding ink, and the charter is not a book.
 #     The SPRING is the bank: ``trade`` with ``to: "spring"`` swaps 4 of one
 #     resource for 1 of another against the citizen's own stock, at the speak
 #     price (a ``trade`` row must cost). Stock moves land in ``stock_delta``.
@@ -439,6 +441,10 @@ def apply_acts(
         # The bundle, on top of credits. A short one is DROPPED and written as
         # a gate row naming only what is missing, so the drop reaches the paper.
         bundle = physics.stock_costs.get(verb, {})
+        if verb == "write" and citizen.charter is None and outcome.charter is None:
+            # The zero ritual: a citizen's first write is its charter, not a
+            # book, and nobody is born holding ink. It never needs the bundle.
+            bundle = {}
         if verb == "build" and act.node:
             bundle = physics.tech_tree[act.node].stock_cost
         if verb == "trade" and act.to == SPRING:

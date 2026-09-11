@@ -75,9 +75,11 @@ def test_tech_unlock_requires_prerequisites():
     assert out.unlocked == []
     assert any("needs ['well']" in d for d in out.dropped)
 
-    # With well held, farm unlocks and leaves a structure artifact.
+    # With well held (and the farm's 2 water), farm unlocks and leaves a structure artifact.
     out = world.apply_acts(
-        physics(), citizen(unlocked=("well",)), decide({"verb": "build", "node": "farm"})
+        physics(),
+        citizen(unlocked=("well",), stock={"water": 2}),
+        decide({"verb": "build", "node": "farm"}),
     )
     assert out.unlocked == ["farm"]
     assert out.artifacts[0].kind == "structure"
@@ -96,7 +98,7 @@ def test_chained_unlock_inside_one_tick_respects_order():
     """well then farm in the same tick works — the second act sees the first."""
     out = world.apply_acts(
         physics(),
-        citizen(balance=500),
+        citizen(balance=500, stock={"water": 2}),
         decide({"verb": "build", "node": "well"}, {"verb": "build", "node": "farm"}),
     )
     assert out.unlocked == ["well", "farm"]

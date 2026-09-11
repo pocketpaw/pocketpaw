@@ -15,9 +15,12 @@
 # The prompt is TWO blocks. ``build_prompt_parts`` returns a STABLE PREFIX
 # (world brief, constitution, charter, values and OCEAN, the drift line saying
 # how a descendant differs from its parent, verbs, costs, tech tree, rules, and
-# the DESIGN block a citizen sees only once it holds the workshop) and a
-# VOLATILE SUFFIX (ground truth, speech, artifacts, weather, outside voices,
-# memories). Both HTTP transports send them as two content blocks and mark the
+# the DESIGN block a citizen sees only once it holds the workshop, and a
+# RESOURCES block — names, bundles per node and verb, the spring's 4:1 rate —
+# present ONLY when the physics declares resources, so a world without them
+# keeps a byte-identical prefix) and a VOLATILE SUFFIX (ground truth including
+# the citizen's stock, speech, artifacts, weather, outside voices, memories).
+# Both HTTP transports send them as two content blocks and mark the
 # prefix ``cache_control: ephemeral`` ONLY when it clears that model's minimum
 # cacheable length (``MIN_CACHEABLE_TOKENS``) — under it the marker is a silent
 # no-op. Transports without ``decide_parts`` (CLI, mock, fakes) get it joined.
@@ -48,6 +51,8 @@ from pocketpaw_ee.terrarium.design import MAX_FEATURES, MAX_HEIGHT, MAX_PARTS, P
 from pocketpaw_ee.terrarium.physics import PhysicsFile
 from pocketpaw_ee.terrarium.world import (
     DESIGN_TECH,
+    SPRING,
+    SPRING_RATE,
     Act,
     CitizenSnapshot,
     Decision,
@@ -412,6 +417,10 @@ class MockLlm:
                     (physics.tech_tree[n].cost, n)
                     for n in unlockable(physics, citizen)
                     if physics.tech_tree[n].cost <= citizen.balance
+                    and all(
+                        citizen.stock.get(k, 0) >= v
+                        for k, v in physics.tech_tree[n].stock_cost.items()
+                    )
                 ),
             )
             if affordable:
@@ -638,9 +647,25 @@ def build_prompt_parts(
     tree_lines = (
         "\n".join(
             f"- {name}: cost {node.cost}, needs {node.needs or 'nothing'}"
+            + (f", makes {node.produces}" if node.produces else "")
+            + (f", also costs {json.dumps(node.stock_cost)}" if node.stock_cost else "")
             for name, node in physics.tech_tree.items()
         )
         or "(this world has no tech tree)"
+    )
+    # Only a world that declares resources sees this block: a world without
+    # them keeps the prefix it had, so its provider cache is not invalidated.
+    resource_block = (
+        f"""
+== RESOURCES ==
+{json.dumps(physics.resources)}. A building that makes one yields a unit each day to whoever \
+holds it; you keep what you harvest. Verb bundles, paid from your stock on top of credits: \
+{json.dumps(physics.stock_costs)}. An act you cannot cover is dropped. The spring swaps \
+{SPRING_RATE} of one for 1 of another: verb "trade" with "to": "{SPRING}", \
+"give": {{"<a>": {SPRING_RATE}}}, "want": {{"<b>": 1}}.
+"""
+        if physics.resources
+        else ""
     )
     lineage = (
         f"\nCompared with the parent you came from, you are {drift_line}.\n" if drift_line else ""
@@ -684,7 +709,7 @@ temperament (OCEAN): {json.dumps(citizen.ocean, sort_keys=True)}
 {json.dumps(verbs)}
 costs: {json.dumps(physics.costs.model_dump())}
 Thinking already cost you {physics.costs.think} this tick.
-{design_block}
+{design_block}{resource_block}
 == TECH TREE ==
 {tree_lines}
 To unlock a node, use verb "build" with "node" set to its name; you must already hold \
@@ -708,6 +733,7 @@ everything it needs and be able to pay its cost.
 day {digest.day}, tick {digest.tick}
 world pool: {digest.ground_truth.get("pool")}
 your balance: {citizen.balance}
+your stock: {json.dumps(citizen.stock, sort_keys=True)}
 you have unlocked: {list(citizen.unlocked) or "nothing"}
 ledger: {json.dumps(digest.ground_truth.get("ledger", []))}
 Within reach right now: {open_nodes}
