@@ -214,3 +214,51 @@ async def test_an_upload_with_no_workspace_is_refused(budget_db, monkeypatch):
 
     assert allowed is False
     assert over == "workspace"
+
+
+# ── the check-only half ──────────────────────────────────────────────────
+
+
+async def test_the_pre_check_does_not_increment(budget_db, monkeypatch):
+    """The HTTP route's fast-reject must not charge a turn. If it did, a turn
+    would cost two, and the cap would bite at half the number it advertises.
+
+    Mutation that must break this: call ``try_spend`` from ``is_over_cap``.
+    """
+    monkeypatch.setenv("POCKETPAW_WORKSPACE_TURNS_DAILY", "5")
+    ws = "w-precheck"
+
+    await turn_budget.try_spend(ws)
+    for _ in range(10):
+        assert await turn_budget.is_over_cap(ws) is False
+
+    doc = await WorkspaceTurnUsage.get_pymongo_collection().find_one({"workspace": ws})
+    assert doc["used"] == 1, "the read-only pre-check charged a turn"
+
+
+async def test_the_pre_check_reports_a_capped_workspace(budget_db, monkeypatch):
+    monkeypatch.setenv("POCKETPAW_WORKSPACE_TURNS_DAILY", "2")
+    ws = "w-precheck-full"
+
+    await turn_budget.try_spend(ws)
+    assert await turn_budget.is_over_cap(ws) is False
+    await turn_budget.try_spend(ws)
+
+    assert await turn_budget.is_over_cap(ws) is True
+
+
+async def test_the_pre_check_fails_open(budget_db, monkeypatch):
+    """The opposite of ``try_spend``, and deliberate: this seam only saves a
+    capped account a run doc and a stream. The executor's gate is the one that
+    has to be right, so a database blip here costs latency, not correctness.
+
+    Mutation that must break this: return ``True`` from the except.
+    """
+    monkeypatch.setenv("POCKETPAW_WORKSPACE_TURNS_DAILY", "2")
+
+    def _boom():
+        raise RuntimeError("mongo is down")
+
+    monkeypatch.setattr(WorkspaceTurnUsage, "get_pymongo_collection", _boom)
+
+    assert await turn_budget.is_over_cap("w-blip") is False
