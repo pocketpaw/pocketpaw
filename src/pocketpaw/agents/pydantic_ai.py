@@ -409,6 +409,18 @@ provider-prefixed one. A spec like ``litellm:anything`` would otherwise resolve
 the deployment's proxy key on a turn that is supposed to run on the tenant's —
 a credential switch wearing a model id, which ``provider_allows_model`` cannot
 catch because a gateway's model ids are its own namespace.
+
+Updated 2026-09-11 (feat/other-hand-page-vision) — **an attached page rode every
+later turn of the session.** Images go on the prompt, which was the whole claim,
+but ``_retain_session`` keeps pydantic-ai's OWN message objects and
+``_session_history`` prefers that transcript over the cloud's stored text. So a
+turn's ``UserPromptPart`` — now ``[text, BinaryContent]`` — came back on turn 2,
+turn 3 and turn 60: N snapshots by turn N, on the one surface that attaches a
+picture to EVERY turn. Cost, real RSS in a process-global map, and a model shown
+every past version of one page with nothing marking the current one.
+``_without_attachments`` rewrites those parts down to their words on the way
+INTO retention, so the guarantee holds for every caller instead of for whichever
+read path someone remembered.
 """
 
 from __future__ import annotations
@@ -419,6 +431,7 @@ import logging
 import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 from typing import Any
 
 from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
@@ -680,6 +693,49 @@ def _user_prompt(message: str, images: tuple[tuple[bytes, str], ...]) -> Any:
     parts: list[Any] = [message]
     parts.extend(BinaryContent(data=data, media_type=media_type) for data, media_type in usable)
     return parts
+
+
+def _without_attachments(message: Any) -> Any:
+    """A retained message with its attached bytes dropped and its words kept.
+
+    A turn that carried images leaves a ``UserPromptPart`` whose content is
+    ``[text, BinaryContent, ...]``. Retaining that verbatim makes turn N replay
+    every earlier turn's picture: tokens against a feature whose whole point is
+    a per-turn byte budget, raw bytes pinned in a process-global map for the
+    life of the session, and a model shown every past version of one page with
+    nothing to say which is current. The fresh snapshot on THIS turn's prompt is
+    the one the agent is meant to answer about.
+
+    Stripping on the way INTO retention, not on the way out, is what makes the
+    guarantee hold for every caller of ``_retain_session`` rather than for the
+    one read path someone remembered.
+
+    Narrow on purpose. Only ``UserPromptPart`` is rewritten: a ``ToolReturnPart``
+    may legitimately hold a non-string sequence, and filtering that down to its
+    ``str`` elements would destroy tool results — which is the very thing
+    retention exists to preserve.
+    """
+    parts = getattr(message, "parts", None)
+    if not parts:
+        return message
+    from pydantic_ai.messages import UserPromptPart
+
+    rewritten: list[Any] = []
+    stripped = False
+    for part in parts:
+        content = getattr(part, "content", None)
+        if not isinstance(part, UserPromptPart) or isinstance(content, str):
+            rewritten.append(part)
+            continue
+        words = [item for item in content if isinstance(item, str)]
+        if len(words) == len(content):
+            rewritten.append(part)
+            continue
+        stripped = True
+        rewritten.append(replace(part, content="\n".join(words)))
+    if not stripped:
+        return message
+    return replace(message, parts=rewritten)
 
 
 def _normalize_tool_id(tool_id: str) -> str:
@@ -2260,7 +2316,13 @@ class PydanticAIBackend:
         # Trailing window: the head of a conversation is the least useful part
         # to carry and the most expensive, and compaction capabilities already
         # operate inside a run.
-        self._session_messages[session_key] = list(messages)[-_MAX_SESSION_MESSAGES:]
+        #
+        # Attachments are dropped here rather than at the read: a turn's images
+        # belong to that turn only, and keeping them would replay every past
+        # picture on every later turn of the session.
+        self._session_messages[session_key] = [
+            _without_attachments(message) for message in list(messages)[-_MAX_SESSION_MESSAGES:]
+        ]
         self._session_messages.move_to_end(session_key)
         while len(self._session_messages) > _MAX_TRACKED_SESSIONS:
             self._session_messages.popitem(last=False)
@@ -2521,11 +2583,13 @@ class PydanticAIBackend:
 
             # The user prompt is a plain string unless this turn carries
             # images, in which case it becomes the parts list pydantic-ai wants.
-            # The images ride the PROMPT, never ``message_history``: history is
-            # replayed from stored text, so an attached page would either be
-            # dropped on the next turn or, worse, serialized into the store.
-            # A fresh snapshot every turn is also the right semantics — the
-            # agent should see the page as it is now, not as it was.
+            # The images ride the PROMPT, and ONE turn's prompt only: this run's
+            # transcript is retained for the next turn, so ``_retain_session``
+            # strips the attached bytes back out on the way in (see
+            # ``_without_attachments``). Without that, turn N would carry N
+            # snapshots of the same page. A fresh snapshot every turn is also
+            # the right semantics — the agent should see the page as it is now,
+            # not as it was.
             prompt = _user_prompt(message, images)
 
             async with agent.run_stream_events(prompt, **kwargs) as stream:

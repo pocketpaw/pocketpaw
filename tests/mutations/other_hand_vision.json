@@ -71,5 +71,23 @@
     "tests": [
       "tests/cloud/surface/test_other_hand_handler.py::test_preamble_carries_snapshot_path_and_free_y"
     ]
+  },
+  {
+    "label": "the page is retained with its bytes — turn N replays every earlier snapshot",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            _without_attachments(message) for message in list(messages)[-_MAX_SESSION_MESSAGES:]",
+    "replace": "            message for message in list(messages)[-_MAX_SESSION_MESSAGES:]",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_a_retained_turn_never_replays_its_page_image"
+    ]
+  },
+  {
+    "label": "the strip takes the words with the bytes — the sentence the picture arrived with is lost",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        words = [item for item in content if isinstance(item, str)]",
+    "replace": "        words = []",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_the_words_of_an_image_turn_survive_into_the_next_one"
+    ]
   }
 ]
