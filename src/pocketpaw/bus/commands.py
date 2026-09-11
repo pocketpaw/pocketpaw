@@ -28,7 +28,9 @@ _COMMANDS = frozenset(
         "/delete",
         "/backend",
         "/backends",
+        "/provider",
         "/model",
+        "/ollama",
         "/tools",
         "/kill",
     }
@@ -124,8 +126,12 @@ class CommandHandler:
             return self._cmd_backends(message)
         elif cmd == "/backend":
             return self._cmd_backend(message, args)
+        elif cmd == "/provider":
+            return self._cmd_provider(message, args)
         elif cmd == "/model":
             return self._cmd_model(message, args)
+        elif cmd == "/ollama":
+            return self._cmd_ollama(message, args)
         elif cmd == "/tools":
             return self._cmd_tools(message, args)
         elif cmd == "/help":
@@ -489,33 +495,43 @@ class CommandHandler:
     # /model
     # ------------------------------------------------------------------
 
-    def _cmd_model(self, message: InboundMessage, args: str) -> OutboundMessage:
-        """Show or switch the model for the active backend."""
+    # ------------------------------------------------------------------
+    # /provider
+    # ------------------------------------------------------------------
+
+    def _cmd_provider(self, message: InboundMessage, args: str) -> OutboundMessage:
+        """Show or switch the LLM provider for the active backend."""
         from pocketpaw.config import get_settings
 
         settings = get_settings()
         backend = settings.agent_backend
-        model_field = _BACKEND_MODEL_FIELDS.get(backend)
 
-        if model_field is None:
+        # Map backend -> provider settings field
+        provider_fields = {
+            "claude_agent_sdk": "claude_sdk_provider",
+            "openai_agents": "openai_agents_provider",
+            "google_adk": "google_adk_provider",
+            "copilot_sdk": "copilot_sdk_provider",
+        }
+        field = provider_fields.get(backend)
+
+        if not field:
             return OutboundMessage(
                 channel=message.channel,
                 chat_id=message.chat_id,
-                content=f"Backend `{backend}` does not support model selection.",
+                content=f"Backend `{backend}` does not support provider switching.",
             )
 
-        current = getattr(settings, model_field, "") or ""
-
+        current = getattr(settings, field, "default")
         if not args:
-            display = f"`{current}`" if current else "default"
             return OutboundMessage(
                 channel=message.channel,
                 chat_id=message.chat_id,
-                content=f"Current model for `{backend}`: {display}",
+                content=f"Current provider for `{backend}`: **{current}**",
             )
 
-        new_model = args.strip()
-        setattr(settings, model_field, new_model)
+        new_provider = args.strip().lower()
+        setattr(settings, field, new_provider)
         settings.save()
         get_settings.cache_clear()
         self._notify_settings_changed()
@@ -523,7 +539,120 @@ class CommandHandler:
         return OutboundMessage(
             channel=message.channel,
             chat_id=message.chat_id,
-            content=f"Model for `{backend}` set to **{new_model}**.",
+            content=f"Provider for `{backend}` switched to **{new_provider}**.",
+        )
+
+    # ------------------------------------------------------------------
+    # /model
+    # ------------------------------------------------------------------
+
+    def _cmd_model(self, message: InboundMessage, args: str) -> OutboundMessage:
+        """Show or switch the model for the active backend/provider."""
+        from pocketpaw.config import get_settings
+        from pocketpaw.llm.providers.base import _BACKEND_MODEL_ATTR, _PROVIDER_MODEL_ATTR
+
+        settings = get_settings()
+        backend = settings.agent_backend
+
+        # Determine which model field to update
+        # Priority: If we are using Ollama, we usually want to update ollama_model
+        # unless a backend-specific override is present.
+        
+        # Get current provider for this backend
+        provider_field = {
+            "claude_agent_sdk": "claude_sdk_provider",
+            "openai_agents": "openai_agents_provider",
+            "google_adk": "google_adk_provider",
+        }.get(backend)
+        provider = getattr(settings, provider_field, "auto") if provider_field else "auto"
+
+        if not args:
+            # Show current resolution
+            from pocketpaw.llm.client import resolve_llm_client
+            client = resolve_llm_client(settings)
+            return OutboundMessage(
+                channel=message.channel,
+                chat_id=message.chat_id,
+            content=(
+                f"Active Model: **{client.model}** "
+                f"(Provider: `{client.provider}`, Backend: `{backend}`)"
+            ),
+            )
+
+        new_model = args.strip()
+
+        # Update logic:
+        # If provider is Ollama, update the global ollama_model.
+        # Otherwise, update the backend-specific model field.
+        if provider == "ollama":
+            settings.ollama_model = new_model
+            msg = f"Global Ollama model set to **{new_model}**."
+        else:
+            model_attr = _BACKEND_MODEL_ATTR.get(backend)
+            if model_attr:
+                setattr(settings, model_attr, new_model)
+                msg = f"Model for `{backend}` set to **{new_model}**."
+            else:
+                # Fallback to provider-level model
+                provider_attr = _PROVIDER_MODEL_ATTR.get(provider)
+                if provider_attr:
+                    setattr(settings, provider_attr, new_model)
+                    msg = f"Model for provider `{provider}` set to **{new_model}**."
+                else:
+                    return OutboundMessage(
+                        channel=message.channel,
+                        chat_id=message.chat_id,
+                        content=(
+                            f"Cannot determine which model setting to update "
+                            f"for `{backend}`/`{provider}`."
+                        ),
+                    )
+
+        settings.save()
+        get_settings.cache_clear()
+        self._notify_settings_changed()
+
+        return OutboundMessage(
+            channel=message.channel,
+            chat_id=message.chat_id,
+            content=msg,
+        )
+
+    # ------------------------------------------------------------------
+    # /ollama
+    # ------------------------------------------------------------------
+
+    def _cmd_ollama(self, message: InboundMessage, args: str) -> OutboundMessage:
+        """Shorthand to switch current backend to Ollama and set model."""
+        from pocketpaw.config import get_settings
+        settings = get_settings()
+        backend = settings.agent_backend
+
+        provider_field = {
+            "claude_agent_sdk": "claude_sdk_provider",
+            "openai_agents": "openai_agents_provider",
+            "google_adk": "google_adk_provider",
+        }.get(backend)
+
+        if not provider_field:
+            # Force backend to claude_agent_sdk if current doesn't support providers
+            settings.agent_backend = "claude_agent_sdk"
+            provider_field = "claude_sdk_provider"
+
+        setattr(settings, provider_field, "ollama")
+        
+        if args:
+            settings.ollama_model = args.strip()
+        
+        settings.save()
+        get_settings.cache_clear()
+        self._notify_settings_changed()
+
+        model_info = f" (model: **{settings.ollama_model}**)" if args else ""
+        return OutboundMessage(
+            channel=message.channel,
+            chat_id=message.chat_id,
+            content=f"Switched backend `{settings.agent_backend}` to **Ollama**{model_info}.",
         )
 
     # ------------------------------------------------------------------
@@ -595,7 +724,9 @@ class CommandHandler:
             "/delete — Delete the current session\n"
             "/backend — Show or switch agent backend\n"
             "/backends — List all available backends\n"
-            "/model — Show or switch model for current backend\n"
+            "/provider <name> — Switch LLM provider (anthropic, openai, ollama)\n"
+            "/model <name> — Switch model for current backend/provider\n"
+            "/ollama <model> — Quick switch to Ollama with model\n"
             "/tools — Show or switch tool profile\n"
             "/kill — Kill the current agent run\n"
             "/converse — Toggle conversation mode in this channel\n"
