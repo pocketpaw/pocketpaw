@@ -493,9 +493,7 @@ async def _make_html_pocket(workspace_id: str, user_id: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_apply_leaf_edits_html_routes_the_html_lane_and_persists(
-    beanie_test_db, monkeypatch
-):
+async def test_apply_leaf_edits_html_routes_the_html_lane_and_persists(beanie_test_db, monkeypatch):
     """An html pocket reaches the bridge with lane="html" and persists through the
     HTML writer. The lane assertion is the point: routing html to the svelte applier
     does not raise, it rejects every edit, so a silent mis-route would look like a
@@ -524,7 +522,12 @@ async def test_apply_leaf_edits_html_routes_the_html_lane_and_persists(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
-        edits=[{"uid": "index:headline:0", "op": {"kind": "setText", "html": "<h1>Ship it Friday</h1>"}}],
+        edits=[
+            {
+                "uid": "index:headline:0",
+                "op": {"kind": "setText", "html": "<h1>Ship it Friday</h1>"},
+            }
+        ],
         _apply=_fake_apply,
     )
 
@@ -542,9 +545,7 @@ async def test_apply_leaf_edits_html_routes_the_html_lane_and_persists(
 
 
 @pytest.mark.asyncio
-async def test_apply_leaf_edits_svelte_still_names_its_lane_explicitly(
-    beanie_test_db, monkeypatch
-):
+async def test_apply_leaf_edits_svelte_still_names_its_lane_explicitly(beanie_test_db, monkeypatch):
     """svelte sends lane="svelte" rather than relying on the CLI's absent-lane
     default. Both sides defaulting independently is how they drift apart."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
@@ -617,8 +618,9 @@ async def test_get_html_armed_source_returns_stamped_source_and_manifest(beanie_
 
     async def _fake_arm(*, source):
         seen["keys"] = sorted(source)
+        stamped = _HTML_INDEX.replace("<h1 ", '<h1 data-uid="index:headline:0" ')
         return {
-            "source": {"index.html": _HTML_INDEX.replace("<h1 ", '<h1 data-uid="index:headline:0" ')},
+            "source": {"index.html": stamped},
             "manifest": [{"uid": "index:headline:0", "file": "index.html", "editKind": "text"}],
         }
 
