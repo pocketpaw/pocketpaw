@@ -441,6 +441,32 @@ def current_pawbar_run() -> dict[str, Any] | None:
     return _active_pawbar_run.get()
 
 
+# Per-stream BELT run id (2026-09-12, feat/belt-factory integration). The chat
+# stream's ``stream_run_id`` — the id the /belt console already holds from
+# ``stream_start`` and the join key the belt entity/stage events carry. Bound by
+# ``run_core`` next to the pawbar/timeline binds; read by the belt MCP server so
+# ``belt_propose_change`` can stamp its ``verify`` stage emit with the SAME key
+# the ``develop`` emits used. Without it a verify emit publishes with neither
+# ``run_id`` nor ``action_id`` (the Instinct Action does not exist until propose
+# time) and lands as an unattributable workspace pulse. ``None`` outside a chat
+# run, which is exactly when there is no run to attribute to.
+_active_stream_run_id: ContextVar[str | None] = ContextVar("agent_stream_run_id", default=None)
+
+
+def bind_stream_run_id(run_id: str | None) -> Token:
+    """Bind (or clear) the active stream's run id. Returns a reset token — the
+    caller resets it in a finally so it never leaks past a run."""
+    return _active_stream_run_id.set(run_id)
+
+
+def unbind_stream_run_id(token: Token) -> None:
+    _active_stream_run_id.reset(token)
+
+
+def current_stream_run_id() -> str | None:
+    return _active_stream_run_id.get()
+
+
 # Per-stream /studio/editor timeline context. Set by ``run_core`` from
 # ``surface_meta.timeline``; read by the ``pocketpaw_timeline`` MCP server so
 # ``edit_timeline`` can check every clip/asset/track id against the SAME

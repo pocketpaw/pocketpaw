@@ -406,6 +406,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     attach_agent_identity,
     attach_sse_event_sink,
     bind_pawbar_run,
+    bind_stream_run_id,
     bind_timeline,
     build_behavior_instructions,
     build_knowledge_context,
@@ -418,6 +419,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     resolve_user_content,
     session_key_for,
     unbind_pawbar_run,
+    unbind_stream_run_id,
     unbind_timeline,
     unregister_stream_sink,
 )
@@ -1529,6 +1531,9 @@ async def _drive_agent_loop(
     pawbar_token = bind_pawbar_run(_pawbar_run_from_ctx(ctx))
     # Same lifetime as the pawbar context: bound here, reset in the same finally.
     timeline_token = bind_timeline(_timeline_from_ctx(ctx))
+    # Same lifetime again: the belt MCP server reads this to stamp its ``verify``
+    # stage emit with the run id the develop/orient emits already carry.
+    stream_run_token = bind_stream_run_id(stream_run_id)
 
     if not history and ctx.session_id:
         asyncio.create_task(_generate_session_title(ctx, user_content))
@@ -2178,6 +2183,10 @@ async def _drive_agent_loop(
             pass
         try:
             unbind_timeline(timeline_token)
+        except Exception:
+            pass
+        try:
+            unbind_stream_run_id(stream_run_token)
         except Exception:
             pass
         try:
