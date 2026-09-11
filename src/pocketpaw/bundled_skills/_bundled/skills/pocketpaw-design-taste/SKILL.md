@@ -202,6 +202,45 @@ All baseline UI animation must stay native to CSS or SVG paths, so it looks flaw
 
 **Svelte-track specifics** (only on the Svelte engine): State → runes (`let open = $state(false)`, `const total = $derived(...)`) with the resting value set in the initializer so it prerenders — free either way. **The next two need the bundle kept:** scroll reveal → a `use:` action adding `.in` on viewport entry (CSS transitions `opacity`/`transform`; reveal immediately under `prefers-reduced-motion`). Count-ups → `tweened` seeded from the FINAL value so the markup prerenders the real total, then reset to 0 and animated up in `onMount` behind a `prefers-reduced-motion` check. Enter/leave within a section → Svelte `transition:`/`in:`/`out:` on elements whose *content* is already present — polish an existing frame, never gate it. Ambient motion → CSS keyframes (no JS, free at prerender).
 
+### 3.F-video Scroll-scrubbed video (the frames-change-on-scroll hero)
+
+A clip whose playhead is driven by scroll position rather than by time. It is the
+one motion effect worth a video asset, and it has more constraints than it looks
+like, so read all six before promising one.
+
+- **Get the asset from `generate_site_video`.** Pass the owner's photo as
+  `image_url` and describe the CAMERA MOVE in the prompt ("slow dolly in",
+  "orbit left around the subject") — the move comes from the words, not a
+  parameter. It returns `url` AND `poster_url`; you need both.
+- **This needs the client bundle.** Setting `currentTime` is JS. Sites keep their
+  bundle by default, so it works — but 3.F still binds: the resting state must be
+  in markup. Render the `<video>` WITH its `poster`, visible and correctly laid
+  out, so the hero looks finished with JS off. A scrubbed hero that starts at
+  `opacity: 0` fails the publish smoke check (`checkRestingVisibility`), and note
+  that `@keyframes`/`animation` counts as a CSS-only reveal there while a bare
+  `transition` does not.
+- **The poster is not optional.** A `<video>` paints nothing until it has
+  buffered enough to decode a frame, so without `poster` the hero is blank on
+  first load — exactly the moment the visitor is judging the page.
+- **Drive it from rAF, never a scroll listener.** 3.E's rule holds: a `scroll`
+  handler re-runs every frame. Read `scrollY` inside `requestAnimationFrame` (or
+  use an IntersectionObserver to start/stop the loop when the hero leaves the
+  viewport) and set `video.currentTime = progress * video.duration`.
+  `preload="auto"`, `muted`, `playsinline`, and never call `play()`.
+- **Seeks land on KEYFRAMES, so scrubbing is chunky by nature.** A generated clip
+  can carry a multi-second GOP, which means `currentTime` snaps rather than
+  glides. Map a GENEROUS scroll distance onto the clip (a tall pinned section,
+  not 400px) so each keyframe gets room, and never build anything that depends on
+  landing on an exact frame. If the judder is unacceptable, the alternative is a
+  frame SEQUENCE drawn to `<canvas>` — smooth, but it costs one public asset per
+  frame, so only reach for it when the client has asked for that fidelity.
+- **No scroll library is available on the svelte or react tracks.** GSAP,
+  ScrollTrigger, Lenis and scrollama are absent from `paw-sites` `allowlist.ts`,
+  and `package.json` is a reserved path, so an author cannot add one. Hand-write
+  the rAF loop there. **The html track is the only escape hatch** — it has no
+  package.json and no allowlist, so a CDN `<script>` works. Pick html when the
+  page genuinely needs a scroll library; do not pretend one exists elsewhere.
+
 ### 3.F The static / prerender guardrail (non-negotiable, every engine)
 These pages render to HTML before any JS runs. Taste must never depend on JS to look finished:
 - **Resting state lives in MARKUP.** Every animated/interactive default's final visual state is rendered in the DOM. Never set the resting state only in `onMount` — the prerendered HTML would bake the *start* frame (the empty hero, the `$0` counter, the collapsed accordion). Ask: *"with all JS off, does this section look done?"* If not, move the final state into markup.
@@ -236,7 +275,7 @@ These pages render to HTML before any JS runs. Taste must never depend on JS to 
 
 **Layout:** NO centered hero over a gradient blur; NO three-equal-card feature row; NO eyebrow on every section; NO section-number eyebrows; NO version labels in the hero (`V0.6`, `BETA`) unless it's literally a launch; NO decoration text strip at the hero bottom (`BRAND. MOTION. SPATIAL.`); NO `border-top` + `border-bottom` on every row of a long list.
 
-**Content & external:** NO "John Doe", `99.99%`, "Acme", filler verbs, em-dash; NO locale/time/weather strips (`Lisbon 14:23 · 18°C`) unless the brand is genuinely place-focused; NO scroll cues (`Scroll`, `↓`); NO pills/labels overlaid on images (caption below if needed); NO pretentious photo-credit captions (`Frame XII · 35mm`); NO fabricated asset URLs, since a made-up `src` is broken media on a live site (check `list_site_assets` FIRST — the owner's own logo and photography beat any stock shot and are the whole reason they uploaded them; then `search_stock_images`, render its `credit`; then `generate_site_image` for what stock cannot supply — a bespoke hero, a product or concept shot, a brand texture — which costs money per image so use it deliberately, not for ordinary photography; fall back to a tasteful gradient) - but any asset the brief's manifest hands you is fair game at its native medium, video included; there is no images-only rule and no approved-media list; NO div-based fake product screenshots; NO emoji as UI (use real SVG via `search_icons`).
+**Content & external:** NO "John Doe", `99.99%`, "Acme", filler verbs, em-dash; NO locale/time/weather strips (`Lisbon 14:23 · 18°C`) unless the brand is genuinely place-focused; NO scroll cues (`Scroll`, `↓`); NO pills/labels overlaid on images (caption below if needed); NO pretentious photo-credit captions (`Frame XII · 35mm`); NO fabricated asset URLs, since a made-up `src` is broken media on a live site (check `list_site_assets` FIRST — the owner's own logo and photography beat any stock shot and are the whole reason they uploaded them; then `search_stock_images`, render its `credit`; then `generate_site_image` for what stock cannot supply — a bespoke hero, a product or concept shot, a brand texture — which costs money per image so use it deliberately, not for ordinary photography; `generate_site_video` when the hero should MOVE — the owner's photo animated, a scroll-scrubbed clip — which costs more again and takes minutes, so one hero moment only; fall back to a tasteful gradient) - but any asset the brief's manifest hands you is fair game at its native medium, video included; there is no images-only rule and no approved-media list; NO div-based fake product screenshots; NO emoji as UI (use real SVG via `search_icons`).
 
 ---
 
@@ -252,5 +291,5 @@ Before finalizing any section output, you must strictly pass this checklist:
 - [ ] **Type:** distinctive display face (not Inter for premium); serif only if the family/brief justifies it and it isn't Fraunces/Instrument; body measure-capped at ~62ch. **Shape-consistency lock:** one radius system throughout.
 - [ ] **Materiality:** cards only where something floats; shadows tinted; glass refracts (or double-bezel applied for soft-premium).
 - [ ] **Motion:** CSS-first, motivated, `prefers-reduced-motion` honored, only `transform`/`opacity` animated, no `scroll` listener / cursor / hijack; marquee ≤ 1.
-- [ ] **Anti-Slop Cleanliness:** ZERO em-dashes anywhere visible; copy self-audit done (specific believable names/numbers/brand, no filler verbs, specificity over abstract benefits); no duplicate CTA intent; the owner's uploaded images checked via `list_site_assets` and used where they fit, real images via `search_stock_images` with credit, anything stock cannot supply via `generate_site_image`, icons via `search_icons`, manifest assets used at their native medium (a video stays a video), no emoji UI, no div-based fake screenshots.
+- [ ] **Anti-Slop Cleanliness:** ZERO em-dashes anywhere visible; copy self-audit done (specific believable names/numbers/brand, no filler verbs, specificity over abstract benefits); no duplicate CTA intent; the owner's uploaded images checked via `list_site_assets` and used where they fit, real images via `search_stock_images` with credit, anything stock cannot supply via `generate_site_image`, a moving hero via `generate_site_video` (with its poster rendered, and the scroll distance long enough that keyframe snapping reads as intent), icons via `search_icons`, manifest assets used at their native medium (a video stays a video), no emoji UI, no div-based fake screenshots.
 - [ ] Nav on one line ≤ 80px; every asymmetric layout collapses to one clean column < 768px; light/dark both hold if the family uses both.
