@@ -229,6 +229,22 @@ class EEUploadService:
                 from pocketpaw_ee.cloud._core.errors import StorageLimitError
 
                 raise StorageLimitError(limit)
+        # feat/abuse-budgets: the plan cap above only runs when billing is
+        # enforced, which is off by default — so on an unbilled deployment it
+        # is not a bound at all. This one always runs. Same rollback, and it
+        # sits AFTER the plan cap so a billed workspace still gets the 402 that
+        # names a real upgrade path rather than a 429 that says "wait".
+        if result.uploaded:
+            from pocketpaw_ee.cloud.uploads import upload_budget
+
+            allowed, over = await upload_budget.try_spend(workspace, len(result.uploaded), incoming)
+            if not allowed:
+                for rec in result.uploaded:
+                    with contextlib.suppress(Exception):
+                        await self._adapter.delete(rec.storage_key)
+                from pocketpaw_ee.cloud._core.errors import DailyUploadLimitError
+
+                raise DailyUploadLimitError(over)
         # Persist each successful record in Mongo with workspace + pocket scoping.
         for rec in result.uploaded:
             await self._meta.save_scoped(

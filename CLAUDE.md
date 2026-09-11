@@ -251,6 +251,40 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   env-configurable), marking queued/running `ChatRunDoc`s older than 10 minutes as
   `interrupted` so runs abandoned by a backend restart surface a retry affordance
   instead of leaving clients subscribed forever.
+- **Abuse ceilings (always on, NOT gated on billing)**: four knobs that bound what
+  one account can do in a day, regardless of whether billing is configured. They
+  exist because the priced ceilings — the per-plan storage cap in
+  `cloud/storage/service.py` and the credit quota in `chat/runs/run_core.py` —
+  are both gated on `billing_enforced`, which defaults to False. On a deployment
+  that has not switched billing on, those are not ceilings at all, and the only
+  remaining bound is the per-IP limiter in `dashboard_auth` (10 req/s, in-memory
+  per process, so N replicas means N buckets).
+  `POCKETPAW_WORKSPACE_TURNS_DAILY` (default `500`) — agent runs per workspace
+  per UTC day. ONE counter covers every model call the platform pays for,
+  because they all happen inside a run: the reply, plus image generation,
+  speech, OCR, translate, research and web search when a run calls them.
+  `POCKETPAW_WORKSPACE_UPLOAD_FILES_DAILY` (default `2000`) and
+  `POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY` (default `20000000000`, 20 GB) — both
+  ceilings on the same daily row, because a file count alone is beaten by fifty
+  25 MiB files and a byte total alone is beaten by a hundred thousand one-byte
+  ones.
+  `POCKETPAW_MAX_OWNED_WORKSPACES` (default `10`) — the one that makes the other
+  three mean anything. Every ceiling above is keyed on the workspace, so an
+  account that can mint workspaces in a loop gets a fresh empty counter each
+  time. Counts only workspaces the account OWNS; being invited to many is normal
+  collaboration and is governed by the inviter's seat limit.
+  All four read `0` as UNCAPPED, which DIVERGES from
+  `POCKETPAW_FILE_COMPREHENSION_DAILY`, where `0` disables the feature and
+  therefore blocks everything. Deliberate: a comprehension is an extra a
+  workspace can live without for a day, whereas uploading, chatting and creating
+  a workspace are the product, and an env typo must not take them off the air.
+  A non-integer value warns and uses the default rather than reading as `0`.
+  The two daily counters fail CLOSED on a database error, which costs nothing
+  because both paths persist to the same Mongo. Rejections are 429 with codes
+  `runs.daily_limit`, `uploads.daily_limit` and `workspace.owned_limit` —
+  deliberately not the 402 `billing.*` / `credits.*` codes, because nothing is
+  for sale here and the answer is to wait, not to upgrade.
+  Crude flood protection belongs at the proxy (Traefik on Coolify), not here.
 - **Concurrency / capacity config**: five ceilings that are easy to confuse. In a
   cloud deploy the first two are the ones that bound how much work executes at once.
   `POCKETPAW_ARQ_MAX_JOBS` (default `10`, arq's own) — the **chat lane's** ceiling:
