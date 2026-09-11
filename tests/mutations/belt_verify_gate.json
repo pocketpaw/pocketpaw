@@ -77,8 +77,8 @@
   {
     "label": "a timeout is swallowed as a pass",
     "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
-    "find": "    except Exception as exc:  # noqa: BLE001 — _run raises RuntimeError on timeout\n        return CheckResult(\n            name=name,\n            ok=False,",
-    "replace": "    except Exception as exc:  # noqa: BLE001 — _run raises RuntimeError on timeout\n        return CheckResult(\n            name=name,\n            ok=True,",
+    "find": "    except Exception as exc:  # noqa: BLE001 \u2014 _run raises RuntimeError on timeout\n        return CheckResult(\n            name=name,\n            ok=False,",
+    "replace": "    except Exception as exc:  # noqa: BLE001 \u2014 _run raises RuntimeError on timeout\n        return CheckResult(\n            name=name,\n            ok=True,",
     "tests": [
       "tests/cloud/test_belt_verify.py::test_timeout_is_a_failure"
     ]
@@ -126,6 +126,75 @@
     "replace": "                        name=\"verify_internal\",",
     "tests": [
       "tests/cloud/test_belt_verify.py::test_non_applying_diff_is_a_named_git_apply_check"
+    ]
+  },
+  {
+    "label": "the operator's per-repo command is ignored and discovery runs anyway",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    argv = _configured_argv(repo, commands)\n    name = \"configured\"",
+    "replace": "    argv = None\n    name = \"configured\"",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_configured_command_wins_over_discovery",
+      "tests/cloud/test_belt_verify.py::test_configured_command_matches_an_unresolved_key",
+      "tests/cloud/test_belt_verify.py::test_configured_failure_reaches_the_caller"
+    ]
+  },
+  {
+    "label": "a configured command escapes the evidence rule, so a run that proved nothing passes",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    # Same evidence rule as a discovered check: exit 0 without a passing count\n    # is not proof. And an argv that cannot LAUNCH raises out of _run into\n    # _timed's handler as ok=False \u2014 a typo in settings must refuse proposals,\n    # never quietly switch the gate off.\n    return _require_evidence(\n        await _timed(",
+    "replace": "    return (\n        await _timed(",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_configured_command_that_proves_nothing_is_no_checks"
+    ]
+  },
+  {
+    "label": "pocketpaw is not recognised, so our own repo falls back to the toothless discovery",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "_POCKETPAW_NAME = \"pocketpaw\"",
+    "replace": "_POCKETPAW_NAME = \"not-pocketpaw\"",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_pocketpaw_is_identified_by_project_name",
+      "tests/cloud/test_belt_verify.py::test_pocketpaw_default_runs_the_real_argv_and_passes",
+      "tests/cloud/test_belt_verify.py::test_pocketpaw_default_selects_the_documented_argv"
+    ]
+  },
+  {
+    "label": "precedence flipped: the built-in default beats the operator's explicit command",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    if argv is None:\n        if not _is_pocketpaw(tree):",
+    "replace": "    if argv is None or _is_pocketpaw(tree):\n        if not _is_pocketpaw(tree):",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_configured_command_beats_the_pocketpaw_default"
+    ]
+  },
+  {
+    "label": "the built-in drops --group ee, the one flag that stops every ee test skipping",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "_POCKETPAW_ARGV = [\"uv\", \"run\", \"--group\", \"ee\", \"--group\", \"dev\", \"pytest\", \"-q\"]",
+    "replace": "_POCKETPAW_ARGV = [\"uv\", \"run\", \"--group\", \"dev\", \"pytest\", \"-q\"]",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_pocketpaw_default_selects_the_documented_argv",
+      "tests/cloud/test_belt_verify.py::test_pocketpaw_default_runs_the_real_argv_and_passes"
+    ]
+  },
+  {
+    "label": "no derivable target silently becomes a pass instead of a named skip",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "        targets = _pocketpaw_targets(tree, diff)\n        if not targets:",
+    "replace": "        targets = _pocketpaw_targets(tree, diff)\n        if False:",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_pocketpaw_default_with_no_derivable_target_is_a_named_skip"
+    ]
+  },
+  {
+    "label": "the settings map never reaches the verifier, so no repo is ever configured",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
+    "find": "        commands=getattr(settings, \"belt_verify_commands\", None),",
+    "replace": "        commands=None,",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_commands_setting_is_threaded_through",
+      "tests/cloud/test_belt_verify.py::test_configured_failure_reaches_the_caller"
     ]
   }
 ]
