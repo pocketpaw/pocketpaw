@@ -1,0 +1,50 @@
+[
+  {
+    "label": "drop the upsert workspace check — the shipped state",
+    "file": "ee/pocketpaw_ee/cloud/sessions/service.py",
+    "find": "            if existing_doc.workspace != workspace_id:\n                logger.warning(\n                    \"Refused a session upsert onto another workspace's row (caller=%s, session=%s)\",\n                    workspace_id,\n                    body.session_id,\n                )\n                raise NotFound(\"session\", body.session_id)\n",
+    "replace": "",
+    "tests": ["tests/cloud/sessions/test_create_is_tenant_scoped.py"]
+  },
+  {
+    "label": "compare the upsert row's workspace to itself, which always passes",
+    "file": "ee/pocketpaw_ee/cloud/sessions/service.py",
+    "find": "            if existing_doc.workspace != workspace_id:",
+    "replace": "            if existing_doc.workspace != existing_doc.workspace:",
+    "tests": ["tests/cloud/sessions/test_create_is_tenant_scoped.py"]
+  },
+  {
+    "label": "drop the foreign-scope-id check entirely",
+    "file": "ee/pocketpaw_ee/cloud/sessions/service.py",
+    "find": "    await _refuse_foreign_scope_ids(workspace_id, body)\n",
+    "replace": "",
+    "tests": ["tests/cloud/sessions/test_create_is_tenant_scoped.py"]
+  },
+  {
+    "label": "compare the scope row's workspace to itself",
+    "file": "ee/pocketpaw_ee/cloud/sessions/service.py",
+    "find": "        if row.workspace != workspace_id:",
+    "replace": "        if row.workspace != row.workspace:",
+    "tests": ["tests/cloud/sessions/test_create_is_tenant_scoped.py"]
+  },
+  {
+    "label": "refuse a dangling scope id too — over-strict, breaks internal callers",
+    "file": "ee/pocketpaw_ee/cloud/sessions/service.py",
+    "find": "        row = await model.get(oid)\n        if row is None:",
+    "replace": "        row = await model.get(oid)\n        if row is None:\n            raise NotFound(kind, raw_id)\n        if False:",
+    "tests": [
+      "tests/cloud/sessions/test_create_is_tenant_scoped.py",
+      "tests/cloud/sessions/test_service_v2.py"
+    ]
+  },
+  {
+    "label": "let a malformed scope id raise InvalidId, which is a 500 not a refusal",
+    "file": "ee/pocketpaw_ee/cloud/sessions/service.py",
+    "find": "        try:\n            oid = PydanticObjectId(raw_id)\n        except (InvalidId, ValueError, TypeError):",
+    "replace": "        try:\n            oid = PydanticObjectId(raw_id)\n        except _NeverRaised:",
+    "tests": [
+      "tests/cloud/sessions/test_create_is_tenant_scoped.py",
+      "tests/cloud/sessions/test_service_v2.py"
+    ]
+  }
+]

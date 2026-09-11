@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 from beanie import PydanticObjectId
 from beanie.operators import In
+from bson.errors import InvalidId
 
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
 from pocketpaw_ee.cloud._core.realtime.emit import emit
@@ -121,6 +122,66 @@ def legacy_ctx(user_id: str, workspace_id: str | None = None) -> RequestContext:
 # ---------------------------------------------------------------------------
 
 
+async def _refuse_foreign_scope_ids(workspace_id: str, body: CreateSessionRequest) -> None:
+    """Reject a create whose ``group_id`` / ``pocket_id`` belongs elsewhere.
+
+    ``create`` stamped ``group=body.group_id`` and ``pocket=body.pocket_id``
+    straight from the request with no validation. The row's own ``workspace``
+    was the caller's, so it looked correctly tenanted — but ``get_history``
+    builds its Message filter from those fields
+    (``{"context_type": "group", "group": session.group}``, no workspace term),
+    so an attacker-chosen group id returned another tenant's whole transcript
+    from a session they legitimately own. Two calls, no bypass.
+
+    Validated here at the write rather than at the read, because the read is
+    reached by several paths and the write is one. ``Message.workspace_id``
+    exists but is ``None`` on every group message written through REST or
+    WebSocket, so filtering the read would return nothing and look correct.
+
+    Deliberately narrow: only an id that resolves to a real row in ANOTHER
+    workspace is refused. A malformed id and a dangling one both pass through,
+    because neither names a row and therefore neither can disclose anything —
+    ``get_history`` filtering on them matches nothing. Rejecting them would be
+    a behaviour change with no security value, and several internal callers
+    pass synthetic scope ids.
+
+    NotFound rather than Forbidden — a scope in another workspace should not
+    confirm that it exists.
+    """
+    from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
+    from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+
+    for kind, raw_id, model in (
+        ("group", body.group_id, _GroupDoc),
+        ("pocket", body.pocket_id, _PocketDoc),
+    ):
+        if not raw_id:
+            continue
+        try:
+            oid = PydanticObjectId(raw_id)
+        except (InvalidId, ValueError, TypeError):
+            # Not an ObjectId, so it names no row and can leak nothing. Left
+            # alone rather than rejected: several internal callers and tests
+            # pass synthetic scope ids, and raising here would be a behaviour
+            # change with no security value — plus an uncaught InvalidId is a
+            # 500, not a refusal.
+            continue
+        row = await model.get(oid)
+        if row is None:
+            # A dangling id. ``get_history`` filtering on it matches nothing,
+            # so there is nothing to disclose and nothing to refuse.
+            continue
+        if row.workspace != workspace_id:
+            logger.warning(
+                "Refused a session naming a %s outside the caller's workspace (caller=%s, %s=%s)",
+                kind,
+                workspace_id,
+                kind,
+                raw_id,
+            )
+            raise NotFound(kind, raw_id)
+
+
 async def create(
     ctx: RequestContext,
     workspace_id: str,
@@ -130,9 +191,27 @@ async def create(
     ``body.session_id`` matches an existing row."""
     sid = body.session_id or f"websocket_{uuid.uuid4().hex[:12]}"
 
+    await _refuse_foreign_scope_ids(workspace_id, body)
+
     if body.session_id:
         existing_doc = await _SessionDoc.find_one(_SessionDoc.sessionId == body.session_id)
         if existing_doc is not None:
+            # The upsert branch looked the row up by ``sessionId`` alone and
+            # compared neither workspace nor owner before patching it, saving
+            # it, emitting SessionUpdated addressed to ``existing_doc.owner``,
+            # and returning the row — which discloses the victim's workspace,
+            # owner, pocket, group and agent. ``link_pocket`` does exactly this
+            # check 375 lines below; this branch never got it.
+            #
+            # NotFound rather than Forbidden, so a session id in another
+            # workspace is indistinguishable from one that does not exist.
+            if existing_doc.workspace != workspace_id:
+                logger.warning(
+                    "Refused a session upsert onto another workspace's row (caller=%s, session=%s)",
+                    workspace_id,
+                    body.session_id,
+                )
+                raise NotFound("session", body.session_id)
             patched: dict = {}
             if body.pocket_id and body.pocket_id != existing_doc.pocket:
                 existing_doc.pocket = body.pocket_id
