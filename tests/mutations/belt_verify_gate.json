@@ -84,6 +84,24 @@
     ]
   },
   {
+    "label": "a JS repo with no install is run anyway, reddening a good diff",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    if not (tree / \"node_modules\").is_dir():",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_node_repo_without_an_install_is_skipped_not_failed"
+    ]
+  },
+  {
+    "label": "a package.json with no test script invents a check",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    if not scripts.get(\"test\"):\n        return None",
+    "replace": "    if False:\n        return None",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_node_repo_without_a_test_script_discovers_nothing"
+    ]
+  },
+  {
     "label": "a stale diff reads as an opaque internal error, not actionable feedback",
     "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
     "find": "                        name=\"git_apply\",",

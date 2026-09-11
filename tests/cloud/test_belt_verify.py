@@ -295,6 +295,47 @@ async def test_pytest_collecting_nothing_is_skipped_not_passed(tmp_path):
     assert result.status == "no_checks"
 
 
+async def test_node_repo_without_an_install_is_skipped_not_failed(tmp_path):
+    """A JS repo's suite cannot run in a fresh worktree (no node_modules), so it
+    is SKIPPED. Running it anyway would fail on missing modules and refuse a
+    perfectly good diff — an install-state failure is not a code failure."""
+    repo = _seed(
+        tmp_path / "node-repo",
+        {
+            "package.json": '{"name":"w","scripts":{"test":"vitest run"}}\n',
+            "bun.lock": "{}\n",
+            "index.js": "export const V = 1;\n",
+        },
+    )
+    diff = _diff("index.js", "export const V = 1;\n", "export const V = 2;\n")
+
+    result = await belt_verify.verify_diff(
+        repo=str(repo), base_branch="main", diff=diff, timeout_s=120
+    )
+
+    assert [(c.name, c.ok, c.skipped) for c in result.checks] == [("bun test", True, True)]
+    assert result.status == "no_checks"
+
+
+async def test_node_repo_without_a_test_script_discovers_nothing(tmp_path):
+    """No ``test`` script → no check at all (distinct from a skipped one)."""
+    repo = _seed(
+        tmp_path / "node-notest",
+        {
+            "package.json": '{"name":"w","scripts":{"build":"tsc"}}\n',
+            "index.js": "export const V = 1;\n",
+        },
+    )
+    diff = _diff("index.js", "export const V = 1;\n", "export const V = 2;\n")
+
+    result = await belt_verify.verify_diff(
+        repo=str(repo), base_branch="main", diff=diff, timeout_s=120
+    )
+
+    assert result.checks == ()
+    assert result.status == "no_checks"
+
+
 async def test_src_layout_repo_imports_from_the_applied_tree(tmp_path):
     """A src-layout repo verifies green — which only happens if the APPLIED
     tree's ``src`` is on the check's import path.
