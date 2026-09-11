@@ -1,0 +1,37 @@
+[
+  {
+    "label": "drop the deployment gate — the shipped state, any tenant by header",
+    "file": "ee/pocketpaw_ee/cloud/pockets/router.py",
+    "find": "    if not _bypass_allowed_here():\n        return False\n    return True",
+    "replace": "    return True",
+    "tests": ["tests/cloud/test_pocket_loopback_bypass.py"]
+  },
+  {
+    "label": "fail OPEN when the multi-tenant signal cannot be read",
+    "file": "ee/pocketpaw_ee/cloud/pockets/router.py",
+    "find": "            \"refusing the pocket internal bypass\",\n            exc_info=True,\n        )\n        return False",
+    "replace": "            \"refusing the pocket internal bypass\",\n            exc_info=True,\n        )\n        return True",
+    "tests": ["tests/cloud/test_pocket_loopback_bypass.py"]
+  },
+  {
+    "label": "treat any present opt-in value as truthy, so =0 means yes",
+    "file": "ee/pocketpaw_ee/cloud/pockets/router.py",
+    "find": "    if os.environ.get(\"POCKETPAW_INTERNAL_BYPASS_ENABLED\", \"\").strip().lower() in (\n        \"1\",\n        \"true\",\n        \"yes\",\n        \"on\",\n    ):",
+    "replace": "    if \"POCKETPAW_INTERNAL_BYPASS_ENABLED\" in os.environ:",
+    "tests": ["tests/cloud/test_pocket_loopback_bypass.py"]
+  },
+  {
+    "label": "stop refusing in multi-tenant cloud",
+    "file": "ee/pocketpaw_ee/cloud/pockets/router.py",
+    "find": "        if is_multi_tenant_cloud():\n            return False",
+    "replace": "        if False:\n            return False",
+    "tests": ["tests/cloud/test_pocket_loopback_bypass.py"]
+  },
+  {
+    "label": "drop the loopback factor while keeping the new gate",
+    "file": "ee/pocketpaw_ee/cloud/pockets/router.py",
+    "find": "    if not _is_localhost(request):\n        return False\n    if internal_header != \"true\":",
+    "replace": "    if internal_header != \"true\":",
+    "tests": ["tests/cloud/test_pocket_loopback_bypass.py"]
+  }
+]

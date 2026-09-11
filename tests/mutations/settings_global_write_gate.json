@@ -1,0 +1,30 @@
+[
+  {
+    "label": "drop the gate from the handler — the shipped state",
+    "file": "src/pocketpaw/api/v1/settings.py",
+    "find": "    _refuse_global_write_in_cloud(request)\n\n    data = await request.json()",
+    "replace": "    data = await request.json()",
+    "tests": ["tests/v1/test_settings_global_write_gate.py"]
+  },
+  {
+    "label": "treat any present override value as truthy, so =0 means yes",
+    "file": "src/pocketpaw/api/v1/settings.py",
+    "find": "    if os.environ.get(\"POCKETPAW_ALLOW_GLOBAL_SETTINGS_WRITE\", \"\").strip().lower() in (\n        \"1\",\n        \"true\",\n        \"yes\",\n        \"on\",\n    ):",
+    "replace": "    if \"POCKETPAW_ALLOW_GLOBAL_SETTINGS_WRITE\" in os.environ:",
+    "tests": ["tests/v1/test_settings_global_write_gate.py"]
+  },
+  {
+    "label": "announce the surface with a 403 instead of a 404",
+    "file": "src/pocketpaw/api/v1/settings.py",
+    "find": "    raise HTTPException(status_code=404, detail=\"Not Found\")",
+    "replace": "    raise HTTPException(status_code=403, detail=\"Forbidden\")",
+    "tests": ["tests/v1/test_settings_global_write_gate.py"]
+  },
+  {
+    "label": "let a cloud session through by ignoring the stamped workspace",
+    "file": "src/pocketpaw/api/v1/settings.py",
+    "find": "    if not getattr(request.state, \"workspace_id\", None):\n        return",
+    "replace": "    return",
+    "tests": ["tests/v1/test_settings_global_write_gate.py"]
+  }
+]

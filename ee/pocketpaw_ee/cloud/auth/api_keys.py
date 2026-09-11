@@ -331,51 +331,63 @@ async def resolve_bearer(token: str) -> tuple[str, str, list[str]] | None:
     if cached is not None:
         return cached.owner_user_id, cached.workspace, list(cached.scopes)
 
-    doc = await APIKey.find_one(
+    # EVERY live key sharing this prefix, not the first one Mongo happens to
+    # return. The prefix is 8 hex characters carved off the secret, so two live
+    # keys collide by birthday at roughly 65k keys in a deployment. find_one
+    # then returns an arbitrary one of them, its argon2 verify fails against the
+    # other key's secret, and that OTHER key stops authenticating — permanently,
+    # with a 401 that says nothing about why. Availability, not disclosure: the
+    # verify below is what actually authenticates, and it is unchanged.
+    #
+    # The loop costs nothing in the normal case, because the normal case is one
+    # document. It only does a second ~30ms argon2 verify when a collision
+    # genuinely exists, which is the situation it exists to survive.
+    candidates = await APIKey.find(
         APIKey.prefix == prefix,
         APIKey.revoked == False,  # noqa: E712
-    )
-    if doc is None:
+    ).to_list()
+    if not candidates:
         return None
 
-    # Cheap expiry check first — skips the ~30ms argon2 verify when the
-    # key is already dead.
-    if doc.expires_at is not None:
-        exp = doc.expires_at if doc.expires_at.tzinfo else doc.expires_at.replace(tzinfo=UTC)
-        if exp <= now:
-            return None
+    for doc in candidates:
+        # Cheap expiry check first — skips the ~30ms argon2 verify when the
+        # key is already dead.
+        if doc.expires_at is not None:
+            exp = doc.expires_at if doc.expires_at.tzinfo else doc.expires_at.replace(tzinfo=UTC)
+            if exp <= now:
+                continue
 
-    # Argon2id at pwdlib's recommended parameters is ~30ms of CPU and a 64 MB
-    # allocation, by design. That cost is fine; running it INLINE on the event
-    # loop was not. This is one process serving every request, so a synchronous
-    # 30ms burn here freezes every other in-flight request, WebSocket frame and
-    # SSE chunk for those 30ms — not just the caller's. Sustained API-key
-    # traffic therefore caps total server throughput around 1/0.03 ≈ 33 req/s
-    # regardless of how trivial the endpoint being called is.
-    #
-    # to_thread hands it to the default executor so the loop keeps serving.
-    # The verify stays exactly as strict; only where it runs has changed.
-    try:
-        result = await asyncio.to_thread(_password_hash.verify, secret, doc.hashed_secret)
-    except Exception:
-        return None
-    if isinstance(result, tuple):
-        valid = bool(result[0])
-    else:
-        valid = bool(result)
-    if not valid:
-        return None
-
-    _cache_verification(_token_digest(token), doc, now_monotonic)
-
-    if _should_write_last_used(str(doc.id), now_monotonic):
+        # Argon2id at pwdlib's recommended parameters is ~30ms of CPU and a
+        # 64 MB allocation, by design. That cost is fine; running it INLINE on
+        # the event loop was not. This is one process serving every request, so
+        # a synchronous 30ms burn here freezes every other in-flight request,
+        # WebSocket frame and SSE chunk for those 30ms — not just the caller's.
+        #
+        # to_thread hands it to the default executor so the loop keeps serving.
+        # The verify stays exactly as strict; only where it runs has changed.
         try:
-            doc.last_used_at = now
-            await doc.save()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("last_used_at update failed: %s", exc)
+            result = await asyncio.to_thread(_password_hash.verify, secret, doc.hashed_secret)
+        except Exception:
+            continue
+        if isinstance(result, tuple):
+            valid = bool(result[0])
+        else:
+            valid = bool(result)
+        if not valid:
+            continue
 
-    return doc.owner_user_id, doc.workspace, list(doc.scopes)
+        _cache_verification(_token_digest(token), doc, now_monotonic)
+
+        if _should_write_last_used(str(doc.id), now_monotonic):
+            try:
+                doc.last_used_at = now
+                await doc.save()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("last_used_at update failed: %s", exc)
+
+        return doc.owner_user_id, doc.workspace, list(doc.scopes)
+
+    return None
 
 
 __all__ = [

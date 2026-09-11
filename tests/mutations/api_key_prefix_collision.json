@@ -1,0 +1,23 @@
+[
+  {
+    "label": "go back to find_one — one colliding key stops authenticating",
+    "file": "ee/pocketpaw_ee/cloud/auth/api_keys.py",
+    "find": "    candidates = await APIKey.find(\n        APIKey.prefix == prefix,\n        APIKey.revoked == False,  # noqa: E712\n    ).to_list()\n    if not candidates:\n        return None",
+    "replace": "    _one = await APIKey.find_one(\n        APIKey.prefix == prefix,\n        APIKey.revoked == False,  # noqa: E712\n    )\n    candidates = [_one] if _one is not None else []\n    if not candidates:\n        return None",
+    "tests": ["tests/cloud/auth/test_api_key_prefix_collision.py"]
+  },
+  {
+    "label": "stop after the first candidate whose verify fails",
+    "file": "ee/pocketpaw_ee/cloud/auth/api_keys.py",
+    "find": "        if not valid:\n            continue",
+    "replace": "        if not valid:\n            return None",
+    "tests": ["tests/cloud/auth/test_api_key_prefix_collision.py"]
+  },
+  {
+    "label": "accept a candidate without verifying it",
+    "file": "ee/pocketpaw_ee/cloud/auth/api_keys.py",
+    "find": "        if isinstance(result, tuple):\n            valid = bool(result[0])\n        else:\n            valid = bool(result)",
+    "replace": "        valid = True",
+    "tests": ["tests/cloud/auth/test_api_key_prefix_collision.py"]
+  }
+]

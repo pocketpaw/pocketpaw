@@ -72,10 +72,66 @@ async def get_settings():
     return data
 
 
+def _refuse_global_write_in_cloud(request: Request) -> None:
+    """404 the settings write when more than one tenant lives on this box.
+
+    ``Settings.load()`` / ``.save()`` is the single on-disk config for the whole
+    PROCESS. There is no workspace anywhere in this handler, and the update is a
+    blind ``setattr`` loop over whatever keys the body carries, bounded only by
+    ``hasattr`` and ``_IMMUTABLE_FIELDS``. So one caller who passes the gate
+    rewrites model routing, provider keys, channel wiring and budget for EVERY
+    tenant on the deployment — while the product presents this as workspace
+    settings.
+
+    The gate in front of it is currently sound: ``require_scope`` fails closed,
+    and the EE bridge grants ``full_access`` only to ``is_superuser``, so a
+    workspace owner cannot reach it. This is not a fix for a broken gate. It is
+    removing the reason one narrow superuser check is the only thing standing
+    between a self-service tenant and everyone else's provider keys.
+
+    HOW "CLOUD" IS DETECTED FROM THE OSS PACKAGE
+
+    This module is in ``pocketpaw``, which must never import ``pocketpaw_ee`` —
+    an import-linter contract enforces it — so ``is_multi_tenant_cloud()`` is
+    out of reach. ``request.state.workspace_id`` is the seam: the EE auth bridge
+    stamps it from the caller's own JWT, and nothing else sets it. If it is
+    present, a cloud session reached this route, which means this deployment has
+    cloud mounted.
+
+    ``POCKETPAW_ALLOW_GLOBAL_SETTINGS_WRITE=1`` re-opens it for an operator who
+    genuinely needs to drive a single-tenant cloud install through this route.
+
+    404 rather than 403: a surface a deployment has turned off should not
+    announce itself.
+
+    Per-workspace settings is the real fix and a real project. This is the
+    launch-week posture, not the end state.
+    """
+    import os
+
+    if not getattr(request.state, "workspace_id", None):
+        return
+    if os.environ.get("POCKETPAW_ALLOW_GLOBAL_SETTINGS_WRITE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        logger.warning(
+            "POCKETPAW_ALLOW_GLOBAL_SETTINGS_WRITE is set — honouring a write to "
+            "the PROCESS-WIDE settings from a cloud session. This changes config "
+            "for every tenant on this deployment."
+        )
+        return
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
 @router.put("/settings", dependencies=[Depends(require_scope("settings:write"))])
 async def update_settings(request: Request):
     """Update settings fields. Only provided fields are changed."""
     from pocketpaw.config import Settings, get_settings, validate_api_key
+
+    _refuse_global_write_in_cloud(request)
 
     data = await request.json()
     settings_data = data.get("settings", data)
