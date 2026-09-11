@@ -15,6 +15,15 @@
 #   * ``founder_cards`` (optional) — when a creator names the founders, the
 #     list length must equal ``founders``, at most 12, each with a non-empty
 #     name and role, a bounded charter and at most four values
+#   * resources (optional layer) — every ``TechNode.produces`` and every bundle
+#     key (``TechNode.stock_cost``, ``stock_costs[verb]``, ``FounderCard.stock``)
+#     names a declared resource, bundle amounts are positive, ``resources`` is
+#     unique, ``stock_costs`` keys are known verbs, ``stock_cap`` is positive
+#
+# Every resource field defaults empty, so a physics file without the layer
+# validates and behaves exactly as before. Bundles live on the node and at the
+# top level, never inside ``Costs`` — ``_check_costs`` reads every Costs value
+# as one positive integer.
 #
 # Wire shape matches the frozen v0 contract exactly (YAML in, JSON out).
 
@@ -95,6 +104,10 @@ class TechNode(BaseModel):
     cost: int
     needs: list[str] = Field(default_factory=list)
     grants: list[str] = Field(default_factory=list)
+    # Resource layer: what a holder harvests each world day, and the bundle
+    # charged at build on top of ``cost``.
+    produces: str | None = None
+    stock_cost: dict[str, int] = Field(default_factory=dict)
 
 
 class ModelTiers(BaseModel):
@@ -116,6 +129,7 @@ class FounderCard(BaseModel):
     role: str
     charter: str = ""
     values: list[str] = Field(default_factory=list)
+    stock: dict[str, int] = Field(default_factory=dict)
 
 
 class PhysicsFile(BaseModel):
@@ -135,6 +149,11 @@ class PhysicsFile(BaseModel):
     founders: int = 5
     founder_cards: list[FounderCard] | None = None
     world_brief: str = ""
+    # Resource layer. ``[]`` means this world has no resources; then no node
+    # produces, every bundle is empty, and the robber never fires.
+    resources: list[str] = Field(default_factory=list)
+    stock_costs: dict[str, dict[str, int]] = Field(default_factory=dict)  # verb -> bundle
+    stock_cap: int | None = None
 
 
 def _check_costs(physics: PhysicsFile) -> None:
@@ -232,6 +251,36 @@ def _check_founder_cards(physics: PhysicsFile) -> None:
             )
 
 
+def _check_bundle(physics: PhysicsFile, where: str, bundle: dict[str, int]) -> None:
+    for name, amount in bundle.items():
+        if name not in physics.resources:
+            raise PhysicsError(
+                f"{where}.{name} names an undeclared resource; resources are {physics.resources}"
+            )
+        if amount <= 0:
+            raise PhysicsError(f"{where}.{name} must be positive, got {amount!r}")
+
+
+def _check_resources(physics: PhysicsFile) -> None:
+    """The resource layer: every name declared once, every bundle positive."""
+    if len(set(physics.resources)) != len(physics.resources):
+        raise PhysicsError(f"resources must be unique, got {physics.resources}")
+    for name, node in physics.tech_tree.items():
+        if node.produces is not None and node.produces not in physics.resources:
+            raise PhysicsError(
+                f"tech_tree.{name}.produces names undeclared resource {node.produces!r}"
+            )
+        _check_bundle(physics, f"tech_tree.{name}.stock_cost", node.stock_cost)
+    for verb, bundle in physics.stock_costs.items():
+        if verb not in KNOWN_VERBS:
+            raise PhysicsError(f"stock_costs.{verb} is not a known verb")
+        _check_bundle(physics, f"stock_costs.{verb}", bundle)
+    for i, card in enumerate(physics.founder_cards or []):
+        _check_bundle(physics, f"founder_cards[{i}].stock", card.stock)
+    if physics.stock_cap is not None and physics.stock_cap <= 0:
+        raise PhysicsError(f"stock_cap must be positive when set, got {physics.stock_cap!r}")
+
+
 def validate_physics(physics: PhysicsFile) -> PhysicsFile:
     """Run every hard rule. Raises ``PhysicsError`` on the first violation."""
     if physics.founders < 1:
@@ -244,6 +293,7 @@ def validate_physics(physics: PhysicsFile) -> PhysicsFile:
     _check_verbs(physics)
     _check_tech_tree(physics)
     _check_founder_cards(physics)
+    _check_resources(physics)
     return physics
 
 
