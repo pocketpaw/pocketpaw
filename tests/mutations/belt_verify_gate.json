@@ -1,0 +1,95 @@
+[
+  {
+    "label": "the gate stops gating: a failed verification no longer refuses the propose",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
+    "find": "    if result.status == \"failed\":\n        failed = [c for c in result.checks if not c.ok]",
+    "replace": "    if False:\n        failed = [c for c in result.checks if not c.ok]",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_propose_is_refused_when_verification_fails"
+    ]
+  },
+  {
+    "label": "verification runs but is never attached to the blob",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
+    "find": "        \"verification\": verification,",
+    "replace": "        \"verification\": {},",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_propose_files_the_action_and_attaches_verification",
+      "tests/cloud/test_belt_verify.py::test_disabled_setting_skips_verification_entirely"
+    ]
+  },
+  {
+    "label": "the gate runs even when the workspace turned it off",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
+    "find": "    if not getattr(settings, \"belt_verify_enabled\", True):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_disabled_setting_skips_verification_entirely"
+    ]
+  },
+  {
+    "label": "nothing ran, but call it a pass anyway",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    if any(not c.skipped for c in checks):\n        return \"passed\"",
+    "replace": "    if True:\n        return \"passed\"",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_repo_with_no_test_command_is_no_checks",
+      "tests/cloud/test_belt_verify.py::test_pytest_collecting_nothing_is_skipped_not_passed"
+    ]
+  },
+  {
+    "label": "an exploding verifier fails OPEN instead of closed",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "                ok=False,\n                skipped=False,\n                output=_tail(message),",
+    "replace": "                ok=True,\n                skipped=True,\n                output=_tail(message),",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_internal_error_fails_closed_and_still_cleans_up"
+    ]
+  },
+  {
+    "label": "pytest collected nothing, but count it as proof",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "_PYTEST_NO_TESTS = 5",
+    "replace": "_PYTEST_NO_TESTS = -1",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_pytest_collecting_nothing_is_skipped_not_passed"
+    ]
+  },
+  {
+    "label": "the throwaway worktree is left behind",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "        if worktree_dir is not None:\n            with _suppress():\n                await _force_remove_worktree(repo_path, worktree_dir)",
+    "replace": "        if worktree_dir is not None and False:\n            with _suppress():\n                await _force_remove_worktree(repo_path, worktree_dir)",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_passing_diff_verifies_green_and_cleans_up",
+      "tests/cloud/test_belt_verify.py::test_internal_error_fails_closed_and_still_cleans_up"
+    ]
+  },
+  {
+    "label": "the check imports from the editable install, not the applied tree",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    roots = [str(tree / \"src\")] if (tree / \"src\").is_dir() else []",
+    "replace": "    roots = []",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_src_layout_repo_imports_from_the_applied_tree"
+    ]
+  },
+  {
+    "label": "a timeout is swallowed as a pass",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    except Exception as exc:  # noqa: BLE001 — _run raises RuntimeError on timeout\n        return CheckResult(\n            name=name,\n            ok=False,",
+    "replace": "    except Exception as exc:  # noqa: BLE001 — _run raises RuntimeError on timeout\n        return CheckResult(\n            name=name,\n            ok=True,",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_timeout_is_a_failure"
+    ]
+  },
+  {
+    "label": "a stale diff reads as an opaque internal error, not actionable feedback",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "                        name=\"git_apply\",",
+    "replace": "                        name=\"verify_internal\",",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_non_applying_diff_is_a_named_git_apply_check"
+    ]
+  }
+]
