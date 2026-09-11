@@ -1170,11 +1170,13 @@ async def _persist_outcome(
         await a.insert()
         artifact_ids.append(str(a.id))
 
-    for ev in outcome.events:
+    for i, ev in enumerate(outcome.events):
         if ev.kind == "accept":
             # Exactly one row lands in the accept's slot (accept or gate), so
-            # ``_land_tick``'s event-to-row alignment holds.
-            ev = await _settle_accept(uni, doc, ev, outcome, docs or {})
+            # ``_land_tick``'s event-to-row alignment holds. Written BACK into
+            # the outcome: the soul summary below reads it, and a gated accept
+            # must not be remembered as a swap that happened.
+            ev = outcome.events[i] = await _settle_accept(uni, doc, ev, outcome, docs or {})
         art_id = (
             artifact_ids[ev.artifact_index]
             if ev.artifact_index is not None and ev.artifact_index < len(artifact_ids)

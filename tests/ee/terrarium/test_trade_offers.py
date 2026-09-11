@@ -195,9 +195,15 @@ async def test_an_accept_moves_both_bundles_and_claims_the_offer(client):
         ("asleep", "not here to trade"),
     ],
 )
-async def test_a_spoiled_accept_is_a_gate_row_and_nothing_moves(client, spoil, needle):
+async def test_a_spoiled_accept_is_a_gate_row_and_nothing_moves(client, spoil, needle, monkeypatch):
     uni, offer = await _post(client)
     acceptor = "Nim"
+    remembered: list[str] = []
+
+    async def capture(path, summary):
+        remembered.append(summary)
+
+    monkeypatch.setattr(service.soul_link, "remember_tick", capture)
     if spoil == "expired":
         offer.data = {**offer.data, "expires_day": 0}
         await offer.save()
@@ -231,6 +237,9 @@ async def test_a_spoiled_accept_is_a_gate_row_and_nothing_moves(client, spoil, n
     assert "taken_by" not in (await _offer(uni["id"])).data or spoil == "taken"
     after = (await CitizenDoc.find_one(CitizenDoc.name == acceptor)).balance
     assert balance - after == physics().costs.think, "the fee is refunded; only the think lands"
+    # Write-policy: the soul remembers the gate, never a swap that did not happen.
+    mine = [m for m in remembered if f": {acceptor} " in m]
+    assert len(mine) == 1 and "gate: could not accept" in mine[0] and "accepts" not in mine[0]
 
 
 async def test_a_giver_still_holds_check_reads_the_ticks_own_doc(client):

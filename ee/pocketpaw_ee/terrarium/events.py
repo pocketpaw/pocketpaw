@@ -10,7 +10,9 @@
 # resolver's workspace fan-out (mirroring ``belt_plan``).
 #
 # ``world.era`` carries the rung change (camp -> town ...), the one system row
-# a viewer wants a banner for rather than a feed line.
+# a viewer wants a banner for rather than a feed line. Resource rows (harvest,
+# raid) and trade rows (offer, accept) ride ``world.act`` explicitly: offers are
+# public like balances.
 #
 # NOTE: registration happens at IMPORT time, so this module must be reachable
 # from app boot — it is, via service.py ← router.py ← cloud/__init__.
