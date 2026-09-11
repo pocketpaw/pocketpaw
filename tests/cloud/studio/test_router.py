@@ -107,7 +107,7 @@ def test_list_styles_returns_envelope(client):
 def test_list_generations_is_workspace_scoped(client, monkeypatch):
     seen: dict = {}
 
-    def _list(workspace_id):
+    async def _list(workspace_id):
         seen["workspace"] = workspace_id
         return [_generation()]
 
@@ -181,7 +181,7 @@ def test_post_generate_proxy_failure_is_502(client, monkeypatch):
 
 
 def test_get_generation_found(client, monkeypatch):
-    def _get(gen_id, workspace_id):
+    async def _get(workspace_id, gen_id):
         assert gen_id == "gen_abc"
         assert workspace_id == "ws-1"
         return _generation()
@@ -193,7 +193,10 @@ def test_get_generation_found(client, monkeypatch):
 
 
 def test_get_generation_not_found_is_404(client, monkeypatch):
-    monkeypatch.setattr(studio_service, "get_generation", lambda gen_id, workspace_id: None)
+    async def _missing(workspace_id, gen_id):
+        return None
+
+    monkeypatch.setattr(studio_service, "get_generation", _missing)
     resp = client.get("/api/v1/studio/generations/nope")
     assert resp.status_code == 404
 

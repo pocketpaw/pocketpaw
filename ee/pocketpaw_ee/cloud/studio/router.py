@@ -70,7 +70,7 @@ async def list_generations(
 ) -> schemas.GenerationsResponse:
     """Return the workspace's generation history, newest first (persisted, so it
     survives reloads)."""
-    return schemas.GenerationsResponse(generations=service.list_generations(workspace_id))
+    return schemas.GenerationsResponse(generations=await service.list_generations(workspace_id))
 
 
 @router.post("/generate", response_model=schemas.Generation)
@@ -105,7 +105,7 @@ async def get_generation(
     workspace_id: str = Depends(current_workspace_id),
 ) -> schemas.Generation:
     """Return one generation by id (scoped to the workspace), or 404."""
-    generation = service.get_generation(gen_id, workspace_id)
+    generation = await service.get_generation(workspace_id, gen_id)
     if generation is None:
         raise HTTPException(404, f"Generation '{gen_id}' not found")
     return generation

@@ -174,7 +174,7 @@ async def list_media(
     tiles. Agent-side generated files (media MCP) are NOT tracked and therefore
     still surface here (in local mode).
     """
-    tracked = tracked_generation_filenames()
+    tracked = await tracked_generation_filenames()
     generated = storage.local_generated_dir()
     entries = (
         _local_entries(generated, sort, tracked, workspace_id)

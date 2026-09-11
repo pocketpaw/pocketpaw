@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -257,8 +257,15 @@ def media_client(media_store):
 
     def _as(workspace_id: str | None):
         app.dependency_overrides[media_router_module.optional_workspace_id] = lambda: workspace_id
+        # list_media takes the STRICT dep (#2114); without this it 401s before it
+        # reaches the capture-exclusion logic these tests are about. serve_media
+        # keeps the optional one, so the anonymous-read tests still mean something.
+        app.dependency_overrides[media_router_module.current_workspace_id] = lambda: (
+            workspace_id or "ws-anon"
+        )
 
     app.dependency_overrides[media_router_module.optional_workspace_id] = lambda: None
+    app.dependency_overrides[media_router_module.current_workspace_id] = lambda: "ws-anon"
     client = TestClient(app)
     client.as_workspace = _as  # type: ignore[attr-defined]
     return client
@@ -339,7 +346,9 @@ async def test_captures_stay_out_of_the_studio_gallery(media_client, media_store
     (media_store / "1700000000000-abc123.png").write_bytes(_PNG)
     capture_url = _url_from(await _capture("ws-1"))
 
-    with patch.object(media_router_module, "tracked_generation_filenames", return_value=set()):
+    with patch.object(
+        media_router_module, "tracked_generation_filenames", AsyncMock(return_value=set())
+    ):
         media_client.as_workspace("ws-1")
         names = [e["name"] for e in media_client.get("/api/v1/media").json()["media"]]
 
