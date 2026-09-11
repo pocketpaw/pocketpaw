@@ -2,7 +2,9 @@
 # stable prefix (cacheable at the provider) and a volatile suffix; HttpLlm marks
 # that prefix ONLY on a Claude model whose minimum cacheable length it clears,
 # the meter records whether it was marked, and cache reads reach the cost meter.
-# The last test measures the shipped Dust seed against those minimums.
+# The last test measures the shipped Dust seed against those minimums: since
+# the resource layer, Dust's RESOURCES block puts the prefix over opus-5's
+# minimum (the founders tier caches) and under every other tier's.
 
 from __future__ import annotations
 

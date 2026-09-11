@@ -1,9 +1,11 @@
-# tests/ee/terrarium/test_topics.py — the nine ``world.*`` realtime topics.
+# tests/ee/terrarium/test_topics.py — the ten ``world.*`` realtime topics.
 #
 # Registration happens at IMPORT time via ``Event.__init_subclass__``, so what
 # actually has to hold is (a) every contract topic is defined and registered,
 # and (b) the module is reachable from app boot — service.py imports it, and
-# the router imports service, so mounting the router pulls it in.
+# the router imports service, so mounting the router pulls it in. ``world.era``
+# (the rung changed) is the tenth; the resource rows ``harvest`` and ``raid``
+# ride ``world.act`` like every other thing that happens to a citizen.
 
 from __future__ import annotations
 

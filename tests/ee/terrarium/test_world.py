@@ -4,7 +4,9 @@
 # server-side against balance / allowed verbs / held tech (the model is never
 # trusted), tech unlock requires prerequisites, hibernation triggers at zero,
 # and the write-policy — viewer text is labelled on the way in and is excluded
-# from the episodic summary on the way out.
+# from the episodic summary on the way out. Dust's farm now also costs 2 water,
+# so the two fixtures that build it bare seed that stock; the resource rules
+# themselves are pinned in test_resources.py.
 
 from __future__ import annotations
 
