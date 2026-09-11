@@ -867,6 +867,10 @@ class ScopeContext:
     # ``claude_sdk_model``. ``None`` (older clients / no picker) leaves the backend's
     # own selection untouched — byte-identical to today.
     model_override: str | None = None
+    #: Per-send tool switch (2026-09-11). ``False`` runs with no tool surface;
+    #: ``None`` is the legacy path. Copied onto ``ctx`` by ``execute_run``
+    #: exactly like ``model_override`` beside it.
+    tools_enabled: bool | None = None
 
 
 # ---------------------------------------------------------------------------

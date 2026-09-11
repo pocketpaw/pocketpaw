@@ -678,6 +678,7 @@ class AgentPool:
         on_client_built: Callable[[Any, str, Callable], None] | None = None,
         model_override: str | None = None,
         exclusive_mcp_tools: bool = False,
+        tools_enabled: bool = True,
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
         byok_api_key: str | None = None,
@@ -891,6 +892,13 @@ class AgentPool:
             # False = legacy grant-union path, unchanged for every existing run.
             if exclusive_mcp_tools:
                 run_kwargs["exclusive_mcp_tools"] = exclusive_mcp_tools
+            # Per-send tool switch (2026-09-11). Same withhold-when-empty rule,
+            # and here the default carries real meaning: True is "the tool
+            # surface this run already resolved", so forwarding it always would
+            # say nothing while narrowing which backends can be called. Only an
+            # explicit False is a request, so only False rides.
+            if tools_enabled is False:
+                run_kwargs["tools_enabled"] = tools_enabled
             # BYOK: swap the SHARED backend for a private one, built for this
             # run alone. Anything that fails here (an unregistered backend, a
             # bad settings key) falls back to the shared instance rather than

@@ -289,6 +289,9 @@ async def post_agent_chat(
         # the request body; ``None`` for every older client leaves model selection
         # to the backend.
         model_override=body.model,
+        # Per-send tool switch. ``None`` for every older client, which is the
+        # legacy path; only an explicit ``False`` changes anything.
+        tools_enabled=body.tools,
         # Studio Flow build context — ride the spec to the executor so the agent
         # knows the ACTIVE FLOW ID and ``build_studio_flow`` persists into the
         # flow project the user is on (``None`` on every non-studio surface).

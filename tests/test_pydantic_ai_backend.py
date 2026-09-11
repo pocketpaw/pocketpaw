@@ -3193,3 +3193,62 @@ def test_a_broken_logfire_does_not_break_the_run():
         mod._CONFIGURED = original_flag
 
     assert "Instrumentation" in caps, "a dead exporter must not drop instrumentation"
+
+
+# --- the per-send tool switch (2026-09-11) ----------------------------------
+#
+# Two reasons a caller turns tools off, both observed live: a gateway profile
+# that refuses the ``tools`` field outright and 400s the whole turn, and a
+# weaker model that fixates on a tool instead of answering. On the Otherhand
+# surface the page is written with ``page-ops`` in ordinary text, so a tool-less
+# turn still draws.
+
+
+def test_tools_off_builds_an_agent_with_no_tools():
+    built: list[object] = []
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    backend._custom_tools = None  # force the real builder to run if it is called
+    backend._build_custom_tools = lambda: built.append("built") or []  # type: ignore[method-assign]
+
+    asyncio.run(_collect(backend, "hi", session_key="s1", tools_enabled=False))
+
+    assert built == [], "the tool surface was built on a run that asked for none"
+
+
+def test_tools_off_and_tools_on_do_not_share_a_cached_agent():
+    """The cache is ONE slot. Without the flag in the key, a tools-off turn is
+    served the agent built WITH tools and the switch does nothing."""
+    keys: list[tuple] = []
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    real = backend._get_or_create_agent
+
+    def _watch(*args, **kwargs):
+        agent = real(*args, **kwargs)
+        keys.append(backend._cached_agent_key)
+        return agent
+
+    backend._get_or_create_agent = _watch  # type: ignore[method-assign]
+
+    async def _go():
+        await _collect(backend, "hi", session_key="s1")
+        await _collect(backend, "hi", session_key="s1", tools_enabled=False)
+
+    asyncio.run(_go())
+
+    assert keys[0] != keys[1], "a tools-off turn was served the agent built with tools"
+
+
+def test_tools_default_to_on():
+    """The legacy path. Every existing caller omits the flag and must be
+    byte-identical — this is the assertion that says the default is not a
+    silent feature flag."""
+    built: list[object] = []
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    backend._build_custom_tools = lambda: built.append("built") or []  # type: ignore[method-assign]
+
+    asyncio.run(_collect(backend, "hi", session_key="s1"))
+
+    assert built == ["built"]
