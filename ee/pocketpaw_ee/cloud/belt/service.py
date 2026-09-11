@@ -1,4 +1,14 @@
 # ee/pocketpaw_ee/cloud/belt/service.py
+# Updated: 2026-09-12 (integration/belt-factory — the component seam is filled)
+#   — ``maybe_emit_belt_entity_changed`` now defaults ``resolve_component`` to
+#   the REAL resolver (``component_map.loom_component``) instead of
+#   ``no_component``. The entity-events slice shipped the Protocol and the
+#   always-``None`` default and nothing ever injected anything else, so every
+#   event carried ``component: None``, and the Factory Map — which keys its
+#   highlight off that field — left every change in the unattributed bucket and
+#   lit no node. The seam was built correctly and simply never connected.
+#   ``emit_belt_entity_changed`` keeps ``no_component``: the emitter is a
+#   primitive and should not read settings unless a caller asks it to.
 # Updated: 2026-09-12 (integration/belt-factory — the join key closes) — the
 #   runs read model (``_run_summary``, so both ``list_runs`` and ``get_run``)
 #   now returns ``run_id``, read off the ``_code_change`` blob where
@@ -135,6 +145,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, get_args
 
+from pocketpaw_ee.cloud.belt.component_map import loom_component
 from pocketpaw_ee.cloud.surface.domain import SurfaceKind
 
 logger = logging.getLogger(__name__)
@@ -563,9 +574,17 @@ async def maybe_emit_belt_entity_changed(
     run_id: str,
     repo_root: str | None,
     action_id: str | None = None,
-    resolve_component: ComponentResolver = no_component,
+    resolve_component: ComponentResolver = loom_component,
 ) -> None:
     """Bridge one agent ``tool_use`` event to ``emit_belt_entity_changed``.
+
+    The default resolver is the REAL one (loom's world model), not
+    ``no_component``. This is the production call path — ``run_core`` calls it
+    once per tool use — and defaulting it here wires every caller at once,
+    including any future one, without a call-site edit to forget. Still
+    injectable, so a test passes its own. ``emit_belt_entity_changed`` keeps
+    ``no_component`` as ITS default: that one is the primitive, and a primitive
+    should not read settings unless asked to.
 
     The narrow filter that keeps this feed honest, in order: BELT surface only
     (a normal chat turn writing a file must stay silent), a file-MUTATING tool

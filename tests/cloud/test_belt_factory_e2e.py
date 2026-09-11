@@ -52,6 +52,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -571,4 +572,75 @@ async def test_the_in_turn_sse_mirrors_the_bus(repo, store, allowlist, stream, r
     pushed = [(name, data) for name, data in sse.events if name in _BELT_EVENTS]
     assert [(n, d.get("file") or d.get("stage")) for n, d in pushed] == [
         (k, d.get("file") or d.get("stage")) for k, d in _feed(recording_bus)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# The component seam, end to end — the field the Factory Map highlights on
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def loom_model(repo: Path, tmp_path: Path, allowlist, monkeypatch) -> Path:
+    """A loom world model owning this run's ``app.py``, layered on the allowlist
+    settings patch (reads the CURRENT settings, so the allowlist survives).
+
+    The scope is the fixture repo's own slug rather than ``pocketpaw`` — the
+    resolver matches on the ``:file:`` / ``:component:`` markers, not on a
+    hardcoded scope, and pinning that here keeps the e2e honest about which
+    repo the run is actually bound to.
+    """
+    from pocketpaw.config import get_settings
+
+    from pocketpaw_ee.cloud.belt import component_map
+
+    model = tmp_path / "worldmodel-e2e.json"
+    model.write_text(
+        json.dumps(
+            {
+                "edges": [
+                    {
+                        "from": "py-repo:file:app.py",
+                        "to": "py-repo:component:fabric",
+                        "type": "composes",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    current = get_settings()
+
+    class _S:
+        loom_model_path = str(model)
+
+        def __getattr__(self, name):
+            return getattr(current, name)
+
+    monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
+    component_map._mapping.cache_clear()
+    yield model
+    component_map._mapping.cache_clear()
+
+
+async def test_a_write_carries_the_component_that_owns_the_file(
+    repo, store, stream, recording_bus, sse, loom_model
+):
+    """The payload field the Factory Map keys its highlight off.
+
+    Nothing injects a resolver here — the bridge's DEFAULT does the work, which
+    is the whole point: the resolver existed as a Protocol with an always-None
+    implementation for six slices, every event carried ``component: None``, and
+    every change landed in the unattributed bucket while each slice's own tests
+    passed. An owned file lights its node; an unowned one is still ``None``,
+    which is what the unattributed bucket is for.
+    """
+    await _write(repo, "app.py", None)
+    await _write(repo, "test_app.py", "develop")
+
+    files = [d for k, d in _feed(recording_bus) if k == "belt_entity_changed"]
+    assert [(f["file"], f["component"]) for f in files] == [
+        ("app.py", "fabric"),
+        ("test_app.py", None),
     ]
