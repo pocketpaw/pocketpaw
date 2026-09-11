@@ -1,0 +1,61 @@
+[
+  {
+    "label": "video url sinks to the private media rail",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
+    "find": "            \"url\": video.url,",
+    "replace": "            \"url\": \"/api/v1/media/\" + video.filename,",
+    "tests": ["tests/ee/sites/test_site_video_tool.py::test_the_video_and_poster_are_public_and_absolute"]
+  },
+  {
+    "label": "poster frame is never published",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
+    "find": "    poster_url = None\n    if poster_bytes:",
+    "replace": "    poster_url = None\n    if False:",
+    "tests": ["tests/ee/sites/test_site_video_tool.py::test_the_video_and_poster_are_public_and_absolute"]
+  },
+  {
+    "label": "no running row - history only learns about the job when it finishes",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
+    "find": "    # Running BEFORE the await, so the job is visible while it renders.\n    await service.record_generation_best_effort(\n        workspace_id, _record(\"running\", []), source=\"sites\", pocket_id=pocket_id\n    )\n",
+    "replace": "",
+    "tests": ["tests/ee/sites/test_site_video_tool.py::test_a_running_row_is_written_before_the_render"]
+  },
+  {
+    "label": "a failed render leaves the row stuck on running",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
+    "find": "        await service.record_generation_best_effort(\n            workspace_id, _record(\"failed\", [], reason), source=\"sites\", pocket_id=pocket_id\n        )\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_site_video_tool.py::test_a_failed_render_moves_the_row_off_running",
+      "tests/ee/sites/test_site_video_tool.py::test_a_rail_rejection_reaches_the_user_intact"
+    ]
+  },
+  {
+    "label": "the rail's ceiling message is swallowed into a generic error",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
+    "find": "    except PublicAssetError as exc:\n        # The 50 MiB ceiling and the mime allow-list live on the rail, and its\n        # message is written to be shown to a user, so pass it through intact.\n        return await _fail(str(exc))",
+    "replace": "    except PublicAssetError:\n        return await _fail(\"the video could not be stored\")",
+    "tests": ["tests/ee/sites/test_site_video_tool.py::test_a_rail_rejection_reaches_the_user_intact"]
+  },
+  {
+    "label": "always text-to-video - the owner's own image is ignored",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
+    "find": "    model = fal_video.DEFAULT_IMAGE_TO_VIDEO_MODEL if image_url else fal_video.DEFAULT_VIDEO_MODEL",
+    "replace": "    model = fal_video.DEFAULT_VIDEO_MODEL",
+    "tests": ["tests/ee/sites/test_site_video_tool.py::test_an_image_selects_the_image_to_video_model"]
+  },
+  {
+    "label": "duration reaches fal uncoerced",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
+    "find": "    if duration_sec not in _VIDEO_DURATIONS:\n        duration_sec = 5\n",
+    "replace": "",
+    "tests": ["tests/ee/sites/test_site_video_tool.py::test_duration_is_coerced_to_a_supported_tier"]
+  },
+  {
+    "label": "no ownership check - a foreign pocket id spends against another tenant",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
+    "find": "    owner = await pockets_service.get_pocket_workspace(pocket_id)\n    if owner != workspace_id:\n        return _error_response(f\"No site {pocket_id!r} in this workspace — nothing was generated.\")\n\n    store = public_asset_store()\n    if store is None:\n        return _error_response(",
+    "replace": "    store = public_asset_store()\n    if store is None:\n        return _error_response(",
+    "tests": ["tests/ee/sites/test_site_video_tool.py::test_a_foreign_pocket_is_refused_before_any_spend"]
+  }
+]

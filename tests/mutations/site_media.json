@@ -11,8 +11,8 @@
   {
     "label": "trust the workspace_id in the tool args (prompt-injection guard)",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
-    "find": "    workspace_id, _user_id = _identity()",
-    "replace": "    workspace_id, _user_id = (args.get(\"workspace_id\") or _identity()[0]), None",
+    "find": "        return _error_response(\"pocket_id is required — say which site this image belongs to.\")\n\n    workspace_id, _user_id = _identity()",
+    "replace": "        return _error_response(\"pocket_id is required — say which site this image belongs to.\")\n\n    workspace_id, _user_id = (args.get(\"workspace_id\") or _identity()[0]), None",
     "tests": [
       "tests/ee/sites/test_site_media_tool.py::test_a_workspace_id_in_the_args_is_ignored"
     ]
@@ -74,8 +74,8 @@
   {
     "label": "trust any pocket id (the tool's only real boundary)",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
-    "find": "    if owner != workspace_id:",
-    "replace": "    if False:",
+    "find": "    if owner != workspace_id:\n        return _error_response(f\"No site {pocket_id!r} in this workspace — nothing was generated.\")\n\n    store = public_asset_store()\n    if store is None:\n        # A deployment fact,",
+    "replace": "    if False:\n        return _error_response(f\"No site {pocket_id!r} in this workspace — nothing was generated.\")\n\n    store = public_asset_store()\n    if store is None:\n        # A deployment fact,",
     "tests": [
       "tests/ee/sites/test_site_media_tool.py::test_a_pocket_owned_by_another_workspace_is_refused"
     ]
@@ -83,8 +83,8 @@
   {
     "label": "treat an unknown pocket as ownable",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
-    "find": "    owner = await pockets_service.get_pocket_workspace(pocket_id)",
-    "replace": "    owner = workspace_id",
+    "find": "    from pocketpaw_ee.cloud.pockets import service as pockets_service\n\n    owner = await pockets_service.get_pocket_workspace(pocket_id)",
+    "replace": "    from pocketpaw_ee.cloud.pockets import service as pockets_service\n\n    owner = workspace_id",
     "tests": [
       "tests/ee/sites/test_site_media_tool.py::test_an_unknown_pocket_is_refused"
     ]
@@ -92,8 +92,8 @@
   {
     "label": "let a storage failure discard already-paid-for images",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
-    "find": "        except Exception as exc:  # noqa: BLE001",
-    "replace": "        except _NeverRaised as exc:  # noqa: BLE001",
+    "find": "        except Exception as exc:  # noqa: BLE001\n            # A StorageFailure or an S3 client error is not a PublicAssetError. If",
+    "replace": "        except _NeverRaised as exc:  # noqa: BLE001\n            # A StorageFailure or an S3 client error is not a PublicAssetError. If",
     "tests": [
       "tests/ee/sites/test_site_media_tool.py::test_a_storage_failure_does_not_discard_the_images_already_stored"
     ]

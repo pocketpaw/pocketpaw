@@ -202,6 +202,17 @@ All baseline UI animation must stay native to CSS or SVG paths, so it looks flaw
 
 **Svelte-track specifics** (only on the Svelte engine): State → runes (`let open = $state(false)`, `const total = $derived(...)`) with the resting value set in the initializer so it prerenders — free either way. **The next two need the bundle kept:** scroll reveal → a `use:` action adding `.in` on viewport entry (CSS transitions `opacity`/`transform`; reveal immediately under `prefers-reduced-motion`). Count-ups → `tweened` seeded from the FINAL value so the markup prerenders the real total, then reset to 0 and animated up in `onMount` behind a `prefers-reduced-motion` check. Enter/leave within a section → Svelte `transition:`/`in:`/`out:` on elements whose *content* is already present — polish an existing frame, never gate it. Ambient motion → CSS keyframes (no JS, free at prerender).
 
+### 3.F-video Scroll-scrubbed video
+
+- **Asset:** `generate_site_video` — owner's photo as `image_url`, camera move in
+  the prompt ("slow dolly in"). Returns `url` + `poster_url`; use both.
+- **Poster is mandatory** (3.F): render the `<video>` with its `poster` visible.
+- **Drive `currentTime` from rAF, not a `scroll` handler**, and never `play()`.
+  Seeks land on keyframes: map a tall pinned section onto the clip, not an
+  exact frame.
+- **No scroll library on svelte/react** — hand-write it, or pick **html**, the
+  only track taking a CDN `<script>`.
+
 ### 3.F The static / prerender guardrail (non-negotiable, every engine)
 These pages render to HTML before any JS runs. Taste must never depend on JS to look finished:
 - **Resting state lives in MARKUP.** Every animated/interactive default's final visual state is rendered in the DOM. Never set the resting state only in `onMount` — the prerendered HTML would bake the *start* frame (the empty hero, the `$0` counter, the collapsed accordion). Ask: *"with all JS off, does this section look done?"* If not, move the final state into markup.
@@ -236,7 +247,7 @@ These pages render to HTML before any JS runs. Taste must never depend on JS to 
 
 **Layout:** NO centered hero over a gradient blur; NO three-equal-card feature row; NO eyebrow on every section; NO section-number eyebrows; NO version labels in the hero (`V0.6`, `BETA`) unless it's literally a launch; NO decoration text strip at the hero bottom (`BRAND. MOTION. SPATIAL.`); NO `border-top` + `border-bottom` on every row of a long list.
 
-**Content & external:** NO "John Doe", `99.99%`, "Acme", filler verbs, em-dash; NO locale/time/weather strips (`Lisbon 14:23 · 18°C`) unless the brand is genuinely place-focused; NO scroll cues (`Scroll`, `↓`); NO pills/labels overlaid on images (caption below if needed); NO pretentious photo-credit captions (`Frame XII · 35mm`); NO fabricated asset URLs, since a made-up `src` is broken media on a live site (check `list_site_assets` FIRST — the owner's own logo and photography beat any stock shot and are the whole reason they uploaded them; then `search_stock_images`, render its `credit`; then `generate_site_image` for what stock cannot supply — a bespoke hero, a product or concept shot, a brand texture — which costs money per image so use it deliberately, not for ordinary photography; fall back to a tasteful gradient) - but any asset the brief's manifest hands you is fair game at its native medium, video included; there is no images-only rule and no approved-media list; NO div-based fake product screenshots; NO emoji as UI (use real SVG via `search_icons`).
+**Content & external:** NO "John Doe", `99.99%`, "Acme", filler verbs, em-dash; NO locale/time/weather strips (`Lisbon 14:23 · 18°C`) unless the brand is genuinely place-focused; NO scroll cues (`Scroll`, `↓`); NO pills/labels overlaid on images (caption below if needed); NO pretentious photo-credit captions (`Frame XII · 35mm`); NO fabricated asset URLs, since a made-up `src` is broken media on a live site (check `list_site_assets` FIRST — the owner's own logo and photography beat any stock shot and are the whole reason they uploaded them; then `search_stock_images`, render its `credit`; then `generate_site_image` for what stock cannot supply — a bespoke hero, a product or concept shot, a brand texture — which costs money per image so use it deliberately, not for ordinary photography; `generate_site_video` for a hero that MOVES, dearer again — one moment only; fall back to a tasteful gradient) - but any asset the brief's manifest hands you is fair game at its native medium, video included; there is no images-only rule and no approved-media list; NO div-based fake product screenshots; NO emoji as UI (use real SVG via `search_icons`).
 
 ---
 

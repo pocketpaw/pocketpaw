@@ -58,15 +58,21 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "pocketpaw_site_media"
 
 GENERATE_SITE_IMAGE_TOOL_ID = f"mcp__{SERVER_NAME}__generate_site_image"
+GENERATE_SITE_VIDEO_TOOL_ID = f"mcp__{SERVER_NAME}__generate_site_video"
 
 #: Ids the surface allow-list must carry. An id absent from ``sites_allow`` in
 #: ``cloud/surface/surface_registry.py`` is SILENTLY filtered out and the tool is
 #: unreachable — registration alone proves nothing.
-SITE_MEDIA_TOOL_IDS = (GENERATE_SITE_IMAGE_TOOL_ID,)
+SITE_MEDIA_TOOL_IDS = (GENERATE_SITE_IMAGE_TOOL_ID, GENERATE_SITE_VIDEO_TOOL_ID)
 
 #: A page needs a hero and a few section images, not a contact sheet. This bounds
 #: one call; it is NOT a spend control (see the cost note above).
 _MAX_IMAGES_PER_CALL = 4
+
+#: A hero backdrop, not a film. Kling's standard tiers take 5 or 10 seconds;
+#: longer costs more and a scroll-scrubbed clip gains nothing from length,
+#: because the page maps the whole duration onto one scroll distance anyway.
+_VIDEO_DURATIONS = (5, 10)
 
 
 def _error_response(message: str) -> dict[str, Any]:
@@ -252,6 +258,182 @@ async def _generate_site_image_handler(args: dict) -> dict:
     )
 
 
+async def _generate_site_video_handler(args: dict) -> dict:
+    """Generate a short video for the site and land it on the public rail.
+
+    Shares the image tool's contract: public sink, ownership guard, history row.
+    Two things differ, and both come from video being slow and expensive.
+
+    IT RECORDS BEFORE IT GENERATES. A fal render takes minutes. The row is written
+    ``running`` first, so /studio shows the job while it is in flight and a reload
+    does not lose it — the property the JSONL store could not hold, because
+    append-on-success was its only write. On the way out the SAME row moves to
+    succeeded or failed rather than a second row appearing.
+
+    IT STORES THE POSTER TOO. ``run_fal_video`` returns a poster frame beside the
+    video, and a scroll-scrubbed ``<video>`` needs one: the element paints nothing
+    until enough data has buffered to decode a frame, so without a poster the hero
+    is blank on first load.
+    """
+    import time
+    import uuid
+
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.cloud.studio import fal_video, schemas, service
+    from pocketpaw_ee.sites.public_assets import PublicAssetError, public_asset_store
+
+    prompt = str(args.get("prompt") or "").strip()
+    if not prompt:
+        return _error_response("prompt is required — describe the shot and the camera move.")
+
+    pocket_id = str(args.get("pocket_id") or "").strip()
+    if not pocket_id:
+        return _error_response("pocket_id is required — say which site this video belongs to.")
+
+    workspace_id, _user_id = _identity()
+    if not workspace_id:
+        return _error_response("No active workspace — cannot generate site media.")
+
+    owner = await pockets_service.get_pocket_workspace(pocket_id)
+    if owner != workspace_id:
+        return _error_response(f"No site {pocket_id!r} in this workspace — nothing was generated.")
+
+    store = public_asset_store()
+    if store is None:
+        return _error_response(
+            "Public asset storage is not configured on this deployment, so a generated "
+            "video would have no address a visitor could load."
+        )
+
+    image_url = str(args.get("image_url") or "").strip()
+    aspect_ratio = str(args.get("aspect_ratio") or "16:9")
+    try:
+        duration_sec = int(args.get("duration_sec") or 5)
+    except (TypeError, ValueError):
+        duration_sec = 5
+    if duration_sec not in _VIDEO_DURATIONS:
+        duration_sec = 5
+
+    # An image turns this into image-to-video, which is the whole point when the
+    # owner handed us a photo: the clip MOVES THEIR IMAGE rather than inventing a
+    # new scene that merely resembles it.
+    model = fal_video.DEFAULT_IMAGE_TO_VIDEO_MODEL if image_url else fal_video.DEFAULT_VIDEO_MODEL
+
+    input_urls: list[str] | None = None
+    if image_url:
+        try:
+            data_url, _mime = await service._resolve_source_data_url(image_url)
+        except Exception as exc:  # noqa: BLE001
+            return _error_response(f"Could not read the source image {image_url!r}: {exc}")
+        input_urls = [data_url]
+
+    generation_id = f"site-vid-{uuid.uuid4().hex[:16]}"
+
+    def _record(status: str, assets: list, error: str | None = None):
+        return schemas.Generation(
+            id=generation_id,
+            prompt=prompt,
+            status=status,
+            kind="video",
+            model=model,
+            params=schemas.GenerationParams(
+                kind="video",
+                model=model,
+                aspectRatio=aspect_ratio,
+                count=1,
+                durationSec=duration_sec,
+            ),
+            assets=assets,
+            createdAt=int(time.time() * 1000),
+            error=error,
+        )
+
+    async def _fail(reason: str) -> dict:
+        await service.record_generation_best_effort(
+            workspace_id, _record("failed", [], reason), source="sites", pocket_id=pocket_id
+        )
+        return _error_response(
+            f"Video generation failed: {reason}. Do NOT invent a video URL — fall back to a "
+            "still hero via generate_site_image, or to stock photography."
+        )
+
+    # Running BEFORE the await, so the job is visible while it renders.
+    await service.record_generation_best_effort(
+        workspace_id, _record("running", []), source="sites", pocket_id=pocket_id
+    )
+
+    try:
+        video_bytes, video_mime, poster_bytes, poster_mime = await fal_video.run_fal_video(
+            prompt=prompt,
+            duration_sec=duration_sec,
+            aspect_ratio=aspect_ratio,
+            model=model,
+            image_urls=input_urls,
+        )
+    except Exception as exc:  # noqa: BLE001 — fal raises its own hierarchy
+        return await _fail(str(exc))
+
+    if not video_bytes:
+        return await _fail("the model returned no video")
+
+    stem = _filename_for(prompt, 0).rsplit(".", 1)[0]
+    video_ext = "webm" if "webm" in (video_mime or "") else "mp4"
+    try:
+        video = await store.put(
+            video_bytes,
+            filename=f"{stem}.{video_ext}",
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+        )
+    except PublicAssetError as exc:
+        # The 50 MiB ceiling and the mime allow-list live on the rail, and its
+        # message is written to be shown to a user, so pass it through intact.
+        return await _fail(str(exc))
+    except Exception as exc:  # noqa: BLE001 — StorageFailure / S3 client errors
+        logger.warning("site_media: could not store a generated video", exc_info=True)
+        return await _fail(str(exc))
+
+    poster_url = None
+    if poster_bytes:
+        poster_ext = "png" if "png" in (poster_mime or "") else "jpg"
+        try:
+            poster = await store.put(
+                poster_bytes,
+                filename=f"{stem}-poster.{poster_ext}",
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+            )
+            poster_url = poster.url
+        except Exception:  # noqa: BLE001 — a missing poster is a worse page, not a failure
+            logger.warning("site_media: could not store the poster frame", exc_info=True)
+
+    assets = [schemas.GeneratedAsset(id="0", url=video.url, mime=video.mime)]
+    if poster_url:
+        assets.append(schemas.GeneratedAsset(id="1", url=poster_url, mime="image/jpeg"))
+    await service.record_generation_best_effort(
+        workspace_id, _record("succeeded", assets), source="sites", pocket_id=pocket_id
+    )
+
+    return _success_response(
+        {
+            "ok": True,
+            "url": video.url,
+            "poster_url": poster_url,
+            "mime": video.mime,
+            "size": video.size,
+            "duration_sec": duration_sec,
+            "message": (
+                "Video published for this site. Both URLs are absolute, public and "
+                "permanent — use them VERBATIM. For a scroll-scrubbed hero, render a "
+                "muted playsinline video element WITH the poster set, and drive its "
+                "currentTime from scroll position. Seeks land on KEYFRAMES, so "
+                "scrubbing is chunky by nature: map a long scroll distance onto the "
+                "clip rather than a short one, and never rely on frame-exact stops."
+            ),
+        }
+    )
+
+
 def build_site_media_server() -> tuple[str, Any] | None:
     """Build the in-process SDK MCP server, or ``None`` if the SDK isn't installed.
 
@@ -316,12 +498,74 @@ def build_site_media_server() -> tuple[str, Any] | None:
     async def generate_site_image(args):  # type: ignore[no-untyped-def]
         return await _generate_site_image_handler(args)
 
-    server = create_sdk_mcp_server(name=SERVER_NAME, tools=[generate_site_image])
+    @tool(
+        "generate_site_video",
+        (
+            "Generate a SHORT VIDEO for the site you are building and publish it, "
+            "returning permanent public URLs for the clip and its poster frame. "
+            "Pass `image_url` to ANIMATE AN EXISTING IMAGE — the owner's uploaded "
+            "photo, or one you just generated — which is what you want for a hero "
+            "that moves their actual subject rather than inventing a lookalike. "
+            "Omit it for a purely generated clip. Describe the CAMERA MOVE in the "
+            "prompt ('slow dolly in', 'orbit left around the subject', 'gentle "
+            "handheld push'), because the move comes from the words, not from a "
+            "parameter. This is the most expensive call available to you and it "
+            "takes MINUTES — use it for one hero moment, never decoratively, and "
+            "tell the user it is rendering before you wait on it. Args: `pocket_id` "
+            "and `prompt` (required), optional `image_url`, `duration_sec` (5 or "
+            "10) and `aspect_ratio`. Returns {ok, url, poster_url, mime, size, "
+            "duration_sec, message}. On failure, relay the reason and fall back to "
+            "a still hero — NEVER invent a video URL."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "description": "The site's pocket id — the video is stored against this site.",
+                },
+                "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "The shot AND the camera move, concretely: subject, motion, "
+                        "pace, mood. The camera move is prose, not a parameter."
+                    ),
+                },
+                "image_url": {
+                    "type": "string",
+                    "description": (
+                        "Public URL of an image to animate (image-to-video). Use the "
+                        "owner's uploaded photo here when there is one."
+                    ),
+                },
+                "duration_sec": {
+                    "type": "integer",
+                    "enum": [5, 10],
+                    "description": "Clip length. Default 5.",
+                },
+                "aspect_ratio": {
+                    "type": "string",
+                    "enum": ["16:9", "9:16", "1:1"],
+                    "description": "Shape of the clip. Default 16:9.",
+                },
+            },
+            "required": ["pocket_id", "prompt"],
+            "additionalProperties": False,
+        },
+    )
+    async def generate_site_video(args):  # type: ignore[no-untyped-def]
+        return await _generate_site_video_handler(args)
+
+    server = create_sdk_mcp_server(
+        name=SERVER_NAME, tools=[generate_site_image, generate_site_video]
+    )
     return SERVER_NAME, server
 
 
 __all__ = [
     "GENERATE_SITE_IMAGE_TOOL_ID",
+    "GENERATE_SITE_VIDEO_TOOL_ID",
     "SERVER_NAME",
     "SITE_MEDIA_TOOL_IDS",
     "build_site_media_server",
