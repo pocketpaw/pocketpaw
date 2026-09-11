@@ -248,3 +248,52 @@ def test_the_dedupe_key_is_declared_unique():
         if isinstance(idx, IndexModel) and idx.document.get("unique")
     ]
     assert ("workspace", "generation_id") in unique_keys
+
+
+# ── 7. A history miss must not cost a paid generation ───────────────────────
+
+
+async def test_a_history_failure_does_not_fail_the_caller(mongo_db, monkeypatch):
+    """The JSONL appender swallowed OSError, so a history failure could never lose
+    a generation the user had already paid for. A bare Mongo write removed that:
+    an error would raise AFTER the image was generated, billed and stored.
+
+    MUTATION: narrow the except in record_generation_best_effort.
+    """
+    from pocketpaw_ee.cloud.studio import service as store
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("mongo is having a day")
+
+    monkeypatch.setattr(store, "record_generation", _boom)
+
+    await store.record_generation_best_effort("w1", _generation("g1"))  # must not raise
+
+
+async def test_tracked_filenames_asks_for_a_projection(mongo_db, monkeypatch):
+    """It runs on every GET /api/v1/media and reads ONE field. Hydrating whole
+    documents reproduces, against Mongo, the failure that made the JSONL
+    untenable — every tenant's entire history decoded on every request.
+
+    Asserted on the QUERY, not on behaviour, because behaviour is identical
+    either way: this is a cost property, and a mutation that drops the projection
+    escapes every behavioural test. That is exactly why this test looks odd.
+    """
+    from pocketpaw_ee.cloud.studio import service as store
+
+    seen: dict = {}
+    real = store.StudioGeneration.get_pymongo_collection()
+
+    class _Spy:
+        def find(self, *args):
+            seen["args"] = args
+            return real.find(*args)
+
+    monkeypatch.setattr(
+        store.StudioGeneration, "get_pymongo_collection", classmethod(lambda cls: _Spy())
+    )
+
+    await store.tracked_generation_filenames()
+
+    assert len(seen["args"]) == 2, "no projection was passed — whole documents hydrate"
+    assert seen["args"][1].get("assets.url") == 1

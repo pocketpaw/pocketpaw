@@ -135,3 +135,62 @@ async def test_the_uri_comes_from_the_same_var_the_app_reads(tmp_path):
     )
     # No env at all still resolves, so a local run needs no setup.
     assert migration.resolve_mongo_uri({}).startswith("mongodb://")
+
+
+# ── The boot hook: it has to run itself, and never block a boot ─────────────
+
+
+async def test_boot_import_runs_without_being_asked(tmp_path, mongo_db, monkeypatch):
+    """The whole point: forgetting a manual command left every existing gallery
+    silently EMPTY, in an environment with no shell to run it from.
+
+    MUTATION: make migrate_on_boot return before calling migrate_file.
+    """
+    path = tmp_path / "generations.jsonl"
+    _write(path, [_record("g1", "ws-1")])
+    monkeypatch.setattr(migration, "legacy_history_path", lambda: path)
+
+    await migration.migrate_on_boot()
+
+    assert [g.id for g in await service.list_generations("ws-1")] == ["g1"]
+
+
+async def test_boot_import_is_a_no_op_on_a_fresh_install(tmp_path, mongo_db, monkeypatch):
+    """No file, no work, no error — this runs on every cloud start."""
+    monkeypatch.setattr(migration, "legacy_history_path", lambda: tmp_path / "absent.jsonl")
+
+    await migration.migrate_on_boot()  # must not raise
+
+
+async def test_boot_import_never_blocks_a_boot(tmp_path, mongo_db, monkeypatch):
+    """A migration hiccup must not take the cloud down with it.
+
+    MUTATION: drop the try/except around migrate_file.
+    """
+    path = tmp_path / "generations.jsonl"
+    _write(path, [_record("g1", "ws-1")])
+    monkeypatch.setattr(migration, "legacy_history_path", lambda: path)
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("mongo is having a day")
+
+    monkeypatch.setattr(migration, "migrate_file", _boom)
+
+    await migration.migrate_on_boot()  # must swallow and carry on
+
+
+async def test_the_cli_suppresses_the_boot_import(tmp_path, mongo_db, monkeypatch):
+    """init_cloud_db now runs the import, so without this flag `--dry-run` would
+    be a lie: the real import would already have happened before the dry run
+    reported what it 'would' do.
+
+    MUTATION: ignore _suppress_boot_import in migrate_on_boot.
+    """
+    path = tmp_path / "generations.jsonl"
+    _write(path, [_record("g1", "ws-1")])
+    monkeypatch.setattr(migration, "legacy_history_path", lambda: path)
+    monkeypatch.setattr(migration, "_suppress_boot_import", True)
+
+    await migration.migrate_on_boot()
+
+    assert await service.list_generations("ws-1") == []

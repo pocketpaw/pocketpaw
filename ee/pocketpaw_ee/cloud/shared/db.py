@@ -333,6 +333,14 @@ async def init_cloud_db(mongo_uri: str = "mongodb://localhost:27017/paw-enterpri
     # helper swallows its own errors so a migration hiccup never blocks boot.
     await migrate_workspace_vm_map_to_db()
 
+    # One-time import of the legacy studio generation history (the deployment-wide
+    # generations.jsonl) into ``studio_generations``. Same best-effort contract as
+    # the line above: without it, every existing /studio gallery renders EMPTY and
+    # nothing errors to say why.
+    from pocketpaw_ee.cloud.studio.migrate_generations_jsonl import migrate_on_boot
+
+    await migrate_on_boot()
+
     # Flip the memory backend AFTER Beanie is initialized so the
     # MongoMemoryStore's first .insert()/.find() call can never race a
     # not-yet-initialized collection. The bootstrap is a no-op until this

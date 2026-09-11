@@ -26,7 +26,11 @@ has no file, and a migration that failed there would deadlock the first deploy.
 It also does NOT delete the file: leaving it makes the run repeatable and keeps a
 copy while the change is still young.
 
-RUN IT as a deploy step (Coolify containers have no shell):
+IT RUNS ITSELF. ``init_cloud_db`` calls ``migrate_on_boot`` on every cloud start,
+beside the workspace-VM map import, because the alternative was a one-off command
+a human had to remember in an environment with no shell — and forgetting it left
+every existing gallery silently EMPTY. The CLI remains for a dry run or a manual
+re-run:
 
     python -m pocketpaw_ee.cloud.studio.migrate_generations_jsonl [--dry-run]
 
@@ -54,6 +58,11 @@ logger = logging.getLogger(__name__)
 #: Env vars carrying the Mongo URI, most authoritative first — the same order
 #: ``credits.migrate_micro_credits`` uses, for the same reason.
 _URI_VARS: tuple[str, ...] = ("CLOUD_MONGODB_URI", "POCKETPAW_MONGO_URL")
+
+#: Set by the CLI before it calls ``init_cloud_db``. Without it ``--dry-run``
+#: would be a lie: init_cloud_db now runs ``migrate_on_boot``, so the real import
+#: would already have happened before the dry run reported what it 'would' do.
+_suppress_boot_import = False
 
 
 def legacy_history_path() -> Path:
@@ -117,6 +126,48 @@ async def migrate_file(path: Path, *, dry_run: bool = False) -> Result:
     )
 
 
+async def migrate_on_boot() -> None:
+    """Import the legacy history at cloud startup. Best-effort, never blocks boot.
+
+    WHY THIS RUNS AUTOMATICALLY. Without it the import is a one-off command a human
+    has to remember, in an environment the team's own notes describe as having no
+    shell — and the failure mode is silent: every existing /studio gallery renders
+    EMPTY, nothing errors, the tiles are simply gone. Same shape and same reasoning
+    as ``migrate_workspace_vm_map_to_db`` beside it in ``init_cloud_db``.
+
+    SAFE TO RUN FROM BOTH CONTAINERS. ``backend`` and ``worker`` boot independently
+    and share the volume, which would once have been a race: ``migrate_file`` does
+    find-then-insert per record with no lock. The unique index on
+    ``(workspace, generation_id)`` closes it — a concurrent double-insert raises
+    ``DuplicateKeyError`` and ``record_generation`` applies the row instead.
+
+    CHEAP WHEN THERE IS NOTHING TO DO. A fresh install has no file and this returns
+    immediately; a converged deployment re-reads the file and writes nothing.
+    """
+    if _suppress_boot_import:
+        return
+
+    path = legacy_history_path()
+    if not path.exists():
+        return
+
+    try:
+        result = await migrate_file(path)
+    except Exception:  # noqa: BLE001 — a migration hiccup must never block boot
+        logger.warning("studio: legacy history import failed; run it by hand", exc_info=True)
+        return
+
+    if result.imported or result.skipped_untagged or result.skipped_unreadable:
+        logger.info(
+            "studio: legacy history import — %d imported, %d already present, "
+            "%d skipped (untagged), %d skipped (unreadable)",
+            result.imported,
+            result.already,
+            result.skipped_untagged,
+            result.skipped_unreadable,
+        )
+
+
 def resolve_mongo_uri(env: dict[str, str] | None = None) -> str:
     """The deployed stack sets ``CLOUD_MONGODB_URI``; fall back to the same
     default ``init_cloud_db`` carries so a local run works with no env at all."""
@@ -140,6 +191,8 @@ async def main() -> int:
 
     from pocketpaw_ee.cloud.shared.db import init_cloud_db
 
+    global _suppress_boot_import
+    _suppress_boot_import = True  # this command IS the import; see the flag's note
     await init_cloud_db(resolve_mongo_uri())
 
     path = legacy_history_path()
