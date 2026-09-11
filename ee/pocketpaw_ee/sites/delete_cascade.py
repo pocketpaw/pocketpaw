@@ -7,7 +7,7 @@
 # that a failure at ANY point leaves the site LESS live than before and never still
 # charging:
 #
-#   1. billing off   — a failed teardown must never keep taking money;
+#   1. billing off   — a failed teardown must never keep charging the customer;
 #   2. auth off      — the signed key dies next, at near-zero cost and before
 #                      anything irreversible, so lead ingest and the concierge stop
 #                      even if every later step fails;
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 # Ledger keys, in execution order. Named rather than positional so a step inserted
 # later cannot silently renumber a half-finished cascade's record of itself.
-STEP_SUBSCRIPTION = "subscription"
+STEP_BILLING = "billing"
 STEP_REVOKE = "revoke"
 STEP_ROUTES = "routes"
 STEP_HOSTNAMES = "hostnames"
@@ -51,7 +51,7 @@ STEP_R2 = "r2"
 STEP_RECORDS = "records"
 
 CASCADE_STEPS: tuple[str, ...] = (
-    STEP_SUBSCRIPTION,
+    STEP_BILLING,
     STEP_REVOKE,
     STEP_ROUTES,
     STEP_HOSTNAMES,
@@ -67,11 +67,14 @@ CASCADE_STEPS: tuple[str, ...] = (
 # operator reading a stalled cascade needs to tell them apart.
 OUTCOME_DONE = "done"
 OUTCOME_SKIPPED = "nothing-to-do"
-# The subscription we cannot cancel because the row predates the activation webhook
-# and holds a checkout SESSION id the gateway rejects. Recorded rather than raised:
-# refusing to delete would trap the customer's site forever over a subscription we
-# can no longer reach either way, so the cascade continues and says so.
-OUTCOME_UNCANCELLABLE = "uncancellable"
+# A row that predates the credits rail. Its local renewal is stopped like any
+# other, but it may still hold a subscription on the payment gateway that this
+# package is structurally forbidden from touching (see
+# tests/cloud/sites/test_no_gateway_in_sites.py) — so an operator has to close that
+# out of band. Recorded rather than raised: refusing would trap the customer's site
+# over a charge this code could not stop either way, and leaving it silent would
+# bill them for a site that no longer exists.
+OUTCOME_LEGACY_RAIL = "legacy-rail-needs-operator"
 
 
 class CascadeStepFailed(Exception):
@@ -87,17 +90,15 @@ class CascadeStepFailed(Exception):
         return f"{self.step}:{self.cause}"
 
 
-def _is_session_id(subscription_id: str) -> bool:
-    """Whether this is a checkout SESSION id rather than a real subscription id.
-
-    ``service.py`` records that rows created before the ``subscription.active``
-    webhook learned to persist the authoritative id still hold a ``cks_`` checkout
-    session id, and that "a session id cannot cancel a subscription and cannot
-    change its plan — the gateway rejects it." Those subscriptions are unreachable
-    from our side, so the cascade records the fact and continues rather than
-    trapping the site.
-    """
-    return subscription_id.startswith("cks_")
+# The rail a site's money runs on. Two are current: "credits" (charged against the
+# workspace balance) and "plan" (carried by the workspace's plan, no money on the
+# row at all — added 2026-09-06, a day after the credits cutover). A legacy row is
+# anything else, and the shape it actually takes is ""  — rows sold before Dodo was
+# removed read "addon" / "subscription" / "", and "" is the common one. Writing
+# this as `rail and rail != _CREDITS_RAIL` passes "" straight through as healthy,
+# which is the exact row the flag exists for.
+_CREDITS_RAIL = "credits"
+_PLAN_RAIL = "plan"
 
 
 async def run_cascade(
@@ -151,8 +152,8 @@ def _classify(exc: Exception) -> str:
 
 
 async def _run_step(step: str, *, site: Any, deps: Any) -> str:
-    if step == STEP_SUBSCRIPTION:
-        return await _cancel_subscription(site=site, deps=deps)
+    if step == STEP_BILLING:
+        return await _stop_billing(site=site, deps=deps)
     if step == STEP_REVOKE:
         return await _revoke_key(site=site, deps=deps)
     if step == STEP_ROUTES:
@@ -170,23 +171,41 @@ async def _run_step(step: str, *, site: Any, deps: Any) -> str:
     raise CascadeStepFailed(step, "unknown_step")
 
 
-async def _cancel_subscription(*, site: Any, deps: Any) -> str:
-    """FIRST, so a teardown that fails later never keeps billing."""
-    sub_id = (getattr(site, "subscription_id", "") or "").strip()
+async def _stop_billing(*, site: Any, deps: Any) -> str:
+    """FIRST, so a teardown that fails later never keeps charging the customer.
+
+    STOPPING THE MONEY IS A LOCAL WRITE, NOT A REMOTE CALL. A paid site is charged
+    against the workspace's own credit balance, and ``renewal_sweeper`` selects the
+    rows it charges on ``subscription_status == "active"`` — so clearing that status
+    is precisely what ends the charging. There is nothing to cancel anywhere else:
+    the gateway rails were deleted on 2026-09-05, and this package may not even name
+    them (``tests/cloud/sites/test_no_gateway_in_sites.py`` asserts it against the
+    source, because a reintroduced call would build its own client and sail past any
+    injected double).
+
+    A LEGACY ROW STILL GETS ITS LOCAL RENEWAL STOPPED, and is then flagged. Its
+    money may run on the old rail, which this code cannot reach and must not try to;
+    an operator closes that. Saying so in the ledger is the difference between a
+    known follow-up and a customer billed for a site that no longer exists.
+    """
     status = getattr(site, "subscription_status", "none")
-    if not sub_id or status in ("none", "cancelled"):
+    if status in ("none", "cancelled"):
+        # Not currently paying for anything, so there is nothing to stop.
         return OUTCOME_SKIPPED
-    if _is_session_id(sub_id):
-        # Unreachable from our side. Say so in the ledger and keep going — refusing
-        # here would trap the site permanently over a subscription that cannot be
-        # cancelled through this product either way.
+
+    # The local stop, which is the whole mechanism on the credits rail.
+    site.subscription_status = "none"
+    site.renewal_date = None
+
+    rail = (getattr(site, "billing_rail", "") or "").strip()
+    if rail not in (_CREDITS_RAIL, _PLAN_RAIL):
         logger.warning(
-            "sites.delete: subscription %s is a checkout session id and cannot be "
-            "cancelled; continuing the cascade",
-            sub_id,
+            "sites.delete: site %s bills on the legacy %r rail; its local renewal is "
+            "stopped but any charge on the old rail must be closed by an operator",
+            getattr(site, "id", "?"),
+            rail,
         )
-        return OUTCOME_UNCANCELLABLE
-    await deps.cancel_subscription(sub_id)
+        return OUTCOME_LEGACY_RAIL
     return OUTCOME_DONE
 
 

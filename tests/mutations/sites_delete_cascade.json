@@ -18,9 +18,9 @@
     ]
   },
   {
-    "label": "billing is cancelled last instead of first, so every teardown that fails partway keeps charging the customer for a site that no longer serves",
+    "label": "billing is stopped last instead of first, so every teardown that fails partway leaves the site still charging the customer for something that no longer serves",
     "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
-    "find": "CASCADE_STEPS: tuple[str, ...] = (\n    STEP_SUBSCRIPTION,\n    STEP_REVOKE,",
+    "find": "CASCADE_STEPS: tuple[str, ...] = (\n    STEP_BILLING,\n    STEP_REVOKE,",
     "replace": "CASCADE_STEPS: tuple[str, ...] = (\n    STEP_REVOKE,",
     "tests": [
       "tests/ee/sites/test_delete_cascade.py"
@@ -38,8 +38,8 @@
   {
     "label": "the signed key is revoked last, so a cascade that fails early leaves a public lead-ingest surface open on a site being torn down",
     "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
-    "find": "    STEP_SUBSCRIPTION,\n    STEP_REVOKE,\n    STEP_ROUTES,",
-    "replace": "    STEP_SUBSCRIPTION,\n    STEP_ROUTES,",
+    "find": "    STEP_BILLING,\n    STEP_REVOKE,\n    STEP_ROUTES,",
+    "replace": "    STEP_BILLING,\n    STEP_ROUTES,",
     "tests": [
       "tests/ee/sites/test_delete_cascade.py"
     ]
@@ -54,10 +54,10 @@
     ]
   },
   {
-    "label": "an uncancellable checkout-session subscription raises instead of being recorded, trapping the customer's site permanently over a subscription nothing can cancel",
+    "label": "a legacy-rail row is reported as an ordinary stop, so a site that may still be charged on a rail this package cannot reach is deleted with nothing flagging it",
     "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
-    "find": "        return OUTCOME_UNCANCELLABLE",
-    "replace": "        raise CascadeStepFailed(STEP_SUBSCRIPTION, \"uncancellable\")",
+    "find": "        return OUTCOME_LEGACY_RAIL",
+    "replace": "        return OUTCOME_DONE",
     "tests": [
       "tests/ee/sites/test_delete_cascade.py"
     ]
@@ -78,6 +78,33 @@
     "replace": "    return str(exc)",
     "tests": [
       "tests/ee/sites/test_delete_cascade.py"
+    ]
+  },
+  {
+    "label": "the billing step stops flagging the row but also stops clearing the status, so the renewal sweeper keeps charging a workspace for a site that has been destroyed",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "    site.subscription_status = \"none\"\n    site.renewal_date = None",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_delete_cascade.py"
+    ]
+  },
+  {
+    "label": "an empty billing_rail passes as healthy (the legacy shape that actually exists)",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "    if rail not in (_CREDITS_RAIL, _PLAN_RAIL):",
+    "replace": "    if rail and rail != _CREDITS_RAIL:",
+    "tests": [
+      "tests/ee/sites/test_delete_cascade.py::test_an_empty_rail_is_legacy_because_that_is_what_legacy_rows_look_like"
+    ]
+  },
+  {
+    "label": "the current plan rail is flagged as legacy (operator chases a charge that does not exist)",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "    if rail not in (_CREDITS_RAIL, _PLAN_RAIL):",
+    "replace": "    if rail != _CREDITS_RAIL:",
+    "tests": [
+      "tests/ee/sites/test_delete_cascade.py::test_the_plan_rail_is_current_and_carries_no_money_to_flag"
     ]
   }
 ]
