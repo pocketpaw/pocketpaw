@@ -190,7 +190,7 @@ async def test_a_legacy_rail_is_flagged_but_still_has_its_local_renewal_stopped(
     do; the flag is what stops the rest becoming a customer billed for a site that
     no longer exists. Refusing outright would trap the site over a charge this code
     could not stop either way."""
-    site = _Site(billing_rail="plan")
+    site = _Site(billing_rail="subscription")
     deps = _Deps()
 
     await run_cascade(site=site, deps=deps, save=_saver([]))
@@ -199,6 +199,45 @@ async def test_a_legacy_rail_is_flagged_but_still_has_its_local_renewal_stopped(
     # Flagged, but the half that IS reachable still happened.
     assert site.subscription_status == "none"
     assert list(site.delete_ledger) == list(CASCADE_STEPS)
+
+
+@pytest.mark.asyncio
+async def test_an_empty_rail_is_legacy_because_that_is_what_legacy_rows_look_like() -> None:
+    """THE case this flag exists for, and the one a truthiness check silently drops.
+
+    Rows sold before Dodo was removed carry "addon" / "subscription" / "", and ""
+    is the common shape — it is what every row written before `billing_rail` was
+    introduced has. Under `if rail and rail != _CREDITS_RAIL` an empty rail is
+    falsy, so it records OUTCOME_DONE with no warning and no operator follow-up:
+    a customer still billed for a site that no longer exists, reported as healthy.
+
+    MUTATION: restore `if rail and rail != _CREDITS_RAIL`.
+    """
+    site = _Site(billing_rail="")
+    deps = _Deps()
+
+    await run_cascade(site=site, deps=deps, save=_saver([]))
+
+    assert site.delete_ledger["billing"] == OUTCOME_LEGACY_RAIL
+    assert site.subscription_status == "none"
+
+
+@pytest.mark.asyncio
+async def test_the_plan_rail_is_current_and_carries_no_money_to_flag() -> None:
+    """`plan` landed 2026-09-06, the day AFTER the credits cutover, so it is not a
+    legacy rail. A plan-carried site has period_paid_usd = 0, no renewal_date and
+    is invisible to the renewal sweep — flagging it sends an operator chasing a
+    charge that does not exist, which is how a real flag stops being believed.
+
+    MUTATION: drop _PLAN_RAIL from the predicate.
+    """
+    site = _Site(billing_rail="plan")
+    deps = _Deps()
+
+    await run_cascade(site=site, deps=deps, save=_saver([]))
+
+    assert site.delete_ledger["billing"] == OUTCOME_DONE
+    assert site.subscription_status == "none"
 
 
 @pytest.mark.asyncio

@@ -90,9 +90,15 @@ class CascadeStepFailed(Exception):
         return f"{self.step}:{self.cause}"
 
 
-# The rail a site's money runs on. "credits" is the only one this product charges
-# on now; anything else is a row from before 2026-09-05.
+# The rail a site's money runs on. Two are current: "credits" (charged against the
+# workspace balance) and "plan" (carried by the workspace's plan, no money on the
+# row at all — added 2026-09-06, a day after the credits cutover). A legacy row is
+# anything else, and the shape it actually takes is ""  — rows sold before Dodo was
+# removed read "addon" / "subscription" / "", and "" is the common one. Writing
+# this as `rail and rail != _CREDITS_RAIL` passes "" straight through as healthy,
+# which is the exact row the flag exists for.
 _CREDITS_RAIL = "credits"
+_PLAN_RAIL = "plan"
 
 
 async def run_cascade(
@@ -192,7 +198,7 @@ async def _stop_billing(*, site: Any, deps: Any) -> str:
     site.renewal_date = None
 
     rail = (getattr(site, "billing_rail", "") or "").strip()
-    if rail and rail != _CREDITS_RAIL:
+    if rail not in (_CREDITS_RAIL, _PLAN_RAIL):
         logger.warning(
             "sites.delete: site %s bills on the legacy %r rail; its local renewal is "
             "stopped but any charge on the old rail must be closed by an operator",
