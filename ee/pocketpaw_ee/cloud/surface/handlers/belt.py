@@ -32,8 +32,16 @@
 #
 # The /belt SurfaceProfile sets ``ripple_mode="off"`` (so the agent doesn't
 # inherit the ~20k-char "default to ui-spec" ripple LAW and build a dashboard)
-# and scopes ``allow_mcp_tool_ids`` to the loom orientation tools + the gate
-# tool (see service.py).
+# and scopes ``allow_mcp_tool_ids`` to the loom orientation tools + the pulley
+# block-engine tools + the gate tool (built in ``surface_registry``).
+#
+# Changes: 2026-09-12 (A1b, belt factory) — stage 2 (DEVELOP) opens with a
+# BLOCKS FIRST rule: search the pulley catalog before writing code for a
+# capability that might already be a reviewed block, install via plan_install →
+# apply_plan, and write fresh code only for the rest. Registering the pulley
+# tools on the surface did not make the agent reach for them — with the loop
+# silent about blocks it kept hand-writing auth / org / roles. The three-stage
+# loop is unchanged; this is a rule INSIDE develop, not a fourth stage.
 #
 # Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
 # ``SurfacePreamble`` keyed on the route plus the repo binding
@@ -125,7 +133,18 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "start reading or editing code until you have oriented.\n"
         "2. DEVELOP. Implement the change in the station worktree using the "
         "built-in tools: `Bash` to run commands, `Read` to read files, `Write` / "
-        "`Edit` to change them, and `Glob` / `Grep` to find code. Run TARGETED "
+        "`Edit` to change them, and `Glob` / `Grep` to find code. "
+        "BLOCKS FIRST: before writing code for a capability that might already "
+        "be a block, call `mcp__pulley__search_catalog`. The published blocks are "
+        "auth, org, roles, notify, files and audit (plus `hello`, an example). "
+        "Sessions, email+password sign-in and one OAuth provider come from "
+        "`auth`; organizations, membership and invitations from `org`; "
+        "permissions and CASL abilities from `roles` — do NOT hand-write those. "
+        "To install one, call `mcp__pulley__plan_install` (it writes nothing — "
+        "read the plan it returns), then `mcp__pulley__apply_plan` with that "
+        "plan's id; a plan id applies once. Write fresh code only for what no "
+        "block provides. "
+        "Run TARGETED "
         "tests for what you touched. Keep the diff SMALL and focused — one task, "
         "one change. If the task genuinely needs a large change, tell the user to "
         "split it into smaller tasks rather than proposing a sprawling diff.\n"

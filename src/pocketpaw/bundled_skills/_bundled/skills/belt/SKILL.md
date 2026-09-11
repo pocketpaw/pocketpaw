@@ -57,6 +57,16 @@ Implement the change in the **station worktree** using the built-in tools:
 - **`Write`** — create a new file (or fully replace one you've read).
 - **`Bash`** — run commands and **targeted tests** for what you touched.
 
+**Blocks first.** Before writing code for a capability that might already be a
+block, call **`mcp__pulley__search_catalog`**. The published blocks are `auth`,
+`org`, `roles`, `notify`, `files` and `audit` (plus `hello`, an example).
+Sessions, email+password sign-in and one OAuth provider come from `auth`;
+organizations, membership and invitations from `org`; permissions and CASL
+abilities from `roles`. **Do not hand-write those.** To install one, call
+**`mcp__pulley__plan_install`** — it writes nothing, so read the plan it returns
+— then **`mcp__pulley__apply_plan`** with that plan's id; a plan id applies once.
+Write fresh code only for what no block provides.
+
 Keep the diff **small and focused** — one task, one change. Don't gold-plate.
 If the task genuinely needs a large change, **tell the user to split it** into
 smaller tasks rather than proposing a sprawling diff.
