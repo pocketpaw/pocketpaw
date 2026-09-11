@@ -225,6 +225,14 @@ Changes:
     the same-box shield daemon's control-API UNIX socket + Bearer token. The
     cloud ``/api/v1/security/*`` proxy reads these to reach shield; the token
     is never logged. Env: POCKETPAW_SHIELD_API_SOCKET / POCKETPAW_SHIELD_API_TOKEN.
+  - 2026-09-12: Added ``pulley_bin`` + ``pulley_path`` + ``pulley_app_path``
+    — the pulley block-engine MCP server settings (A1, belt factory).
+    ``pulley_path`` defaults to None, which disables the server; set it to a
+    pulley checkout to give the /belt develop station search_catalog /
+    describe_block / plan_install / apply_plan / doctor. ``pulley_app_path``
+    is the default ``--app`` target and is omitted from the launch line when
+    unset. Env: POCKETPAW_PULLEY_BIN / POCKETPAW_PULLEY_PATH /
+    POCKETPAW_PULLEY_APP_PATH.
   - 2026-06-10: Added ``loom_bin`` + ``loom_model_path`` — the codebase
     orientation (loom) MCP server settings. ``loom_model_path`` defaults
     to None, which disables the loom MCP server; set it to a built
@@ -1649,6 +1657,40 @@ class Settings(BaseSettings):
             "Path to a loom world-model JSON (built via `loom build`). When "
             "unset, the loom MCP server is not registered — orientation is "
             "disabled. The binary is served as `loom mcp -model <this path>`."
+        ),
+    )
+
+    # Block assembly (pulley) — the pulley checkout serves an MCP server over
+    # stdio that drives the belt block engine for the /belt develop station
+    # (search_catalog / describe_block / plan_install / apply_plan / doctor), so
+    # the agent installs reviewed blocks instead of hand-writing auth, org,
+    # roles, notify, files and audit code. Wired into the claude_agent_sdk
+    # backend via CloudPulleyMcpProvider. Env auto-derives POCKETPAW_PULLEY_PATH
+    # / POCKETPAW_PULLEY_BIN / POCKETPAW_PULLEY_APP_PATH.
+    pulley_bin: str = Field(
+        default="bun",
+        description=(
+            "Path to the bun binary that runs the pulley MCP server. Resolved "
+            "as: this explicit setting → PATH lookup → ~/.bun/bin/bun fallback. "
+            "The default 'bun' relies on PATH; set an absolute path to pin one."
+        ),
+    )
+    pulley_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to a pulley checkout. When unset, the pulley MCP server is "
+            "not registered — block assembly is disabled. The server is served "
+            "as `bun <this path>/mcp/server.ts`; the block registry defaults to "
+            "<this path>/registry."
+        ),
+    )
+    pulley_app_path: str | None = Field(
+        default=None,
+        description=(
+            "Default client app directory blocks install INTO, passed as "
+            "`--app`. When unset the flag is omitted and every pulley tool "
+            "requires an explicit `app` argument. Per-run app scoping (binding "
+            "this to the repo a belt run targets) is a follow-up."
         ),
     )
 
