@@ -2,6 +2,12 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-11 (feat/otherhand-tools-toggle) — added the "Agent chat — the
+`tools` switch" section for the new per-send request field. Written around the
+two things a client cannot infer from a `bool | None`: the field is subtractive
+only, so `true` is a no-op and cannot re-enable anything the server withdrew,
+and it governs one send rather than being a setting that sticks.
+
 Updated: 2026-09-11 (feat/byok-image-key) — added the "BYOK key management"
 section. The whole `/byok` prefix was undocumented here: five routes, of which
 two are new (`PUT` and `DELETE /byok/image-key`), plus the four `image_*`
@@ -1190,6 +1196,36 @@ Response `200`:
 conversion, a pricing-rules engine, and disputes / clawback. This endpoint
 returns a raw sum of declared values — the queryable figure those layers
 will build on later (see `outcome-spec.md`).
+
+## Agent chat — the `tools` switch
+
+`POST /cloud/chat/{scope}/{scope_id}/agent` takes an optional `tools` field on
+the request body.
+
+| Value | Effect |
+|---|---|
+| `false` | Run this turn with no tool surface at all. No custom tools and no MCP toolsets are built, so nothing can reach the wire. |
+| `true` | Nothing. Identical to omitting the field. |
+| omitted / `null` | Today's behaviour, which is what every existing client sends. |
+
+**It can only withdraw tools, never add one.** The backend forwards the flag
+only when it is exactly `false`; `true` is dropped on the floor, so a client
+cannot use this field to switch on a tool the server did not intend to offer,
+and it cannot undo a server-side withdrawal (the surface profile's
+`deny_mcp_tool_ids` is a different mechanism that the request body never
+reaches). The only direction of travel is subtractive.
+
+**It is per-send, not a setting.** The flag applies to the one turn that
+carries it and is not remembered. It is part of the agent cache key, so a
+turn asking for no tools never gets served a cached agent that was built with
+them.
+
+Two reasons a client reaches for it, both from the Otherhand kiosk: a gateway
+profile that refuses the `tools` field outright and 400s the whole turn, and a
+weaker model that fixates on a tool instead of doing the work. It is also the
+largest token lever on that surface, because the upstream prompt cache does
+not cover tool schemas — a run carrying a tool surface reads zero cached
+tokens every turn.
 
 ## Agent Activity
 
