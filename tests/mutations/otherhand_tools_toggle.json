@@ -97,5 +97,68 @@
     "tests": [
       "tests/test_pydantic_ai_backend.py::test_tools_off_puts_no_tool_on_the_wire"
     ]
+  },
+  {
+    "label": "the pool forwards the switch without asking the signature \u2014 every tools-off turn on a narrow backend dies in TypeError",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            if tools_enabled is False and _accepts_tools_enabled_kwarg(run_backend.run):",
+    "replace": "            if tools_enabled is False:",
+    "tests": [
+      "tests/test_tools_switch_reaches_every_backend.py::test_a_tools_off_turn_on_a_narrow_backend_does_not_crash"
+    ]
+  },
+  {
+    "label": "the signature check always says no \u2014 the switch is silently dead on every backend",
+    "file": "src/pocketpaw/agents/backend.py",
+    "find": "        return \"tools_enabled\" in inspect.signature(func).parameters",
+    "replace": "        return False",
+    "tests": [
+      "tests/test_tools_switch_reaches_every_backend.py::test_a_backend_that_declares_it_is_offered_the_kwarg"
+    ]
+  },
+  {
+    "label": "the SDK backend relies on an empty allowlist \u2014 the CLI omits the flag and falls back to its DEFAULT tools",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        if not tools_enabled:\n            options_kwargs[\"tools\"] = []",
+    "replace": "        if False:\n            options_kwargs[\"tools\"] = []",
+    "tests": [
+      "tests/test_tools_switch_reaches_every_backend.py::test_tools_off_sets_the_base_tool_set_empty"
+    ]
+  },
+  {
+    "label": "the base tool set is emptied on EVERY turn \u2014 the SDK backend loses all its tools",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        if not tools_enabled:\n            options_kwargs[\"tools\"] = []",
+    "replace": "        if True:\n            options_kwargs[\"tools\"] = []",
+    "tests": [
+      "tests/test_tools_switch_reaches_every_backend.py::test_tools_on_is_unchanged"
+    ]
+  },
+  {
+    "label": "a tools-off turn still registers every MCP server",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        mcp_servers = {} if not tools_enabled else self._get_mcp_servers()",
+    "replace": "        mcp_servers = self._get_mcp_servers()",
+    "tests": [
+      "tests/test_tools_switch_reaches_every_backend.py::test_tools_off_registers_no_mcp_servers"
+    ]
+  },
+  {
+    "label": "the allowlist survives a tools-off turn \u2014 the warm client built WITH tools is reused",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        if not tools_enabled:\n            allowed_tools = []",
+    "replace": "        if False:\n            allowed_tools = []",
+    "tests": [
+      "tests/test_tools_switch_reaches_every_backend.py::test_tools_off_empties_the_allowlist_so_the_cache_key_differs"
+    ]
+  },
+  {
+    "label": "the pool never forwards the switch \u2014 it reads Off and does nothing on every backend",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            if tools_enabled is False and _accepts_tools_enabled_kwarg(run_backend.run):\n                run_kwargs[\"tools_enabled\"] = tools_enabled",
+    "replace": "            if False:\n                run_kwargs[\"tools_enabled\"] = tools_enabled",
+    "tests": [
+      "tests/test_tools_switch_reaches_every_backend.py::test_a_tools_off_turn_still_reaches_a_backend_that_declares_it"
+    ]
   }
 ]
