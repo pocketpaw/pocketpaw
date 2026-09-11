@@ -32,13 +32,24 @@
 #      (a) and (b) REPLACE discovery rather than adding to it.
 #   3. Run each check with a per-check timeout, capture the tail of its output.
 #
-# Why (a) and (b) exist — discovery was honest but toothless on our OWN repo.
+# Why (a) and (b) exist — discovery was worse than toothless on our OWN repo.
 # Generic discovery runs ``uv run pytest``, which in a throwaway pocketpaw
 # worktree syncs the DEFAULT groups only: ``pocketpaw_ee`` is absent, every
 # ``tests/ee`` module ``importorskip``s, and ``addopts`` hides ``tests/cloud``
-# outright. ``_require_evidence`` correctly demoted that to ``no_checks`` instead
-# of a false pass — honest, but it meant a belt run changing ``ee/cloud`` code
-# got NO verification at all. The built-in default fixes the invocation:
+# outright. ``_require_evidence`` demoted that to ``no_checks`` instead of a
+# false pass — honest, but a belt run changing ``ee/cloud`` code got NO
+# verification at all.
+#
+# Measured end-to-end against the real repo, it is worse than that. A
+# trivially-good diff touching ``cloud/belt/executor.py`` and
+# ``tests/cloud/test_belt_gate.py`` came back FAILED under discovery: without
+# the ee group, ``tests/cloud/conftest.py`` raises its own ``importorskip`` at
+# import time, pytest counts a conftest skip as a COLLECTION ERROR, and the gate
+# refuses the change. So the pre-existing behaviour on our primary repo was a
+# false REFUSAL of good work, not merely a shrug. Same repo, same diff, with the
+# built-in: ``passed``, ``11 passed in 8.56s``, 22s wall.
+#
+# The built-in default fixes the invocation:
 # ``uv run --group ee --group dev pytest <targets> -q`` (``uv run`` syncs those
 # groups before running, so sync and run are one command), targeted at the test
 # files the diff carries plus the conventional test file for each module it
