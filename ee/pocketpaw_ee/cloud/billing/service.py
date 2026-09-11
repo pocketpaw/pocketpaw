@@ -966,12 +966,22 @@ def _reversal_ack(reversed_credits: int = 0) -> dict:
 async def _release_reversal_claim(doc: Payment, event: ReversalEvent, amount: int) -> None:
     """Undo one reversal's claim after its debit raised, so a redelivery can retry.
 
-    GUARDED ON THE LEDGER, because ``credits.debit`` can also raise AFTER the
-    money moved — it stamps the entry and emits once the balance ``$inc`` has
-    landed. Releasing then would hand the remainder back to a later reversal on
-    top of credits already taken, which is the over-reversal the claim-first
-    ordering exists to prevent. "Recorded" is the conservative answer: keep the
-    claim and let the redelivery's identity check classify it.
+    GUARDED ON THE LEDGER, for two reasons and not one.
+
+    First, ``credits.debit`` can raise AFTER the money moved: it stamps the entry
+    and emits once the balance ``$inc`` has landed, two awaits past the point of
+    no return. Releasing then hands the remainder back to a later reversal on top
+    of credits already taken — the over-reversal this ordering exists to prevent.
+
+    Second, and less obvious: an entry inserted whose ``$inc`` never landed is a
+    PHANTOM, and ``reconcile`` re-drives every ``applied is False`` entry it
+    finds. Release the claim there and reconcile applies the debit later against
+    a row that no longer records it, so the next reversal can take the same share
+    again. That turns a recoverable phantom into an over-reversal. Do not relax
+    this guard to "only the money-already-moved case" — it covers both.
+
+    "Recorded" is therefore the conservative answer in every ambiguous state:
+    keep the claim, and let the redelivery's identity check classify it.
 
     Never raises. A release that fails leaves exactly the state a hard kill
     leaves, which the redelivery already alarms on, and swallowing the original
@@ -1069,7 +1079,11 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
       * a hard kill runs no ``except``, so the claim survives with no debit behind
         it. The redelivery detects that by identity plus ``is_recorded`` and logs
         at ERROR instead of reporting the routine outcome — see the check above
-        the cap. It is the one state in which "already applied" would be false.
+        the cap. It is NOT the only state in which "already applied" would be
+        false: a phantom ledger entry is the other, and this path deliberately
+        reports that one as routine. The difference is that a phantom still has
+        an entry for ``reconcile`` to re-drive, and an orphaned claim has nothing
+        — no other mechanism will ever resolve it, which is why it alarms.
 
     THE RESIDUAL TRADE is deliberate: a hard kill leaves an under-reversal for a
     human to settle. The old order healed that case and could over-reverse
@@ -1144,11 +1158,18 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
     #
     # TWO HONEST LIMITS. A ledger entry is inserted before the balance moves, so
     # a crash in that narrow window reads as recorded here and logs routine —
-    # that is ``credits.service``'s own phantom state, and ``reconcile`` is its
-    # named remedy, not this path's. And a SECOND copy of this event arriving
-    # while the first is still mid-debit can read "not recorded" and alarm
-    # spuriously; the window is one round-trip wide, and a false alarm is the
-    # right way to be wrong here.
+    # that is ``credits.service``'s own phantom state, whose remedy is
+    # ``reconcile``, run BY HAND. Nothing schedules it, so "reconcile covers it"
+    # means a person has to run it; it is still the right owner for that state,
+    # because the entry exists to be re-driven and a claimed-but-undebited
+    # reversal has nothing at all.
+    #
+    # And a SECOND copy of this event arriving while the first is still mid-debit
+    # can read "not recorded" and alarm spuriously; the window is one round-trip
+    # wide. A false alarm is the right way to be wrong here — it is noisy and
+    # resolves the moment someone reads the ledger, where a missed orphan is
+    # silent, permanent, and costs the customer money. The message below says so
+    # rather than asserting a certainty this check does not have.
     if event.event_id in (doc.reversal_event_ids or []):
         if await credits_service.is_recorded(doc.workspace, event.event_id):
             logger.info(
@@ -1160,12 +1181,15 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
             )
         else:
             logger.error(
-                "billing.webhook: %s for payment=%s (event_id=%s) is RECORDED ON THE PAYMENT "
-                "ROW BUT NO CREDITS WERE EVER TAKEN, and this redelivery cannot take them — "
-                "the row already lists this event. The reversal died between claiming its "
-                "share and debiting the wallet. workspace=%s is holding credits it was "
-                "refunded for; the row reads credits_reversed=%d against granted=%d. Settle "
-                "it by hand: nothing retries this",
+                "billing.webhook: %s for payment=%s (event_id=%s) is RECORDED ON THE "
+                "PAYMENT ROW WITH NO LEDGER MOVEMENT BEHIND IT, and this redelivery cannot "
+                "make one — the row already lists this event. Almost certainly the reversal "
+                "died between claiming its share and debiting the wallet, leaving "
+                "workspace=%s holding credits it was refunded for; the row reads "
+                "credits_reversed=%d against granted=%d, and nothing retries it. CHECK THE "
+                "LEDGER BEFORE SETTLING BY HAND: a duplicate delivery of this same event "
+                "still in flight reads identically here for about one round-trip, and its "
+                "debit may land a moment from now",
                 event.type,
                 event.payment_id,
                 event.event_id,
