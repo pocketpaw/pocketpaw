@@ -1,5 +1,12 @@
 # tests/cloud/byok/test_byok_service.py — the BYOK credential path.
 #
+# Updated 2026-09-11 (feat/byok-image-key): the delete-path tests now drive a
+# REAL ``ByokProviderKey`` instead of a hand-rolled stand-in, and a new test
+# pins that provider error text is scrubbed before it is stored. The stub they
+# used to share declared two columns the document does not have on this branch,
+# so it accepted an assignment pydantic rejects and ``delete_key`` crashed
+# green. See ``TestTheTwoCredentialsAreIndependent``.
+#
 # Created 2026-08-28 (feat/other-hand-byok).
 #
 # Three things are worth testing here and they are all about CONTAINMENT, not
@@ -17,6 +24,7 @@ import pytest
 from pocketpaw_ee.cloud._core import crypto
 from pocketpaw_ee.cloud.byok import service as byok
 from pocketpaw_ee.cloud.byok.dto import ByokSetRequest, ByokStatus
+from pocketpaw_ee.cloud.models.byok_key import ByokProviderKey
 
 _REAL_KEY = "sk-ant-api03-" + "z" * 40
 
@@ -255,47 +263,72 @@ class TestImageKeyDisplayColumns:
         assert byok._fal_hint("nocolonhere") == ""
 
 
+def _intercepted_row(monkeypatch) -> tuple[ByokProviderKey, dict, list]:
+    """A REAL ``ByokProviderKey`` with its two Mongo writes intercepted.
+
+    ``model_construct`` rather than the constructor because Beanie's
+    ``__init__`` wants an initialised collection. The two parts under test —
+    the document's field set, and pydantic refusing an assignment to a field
+    it does not declare — both survive that, which a hand-rolled stand-in
+    class does not: an earlier version of these tests declared ``base_url``
+    and ``model`` (columns the sibling gateway branch adds and this one does
+    not have), so ``delete_key`` assigned them happily in the test and raised
+    ``ValueError: object has no field`` against the real document in
+    production. A stub laxer than the model hides the bug it exists to catch.
+
+    Only the query and the two writes are replaced. Returns the row plus what
+    ``save`` saw and whether ``delete`` was called.
+    """
+    saved: dict[str, object] = {}
+    deleted: list[bool] = []
+
+    row = ByokProviderKey.model_construct(
+        workspace="ws-1",
+        encrypted_key="llm-token",
+        last4="zzzz",
+        key_hint="sk-ant-api03",
+        provider="anthropic",
+        last_verified_at=None,
+        last_error=None,
+        image_encrypted_key="image-token",
+        image_last4="ffff",
+        image_key_hint="key-id",
+        image_last_error=None,
+    )
+
+    async def _save(self):
+        saved["encrypted_key"] = self.encrypted_key
+        saved["image_encrypted_key"] = self.image_encrypted_key
+        saved["last_error"] = self.last_error
+        saved["image_last_error"] = self.image_last_error
+
+    async def _delete(self):
+        deleted.append(True)
+
+    monkeypatch.setattr(ByokProviderKey, "save", _save)
+    monkeypatch.setattr(ByokProviderKey, "delete", _delete)
+
+    class _Query:
+        # Stands in for the QUERY, not for the row: the real class only grows
+        # its comparable ``workspace`` attribute once ``init_beanie`` has run.
+        workspace = "workspace"
+
+        @staticmethod
+        async def find_one(*_a, **_k):
+            return row
+
+    monkeypatch.setattr(byok, "ByokProviderKey", _Query)
+    return row, saved, deleted
+
+
 class TestTheTwoCredentialsAreIndependent:
     """The data-loss case. Both directions, because both are one line of code
     apart from being wrong."""
 
     @pytest.mark.asyncio
     async def test_removing_the_llm_key_keeps_the_image_key(self, monkeypatch):
-        saved: dict[str, object] = {}
-        deleted: list[bool] = []
+        _row, saved, deleted = _intercepted_row(monkeypatch)
 
-        class _Row:
-            workspace = "ws-1"
-            encrypted_key = "llm-token"
-            last4 = "zzzz"
-            key_hint = "sk-ant-api03"
-            base_url = None
-            model = None
-            provider = "anthropic"
-            last_verified_at = None
-            last_error = None
-            image_encrypted_key = "image-token"
-            image_last4 = "ffff"
-            image_key_hint = "key-id"
-            image_last_error = None
-
-            async def save(self):
-                saved["encrypted_key"] = self.encrypted_key
-                saved["image_encrypted_key"] = self.image_encrypted_key
-
-            async def delete(self):
-                deleted.append(True)
-
-        row = _Row()
-
-        class _StubDoc:
-            workspace = "workspace"
-
-            @staticmethod
-            async def find_one(*_a, **_k):
-                return row
-
-        monkeypatch.setattr(byok, "ByokProviderKey", _StubDoc)
         await byok.delete_key("ws-1")
 
         assert deleted == [], "the row was dropped, taking the image key with it"
@@ -304,46 +337,77 @@ class TestTheTwoCredentialsAreIndependent:
 
     @pytest.mark.asyncio
     async def test_removing_the_image_key_keeps_the_llm_key(self, monkeypatch):
-        saved: dict[str, object] = {}
-        deleted: list[bool] = []
+        _row, saved, deleted = _intercepted_row(monkeypatch)
 
-        class _Row:
-            workspace = "ws-1"
-            encrypted_key = "llm-token"
-            last4 = "zzzz"
-            key_hint = "sk-ant-api03"
-            base_url = None
-            model = None
-            provider = "anthropic"
-            last_verified_at = None
-            last_error = None
-            image_encrypted_key = "image-token"
-            image_last4 = "ffff"
-            image_key_hint = "key-id"
-            image_last_error = None
-
-            async def save(self):
-                saved["encrypted_key"] = self.encrypted_key
-                saved["image_encrypted_key"] = self.image_encrypted_key
-
-            async def delete(self):
-                deleted.append(True)
-
-        row = _Row()
-
-        class _StubDoc:
-            workspace = "workspace"
-
-            @staticmethod
-            async def find_one(*_a, **_k):
-                return row
-
-        monkeypatch.setattr(byok, "ByokProviderKey", _StubDoc)
         await byok.delete_image_key("ws-1")
 
         assert deleted == [], "the row was dropped, taking the LLM key with it"
         assert saved["image_encrypted_key"] is None
         assert saved["encrypted_key"] == "llm-token"
+
+    def test_the_clear_list_only_names_columns_the_document_declares(self):
+        """The shape of the bug above, stated directly.
+
+        ``delete_key`` clears the LLM half of a shared row by assigning each
+        of its columns. Naming one the document does not declare is not a
+        no-op — pydantic raises, and the delete fails for every workspace that
+        also has an image key. The sibling gateway branch adds ``base_url``
+        and ``model``; until it merges they are absent here, so the clear has
+        to ask the document rather than assume.
+        """
+        declared = set(ByokProviderKey.model_fields)
+        assert {"encrypted_key", "last4", "key_hint", "last_verified_at", "last_error"} <= declared
+        with pytest.raises(ValueError, match="no field"):
+            ByokProviderKey.model_construct(workspace="ws-1").base_url = None
+
+
+class TestStoredErrorTextCarriesNoCredential:
+    """``image_last_error`` / ``last_error`` are written by the PROVIDER and
+    read back by the settings panel.
+
+    fal, Anthropic and any gateway a workspace names all write this text, and
+    several providers echo the submitted credential in an error body. The
+    round trip is short: provider error -> stored column -> ``ByokStatus`` ->
+    "This key stopped working: {error}" in the UI.
+    """
+
+    _LEAKY = (
+        "401 Unauthorized for key "
+        "11111111-2222-3333-4444-555555555555:" + "f" * 32 + " via "
+        "https://user:hunter2@gateway.example.com/v1 "
+        "(Authorization: Bearer " + "t" * 40 + ", "
+        "api_key=" + "k" * 32 + ")"
+    )
+
+    @pytest.mark.asyncio
+    async def test_a_fal_key_echoed_in_an_error_never_reaches_the_column(self, monkeypatch):
+        _row, saved, _deleted = _intercepted_row(monkeypatch)
+
+        await byok.record_image_auth_failure("ws-1", self._LEAKY)
+
+        stored = saved["image_last_error"]
+        assert "f" * 32 not in stored, "the fal secret was stored"
+        assert "hunter2" not in stored, "the gateway password was stored"
+        assert "t" * 40 not in stored, "the bearer token was stored"
+        assert "k" * 32 not in stored, "the api_key parameter was stored"
+        assert "401" in stored, "scrubbing ate the part the user needs to read"
+
+    @pytest.mark.asyncio
+    async def test_the_llm_column_is_scrubbed_on_the_same_terms(self, monkeypatch):
+        _row, saved, _deleted = _intercepted_row(monkeypatch)
+
+        await byok.record_auth_failure("ws-1", self._LEAKY)
+
+        assert "f" * 32 not in saved["last_error"]
+        assert "hunter2" not in saved["last_error"]
+
+    def test_redaction_happens_before_truncation(self):
+        """Truncating first can cut a credential in half and leave a remnant
+        no pattern matches — the 300-char cap would then be what leaks it."""
+        secret = "f" * 32
+        padded = "x" * 290 + " key=" + "11111111-2222-3333-4444-555555555555:" + secret
+        assert secret not in byok._safe_provider_error(padded)
+        assert len(byok._safe_provider_error(padded)) <= 300
 
 
 class TestImageKeyResolution:

@@ -2,6 +2,16 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-11 (feat/byok-image-key) — added the "BYOK key management"
+section. The whole `/byok` prefix was undocumented here: five routes, of which
+two are new (`PUT` and `DELETE /byok/image-key`), plus the four `image_*`
+columns `ByokStatus` now carries. Two things a reader cannot get from the field
+names and both are entitlement changes rather than plumbing: the image key is
+stored WITHOUT a validation round trip, so the first refused generation is where
+a bad credential becomes visible, and a workspace with its own image key is
+neither refused as a guest nor counted against the platform's daily cap. Also
+stated that the ceiling it removes is a SPEND ceiling and not a rate one.
+
 Updated: 2026-09-02 (SA-7) — finished the Visitor Analytics section with the two
 things a reader could not get from the endpoint's own fields. First, what the
 `analytics` grant actually buys: which tiers carry it, that it needs an active
@@ -2574,6 +2584,40 @@ its chat turns on that key — the executor resolves credentials per turn and
 threads them into the agent pool's isolated backend. The turn's model must
 belong to the key's provider (402-style `byok.model_provider_mismatch` error
 frame on a mismatch, never a silent upstream 401).
+
+### BYOK key management
+
+Workspace-scoped, not user-scoped, matching where a credential is spent. Every
+response is a `ByokStatus`; no route on this prefix returns a key, and there is
+no echo on save. Once written, a key is write-only from the API's point of view.
+
+| Endpoint | Notes |
+|---|---|
+| `GET /byok/key` | `ByokStatus` — `configured`, `provider`, `last4`, `key_hint`, `last_verified_at`, `last_error`, plus the image columns below. Built from display-only columns; answering never decrypts. |
+| `PUT /byok/key` | `{provider?="anthropic", api_key}`. Validates against the provider, then encrypts and upserts. A key the provider rejects is never written. |
+| `DELETE /byok/key` | Idempotent. Removing an absent key succeeds. Clears the LLM columns rather than dropping the row when an image key still lives on it, so rotating one credential never takes the other with it. |
+| `PUT /byok/image-key` | `{api_key}` — the workspace's own fal.ai key, for illustrations. Shape-checked at the edge (`<key-id>:<secret>`) and stored encrypted, but **not** validated against fal: fal has no free endpoint that proves a credential without generating an image, so a save-time check would spend money on every paste. A bad key surfaces on the first illustration as `image_last_error`. |
+| `DELETE /byok/image-key` | Idempotent, and it never touches the LLM key. Safe to call: the workspace falls back to the platform illustrator under the daily cap (an account) or to the guest refusal (a guest), where a workspace with no LLM key answers 402 on every turn. |
+
+`ByokStatus` carries four image columns alongside the LLM ones. They are
+display-only and independent of the LLM key — a workspace may have either
+credential, both, or neither:
+
+| Field | Meaning |
+|---|---|
+| `image_configured` | Whether a fal key is stored. |
+| `image_last4` | Last four of the SECRET half, so two keys sharing a key id still read differently. |
+| `image_key_hint` | The key id, which is the non-secret half of a fal credential. Never the secret. |
+| `image_last_error` | Why the last generation was refused, or `null`. Stamped when fal answers 401/403 and cleared on the next successful save. There is no `image_verified_at`, because this is the whole verification story for the credential. The text comes from the provider and is run through the output redactor before it is stored, so an error body that echoes the submitted key does not land in a field the API hands back. |
+
+**A workspace image key bypasses the guest illustration refusal.** Guests are
+normally refused an illustration outright, and accounts are metered against a
+daily platform cap. A workspace with its own fal key is neither: it is not
+refused for being a guest, and it does not claim the platform budget. The guest
+refusal exists because a guest can mint a fresh workspace for a fresh ceiling,
+which is an argument about the platform's money and says nothing about someone
+spending their own. Note that this removes the spend ceiling but not the request
+rate — a BYOK illustration path is not rate-limited today.
 
 ### Sign-in endpoints (no session — that is the point)
 
