@@ -13,6 +13,8 @@ non-/sites and older clients are unchanged.
 
 Changes: 2026-07-08 (CS-13, feat/per-send-model-override) — ``RunSpec`` grows
 ``model_override``: the optional per-send model id from ``CloudAgentChatRequest.model``.
+``tools_enabled``: the optional per-send tool switch from ``CloudAgentChatRequest.tools``.
+  ``False`` runs the turn with no tool surface; ``None`` is every older client.
 Same boundary reason as ``surface`` — the HTTP handler has the value but submits a
 ``RunSpec`` to the executor, so without carrying it the executor's rebuilt ctx would
 never see the client's model choice. ``None`` (the default / older clients) leaves the
@@ -149,6 +151,7 @@ class RunSpec(BaseModel):
     # must ride the spec to survive the submit. ``None`` = backend picks the model
     # (the legacy path). Validated at the HTTP edge before it ever reaches here.
     model_override: str | None = None
+    tools_enabled: bool | None = None
     # Studio Flow build context, mirrored from ``CloudAgentChatRequest.flow_context``
     # so the executor (which rebuilds its own ctx from this spec) can inject the
     # ACTIVE FLOW ID into the agent's prompt and drive ``build_studio_flow`` into

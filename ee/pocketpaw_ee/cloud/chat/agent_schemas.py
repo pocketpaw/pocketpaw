@@ -111,6 +111,20 @@ class CloudAgentChatRequest(BaseModel):
     # Argument string for ``intent="skill:<name>"`` (empty when the skill
     # was invoked bare). Reserved — not consumed by the backend yet.
     skill_args: str | None = None
+    # Per-send TOOL SWITCH (2026-09-11). ``False`` runs the turn with no tool
+    # surface at all; ``None`` (every existing client) is today's behaviour.
+    #
+    # Two reasons a user reaches for it, both observed on the Otherhand kiosk:
+    # a gateway profile that refuses the ``tools`` field outright and 400s the
+    # whole turn, and a weaker model that fixates on a tool instead of doing the
+    # work. On this surface the cost is small and the saving is not — the page
+    # is written with ``page-ops`` in ordinary text, so a tool-less turn still
+    # draws; what it loses is the agent's ability to generate an illustration.
+    #
+    # It is also the biggest token lever the surface has: the upstream prompt
+    # cache does not cover tool schemas, so a run carrying a tool surface reads
+    # zero cached tokens on every turn.
+    tools: bool | None = None
     # Surface-aware context hint (RFC: universal surface context).
     # ``surface`` is the SurfaceKind enum value the client computed from
     # ``$page.route.id`` ("home", "pockets", "pocket", "mission_control",
