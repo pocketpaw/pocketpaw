@@ -3204,16 +3204,70 @@ def test_a_broken_logfire_does_not_break_the_run():
 # turn still draws.
 
 
-def test_tools_off_builds_an_agent_with_no_tools():
-    built: list[object] = []
+def test_tools_off_puts_no_tool_on_the_wire():
+    """Measure what the MODEL is handed, not what the backend chose to build.
 
-    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    The first version of this test asserted only that ``_build_custom_tools``
+    was not called. It passed while ``write_plan``, ``read_tool_result``,
+    ``load_capability`` and ``search_tools`` still rode the request, because a
+    CAPABILITY registers its own toolset and capabilities were not gated. A
+    gateway profile that rejects the ``tools`` field kept answering 400
+    ``unsupported_capability`` with the switch off.
+
+    ``info.function_tools`` is everything pydantic-ai will map into the request,
+    whatever put it there. Empty here means the OpenAI mapper's ``tools or
+    OMIT`` drops the field entirely rather than sending ``tools: []`` — which is
+    what the gateway asked for ("Remove the field and resend").
+
+    Mutation that must break this: restore ``Planning()`` unconditionally in
+    ``_build_capabilities``.
+    """
+    seen: list[list[str]] = []
+
+    async def _spy(messages, info: AgentInfo):
+        params = info.model_request_parameters
+        # function tools AND native ones: a native web tool is not a function
+        # tool, and it is still a ``tools`` entry on the request.
+        seen.append(
+            sorted(t.name for t in info.function_tools)
+            + sorted(type(t).__name__ for t in getattr(params, "native_tools", ()))
+        )
+        yield "ok"
+
+    # Skills and native web tools are turned ON here on purpose: each
+    # contributes a tool through a CAPABILITY rather than the tool list, and
+    # at the helper's defaults the gate on each would be untested. A stream
+    # spy never calls a tool, so the retry loop the helper's default exists
+    # to avoid cannot happen.
+    backend = _backend_with_model(
+        FunctionModel(stream_function=_spy),
+        pydantic_ai_skills_enabled=True,
+        pydantic_ai_native_web_tools=True,
+    )
     backend._custom_tools = None  # force the real builder to run if it is called
-    backend._build_custom_tools = lambda: built.append("built") or []  # type: ignore[method-assign]
 
     asyncio.run(_collect(backend, "hi", session_key="s1", tools_enabled=False))
 
-    assert built == [], "the tool surface was built on a run that asked for none"
+    assert seen == [[]], f"tools off still put {seen} on the wire"
+
+
+def test_tools_on_still_puts_the_capability_tools_on_the_wire():
+    """The other half of the gate: the default path is unchanged.
+
+    Without this, deleting ``Planning()`` outright would pass the tools-off
+    test and silently remove the todo toolset from every ordinary run.
+    """
+    seen: list[list[str]] = []
+
+    async def _spy(messages, info: AgentInfo):
+        seen.append(sorted(t.name for t in info.function_tools))
+        yield "ok"
+
+    backend = _backend_with_model(FunctionModel(stream_function=_spy))
+
+    asyncio.run(_collect(backend, "hi", session_key="s1"))
+
+    assert seen and "write_plan" in seen[0], f"the planning toolset vanished: {seen}"
 
 
 def test_tools_off_and_tools_on_do_not_share_a_cached_agent():
