@@ -837,9 +837,18 @@ class TestTheTurnPathReGuardsTheStoredUrl:
             socket, "getaddrinfo", _fake_getaddrinfo({"rebind.example.com": ["127.0.0.1"]})
         )
         _stub_row(monkeypatch, _GatewayRow("https://rebind.example.com/v1"))
-        with pytest.raises(byok.GatewayEgressRejected):
+        # Written as try/else rather than pytest.raises deliberately: what is
+        # under test is that it does NOT return, and an assertion placed inside
+        # a raises block never runs when the raise happens, so it would pin
+        # nothing.
+        try:
             creds = await byok.resolve_turn_credentials("ws-1")
-            assert creds.source != "platform", "degrading here spends the platform's money"
+        except byok.GatewayEgressRejected:
+            return
+        pytest.fail(
+            f"returned source={creds.source!r} instead of refusing — a rejected "
+            "gateway address must not fall back to platform credentials"
+        )
 
     async def test_a_still_public_row_resolves_normally(self, monkeypatch):
         monkeypatch.setattr(

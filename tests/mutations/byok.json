@@ -83,10 +83,10 @@
     ]
   },
   {
-    "label": "a rejected gateway address degrades to platform credentials \u2014 the tenant's bad config spends our money every turn",
+    "label": "a rejected gateway address degrades to platform credentials \u2014 the tenant's bad config spends OUR money every turn",
     "file": "ee/pocketpaw_ee/cloud/byok/service.py",
-    "find": "class GatewayEgressRejected(ValidationError):",
-    "replace": "class GatewayEgressRejected(Exception):",
+    "find": "        base_url = (await assert_gateway_egress(base_url or \"\")).url",
+    "replace": "        try:\n            base_url = (await assert_gateway_egress(base_url or \"\")).url\n        except GatewayEgressRejected:\n            return TurnCredentials(source=\"platform\")",
     "tests": [
       "tests/cloud/byok/test_byok_service.py::TestTheTurnPathReGuardsTheStoredUrl::test_it_refuses_rather_than_degrading_to_platform_credentials"
     ]
@@ -101,19 +101,29 @@
     ]
   },
   {
-    "label": "the stored URL is the raw one, not the one that passed the guard",
+    "label": "the guest mint stores the raw URL, not the one that passed the guard",
     "file": "ee/pocketpaw_ee/cloud/auth/guest.py",
     "find": "    if canonical_base_url:\n        base_url = canonical_base_url",
-    "replace": "    pass",
+    "replace": "    canonical_base_url = None",
     "tests": [
-      "tests/cloud/byok/test_byok_service.py::TestAHostnameThatResolvesInsideIsRejected::test_validate_key_returns_the_canonical_url_callers_must_store"
+      "tests/cloud/auth/test_guest.py::TestMintGuest::test_a_gateway_mint_stores_the_url_that_passed_the_guard"
+    ]
+  },
+  {
+    "label": "the validator stops handing back the canonical URL \u2014 every caller silently stores its own input again",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "            \"The gateway did not respond. Your key was not saved \u2014 try again shortly.\",\n        )\n    return base",
+    "replace": "            \"The gateway did not respond. Your key was not saved \u2014 try again shortly.\",\n        )\n    return None",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestAHostnameThatResolvesInsideIsRejected::test_validate_key_returns_the_canonical_url_callers_must_store",
+      "tests/cloud/auth/test_guest.py::TestMintGuest::test_a_gateway_mint_stores_the_url_that_passed_the_guard"
     ]
   },
   {
     "label": "mint drops the gateway kwargs \u2014 an xpl_ key is validated against Anthropic and reads as a bad key",
     "file": "ee/pocketpaw_ee/cloud/auth/guest.py",
-    "find": "    await byok_service.validate_key(api_key, provider=provider, base_url=base_url, model=model)",
-    "replace": "    await byok_service.validate_key(api_key)",
+    "find": "    canonical_base_url = await byok_service.validate_key(\n        api_key, provider=provider, base_url=base_url, model=model\n    )",
+    "replace": "    canonical_base_url = await byok_service.validate_key(api_key)",
     "tests": [
       "tests/cloud/auth/test_guest.py::TestMintGuest"
     ]

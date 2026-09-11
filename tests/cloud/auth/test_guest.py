@@ -300,6 +300,34 @@ class TestMintGuest:
         assert exc.value.code == "byok.key_rejected"
         assert await User.find_all().count() == 0, "a dead key must not mint a user row"
 
+    async def test_a_gateway_mint_stores_the_url_that_passed_the_guard(
+        self, mongo_db, monkeypatch, _resolver_stub
+    ):
+        """Review S6. ``validate_key`` normalizes before it guards, and the
+        value written to the database must be the value that was checked — not
+        the raw body string, which is what this path used to store. The gap is
+        whitespace and a trailing slash today; it is the shape that a later
+        normalization change turns into a stored value nothing vetted."""
+        canonical = "https://api.experientiallabs.ai/v1"
+
+        async def _ok_returning_canonical(api_key, **_kw):
+            return canonical
+
+        monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.validate_key", _ok_returning_canonical)
+
+        user = await guest_service.mint_guest(
+            "xpl_" + "a" * 40,
+            provider="openai_compatible",
+            base_url=f"  {canonical}/  ",
+            model="claude-opus-5",
+        )
+
+        from pocketpaw_ee.cloud.models.byok_key import ByokProviderKey
+
+        row = await ByokProviderKey.find_one(ByokProviderKey.workspace == user.active_workspace)
+        assert row is not None
+        assert row.base_url == canonical, "the stored URL is not the one that passed the guard"
+
     async def test_a_good_key_mints_user_workspace_and_encrypted_key(
         self, mongo_db, monkeypatch, _resolver_stub
     ):
