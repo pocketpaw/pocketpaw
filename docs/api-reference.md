@@ -2987,7 +2987,10 @@ threads them into the agent pool's isolated backend. The turn's model must
 belong to the key's provider (402-style `byok.model_provider_mismatch` error
 frame on a mismatch, never a silent upstream 401). A gateway key
 (`openai_compatible`, 2026-09-09) is exempt from that check: a gateway's model
-ids are its own namespace, and the turn is pinned to the stored model anyway.
+ids are its own namespace, so there is no name shape the server could check
+against, and the model that actually runs is the `pydantic_ai_model` the
+credential resolver pins — the pydantic_ai backend, which is the one a gateway
+turn runs on, accepts a per-send `model_override` only to ignore it.
 
 **The gateway address is re-checked on every turn** (2026-09-11). A stored
 `base_url` is resolved again before the turn runs, and every address it
