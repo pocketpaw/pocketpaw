@@ -1,15 +1,15 @@
 [
   {
-    "label": "body size drops back — the ladder moves without the counts, and the agent budgets lines that no longer fit",
+    "label": "body size drops back \u2014 the ladder moves without the counts, and the agent budgets lines that no longer fit",
     "file": "ee/pocketpaw_ee/cloud/surface/system_prompts.py",
-    "find": "      size: 32 (small) | 44 (body, the DEFAULT) | 62 (heading).",
-    "replace": "      size: 40 (small) | 55 (body, the DEFAULT) | 78 (heading).",
+    "find": "      size: 32 (small) | 44 (body, the DEFAULT) | 54 (heading).",
+    "replace": "      size: 40 (small) | 55 (body, the DEFAULT) | 96 (heading).",
     "tests": [
       "tests/cloud/surface/test_other_hand_handler.py::test_profile_carries_the_page_ops_output_contract"
     ]
   },
   {
-    "label": "per-line counts go stale — text wraps where the agent did not plan and the next block lands on top",
+    "label": "per-line counts go stale \u2014 text wraps where the agent did not plan and the next block lands on top",
     "file": "ee/pocketpaw_ee/cloud/surface/system_prompts.py",
     "find": "      x=100, roughly 81 characters fit on a size-32 line, 59 at size 44, and",
     "replace": "      x=100, roughly 43 characters fit on a size-40 line, 31 at size 55, and",
@@ -18,7 +18,7 @@
     ]
   },
   {
-    "label": "the pointer to the frontend half is removed — the next change silently edits one side",
+    "label": "the pointer to the frontend half is removed \u2014 the next change silently edits one side",
     "file": "ee/pocketpaw_ee/cloud/surface/system_prompts.py",
     "find": "  other half is paw-enterprise `src/lib/core/other-hand/types.ts`, whose",
     "replace": "  other half is another repo, whose",
