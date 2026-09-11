@@ -19,9 +19,22 @@
 #
 # Created 2026-09-02 (fix/billing-reversals-and-dunning, M1 + M1a + F8): new
 #   test module.
+# Updated 2026-09-11 (fix/billing-reversal-claim-first, T-4): added the three
+#   racing-reversal tests at the foot of the module. The per-payment cap was a
+#   read-modify-write, so a refund and a lost dispute on one payment could each
+#   read ``credits_reversed`` before either claimed it and each take the whole
+#   grant — 1000 clawed back against a 500 grant, wallet at -500. The existing
+#   ``test_a_refund_then_a_lost_dispute_cannot_double_claw`` misses it because it
+#   awaits the first delivery to completion before starting the second.
+#   mongomock's awaits never actually suspend, so ``asyncio.gather`` alone runs
+#   the two deliveries end to end; ``_interleave_at_the_read_and_the_debit``
+#   restores the suspension production's real I/O has at the row read and the
+#   debit, and nothing else about the deliveries is faked. Mutation plan:
+#   ``tests/mutations/billing_reversal_claim.json``.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from datetime import UTC, datetime
@@ -483,3 +496,155 @@ async def test_provider_refuses_to_guess_a_malformed_amount():
         payload=body.encode(), headers=_sign(body, msg_id="evt_parse_bad")
     )
     assert event.amount_credits == 0
+
+
+# ---------------------------------------------------------------------------
+# T-4 — two DIFFERENT reversals on one payment, interleaved in ONE event loop.
+#
+# The ``$ne`` filter on ``reversal_event_ids`` guards a REDELIVERY of the same
+# event. It does nothing for a refund and a lost dispute arriving together,
+# which is the routine case (Verifi RDR resolves disputes by refunding). Both
+# read ``credits_reversed`` before either has claimed it, both compute the same
+# ``remaining``, both debit under distinct idempotency keys, and the running
+# total lands at twice the grant with the wallet driven negative.
+#
+# This needs NO second process. The read, the awaited debit and the claim are
+# ordered so two deliveries interleave at an ``await`` inside a single loop, so
+# a single-worker deployment gives no protection at all. mongomock's awaits
+# never actually suspend, so the two helpers below restore the suspension that
+# production's real I/O has at exactly those two points — nothing else about
+# the deliveries is faked.
+# ---------------------------------------------------------------------------
+
+
+def _interleave_at_the_read_and_the_debit(monkeypatch) -> None:
+    """Make ``Payment.find_one`` and ``credits.debit`` yield to the loop.
+
+    Both are network round-trips in production and neither is under mongomock,
+    so without this ``asyncio.gather`` runs the two deliveries end to end, one
+    after the other, and no interleaving is possible to observe.
+    """
+    real_find_one = Payment.find_one
+    real_debit = credits.debit
+
+    async def _find_one_that_yields(*args, **kwargs):
+        doc = await real_find_one(*args, **kwargs)
+        await asyncio.sleep(0)
+        return doc
+
+    async def _debit_that_yields(*args, **kwargs):
+        await asyncio.sleep(0)
+        return await real_debit(*args, **kwargs)
+
+    monkeypatch.setattr(Payment, "find_one", _find_one_that_yields)
+    monkeypatch.setattr(billing.credits_service, "debit", _debit_that_yields)
+
+
+async def test_a_racing_refund_and_lost_dispute_cannot_claw_back_more_than_the_grant(
+    mongo_db, monkeypatch, caplog
+):
+    """The T-4 over-clawback. Granted 500; a refund and a lost dispute land
+    together and the pair must still only ever take 500."""
+    await _grant_topup(amount=500)
+    assert await credits.balance(WS) == 500
+
+    _interleave_at_the_read_and_the_debit(monkeypatch)
+
+    refund = _refund_body()
+    dispute = _dispute_body()
+    with caplog.at_level("ERROR"):
+        results = await asyncio.gather(
+            billing.handle_webhook(
+                payload=refund.encode(),
+                headers=_sign(refund, msg_id="evt_race_refund"),
+                provider=_provider(),
+            ),
+            billing.handle_webhook(
+                payload=dispute.encode(),
+                headers=_sign(dispute, msg_id="evt_race_dispute"),
+                provider=_provider(),
+            ),
+        )
+
+    # Exactly one of the two took the money; the other took nothing.
+    assert sorted(r["reversed"] for r in results) == [0, 500]
+
+    row = await Payment.find_one(Payment.workspace == WS)
+    assert row is not None
+    assert row.credits_reversed == 500  # NOT 1000
+    assert len(row.reversal_event_ids) == 1
+
+    # 500 granted, 500 clawed back, nothing spent — the wallet lands at zero and
+    # the customer is not locked out by a shortfall they never owed.
+    assert await credits.balance(WS) == 0
+
+    # Nothing compares the running total against the grant after the fact, so
+    # the loser has to alarm here or an attempted over-reversal is silent until
+    # ``check_balance`` locks the customer out.
+    assert any(
+        "evt_race_dispute" in r.getMessage() or "evt_race_refund" in r.getMessage()
+        for r in caplog.records
+        if r.levelname == "ERROR"
+    )
+
+
+async def test_a_racing_pair_of_partial_refunds_cannot_exceed_the_grant(mongo_db, monkeypatch):
+    """The same race with amounts that each fit under the cap on their own.
+    300 + 300 against a 500 grant must settle at 500, never 600."""
+    await _grant_topup(amount=500)
+
+    _interleave_at_the_read_and_the_debit(monkeypatch)
+
+    first = _refund_body(amount=300, is_partial=True)
+    second = _refund_body(amount=300, is_partial=True)
+    results = await asyncio.gather(
+        billing.handle_webhook(
+            payload=first.encode(),
+            headers=_sign(first, msg_id="evt_race_part_1"),
+            provider=_provider(),
+        ),
+        billing.handle_webhook(
+            payload=second.encode(),
+            headers=_sign(second, msg_id="evt_race_part_2"),
+            provider=_provider(),
+        ),
+    )
+
+    row = await Payment.find_one(Payment.workspace == WS)
+    assert row is not None
+    assert row.credits_reversed <= 500
+    assert sum(r["reversed"] for r in results) == row.credits_reversed
+    assert await credits.balance(WS) >= 0
+
+
+async def test_a_racing_reversal_that_loses_the_claim_debits_nothing(mongo_db, monkeypatch):
+    """The heart of the fix: the loser must be turned away BEFORE the money
+    moves. A loser that debits first and discovers the cap afterwards has
+    already taken the credits — the ledger is append-only and the wallet is
+    already short."""
+    await _grant_topup(amount=500)
+
+    _interleave_at_the_read_and_the_debit(monkeypatch)
+
+    refund = _refund_body()
+    dispute = _dispute_body()
+    await asyncio.gather(
+        billing.handle_webhook(
+            payload=refund.encode(),
+            headers=_sign(refund, msg_id="evt_race_ledger_r"),
+            provider=_provider(),
+        ),
+        billing.handle_webhook(
+            payload=dispute.encode(),
+            headers=_sign(dispute, msg_id="evt_race_ledger_d"),
+            provider=_provider(),
+        ),
+    )
+
+    # One reversal debit in the ledger, not two. The ledger is append-only, so a
+    # loser that debits and only then discovers the cap has already taken the
+    # credits — there is no entry here to take back.
+    entries, _ = await credits.history(WS, limit=200)
+    reversals = [e for e in entries if e.cause == billing._REVERSAL_CAUSE]
+    assert len(reversals) == 1
+    assert reversals[0].amount_delta == -500

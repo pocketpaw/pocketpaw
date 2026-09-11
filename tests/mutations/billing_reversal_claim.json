@@ -1,0 +1,38 @@
+[
+  {
+    "label": "reversal: drop the cap from the claim filter (back to the $ne-only guard)",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "            \"$or\": [\n                {\"credits_reversed\": {\"$lte\": cap}},\n                {\"credits_reversed\": {\"$exists\": False}},\n            ],\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/billing/test_reversals.py"
+    ]
+  },
+  {
+    "label": "reversal: cap ignores this delivery's own amount",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    cap = int(granted) - amount",
+    "replace": "    cap = int(granted)",
+    "tests": [
+      "tests/cloud/billing/test_reversals.py"
+    ]
+  },
+  {
+    "label": "reversal: a legacy row with no credits_reversed field is excluded",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "                {\"credits_reversed\": {\"$exists\": False}},",
+    "replace": "                {\"credits_reversed\": {\"$exists\": True}},",
+    "tests": [
+      "tests/cloud/billing/test_reversals.py"
+    ]
+  },
+  {
+    "label": "reversal: the refused claim is logged as a routine redelivery, not an alarm",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        if event.event_id in ((current or {}).get(\"reversal_event_ids\") or []):",
+    "replace": "        if True:",
+    "tests": [
+      "tests/cloud/billing/test_reversals.py"
+    ]
+  }
+]
