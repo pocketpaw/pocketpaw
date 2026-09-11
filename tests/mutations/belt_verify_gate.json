@@ -1,11 +1,12 @@
 [
   {
-    "label": "the gate stops gating: a failed verification no longer refuses the propose",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
-    "find": "    if result.status == \"failed\":\n        failed = [c for c in result.checks if not c.ok]",
-    "replace": "    if False:\n        failed = [c for c in result.checks if not c.ok]",
+    "label": "the gate stops gating: a failed verification refuses neither develop path",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    if result.status != \"failed\":\n        return verification, None",
+    "replace": "    if True:\n        return verification, None",
     "tests": [
-      "tests/cloud/test_belt_verify.py::test_propose_is_refused_when_verification_fails"
+      "tests/cloud/test_belt_verify.py::test_propose_is_refused_when_verification_fails",
+      "tests/cloud/test_belt_headless.py::test_gate_failure_leaves_the_run_queued_and_unproposed"
     ]
   },
   {
@@ -20,11 +21,12 @@
   },
   {
     "label": "the gate runs even when the workspace turned it off",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
     "find": "    if not getattr(settings, \"belt_verify_enabled\", True):",
     "replace": "    if False:",
     "tests": [
-      "tests/cloud/test_belt_verify.py::test_disabled_setting_skips_verification_entirely"
+      "tests/cloud/test_belt_verify.py::test_disabled_setting_skips_verification_entirely",
+      "tests/cloud/test_belt_headless.py::test_gate_disabled_behaves_exactly_as_before"
     ]
   },
   {
@@ -189,7 +191,7 @@
   },
   {
     "label": "the settings map never reaches the verifier, so no repo is ever configured",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
     "find": "        commands=getattr(settings, \"belt_verify_commands\", None),",
     "replace": "        commands=None,",
     "tests": [
@@ -204,6 +206,52 @@
     "replace": "    return Path(test_rel).name == f\"test_{module.stem}.py\"",
     "tests": [
       "tests/cloud/test_belt_verify.py::test_a_bare_test_name_only_counts_in_the_mirrored_directory"
+    ]
+  },
+  {
+    "label": "the headless runner walks around the gate again, as it did on day one",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "            verification, refusal = await gate_diff(",
+    "replace": "            verification, refusal = ({\"status\": \"disabled\"}, None) or await gate_diff(",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_the_gate_is_reached_from_both_develop_paths",
+      "tests/cloud/test_belt_headless.py::test_gate_failure_leaves_the_run_queued_and_unproposed"
+    ]
+  },
+  {
+    "label": "a red verdict is read and ignored: the unverified diff is attached anyway",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "        if refusal is not None:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_gate_failure_leaves_the_run_queued_and_unproposed"
+    ]
+  },
+  {
+    "label": "the headless verdict never reaches the blob, so the Tray sees no evidence",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "            blob[\"verification\"] = verification",
+    "replace": "            blob[\"verification\"] = {}",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_gate_passes_attaches_a_verified_diff"
+    ]
+  },
+  {
+    "label": "a swallowed write failure still reports a proposal waiting at the gate",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "                store, action_id, \"headless failed to persist the produced diff\"\n            )\n            return False",
+    "replace": "                store, action_id, \"headless failed to persist the produced diff\"\n            )\n            return True",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_a_write_failure_does_not_report_a_proposal"
+    ]
+  },
+  {
+    "label": "the gate stage is emitted from behind the forward-only guard, so it never publishes",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "            prev=\"verify\",",
+    "replace": "            prev=\"done\",",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_gate_passes_attaches_a_verified_diff"
     ]
   }
 ]

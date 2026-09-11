@@ -2,6 +2,16 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-12 (headless gate). The "What the gate does not cover" section
+recorded a real hole — the gate had one call site and the headless develop
+runner walked around it — and that hole is now closed, so the section is
+rewritten to say what the second path actually does. Also corrected: the stage
+table's `verify` and `gate` emitter column (both paths reach them now), and the
+claim that `failed` never appears on a stored blob (still true of the blob's
+`verification` key; a headless refusal records the check names under
+`headless_error` on a run that stays queued). The changelog entry below is left
+as written — it was accurate the day the gate shipped.
+
 Updated: 2026-09-12 (integration/belt-factory). Added the "Belt: the develop
 station console" section. The Belt console's REST surface had no entry in this file at
 all, so the branch's wire change (a new nullable `run_id` on the runs read
@@ -4080,8 +4090,8 @@ keep the exact values and meanings they already had.
 | `station` | the mandate plan executor, when it dispatches or queues a task as a station run | `dispatched`, `queued` | proven |
 | `orient` | interactive: a `Read`, `Glob`, `Grep`, or any `mcp__loom__*` tool call. Headless: once the queued blob is validated | null interactive, `queued` headless | **heuristic** on the interactive station |
 | `develop` | interactive: a `Write` or `Edit`. Headless: immediately before the develop loop is awaited | null interactive, `queued` headless | proven |
-| `verify` | `belt_propose_change`, immediately before the mechanical gate runs | null | proven |
-| `gate` | `belt_propose_change` on a filed proposal, and the Instinct router on approve | `proposed`, `approved` | proven |
+| `verify` | both develop paths, immediately before the mechanical gate runs — the emit lives inside `verify.gate_diff`, after the enabled check, so a disabled gate emits nothing | null interactive, `queued` headless | proven |
+| `gate` | `belt_propose_change` on a filed proposal, the headless runner once its verified diff is on the row, and the Instinct router on approve | `proposed`, `approved` | proven |
 | `done` | the Instinct router on reject, and the belt executor on its terminals | `rejected`, `landed`, `failed` | proven |
 
 `orient` is the one heuristic and is labelled as such in the code. Reading the
@@ -4276,28 +4286,46 @@ Status, per-check metadata and a one-line summary only. The full logs are never
 stored; they would bloat every Instinct row, and the agent already got them in
 the refusal. A `disabled` verdict is the bare `{"status": "disabled"}`.
 
-`failed` never appears on a stored blob, because a failed verification files no
-Action.
+`failed` never appears under `verification`. On the interactive path a failed
+verification files no Action at all. On the headless path the Action already
+exists, so a failure leaves it queued with no diff and writes the failing check
+names to `headless_error` on the same blob — a different key, because a run
+with no diff has proposed nothing and should not read as a verdict on one.
 
 `verification` is an optional blob key and needs no schema bump. The executor's
 guard compares the blob's `schema` for equality, so `CODE_CHANGE_SCHEMA` stays
 at 2 and an in-flight blob filed without the key still applies. `run_id` rides
 on the same terms.
 
-#### What the gate does not cover
+#### Both develop paths go through the gate
 
-The gate has exactly one call site, `belt_propose_change`, which is the
-interactive station's MCP tool. **The headless develop runner does not go
-through it.** That runner writes the produced diff straight onto the queued
-Action's blob, so a headless run has no `verification` key, no `verify` stage
-event, and no `run_id`. The per-diff human gate is still preserved there; the
-mechanical one is not run.
+The gate shipped with one call site, `belt_propose_change`, the interactive
+station's MCP tool. The headless develop runner wrote its produced diff straight
+onto the queued Action, so for its first day the promise that a human only ever
+approves verified work held on the station and not on the mandate-driven path
+where no human is driving at all. Both now call the same
+`cloud.belt.verify.gate_diff`.
+
+What differs is only what a refusal can mean on each path, because their
+starting states differ:
+
+| | interactive station | headless runner |
+|---|---|---|
+| on `failed` | the propose is refused, the failing checks and their output go back to the agent, and **no Action is filed** | **no diff is attached**; the run stays queued with `station_pending` set, the check names land on `headless_error`, and the output goes to the log — there is no agent here to hand it to |
+| on `passed` / `no_checks` / `disabled` | the Action is filed with `verification` on its blob | the diff is attached with the same `verification` key on the same blob |
+| stages | `verify`, then `gate` on the filed proposal | `verify`, then `gate` once the diff is really on the row |
+| `run_id` | the chat stream's | still null — a headless run has no stream |
+
+A headless run that fails verification is therefore indistinguishable from one
+whose develop loop failed: queued, no diff, a note saying why. That is the
+existing safe state, and it is deliberate — a human can still open the station
+and drive the task, or the dispatcher can retry it.
 
 Settings: `belt_verify_enabled`, `belt_verify_timeout_s` and
 `belt_verify_commands`, all documented in
-`docs/api/configuration-reference.mdx`. All three are read per
-call from settings, never cached in a process global, and threaded into the
-verifier by the handler, so the verifier itself never touches settings.
+`docs/api/configuration-reference.mdx`. All three are read per call inside
+`gate_diff`, never cached in a process global, and threaded into `verify_diff`
+from there, so the verifier itself never touches settings.
 
 ### The pulley block engine on `/belt`
 

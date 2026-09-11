@@ -9,6 +9,13 @@ tags: ["api", "configuration"]
 
 {/*
   docs/api/configuration-reference.mdx
+  Updated 2026-09-12 (headless gate). The Belt section said the gate covers the
+  interactive station only and that the headless runner records no verdict
+  whatever these settings are. That was true when it was written and is not now:
+  the headless runner calls the same gate before attaching its diff, so
+  belt_verify_enabled / _timeout_s / _commands govern both paths. Rewrote that
+  callout and extended the belt_verify_enabled row with what a failure means on
+  the path that has no agent to hand the failure back to.
   Updated 2026-09-12 (integration/belt-factory). Added the "Belt and Pulley"
   section with the five settings this branch introduces: belt_verify_enabled,
   belt_verify_timeout_s, belt_verify_commands, pulley_path and pulley_bin. The
@@ -298,14 +305,18 @@ which is the default, that field is always null.
 the Instinct gate was approving work nothing had ever run. Turning it off does not
 loosen a check, it removes the only mechanical one there is.
 
-**The gate covers the interactive station only.** It has a single call site, the
-`belt_propose_change` tool. The headless develop runner writes its diff straight
-onto the queued Action, so it runs no checks and records no verdict regardless of
-these settings. The per-diff human gate still applies there.
+**The gate covers both develop paths.** It had a single call site when it
+shipped — the `belt_propose_change` tool, the interactive station — and the
+headless develop runner wrote its diff straight onto the queued Action, checking
+nothing. Both now go through it, so these settings govern the mandate-driven
+autonomous path too. The two differ only in what a failure can do: the station
+refuses the propose and files no Action, while the headless runner leaves its run
+queued with no diff attached and the failing check names recorded on the blob.
+Either way, nothing an operator can see at the Instinct gate arrived unchecked.
 
 | Setting | Env Variable | Type | Default | Description |
 |---------|-------------|------|---------|-------------|
-| `belt_verify_enabled` | `POCKETPAW_BELT_VERIFY_ENABLED` | boolean | `true` | Run mechanical checks on a Belt code-change proposal **before** it reaches the human approval gate. The diff is applied with `git apply --3way` in a throwaway git worktree of the repo at its base branch, the checks that tree offers are run, and the worktree is torn down on every path. A failed check refuses the proposal outright: no Instinct Action is filed, and the failing check names and their output go back to the agent so it can fix and re-propose. A passing or "nothing to run" result files the Action and records the verdict on its `_code_change` blob under `verification`. Set to false and the proposal is filed unverified with `verification` recorded as `disabled`. |
+| `belt_verify_enabled` | `POCKETPAW_BELT_VERIFY_ENABLED` | boolean | `true` | Run mechanical checks on a Belt code-change proposal **before** it reaches the human approval gate. The diff is applied with `git apply --3way` in a throwaway git worktree of the repo at its base branch, the checks that tree offers are run, and the worktree is torn down on every path. A failed check refuses the proposal outright: no Instinct Action is filed, and the failing check names and their output go back to the agent so it can fix and re-propose. A passing or "nothing to run" result files the Action and records the verdict on its `_code_change` blob under `verification`. Set to false and the proposal is filed unverified with `verification` recorded as `disabled`. The same setting governs the headless develop runner, which runs the identical checks before attaching its diff; there a failed check attaches nothing and leaves the run queued, since there is no agent to hand the failure back to. |
 | `belt_verify_timeout_s` | `POCKETPAW_BELT_VERIFY_TIMEOUT_S` | integer | `600` | Per-check timeout in seconds. A check that exceeds it is killed and counts as **failed**, not skipped, because an unbounded suite proves nothing. It is per check, not per proposal, so a repo whose discovery finds a pytest run and a `pulley doctor` can spend this budget twice. |
 | `belt_verify_commands` | `POCKETPAW_BELT_VERIFY_COMMANDS` | JSON object | unset | Per-repo verification command, keyed by the repo's path, valued as one argv list. Set as a JSON object of path to argv, for example `{"/srv/repos/acme": ["make", "check"]}`. The command runs verbatim in the throwaway worktree after the diff applies, and it **replaces** generic discovery rather than adding to it. Three things to know before setting one. It runs exactly as written, with no diff-derived test paths appended, so a bare `pytest` runs the whole suite and will hit the timeout. Evidence is still required: a run that exits 0 without showing a passing count is recorded as `no_checks`, never as a pass. And a command that cannot launch is a **failed** check, not a skip, so a typo here refuses proposals rather than silently switching the gate off. The one non-zero exit that is not a refusal is `5`, read as pytest's "no tests collected", which records `no_checks`. These argv elements are operator-configured only and are never read from a diff or from agent text. |
 | `pulley_path` | `POCKETPAW_PULLEY_PATH` | string | unset | Path to a pulley checkout. Unset, which is the default, no pulley MCP server is registered and block assembly is simply absent: the station agent writes the code by hand. Set it and the `/belt` develop station gains five tools (`search_catalog`, `describe_block`, `plan_install`, `apply_plan`, `doctor`) for installing reviewed blocks instead of hand-writing auth, org, roles, notify, files and audit code. The server is served as `bun <this path>/mcp/server.ts` and the block registry defaults to `<this path>/registry`. Registration degrades to absent, without raising, when the `server.ts` is missing or bun cannot be resolved. |
