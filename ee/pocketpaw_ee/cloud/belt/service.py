@@ -1,4 +1,11 @@
 # ee/pocketpaw_ee/cloud/belt/service.py
+# Updated: 2026-09-12 (headless gate) — COMMENT-ONLY corrections, no behaviour
+#   change. The note above ``BeltStage`` claimed ``station`` "has never been
+#   emitted on the bus"; it has, since June, from ``mandates/executor.py`` lines
+#   133 and 252 (both verified). And ``emit_belt_stage``'s docstring named
+#   ``belt_propose_change`` as the one place ``verify`` is emitted from — the
+#   emit now lives in ``verify.gate_diff``, which BOTH develop paths call, the
+#   headless runner included.
 # Updated: 2026-09-12 (integration/belt-factory — the component seam is filled)
 #   — ``maybe_emit_belt_entity_changed`` now defaults ``resolve_component`` to
 #   the REAL resolver (``component_map.loom_component``) instead of
@@ -165,12 +172,17 @@ logger = logging.getLogger(__name__)
 #   gate    — the diff is at the HUMAN Instinct gate awaiting review.
 #   done    — terminal (landed / failed / rejected).
 #
-# ``gate`` and ``done`` predate this alias and are UNCHANGED: the existing
-# emitters in ``agent/mcp_servers/belt.py`` and ``belt/executor.py`` pass those
-# exact strings and mean exactly what they meant before. ``station`` was already
-# produced by ``_derive_status_stage`` for a queued run (REST only — it has never
-# been emitted on the bus). Only ``orient`` / ``develop`` / ``verify`` are new,
-# and each is only ever emitted when it is genuinely REACHED.
+# ``station``, ``gate`` and ``done`` all predate this alias and are UNCHANGED:
+# the existing emitters pass those exact strings and mean exactly what they meant
+# before — ``gate`` / ``done`` from ``agent/mcp_servers/belt.py`` and
+# ``belt/executor.py``, and ``station`` from ``mandates/executor.py``, which has
+# published it on the bus through ``emit_belt_run_updated`` since June: line 133
+# (``status="dispatched"``, the plan executor dispatching a task) and line 252
+# (``status="queued"``, the StationTaskDispatcher filing the queued run).
+# ``_derive_status_stage`` ALSO derives ``station`` for a queued run on the REST
+# read, so the two agree rather than one covering for the other. Only ``orient``
+# / ``develop`` / ``verify`` are new, and each is only ever emitted when it is
+# genuinely REACHED.
 BeltStage = Literal["station", "orient", "develop", "verify", "gate", "done"]
 
 # The same values as a tuple, earliest-first — the forward-only comparison key.
@@ -305,12 +317,14 @@ async def emit_belt_stage(
     ``action_id`` is likewise optional, and null on the interactive path for the
     same reason: ``belt_propose_change`` mints the Action AFTER the file writes.
 
-    **The propose path should call this with ``stage="verify"`` immediately
-    before it runs the mechanical diff gate**, so the console shows the run
-    being checked rather than jumping straight from ``develop`` to ``gate``.
-    That call site lives in ``belt_propose_change`` (agent MCP server), next to
-    the ``verify_diff`` invocation; it is not wired from here because the emit
-    has to happen at the gate, not at a distance from it.
+    **``stage="verify"`` is emitted immediately before the mechanical diff gate
+    runs**, so the console shows the run being checked rather than jumping
+    straight from ``develop`` to ``gate``. That call site lives inside
+    ``belt.verify.gate_diff``, next to the ``verify_diff`` invocation and after
+    the enabled check — not at a distance from it, and not duplicated into each
+    caller: both develop paths (the interactive station's
+    ``belt_propose_change`` and the headless runner) reach the gate through that
+    one function, so both report the stage on the same terms.
 
     Best-effort like every other belt emit: delivery failures are swallowed by
     ``_publish_run_updated``, so a live nudge can never break a station run.
