@@ -1232,6 +1232,51 @@ v1 is a plain GET for the client to poll. A push stream is the upgrade path
 if polling stops being enough — event-driven off the existing run-status
 transitions, not a faster poll.
 
+## Files — Accepted Types and Size
+
+`POST /uploads` accepts **any file type** by default. A Blender `.blend`, a
+Photoshop `.psd`, an FBX rig, a firmware image, a packet capture — none of them
+need to be registered anywhere first.
+
+This was not always true. Until 2026-09-11 the pipeline enforced an exact-match
+allowlist of about 35 browser-native document and code mimes, and anything
+outside it came back in the response's `failed[]` array with
+`code: "unsupported_mime"`. The list could only be widened by editing
+`src/pocketpaw/uploads/config.py`.
+
+**Narrowing it again is a deployment choice.**
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `POCKETPAW_UPLOAD_ALLOWED_MIMES` | `*/*` | Comma-separated policy. Entries may be exact (`application/pdf`), a family (`image/*`), or the `*/*` wildcard. Case and `;charset=…` parameters are ignored on both sides of the comparison. A blank or unparseable value falls back to `*/*` rather than locking uploads out. |
+| `POCKETPAW_UPLOAD_MAX_BYTES` | `26214400` (25 MiB) | Per-file ceiling. The ASGI request-body ceiling in `security/body_limit.py` is derived from this × `max_files_per_batch`, so raising this raises that guard with it. A file over the limit fails with `code: "too_large"`. |
+
+Example — an install that only wants images and PDFs:
+
+```bash
+POCKETPAW_UPLOAD_ALLOWED_MIMES="image/*,application/pdf"
+```
+
+**Accepting a type is not the same as rendering it inline.** This policy governs
+what may be *stored*; `INLINE_MIMES` governs what may be *served inline*. Every
+download rail serves anything outside that short set as
+`Content-Disposition: attachment`, so an uploaded `.html` or `.svg` downloads
+rather than executing on the storage origin. That set did not change when the
+type policy opened up.
+
+**What a file is recorded as.** The stored `mime` comes from, in order: magic
+bytes (which overrule a lying `Content-Type`), the client's `Content-Type` when
+it says something useful, and the filename otherwise. A browser sends
+`application/octet-stream` for anything it does not recognise, so
+`spaceship.blend` records as `application/x-blender` and keeps a `.blend` on its
+storage key. Formats the stdlib registry misses live in `_EXT_TO_MIME_EXTRAS`;
+extending it is always safe, since it decides what a file is *called*, never
+whether it is accepted.
+
+Source: `src/pocketpaw/uploads/config.py`,
+`src/pocketpaw/uploads/service.py::UploadService._upload_one` (the single gate
+every upload path goes through, OSS and cloud alike).
+
 ## Files — Content Search
 
 `POST /files/search` answers "which of my files says this?" — as distinct from

@@ -7,7 +7,12 @@ import pytest
 from fastapi import UploadFile
 
 from pocketpaw.uploads.adapter import StorageAdapter, StoredObject
-from pocketpaw.uploads.config import UploadSettings
+from pocketpaw.uploads.config import (
+    DEFAULT_ALLOWED_MIMES,
+    INLINE_MIMES,
+    UploadSettings,
+    mime_allowed,
+)
 from pocketpaw.uploads.errors import (
     EmptyFile,
     NotFound,
@@ -87,11 +92,41 @@ class TestUploadServiceSingle:
         with pytest.raises(TooLarge):
             await svc.upload(file, owner_id="u1", chat_id=None)
 
-    async def test_rejects_disallowed_mime(self, service):
+    async def test_accepts_any_type_by_default(self, service):
+        """The default policy is ``*/*``: a .blend used to be unsupported_mime.
+
+        It also keeps a real mime and extension — the client sends
+        octet-stream for a format it cannot name, so the filename supplies it.
+        """
+        svc, adapter, _ = service
+        file = _upload(b"BLENDER-v303\x00", "spaceship.blend", "application/octet-stream")
+        rec = await svc.upload(file, owner_id="u1", chat_id=None)
+        assert rec.filename == "spaceship.blend"
+        assert rec.mime == "application/x-blender"
+        assert rec.storage_key.endswith(".blend")
+        assert adapter.blobs[rec.storage_key] == b"BLENDER-v303\x00"
+
+    async def test_rejects_disallowed_mime_when_narrowed(self, service):
+        """The gate still fires against a policy a deployment narrowed with
+        POCKETPAW_UPLOAD_ALLOWED_MIMES. Exact, family (``image/*``) and ``*/*``
+        all parse; an unnamed type passes only under ``*/*``."""
         svc, _, _ = service
-        file = _upload(b"<svg/>", "x.svg", "image/svg+xml")
+        svc._cfg = UploadSettings(
+            allowed_mimes=frozenset({"image/*"}),
+            local_root=svc._cfg.local_root,
+        )
+        ok = await svc.upload(_upload(PNG_MAGIC, "a.png", "image/png"), "u1", None)
+        assert ok.mime == "image/png"
         with pytest.raises(UnsupportedMime):
-            await svc.upload(file, owner_id="u1", chat_id=None)
+            await svc.upload(_upload(b"%PDF-1.7", "a.pdf", "application/pdf"), "u1", None)
+
+    async def test_accepting_a_type_does_not_make_it_inline(self):
+        """An uploaded .html/.svg is storable but still downloads: INLINE_MIMES,
+        not the type policy, is what keeps active content off our origin, and
+        it did not grow when the policy opened up."""
+        assert mime_allowed("text/html", UploadSettings().allowed_mimes)
+        assert "text/html" not in INLINE_MIMES
+        assert "image/svg+xml" not in INLINE_MIMES
 
     async def test_rejects_empty_file(self, service):
         svc, _, _ = service
@@ -126,8 +161,14 @@ class TestUploadServiceBulk:
         assert len(result.failed) == 0
 
     async def test_partial_failure(self, service):
+        # Needs a narrowed policy for the mime failure to exist — the default
+        # accepts the svg.
         svc, _, _ = service
-        svc._cfg = UploadSettings(max_file_bytes=100, local_root=svc._cfg.local_root)
+        svc._cfg = UploadSettings(
+            max_file_bytes=100,
+            allowed_mimes=DEFAULT_ALLOWED_MIMES,
+            local_root=svc._cfg.local_root,
+        )
         files = [
             _upload(PNG_MAGIC, "good.png", "image/png"),
             _upload(b"x" * 500, "big.bin", "application/octet-stream"),
