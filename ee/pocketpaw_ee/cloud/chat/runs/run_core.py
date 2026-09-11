@@ -1,6 +1,25 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-09-12 (feat/belt-entity-events, stage slice) — the same ``tool_use``
+  branch now also reports WHICH STAGE a belt run has reached, via
+  ``belt.service.maybe_emit_belt_stage``. The per-file feed added below says
+  what changed; this says where the run is, so the /belt strip can light
+  ``orient`` and ``develop`` from proven data instead of inferring them. A
+  read-only codebase lookup (Read / Glob / Grep / any ``mcp__loom__*``) proves
+  ``orient``; a Write / Edit proves ``develop``.
+
+  The forward-only guard is the local ``belt_stage``, minted next to
+  ``stream_run_id`` and passed back in on every call: per-run by construction,
+  no module-level map, nothing to reset. It is what makes the ``orient``
+  heuristic safe — a ``Read`` during development cannot walk the run backwards,
+  because the run has already advanced past ``orient`` and the emit is dropped.
+
+  These emits carry ``run_id`` and a NULL ``action_id``: on the interactive
+  station the Instinct Action does not exist until ``belt_propose_change``
+  runs, which is after every file write. Same limitation, same reason, as the
+  entity-change feed below.
+
 - 2026-09-12 (feat/belt-entity-events) — the ``tool_use`` branch now also feeds
   the /belt console's per-FILE live feed. A develop-station run went silent
   between "started" and the single ``belt_run_updated(proposed)`` at the end,
@@ -1465,6 +1484,13 @@ async def _drive_agent_loop(
     # bridge where ``run_id`` equals the id on ``agent.stream_start``.
     stream_run_id = _new_run_id()
     plan_tracker = PlanTracker(run_id=stream_run_id)
+    # The furthest belt stage THIS run has proven (``None`` until it proves one).
+    # Deliberately a local rather than shared state: it is minted alongside
+    # ``stream_run_id``, so its lifetime is exactly one run and concurrent runs
+    # cannot see each other's progress. The tool loop below advances it; the
+    # emitter refuses anything that isn't strictly forward. Stays ``None`` for
+    # every non-belt run — the bridge is a no-op off the BELT surface.
+    belt_stage: str | None = None
 
     if emit_stream_start:
         stream_start_payload: dict[str, Any] = {
@@ -1919,6 +1945,33 @@ async def _drive_agent_loop(
                         )
                     except Exception:  # noqa: BLE001 — a live feed never breaks a turn
                         logger.debug("belt: entity-change bridge failed", exc_info=True)
+
+                    # Same tool stream, the other axis: WHICH STAGE the run has
+                    # reached. The per-file feed above says what changed; this
+                    # says where the run is — a codebase lookup proves
+                    # ``orient``, a Write / Edit proves ``develop``.
+                    #
+                    # ``belt_stage`` is a LOCAL of this function, and
+                    # ``stream_run_id`` is minted once per call, so the
+                    # forward-only guard is scoped to exactly one run with no
+                    # module-level map and nothing to reset. The bridge returns
+                    # the next value to hold, so a tool that proves nothing (or
+                    # a stage the run is already past) leaves it untouched — and
+                    # that is what stops a ``Read`` after the first write from
+                    # walking the run back to ``orient``.
+                    try:
+                        from pocketpaw_ee.cloud.belt.service import maybe_emit_belt_stage
+
+                        _sc = ctx.surface_context
+                        belt_stage = await maybe_emit_belt_stage(
+                            surface=_sc.kind.value if _sc else None,
+                            tool_name=name,
+                            workspace_id=ctx.workspace_id,
+                            run_id=stream_run_id,
+                            prev=belt_stage,
+                        )
+                    except Exception:  # noqa: BLE001 — a live feed never breaks a turn
+                        logger.debug("belt: stage bridge failed", exc_info=True)
                 if name == _ASK_USER_TOOL_ID:
                     # Interactive question: emit an ``ask_user_question`` frame the
                     # client renders as clickable option chips (service.ts ->
