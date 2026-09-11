@@ -83,6 +83,12 @@
 # tool (``_BELT_GATE_TOOL_IDS``). The gate tool id is a literal here because its
 # constant lives in a SIBLING branch's ``agent/mcp_servers/belt.py`` — the
 # import reconciles when both PRs land.
+# Changes: 2026-09-12 (A1, belt factory) — BELT's ``allow_mcp_tool_ids`` also
+# carries ``PULLEY_TOOL_IDS`` (the block engine: search_catalog /
+# describe_block / plan_install / apply_plan / doctor). NOTE FOR THE NEXT
+# READER: that union is BUILT in ``surface_registry._load_mcp_tool_ids``, not in
+# this module — the paragraph above is a description of it, not the code. Go
+# there to change it.
 # Changes: 2026-07-23 (feat/ship-surface-kind, SHIP-8a) — the declarative
 # ``SURFACES`` registry gains the SHIP row (the managed-deploy control plane).
 # ``resolve_profile`` sources it like every other row (SR-2): SHIP carries a

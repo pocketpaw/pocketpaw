@@ -77,6 +77,16 @@ def test_provider_tool_ids_match_module() -> None:
     assert CloudPulleyMcpProvider().tool_ids() == list(pulley.PULLEY_TOOL_IDS)
 
 
+def test_pulley_is_ambient_not_opt_in() -> None:
+    """pulley is ambient — the /belt surface scopes it via its profile
+    allowlist, so it must NOT be in the opt-in set. Adding it there would
+    silently strip the tools from /belt, which is the only surface that has
+    them. Mirrors ``test_loom_is_ambient_not_opt_in``."""
+    from pocketpaw.agents.claude_sdk import OPT_IN_MCP_SERVERS
+
+    assert pulley.SERVER_NAME not in OPT_IN_MCP_SERVERS
+
+
 # --- build_server: disabled / degraded paths -------------------------------
 
 
