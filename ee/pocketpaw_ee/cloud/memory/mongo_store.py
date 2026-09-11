@@ -21,15 +21,38 @@ Tenant scope
 Every row is stamped with a ``workspace_id`` so multi-tenant ee deployments
 can isolate reads. For SESSION rows the adapter resolves it from the linked
 Session.workspace at write time. For LONG_TERM / DAILY rows callers populate
-``entry.metadata["workspace_id"]``. Reads expose ``workspace_id`` as a
-parameter on the adapter-specific helpers (``list_facts_in_workspace``,
-``get_session_in_workspace``); the protocol-level methods stay unscoped to
-preserve the ``MemoryStoreProtocol`` contract for OSS callers.
+``entry.metadata["workspace_id"]``.
+
+**Changed 2026-09-11.** This module previously said:
+
+    Reads expose ``workspace_id`` as a parameter on the adapter-specific
+    helpers (``list_facts_in_workspace``, ``get_session_in_workspace``); the
+    protocol-level methods stay unscoped to preserve the
+    ``MemoryStoreProtocol`` contract for OSS callers.
+
+That was true, and it was the defect. The protocol-level methods are reachable
+from ``recall``, ``clear_session`` and ``delete_session`` — built-in agent tools
+on the ``_TENANT_SAFE_TOOLS`` allowlist in ``pocketpaw.agents.pydantic_ai``,
+where the grant is annotated "scoped by the caller's own session key". Nothing
+in this adapter was scoping them, so one tenant's prompt could read every
+workspace's memory facts by regex, and delete another tenant's pocket messages.
+
+Now every protocol-level read and delete resolves the active workspace through
+``_scoped`` / ``_row_in_scope`` and refuses rather than answering globally. The
+``MemoryStoreProtocol`` signatures are unchanged, so the OSS contract holds; what
+changed is that a multi-tenant deployment with no workspace in context gets an
+empty result and a loud log line instead of everyone's data. Single-tenant and
+local installs are unaffected — ``_tenant_isolation_required()`` is false there,
+and the methods behave exactly as before.
+
+``POCKETPAW_MEMORY_ALLOW_GLOBAL_READS=1`` restores the old behaviour for an
+operator who needs it, and says so in the log every time it is consulted.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import UTC, datetime
 
@@ -82,6 +105,108 @@ def _normalize_session_key(key: str) -> str:
     return key
 
 
+_ALLOW_GLOBAL_ENV = "POCKETPAW_MEMORY_ALLOW_GLOBAL_READS"
+
+
+def _active_workspace_scope() -> str | None:
+    """The workspace bound for this execution context, or None.
+
+    Reads the OSS-core ``current_workspace`` ContextVar rather than any ee
+    ContextVar, for two reasons: it is the seam OSS core owns for exactly this
+    (``pocketpaw.stores``), and ``agent_service.attach_agent_identity`` bridges
+    the per-stream workspace onto it (ISO-3), including the second bind inside
+    prewarm that exists so in-process tools can read identity at all.
+    """
+    try:
+        from pocketpaw.stores import current_workspace  # type: ignore[import-untyped]
+
+        value = current_workspace.get()
+    except Exception:  # noqa: BLE001 — an unreadable ContextVar means "no scope"
+        return None
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
+def _tenant_isolation_required() -> bool:
+    """True when this deployment holds more than one tenant.
+
+    Fails CLOSED. If the signal cannot be read we isolate, because the unsafe
+    direction here is answering a query globally — the opposite of the pocket
+    router's bypass gate, where the unsafe direction is opening the bypass.
+    Both refuse on an unreadable signal; the returned boolean differs because
+    the dangerous answer differs.
+
+    ``is_multi_tenant_cloud()`` rather than an env flag, for the reason given in
+    PR #2126: a flag defaults to whatever an operator remembers to set, and this
+    one would have to be remembered on every deployment that ever gains a second
+    tenant.
+    """
+    if os.environ.get(_ALLOW_GLOBAL_ENV, "").strip().lower() in ("1", "true", "yes", "on"):
+        logger.warning(
+            "%s is set — memory reads are NOT tenant-scoped. Every workspace's "
+            "memory facts and pocket messages are visible to every caller.",
+            _ALLOW_GLOBAL_ENV,
+        )
+        return False
+    try:
+        from pocketpaw_ee.cloud.shared.db import is_multi_tenant_cloud
+
+        return bool(is_multi_tenant_cloud())
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Could not determine whether this deployment is multi-tenant; "
+            "scoping memory reads to the active workspace (fail-closed)."
+        )
+        return True
+
+
+def _scoped(filters: dict, *, field: str = "workspace_id") -> dict | None:
+    """Narrow ``filters`` to the active workspace, or None meaning "refuse".
+
+    None is the caller's signal to return an empty result rather than run the
+    query: in a multi-tenant deployment a request with no workspace in context
+    cannot be attributed, and answering it globally is the defect this closes.
+
+    Rows carrying no ``workspace_id`` (legacy and OSS-path data) fall out of a
+    scoped read. That is deliberate and matches ``list_facts_in_workspace``,
+    which has always excluded them — an unattributed row cannot be shown to a
+    tenant on the assumption that it is theirs.
+    """
+    if not _tenant_isolation_required():
+        return filters
+    workspace_id = _active_workspace_scope()
+    if not workspace_id:
+        return None
+    return {**filters, field: workspace_id}
+
+
+def _refused(operation: str) -> None:
+    """Log a refused unscoped access. Loud, because silence is the failure mode."""
+    logger.warning(
+        "MongoMemoryStore.%s refused: multi-tenant deployment with no workspace "
+        "bound in this execution context. Returning an empty result rather than "
+        "reading across tenants. Bind identity via attach_agent_identity before "
+        "the agent runs, or pass an explicit workspace via the *_in_workspace "
+        "helpers.",
+        operation,
+    )
+
+
+def _row_in_scope(row_workspace: str | None) -> bool:
+    """True when a fetched row may be shown to the current context.
+
+    Used by the id-keyed methods (``get``, ``delete``), where the check has to
+    happen after the fetch because the id IS the whole query.
+    """
+    if not _tenant_isolation_required():
+        return True
+    workspace_id = _active_workspace_scope()
+    if not workspace_id:
+        return False
+    return row_workspace == workspace_id
+
+
 def _message_to_entry(msg: Message) -> MemoryEntry:
     """Translate a pocket-context Message to a protocol MemoryEntry."""
     ts = msg.createdAt or datetime.now(UTC)
@@ -130,11 +255,17 @@ class MongoMemoryStore:
     ~~~~~~~~~~~~~~~~~~~~
     Every persisted row carries a ``workspace_id`` (derived from the linked
     ``Session.workspace`` for pocket messages, supplied via
-    ``entry.metadata["workspace_id"]`` for facts). The protocol-level read
-    methods stay tenant-agnostic to keep the ``MemoryStoreProtocol`` contract
-    unchanged for OSS callers; ee callers that need strict isolation should
-    use the adapter-specific ``*_in_workspace`` helpers, which add an explicit
-    ``workspace_id`` filter.
+    ``entry.metadata["workspace_id"]`` for facts).
+
+    The protocol-level methods keep their ``MemoryStoreProtocol`` signatures but
+    are no longer tenant-agnostic: each resolves the active workspace from the
+    ``current_workspace`` ContextVar and, on a multi-tenant deployment with no
+    workspace in context, returns an empty result rather than reading across
+    tenants. See the module docstring for why that changed.
+
+    The ``*_in_workspace`` helpers remain the right call for any ee caller that
+    already holds a request scope — they take the workspace explicitly and do
+    not depend on a ContextVar being bound.
     """
 
     async def save(self, entry: MemoryEntry) -> str:
@@ -214,9 +345,15 @@ class MongoMemoryStore:
             return None
         msg = await Message.get(oid)
         if msg and msg.context_type == "pocket":
+            if not _row_in_scope(msg.workspace_id):
+                _refused("get")
+                return None
             return _message_to_entry(msg)
         fact = await MemoryFactDoc.get(oid)
         if fact:
+            if not _row_in_scope(fact.workspace_id):
+                _refused("get")
+                return None
             return _fact_to_entry(fact)
         return None
 
@@ -227,11 +364,17 @@ class MongoMemoryStore:
             return False
         msg = await Message.get(oid)
         if msg and msg.context_type == "pocket":
+            if not _row_in_scope(msg.workspace_id):
+                _refused("delete")
+                return False
             from pocketpaw_ee.cloud.chat import message_service
 
             return await message_service.delete_message_doc_by_id(entry_id)
         fact = await MemoryFactDoc.get(oid)
         if fact:
+            if not _row_in_scope(fact.workspace_id):
+                _refused("delete")
+                return False
             await fact.delete()
             return True
         return False
@@ -252,7 +395,11 @@ class MongoMemoryStore:
                 raise NotImplementedError("tag search is not supported for SESSION messages in v1")
             if query:
                 filters["content"] = {"$regex": re.escape(query), "$options": "i"}
-            messages = await Message.find(filters).sort("-createdAt").limit(limit).to_list()
+            scoped = _scoped(filters)
+            if scoped is None:
+                _refused("search")
+                return []
+            messages = await Message.find(scoped).sort("-createdAt").limit(limit).to_list()
             return [_message_to_entry(m) for m in messages]
 
         fact_filters: dict = {}
@@ -262,7 +409,11 @@ class MongoMemoryStore:
             fact_filters["tags"] = {"$in": tags}
         if query:
             fact_filters["content"] = {"$regex": re.escape(query), "$options": "i"}
-        facts = await MemoryFactDoc.find(fact_filters).sort("-createdAt").limit(limit).to_list()
+        scoped_facts = _scoped(fact_filters)
+        if scoped_facts is None:
+            _refused("search")
+            return []
+        facts = await MemoryFactDoc.find(scoped_facts).sort("-createdAt").limit(limit).to_list()
         return [_fact_to_entry(f) for f in facts]
 
     async def get_by_type(
@@ -272,25 +423,32 @@ class MongoMemoryStore:
         user_id: str | None = None,
     ) -> list[MemoryEntry]:
         if memory_type == MemoryType.SESSION:
-            messages = (
-                await Message.find({"context_type": "pocket"})
-                .sort("-createdAt")
-                .limit(limit)
-                .to_list()
-            )
+            scoped = _scoped({"context_type": "pocket"})
+            if scoped is None:
+                _refused("get_by_type")
+                return []
+            messages = await Message.find(scoped).sort("-createdAt").limit(limit).to_list()
             return [_message_to_entry(m) for m in messages]
 
         filters: dict = {"type": memory_type.value}
         if user_id is not None:
             filters["user_id"] = user_id
-        facts = await MemoryFactDoc.find(filters).sort("-createdAt").limit(limit).to_list()
+        scoped_facts = _scoped(filters)
+        if scoped_facts is None:
+            _refused("get_by_type")
+            return []
+        facts = await MemoryFactDoc.find(scoped_facts).sort("-createdAt").limit(limit).to_list()
         return [_fact_to_entry(f) for f in facts]
 
     async def get_session(
         self, session_key: str, limit: int | None = DEFAULT_SESSION_HISTORY_LIMIT
     ) -> list[MemoryEntry]:
         key = _normalize_session_key(session_key)
-        query = Message.find({"context_type": "pocket", "session_key": key})
+        scoped = _scoped({"context_type": "pocket", "session_key": key})
+        if scoped is None:
+            _refused("get_session")
+            return []
+        query = Message.find(scoped)
         if limit is None:
             messages = await query.sort("createdAt").to_list()
         else:
@@ -306,7 +464,11 @@ class MongoMemoryStore:
         from pocketpaw_ee.cloud.chat import message_service
 
         key = _normalize_session_key(session_key)
-        messages = await Message.find({"context_type": "pocket", "session_key": key}).to_list()
+        scoped = _scoped({"context_type": "pocket", "session_key": key})
+        if scoped is None:
+            _refused("clear_session")
+            return 0
+        messages = await Message.find(scoped).to_list()
         count = 0
         for m in messages:
             if await message_service.delete_message_doc_by_id(str(m.id)):
@@ -321,8 +483,15 @@ class MongoMemoryStore:
         The adapter never auto-creates `sessions` rows — that's the API layer's
         job (`SessionService`). A None return means no user-facing session
         metadata exists, even if messages do.
+
+        ``Session`` names its tenant column ``workspace``, not ``workspace_id``
+        like ``Message`` and ``MemoryFactDoc`` — hence the explicit ``field``.
         """
-        return await Session.find_one(Session.sessionId == session_key)
+        scoped = _scoped({"sessionId": session_key}, field="workspace")
+        if scoped is None:
+            _refused("get_session_info")
+            return None
+        return await Session.find_one(scoped)
 
     async def _load_session_index_async(self, *, workspace_id: str, owner_id: str) -> dict:
         """Build a session-index dict from one owner's pocket-context Sessions.
@@ -380,7 +549,11 @@ class MongoMemoryStore:
         """
         session = await self.get_session_info(session_key)
         key = _normalize_session_key(session_key)
-        query = Message.find({"context_type": "pocket", "session_key": key})
+        scoped = _scoped({"context_type": "pocket", "session_key": key})
+        if scoped is None:
+            _refused("get_session_with_messages")
+            return None, []
+        query = Message.find(scoped)
         if limit is None:
             messages = await query.sort("createdAt").to_list()
         else:
