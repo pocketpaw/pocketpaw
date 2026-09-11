@@ -41,6 +41,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -589,3 +590,313 @@ async def test_timeout_setting_is_threaded_through(py_repo, store, settings_patc
     assert res.get("is_error") is not True, res
     assert seen["timeout_s"] == 42
     assert seen["base_branch"] == "main"
+
+
+# ---------------------------------------------------------------------------
+# Per-repo verify commands — the gap generic discovery left on our OWN repo
+# ---------------------------------------------------------------------------
+#
+# Discovery guesses the runner from the tree's shape, and on pocketpaw the guess
+# is wrong in a way that reads as honest: `uv run pytest` in a throwaway worktree
+# syncs the default groups only, pocketpaw_ee is absent, every tests/ee module
+# importorskips, addopts hides tests/cloud, and _require_evidence demotes the
+# whole thing to no_checks. Not a false pass — but no verification either, on the
+# repo the gate was built for. These pin the two ways out: an operator's per-repo
+# argv, and a built-in default for pocketpaw itself.
+
+_PP_PYPROJECT = (
+    '[project]\nname = "pocketpaw"\nversion = "0.1.0"\nrequires-python = ">=3.11"\n\n'
+    '[dependency-groups]\ndev = ["pytest"]\nee = []\n'
+)
+_PP_MODULE = "def greet():\n    return 'hi'\n"
+_PP_MODULE_NEW = "def greet():\n    return 'hi there'\n"
+_PP_TEST = (
+    "from thing import greet\n\n\ndef test_greet():\n    assert greet() in ('hi', 'hi there')\n"
+)
+
+_needs_uv = pytest.mark.skipif(shutil.which("uv") is None, reason="the built-in default shells uv")
+
+
+@pytest.fixture
+def pocketpaw_repo(tmp_path: Path) -> Path:
+    """A repo shaped like pocketpaw — identified by [project].name, which is how
+    the built-in default recognises it (no operator would key a worktree path,
+    and every checkout deserves the same treatment).
+
+    Deliberately tiny: it declares the same `ee` and `dev` groups the real
+    default syncs, so the REAL argv runs here in ~2s instead of the real suite's
+    forever. `tests/test_thing.py` is NOT in the diff below — the built-in has to
+    derive it from the touched module's name."""
+    return _seed(
+        tmp_path / "pocketpaw",
+        {
+            "pyproject.toml": _PP_PYPROJECT,
+            # A root conftest puts the repo root on sys.path, so the test below
+            # imports the APPLIED tree's module rather than failing to find it.
+            "conftest.py": "",
+            "thing.py": _PP_MODULE,
+            "tests/test_thing.py": _PP_TEST,
+            # A module with no conventionally-named test — the skip case.
+            "orphan.py": "X = 1\n",
+        },
+    )
+
+
+async def test_configured_command_wins_over_discovery(py_repo):
+    """An explicit per-repo command REPLACES discovery — it does not run beside
+    it.
+
+    py_repo's discovery would find pytest and pass; the configured command
+    fails. Red proves the configured one ran; exactly one check proves discovery
+    did not also run (two checks would mean the operator's answer was merely
+    added to a guess)."""
+    result = await belt_verify.verify_diff(
+        repo=str(py_repo),
+        base_branch="main",
+        diff=_passing_diff(),
+        timeout_s=120,
+        commands={str(py_repo): [sys.executable, "-c", "import sys; sys.exit(3)"]},
+    )
+
+    assert result.status == "failed", result.summary
+    assert [c.name for c in result.checks] == ["configured"]
+
+
+async def test_configured_command_matches_an_unresolved_key(py_repo, tmp_path):
+    """The key is a repo PATH in the allowlist's form, so it is resolved on BOTH
+    sides — a `..` hop or a trailing slash in config still names the same repo.
+    A literal string compare would miss this and silently fall back to
+    discovery."""
+    detour = f"{py_repo.parent}/./{py_repo.name}/../{py_repo.name}/"
+
+    result = await belt_verify.verify_diff(
+        repo=str(py_repo),
+        base_branch="main",
+        diff=_passing_diff(),
+        timeout_s=120,
+        commands={detour: [sys.executable, "-c", "import sys; sys.exit(3)"]},
+    )
+
+    assert [c.name for c in result.checks] == ["configured"]
+    assert result.status == "failed"
+
+
+async def test_configured_command_that_proves_nothing_is_no_checks(py_repo):
+    """A configured command that RUNS, exits 0 and shows no passing count is
+    held to the same evidence rule as a discovered one: skipped, so the run
+    lands on 'no_checks'.
+
+    Never 'passed'. Configuring a command is not the same as proving something
+    with it, and the gate must not accept the former as the latter."""
+    result = await belt_verify.verify_diff(
+        repo=str(py_repo),
+        base_branch="main",
+        diff=_passing_diff(),
+        timeout_s=120,
+        commands={str(py_repo): [sys.executable, "-c", "print('nothing to do here')"]},
+    )
+
+    assert result.status == "no_checks"
+    check = result.checks[0]
+    assert (check.ok, check.skipped) == (True, True)
+    assert "No test PASSED" in check.output
+
+
+async def test_configured_command_that_cannot_launch_is_a_failure(py_repo):
+    """A command that does not exist FAILS — it does not skip.
+
+    This is the whole reason the property is pinned: a skip here would mean one
+    typo in settings silently switches the gate off for that repo, and every
+    proposal after it sails through unverified looking fine."""
+    result = await belt_verify.verify_diff(
+        repo=str(py_repo),
+        base_branch="main",
+        diff=_passing_diff(),
+        timeout_s=120,
+        commands={str(py_repo): ["pocketpaw-no-such-binary-xyz", "--run"]},
+    )
+
+    assert result.status == "failed"
+    check = result.checks[0]
+    assert (check.name, check.ok, check.skipped) == ("configured", False, False)
+    assert "FileNotFoundError" in check.output
+
+
+async def test_configured_failure_reaches_the_caller(py_repo, store, settings_patch):
+    """A red configured command refuses the propose, and the check name AND its
+    output ride back to the agent — otherwise the feedback loop has nothing to
+    act on and no Action for a human to see either."""
+    settings_patch(
+        belt_repo_allowlist=[str(py_repo.parent)],
+        belt_verify_commands={
+            str(py_repo): [sys.executable, "-c", "import sys; print('BOOM-42'); sys.exit(1)"]
+        },
+    )
+
+    res = await _propose(py_repo, _passing_diff())
+
+    assert res["is_error"] is True
+    text = res["content"][0]["text"]
+    assert "verification FAILED" in text
+    assert "configured" in text
+    assert "BOOM-42" in text
+    assert await store.list_actions(workspace_id="w1") == []
+
+
+async def test_commands_setting_is_threaded_through(py_repo, store, settings_patch, monkeypatch):
+    """The map comes from settings via the handler, like the timeout — verify.py
+    never reads settings itself, which is what keeps it testable without them."""
+    settings_patch(
+        belt_repo_allowlist=[str(py_repo.parent)],
+        belt_verify_commands={"/srv/other": ["make", "check"]},
+    )
+    seen: dict = {}
+
+    async def _capture(**kwargs):
+        seen.update(kwargs)
+        return belt_verify.VerifyResult(status="no_checks", checks=(), summary="none")
+
+    monkeypatch.setattr(belt_verify, "verify_diff", _capture)
+
+    res = await _propose(py_repo, _passing_diff())
+    assert res.get("is_error") is not True, res
+    assert seen["commands"] == {"/srv/other": ["make", "check"]}
+
+
+async def test_discovery_is_unchanged_when_nothing_matches(py_repo):
+    """REGRESSION PIN. A repo with no configured command keeps today's discovery
+    path exactly — same check name, same green. A non-matching key must not
+    shadow it, and neither must an empty map."""
+    for commands in (None, {}, {"/srv/somewhere-else": ["make", "check"]}):
+        result = await belt_verify.verify_diff(
+            repo=str(py_repo),
+            base_branch="main",
+            diff=_passing_diff(),
+            timeout_s=120,
+            commands=commands,
+        )
+        assert result.status == "passed", (commands, result.summary)
+        assert [c.name for c in result.checks] == ["pytest(ambient)"], commands
+
+
+# --- the built-in pocketpaw default ---------------------------------------
+
+
+def test_pocketpaw_is_identified_by_project_name(pocketpaw_repo, py_repo):
+    """Shape detection, not a path: [project].name is what marks the repo, so
+    every checkout and worktree of pocketpaw gets the default and 'widget' does
+    not."""
+    assert belt_verify._is_pocketpaw(pocketpaw_repo) is True
+    assert belt_verify._is_pocketpaw(py_repo) is False
+    assert belt_verify._is_pocketpaw(py_repo / "nope") is False
+
+
+def test_pocketpaw_targets_follow_the_repo_naming_convention(pocketpaw_repo):
+    """Targeting is derived from the diff two ways: test files it carries, and
+    the conventional test file for each module it touches.
+
+    `test_<parent>_<stem>` is in there because that IS this repo's convention —
+    cloud/belt/verify.py is covered by tests/cloud/test_belt_verify.py. A looser
+    `*<stem>*` glob would drag half the suite in on a module named `service`."""
+    (pocketpaw_repo / "ee/pocketpaw_ee/cloud/belt").mkdir(parents=True)
+    (pocketpaw_repo / "ee/pocketpaw_ee/cloud/belt/verify.py").write_text("X = 1\n")
+    (pocketpaw_repo / "tests/cloud").mkdir(parents=True)
+    (pocketpaw_repo / "tests/cloud/test_belt_verify.py").write_text("def test_x():\n    pass\n")
+
+    diff = _diff("ee/pocketpaw_ee/cloud/belt/verify.py", "X = 1\n", "X = 2\n")
+    assert belt_verify._pocketpaw_targets(pocketpaw_repo, diff) == [
+        "tests/cloud/test_belt_verify.py"
+    ]
+
+    # A module with no conventionally-named test finds nothing — the honest
+    # floor, rather than widening to a directory that would blow the budget.
+    orphan = _diff("ee/pocketpaw_ee/cloud/belt/orphan.py", "X = 1\n", "X = 2\n")
+    assert belt_verify._pocketpaw_targets(pocketpaw_repo, orphan) == []
+
+
+@_needs_uv
+async def test_pocketpaw_default_runs_the_real_argv_and_passes(pocketpaw_repo):
+    """The built-in default is selected for a pocketpaw-shaped repo and produces
+    a REAL pass on a good diff — through the real argv, a real uv subprocess and
+    a real pytest, not a stand-in.
+
+    The diff touches thing.py ONLY, so tests/test_thing.py is reached by
+    derivation, not because the diff carried it. `--group ee --group dev` is the
+    load-bearing part of the argv: without it uv syncs the default groups, and
+    on the real repo that is exactly the all-skipped nothing this default
+    exists to fix."""
+    result = await belt_verify.verify_diff(
+        repo=str(pocketpaw_repo),
+        base_branch="main",
+        diff=_diff("thing.py", _PP_MODULE, _PP_MODULE_NEW),
+        timeout_s=300,
+    )
+
+    assert result.status == "passed", result.checks[0].output
+    check = result.checks[0]
+    assert (check.name, check.ok, check.skipped) == ("pytest(pocketpaw)", True, False)
+    # The real command, and the derived target — not a discovered `uv run pytest`.
+    assert "--group ee --group dev" in check.output
+    assert "tests/test_thing.py" in check.output
+    assert _worktrees(pocketpaw_repo) == []
+
+
+async def test_pocketpaw_default_selects_the_documented_argv(pocketpaw_repo, monkeypatch):
+    """Pins the argv itself, so the shelling test above cannot pass on a
+    quietly-changed default (and so the uv-less skip still leaves the command
+    covered)."""
+    seen: list[list[str]] = []
+
+    async def _capture(name, argv, **_k):
+        seen.append(argv)
+        return belt_verify.CheckResult(
+            name=name, ok=True, skipped=False, output="1 passed", duration_s=0.1
+        )
+
+    monkeypatch.setattr(belt_verify, "_timed", _capture)
+
+    await belt_verify.verify_diff(
+        repo=str(pocketpaw_repo),
+        base_branch="main",
+        diff=_diff("thing.py", _PP_MODULE, _PP_MODULE_NEW),
+        timeout_s=120,
+    )
+
+    assert seen == [
+        ["uv", "run", "--group", "ee", "--group", "dev", "pytest", "-q", "tests/test_thing.py"]
+    ]
+
+
+async def test_pocketpaw_default_with_no_derivable_target_is_a_named_skip(pocketpaw_repo):
+    """No test in the diff and no test matching the touched module → a named
+    SKIP that says so, landing on 'no_checks'.
+
+    Not a full-suite run (that outruns any propose-time budget) and not a pass.
+    The message tells the agent the move that makes the gate bite: change the
+    test alongside the code."""
+    result = await belt_verify.verify_diff(
+        repo=str(pocketpaw_repo),
+        base_branch="main",
+        diff=_diff("orphan.py", "X = 1\n", "X = 2\n"),
+        timeout_s=120,
+    )
+
+    assert result.status == "no_checks"
+    check = result.checks[0]
+    assert (check.name, check.ok, check.skipped) == ("pytest(pocketpaw)", True, True)
+    assert "nothing targeted to run" in check.output
+
+
+async def test_configured_command_beats_the_pocketpaw_default(pocketpaw_repo):
+    """Precedence runs one way: an operator who has configured this repo
+    overrides the built-in, not the other way round."""
+    result = await belt_verify.verify_diff(
+        repo=str(pocketpaw_repo),
+        base_branch="main",
+        diff=_diff("thing.py", _PP_MODULE, _PP_MODULE_NEW),
+        timeout_s=120,
+        commands={str(pocketpaw_repo): [sys.executable, "-c", "import sys; sys.exit(7)"]},
+    )
+
+    assert [c.name for c in result.checks] == ["configured"]
+    assert result.status == "failed"
