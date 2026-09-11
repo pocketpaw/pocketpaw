@@ -590,9 +590,9 @@ def loom_model(repo: Path, tmp_path: Path, allowlist, monkeypatch) -> Path:
     hardcoded scope, and pinning that here keeps the e2e honest about which
     repo the run is actually bound to.
     """
-    from pocketpaw.config import get_settings
-
     from pocketpaw_ee.cloud.belt import component_map
+
+    from pocketpaw.config import get_settings
 
     model = tmp_path / "worldmodel-e2e.json"
     model.write_text(
