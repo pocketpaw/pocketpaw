@@ -913,7 +913,7 @@ async def test_leaf_edits_route_persists_and_returns_verdicts(beanie_test_db, mo
     )
     assert err is None, err
 
-    async def _fake_apply(*, source, edits):
+    async def _fake_apply(*, source, edits, lane=None):
         new = dict(source)
         new["src/lib/components/Hero.svelte"] = "<h1>Brighter</h1>"
         return {"source": new, "results": [{"uid": edits[0]["uid"], "applied": True}]}

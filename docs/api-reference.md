@@ -1533,6 +1533,59 @@ component map; a ripple-engine or non-site pocket is a `422`
 exactly like every other `by-pocket` route. All work is tenant-scoped on the
 request context (`workspace_id`, `user_id`).
 
+**HE-9 widened this.** `/leaf-edits` now accepts **html** pockets as well as
+svelte, and a third endpoint (`/html-armed-source`) serves the html lane's render.
+The engine guard moved from a flat `engine != "svelte"` to a write-back predicate,
+so the refusal code is now `pocket.not_editable_site`. Note the two questions are
+still separate and neither implies the other: **react** can be selected and
+refined through chat (it has an armed build) but has no TSX splice, so it is still
+refused here; **html** has a splice but no armed build, so it is accepted here and
+absent from `/native-artifact`.
+
+### `GET /sites/by-pocket/{pocket_id}/html-armed-source`
+
+HE-9. Serve an **html** pocket's source with `data-uid` stamped on every editable
+leaf, plus the leaf manifest behind those uids.
+
+This exists because select and write did not share an identity. The builder
+previews an html pocket by assembling its **raw** source into a sandboxed
+`srcdoc` — no build, which is the whole point of the html track — so nothing in
+that document carried a uid. The in-frame select agent resolved a click by walking
+the DOM (`<section>:<tag>:<ordinal>`) while `/leaf-edits` resolves by manifest uid
+(`<page>:<role>:<ordinal>`): two schemes over two documents, so a pick named
+something the splice could never find. This returns the document the builder
+should actually render, so both sides agree by construction.
+
+It is **not** the html branch of `/native-artifact`. That serves a built, armed
+tree for shadow-rendering and is gated on `has_native_edit_lane`, which html sits
+outside of deliberately. This is a parse and an offset splice over the source map:
+no bun build, no Daytona, no artifact cache — cheap enough to call when the
+operator opens Design mode.
+
+A non-html pocket is a `422` (`pocket.not_html_site`). A failed or unavailable
+toolchain is `sites.arm_html_failed` rather than an opaque 500.
+
+Response `200`:
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "source": { "index.html": "<h1 data-uid=\"index:headline:0\">Build faster</h1>" },
+  "manifest": [
+    { "uid": "index:headline:0", "file": "index.html", "editKind": "text" }
+  ]
+}
+```
+
+`source` is byte-identical to the authored files apart from the inserted
+attributes — the stamping is an offset splice, never a re-serialize, so quote
+style, attribute order and entities all survive.
+
+**Re-arm; do not cache.** uids are *derived* from the current source, not stored
+in it, so spans shift the moment an edit lands and a held manifest is stale by
+construction. That is a feature: a stale uid fails loudly instead of splicing into
+the wrong offsets.
+
 ### `POST /sites/by-pocket/{pocket_id}/leaf-edits`
 
 Persist a batch of native-editor leaf edits as a Branch draft. The editor has

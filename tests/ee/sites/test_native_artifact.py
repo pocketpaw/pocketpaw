@@ -581,7 +581,7 @@ async def test_leaf_edit_change_schedules_prewarm(beanie_test_db, _captured_prew
     captured, not run)."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
 
-    async def _fake_apply(*, source, edits):
+    async def _fake_apply(*, source, edits, lane=None):
         new = dict(source)
         new["src/lib/components/Hero.svelte"] = "<section class='hero'><h1>Edited</h1></section>"
         return {"source": new, "results": [{"uid": edits[0]["uid"], "applied": True}]}
@@ -602,7 +602,7 @@ async def test_leaf_edit_rejected_schedules_no_prewarm(beanie_test_db, _captured
     """A REJECTED leaf edit persists nothing, so it warms nothing — no pre-warm scheduled."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
 
-    async def _fake_apply(*, source, edits):
+    async def _fake_apply(*, source, edits, lane=None):
         # Byte-identical source back (a rejected edit) → the persist loop writes nothing.
         return {
             "source": dict(source),
@@ -759,7 +759,7 @@ async def test_leaf_edit_prewarm_uses_prewarm_origin(beanie_test_db, monkeypatch
 
     monkeypatch.setattr(sites_service, "_schedule_native_prewarm", _capture)
 
-    async def _fake_apply(*, source, edits):
+    async def _fake_apply(*, source, edits, lane=None):
         new = dict(source)
         new["src/lib/components/Hero.svelte"] = "<section class='hero'><h1>Edited</h1></section>"
         return {"source": new, "results": [{"uid": edits[0]["uid"], "applied": True}]}

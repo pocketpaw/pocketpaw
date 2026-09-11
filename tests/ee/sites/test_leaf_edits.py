@@ -183,7 +183,7 @@ async def test_apply_leaf_edits_persists_changed_file_as_draft(beanie_test_db, m
     through. The CLI bridge is faked — no Bun runs."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
 
-    async def _fake_apply(*, source, edits):
+    async def _fake_apply(*, source, edits, lane=None):
         new = dict(source)
         new["src/lib/components/Hero.svelte"] = _HERO_V2
         return {"source": new, "results": [{"uid": edits[0]["uid"], "applied": True}]}
@@ -222,7 +222,7 @@ async def test_apply_leaf_edits_rejected_edit_persists_nothing(beanie_test_db, m
     source is untouched; the reason is surfaced to the caller."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
 
-    async def _fake_apply(*, source, edits):
+    async def _fake_apply(*, source, edits, lane=None):
         # Source returned UNCHANGED (the whole-file re-author stays with the caller).
         return {
             "source": dict(source),
@@ -260,7 +260,7 @@ async def test_apply_leaf_edits_non_svelte_pocket_rejected(beanie_test_db):
     )
     assert err is None, err
 
-    async def _fake_apply(*, source, edits):  # pragma: no cover - must not be reached
+    async def _fake_apply(*, source, edits, lane=None):  # pragma: no cover - must not be reached
         raise AssertionError("the bridge must not run for a non-svelte pocket")
 
     with pytest.raises(ValidationError):
@@ -278,7 +278,7 @@ async def test_apply_leaf_edits_empty_batch_rejected():
     """An empty edit batch raises ValidationError (422) before any pocket read or
     bridge call — so it needs no DB and the bridge must never run."""
 
-    async def _fake_apply(*, source, edits):  # pragma: no cover - must not be reached
+    async def _fake_apply(*, source, edits, lane=None):  # pragma: no cover - must not be reached
         raise AssertionError("the bridge must not run for an empty batch")
 
     with pytest.raises(ValidationError):
@@ -323,7 +323,7 @@ async def test_apply_leaf_edits_bridge_runtime_error_maps_to_cloud_error(beanie_
     gets a structured envelope — NOT an opaque, unhandled 500."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
 
-    async def _fake_apply(*, source, edits):
+    async def _fake_apply(*, source, edits, lane=None):
         raise RuntimeError("apply-leaf-edit failed: unparseable op")
 
     with pytest.raises(CloudError) as excinfo:
@@ -348,7 +348,7 @@ async def test_apply_leaf_edits_malformed_result_maps_to_cloud_error(beanie_test
     a 500."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
 
-    async def _fake_apply(*, source, edits):
+    async def _fake_apply(*, source, edits, lane=None):
         # ``source`` present but ``results`` missing → KeyError on the parse.
         return {"source": dict(source)}
 
@@ -378,7 +378,7 @@ async def test_apply_leaf_edits_dynamic_pocket_splits_bindings_and_confines_pers
 
     captured: dict = {}
 
-    async def _fake_apply(*, source, edits):
+    async def _fake_apply(*, source, edits, lane=None):
         captured["source"] = source
         new = dict(source)
         new["src/lib/components/Hero.svelte"] = _HERO_V2  # a real file changed
@@ -452,3 +452,219 @@ async def test_generator_bridge_cleans_temp_on_dump_failure(monkeypatch):
     assert created, "expected a temp file to be created"
     for path in created:
         assert not Path(path).exists(), f"temp file leaked after dump failure: {path}"
+
+
+# ---------------------------------------------------------------------------
+# HE-9 — the html write-back lane
+#
+# Both halves of html editing shipped months apart and were never connected:
+# the generator could splice html (applyHtmlLeafEdit, HE-8) and this service
+# refused every html pocket with a flat ``engine != "svelte"``. These tests pin
+# the three things that connect them, because each fails SILENTLY if wrong —
+# a wrong lane rejects every uid with a per-uid reason that reads like bad
+# input, and the wrong persist writer 422s on engine rather than saying so.
+# ---------------------------------------------------------------------------
+
+_HTML_INDEX = (
+    "<!doctype html>\n<html><body>\n"
+    '  <h1 class="headline">Build faster</h1>\n'
+    '  <a href="/pricing">See pricing</a>\n'
+    "</body></html>\n"
+)
+_HTML_INDEX_V2 = _HTML_INDEX.replace("Build faster", "Ship it Friday")
+
+
+async def _make_html_pocket(workspace_id: str, user_id: str) -> str:
+    """Persist a real html-engine Pocket (mirrors how create_html_site lands one)."""
+    _view, pocket_id, err = await pockets_service.agent_create(
+        workspace_id=workspace_id,
+        owner_id=user_id,
+        name="Bright Smile HTML",
+        type_="site",
+        pattern="landing",
+        ripple_spec=None,
+        engine="html",
+        source={"index.html": _HTML_INDEX, "styles.css": "h1{color:#111}\n"},
+        trusted=True,
+    )
+    assert err is None, err
+    assert pocket_id is not None
+    return pocket_id
+
+
+@pytest.mark.asyncio
+async def test_apply_leaf_edits_html_routes_the_html_lane_and_persists(beanie_test_db, monkeypatch):
+    """An html pocket reaches the bridge with lane="html" and persists through the
+    HTML writer. The lane assertion is the point: routing html to the svelte applier
+    does not raise, it rejects every edit, so a silent mis-route would look like a
+    bad edit rather than a bad lane."""
+    pocket_id = await _make_html_pocket("ws1", "u1")
+
+    seen: dict = {}
+
+    async def _fake_apply(*, source, edits, lane=None):
+        seen["lane"] = lane
+        seen["keys"] = sorted(source)
+        new = dict(source)
+        new["index.html"] = _HTML_INDEX_V2
+        return {"source": new, "results": [{"uid": edits[0]["uid"], "applied": True}]}
+
+    calls: list[str] = []
+    real = pockets_service.set_html_source_file
+
+    async def _spy(*args, **kwargs):
+        calls.append(kwargs.get("file_path"))
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(pockets_service, "set_html_source_file", _spy)
+
+    results = await sites_service.apply_leaf_edits(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        edits=[
+            {
+                "uid": "index:headline:0",
+                "op": {"kind": "setText", "html": "<h1>Ship it Friday</h1>"},
+            }
+        ],
+        _apply=_fake_apply,
+    )
+
+    assert seen["lane"] == "html"
+    # html has no dynamic track, so the whole source map is files — including the
+    # stylesheet, which must be forwarded (a css edit is a legitimate future op) but
+    # not persisted here because it did not change.
+    assert seen["keys"] == ["index.html", "styles.css"]
+    assert results == [{"uid": "index:headline:0", "applied": True}]
+    assert calls == ["index.html"]
+
+    wire = await pockets_service.get(pocket_id, "u1")
+    assert wire["source"]["index.html"] == _HTML_INDEX_V2
+    assert wire["source"]["styles.css"] == "h1{color:#111}\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_leaf_edits_svelte_still_names_its_lane_explicitly(beanie_test_db, monkeypatch):
+    """svelte sends lane="svelte" rather than relying on the CLI's absent-lane
+    default. Both sides defaulting independently is how they drift apart."""
+    pocket_id = await _make_svelte_pocket("ws1", "u1")
+
+    seen: dict = {}
+
+    async def _fake_apply(*, source, edits, lane=None):
+        seen["lane"] = lane
+        return {"source": dict(source), "results": [{"uid": edits[0]["uid"], "applied": True}]}
+
+    await sites_service.apply_leaf_edits(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        edits=[{"uid": "Hero:headline:0", "op": {"kind": "setText", "html": "x"}}],
+        _apply=_fake_apply,
+    )
+
+    assert seen["lane"] == "svelte"
+
+
+@pytest.mark.asyncio
+async def test_apply_leaf_edits_react_still_refused(beanie_test_db):
+    """react has a read lane but no TSX splice, so it must keep answering 422. This
+    is the assertion that stops a future widening from being done with
+    is_source_engine, which would let react through to a save that can only fail."""
+    _view, pocket_id, err = await pockets_service.agent_create(
+        workspace_id="ws1",
+        owner_id="u1",
+        name="React site",
+        type_="site",
+        pattern="landing",
+        ripple_spec=None,
+        engine="react",
+        source={"src/App.tsx": "export default function App(){return <h1>Hi</h1>}\n"},
+        trusted=True,
+    )
+    assert err is None, err
+
+    async def _fake_apply(*, source, edits, lane=None):  # pragma: no cover - unreachable
+        raise AssertionError("the bridge must not run for a react pocket")
+
+    with pytest.raises(ValidationError):
+        await sites_service.apply_leaf_edits(
+            workspace_id="ws1",
+            user_id="u1",
+            pocket_id=pocket_id,
+            edits=[{"uid": "App:headline:0", "op": {"kind": "setText", "html": "x"}}],
+            _apply=_fake_apply,
+        )
+
+
+# ---------------------------------------------------------------------------
+# HE-9 — arming an html pocket for direct editing
+#
+# The gap this closes is an IDENTITY mismatch, not a missing feature: the builder
+# previews raw source (no uids) while the write path resolves by manifest uid, so a
+# pick named something the splice could not find. These pin that the armed document
+# and the write path agree, and that the engine guard is real.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_html_armed_source_returns_stamped_source_and_manifest(beanie_test_db):
+    """The service hands back the generator's stamped source + manifest, keyed to the
+    pocket. The bridge is faked — no Bun runs."""
+    pocket_id = await _make_html_pocket("ws1", "u1")
+
+    seen: dict = {}
+
+    async def _fake_arm(*, source):
+        seen["keys"] = sorted(source)
+        stamped = _HTML_INDEX.replace("<h1 ", '<h1 data-uid="index:headline:0" ')
+        return {
+            "source": {"index.html": stamped},
+            "manifest": [{"uid": "index:headline:0", "file": "index.html", "editKind": "text"}],
+        }
+
+    out = await sites_service.get_html_armed_source(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id, _arm=_fake_arm
+    )
+
+    # The WHOLE source map goes to the generator — the stylesheet included, since a
+    # leaf can live in any html file and the arm decides which do.
+    assert seen["keys"] == ["index.html", "styles.css"]
+    assert 'data-uid="index:headline:0"' in out["source"]["index.html"]
+    assert out["manifest"][0]["uid"] == "index:headline:0"
+
+
+@pytest.mark.asyncio
+async def test_get_html_armed_source_refuses_a_svelte_pocket(beanie_test_db):
+    """Arming is html-only. A svelte pocket has an armed BUILD served by
+    /native-artifact instead, and pointing this at one would hand the srcdoc lane a
+    document the svelte editor does not render."""
+    pocket_id = await _make_svelte_pocket("ws1", "u1")
+
+    async def _fake_arm(*, source):  # pragma: no cover - must not be reached
+        raise AssertionError("the arm bridge must not run for a svelte pocket")
+
+    with pytest.raises(ValidationError):
+        await sites_service.get_html_armed_source(
+            workspace_id="ws1", user_id="u1", pocket_id=pocket_id, _arm=_fake_arm
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_html_armed_source_maps_a_bridge_failure_to_a_structured_error(
+    beanie_test_db,
+):
+    """A wedged or missing toolchain surfaces as a CloudError with a code, not an
+    unhandled 500 — the cloud error handler maps only CloudError, so a bare
+    RuntimeError would reach the operator as an opaque crash."""
+    pocket_id = await _make_html_pocket("ws1", "u1")
+
+    async def _fake_arm(*, source):
+        raise RuntimeError("arm-html failed: bun not found")
+
+    with pytest.raises(CloudError) as exc:
+        await sites_service.get_html_armed_source(
+            workspace_id="ws1", user_id="u1", pocket_id=pocket_id, _arm=_fake_arm
+        )
+    assert exc.value.code == "sites.arm_html_failed"

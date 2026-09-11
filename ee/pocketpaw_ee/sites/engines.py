@@ -214,6 +214,49 @@ def has_native_edit_lane(engine: str | None) -> bool:
     return normalize_engine(engine) in _NATIVE_EDIT_ENGINES
 
 
+#: Engines with a WRITE-BACK LANE — a generator-side applier that can splice a
+#: ``{uid, op}`` leaf edit back into the authored source at byte offsets.
+#:
+#: STRICTLY DIFFERENT from :func:`has_native_edit_lane`, and neither is a subset of
+#: the other — which is the whole reason both exist:
+#:
+#:   * ``html`` is HERE but not there. It has an applier (``applyHtmlLeafEdit``) and
+#:     no armed build; it is selected through its own srcdoc.
+#:   * ``react`` is there but NOT here. RX-2 built its read half (stamped uids, a
+#:     manifest, a shadow-renderable artifact) so it can be selected and refined
+#:     through chat, but the TSX splice does not exist. Offering direct manipulation
+#:     on react would hand the operator a save that can only fail.
+#:
+#: Mirrors ``hasWriteBackLane`` in paw-enterprise ``core/sites/engines.ts``. The two
+#: must agree or the UI offers a tool the API answers 422 to.
+_WRITE_BACK_ENGINES: frozenset[str] = frozenset({"svelte", "html"})
+
+
+def has_write_back_lane(engine: str | None) -> bool:
+    """True when a leaf edit can be spliced back into this engine's source.
+
+    The guard for ``apply_leaf_edits``. Before HE-9 this question was asked inline as
+    ``engine != "svelte"``, which is why the html lane stayed dark for months after
+    both of its halves had shipped: the generator could splice html and nothing on
+    this side would let it.
+    """
+    return normalize_engine(engine) in _WRITE_BACK_ENGINES
+
+
+#: The generator lane id a write-back engine's edits are spliced with. Only engines
+#: in ``_WRITE_BACK_ENGINES`` appear here, and the CLI rejects an unrecognized lane
+#: rather than falling back, so a new engine that forgets to register lands as a
+#: clean 422 instead of a batch of confusing per-uid rejections.
+_ENGINE_LANE: dict[str, str] = {"svelte": "svelte", "html": "html"}
+
+
+def write_back_lane(engine: str | None) -> str | None:
+    """The ``lane`` to send the generator for this engine, or None when it has no
+    write-back lane. ``svelte`` is spelled out rather than left implicit: the CLI
+    defaults an absent lane to svelte, but a caller that MEANS svelte should say so."""
+    return _ENGINE_LANE.get(normalize_engine(engine))
+
+
 def content_key(engine: str | None) -> str:
     """The pocket-dict key holding this engine's authored content.
 
