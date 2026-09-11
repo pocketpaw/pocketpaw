@@ -187,6 +187,58 @@
 #      permanently red while the runbook said to treat any non-zero count as
 #      blocking. Measured on the production proxy 2026-09-03: all 8 flagged rows
 #      were exactly that, worth $0.00014545 between them.
+#
+# Updated 2026-09-11 (fix/billing-reconcile-two-reads): the SHADOW compare reads
+# the proxy TWICE, like the ingest it is meant to vouch for.
+#
+# ``reconcile_tenant_spend`` performed the per-KEY read alone — the half a chat run
+# never appears in, for the reason stated above ``_read_tenant_spend_rows``: chat
+# authenticates with the deployment key and names its workspace in the body. This
+# is the one instrument an operator is told to read before making LiteLLM the sole
+# meter, and it could not see the product's main cost centre. On the deployment
+# shape recorded 2026-09-02 (three tenants with keys and no spend, three customers
+# with spend and no keys) it reported ``litellm=0, bc3=N, delta=-N`` on healthy
+# tenants — a coverage gap manufactured out of a read that never happened — and
+# ``litellm=0, bc3=0`` on the ones actually spending, two meters agreeing because
+# both looked away.
+#
+# It now calls ``_read_tenant_spend_rows``, which already merges both reads for the
+# ingest. Two things that helper had to gain, both additive (the ingest's call is
+# unchanged):
+#   * an explicit ``window``. Shadow compares the CALLER's ``[since, until)``; the
+#     high-water mark bounds the ingest and shadow must neither honour nor advance
+#     it, so the merge's per-row mark flag is discarded here and ``_in_window``
+#     stays the only filter, as it already was for the unbounded per-key read.
+#   * a nullable ``doc``. The compare reads workspaces with no provisioning row and
+#     must not create one: ``_spend_bookkeeping_row``'s ``createdAt`` becomes the
+#     live read window's start, so minting a row from a read-only path would move
+#     where billing later begins. Nothing else changes — the compare still debits
+#     nothing, writes no ledger entry, and touches no wallet.
+#
+# ONE WINDOW, RESOLVED ONCE, is the other half of the same fix, and it is the
+# general form of the bug. The first cut wired the second read up but let each
+# half of the compare resolve its own span when the caller passed no ``since``:
+# the LiteLLM side derived a start from the tenant's row while the ledger side
+# got the caller's None and summed all time. That reproduces the exact false
+# alarm — on a freshly provisioned tenant ``_customer_read_window`` returns
+# ``(createdAt, now)``, which is ZERO WIDTH, so the proxy was asked for spend
+# over an empty instant and the compare scored the nothing it got against an
+# all-time ledger sum. A swept tenant got 15 minutes against all time, which is
+# the same error with a smaller number on it.
+#
+# So the window is resolved BEFORE either read and the same pair drives all four
+# consumers: the customer read, ``_in_window``, ``sum_debits_by_cause``, and the
+# ``window_start``/``window_end`` on the persisted audit row (which now reports
+# what was compared, not what the caller typed). An omitted bound becomes
+# concrete here — ``_ALL_TIME_START`` below, and the instant the compare runs —
+# because the proxy read needs two dates and "resolve it for one side only" is
+# precisely the defect. An INVERTED window is refused outright: it compares
+# nothing on either side and would otherwise persist a confident
+# ``delta=0, coverage_gap=False``, a clean bill of health for a question nobody
+# asked, while reaching the proxy as ``start_date > end_date``.
+#
+# Mutation plan: tests/mutations/reconcile_two_reads.json (6 mutations, all
+# observed to fail the suite).
 
 from __future__ import annotations
 
@@ -264,6 +316,19 @@ _PROXY_INTERNAL_TEAMS = frozenset({"litellm-dashboard", "litellm-internal-health
 # precision keeps the window tight enough that the overlap above is the only
 # deliberate re-read.
 _PROXY_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# An OPEN lower bound, made concrete. The shadow compare's ``since`` is optional
+# ("compare everything"), and the credit-ledger side takes that literally — a None
+# bound is simply not filtered. The proxy read cannot: /spend/logs/v2 needs two
+# dates. Resolving the open side to the epoch is what keeps the two halves reading
+# the SAME span; the alternative (deriving a start for one half only) is how the
+# compare came to report a 15-minute proxy read against an all-time ledger sum.
+#
+# It is not an unbounded read in practice: ``spend_logs_by_end_user`` stops at 200
+# pages of 100, and the per-key half of the merge has always been all-time anyway.
+# The cutover sweep passes a 24h window, so this is the open-ended call's floor,
+# not the sweep's.
+_ALL_TIME_START = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -839,8 +904,10 @@ async def _spend_bookkeeping_row(workspace: str) -> LiteLLMTenantKey:
 
 async def _read_tenant_spend_rows(
     workspace: str,
-    doc: LiteLLMTenantKey,
+    doc: LiteLLMTenantKey | None,
     client: LiteLLMAdminClient,
+    *,
+    window: tuple[datetime, datetime] | None = None,
 ) -> list[tuple[dict[str, Any], bool]]:
     """Every spend row that could belong to ``workspace``, from both reads.
 
@@ -858,9 +925,29 @@ async def _read_tenant_spend_rows(
     A failure of the customer read does not sink the key read, or vice versa. One
     of them returning nothing is normal; both being skipped because the other
     raised would turn a partial outage into a total one, and the sweep retries.
+
+    ``window`` overrides the customer read's bounds for a caller that has its own
+    — the SHADOW compare reconciles an explicit ``[since, until)`` and must not be
+    bounded by the ingest's high-water mark, which it neither honours nor
+    advances. Omitted (the live ingest), the mark-derived
+    ``_customer_read_window`` applies as before.
+
+    ``doc`` may be None: the compare reads a workspace that has no provisioning
+    row at all, and must not create one to read it. Only the per-KEY half needs
+    the row, and that half is skipped without a key either way.
     """
     customer_rows: list[dict[str, Any]] = []
-    since, until = _customer_read_window(doc, now=datetime.now(UTC))
+    if window is None:
+        if doc is None:
+            # The live ingest always has a row (``_spend_bookkeeping_row`` creates
+            # one), and every windowless caller is that ingest. Raising here beats
+            # inventing a window, which would silently read the wrong span of time.
+            raise ValueError(
+                "_read_tenant_spend_rows needs either a tenant spend row or an "
+                f"explicit window (workspace={workspace})"
+            )
+        window = _customer_read_window(doc, now=datetime.now(UTC))
+    since, until = window
     start_date, end_date = _proxy_window(since, until)
     try:
         customer_rows = await client.spend_logs_by_end_user(
@@ -878,7 +965,7 @@ async def _read_tenant_spend_rows(
         )
 
     key_rows: list[dict[str, Any]] = []
-    if doc.litellm_key:
+    if doc is not None and doc.litellm_key:
         try:
             key_rows = await client.spend_logs(api_key=doc.litellm_key)
         except Exception:
@@ -1201,54 +1288,115 @@ async def reconcile_tenant_spend(
     CRITICAL — this performs ZERO debits. It NEVER calls ``credits.service.debit``
     and NEVER advances the spend high-water mark. BC-3 keeps billing untouched
     during shadow. The credit ledger is read (via the credits service's own
-    tenant-filtered ``sum_debits_by_cause``) but never written. A workspace with no
-    provisioned key still produces a record (litellm_credits=0) so the operator
-    sees every tenant in the compare, not a silent gap.
+    tenant-filtered ``sum_debits_by_cause``) but never written, and no provisioning
+    row is created — the compare reads a keyless workspace without minting the
+    bookkeeping row the ingest would.
+
+    Reads the proxy TWICE and merges, the same way ``ingest_tenant_spend`` does
+    (``_read_tenant_spend_rows``): customer-scoped, which is the only read that
+    sees a chat run, plus per-virtual-key. A workspace with no provisioned key is
+    still read — by customer — instead of producing the litellm_credits=0 this
+    used to report for it.
 
     ``since`` / ``until`` bound the window (datetimes; ``until`` exclusive). The
     LiteLLM rows are filtered on their parsed ``startTime``; the BC-3 debits on
-    ``createdAt`` — the same window on both sides. ``spend_card`` / ``threshold``
-    are injectable for tests; they default to the settings-derived values.
+    ``createdAt`` — the same window on both sides. That is enforced by resolving
+    the window ONCE, before either read: an omitted bound becomes concrete here
+    (the epoch below, and the instant the compare runs), and the SAME pair then
+    drives the proxy read, the row filter, the ledger sum, and the ``window_start``
+    /``window_end`` the audit row reports. Resolving them per-side is a bug with a
+    specific shape — a short proxy read scored against an all-time ledger sum is a
+    coverage gap that nothing spent — so there is one window or there is none.
+    An INVERTED window (``since`` after ``until``) raises rather than recording a
+    vacuous agreement. ``spend_card`` / ``threshold`` are injectable for tests;
+    they default to the settings-derived values.
     """
     _require_workspace(workspace)
 
     card = spend_card if spend_card is not None else load_spend_credits()
     gap_threshold = threshold if threshold is not None else reconcile_gap_threshold()
 
+    # --- The window, resolved ONCE for both meters. --------------------------
+    # An inverted window compares nothing on either side and would still persist a
+    # confident ``litellm=0, bc3=0, delta=0, coverage_gap=False`` — a clean bill of
+    # health for a question nobody asked. It also reaches the proxy as
+    # ``start_date > end_date``, which /spend/logs/v2 answers however it likes.
+    # Refuse it before any read and before any record.
+    if since is not None and until is not None and since > until:
+        raise ValidationError(
+            "llm_provisioning.invalid_window",
+            f"reconcile window is inverted: since={since.isoformat()} is after "
+            f"until={until.isoformat()}",
+        )
+    # Open bounds become concrete HERE, once, so that every consumer downstream
+    # measures the same span: the proxy read (which needs two dates), ``_in_window``
+    # on the LiteLLM rows, ``sum_debits_by_cause`` on the BC-3 debits, and the
+    # window the audit row reports. Resolving them separately is what made the two
+    # halves disagree — a 15-minute proxy read scored against an all-time ledger
+    # sum reads as a coverage gap, which is the exact false alarm this function was
+    # fixed to stop manufacturing.
+    window_since = since if since is not None else _ALL_TIME_START
+    window_until = until if until is not None else datetime.now(UTC)
+
     # --- LiteLLM side: proxy spend over the window -> credits. ---------------
-    litellm_credits = 0
     litellm_rows = 0
     doc = await LiteLLMTenantKey.find_one(LiteLLMTenantKey.workspace == workspace)
-    if doc is not None and doc.litellm_key:
-        client = admin_client if admin_client is not None else LiteLLMAdminClient()
-        rows = await client.spend_logs(api_key=doc.litellm_key)
-        # Sum the USD and convert ONCE. Converting per row and adding the results
-        # up rounds each row separately, so every call worth less than half a credit
-        # contributes nothing — and this is the compare an operator reads to decide
-        # whether LiteLLM can be trusted as the only meter. It understated the
-        # LiteLLM side against BC-3's per-run figure by exactly the rows the live
-        # ingest was also dropping, which made the cutover look safer than it was.
-        litellm_usd = 0.0
-        for row in rows:
-            row_dt = _parse_iso(_row_start_time(row))
-            if not _in_window(row_dt, since, until):
-                continue
-            litellm_rows += 1
-            litellm_usd += _num(row.get("spend"))
-        litellm_credits = card.to_credits(litellm_usd)
+    client = admin_client if admin_client is not None else LiteLLMAdminClient()
+    # BOTH reads, the same two the live ingest merges — the customer-scoped one is
+    # the only read that sees a chat run (chat authenticates with the deployment
+    # key), and this compare used to perform the per-KEY read alone. That made the
+    # instrument blind to the product's main cost centre in exactly the shape
+    # production has: tenants whose spend is chat reported ``litellm=0, bc3=N`` and
+    # a coverage gap manufactured out of a read that never happened, and the
+    # workspaces spending with no key at all reported ``litellm=0, bc3=0`` — two
+    # meters agreeing because both looked away. This is the number an operator
+    # reads before making LiteLLM the sole meter; it has to see what LiteLLM sees.
+    #
+    # The window is ``window_since``/``window_until`` above — the CALLER's, resolved
+    # ONCE and used by all four consumers below (the customer read, ``_in_window``,
+    # the BC-3 sum, and the persisted row). NOT the ingest's high-water mark: shadow
+    # neither honours nor advances that mark, so the merge's per-row flag is
+    # discarded here and ``_in_window`` stays the only filter, exactly as it already
+    # was for the unbounded per-key read.
+    #
+    # ``doc`` may be None and stays None. The compare must not mint the bookkeeping
+    # row the ingest creates: that row's ``createdAt`` becomes the live read
+    # window's start, so creating one from a read-only path would move where
+    # billing later begins.
+    rows = await _read_tenant_spend_rows(
+        workspace, doc, client, window=(window_since, window_until)
+    )
+    # Sum the USD and convert ONCE. Converting per row and adding the results
+    # up rounds each row separately, so every call worth less than half a credit
+    # contributes nothing — and this is the compare an operator reads to decide
+    # whether LiteLLM can be trusted as the only meter. It understated the
+    # LiteLLM side against BC-3's per-run figure by exactly the rows the live
+    # ingest was also dropping, which made the cutover look safer than it was.
+    litellm_usd = 0.0
+    for row, _honour_mark in rows:
+        row_dt = _parse_iso(_row_start_time(row))
+        if not _in_window(row_dt, window_since, window_until):
+            continue
+        litellm_rows += 1
+        litellm_usd += _num(row.get("spend"))
+    litellm_credits = card.to_credits(litellm_usd)
 
     # --- BC-3 side: the metered compute_spend debits over the SAME window. ---
     # Read through the credits service (entity-isolation: it owns its ledger doc).
     # This is a READ — no debit, no write.
     bc3_credits, bc3_entries = await credits_service.sum_debits_by_cause(
-        workspace, _BC3_COMPUTE_SPEND_CAUSE, since=since, until=until
+        workspace, _BC3_COMPUTE_SPEND_CAUSE, since=window_since, until=window_until
     )
 
     delta = litellm_credits - bc3_credits
     coverage_gap = abs(delta) > gap_threshold
 
-    window_start = since.isoformat() if since is not None else None
-    window_end = until.isoformat() if until is not None else None
+    # What was ACTUALLY compared, not what the caller typed. An open-ended call
+    # records the resolved bounds (the epoch, and the instant the compare ran)
+    # rather than a null, so an operator reading the audit row can tell which
+    # span produced the delta in front of them.
+    window_start = window_since.isoformat()
+    window_end = window_until.isoformat()
 
     # Persist the reconciliation row (append-only audit — NOT a ledger; recording
     # one moves no money). One row per tenant per window.
