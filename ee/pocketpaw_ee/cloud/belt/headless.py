@@ -1,6 +1,21 @@
 # ee/pocketpaw_ee/cloud/belt/headless.py — the HEADLESS develop runner.
 # Created: 2026-06-13 (feat/belt-headless-exec).
 #
+# Updated: 2026-09-12 (feat/belt-entity-events, stage slice) — ``run`` now emits
+#   the two stages it genuinely reaches, via ``service.emit_belt_stage``:
+#   ``orient`` once the queued blob is validated and the ``DevelopRequest`` is
+#   built (the runner has resolved what it is working on), then ``develop``
+#   immediately before ``develop_fn`` is awaited (the long step, reported while
+#   it happens rather than after). Both carry the REAL ``action_id`` — this is
+#   the only develop path that has one, because the queued Action was filed by a
+#   mandate before the runner ever saw it, so the transitions patch a run card
+#   that already exists. ``status`` stays ``"queued"``: the Action row IS still
+#   queued until a diff comes back, and the stage moving is not the status
+#   moving. Best-effort and non-fatal, like every other belt emit — a dead bus
+#   cannot fail a develop run. No new dependency, no new state: the path is
+#   linear, so the forward-only guard is just ``prev`` threaded between the two
+#   calls.
+#
 # Updated: 2026-06-13 (PR #1464 review) — store the produced diff VERBATIM (only
 #   normalizing a single trailing newline) instead of the leading/trailing-
 #   stripped value: stripping a real diff's trailing newline corrupts it for
@@ -54,6 +69,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import uuid4
+
+from pocketpaw_ee.cloud.belt.service import emit_belt_stage
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +176,44 @@ class HeadlessDevelopRunner:
             workspace_id=str(blob.get("workspace_id") or ""),
             mandate_id=str(blob.get("mandate_id") or ""),
             shift_no=int(blob.get("shift_no") or 0),
+        )
+
+        # STAGE: orient. The runner has resolved WHICH run it is developing —
+        # the action loaded, the blob validated as a genuinely queued run, the
+        # task / repo / base branch read off it. That is this path's orientation
+        # step, and it is the last point before the develop loop takes over for
+        # what may be several minutes.
+        #
+        # This is the ONE path that can carry a real ``action_id``: the queued
+        # Action already exists (a mandate filed it), so the console's run card
+        # exists too and these transitions patch a REAL row. The interactive
+        # station cannot — see ``belt/service.py``'s module comment.
+        #
+        # ``status`` stays "queued" because the Action row genuinely still is:
+        # ``station_pending`` is only cleared once a diff comes back. The stage
+        # is what moved, not the lifecycle status, and conflating them would
+        # claim progress the store does not have.
+        #
+        # No forward-only bookkeeping beyond threading ``prev`` through: this
+        # path is strictly linear (orient, then develop, exactly once each).
+        ws_id = request.workspace_id or workspace_id or ""
+        stage = await emit_belt_stage(
+            workspace_id=ws_id,
+            stage="orient",
+            prev=None,
+            action_id=action_id,
+            status="queued",
+        )
+
+        # STAGE: develop. The develop loop is about to run — from here the run
+        # is producing changes. Emitted BEFORE the await, not after, because the
+        # whole point is to report the long step while it is happening.
+        await emit_belt_stage(
+            workspace_id=ws_id,
+            stage="develop",
+            prev=stage,
+            action_id=action_id,
+            status="queued",
         )
 
         try:
