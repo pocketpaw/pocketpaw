@@ -1,0 +1,44 @@
+[
+  {
+    "label": "drop the gate from the resolver — the shipped state",
+    "file": "ee/pocketpaw_ee/cloud/_core/context.py",
+    "find": "    if not _header_bypass_allowed_here():\n        return None\n\n    if not _is_loopback_client(request):",
+    "replace": "    if not _is_loopback_client(request):",
+    "tests": ["tests/cloud/test_internal_header_context_gate.py"]
+  },
+  {
+    "label": "return True when the multi-tenant signal cannot be read",
+    "file": "ee/pocketpaw_ee/cloud/_core/context.py",
+    "find": "            \"refusing the internal header context (fail-closed).\"\n        )\n        return False\n    return True",
+    "replace": "            \"refusing the internal header context (fail-closed).\"\n        )\n        return True\n    return True",
+    "tests": ["tests/cloud/test_internal_header_context_gate.py"]
+  },
+  {
+    "label": "treat any present value of the opt-in as truthy, so =0 means yes",
+    "file": "ee/pocketpaw_ee/cloud/_core/context.py",
+    "find": "    if os.environ.get(_ALLOW_HEADER_BYPASS_ENV, \"\").strip().lower() in (\n        \"1\",\n        \"true\",\n        \"yes\",\n        \"on\",\n    ):",
+    "replace": "    if _ALLOW_HEADER_BYPASS_ENV in os.environ:",
+    "tests": ["tests/cloud/test_internal_header_context_gate.py"]
+  },
+  {
+    "label": "allow the bypass in cloud outright",
+    "file": "ee/pocketpaw_ee/cloud/_core/context.py",
+    "find": "        if is_multi_tenant_cloud():\n            return False",
+    "replace": "        if is_multi_tenant_cloud():\n            return True",
+    "tests": ["tests/cloud/test_internal_header_context_gate.py"]
+  },
+  {
+    "label": "drop the loopback factor — a pre-existing check",
+    "file": "ee/pocketpaw_ee/cloud/_core/context.py",
+    "find": "    if not _is_loopback_client(request):\n        return None\n\n    workspace_id = request.headers.get(WORKSPACE_HEADER, \"\").strip()",
+    "replace": "    workspace_id = request.headers.get(WORKSPACE_HEADER, \"\").strip()",
+    "tests": ["tests/cloud/test_internal_header_context_gate.py"]
+  },
+  {
+    "label": "restore the incorrect uvicorn claim",
+    "file": "ee/pocketpaw_ee/cloud/_core/context.py",
+    "find": "# This comment used to claim that uvicorn ignores forwarded headers unless\n# configured. That is WRONG, and it was load-bearing for how safe this looked.",
+    "replace": "# An attacker has to forge X-Forwarded-For upstream of the ASGI server\n# (uvicorn doesn't honor the header by default).",
+    "tests": ["tests/cloud/test_internal_header_context_gate.py"]
+  }
+]
