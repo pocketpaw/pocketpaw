@@ -15,6 +15,14 @@
 # shape of an SSRF, so the permissive ``validate_external_url`` is the wrong
 # one here even though it is what the Settings fields use.
 #
+# Updated 2026-09-11 (review B1): that validator is a SHAPE check, not the
+# whole guard — it does not resolve a hostname, so a public name pointing at a
+# private address passes it. It stays here because it is free and it fails a
+# bad paste early; the resolving egress guard lives in ``byok.service``
+# (``assert_gateway_egress``), which every write and every turn goes through.
+# The guest-mint route bypasses this DTO entirely, so a guard that only ran
+# here would not be a guard at all.
+#
 # There is deliberately NO response model carrying the key. ``ByokStatus`` is
 # the ONLY thing this domain returns, and it is built from display-only columns
 # (``last4`` / ``key_hint``) so answering a status call never decrypts anything.
@@ -83,11 +91,15 @@ class ByokSetRequest(BaseModel):
         v = v.strip().rstrip("/")
         if not v:
             return None
-        # ponytail: validated here and resolved again when the request is made,
-        # so a DNS rebind between the two is not closed. The egress guard
-        # (``assert_egress_allowed`` + ``PinnedTransport``) closes it and is the
-        # upgrade path if a gateway URL ever becomes long-lived infrastructure
-        # rather than a thing one guest typed.
+        # The CHEAP half of the guard, on purpose: https, non-empty, and
+        # internal hosts written as IP literals — all decided without touching
+        # DNS, so a junk paste is refused before anything resolves it. It is
+        # NOT sufficient on its own and must never be the only check: a bare
+        # hostname is not resolved here, so a public name with an A record
+        # inside RFC1918 passes this line. ``byok.service`` runs the resolving
+        # egress guard (``assert_gateway_egress``) on every path that stores or
+        # spends the URL, including the guest route, which does not come
+        # through this DTO at all.
         return validate_external_url_strict(v)
 
     @model_validator(mode="after")

@@ -31,6 +31,23 @@
 # talks to the user's base URL directly. That is the price of accepting any
 # base URL, and it costs the proxy's spend log and guardrails for those turns.
 #
+# Updated 2026-09-11 (review B1/B2/S6/S7): the gateway base URL is an SSRF
+# boundary and was only shape-checked. ``validate_external_url_strict`` blocks
+# internal hosts written as IP LITERALS and says in its own helper's docstring
+# that resolving a name is the caller's job — and no caller resolved. So
+# ``https://10-0-0-5.nip.io/v1`` passed both write paths, and ``POST
+# /auth/guest`` puts that behind no authentication at all. Now:
+#
+#   * ``assert_gateway_egress`` runs the real egress guard (DNS + every
+#     resolved address checked, internal rejected unconditionally) and the
+#     validation request goes out pinned to the vetted IP with redirects off.
+#   * ``resolve_turn_credentials`` re-runs it, because a row stored before this
+#     check, or a host whose DNS moved afterwards, is dialed on every turn.
+#     It REFUSES the turn rather than falling back to platform credentials —
+#     falling back would spend our money on the tenant's broken config.
+#   * ``validate_key`` returns the canonical URL so callers store the string
+#     that passed the guard rather than the one that arrived.
+#
 # Created 2026-08-28 (feat/other-hand-byok).
 #
 # Two audiences, deliberately separated:
@@ -52,11 +69,16 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+from urllib.parse import urlsplit
 
 import httpx
 
 from pocketpaw.security.redact import redact_output
+
+if TYPE_CHECKING:
+    from pocketpaw.security.url_validators import EgressTarget
+
 from pocketpaw_ee.cloud._core import crypto
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.byok.dto import ByokStatus
@@ -77,6 +99,78 @@ _VALIDATE_MODEL = "claude-haiku-4-5-20251001"
 # it, and a ``provider_allows_model`` rule. Adding a name here without those is
 # how you mint accounts whose every turn dead-ends.
 SUPPORTED_PROVIDERS = frozenset({"anthropic", "openai_compatible"})
+
+
+class GatewayEgressRejected(ValidationError):
+    """A gateway base URL does not pass the egress guard.
+
+    A ``ValidationError`` subclass, so the two write paths keep answering 422
+    with ``byok.base_url_rejected`` exactly as before. It is a distinct TYPE
+    because the turn path has to tell this apart from everything else that can
+    go wrong while resolving credentials: a generic failure there degrades to
+    platform billing, and doing that here would spend OUR money running a turn
+    whose stored address points somewhere it must not. The turn is refused
+    instead — see ``resolve_turn_credentials``.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__("byok.base_url_rejected", message)
+
+
+async def assert_gateway_egress(base_url: str) -> EgressTarget:
+    """Normalize a gateway base URL and prove it does not point inside.
+
+    Two layers, and the second one is the point:
+
+    * ``validate_external_url_strict`` — the cheap shape check the DTO edge
+      also runs: https only, non-empty, and internal hosts written as IP
+      LITERALS blocked. No DNS, so it is free.
+    * ``assert_egress_allowed`` — resolves the hostname and rejects EVERY
+      resolved address that is internal, then returns the single IP the
+      request must dial.
+
+    The shape check alone was the B1 hole. ``host_is_internal`` says so in its
+    own docstring — "a bare hostname (not an IP literal) returns False — name
+    resolution is the caller's job" — and no caller resolved, so
+    ``https://10-0-0-5.nip.io/v1`` (or any attacker-owned name with an A record
+    in RFC1918) passed both write paths and the server then POSTed to it. The
+    status codes ``_validate_gateway_key`` maps back are a five-way response
+    oracle, and ``POST /auth/guest`` is unauthenticated, so a stranger picked
+    the target.
+
+    ``allow_internal=False`` is passed explicitly rather than inherited.
+    ``assert_egress_allowed`` otherwise honours ``POCKETPAW_ALLOW_INTERNAL_URLS``,
+    and an operator who set that so localhost connectors keep working would
+    reopen this boundary — which is the one boundary here a signed-out stranger
+    can reach.
+
+    The allow-list is the URL's own hostname. There is no registry of gateways
+    a user may name (that is the whole feature), so what this call wants from
+    the guard is the resolution and the pin, not a membership test.
+
+    Returns the ``EgressTarget``: ``.url`` is the canonical (stripped,
+    slash-trimmed) URL to store and request against, ``.pinned_ip`` the address
+    ``PinnedTransport`` must dial so DNS cannot be re-resolved between the check
+    and the connect.
+    """
+    from pocketpaw.security.url_validators import (
+        EgressError,
+        assert_egress_allowed,
+        validate_external_url_strict,
+    )
+
+    try:
+        base = validate_external_url_strict((base_url or "").strip().rstrip("/"))
+    except ValueError as exc:
+        raise GatewayEgressRejected(str(exc)) from exc
+
+    host = urlsplit(base).hostname or ""
+    try:
+        return await assert_egress_allowed(base, {host}, allow_internal=False)
+    except EgressError as exc:
+        raise GatewayEgressRejected(
+            f"That gateway address is not reachable from here: {exc}"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -133,7 +227,7 @@ async def validate_key(
     provider: str = "anthropic",
     base_url: str | None = None,
     model: str | None = None,
-) -> None:
+) -> str | None:
     """Prove the key works, or raise ValidationError naming why.
 
     Network trouble is NOT a bad key: a timeout raises the transport error so
@@ -144,10 +238,17 @@ async def validate_key(
     what a turn will actually use. Checking only the key would let a wrong
     model id through to fail on the first turn, which is the failure mode this
     whole function exists to move earlier.
+
+    RETURNS the canonical base URL for a gateway, ``None`` for anthropic
+    (2026-09-11, review S6). Callers must store the returned value, not the one
+    they passed in: this function normalizes (``strip().rstrip("/")``) before
+    guarding, and the guest-mint path used to throw that away and write the raw
+    body value. Today the delta is only whitespace and a trailing slash, which
+    is exactly the size of gap that a later normalization change turns into a
+    stored value that never passed a guard.
     """
     if provider == "openai_compatible":
-        await _validate_gateway_key(api_key, base_url or "", model or "")
-        return
+        return await _validate_gateway_key(api_key, base_url or "", model or "")
 
     payload = {
         "model": _VALIDATE_MODEL,
@@ -180,22 +281,32 @@ async def validate_key(
         )
     # Anything else (200, or a 400 about the tiny payload) means the credential
     # was accepted and the request was understood. That is what we are testing.
+    return None
 
 
-async def _validate_gateway_key(api_key: str, base_url: str, model: str) -> None:
+async def _validate_gateway_key(api_key: str, base_url: str, model: str) -> str:
     """Same proof, against an OpenAI-compatible gateway the user named.
 
-    The URL has already passed ``validate_external_url_strict`` at the DTO
-    edge (https, no internal hosts). It is re-checked here because this
-    function is also reachable from ``set_key``, and a guard that only runs on
-    one of two paths is not a guard.
-    """
-    from pocketpaw.security.url_validators import validate_external_url_strict
+    The URL passed ``validate_external_url_strict`` at the DTO edge, but that
+    is a shape check only. The full egress guard runs HERE because this is the
+    one point both write paths share: the guest-mint route's
+    ``_GuestMintRequest`` has plain ``str`` fields and never touches the DTO,
+    so on the unauthenticated path this is the only guard there is.
 
-    try:
-        base = validate_external_url_strict(base_url.strip().rstrip("/"))
-    except ValueError as exc:
-        raise ValidationError("byok.base_url_rejected", str(exc)) from exc
+    The request then goes out through ``PinnedTransport``, dialing the exact IP
+    the guard vetted, with redirects off. Without the pin, DNS is resolved a
+    second time when the connection opens and a rebinding host can answer with
+    an internal address in the gap (the TOCTOU the guard exists to close).
+    Redirects are pinned OFF rather than inherited from httpx's default: a
+    cooperating gateway could otherwise bounce the request onto an internal
+    host, and that is a security property, not a default worth inheriting.
+
+    Returns the canonical base URL — the caller stores THIS, not its input.
+    """
+    from pocketpaw.security.url_validators import PinnedTransport
+
+    target = await assert_gateway_egress(base_url)
+    base = target.url
 
     payload = {
         "model": model,
@@ -206,7 +317,11 @@ async def _validate_gateway_key(api_key: str, base_url: str, model: str) -> None
         "authorization": f"Bearer {api_key}",
         "content-type": "application/json",
     }
-    async with httpx.AsyncClient(timeout=_VALIDATE_TIMEOUT_S) as client:
+    async with httpx.AsyncClient(
+        timeout=_VALIDATE_TIMEOUT_S,
+        follow_redirects=False,
+        transport=PinnedTransport(target.pinned_ip),
+    ) as client:
         resp = await client.post(f"{base}/chat/completions", json=payload, headers=headers)
 
     if resp.status_code == 401:
@@ -250,6 +365,7 @@ async def _validate_gateway_key(api_key: str, base_url: str, model: str) -> None
             "byok.provider_unavailable",
             "The gateway did not respond. Your key was not saved — try again shortly.",
         )
+    return base
 
 
 async def set_key(
@@ -279,7 +395,12 @@ async def set_key(
         )
 
     if validate:
-        await validate_key(api_key, provider=provider, base_url=base_url, model=model)
+        # Store what passed the guard, not what arrived (review S6). The
+        # validator normalizes before checking, and writing the un-normalized
+        # copy is the shape a future normalization change turns into a hole.
+        canonical = await validate_key(api_key, provider=provider, base_url=base_url, model=model)
+        if canonical:
+            base_url = canonical
 
     # An anthropic row never carries a gateway address. Writing one through
     # would leave a stale URL behind after a switch back, and the resolver
@@ -393,6 +514,15 @@ async def resolve_turn_credentials(workspace_id: str | None) -> TurnCredentials:
     undecryptable row (the deployment's Fernet key rotated) also degrades to
     platform rather than failing the turn — the user re-enters their key from a
     working product, not from a broken one.
+
+    ONE case raises instead of degrading: a gateway row whose base URL no
+    longer passes the egress guard (review B2). Write-time validation is not a
+    runtime guard — a row stored before this check existed, or a host whose DNS
+    moved inside afterwards, would otherwise be dialed on every turn, with the
+    upstream's answer flowing back to the user. It raises
+    ``GatewayEgressRejected`` rather than returning ``platform`` DELIBERATELY:
+    degrading would run the tenant's turn on our credential, so a tenant's
+    broken (or hostile) configuration would spend our money. Refuse the turn.
     """
     if not workspace_id:
         return TurnCredentials(source="platform")
@@ -413,11 +543,27 @@ async def resolve_turn_credentials(workspace_id: str | None) -> TurnCredentials:
 
     if not plaintext:
         return TurnCredentials(source="platform")
+
+    base_url = doc.base_url
+    if doc.provider == "openai_compatible":
+        # Re-guard at turn time, not just at write time. Raises
+        # ``GatewayEgressRejected``; see this function's docstring for why that
+        # is a raise and not a degrade-to-platform.
+        #
+        # ponytail: this vets the address, it does not pin the connection —
+        # the runtime's own OpenAI client resolves the hostname again when it
+        # dials, so a host that rebinds between here and the connect is still
+        # open. Closing it means plumbing ``target.pinned_ip`` through the
+        # settings override into the backend's transport, which is a change to
+        # the runtime rather than to this seam. The un-resolved-at-all hole
+        # (B1) is what this closes.
+        base_url = (await assert_gateway_egress(base_url or "")).url
+
     return TurnCredentials(
         source="byok",
         api_key=plaintext,
         provider=doc.provider,
-        base_url=doc.base_url,
+        base_url=base_url,
         model=doc.model,
     )
 

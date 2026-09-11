@@ -15,6 +15,12 @@
 #      server-side).
 #   5. The wire contract (top-level code/kind) is pinned byte-for-byte — the
 #      sibling frontend builds against it.
+#
+# Updated 2026-09-11 (review B1): added the unauthenticated-SSRF case to
+# ``TestMintGuest``. Every other mint test patches ``validate_key`` away, which
+# is right for what they assert and blinding for this one — the guard lives
+# inside that call, and this route never touches the DTO that would otherwise
+# back it up. The new test leaves ``validate_key`` alone and stubs DNS instead.
 
 from __future__ import annotations
 
@@ -246,6 +252,43 @@ class TestMintGuest:
         with pytest.raises(ValidationError) as exc:
             await guest_service.mint_guest("xpl_" + "a" * 40, provider="openai_compatible")
         assert exc.value.code == "byok.base_url_required"
+
+    async def test_a_gateway_address_that_resolves_INSIDE_mints_nothing(
+        self, mongo_db, monkeypatch
+    ):
+        """The unauthenticated SSRF (review B1). /auth/guest is on the
+        route-auth allowlist and rate-limited per IP only, so a signed-out
+        stranger picks this address. ``_GuestMintRequest`` carries plain ``str``
+        fields and never touches ``ByokSetRequest``, so ``validate_key`` is the
+        ONLY guard on this path — which is why ``validate_key`` is deliberately
+        NOT patched here. Patching it is what makes every other test in this
+        class blind to the guard.
+
+        PRE-FIX THIS MINTS A GUEST. ``validate_external_url_strict`` catches
+        internal IP literals and never resolves a name, so a public hostname
+        with an A record in RFC1918 passed, was stored, and was then POSTed to
+        — at mint and again on every turn.
+        """
+        import socket
+
+        def _resolves_inside(host, *_a, **_kw):
+            if host == "10-0-0-5.nip.io":
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))]
+            raise socket.gaierror(f"name resolution disabled in test: {host}")
+
+        monkeypatch.setattr(socket, "getaddrinfo", _resolves_inside)
+        # The operator's dev escape must not reach this boundary.
+        monkeypatch.setenv("POCKETPAW_ALLOW_INTERNAL_URLS", "true")
+
+        with pytest.raises(ValidationError) as exc:
+            await guest_service.mint_guest(
+                "xpl_" + "a" * 40,
+                provider="openai_compatible",
+                base_url="https://10-0-0-5.nip.io/v1",
+                model="claude-opus-5",
+            )
+        assert exc.value.code == "byok.base_url_rejected"
+        assert await User.find_all().count() == 0, "a rejected address must not mint a user row"
 
     async def test_a_dead_key_mints_NOTHING(self, mongo_db, monkeypatch):
         async def _dead(api_key, **_kw):

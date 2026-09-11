@@ -9,6 +9,13 @@
 # provider gate below is now the only thing deciding what is accepted, and it
 # reads ``byok_service.SUPPORTED_PROVIDERS`` rather than naming a provider.
 #
+# Updated 2026-09-11 (review S6): ``mint_guest`` now stores the base URL
+# ``validate_key`` hands back rather than the raw body string. The validator
+# normalizes (``strip().rstrip("/")``) before it guards, and writing the
+# un-normalized copy meant the value in the database was not the value that
+# passed the check. This route also does not go through ``ByokSetRequest``, so
+# ``validate_key`` is the whole guard here, not a second opinion on one.
+#
 # Flow (the order is the security property):
 #   rate-limit -> validate the key against the provider -> mint user ->
 #   provision workspace (default agent + LiteLLM tenant key ride along) ->
@@ -89,8 +96,18 @@ async def mint_guest(
         raise ValidationError("byok.key_missing", "Enter an API key to try Otherhand.")
     api_key = api_key.strip()
 
-    # 1. Prove the key works BEFORE anything is created.
-    await byok_service.validate_key(api_key, provider=provider, base_url=base_url, model=model)
+    # 1. Prove the key works BEFORE anything is created. For a gateway this is
+    #    also the ONLY SSRF guard on this path — ``_GuestMintRequest`` carries
+    #    plain ``str`` fields and never touches ``ByokSetRequest`` — and the
+    #    route is unauthenticated, so a stranger picks the address.
+    #    Keep the URL it hands back: it normalized before guarding, and the
+    #    value that reaches the database must be the value that passed
+    #    (review S6). Previously the raw body string was stored instead.
+    canonical_base_url = await byok_service.validate_key(
+        api_key, provider=provider, base_url=base_url, model=model
+    )
+    if canonical_base_url:
+        base_url = canonical_base_url
 
     # 2. Mint the anonymous user. Synthetic unique email (fastapi-users
     #    requires one), random password nobody knows — the account is only

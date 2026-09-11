@@ -7,6 +7,13 @@ self-hosted LiteLLM proxy.
 
 Design source: ``docs/design/drafts/2026-07-29-pydantic-ai-agent-backend-prd.md``.
 
+Changed 2026-09-11 (feat/byok-custom-gateway, review B2/N1): the shared HTTP
+client in ``_get_http_client`` pins ``follow_redirects=False``. It is httpx's
+default, so nothing changes today — but the OpenAI SDK's own client sets it
+True, and this is the client a BYOK gateway turn uses to dial a base URL the
+user supplied. A redirect there would carry the request, and the key in its
+header, to a host no egress guard vetted.
+
 Changed 2026-09-05: this file no longer calls ``logfire.configure`` itself. That
 call is process-global and this file is not — see
 ``_build_instrumentation_capability``. It now delegates to
@@ -1189,6 +1196,15 @@ class PydanticAIBackend:
                     connect=15.0,
                 ),
                 headers=headers,
+                # Pinned, not inherited (2026-09-11, review B2/N1). httpx already
+                # defaults to False, so this changes nothing today — but the
+                # OpenAI SDK's own client sets it True, and this client is what a
+                # BYOK gateway turn dials a user-supplied base URL with. Following
+                # a redirect there would let a cooperating gateway bounce the
+                # request (and the key in its header) onto a host no guard saw.
+                # A security property is worth a line; a default is not worth
+                # trusting.
+                follow_redirects=False,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not build HTTP client, using library defaults: %s", exc)

@@ -54,6 +54,62 @@
     ]
   },
   {
+    "label": "gateway URL is shape-checked but never RESOLVED \u2014 10-0-0-5.nip.io reaches our private network, unauthenticated",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "        return await assert_egress_allowed(base, {host}, allow_internal=False)",
+    "replace": "        from pocketpaw.security.url_validators import EgressTarget\n\n        return EgressTarget(url=base, host=host, port=443, pinned_ip=host)",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestAHostnameThatResolvesInsideIsRejected",
+      "tests/cloud/auth/test_guest.py::TestMintGuest::test_a_gateway_address_that_resolves_INSIDE_mints_nothing"
+    ]
+  },
+  {
+    "label": "egress guard inherits POCKETPAW_ALLOW_INTERNAL_URLS \u2014 an operator's localhost-connector flag reopens the guest SSRF",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "        return await assert_egress_allowed(base, {host}, allow_internal=False)",
+    "replace": "        return await assert_egress_allowed(base, {host})",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestAHostnameThatResolvesInsideIsRejected",
+      "tests/cloud/auth/test_guest.py::TestMintGuest::test_a_gateway_address_that_resolves_INSIDE_mints_nothing"
+    ]
+  },
+  {
+    "label": "turn path trusts the stored URL \u2014 a row whose DNS moved inside is dialed on every turn",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "        base_url = (await assert_gateway_egress(base_url or \"\")).url",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestTheTurnPathReGuardsTheStoredUrl"
+    ]
+  },
+  {
+    "label": "a rejected gateway address degrades to platform credentials \u2014 the tenant's bad config spends our money every turn",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "class GatewayEgressRejected(ValidationError):",
+    "replace": "class GatewayEgressRejected(Exception):",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestTheTurnPathReGuardsTheStoredUrl::test_it_refuses_rather_than_degrading_to_platform_credentials"
+    ]
+  },
+  {
+    "label": "the validation request is unpinned \u2014 DNS is resolved a second time at connect and a rebinding host answers from inside",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "        transport=PinnedTransport(target.pinned_ip),",
+    "replace": "",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestAHostnameThatResolvesInsideIsRejected::test_the_request_is_pinned_and_does_not_follow_redirects"
+    ]
+  },
+  {
+    "label": "the stored URL is the raw one, not the one that passed the guard",
+    "file": "ee/pocketpaw_ee/cloud/auth/guest.py",
+    "find": "    if canonical_base_url:\n        base_url = canonical_base_url",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestAHostnameThatResolvesInsideIsRejected::test_validate_key_returns_the_canonical_url_callers_must_store"
+    ]
+  },
+  {
     "label": "mint drops the gateway kwargs \u2014 an xpl_ key is validated against Anthropic and reads as a bad key",
     "file": "ee/pocketpaw_ee/cloud/auth/guest.py",
     "find": "    await byok_service.validate_key(api_key, provider=provider, base_url=base_url, model=model)",
