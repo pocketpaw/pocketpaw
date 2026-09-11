@@ -1722,7 +1722,9 @@ class Settings(BaseSettings):
             "that shows no pytest-style 'N passed' line is recorded as "
             "'no_checks', never a pass. And a command that cannot launch is a "
             "FAILED check, not a skip, so a typo here refuses proposals rather "
-            "than silently disabling the gate. Left unset, pocketpaw itself gets "
+            "than silently disabling the gate — the one non-zero exit that is "
+            "NOT a refusal is 5, read as pytest's 'no tests collected', which "
+            "records 'no_checks'. Left unset, pocketpaw itself gets "
             "a built-in targeted default (see verify.py) and every other repo "
             "falls through to discovery. Set via POCKETPAW_BELT_VERIFY_COMMANDS "
             'as a JSON object, e.g. {"/srv/repos/acme": ["make", "check"]}.'
