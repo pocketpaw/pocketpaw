@@ -66,6 +66,15 @@ class TestStatusNeverCarriesTheKey:
             "key_hint",
             "last_verified_at",
             "last_error",
+            # The illustration credential (2026-09-11). Same display-only rule:
+            # ``image_configured`` is a bool and the other two are a hint and a
+            # last-four, none of which needs a decrypt to compute. There is no
+            # ``image_verified_at`` because fal cannot be asked whether a key is
+            # good without generating an image.
+            "image_configured",
+            "image_last4",
+            "image_key_hint",
+            "image_last_error",
         }
         assert set(ByokStatus.model_fields) == allowed
 
@@ -195,3 +204,181 @@ class TestTheHeaderThatCarriesTheKey:
         client = self._client_for("   ")
         assert client is not None
         assert "x-api-key" not in client.headers
+
+
+# ---------------------------------------------------------------------------
+# The illustration credential (2026-09-11, feat/byok-image-key).
+#
+# One row now holds TWO independent credentials, which creates exactly one new
+# way to lose data: removing one taking the other with it. ``delete_key`` used
+# to drop the whole document, and a user rotating their Anthropic key would
+# have silently lost their illustrator.
+# ---------------------------------------------------------------------------
+
+from pocketpaw_ee.cloud.byok.dto import ByokImageKeyRequest  # noqa: E402
+
+_FAL_KEY = "11111111-2222-3333-4444-555555555555:" + "f" * 32
+
+
+class TestImageKeyValidation:
+    def test_accepts_the_shape_fal_actually_issues(self):
+        assert ByokImageKeyRequest(api_key=_FAL_KEY).api_key == _FAL_KEY
+
+    def test_rejects_a_key_with_no_secret_half(self):
+        with pytest.raises(ValueError, match="key-id"):
+            ByokImageKeyRequest(api_key="11111111-2222-3333-4444-555555555555")
+
+    def test_rejects_a_whole_shell_command(self):
+        with pytest.raises(ValueError, match="whitespace"):
+            ByokImageKeyRequest(api_key='export FAL_KEY="abc:def"')
+
+
+class TestImageKeyDisplayColumns:
+    """The hint must name the key WITHOUT naming the secret.
+
+    ``_hint`` splits on ``-``, so reusing it on a fal key would print three
+    segments of the UUID and tell the user nothing. Worse, a naive "first N
+    characters" would be right up until fal changed its format.
+    """
+
+    def test_the_hint_is_the_key_id_and_never_the_secret(self):
+        hint = byok._fal_hint(_FAL_KEY)
+        assert hint == "11111111-2222-3333-4444-555555555555"
+        assert "f" * 32 not in hint
+
+    def test_last4_comes_from_the_secret_so_two_keys_sharing_an_id_differ(self):
+        a = "same-id:" + "a" * 20 + "abcd"
+        b = "same-id:" + "a" * 20 + "wxyz"
+        assert byok._fal_last4(a) != byok._fal_last4(b)
+
+    def test_a_key_of_an_unexpected_shape_yields_no_hint_rather_than_a_guess(self):
+        assert byok._fal_hint("nocolonhere") == ""
+
+
+class TestTheTwoCredentialsAreIndependent:
+    """The data-loss case. Both directions, because both are one line of code
+    apart from being wrong."""
+
+    @pytest.mark.asyncio
+    async def test_removing_the_llm_key_keeps_the_image_key(self, monkeypatch):
+        saved: dict[str, object] = {}
+        deleted: list[bool] = []
+
+        class _Row:
+            workspace = "ws-1"
+            encrypted_key = "llm-token"
+            last4 = "zzzz"
+            key_hint = "sk-ant-api03"
+            base_url = None
+            model = None
+            provider = "anthropic"
+            last_verified_at = None
+            last_error = None
+            image_encrypted_key = "image-token"
+            image_last4 = "ffff"
+            image_key_hint = "key-id"
+            image_last_error = None
+
+            async def save(self):
+                saved["encrypted_key"] = self.encrypted_key
+                saved["image_encrypted_key"] = self.image_encrypted_key
+
+            async def delete(self):
+                deleted.append(True)
+
+        row = _Row()
+
+        class _StubDoc:
+            workspace = "workspace"
+
+            @staticmethod
+            async def find_one(*_a, **_k):
+                return row
+
+        monkeypatch.setattr(byok, "ByokProviderKey", _StubDoc)
+        await byok.delete_key("ws-1")
+
+        assert deleted == [], "the row was dropped, taking the image key with it"
+        assert saved["encrypted_key"] == "", "the LLM key was not actually removed"
+        assert saved["image_encrypted_key"] == "image-token"
+
+    @pytest.mark.asyncio
+    async def test_removing_the_image_key_keeps_the_llm_key(self, monkeypatch):
+        saved: dict[str, object] = {}
+        deleted: list[bool] = []
+
+        class _Row:
+            workspace = "ws-1"
+            encrypted_key = "llm-token"
+            last4 = "zzzz"
+            key_hint = "sk-ant-api03"
+            base_url = None
+            model = None
+            provider = "anthropic"
+            last_verified_at = None
+            last_error = None
+            image_encrypted_key = "image-token"
+            image_last4 = "ffff"
+            image_key_hint = "key-id"
+            image_last_error = None
+
+            async def save(self):
+                saved["encrypted_key"] = self.encrypted_key
+                saved["image_encrypted_key"] = self.image_encrypted_key
+
+            async def delete(self):
+                deleted.append(True)
+
+        row = _Row()
+
+        class _StubDoc:
+            workspace = "workspace"
+
+            @staticmethod
+            async def find_one(*_a, **_k):
+                return row
+
+        monkeypatch.setattr(byok, "ByokProviderKey", _StubDoc)
+        await byok.delete_image_key("ws-1")
+
+        assert deleted == [], "the row was dropped, taking the LLM key with it"
+        assert saved["image_encrypted_key"] is None
+        assert saved["encrypted_key"] == "llm-token"
+
+
+class TestImageKeyResolution:
+    @pytest.mark.asyncio
+    async def test_an_unreadable_row_reads_as_no_key_rather_than_raising(self, monkeypatch):
+        """Same posture as the LLM key's rotated-Fernet case, for a smaller
+        reason: a picture is not worth failing a turn over, so an unreadable
+        image key falls back to the platform's instead of raising inside a tool
+        call the agent is in the middle of."""
+        from cryptography.fernet import Fernet
+
+        token = crypto.encrypt(_FAL_KEY)
+        monkeypatch.setenv("CLOUD_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+        class _Row:
+            image_encrypted_key = token
+
+        class _StubDoc:
+            workspace = "workspace"
+
+            @staticmethod
+            async def find_one(*_a, **_k):
+                return _Row()
+
+        monkeypatch.setattr(byok, "ByokProviderKey", _StubDoc)
+        assert await byok.resolve_image_key("ws-1") is None
+
+    @pytest.mark.asyncio
+    async def test_no_workspace_never_touches_the_database(self, monkeypatch):
+        class _Exploding:
+            workspace = "workspace"
+
+            @staticmethod
+            async def find_one(*_a, **_k):
+                raise AssertionError("a keyless turn queried for a credential")
+
+        monkeypatch.setattr(byok, "ByokProviderKey", _Exploding)
+        assert await byok.resolve_image_key(None) is None

@@ -19,6 +19,11 @@ from pydantic import BaseModel, Field, field_validator
 # reaches the provider — and before we spend a validation round trip on it.
 _ANTHROPIC_PREFIX = "sk-ant-"
 _MIN_KEY_LEN = 20
+# fal spells its credential ``<key-id>:<secret>``. Checked at the edge for the
+# same reason the Anthropic prefix is: a paste that is obviously not a fal key
+# should fail here, where the user can see the field, rather than one picture
+# later inside a generation they paid for.
+_MIN_IMAGE_KEY_LEN = 16
 
 
 class ByokSetRequest(BaseModel):
@@ -47,6 +52,29 @@ class ByokSetRequest(BaseModel):
         return v
 
 
+class ByokImageKeyRequest(BaseModel):
+    """Set or replace this workspace's fal.ai key (illustrations).
+
+    A SEPARATE route from ``ByokSetRequest`` on purpose: ``PUT /byok/key`` takes
+    the whole LLM credential or nothing, so folding the image key in would mean
+    re-pasting an Anthropic key to change an illustrator. The two credentials
+    are independent and their write paths are too.
+    """
+
+    api_key: str = Field(min_length=_MIN_IMAGE_KEY_LEN, max_length=512)
+
+    @field_validator("api_key")
+    @classmethod
+    def _looks_like_a_fal_key(cls, v: str) -> str:
+        v = v.strip()
+        if any(c.isspace() for c in v):
+            raise ValueError("the key contains whitespace — paste the key alone")
+        head, sep, secret = v.partition(":")
+        if not sep or not head or not secret:
+            raise ValueError("a fal.ai key looks like '<key-id>:<secret>'")
+        return v
+
+
 class ByokStatus(BaseModel):
     """What the UI is allowed to know about the stored key.
 
@@ -59,3 +87,13 @@ class ByokStatus(BaseModel):
     key_hint: str | None = None
     last_verified_at: datetime | None = None
     last_error: str | None = None
+
+    # The illustration credential (2026-09-11). Display-only, like the pair
+    # above, and independent of it: a workspace may have either, both, or
+    # neither. There is no ``image_verified_at`` because fal cannot be asked
+    # whether a key is good without generating an image — ``image_last_error``
+    # is stamped by the first refused generation instead.
+    image_configured: bool = False
+    image_last4: str | None = None
+    image_key_hint: str | None = None
+    image_last_error: str | None = None
