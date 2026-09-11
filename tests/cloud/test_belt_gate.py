@@ -212,6 +212,29 @@ class _identity:
         return False
 
 
+def _verify_off(monkeypatch) -> None:
+    """Turn the propose-time mechanical gate OFF for one test.
+
+    Since feat/belt-gate (2026-09-12) ``belt_propose_change`` verifies a diff
+    before filing the Action, so a deliberately non-applying diff is refused at
+    propose time and never reaches the executor. The executor's own apply-
+    conflict handling is still live in production — a human can approve an hour
+    after the base branch moved — so the tests that cover it disable the gate
+    rather than lose the path. Layers on top of whatever ``allowlist`` patched,
+    so call it from the test body, after the fixtures."""
+    from pocketpaw.config import get_settings
+
+    current = get_settings()
+
+    class _S:
+        belt_verify_enabled = False
+
+        def __getattr__(self, name):
+            return getattr(current, name)
+
+    monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
+
+
 class FakePrOpener:
     """An injectable PrOpener that records its call args and returns a fixed
     URL — never touches GitHub."""
@@ -431,9 +454,15 @@ async def test_reject_round_trips_for_code_change(repo, store, allowlist):
 # ---------------------------------------------------------------------------
 
 
-async def test_apply_conflict_marks_failed_and_cleans_up(repo, store, allowlist):
+async def test_apply_conflict_marks_failed_and_cleans_up(repo, store, allowlist, monkeypatch):
     """A diff that cannot apply (it edits a line the base no longer has) →
-    the Action is marked FAILED, no branch is pushed, the worktree is cleaned."""
+    the Action is marked FAILED, no branch is pushed, the worktree is cleaned.
+
+    The propose-time gate would refuse this diff outright (it is covered there
+    by ``test_belt_verify.py::test_non_applying_diff_is_a_named_git_apply_check``),
+    so it is turned off here to reach the EXECUTOR's conflict path — which stays
+    live in production for a base branch that moves between propose and approve."""
+    _verify_off(monkeypatch)
     # A diff that targets content NOT present in the seeded app.py — git apply
     # --3way can't reconcile it, so it fails.
     bad_diff = (

@@ -197,6 +197,29 @@ def allowlist(repo: Path, monkeypatch) -> None:
     monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
 
 
+def _verify_off(monkeypatch) -> None:
+    """Turn the propose-time mechanical gate OFF for one test.
+
+    Since feat/belt-gate (2026-09-12) ``belt_propose_change`` verifies a diff
+    before filing the Action, so a deliberately non-applying diff is refused at
+    propose time and never reaches the executor. The executor's apply-conflict
+    path stays live in production (a human can approve after the base branch
+    moved), so the test that covers its chain disables the gate rather than lose
+    the path. Layers on top of whatever ``allowlist`` patched — call it from the
+    test body, after the fixtures."""
+    from pocketpaw.config import get_settings
+
+    current = get_settings()
+
+    class _S:
+        belt_verify_enabled = False
+
+        def __getattr__(self, name):
+            return getattr(current, name)
+
+    monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
+
+
 # ---------------------------------------------------------------------------
 # identity + router client + fake PR opener (the ONE allowed external fake)
 # ---------------------------------------------------------------------------
@@ -527,7 +550,12 @@ async def test_failed_apply_is_one_clean_three_event_chain(
     """An approved run whose diff cannot apply closes the chain with a single
     failed terminal: agent.proposed → human.corrected(accepted) →
     decision.completed(passed=False, action_outcome="failed",
-    error_class="ApplyConflict"). No PR opened, no doubled terminal."""
+    error_class="ApplyConflict"). No PR opened, no doubled terminal.
+
+    The propose-time gate would refuse this diff before the Action exists, so it
+    is disabled here to reach the EXECUTOR's conflict path — the one that still
+    fires in production when the base branch moves between propose and approve."""
+    _verify_off(monkeypatch)
     _patch_pr_opener(monkeypatch)
     user = _FakeUser()
     client = _make_client(store, user, monkeypatch)
