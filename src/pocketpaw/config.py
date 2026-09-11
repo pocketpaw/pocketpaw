@@ -221,6 +221,12 @@ Changes:
     Belt & Pulley code-change gate (BS-3). A ``belt_propose_change`` proposal's
     repo path must resolve inside one of these roots; empty defaults to the
     cwd's parent. Env: POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
+  - 2026-09-12: Added ``belt_verify_enabled`` (True) + ``belt_verify_timeout_s``
+    (600) — the develop station's MECHANICAL gate. A ``belt_propose_change``
+    diff is applied in a throwaway worktree and the tree's own checks are run
+    BEFORE the human approval gate; a failure refuses the proposal outright.
+    ON by default: the point is that the Instinct approver sees verified work.
+    Env: POCKETPAW_BELT_VERIFY_ENABLED / POCKETPAW_BELT_VERIFY_TIMEOUT_S.
   - 2026-07-01: Added ``shield_api_socket`` + ``shield_api_token`` (SEC-5) —
     the same-box shield daemon's control-API UNIX socket + Bearer token. The
     cloud ``/api/v1/security/*`` proxy reads these to reach shield; the token
@@ -1669,6 +1675,30 @@ class Settings(BaseSettings):
             "refused. Empty → defaults to the cwd's parent (the workspace root)."
         ),
     )
+    # --- belt verify gate (feat/belt-gate, 2026-09-12) — keep contiguous ---
+    # The station's MECHANICAL gate. ON by default: that is the point — before
+    # this, a human at the Instinct gate approved work nothing had ever run.
+    # ``belt_propose_change`` applies the diff in a throwaway worktree and runs
+    # the checks that tree offers; a red result REFUSES the propose. Env auto-
+    # derives POCKETPAW_BELT_VERIFY_ENABLED / POCKETPAW_BELT_VERIFY_TIMEOUT_S.
+    belt_verify_enabled: bool = Field(
+        default=True,
+        description=(
+            "Run mechanical checks (tests / pulley doctor) on a Belt code-change "
+            "proposal before it reaches the human approval gate. A failed check "
+            "refuses the proposal. Off → the proposal is filed unverified and "
+            "records verification status 'disabled'."
+        ),
+    )
+    belt_verify_timeout_s: int = Field(
+        default=600,
+        description=(
+            "Per-check timeout (seconds) for Belt proposal verification. A check "
+            "that exceeds it is killed and counts as FAILED — an unbounded suite "
+            "proves nothing."
+        ),
+    )
+    # --- end belt verify gate ---
 
     # Shield — the same-box Go security daemon (deny-by-default connector
     # egress + agent-decision control plane). shield serves a control API on a

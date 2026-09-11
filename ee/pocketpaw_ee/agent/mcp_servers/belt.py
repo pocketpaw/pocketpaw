@@ -2,6 +2,28 @@
 # code-change gate to the claude_agent_sdk cloud chat backend. Created:
 # 2026-06-10 (feat/belt-gate, BS-3).
 #
+# Updated: 2026-09-12 (feat/belt-gate — the station's first MECHANICAL gate) —
+#   ``belt_propose_change`` no longer files a proposal on structural validation
+#   alone. After the four structural checks (identity, non-empty diff, size cap,
+#   repo allowlist) and BEFORE the Instinct Action is filed, it calls
+#   ``cloud.belt.verify.verify_diff``, which applies the diff in a throwaway
+#   worktree and runs the checks that tree offers (pytest / package.json test /
+#   pulley doctor).
+#     * ``failed``   → the propose is REFUSED with the failing check names and
+#                      their output, and NO Action is filed. The agent reads the
+#                      failure, fixes it, and re-proposes — the feedback loop.
+#     * ``passed`` / ``no_checks`` → the Action is filed as before and the
+#                      verdict rides on the blob under ``verification`` (status,
+#                      per-check metadata, summary — never the full logs), so the
+#                      Tray/console can show the human what was PROVEN.
+#   Gate BEFORE the human, not after: an Instinct approver was previously
+#   approving work nothing had ever run. ``belt_verify_enabled`` (default True)
+#   turns it off, recording ``verification={"status":"disabled"}``;
+#   ``belt_verify_timeout_s`` (default 600) bounds each check. Both are read per
+#   call, never cached in a process-global. ``verification`` is an OPTIONAL blob
+#   key — the executor's guard tests ``schema`` for equality — so CODE_CHANGE_SCHEMA
+#   stays at 2 and an in-flight schema-2 blob without the key still applies.
+#
 # Updated: 2026-06-10 (feat/belt-trace, BS-4 — Decision-Graph chain) —
 #   ``belt_propose_change`` now MINTS a Decision-Graph ``correlation_id``
 #   at propose time and emits the chain-opening ``agent.proposed`` event
@@ -390,6 +412,60 @@ async def _persist_chain_ids(
         )
 
 
+async def _verify_change(
+    repo_path: Path, base_branch: str, diff: str
+) -> tuple[dict[str, Any], str | None]:
+    """Run the mechanical gate over a proposed diff.
+
+    Returns ``(verification_blob, refusal)``. ``refusal`` is non-None only when
+    verification FAILED — the caller must refuse the propose with it and file no
+    Action. The blob is what rides on ``_code_change.verification``: the status,
+    the per-check metadata and the one-line summary — NEVER the full logs (they
+    would bloat every Instinct row; the agent gets them in the refusal instead).
+
+    The gate is read per call from settings, not from a process-global, so a
+    workspace that turns it off can never leave a stale flag behind.
+    ``getattr`` defaults keep the fail-SAFE direction (gate ON) if an older
+    settings build has no field."""
+    from pocketpaw.config import get_settings
+
+    settings = get_settings()
+    if not getattr(settings, "belt_verify_enabled", True):
+        return {"status": "disabled"}, None
+
+    from pocketpaw_ee.cloud.belt.verify import verify_diff
+
+    result = await verify_diff(
+        repo=str(repo_path),
+        base_branch=base_branch,
+        diff=diff,
+        timeout_s=int(getattr(settings, "belt_verify_timeout_s", 600)),
+    )
+    if result.status == "failed":
+        failed = [c for c in result.checks if not c.ok]
+        names = ", ".join(c.name for c in failed) or "unknown"
+        detail = "\n\n".join(f"--- {c.name} ---\n{c.output}" for c in failed)
+        return {}, (
+            f"verification FAILED ({names}) — the change was NOT proposed and no "
+            "human will see it. Fix the failure and propose again.\n\n"
+            f"{detail}"
+        )
+
+    return {
+        "status": result.status,
+        "checks": [
+            {
+                "name": c.name,
+                "ok": c.ok,
+                "skipped": c.skipped,
+                "duration_s": round(c.duration_s, 2),
+            }
+            for c in result.checks
+        ],
+        "summary": result.summary,
+    }, None
+
+
 async def _propose_change_handler(args: dict) -> dict:
     """MCP handler for ``belt__belt_propose_change``.
 
@@ -450,6 +526,16 @@ async def _propose_change_handler(args: dict) -> dict:
     if repo_err is not None or repo_path is None:
         return _error_response(repo_err or "could not resolve the repo path.")
 
+    # THE MECHANICAL GATE — before the human, not after. The four checks above
+    # are structural (identity, size, allowlist); none of them prove the change
+    # WORKS. Verification applies the diff in a throwaway worktree and runs
+    # whatever checks that tree offers, and a red result REFUSES the propose, so
+    # the Instinct approver only ever sees verified work. The failure text goes
+    # back to the agent, which fixes and re-proposes — that is the feedback loop.
+    verification, refusal = await _verify_change(repo_path, base_branch.strip(), diff)
+    if refusal is not None:
+        return _error_response(refusal)
+
     orient_clean = (
         orient_ref.strip() if isinstance(orient_ref, str) and orient_ref.strip() else None
     )
@@ -484,6 +570,11 @@ async def _propose_change_handler(args: dict) -> dict:
         # RFC 09 chain-correlation fields (schema 2).
         "correlation_id": str(correlation_id),
         "proposed_event_id": None,
+        # The mechanical gate's verdict — what was mechanically PROVEN before a
+        # human was asked. Status + per-check metadata + summary only, no logs.
+        # An OPTIONAL key: the executor's guard compares ``schema`` for equality,
+        # so adding it needs no schema bump and an older blob still applies.
+        "verification": verification,
     }
 
     from pocketpaw.instinct.models import ActionCategory, ActionPriority, ActionTrigger
