@@ -19,6 +19,13 @@
 #   * The headless runner's two emits, driven end-to-end through a real
 #     InstinctStore with a canned DevelopFn.
 #
+# Updated: 2026-09-12 (headless gate) — the headless runner now reaches TWO more
+# stages, ``verify`` and ``gate``, because it puts its diff through the same
+# mechanical gate the interactive station does. The per-verdict stage
+# assertions live in ``test_belt_headless.py``; here the ``green_gate`` autouse
+# fixture stubs the verifier so these tests keep measuring what they were
+# written for (the emits) rather than a refusal on a repo that never existed.
+#
 # The bus is the REAL one (conftest swaps in a RecordingBus) rather than a mock
 # of the emitter — over-mocking the seam under test hides live bugs. Only the
 # genuinely external things are substituted: the per-stream SSE sink (there is
@@ -360,6 +367,32 @@ def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     st = InstinctStore(tmp_path / "instinct_stage.db")
     monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
     return st
+
+
+@pytest.fixture(autouse=True)
+def green_gate(monkeypatch):
+    """Stub the MECHANICAL gate GREEN for this module.
+
+    The headless runner verifies its diff before attaching it, and the queued
+    blobs here name ``demo-repo``, which does not exist — the real verifier
+    would refuse every one of them and these tests would be measuring the
+    refusal path. The verdict is not what this file is about; the stage
+    SEQUENCE is, and it is pinned in ``test_belt_headless.py``'s gate section
+    for each verdict."""
+    import pocketpaw_ee.cloud.belt.verify as belt_verify
+
+    async def _passed(**_kwargs):
+        return belt_verify.VerifyResult(
+            status="passed",
+            checks=(
+                belt_verify.CheckResult(
+                    name="pytest(fake)", ok=True, skipped=False, output="3 passed", duration_s=0.1
+                ),
+            ),
+            summary="passed: pytest(fake) ok (0.1s)",
+        )
+
+    monkeypatch.setattr(belt_verify, "verify_diff", _passed)
 
 
 async def _queue_station_run(store: InstinctStore) -> str:

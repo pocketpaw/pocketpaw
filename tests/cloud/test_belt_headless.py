@@ -3,6 +3,19 @@
 #
 # Created: 2026-06-13.
 #
+# Updated: 2026-09-12 (headless gate) — the runner now puts its produced diff
+#   through the MECHANICAL gate before attaching it, so this file grew a "THE
+#   MECHANICAL GATE" section at the bottom covering the four verdicts (passed /
+#   failed / no_checks / disabled), a verifier that explodes, and a swallowed
+#   write failure. Two things to know before adding a test here:
+#     * the ``gate`` fixture is AUTOUSE and stubs the verifier GREEN. The gate
+#       is on by default and these blobs name ``demo-repo``, which does not
+#       exist — without the stub every attach assertion in the file would
+#       silently be measuring the refusal path instead.
+#     * the both-call-sites pin (that the interactive station AND this runner
+#       reach the same ``verify_diff``) lives in ``test_belt_verify.py``, which
+#       already has the harness to drive the MCP propose handler.
+#
 # THE GAP UNDER TEST — before this, an approved mandate plan task became a
 # QUEUED ``code_change`` Instinct Action (``station_pending=True``, NO diff) and
 # a HUMAN had to open the ``/belt`` chat surface to produce the diff. The
@@ -35,6 +48,7 @@ import pytest
 
 pytest.importorskip("pocketpaw_ee")
 
+import pocketpaw_ee.cloud.belt.verify as belt_verify  # noqa: E402
 from pocketpaw_ee.cloud.belt.headless import (  # noqa: E402
     DevelopRequest,
     DevelopResult,
@@ -64,6 +78,72 @@ def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     st = InstinctStore(tmp_path / "instinct_headless.db")
     monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
     return st
+
+
+class _FakeVerifier:
+    """Stands in for ``verify_diff`` — the one genuinely external thing in the
+    gate (it shells out to git and a test runner in a throwaway worktree).
+
+    Records the kwargs it was handed, so a test can assert the REAL repo / base
+    branch / diff reached the gate rather than trusting that something was
+    called, and returns whatever verdict the test sets. ``raises`` makes it
+    explode, which is the one thing the real one promises never to do — the
+    runner must survive it anyway."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.raises: Exception | None = None
+        self.result = _verdict("passed")
+
+    async def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.raises is not None:
+            raise self.raises
+        return self.result
+
+
+def _verdict(status: str, *, name: str = "pytest(fake)") -> belt_verify.VerifyResult:
+    """A VerifyResult of the given status, shaped the way the real one is."""
+    if status == "no_checks":
+        return belt_verify.VerifyResult(
+            status="no_checks",
+            checks=(),
+            summary="no mechanical checks discovered for this repo",
+        )
+    ok = status == "passed"
+    return belt_verify.VerifyResult(
+        status=status,  # type: ignore[arg-type]
+        checks=(
+            belt_verify.CheckResult(
+                name=name,
+                ok=ok,
+                skipped=False,
+                output="3 passed" if ok else "1 failed: test_greet",
+                duration_s=0.5,
+            ),
+        ),
+        summary=f"{status}: {name} {'ok' if ok else 'FAILED'} (0.5s)",
+    )
+
+
+@pytest.fixture(autouse=True)
+def gate(monkeypatch) -> _FakeVerifier:
+    """The mechanical gate, stubbed GREEN for every test in this module.
+
+    Autouse because the gate is ON by default (``belt_verify_enabled``) and the
+    runner now goes through it on the way to attaching a diff: without this, the
+    repo on these queued blobs (``demo-repo``, which does not exist) would fail
+    verification and every attach assertion in the file would be measuring the
+    refusal path by accident. Tests that care about the verdict set
+    ``gate.result`` / ``gate.raises``."""
+    fake = _FakeVerifier()
+    monkeypatch.setattr(belt_verify, "verify_diff", fake)
+    return fake
+
+
+def _stages(recording_bus) -> list[str]:
+    """Every stage value that hit the bus, in order."""
+    return [e.data["stage"] for e in recording_bus.events if e.type == "belt_run_updated"]
 
 
 async def _queue_station_run(store: InstinctStore, *, repo: str = "demo-repo") -> str:
@@ -422,3 +502,212 @@ async def test_headless_diff_applies_after_human_approval(
     # A real belt branch was created carrying the headless-produced change.
     branches = _git(local_repo, "branch", "--list", "feat/belt-*")
     assert branches.strip(), "expected a feat/belt-* branch from the applied diff"
+
+
+# ---------------------------------------------------------------------------
+# THE MECHANICAL GATE — the hole this closes
+# ---------------------------------------------------------------------------
+#
+# ``verify_diff`` had exactly ONE call site: ``belt_propose_change``, the
+# INTERACTIVE station. This runner — the mandate-driven autonomous path, the one
+# with no human anywhere in it — wrote its produced diff straight onto the queued
+# Action. "A human at the Instinct gate only ever approves VERIFIED work" was
+# therefore true of the station and false here, on the path where an unverified
+# diff is most dangerous.
+#
+# The runner's standing contract shapes what fail-closed can MEAN here. It never
+# raises, and a failure leaves the run SAFE — still queued, no diff, a note on
+# the blob. That is a different move from the station's: the station refuses the
+# propose and hands the failure text back to an agent that can fix it, and files
+# no Action at all. There is no agent here, and the Action already exists, so a
+# red verdict lands the run back on the state it was already in.
+
+
+async def test_gate_passes_attaches_a_verified_diff(store, gate, recording_bus):
+    """GREEN — the diff attaches as before, carrying the SAME ``verification``
+    blob key the interactive station writes, and the two stages fire in order.
+
+    Mutation: drop ``blob["verification"] = verification`` in ``_attach_diff``
+    and the human loses the evidence; drop the ``gate`` emit and the console
+    never learns the run reached review."""
+    action_id = await _queue_station_run(store)
+    recording_bus.events.clear()  # ignore the dispatch's own station event
+
+    async def fake_develop(req: DevelopRequest) -> DevelopResult:
+        return DevelopResult(diff=CANNED_DIFF, base_branch="main", summary="adds hello.txt")
+
+    await HeadlessDevelopRunner(develop_fn=fake_develop).run(action_id, workspace_id=WS)
+
+    # The REAL produced diff reached the gate — not a placeholder, and not a
+    # different repo or base than the one about to be written onto the blob.
+    assert len(gate.calls) == 1
+    assert gate.calls[0]["repo"] == "demo-repo"
+    assert gate.calls[0]["base_branch"] == "main"
+    assert gate.calls[0]["diff"] == CANNED_DIFF
+
+    after = await store.get_action(action_id)
+    assert after is not None
+    cc = after.parameters["_code_change"]
+    assert cc["diff"] == CANNED_DIFF
+    assert cc["station_pending"] is False
+    assert cc["verification"]["status"] == "passed"
+    assert cc["verification"]["checks"][0]["name"] == "pytest(fake)"
+    assert after.status == ActionStatus.PENDING  # still the human's call
+
+    # verify BEFORE the check, gate once the diff is really on the row.
+    assert _stages(recording_bus) == ["orient", "develop", "verify", "gate"]
+    gate_event = [e.data for e in recording_bus.events if e.data.get("stage") == "gate"]
+    assert gate_event[0]["action_id"] == action_id
+    assert gate_event[0]["status"] == "proposed"
+
+    # The operator trail says what was proven, not just that something was.
+    audit = await store.query_audit(event="headless_diff_attached")
+    assert audit[0].context.get("verification") == "passed"
+
+
+async def test_gate_failure_leaves_the_run_queued_and_unproposed(store, gate, recording_bus):
+    """RED — fail closed. No diff is attached, the run stays exactly as queued
+    as it was, the failing check name is on the blob, and NO ``gate`` stage is
+    emitted: a human must see no proposal rather than an unverified one.
+
+    Mutation: turn the ``if refusal is not None`` branch off and an unverified
+    diff lands on the row."""
+    gate.result = _verdict("failed", name="pytest(pocketpaw)")
+    action_id = await _queue_station_run(store)
+    recording_bus.events.clear()
+
+    async def fake_develop(req: DevelopRequest) -> DevelopResult:
+        return DevelopResult(diff=CANNED_DIFF, base_branch="main", summary="adds hello.txt")
+
+    ref = await HeadlessDevelopRunner(develop_fn=fake_develop).run(action_id, workspace_id=WS)
+    assert ref == action_id  # handled, not raised
+
+    after = await store.get_action(action_id)
+    assert after is not None
+    cc = after.parameters["_code_change"]
+    assert not cc["diff"]
+    assert cc["station_pending"] is True  # unchanged — the safe state it began in
+    assert "verification" not in cc  # nothing was proven, so nothing is claimed
+    assert "pytest(pocketpaw)" in cc["headless_error"]
+    assert after.status == ActionStatus.PENDING
+
+    # ``verify`` is honest — the check DID run. ``gate`` must not appear.
+    assert _stages(recording_bus) == ["orient", "develop", "verify"]
+
+    # Nothing was written to the operator trail either: no diff was attached.
+    assert await store.query_audit(event="headless_diff_attached") == []
+
+
+async def test_gate_disabled_behaves_exactly_as_before(store, gate, recording_bus, monkeypatch):
+    """OFF — a workspace that turns the gate off gets the pre-gate behaviour
+    byte for byte: the verifier is never called, no ``verify`` stage is emitted
+    (a stage we cannot prove is one we do not emit), and the blob records
+    ``disabled`` so nobody mistakes it for a pass."""
+    from pocketpaw.config import get_settings
+
+    real = get_settings()
+
+    class _S:
+        belt_verify_enabled = False
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
+
+    gate.raises = AssertionError("verify_diff must not run when the gate is disabled")
+    action_id = await _queue_station_run(store)
+    recording_bus.events.clear()
+
+    async def fake_develop(req: DevelopRequest) -> DevelopResult:
+        return DevelopResult(diff=CANNED_DIFF, base_branch="main", summary="adds hello.txt")
+
+    await HeadlessDevelopRunner(develop_fn=fake_develop).run(action_id, workspace_id=WS)
+
+    assert gate.calls == []
+    after = await store.get_action(action_id)
+    assert after is not None
+    cc = after.parameters["_code_change"]
+    assert cc["diff"] == CANNED_DIFF
+    assert cc["station_pending"] is False
+    assert cc["verification"] == {"status": "disabled"}
+    assert _stages(recording_bus) == ["orient", "develop", "gate"]
+
+
+async def test_no_checks_is_not_a_refusal(store, gate, recording_bus):
+    """A repo with nothing runnable is not a failure. The diff attaches and the
+    human sees that nothing was proven — the same three-state rule the station
+    gets."""
+    gate.result = _verdict("no_checks")
+    action_id = await _queue_station_run(store)
+
+    async def fake_develop(req: DevelopRequest) -> DevelopResult:
+        return DevelopResult(diff=CANNED_DIFF, base_branch="main", summary="adds hello.txt")
+
+    await HeadlessDevelopRunner(develop_fn=fake_develop).run(action_id, workspace_id=WS)
+
+    after = await store.get_action(action_id)
+    assert after is not None
+    cc = after.parameters["_code_change"]
+    assert cc["diff"] == CANNED_DIFF
+    assert cc["station_pending"] is False
+    assert cc["verification"]["status"] == "no_checks"
+
+
+async def test_a_verifier_that_explodes_does_not_escape_the_runner(store, gate, recording_bus):
+    """``verify_diff`` promises never to raise. If it ever breaks that promise,
+    the runner's own promise — NEVER raises, always lands safe — has to hold
+    anyway, because it runs on a background dispatch path where an escaping
+    exception takes the whole mandate shift with it."""
+    gate.raises = RuntimeError("the verifier fell over")
+    action_id = await _queue_station_run(store)
+    recording_bus.events.clear()
+
+    async def fake_develop(req: DevelopRequest) -> DevelopResult:
+        return DevelopResult(diff=CANNED_DIFF, base_branch="main", summary="adds hello.txt")
+
+    ref = await HeadlessDevelopRunner(develop_fn=fake_develop).run(action_id, workspace_id=WS)
+    assert ref == action_id
+
+    after = await store.get_action(action_id)
+    assert after is not None
+    cc = after.parameters["_code_change"]
+    assert not cc["diff"]
+    assert cc["station_pending"] is True
+    assert "errored" in cc["headless_error"]
+    assert "gate" not in _stages(recording_bus)
+
+
+async def test_a_write_failure_does_not_report_a_proposal(store, gate, recording_bus, monkeypatch):
+    """``_attach_diff`` swallows a write failure (dispatch must not crash). The
+    ``gate`` stage hangs off whether the row actually TOOK the diff, so a
+    swallowed failure cannot light a review card for a proposal that is not
+    there."""
+    import aiosqlite
+
+    action_id = await _queue_station_run(store)
+    recording_bus.events.clear()
+
+    # Every sqlite call from the develop loop onwards fails — the store is real
+    # up to that point (so the run gets as far as attaching) and dead after it.
+    real_connect = aiosqlite.connect
+    boom = {"on": False}
+
+    def _maybe_boom(*a, **k):
+        if boom["on"]:
+            raise RuntimeError("disk full")
+        return real_connect(*a, **k)
+
+    monkeypatch.setattr("aiosqlite.connect", _maybe_boom)
+
+    async def fake_develop(req: DevelopRequest) -> DevelopResult:
+        boom["on"] = True
+        return DevelopResult(diff=CANNED_DIFF, base_branch="main", summary="adds hello.txt")
+
+    await HeadlessDevelopRunner(develop_fn=fake_develop).run(action_id, workspace_id=WS)
+    boom["on"] = False  # let the assertions read the row back
+
+    assert "gate" not in _stages(recording_bus)
+    after = await store.get_action(action_id)
+    assert after is not None
+    assert not after.parameters["_code_change"]["diff"]

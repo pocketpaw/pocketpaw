@@ -1,5 +1,12 @@
 # tests/cloud/test_belt_verify.py — the develop station's MECHANICAL gate.
 # Created: 2026-09-12 (feat/belt-gate).
+# Updated: 2026-09-12 (headless gate) — a final section pins that BOTH develop
+#   paths reach the gate. The gate shipped with one call site and the headless
+#   runner walked around it; one recorder patched once, with the interactive MCP
+#   handler and the headless runner both driven for real, is the only shape of
+#   test that notices a path going missing. The per-verdict headless behaviour
+#   (fail closed, disabled, no_checks, an exploding verifier) is in
+#   ``test_belt_headless.py``.
 # Updated: 2026-09-12 — per-repo verify commands. See the second section below.
 #
 # What this pins — verification runs BEFORE the human, on REAL git repos and
@@ -954,3 +961,90 @@ async def test_configured_command_beats_the_pocketpaw_default(pocketpaw_repo):
 
     assert [c.name for c in result.checks] == ["configured"]
     assert result.status == "failed"
+
+
+# ---------------------------------------------------------------------------
+# BOTH develop paths reach the gate — the hole this file's gate did not cover
+# ---------------------------------------------------------------------------
+#
+# For its first day the gate had exactly ONE call site, ``belt_propose_change``.
+# The headless develop runner — the mandate-driven autonomous path, where no
+# human is driving and an unverified diff is most dangerous — wrote its produced
+# diff straight onto the queued Action. Everything above proves the gate works;
+# this proves nothing walks around it.
+#
+# One recorder, one patch, both paths driven for real. If either stops calling
+# the gate, ``seen`` is short by one and this fails — which is the property that
+# a per-path test, however thorough, cannot give you.
+
+
+async def test_the_gate_is_reached_from_both_develop_paths(
+    py_repo, store, settings_patch, monkeypatch
+):
+    from pocketpaw_ee.cloud.belt.headless import (
+        DevelopRequest,
+        DevelopResult,
+        HeadlessDevelopRunner,
+    )
+    from pocketpaw_ee.cloud.mandates import executor as mandates_ex
+
+    settings_patch(belt_repo_allowlist=[str(py_repo.parent)])
+
+    seen: list[dict] = []
+
+    async def _capture(**kwargs):
+        seen.append(kwargs)
+        return belt_verify.VerifyResult(
+            status="passed",
+            checks=(
+                belt_verify.CheckResult(
+                    name="pytest(fake)", ok=True, skipped=False, output="1 passed", duration_s=0.1
+                ),
+            ),
+            summary="passed: pytest(fake) ok (0.1s)",
+        )
+
+    monkeypatch.setattr(belt_verify, "verify_diff", _capture)
+
+    # 1. INTERACTIVE — a human is driving the station and calls the MCP tool.
+    interactive_diff = _passing_diff()
+    res = await _propose(py_repo, interactive_diff)
+    assert res.get("is_error") is not True, res
+
+    # 2. HEADLESS — a mandate filed a queued run and the runner develops it with
+    #    nobody watching. Same store, same repo.
+    async def _fake_repo(workspace_id: str, mandate_id: str) -> str | None:
+        return str(py_repo)
+
+    monkeypatch.setattr(mandates_ex, "_repo_for_mandate", _fake_repo)
+    action_id = await mandates_ex.StationTaskDispatcher().dispatch(
+        workspace_id="w1",
+        mandate_id="m1",
+        shift_no=1,
+        plan_action_id="plan-act-1",
+        index=1,
+        task={"title": "Change the greeting", "why": "demo", "requested_by": "u1"},
+    )
+
+    headless_diff = _diff(
+        "app.py", "def hello():\n    return 'hi'\n", "def hello():\n    return 'yo'\n"
+    )
+
+    async def _develop(request: DevelopRequest) -> DevelopResult:
+        return DevelopResult(diff=headless_diff, base_branch="main", summary="say yo")
+
+    await HeadlessDevelopRunner(develop_fn=_develop).run(action_id, workspace_id="w1")
+
+    # BOTH reached the gate, each with its OWN diff — not one path called twice.
+    assert len(seen) == 2, f"the gate was reached {len(seen)} time(s), expected both paths"
+    assert [c["repo"] for c in seen] == [str(py_repo), str(py_repo)]
+    assert seen[0]["diff"] == interactive_diff
+    assert seen[1]["diff"] == headless_diff
+
+    # And the headless run really is a verified, pending proposal now.
+    produced = await store.get_action(action_id)
+    assert produced is not None
+    blob = produced.parameters["_code_change"]
+    assert blob["diff"] == headless_diff
+    assert blob["station_pending"] is False
+    assert blob["verification"]["status"] == "passed"
