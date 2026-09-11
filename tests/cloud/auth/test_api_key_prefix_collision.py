@@ -76,8 +76,7 @@ async def test_a_colliding_prefix_does_not_lock_the_other_key_out(mongo_db, monk
 
         resolved = await api_keys.resolve_bearer(token)
         assert resolved is not None, (
-            f"{workspace}'s key stopped authenticating because another live key "
-            "shares its prefix"
+            f"{workspace}'s key stopped authenticating because another live key shares its prefix"
         )
         assert resolved[1] == workspace
 
