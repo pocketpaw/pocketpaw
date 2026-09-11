@@ -1,4 +1,15 @@
 # ee/pocketpaw_ee/cloud/belt/service.py
+# Updated: 2026-09-12 (integration/belt-factory — the join key closes) — the
+#   runs read model (``_run_summary``, so both ``list_runs`` and ``get_run``)
+#   now returns ``run_id``, read off the ``_code_change`` blob where
+#   ``belt_propose_change`` stamps ``current_stream_run_id()``. Before this the
+#   row carried only ``action_id`` while the run's early events carried only
+#   ``run_id`` (the Action does not exist during orient / develop), so a
+#   ``belt_entity_changed`` or an intermediate stage could never be matched to
+#   the row it belonged to. One row now holds BOTH halves of the join. ``None``
+#   for a headless run and for every Action filed before the key existed — a
+#   read model that invented an id would be worse than one that admits it has
+#   none.
 # Updated: 2026-09-12 (feat/belt-entity-events, stage slice) — a run now reports
 #   the STAGES it reaches, not just its two lifecycle endpoints. The bus only
 #   ever carried ``stage="gate"`` (propose) and ``stage="done"`` (the executor
@@ -1158,6 +1169,14 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
         "commit_sha": blob.get("commit_sha") or None,
         "created_at": created.isoformat() if hasattr(created, "isoformat") else None,
         "correlation_id": str(blob.get("correlation_id") or "") or None,
+        # The chat stream's run id, stamped on the blob by ``belt_propose_change``.
+        # This is the ONLY way a consumer can match a row to the live events the
+        # run emitted BEFORE it existed: those carry ``run_id`` and a null
+        # ``action_id`` (the Action is minted after the last file write), while
+        # every event from ``gate`` onwards carries ``action_id`` and no run_id.
+        # The join closes HERE — one row holding both halves. ``None`` for a
+        # headless run (no chat stream) and for any Action filed before this key.
+        "run_id": str(blob.get("run_id") or "") or None,
     }
 
 
