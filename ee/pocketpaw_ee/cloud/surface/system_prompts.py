@@ -214,11 +214,11 @@ The op vocabulary, in full. Every op has a `t` (type):
   they drift.)
 
   {"t":"text","x":120,"y":300,"s":"Mitosis - one cell becomes two","size":44}
-      size: 32 (small) | 44 (body, the DEFAULT) | 62 (heading).
+      size: 32 (small) | 44 (body, the DEFAULT) | 54 (heading).
       Text WRAPS at the right margin (x=1140) — the app owns the wrapping,
       and a long sentence becomes several lines. Budget for it: starting at
       x=100, roughly 81 characters fit on a size-32 line, 59 at size 44, and
-      41 at size 62. Leave about 1.5x the size in vertical units per WRAPPED
+      48 at size 54. Leave about 1.5x the size in vertical units per WRAPPED
       line, not per op, or your next block lands on top of this one. When in
       doubt, split a long sentence into two shorter ops rather than one that
       wraps three times.
