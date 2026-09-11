@@ -1,6 +1,20 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated: 2026-09-11 (feat/sites-svelte-edit-create, SC-1) — ``edit_svelte_component``
+# gained ``create``, closing the last hole of the set RX-3 and HE-10 closed for react
+# and html. It was the FIRST edit lane to ship and the last to be able to mint a file:
+# its ``component_path`` had to already exist, so "add an about page" to a live svelte
+# site had no reachable tool on this server. Two things made that worse than a missing
+# feature. Its description was also the only one of the three WITHOUT the "NEVER call
+# `create_<engine>_site` again" warning, so the blocked agent's next move was a second
+# ``create_svelte_site`` — a second pocket at a second url, leaving the site the user
+# was looking at untouched — and the /sites surface denies the file built-ins, so there
+# was no fallback. The description now also teaches the shape unique to this track: a
+# SvelteKit page is TWO files (``+page.svelte`` plus the ``+page.ts`` carrying its own
+# prerender flag, which the root page's page-level flag does not cascade to), so adding
+# one is three calls counting the link. Path policy lives in ``sites/svelte_paths.py``.
+#
 # Updated: 2026-09-01 (fix/sites-html-orphan-create) — ``edit_html_file`` carries the
 # same ``unreferenced`` key and its own warning, naming the wiring step this track
 # actually has: a LINK from an existing page, not an import.
@@ -1783,19 +1797,27 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
                 )
     name_raw = args.get("name")
     name = name_raw if isinstance(name_raw, str) else ""
+    create = bool(args.get("create"))
+    if create and not has_new_source:
+        return _error_response(
+            "edit_svelte_component `create` needs `new_source` — the full contents "
+            "of the new file. There is nothing for `edits` to search against in a "
+            "file that does not exist yet."
+        )
 
     from pocketpaw_ee.cloud._core.errors import CloudError
     from pocketpaw_ee.sites import service as sites_service
     from pocketpaw_ee.sites.generator_client import SmokeGateFailed
 
     try:
-        doc = await sites_service.edit_svelte_component(
+        doc, unreferenced = await sites_service.edit_svelte_component(
             workspace_id=workspace_id,
             user_id=user_id,
             pocket_id=pocket_id,
             component_path=component_path,
             new_source=new_source if has_new_source else None,
             edits=edits if has_edits else None,
+            create=create,
             name=name,
         )
     except SmokeGateFailed as exc:
@@ -1820,12 +1842,26 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
     # the live site), and the user must Submit for review to publish. The wording
     # deliberately avoids "published"/"republished"/"live at" so the agent does not
     # tell the user the change is live.
+    # A create is HALF of adding a page or a section — the other half is the edit
+    # that links or imports it. Saying so in the ``message`` (not only in the flag)
+    # is what keeps the agent from reading a clean success as "done" and telling the
+    # user about a page nothing navigates to.
+    orphan_note = (
+        " NOTE: nothing in the site reaches this file yet — no other file links to "
+        "or imports it, so visitors cannot get to it. You are half-done: make the "
+        "follow-up edit that wires it in (a nav/footer link for a route, an import "
+        "for a component) before you tell the user it was added."
+        if unreferenced
+        else ""
+    )
     return _success_response(
         {
             "ok": True,
             "status": "draft",
             "is_live": False,
             "component_path": component_path,
+            "created": create,
+            "unreferenced": unreferenced,
             "site": {
                 "id": str(doc.id),
                 "pocket_id": doc.pocket_id,
@@ -1838,7 +1874,7 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
                 "Your change is staged as a draft preview — it is NOT live yet. "
                 "The preview_url shows a preview of the edit, not the live site. "
                 "To take it live, the user clicks 'Submit for review' (which sends "
-                "the draft for approval)."
+                "the draft for approval)." + orphan_note
             ),
         }
     )
@@ -1855,11 +1891,15 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
     @tool(
         "edit_svelte_component",
         (
-            "Edit ONE component of an EXISTING svelte Paw Site and stage it as a "
-            "DRAFT PREVIEW. Use this when the user asks to change a section of a "
-            "svelte site — 'add a background color to the nav', 'make the hero "
-            "headline bolder', 'change the pricing copy', 'restyle the FAQ'. The "
-            "edit is NOT published and does NOT go live — it is staged for review. "
+            "Change ONE file of an EXISTING svelte Paw Site and stage it as a "
+            "DRAFT PREVIEW. Use this WHENEVER the user asks to alter a svelte site "
+            "that already exists — 'add a background color to the nav', 'make the "
+            "hero headline bolder', 'change the pricing copy', 'restyle the FAQ', "
+            "'add an about page', 'add a testimonials section'. NEVER call "
+            "`create_svelte_site` again for a change: that mints a SECOND site "
+            "pocket at a SECOND url and leaves the one the user is looking at "
+            "untouched. The edit is NOT published and does NOT go live — it is "
+            "staged for review. "
             "Give the edit ONE of two ways (exactly one, not both):\n"
             "  * `edits` — PREFER THIS for small/targeted changes. A list of "
             "search/replace blocks [{old_string, new_string}, ...], exactly like "
@@ -1875,14 +1915,37 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
             "  * `new_source` — the FULL new file contents as a string (REPLACES "
             "the whole file, not a patch). Reserve this for LARGE rewrites where "
             "most of the file changes; for a small tweak use `edits`.\n"
+            "To ADD A PAGE: a SvelteKit route is TWO files, so call this three "
+            "times — `create=true` with `new_source` for "
+            "`src/routes/<slug>/+page.svelte`, again for "
+            "`src/routes/<slug>/+page.ts` containing `export const prerender = "
+            "true;` (the root page's prerender flag is page-level and does NOT "
+            "cascade to a child route), then once with `edits` on the nav/footer "
+            "component to link `/<slug>`. To ADD A SECTION: `create=true` for the "
+            "new `src/lib/components/<Name>.svelte`, then `edits` on "
+            "`src/routes/+page.svelte` to import and render it. `create=true` "
+            "REQUIRES the path to be new; editing an existing file with it is "
+            "rejected so you cannot overwrite a component by accident. Without "
+            "`create` the path must already exist, so a typo is an error and never "
+            "a stray new file.\n"
+            "You may only write under `src/`. `package.json`, `vite.config.ts`, "
+            "`svelte.config.js`, `src/lib/paw/`, `src/hooks.server.ts`, "
+            "`src/lib/auth.ts` and `src/app.d.ts` are GENERATED and rejected — they "
+            "carry the dependency allowlist, the adapter/prerender configuration and "
+            "a gated site's session gate. There is no way to add a dependency.\n"
             "Other args: `pocket_id` (the svelte site pocket), `component_path` (the "
-            "relative path of the file to edit — it must already exist in the source "
-            "map, e.g. 'src/lib/components/Hero.svelte'), optional `name`. CRITICAL "
+            "relative path of the file to write, e.g. "
+            "'src/lib/components/Hero.svelte'), optional `create`, optional `name`. "
+            "CRITICAL "
             "authoring rule (same as create_svelte_site): the component must render "
             "its resting/final state in MARKUP — never set it only in onMount — "
             "because the page is PRERENDERED. Returns {ok, status:'draft', "
             "is_live:false, site: {id, name, preview_url, deployed:false, "
-            "pocket_id}, component_path, message}. Relay the `message` to the user: "
+            "pocket_id}, component_path, created, unreferenced, message}. "
+            "`unreferenced:true` means nothing in the site links to or imports the "
+            "file you just created — visitors cannot reach it — so the follow-up "
+            "call is still outstanding and you must NOT report the page or section "
+            "as added yet. Relay the `message` to the user: "
             "the change is a DRAFT PREVIEW (not live), `preview_url` is a PREVIEW "
             "(not the published site), and to publish it the user clicks 'Submit for "
             "review'. Do NOT tell the user the change is published or live. ok=false "
@@ -1904,9 +1967,12 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Relative path of the file to edit — must already exist "
-                        "in the site's source map (e.g. "
-                        "'src/lib/components/Hero.svelte')."
+                        "Relative path of the file to write (e.g. "
+                        "'src/lib/components/Hero.svelte', "
+                        "'src/routes/about/+page.svelte'). Must already exist in "
+                        "the site's source map unless `create` is true. Only "
+                        "`src/` may be written, and the generated build-config / "
+                        "auth files are reserved."
                     ),
                 },
                 "edits": {
@@ -1942,6 +2008,18 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
                         "The FULL new contents of the file as a string (REPLACES the "
                         "whole file — not a diff). Use for large rewrites; for small "
                         "changes prefer `edits`."
+                    ),
+                },
+                "create": {
+                    "type": "boolean",
+                    "description": (
+                        "Create a NEW file at `component_path` instead of editing "
+                        "an existing one. Requires `new_source`, and the path must "
+                        "NOT already exist. Use it to add a page "
+                        "(`src/routes/<slug>/+page.svelte` AND "
+                        "`src/routes/<slug>/+page.ts`) or a section "
+                        "(`src/lib/components/<Name>.svelte`), then edit the nav or "
+                        "`src/routes/+page.svelte` to wire it in."
                     ),
                 },
                 "name": {
