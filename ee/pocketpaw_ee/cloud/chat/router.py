@@ -168,8 +168,9 @@ async def archive_group(
 async def join_group(
     group_id: str,
     user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
 ):
-    await group_service.join_group(group_id, user_id)
+    await group_service.join_group(group_id, user_id, workspace_id)
     return {"ok": True}
 
 
