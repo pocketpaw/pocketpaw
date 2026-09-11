@@ -13,12 +13,26 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tests.cloud.uploads.conftest import install_workspace_caller
+
 PNG = b"\x89PNG\r\n\x1a\n" + b"body"
 
 
 @pytest.fixture()
 def ee_client(tmp_path: Path, beanie_upload_db, monkeypatch):
     """Build an app with the EE uploads router pointed at a tmp dir and fake deps."""
+    return _build_ee_client(tmp_path, monkeypatch)
+
+
+@pytest.fixture()
+def gated_ee_client(tmp_path: Path, beanie_upload_db, monkeypatch):
+    """The same app on a deployment that narrowed the accepted-types policy."""
+    from pocketpaw.uploads.config import DEFAULT_ALLOWED_MIMES
+
+    return _build_ee_client(tmp_path, monkeypatch, allowed_mimes=DEFAULT_ALLOWED_MIMES)
+
+
+def _build_ee_client(tmp_path: Path, monkeypatch, allowed_mimes=None) -> TestClient:
     import pocketpaw_ee.cloud.uploads.router as uploads_module
     from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
     from pocketpaw_ee.cloud.uploads.service import EEUploadService
@@ -27,9 +41,12 @@ def ee_client(tmp_path: Path, beanie_upload_db, monkeypatch):
     from pocketpaw.uploads.local import LocalStorageAdapter
 
     root = tmp_path / "u"
-    root.mkdir()
+    root.mkdir(exist_ok=True)
 
-    test_cfg = UploadSettings(local_root=root)
+    cfg_kwargs = {"local_root": root}
+    if allowed_mimes is not None:
+        cfg_kwargs["allowed_mimes"] = allowed_mimes
+    test_cfg = UploadSettings(**cfg_kwargs)
     test_adapter = LocalStorageAdapter(root=root)
     test_meta = MongoFileStore()
     test_svc = EEUploadService(adapter=test_adapter, meta=test_meta, cfg=test_cfg)
@@ -54,6 +71,9 @@ def ee_client(tmp_path: Path, beanie_upload_db, monkeypatch):
 
     app.dependency_overrides[current_user_id] = _user_dep
     app.dependency_overrides[current_workspace_id] = _workspace_dep
+
+    # The write routes 401 on a bare test app until the caller is supplied.
+    install_workspace_caller(app)
 
     app.include_router(uploads_module.router, prefix="/api/v1")
     return TestClient(app)
@@ -125,11 +145,9 @@ def test_delete_then_get_is_404(ee_client: TestClient):
 async def _seed_upload(fid: str = "seed1", user: str = "u1", ws: str = "w1") -> str:
     """Insert a live upload row directly via the store.
 
-    The guarded ``POST /uploads`` route depends on
-    ``require_action_any_workspace`` which the ee_client fixture does not
-    override (a pre-existing harness gap unrelated to FL-1 — it 401s in this
-    test env). Seeding through the store keeps these FL-1 tests hermetic while
-    still exercising the real PATCH route and the real /files read path.
+    Written when ``POST /uploads`` 401'd in this harness; that gap is fixed
+    (see ``install_workspace_caller``), but seeding keeps these FL-1 tests
+    hermetic while still exercising the real PATCH and /files read paths.
     """
     from datetime import UTC, datetime
 
@@ -239,8 +257,10 @@ async def test_patch_rejects_bad_hide_type(ee_client: TestClient):
     assert r2.status_code == 400
 
 
-def test_bulk_partial_success(ee_client: TestClient):
-    r = ee_client.post(
+def test_bulk_partial_success(gated_ee_client: TestClient):
+    """Per-file failures inside a 200. Needs a narrowed policy: the shipped
+    default accepts every type."""
+    r = gated_ee_client.post(
         "/api/v1/uploads",
         files=[
             ("files", ("good.png", PNG, "image/png")),
@@ -253,3 +273,18 @@ def test_bulk_partial_success(ee_client: TestClient):
     assert len(data["uploaded"]) == 1
     assert len(data["failed"]) == 1
     assert data["failed"][0]["code"] == "unsupported_mime"
+
+
+def test_workspace_upload_accepts_any_type(ee_client: TestClient):
+    """The reported bug at the route the client posts to: a .blend arrives with
+    no usable Content-Type and used to come back unsupported_mime."""
+    r = ee_client.post(
+        "/api/v1/uploads",
+        files=[("files", ("spaceship.blend", b"BLENDER-v303\x00\x00", "application/octet-stream"))],
+        headers={"x-user": "u1", "x-workspace": "w1"},
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["failed"] == []
+    assert data["uploaded"][0]["filename"] == "spaceship.blend"
+    assert data["uploaded"][0]["mime"] == "application/x-blender"

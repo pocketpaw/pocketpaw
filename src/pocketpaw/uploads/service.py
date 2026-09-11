@@ -1,4 +1,9 @@
-"""UploadService — validates, stores, persists metadata, and generates thumbnails."""
+"""UploadService — validates, stores, persists metadata, and generates thumbnails.
+
+2026-09-11 — the type gate goes through ``config.mime_allowed`` (``*/*`` and
+``type/*`` aware) rather than set membership, and ``_sniff_mime`` takes the
+filename so a format the client cannot name keeps a real mime and extension.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +20,14 @@ from typing import Literal
 from fastapi import UploadFile
 
 from pocketpaw.uploads.adapter import StorageAdapter
-from pocketpaw.uploads.config import UploadSettings, extension_for
+from pocketpaw.uploads.config import (
+    UploadSettings,
+    extension_for,
+    is_generic_mime,
+    mime_allowed,
+    mime_for_filename,
+    normalize_mime,
+)
 from pocketpaw.uploads.errors import (
     EmptyFile,
     NotFound,
@@ -44,7 +56,12 @@ _THUMB_FORMATS: dict[str, tuple[str, str, str]] = {
 _SNIFF_BYTES = 512
 
 
-def _sniff_mime(head: bytes, fallback: str) -> str:
+def _sniff_mime(head: bytes, fallback: str, filename: str = "") -> str:
+    """Magic bytes, then the client's ``Content-Type``, then the filename.
+
+    The client is skipped when it says nothing useful (empty, octet-stream) —
+    what a browser sends for any format it does not recognise.
+    """
     if head.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
     if head.startswith(b"\xff\xd8\xff"):
@@ -55,14 +72,19 @@ def _sniff_mime(head: bytes, fallback: str) -> str:
         return "image/webp"
     if head.startswith(b"%PDF-"):
         return "application/pdf"
+    claimed = normalize_mime(fallback)
     if head.startswith(b"PK\x03\x04"):
-        # ZIP container — docx/xlsx both use this. Keep fallback if it matches.
-        if fallback in (
+        # ZIP container — docx/xlsx both use this. Keep the claim if it matches;
+        # plenty of other formats are zips too (.usdz, .kra, .epub), so an
+        # unmatched claim falls through to the filename rather than "zip".
+        if claimed in (
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ):
-            return fallback
-    return fallback
+            return claimed
+    if claimed and not is_generic_mime(claimed):
+        return claimed
+    return mime_for_filename(filename) or claimed or "application/octet-stream"
 
 
 FailCode = Literal["too_large", "unsupported_mime", "empty", "storage_error"]
@@ -155,11 +177,12 @@ class UploadService:
         if len(head) > cap:
             raise TooLarge(f"file exceeds {cap} bytes")
 
-        mime = _sniff_mime(head, file.content_type or "application/octet-stream")
-        if mime not in self._cfg.allowed_mimes:
+        filename = _basename(file.filename) or "upload"
+        mime = _sniff_mime(head, file.content_type or "", filename)
+        if not mime_allowed(mime, self._cfg.allowed_mimes):
             raise UnsupportedMime(f"mime not allowed: {mime}")
 
-        ext = extension_for(mime)
+        ext = extension_for(mime, filename)
         key = new_storage_key("chat", ext)
 
         first = head
@@ -187,7 +210,6 @@ class UploadService:
             raise
 
         file_id = uuid.uuid4().hex
-        filename = _basename(file.filename) or "upload"
         record = FileRecord(
             id=file_id,
             storage_key=obj.key,

@@ -141,3 +141,34 @@ async def store(beanie_upload_db):
     from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 
     return MongoFileStore()
+
+
+def install_workspace_caller(app) -> None:
+    """Give a bare router-test app a caller the RBAC guards can resolve.
+
+    The write routes carry ``require_action_any_workspace("uploads.write")``,
+    whose first dep is fastapi-users' ``current_active_user``. A test app has no
+    auth stack, so that resolved nothing and every write answered 401 before its
+    role check ran — why 23 tests in this package were red on dev. Identity comes
+    from the same x-user / x-workspace headers the other deps use; the guard and
+    each route's own ACL still run for real.
+    """
+    from types import SimpleNamespace
+
+    from fastapi import Header
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud.auth import current_active_user
+
+    add_error_handler(app)
+
+    async def _active_user_dep(
+        x_user: str = Header(default="u1"),
+        x_workspace: str = Header(default="w1"),
+    ):
+        return SimpleNamespace(
+            id=x_user,
+            active_workspace=x_workspace,
+            workspaces=[SimpleNamespace(workspace=x_workspace, role="owner")],
+        )
+
+    app.dependency_overrides[current_active_user] = _active_user_dep

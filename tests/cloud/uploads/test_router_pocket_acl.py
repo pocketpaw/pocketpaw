@@ -12,6 +12,8 @@ import pytest
 from fastapi import FastAPI, Header
 from fastapi.testclient import TestClient
 
+from tests.cloud.uploads.conftest import install_workspace_caller
+
 PNG = b"\x89PNG\r\n\x1a\n" + b"body"
 
 
@@ -49,6 +51,8 @@ def ee_client(tmp_path: Path, beanie_upload_db, monkeypatch):
 
     app.dependency_overrides[current_user_id] = _user_dep
     app.dependency_overrides[current_workspace_id] = _workspace_dep
+    # Without this the upload route 401s before the pocket ACL ever runs.
+    install_workspace_caller(app)
 
     app.include_router(uploads_module.router, prefix="/api/v1")
     return TestClient(app)
