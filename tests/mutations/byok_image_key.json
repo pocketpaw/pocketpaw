@@ -1,0 +1,56 @@
+[
+  {
+    "label": "a self-funded workspace is charged our quota too — pictures stop at 20 a day for someone paying their own bill",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/router.py",
+    "find": "    if not grant.byok:\n        allowed, spent, cap = await illustration_budget.try_spend(workspace_id)",
+    "replace": "    if True:\n        allowed, spent, cap = await illustration_budget.try_spend(workspace_id)",
+    "tests": [
+      "tests/cloud/other_hand/test_illustrate_endpoint.py::TestAWorkspaceOnItsOwnKey::test_the_route_does_not_claim_our_budget"
+    ]
+  },
+  {
+    "label": "the agent's tool ignores the stored key — the more natural way in draws on the platform's account",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/other_hand.py",
+    "find": "    api_key = grant.api_key",
+    "replace": "    from pocketpaw_ee.cloud.studio import fal_edit\n\n    api_key = fal_edit.fal_api_key() or grant.api_key",
+    "tests": [
+      "tests/cloud/other_hand/test_illustrate_endpoint.py::TestAWorkspaceOnItsOwnKey::test_the_mcp_tool_does_not_claim_our_budget_either"
+    ]
+  },
+  {
+    "label": "the guest refusal moves ahead of the stored key — a guest paying their own way is refused anyway",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/illustration_credentials.py",
+    "find": "    own = await byok_service.resolve_image_key(workspace_id)\n    if own:\n        return IllustrationGrant(api_key=own, byok=True)\n\n    if is_guest:",
+    "replace": "    if is_guest:\n        return IllustrationRefusal(reason=GUEST_REFUSAL, guest_gate=True)\n\n    own = await byok_service.resolve_image_key(workspace_id)\n    if own:\n        return IllustrationGrant(api_key=own, byok=True)\n\n    if False:",
+    "tests": [
+      "tests/cloud/other_hand/test_illustration_credentials.py::test_a_guest_with_their_own_key_may_illustrate"
+    ]
+  },
+  {
+    "label": "the guest refusal is dropped — a keyless guest spends platform money from a signup form that asks for nothing",
+    "file": "ee/pocketpaw_ee/cloud/other_hand/illustration_credentials.py",
+    "find": "    if is_guest:\n        return IllustrationRefusal(reason=GUEST_REFUSAL, guest_gate=True)",
+    "replace": "    if False:\n        return IllustrationRefusal(reason=GUEST_REFUSAL, guest_gate=True)",
+    "tests": [
+      "tests/cloud/other_hand/test_illustration_credentials.py::test_a_guest_without_a_key_is_still_refused"
+    ]
+  },
+  {
+    "label": "removing the LLM key drops the whole row — the user rotates one credential and silently loses the other",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "    if doc.image_encrypted_key:\n        doc.encrypted_key = \"\"",
+    "replace": "    if False:\n        doc.encrypted_key = \"\"",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestTheTwoCredentialsAreIndependent::test_removing_the_llm_key_keeps_the_image_key"
+    ]
+  },
+  {
+    "label": "the fal hint prints the secret half — a credential is displayed in a settings panel",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "    return api_key.partition(\":\")[0] if \":\" in api_key else \"\"",
+    "replace": "    return api_key",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestImageKeyDisplayColumns::test_the_hint_is_the_key_id_and_never_the_secret"
+    ]
+  }
+]

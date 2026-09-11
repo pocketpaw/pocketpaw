@@ -73,6 +73,20 @@ async def _guest_or_none() -> Any:
         return _NO_IDENTITY
 
 
+def _workspace_or_none() -> str | None:
+    """This turn's workspace, or None. The same public accessor every other
+    in-process MCP tool uses for tenancy — and the same failure posture: no
+    tenancy means no stored key, which resolves to the platform's (or, for a
+    guest, to a refusal)."""
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import current_workspace_id
+
+        return current_workspace_id()
+    except Exception:  # noqa: BLE001 — no tenancy is a missing key, not a crash
+        logger.debug("other-hand: no workspace in context for illustration", exc_info=True)
+        return None
+
+
 def _ok(message: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": message}]}
 
@@ -82,41 +96,38 @@ async def _illustrate_handler(args: dict) -> dict:
     from pocketpaw_ee.cloud.chat.agent_service import push_sse_event
     from pocketpaw_ee.cloud.other_hand import illustrate as illustrator
     from pocketpaw_ee.cloud.other_hand.svg_to_ink import Box
-    from pocketpaw_ee.cloud.studio import fal_edit
 
     subject = str(args.get("subject") or "").strip()
     if len(subject) < 2:
         return _error("Say what to illustrate — a subject of at least two characters.")
 
-    api_key = fal_edit.fal_api_key()
-    if not api_key:
-        # Not an error the agent should retry or apologise at length for. Tell
-        # it plainly so it explains in words instead and moves on.
-        return _error(
-            "No illustrator is configured on this deployment. Explain in words "
-            "and with your own drawing instead; do not try again."
-        )
-
     from pocketpaw_ee.cloud.other_hand import illustration_budget as budget
+    from pocketpaw_ee.cloud.other_hand import illustration_credentials as creds
 
-    # Guests do not get to spend platform money on pictures, on this path
-    # either. The REST route refuses them too; gating only there would leave
-    # the whole feature reachable by simply ASKING the agent to draw, which is
-    # the more natural way in. Refused before the budget is claimed, and worded
-    # so the agent explains instead of retrying.
-    guest = await _guest_or_none()
-    if guest is not None:
-        return _error(
-            "Illustrations need an account. Say so plainly and offer to keep "
-            "going in words and your own drawing; do not try again this turn."
-        )
+    # Who pays, and whether this may happen at all. Both entry points ask the
+    # same module — this path and the toolbar button's REST route — because the
+    # rules are about money and two copies of a money rule drift.
+    #
+    # The guest check stays on BOTH paths rather than only on the route: gating
+    # there alone would leave the whole feature reachable by simply ASKING the
+    # agent to draw, which is the more natural way in.
+    is_guest = await _guest_or_none() is not None
+    grant = await creds.resolve(_workspace_or_none(), is_guest=is_guest)
+    if isinstance(grant, creds.IllustrationRefusal):
+        # Not an error the agent should retry or apologise at length for.
+        return _error(grant.reason)
+    api_key = grant.api_key
 
-    allowed, spent, cap = await budget.try_spend()
-    if not allowed:
-        return _error(
-            f"Today's illustration limit is used up ({spent}/{cap}). Explain in "
-            "words and with your own drawing instead; do not try again today."
-        )
+    # The platform's ceiling, claimed only when the platform is paying. A
+    # workspace on its own key is spending its own money and has no reason to
+    # be inside our quota.
+    if not grant.byok:
+        allowed, spent, cap = await budget.try_spend()
+        if not allowed:
+            return _error(
+                f"Today's illustration limit is used up ({spent}/{cap}). Explain in "
+                "words and with your own drawing instead; do not try again today."
+            )
 
     try:
         ops = await illustrator.illustrate_as_ops(

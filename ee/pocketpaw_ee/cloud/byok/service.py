@@ -82,12 +82,16 @@ async def get_status(workspace_id: str) -> ByokStatus:
     if doc is None:
         return ByokStatus(configured=False)
     return ByokStatus(
-        configured=True,
+        configured=bool(doc.encrypted_key),
         provider=doc.provider,
         last4=doc.last4,
         key_hint=doc.key_hint,
         last_verified_at=doc.last_verified_at,
         last_error=doc.last_error,
+        image_configured=bool(doc.image_encrypted_key),
+        image_last4=doc.image_last4,
+        image_key_hint=doc.image_key_hint,
+        image_last_error=doc.image_last_error,
     )
 
 
@@ -181,12 +185,29 @@ async def set_key(
 
 
 async def delete_key(workspace_id: str) -> ByokStatus:
-    """Remove the workspace's key. Idempotent — deleting nothing is success."""
+    """Remove the workspace's LLM key. Idempotent — deleting nothing is success.
+
+    Clears the columns rather than dropping the row whenever an IMAGE key still
+    lives on it. One row holds two independent credentials (2026-09-11), and
+    removing one must never take the other with it — a user who rotates their
+    Anthropic key would otherwise silently lose their illustrator.
+    """
     doc = await ByokProviderKey.find_one(ByokProviderKey.workspace == workspace_id)
-    if doc is not None:
+    if doc is None:
+        return ByokStatus(configured=False)
+    if doc.image_encrypted_key:
+        doc.encrypted_key = ""
+        doc.last4 = ""
+        doc.key_hint = None
+        doc.base_url = None
+        doc.model = None
+        doc.last_verified_at = None
+        doc.last_error = None
+        await doc.save()
+    else:
         await doc.delete()
-        logger.info("byok: key removed for workspace=%s", workspace_id)
-    return ByokStatus(configured=False)
+    logger.info("byok: key removed for workspace=%s", workspace_id)
+    return await get_status(workspace_id)
 
 
 async def record_auth_failure(workspace_id: str, message: str) -> None:
@@ -233,6 +254,139 @@ async def resolve_turn_credentials(workspace_id: str | None) -> TurnCredentials:
     if not plaintext:
         return TurnCredentials(source="platform")
     return TurnCredentials(source="byok", api_key=plaintext, provider=doc.provider)
+
+
+# ── The illustration credential (fal.ai) ────────────────────────────────────
+#
+# Added 2026-09-11 (feat/byok-image-key). Illustrations are generated through
+# fal and billed per image on the PLATFORM's account, which is why guests are
+# refused them outright: a guest can mint a fresh workspace for a fresh daily
+# ceiling, so the cap alone left a bill attached to a signup form. A workspace
+# that brings its own fal key pays for its own pictures, and that objection
+# disappears.
+#
+# NOT validated on save. fal has no free endpoint that proves a key without
+# generating an image, so a validate-on-save would spend money every time
+# someone pasted one. ``record_image_auth_failure`` stamps the row the first
+# time a generation is refused, which is the same signal one picture later.
+
+
+def _fal_hint(api_key: str) -> str:
+    """The non-secret half of a fal key.
+
+    fal spells its credential ``<key-id>:<secret>``. The id is not secret and
+    is what tells two keys apart; the secret is the part that must never be
+    displayed. ``_hint`` above splits on ``-`` and would print three UUID
+    segments of a fal key, so this one exists rather than reusing it.
+    """
+    return api_key.partition(":")[0] if ":" in api_key else ""
+
+
+def _fal_last4(api_key: str) -> str:
+    """Last four of the SECRET half, so two keys sharing an id still differ."""
+    secret = api_key.partition(":")[2] if ":" in api_key else api_key
+    return secret[-4:]
+
+
+async def set_image_key(
+    workspace_id: str,
+    api_key: str,
+    *,
+    user_id: str | None = None,
+) -> ByokStatus:
+    """Encrypt-and-upsert the workspace's fal key. Never touches the LLM key."""
+    if not crypto.is_configured():
+        raise ValidationError(
+            "byok.encryption_unavailable",
+            "This deployment cannot store provider keys — CLOUD_ENCRYPTION_KEY "
+            "is not set. Contact the operator.",
+        )
+
+    doc = await ByokProviderKey.find_one(ByokProviderKey.workspace == workspace_id)
+    if doc is None:
+        # A workspace may bring an image key and no LLM key at all — on a
+        # platform-credential deployment that is the ordinary case. The row is
+        # created with an EMPTY ``encrypted_key``, which ``get_status`` reads as
+        # "no LLM key configured" and ``resolve_turn_credentials`` reads as
+        # platform. Both already handle the empty string.
+        doc = ByokProviderKey(workspace=workspace_id, encrypted_key="", last4="")
+
+    doc.image_encrypted_key = crypto.encrypt(api_key)
+    doc.image_last4 = _fal_last4(api_key)
+    doc.image_key_hint = _fal_hint(api_key)
+    doc.image_last_error = None
+    doc.set_by_user = user_id or doc.set_by_user
+    await doc.save()
+
+    logger.info("byok: image key set for workspace=%s", workspace_id)
+    return await get_status(workspace_id)
+
+
+async def delete_image_key(workspace_id: str) -> ByokStatus:
+    """Remove the fal key. Idempotent, and it never touches the LLM key.
+
+    Unlike the LLM key, removing this one is SAFE and the UI offers it: a
+    workspace with no image key falls back to today's behaviour (the platform
+    key under the daily cap for accounts, a refusal for guests), where a
+    workspace with no LLM key answers 402 on every turn.
+    """
+    doc = await ByokProviderKey.find_one(ByokProviderKey.workspace == workspace_id)
+    if doc is None:
+        return ByokStatus(configured=False)
+    if doc.encrypted_key:
+        doc.image_encrypted_key = None
+        doc.image_last4 = None
+        doc.image_key_hint = None
+        doc.image_last_error = None
+        await doc.save()
+    else:
+        # Nothing left on the row once the image key goes.
+        await doc.delete()
+        return ByokStatus(configured=False)
+    logger.info("byok: image key removed for workspace=%s", workspace_id)
+    return await get_status(workspace_id)
+
+
+async def resolve_image_key(workspace_id: str | None) -> str | None:
+    """The workspace's own fal key, or None. A DECRYPT SITE.
+
+    Same degrade-to-None shape as ``resolve_turn_credentials``: an undecryptable
+    row (the deployment's Fernet key rotated) reads as "no key", so the caller
+    falls back to the platform's rather than failing. Never raises — an
+    illustration is not worth breaking a turn over.
+    """
+    if not workspace_id:
+        return None
+    try:
+        doc = await ByokProviderKey.find_one(ByokProviderKey.workspace == workspace_id)
+        if doc is None or not doc.image_encrypted_key:
+            return None
+        return crypto.decrypt(doc.image_encrypted_key) or None
+    except Exception:  # noqa: BLE001 — an unreadable key is a missing key
+        logger.warning(
+            "byok: stored image key for workspace=%s is unreadable; using the "
+            "platform illustrator this time",
+            workspace_id,
+        )
+        return None
+
+
+async def record_image_auth_failure(workspace_id: str | None, message: str) -> None:
+    """Mark the stored fal key as having failed, so the UI stops showing it good.
+
+    This IS the verification story for this credential (see the header): there
+    is no save-time check, so the first refused generation is where a bad key
+    becomes visible. Best-effort — bookkeeping never fails the caller.
+    """
+    if not workspace_id:
+        return
+    try:
+        doc = await ByokProviderKey.find_one(ByokProviderKey.workspace == workspace_id)
+        if doc is not None and doc.image_encrypted_key:
+            doc.image_last_error = message[:300]
+            await doc.save()
+    except Exception:  # noqa: BLE001
+        logger.debug("byok: could not record image auth failure", exc_info=True)
 
 
 #: Model names that mean "let the backend pick" — never a cross-provider pin.
