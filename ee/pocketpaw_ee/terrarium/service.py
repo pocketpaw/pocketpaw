@@ -28,6 +28,15 @@
 #      trail the edge by ``TERRARIUM_PUBLIC_DELAY_EVENTS`` (default 20) rows.
 #   8. a DORMANT world thinks in a half-price Message Batch when
 #      ``TERRARIUM_BATCH_DORMANT`` is on (DEFAULT OFF) — ``dormant_batch_step``.
+#   9. resources: ``_new_day`` is the only producer (one ``harvest`` row per
+#      citizen per day, weather-scaled by ``UniverseDoc.weather_marks``) and
+#      the only robber (``raids`` + ``stock_cap``: a hoard over the cap loses
+#      half, one ``raid`` row). Bundles are charged from ``outcome.stock_delta``
+#      in ``_persist_outcome``; a founder card's ``stock`` seeds the citizen.
+#      Both the watched fan-out and the dormant batch reach ``_new_day``
+#      through ``_land_tick``, so the two paths harvest identically.
+#  10. the rung is a projection, but a CHANGE of rung is a Journal row: one
+#      zero-cost ``era`` (actor GATE, ``data.from`` / ``data.to``).
 
 """Terrarium service — persistence, souls, the gate and the bus."""
 
@@ -201,6 +210,7 @@ def citizen_wire(doc: CitizenDoc) -> dict[str, Any]:
         "y": doc.y,
         "unlocked": doc.unlocked,
         "born_day": doc.born_day,
+        "stock": doc.stock,
     }
 
 
@@ -522,6 +532,7 @@ async def create_universe(workspace_id: str, user_id: str, body: dict[str, Any])
             x=round(20.0 + (i * 13) % 60, 2),
             y=round(30.0 + (i * 17) % 50, 2),
             born_day=1,
+            stock=dict(card.stock) if card else {},
         )
         await citizen.insert()
         uni.pool -= endowment
@@ -615,6 +626,7 @@ async def _ledger(universe_id: str) -> list[dict[str, Any]]:
             "earned_today": c.earned_today,
             "spent_today": c.spent_today,
             "state": c.state,
+            "stock": c.stock,
         }
         for c in rows
     ]
@@ -634,6 +646,7 @@ def _snapshot(doc: CitizenDoc) -> world.CitizenSnapshot:
         generation=doc.generation,
         ocean=dict(doc.ocean),
         values=tuple(doc.values),
+        stock=dict(doc.stock),
     )
 
 
@@ -885,7 +898,22 @@ async def _land_tick(
         await _new_day(uni, physics)
     if uni.storm_ticks > 0:
         uni.storm_ticks -= 1
-    uni.rung = world.rung_for(len(pairs), len({u for doc, _snap in pairs for u in doc.unlocked}))
+    rung = world.rung_for(len(pairs), len({u for doc, _snap in pairs for u in doc.unlocked}))
+    if rung != uni.rung:
+        # Invariant 10: the ladder moving is the one system row a viewer wants
+        # a banner for, so it is written rather than left to be inferred.
+        era = await _append_event(
+            uni,
+            kind="era",
+            actor="GATE",
+            body=f"{uni.name} is now a {rung}",
+            cost=0,
+            origin="system",
+            data={"from": uni.rung, "to": rung},
+        )
+        await _publish(uni, era)
+        written.append(event_wire(era))
+        uni.rung = rung
     if meter is not None:
         _accrue_meter(uni, meter)
     await uni.save()
@@ -1015,6 +1043,9 @@ async def _persist_outcome(
             if ev.artifact_index is not None and ev.artifact_index < len(artifact_ids)
             else None
         )
+        data = dict(ev.data or {})
+        if ev.kind == "design" and art_id:
+            data["design_id"] = art_id
         row = await _append_event(
             uni,
             kind=ev.kind,
@@ -1024,7 +1055,7 @@ async def _persist_outcome(
             artifact_id=art_id,
             origin=ev.origin,
             viewer_origin=ev.viewer_origin,
-            data={"design_id": art_id} if ev.kind == "design" and art_id else None,
+            data=data or None,
         )
         await _publish(uni, row)
         written.append(event_wire(row))
@@ -1044,6 +1075,12 @@ async def _persist_outcome(
         doc.unlocked = sorted({*doc.unlocked, *outcome.unlocked})
     if outcome.x is not None:
         doc.x, doc.y = outcome.x, outcome.y or doc.y
+    if outcome.stock_delta:
+        # Bundles the engine already checked against this stock; spring swaps.
+        stock = dict(doc.stock)
+        for name, amount in outcome.stock_delta.items():
+            stock[name] = stock.get(name, 0) + amount
+        doc.stock = {k: v for k, v in stock.items() if v > 0}
 
     for to_name, amount in outcome.transfers:
         other = await CitizenDoc.find_one(
@@ -1091,12 +1128,81 @@ async def _persist_outcome(
     return written
 
 
+# How many world days a rain / drought mark scales the harvest for.
+_MARK_DAYS = 2
+
+
+def _yield_at(marks: list[dict[str, Any]], x: float, y: float) -> int:
+    """Units one building yields today: 0 inside a drought, 2 inside rain, else 1."""
+    n = 1
+    for m in marks:
+        r = weather.RADIUS.get(str(m.get("kind")), 0.0)
+        if (x - float(m["x"])) ** 2 + (y - float(m["y"])) ** 2 <= r * r:
+            if m["kind"] == "drought":
+                return 0
+            n = 2
+    return n
+
+
+async def _structure_places(universe_id: str) -> dict[tuple[str, str], tuple[float, float]]:
+    """(author, node) -> where that building stands. Only read when a mark is live."""
+    places: dict[tuple[str, str], tuple[float, float]] = {}
+    async for a in ArtifactDoc.find(
+        ArtifactDoc.universe_id == universe_id, ArtifactDoc.kind == "structure"
+    ):
+        if a.unlocks and a.x is not None and a.y is not None:
+            places[(a.author, a.unlocks[0])] = (float(a.x), float(a.y))
+    return places
+
+
 async def _new_day(uni: UniverseDoc, physics: PhysicsFile) -> None:
-    """Day rollover — the endowment rains into the pool, daily counters reset."""
+    """Day rollover — the endowment rains into the pool, daily counters reset,
+    every held producing building yields into its holder's stock, and the
+    robber visits any hoard over the cap. Reached by BOTH tick paths."""
     uni.pool += physics.endowment.daily
-    async for c in CitizenDoc.find(CitizenDoc.universe_id == str(uni.id)):
+    universe_id = str(uni.id)
+    uni.weather_marks = [m for m in uni.weather_marks if int(m.get("expires_day", 0)) >= uni.day]
+    producing = {n: node.produces for n, node in physics.tech_tree.items() if node.produces}
+    places = await _structure_places(universe_id) if producing and uni.weather_marks else {}
+    cap = physics.stock_cap if physics.raids else None
+    async for c in CitizenDoc.find(CitizenDoc.universe_id == universe_id):
         c.earned_today = 0
         c.spent_today = 0
+        got: dict[str, int] = {}
+        if c.state == "alive":
+            for node in c.unlocked:
+                resource = producing.get(node)
+                if resource is None:
+                    continue
+                x, y = places.get((c.name, node), (c.x, c.y))
+                units = _yield_at(uni.weather_marks, x, y)
+                if units:
+                    got[resource] = got.get(resource, 0) + units
+        if got:
+            c.stock = {**c.stock, **{k: c.stock.get(k, 0) + v for k, v in got.items()}}
+            row = await _append_event(
+                uni,
+                kind="harvest",
+                actor=c.name,
+                body="harvested " + ", ".join(f"{v} {k}" for k, v in got.items()),
+                cost=0,
+                origin="system",
+                data={"got": got},
+            )
+            await _publish(uni, row)
+        took = {k: v // 2 for k, v in c.stock.items() if cap and v > cap}
+        if took:
+            c.stock = {**c.stock, **{k: c.stock[k] - v for k, v in took.items()}}
+            row = await _append_event(
+                uni,
+                kind="raid",
+                actor=c.name,
+                body="the storm took " + ", ".join(f"{v} {k}" for k, v in took.items()),
+                cost=0,
+                origin="system",
+                data={"took": took},
+            )
+            await _publish(uni, row)
         await c.save()
 
 
@@ -1611,6 +1717,11 @@ async def _fire_weather(uni: UniverseDoc, kind: str, line: Any) -> None:
             c.state = "alive"
             await c.save()
     at = {"x": place.x, "y": place.y, "radius": place.radius} if place else None
+    if place is not None and kind in ("rain", "drought"):
+        # The harvest reads this: rain doubles, drought zeroes, for _MARK_DAYS.
+        uni.weather_marks.append(
+            {"kind": kind, "x": place.x, "y": place.y, "expires_day": uni.day + _MARK_DAYS}
+        )
     row = await _append_event(
         uni, kind="weather", actor="GOD", body=fx.body, cost=0, data={"at": at} if at else None
     )
