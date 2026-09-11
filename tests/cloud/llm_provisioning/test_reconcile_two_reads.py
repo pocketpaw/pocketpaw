@@ -27,21 +27,44 @@
 #   * and the critical invariant survives the second read: shadow still debits
 #     nothing, and still creates no provisioning row.
 #
+# ONE WINDOW, BOTH METERS. The bug has a general form the second read alone does
+# not close: the two halves resolving their span separately. Wiring the proxy read
+# up without that produced it again on the windowless path — the LiteLLM side
+# derived a start from the tenant's own row (zero-width on a freshly provisioned
+# tenant, 15 minutes on a swept one) while the ledger side summed all time, which
+# is a coverage gap nothing spent. So three tests pin the window itself:
+#
+#   * no window at all -> both sides measure the same span, and the audit row
+#     reports the span actually compared rather than a null;
+#   * an open UPPER bound -> both sides stop at the same instant, proven with a
+#     row and a debit stamped past it;
+#   * an inverted window -> refused, rather than recorded as a vacuous agreement.
+#
+# Mutation-proven: tests/mutations/reconcile_two_reads.json breaks the per-key-only
+# read, both halves of the window resolution, the recorded bounds, the inverted-
+# window guard, and the read-only discipline. All six were observed to fail here.
+#
 # Uses the shared ``mongo_db`` + autouse ``recording_bus`` fixtures from
 # tests/cloud/conftest.py. A FAKE admin client stands in for the proxy.
 #
 # Created 2026-09-11 (fix/billing-reconcile-two-reads): new test module.
+# Updated 2026-09-11 (same branch, review): added the three window tests + the
+#   mutation plan, after review found the windowless path reproducing the very
+#   false gap this module exists to prevent.
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from pocketpaw_ee.catalog.admin_client import LiteLLMAdminError
+from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.credits import service as credits
 from pocketpaw_ee.cloud.llm_provisioning import service as provisioning
 from pocketpaw_ee.cloud.llm_provisioning.domain import KeyBudget, SpendCredits
 from pocketpaw_ee.cloud.models.credit import CreditLedgerEntry
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
+from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
 
 WS = "ws_reconcile_two_reads"
 
@@ -237,6 +260,145 @@ async def test_reconcile_survives_one_read_failing(mongo_db):
         WS, since=SINCE, until=UNTIL, spend_card=SPEND, threshold=2, admin_client=admin
     )
     assert rec.litellm_credits == 20  # the customer half still read
+
+
+async def test_reconcile_without_a_window_compares_the_same_span_on_both_sides(mongo_db):
+    """The windowless call is where the two meters drifted apart.
+
+    The LiteLLM side used to derive its own start (the tenant's mark, or its row's
+    ``createdAt``) while the BC-3 side got the caller's ``None`` and summed all
+    time. On a freshly provisioned tenant — no mark, ``createdAt`` ≈ now — that
+    derived window is ZERO WIDTH: the proxy was asked for spend over
+    ``[now, now]``, returned nothing, and the compare reported a coverage gap
+    against an all-time ledger sum. Both halves now resolve from one window.
+    """
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await credits.debit(
+        WS, 30, cause="compute_spend", idempotency_key="run:r1", allow_negative=True
+    )
+    await _provision()  # fresh row: no high-water mark, createdAt ≈ now
+
+    admin = FakeAdmin(
+        key_rows=[_row("req-key", usd=0.04)],  # 10 credits, dated months back
+        customer_rows=[_row("req-chat", usd=0.08)],  # 20 credits, dated months back
+    )
+
+    rec = await provisioning.reconcile_tenant_spend(
+        WS, spend_card=SPEND, threshold=2, admin_client=admin
+    )
+
+    # The customer read covered a real span, not the zero-width one the tenant's
+    # own row would have produced.
+    assert len(admin.windows) == 1
+    start_date, end_date = admin.windows[0]
+    assert start_date == "1970-01-01 00:00:00"
+    assert start_date < end_date
+
+    # Both meters saw their spend, so the compare agrees instead of manufacturing
+    # a gap out of a window only one side used.
+    assert rec.litellm_rows == 2
+    assert rec.litellm_credits == 30
+    assert rec.bc3_credits == 30
+    assert rec.delta == 0
+    assert rec.coverage_gap is False
+
+    # And the audit row reports the span that was actually compared — an operator
+    # reading it back can tell which window produced the delta.
+    records = await SpendReconciliation.find(SpendReconciliation.workspace == WS).to_list()
+    assert len(records) == 1
+    assert records[0].window_start == start_date.replace(" ", "T") + "+00:00"
+    assert records[0].window_start == rec.window_start
+    assert records[0].window_end == rec.window_end
+
+
+async def test_reconcile_ends_both_sides_at_the_same_instant(mongo_db):
+    """The open UPPER bound, which is where the two sides can still drift apart.
+
+    With no ``until`` the compare ends at the instant it runs. If the ledger half
+    keeps the caller's raw ``None`` while the proxy half gets that resolved
+    instant, a row dated in the FUTURE is dropped from one meter and counted by
+    the other — a delta out of a span only one side measured. Same bug as the
+    original, one bound over. Both halves must stop at the same instant.
+    """
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _provision()
+
+    # One settled debit, and one stamped ahead of the compare. Proxy rows are
+    # recorded with a ``startTime`` the tenant's own clock supplies, so a row
+    # ahead of ours is not hypothetical.
+    await credits.debit(
+        WS, 10, cause="compute_spend", idempotency_key="run:past", allow_negative=True
+    )
+    await credits.debit(
+        WS, 99, cause="compute_spend", idempotency_key="run:ahead", allow_negative=True
+    )
+    ahead = await CreditLedgerEntry.find_one(
+        CreditLedgerEntry.workspace == WS,
+        CreditLedgerEntry.idempotency_key == "run:ahead",
+    )
+    assert ahead is not None
+    await ahead.set({CreditLedgerEntry.createdAt: datetime(2099, 1, 1, tzinfo=UTC)})
+
+    admin = FakeAdmin(
+        customer_rows=[
+            _row("req-past", usd=0.04),  # 10 credits, months back
+            _row("req-ahead", usd=0.40, at="2099-01-01T00:00:00"),  # 100, ahead of now
+        ]
+    )
+
+    rec = await provisioning.reconcile_tenant_spend(
+        WS, spend_card=SPEND, threshold=2, admin_client=admin
+    )
+
+    # Each side counted the settled row and neither counted the one past the end
+    # of the window.
+    assert rec.litellm_rows == 1
+    assert rec.litellm_credits == 10
+    assert rec.bc3_entries == 1
+    assert rec.bc3_credits == 10
+    assert rec.delta == 0
+    assert rec.coverage_gap is False
+
+
+async def test_reconcile_refuses_an_inverted_window(mongo_db):
+    """``since`` after ``until`` compares nothing on either side, so it would
+    persist a confident ``delta=0, coverage_gap=False`` — a clean bill of health
+    for a question nobody asked — and reach the proxy as ``start_date >
+    end_date``, which /spend/logs/v2 answers however it likes."""
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _provision()
+
+    admin = FakeAdmin(customer_rows=[_row("req-chat", usd=0.08)])
+
+    with pytest.raises(ValidationError):
+        await provisioning.reconcile_tenant_spend(
+            WS, since=UNTIL, until=SINCE, spend_card=SPEND, threshold=2, admin_client=admin
+        )
+
+    assert admin.windows == []  # refused before the proxy was touched
+    assert await SpendReconciliation.find(SpendReconciliation.workspace == WS).to_list() == []
+
+
+async def test_reconcile_with_only_until_reads_from_the_epoch(mongo_db):
+    """The backfill shape: "everything before last week". The open lower bound
+    must widen the read, never invert it — the proxy gets epoch..until, and the
+    BC-3 sum is bounded by the same pair."""
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _provision()
+
+    admin = FakeAdmin(customer_rows=[_row("req-chat", usd=0.08, at="2026-08-01T10:00:00")])
+
+    rec = await provisioning.reconcile_tenant_spend(
+        WS, until=UNTIL, spend_card=SPEND, threshold=2, admin_client=admin
+    )
+
+    assert admin.windows == [("1970-01-01 00:00:00", "2026-09-03 00:00:00")]
+    assert rec.litellm_credits == 20
+    assert rec.window_start == "1970-01-01T00:00:00+00:00"
+    assert rec.window_end == UNTIL.isoformat()
+    # The ledger side is bounded by the same pair, so a debit made now — after
+    # ``until`` — is outside the compare on BOTH sides rather than on one.
+    assert rec.bc3_credits == 0
 
 
 async def test_reconcile_still_debits_nothing_with_both_reads(mongo_db):
