@@ -85,7 +85,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -272,7 +272,7 @@ async def emit_belt_entity_changed(
         "file": file,
         "change": change,
         "component": component,
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
     }
 
     # PRIMARY — workspace realtime bus (async fan-out to every workspace member).

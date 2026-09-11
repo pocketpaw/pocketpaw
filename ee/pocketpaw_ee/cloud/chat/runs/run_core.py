@@ -1,6 +1,20 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-09-12 (feat/belt-entity-events) — the ``tool_use`` branch now also feeds
+  the /belt console's per-FILE live feed. A develop-station run went silent
+  between "started" and the single ``belt_run_updated(proposed)`` at the end,
+  which on a multi-minute run reads as a hang, so each ``Write`` / ``Edit``
+  additionally calls ``belt.service.maybe_emit_belt_entity_changed``. This loop
+  is the only place the agent's tool stream meets the surface binding it needs
+  (``ctx.surface_context`` carries both the BELT kind and ``meta.repo``, the
+  repo the /belt page bound for the run) — the headless runner takes an
+  injectable ``DevelopFn`` and never sees an ``AgentEvent``. ALL the filtering
+  lives in the bridge, so this stays one guarded call and a non-belt turn is a
+  no-op. Skips the provisional ``input_pending`` announcement, whose ``input``
+  is ``{}`` — the resolved ``AssistantMessage`` event carries the real
+  ``file_path`` and emitting on both would double every change.
+
 - 2026-09-08 (fix/attachment-only-turns) — ``_drive_agent_loop`` now runs its
   ``user_content`` through ``agent_service.resolve_user_content`` before
   anything reads it. A send with attachments and no typed text arrives as the
@@ -1869,6 +1883,42 @@ async def _drive_agent_loop(
                         tool_input = econtent
                     elif isinstance(econtent, str):
                         name = econtent
+                # feat/belt-entity-events: on the BELT surface, a Write / Edit
+                # inside the run's bound repo also rides the workspace bus as
+                # ``belt_entity_changed`` so the /belt page can follow the work
+                # live instead of waiting for the one ``proposed`` event at the
+                # end. Every other surface, and every other tool, is a no-op
+                # inside the bridge — the gating lives there so it is testable
+                # without driving this loop.
+                #
+                # Skips the PROVISIONAL announcement: ``content_block_start``
+                # names the tool before a single argument has streamed, so its
+                # ``input`` is ``{}`` and the resolved ``AssistantMessage``
+                # event that follows carries the real ``file_path``. Emitting on
+                # both would double every change. Same ``input_pending`` idiom
+                # as ``agents/loop.py``.
+                #
+                # Fire-and-forget on purpose: this must not add latency to the
+                # tool chip, and it cannot fail the run (the bridge swallows its
+                # own errors; the import is guarded for an OSS-only install).
+                _input_pending = isinstance(meta, dict) and meta.get("input_pending") is True
+                if not _input_pending:
+                    try:
+                        from pocketpaw_ee.cloud.belt.service import (
+                            maybe_emit_belt_entity_changed,
+                        )
+
+                        _sc = ctx.surface_context
+                        await maybe_emit_belt_entity_changed(
+                            surface=_sc.kind.value if _sc else None,
+                            tool_name=name,
+                            tool_input=tool_input,
+                            workspace_id=ctx.workspace_id,
+                            run_id=stream_run_id,
+                            repo_root=_sc.meta.repo if _sc else None,
+                        )
+                    except Exception:  # noqa: BLE001 — a live feed never breaks a turn
+                        logger.debug("belt: entity-change bridge failed", exc_info=True)
                 if name == _ASK_USER_TOOL_ID:
                     # Interactive question: emit an ``ask_user_question`` frame the
                     # client renders as clickable option chips (service.ts ->
