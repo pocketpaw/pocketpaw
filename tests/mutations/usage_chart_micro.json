@@ -1,0 +1,48 @@
+[
+  {
+    "label": "usage chart: spend_by_model throws the exact figure away again (the original bug)",
+    "file": "ee/pocketpaw_ee/cloud/credits/service.py",
+    "find": "                credits_micro=group_micro,",
+    "replace": "                credits_micro=0,",
+    "tests": [
+      "tests/cloud/billing/test_usage_sub_credit_micro.py",
+      "tests/cloud/credits/test_spend_by_model.py"
+    ]
+  },
+  {
+    "label": "usage chart: the fold accumulates truncated credits instead of micro",
+    "file": "ee/pocketpaw_ee/cloud/billing/usage.py",
+    "find": "            micro + row.credits_micro,",
+    "replace": "            micro + row.credits,",
+    "tests": [
+      "tests/cloud/billing/test_usage_sub_credit_micro.py"
+    ]
+  },
+  {
+    "label": "usage chart: the day total sums the per-model truncations",
+    "file": "ee/pocketpaw_ee/cloud/billing/usage.py",
+    "find": "                total_credits=micro_to_credits(day_micro),",
+    "replace": "                total_credits=sum(s.credits for s in stats_by_model.values()),",
+    "tests": [
+      "tests/cloud/billing/test_usage_sub_credit_micro.py"
+    ]
+  },
+  {
+    "label": "usage chart: the grand total sums the per-day truncations",
+    "file": "ee/pocketpaw_ee/cloud/billing/usage.py",
+    "find": "        total_credits=micro_to_credits(total_micro),",
+    "replace": "        total_credits=sum(b.total_credits for b in out_buckets),",
+    "tests": [
+      "tests/cloud/billing/test_usage_sub_credit_micro.py"
+    ]
+  },
+  {
+    "label": "usage chart: the day's exact total never reaches the wire",
+    "file": "ee/pocketpaw_ee/cloud/billing/usage.py",
+    "find": "                total_credits_micro=day_micro,",
+    "replace": "                total_credits_micro=0,",
+    "tests": [
+      "tests/cloud/billing/test_usage_sub_credit_micro.py"
+    ]
+  }
+]

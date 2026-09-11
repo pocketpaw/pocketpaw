@@ -136,6 +136,12 @@
 # token volume instead of a hardcoded 0. A legacy entry whose ref predates the
 # token stamp contributes 0 (the credits + requests figures are unchanged). Read
 # only — no new writes.
+# Changed 2026-09-11 (fix/billing-usage-chart-micro): ``spend_by_model`` now
+# returns the group's EXACT micro-credit sum on ``ModelSpendRow.credits_micro``
+# alongside the truncated ``credits``. The pipeline already summed
+# ``amount_delta_micro`` correctly; this function then threw the precision away per
+# (day, model) group, so a day of sub-credit runs reached the usage chart as zeros.
+# Read only — the pipeline, the causes and every written figure are untouched.
 # Changed 2026-06-30 (feat/billing-quota-enforcement, chunk 2): added the monthly
 # credit-QUOTA reads + assertion. ``month_to_date_spend`` sums this UTC calendar
 # month's APPLIED spend debits (compute_spend + litellm_spend, the same two
@@ -946,12 +952,17 @@ async def spend_by_model(
     Per entry: ``day`` is ``createdAt.date()`` in UTC (``YYYY-MM-DD``); ``model``
     is ``ref.model`` or ``"unknown"`` when the debit carried no model (real
     charged spend with no model still counts toward the day so the chart
-    reconciles with the wallet); ``credits`` is the POSITIVE amount debited (a
-    stray positive delta is clamped out, like ``sum_debits_by_cause``). ``requests``
-    is the COUNT of entries in the (day, model) group. ``tokens`` is the real total
-    token volume for the group, summed from each entry's ``ref.total_tokens`` (the
-    metering path now records it — a legacy entry without it contributes 0, so the
-    figure reflects real volume going forward without breaking historical reads).
+    reconciles with the wallet); ``credits_micro`` is the POSITIVE amount debited in
+    micro-credits (a stray positive delta is clamped out, like
+    ``sum_debits_by_cause``) and ``credits`` is that figure truncated to whole
+    credits for display. READ ``credits_micro`` — a group of ordinary light usage
+    (a chat run is about 375_000 micro) truncates to 0 whole credits, and an
+    aggregate built by summing the truncated field compounds that shortfall over
+    every group. ``requests`` is the COUNT of entries in the (day, model) group.
+    ``tokens`` is the real total token volume for the group, summed from each
+    entry's ``ref.total_tokens`` (the metering path now records it — a legacy entry
+    without it contributes 0, so the figure reflects real volume going forward
+    without breaking historical reads).
 
     The fold runs SERVER-SIDE (``_spend_by_model_pipeline``): a Mongo ``$match``
     on the tenant, causes, applied flag and window feeds a ``$group`` on (day,
@@ -982,12 +993,16 @@ async def spend_by_model(
     rows: list[ModelSpendRow] = []
     async for doc in cursor:
         key = doc.get("_id") or {}
+        # The pipeline sums the micro field. Carry it through EXACTLY — truncating
+        # here is what made a day of sub-credit runs chart as zeros. ``credits``
+        # remains for display; callers that aggregate must fold the micro figure.
+        group_micro = int(doc.get("credits") or 0)
         rows.append(
             ModelSpendRow(
                 day=str(key.get("day") or ""),
                 model=str(key.get("model") or "unknown"),
-                # The pipeline sums the micro field; the graph plots whole credits.
-                credits=micro_to_credits(int(doc.get("credits") or 0)),
+                credits=micro_to_credits(group_micro),
+                credits_micro=group_micro,
                 requests=int(doc.get("requests") or 0),
                 tokens=int(doc.get("tokens") or 0),
             )

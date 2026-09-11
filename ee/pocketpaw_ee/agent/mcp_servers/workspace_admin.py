@@ -136,6 +136,15 @@
 #   who is refused the usage read over HTTP able to ask the agent for the same
 #   numbers — a documented bypass of a gate added in the same commit. The other
 #   four READ tools are unchanged and stay on ``_READ_ACTION`` / ``workspace.view``.
+#
+# Updated: 2026-09-11 (fix/billing-usage-chart-micro) — billing_usage_read now
+#   reports a MICRO-CREDIT figure beside every whole-credit one. The wallet stores
+#   micro-credits and a chat run costs about 375_000 of them, so the whole-credit
+#   fields are 0 for a day of ordinary light usage; an agent answering "what did we
+#   spend?" from those alone told the customer "nothing" while the wallet drained.
+#   Same defect the REST usage chart had, one hop further out — the tool renders the
+#   same ``billing.usage`` response, so it inherited the rounding and now inherits
+#   the fix. Additive: the whole-credit keys keep their names and meaning.
 """Agent-side MCP surface for workspace administration.
 
 Tools registered:
@@ -798,7 +807,12 @@ async def _billing_usage_read_handler(args: dict) -> dict:
     gates on; the two are deliberately the same key so they cannot drift). NOT
     ``billing.manage`` (OWNER): reading the bill is not managing it. EXECUTES
     directly on a gate pass. ``start`` / ``end`` are optional ``YYYY-MM-DD``
-    strings (default: the trailing 30 days)."""
+    strings (default: the trailing 30 days).
+
+    Every credit figure is reported twice: ``*_credits`` truncated to whole credits
+    for a human-readable answer, and ``*_credits_micro`` exact (1_000_000 micro ==
+    1 credit == $0.01). Read the MICRO field when the answer is about money — a
+    typical run is 375_000 micro, so a light day's whole-credit figures are all 0."""
     start = args.get("start")
     end = args.get("end")
     if start is not None and not isinstance(start, str):
@@ -825,6 +839,10 @@ async def _billing_usage_read_handler(args: dict) -> dict:
         logger.warning("billing_usage_read failed", exc_info=True)
         return _error_response(f"billing_usage_read failed: {exc}")
 
+    # Carry the MICRO figures alongside the whole-credit ones. A chat run costs
+    # about 375_000 micro-credits, so ``credits`` is 0 for a day of ordinary light
+    # usage — an agent answering "what did we spend?" off the whole-credit fields
+    # alone would tell the customer "nothing" while their wallet drained.
     return _success_response(
         {
             "ok": True,
@@ -833,13 +851,16 @@ async def _billing_usage_read_handler(args: dict) -> dict:
             "end_date": usage.end_date,
             "models": usage.models,
             "total_credits": usage.total_credits,
+            "total_credits_micro": usage.total_credits_micro,
             "buckets": [
                 {
                     "date": b.date,
                     "total_credits": b.total_credits,
+                    "total_credits_micro": b.total_credits_micro,
                     "by_model": {
                         model: {
                             "credits": stats.credits,
+                            "credits_micro": stats.credits_micro,
                             "requests": stats.requests,
                             "tokens": stats.tokens,
                         }
