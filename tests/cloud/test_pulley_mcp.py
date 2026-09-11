@@ -12,6 +12,17 @@
 #   * The BELT surface profile's allow_mcp_tool_ids carries the pulley ids and a
 #     non-BELT surface's does not (apply_plan writes to disk).
 #
+# Updated: 2026-09-12 (A1b, belt factory) — added the DENY-FOLD block at the
+# bottom. The allow-list only binds surfaces that HAVE one, and pulley is an
+# AMBIENT server: a surface with ``allow_mcp_tool_ids=None`` (/chat and every
+# unmapped kind — the default case) could call ``mcp__pulley__apply_plan``, which
+# writes files to disk. ``service._deny_off_surface`` now folds the pulley ids
+# into the deny set of every non-BELT surface, the same chokepoint BR-1 used for
+# the agentic browser; these tests pin the unmapped case, the BELT exemption,
+# every named surface, the surviving browser floor, and the independent
+# ``pulley_tool_ids()`` load that keeps an unrelated ImportError from emptying
+# the deny.
+#
 # build_pulley_server reads its config through pocketpaw.config.get_settings (a
 # cached singleton, the same pattern loom / media / sites use), so every test
 # patches get_settings.
@@ -26,6 +37,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pocketpaw_ee.agent.mcp_servers.pulley as pulley
+import pytest
 from pocketpaw_ee.cloud.surface.domain import SurfaceKind, SurfaceMeta
 from pocketpaw_ee.cloud.surface.service import resolve_profile
 from pocketpaw_ee.extensions import CloudPulleyMcpProvider
@@ -231,3 +243,125 @@ def test_belt_profile_allows_pulley_and_studio_does_not() -> None:
     assert studio.allow_mcp_tool_ids is not None
     for tool_id in pulley.PULLEY_TOOL_IDS:
         assert tool_id not in studio.allow_mcp_tool_ids
+
+
+# --- the deny-fold: an allow-list alone does not scope an AMBIENT server ------
+#
+# The allow-list above only binds surfaces that HAVE one. pulley is registered
+# ambiently (like loom), so a surface with ``allow_mcp_tool_ids=None`` — /chat
+# and every unmapped kind, the default case — sees every ambient tool, including
+# ``mcp__pulley__apply_plan``, which WRITES FILES TO DISK. ``service.
+# _deny_off_surface`` closes that at the one chokepoint every ``(kind, meta)``
+# passes through, exactly as BR-1 did for the agentic browser.
+
+
+def test_unmapped_surface_denies_pulley() -> None:
+    """The case the allow-list CANNOT reach: a surface with no allow-list.
+
+    /chat carries ``allow_mcp_tool_ids=None`` (asserted first, so this proves
+    the unrestricted default rather than a vacuous membership check) and would
+    otherwise reach ``apply_plan`` beside the send-capable connector tools.
+    """
+    chat = resolve_profile(SurfaceKind.CHAT, SurfaceMeta())
+    assert chat.allow_mcp_tool_ids is None, "CHAT must stay the unrestricted case"
+    assert frozenset(pulley.PULLEY_TOOL_IDS) <= chat.deny_mcp_tool_ids
+
+
+def test_belt_allows_pulley_and_does_not_deny_it() -> None:
+    """The owner surface keeps them: on the allow-list AND off the deny set.
+
+    A deny is subtracted from the allowed tools before the SDK launches, so
+    folding the ids into BELT's deny too would silently strip the block engine
+    from the only surface that is supposed to have it.
+    """
+    belt = resolve_profile(SurfaceKind.BELT, SurfaceMeta())
+    ids = frozenset(pulley.PULLEY_TOOL_IDS)
+    assert ids <= (belt.allow_mcp_tool_ids or frozenset())
+    assert not (ids & belt.deny_mcp_tool_ids)
+
+
+def test_every_non_belt_surface_denies_pulley() -> None:
+    """Every named surface but /belt denies all five ids — STUDIO and SHIP
+    included, and the unmapped GENERIC default with them.
+
+    THE MUTATION THAT BREAKS THIS: drop the ``_deny_off_surface`` call from
+    ``resolve_profile``, or drop the ``pulley_tool_ids()`` branch inside it —
+    every surface's deny set loses the pulley ids and an ambient ``apply_plan``
+    becomes reachable from /chat.
+    """
+    ids = frozenset(pulley.PULLEY_TOOL_IDS)
+    for kind in SurfaceKind:
+        profile = resolve_profile(kind, SurfaceMeta())
+        if kind is SurfaceKind.BELT:
+            assert not (ids & profile.deny_mcp_tool_ids), kind
+        else:
+            assert ids <= profile.deny_mcp_tool_ids, kind
+
+
+def test_browser_deny_fold_still_applies() -> None:
+    """A1b generalized ``_deny_browser_off_surface`` into ``_deny_off_surface``;
+    BR-1's floor must survive that. /belt owns pulley, not the browser, so it is
+    the sharpest surface to check: it must deny the browser ids and keep pulley.
+    """
+    from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
+
+    browser_ids = frozenset(BROWSER_TOOL_IDS)
+    assert browser_ids <= resolve_profile(SurfaceKind.CHAT, SurfaceMeta()).deny_mcp_tool_ids
+    assert browser_ids <= resolve_profile(SurfaceKind.BELT, SurfaceMeta()).deny_mcp_tool_ids
+
+    browser = resolve_profile(SurfaceKind.BROWSER, SurfaceMeta())
+    assert browser_ids <= (browser.allow_mcp_tool_ids or frozenset())
+    assert not (browser_ids & browser.deny_mcp_tool_ids)
+
+
+@pytest.fixture
+def _clear_tool_id_caches():
+    """Reset the three memo caches around a test that fakes an import failure."""
+    from pocketpaw_ee.cloud.surface import surface_registry as reg
+
+    reg._MCP_TOOL_IDS_CACHE = None
+    reg._BROWSER_TOOL_IDS_CACHE = None
+    reg._PULLEY_TOOL_IDS_CACHE = None
+    yield
+    reg._MCP_TOOL_IDS_CACHE = None
+    reg._BROWSER_TOOL_IDS_CACHE = None
+    reg._PULLEY_TOOL_IDS_CACHE = None
+
+
+def test_unrelated_import_failure_still_denies_pulley(_clear_tool_id_caches) -> None:
+    """An unrelated sibling module breaking must NOT unlock pulley on /chat.
+
+    ``_load_mcp_tool_ids`` wraps a dozen imports in ONE try/except, so sourcing
+    the deny ids from it would mean a palette ImportError empties the deny while
+    ``CloudPulleyMcpProvider`` — which imports the pulley module on its own path
+    — still registers the server. ``pulley_tool_ids()`` therefore loads
+    independently. Mirrors the browser regression this fail-open was found in.
+
+    THE MUTATION THAT BREAKS THIS: serve ``pulley_tool_ids()`` out of
+    ``_mcp_tool_ids()`` instead of its own import.
+    """
+    import builtins
+
+    from pocketpaw_ee.cloud.surface import surface_registry as reg
+
+    real_import = builtins.__import__
+
+    def _fake_import(name, *args, **kwargs):
+        # A module pulley has nothing to do with.
+        if name == "pocketpaw_ee.agent.mcp_servers.palette":
+            raise ImportError("simulated unrelated breakage")
+        return real_import(name, *args, **kwargs)
+
+    builtins.__import__ = _fake_import
+    try:
+        ids = reg.pulley_tool_ids()
+        chat_profile = resolve_profile(SurfaceKind.CHAT, SurfaceMeta())
+        # Sampled INSIDE the patch: proves the shared block really did degrade,
+        # so the test is exercising the fail-open path and not a healthy one.
+        shared_block_degraded = reg._mcp_tool_ids().loaded is False
+    finally:
+        builtins.__import__ = real_import
+
+    assert shared_block_degraded, "shared import block did not degrade; test proves nothing"
+    assert ids == frozenset(pulley.PULLEY_TOOL_IDS)
+    assert frozenset(pulley.PULLEY_TOOL_IDS) <= chat_profile.deny_mcp_tool_ids
