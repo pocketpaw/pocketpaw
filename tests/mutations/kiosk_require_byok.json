@@ -1,0 +1,37 @@
+[
+  {
+    "label": "the flag is ignored — every signed-up kiosk turn is refused the moment the code ships, with no rollout step",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    if not get_settings().other_hand_require_byok:\n        return False",
+    "replace": "    if False:\n        return False",
+    "tests": ["tests/cloud/runs/test_run_core_kiosk_requires_byok.py::test_flag_off_keeps_the_platform_fallback"]
+  },
+  {
+    "label": "the gate never fires — the switch reads On and the platform keeps paying",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    sc = ctx.surface_context\n    return sc is not None and sc.kind is SurfaceKind.OTHER_HAND",
+    "replace": "    sc = ctx.surface_context\n    return False and sc is not None",
+    "tests": ["tests/cloud/runs/test_run_core_kiosk_requires_byok.py::test_flag_on_refuses_a_keyless_account_on_the_kiosk"]
+  },
+  {
+    "label": "the surface check is dropped — the gate goes workspace-wide and takes the whole Paw OS off the air",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    sc = ctx.surface_context\n    return sc is not None and sc.kind is SurfaceKind.OTHER_HAND",
+    "replace": "    sc = ctx.surface_context\n    return True or sc is not None",
+    "tests": ["tests/cloud/runs/test_run_core_kiosk_requires_byok.py::test_another_surface_is_never_gated"]
+  },
+  {
+    "label": "the account gate runs BEFORE the guest one — a guest is told to add a key in Settings they cannot reach",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            if _guest is not None:\n                yield (\n                    \"error\",\n                    {\n                        \"code\": \"guest_key_required\",",
+    "replace": "            if _guest is not None and not _requires_own_key(ctx):\n                yield (\n                    \"error\",\n                    {\n                        \"code\": \"guest_key_required\",",
+    "tests": ["tests/cloud/runs/test_run_core_kiosk_requires_byok.py::test_a_guest_still_gets_the_guest_code"]
+  },
+  {
+    "label": "a resolved key is refused too — the gate fires on every kiosk turn, key or not",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        if byok_creds.source == \"byok\" and byok_creds.api_key:",
+    "replace": "        if False and byok_creds.api_key:",
+    "tests": ["tests/cloud/runs/test_run_core_kiosk_requires_byok.py::test_an_account_with_a_key_proceeds"]
+  }
+]

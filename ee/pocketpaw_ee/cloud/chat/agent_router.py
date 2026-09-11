@@ -109,6 +109,41 @@ SITES_REFINE_HISTORY_TURNS = 2
 _SITES_REFINE_HISTORY_ROWS = 2 * SITES_REFINE_HISTORY_TURNS
 
 
+async def _assert_own_key_if_kiosk_requires_it(ctx: Any) -> None:
+    """Raise ``ByokKeyRequired`` when the kiosk needs a key this account lacks.
+
+    A CHECK, never a spend, and a convenience rather than a control: the
+    surface it reads was resolved from a client-supplied hint, so omitting the
+    hint skips it. ``run_core._requires_own_key`` is the gate that decides,
+    from the server-side context, and it runs on every path into the executor.
+
+    Guests are left alone here: ``assert_guest_turn_allowed`` above already
+    refused a keyless guest with their own code, and answering them twice with
+    two different codes would make the prompt flicker between "create an
+    account" and "add a key".
+    """
+    from pocketpaw.config import get_settings
+
+    if not get_settings().other_hand_require_byok:
+        return
+    sc = getattr(ctx, "surface_context", None)
+    if sc is None or sc.kind is not SurfaceKind.OTHER_HAND:
+        return
+
+    from pocketpaw_ee.cloud.auth import guest_budget
+
+    if await guest_budget.load_guest(ctx.user_id) is not None:
+        return
+
+    from pocketpaw_ee.cloud.byok import service as byok_service
+
+    status = await byok_service.get_status(ctx.workspace_id)
+    if not getattr(status, "configured", False):
+        from pocketpaw_ee.cloud._core.errors import ByokKeyRequired
+
+        raise ByokKeyRequired()
+
+
 def _is_sites_refine_surface(surface_context: SurfaceContext | None) -> bool:
     """True only for the /sites EDIT/REFINE chat surface.
 
@@ -249,6 +284,16 @@ async def post_agent_chat(
         user_id,
         {"surface": body.surface, "meta": body.surface_meta or {}},
     )
+
+    # Kiosk BYOK fast-reject (2026-09-12). UX ONLY — see the docstring.
+    #
+    # The browser gets a clean pre-stream 402 with the code the key prompt
+    # keys on, instead of a run doc whose first frame is an error. But the
+    # surface here comes from ``body.surface``, which the CLIENT sends, so a
+    # caller that simply omits it walks straight past this. The enforcement
+    # lives in the executor (``run_core._requires_own_key``), which reads the
+    # server-resolved context. Never move the gate here and delete that one.
+    await _assert_own_key_if_kiosk_requires_it(ctx)
 
     # Supersede any prior in-flight run for this scope. ``request_cancel``
     # writes the cancel flag in Redis so a worker in another process notices.
