@@ -171,6 +171,19 @@
 #   first under a conditional ``credits_reversed <= granted - amount`` filter
 #   and the debit only follows a claim that won.
 #
+#   THAT ORDERING OPENS ITS OWN WINDOW, and it is covered twice. A failure
+#   between the claim and the debit leaves a reversal recorded that never took
+#   the credits, and the redelivery carries this delivery's own id so the row
+#   alone cannot tell it from a routine replay. The debit's failure path
+#   RELEASES the claim (``_release_reversal_claim``, skipped when the ledger
+#   already records the movement, since ``debit`` can raise after the balance
+#   moved) so a redelivery re-drives cleanly; and a hard kill, which runs no
+#   ``except``, is caught on redelivery by an identity check plus
+#   ``is_recorded`` that logs at ERROR instead of "already applied". That
+#   check sits ABOVE the ``remaining <= 0`` return on purpose — below it, a
+#   redelivery of a FULL reversal returns before the claim is ever reached and
+#   the alarm is dead code.
+#
 #   THE TRAP THAT MAKES M5 MORE THAN A ONE-LINER: ``_active_subscription`` used
 #   to filter ``status == "active"`` and is now ``_billable_subscription`` over
 #   {active, on_hold}. Writing "on_hold" into that field WITHOUT widening the
@@ -950,6 +963,42 @@ def _reversal_ack(reversed_credits: int = 0) -> dict:
     return {"ok": True, "granted": False, "reversed": int(reversed_credits)}
 
 
+async def _release_reversal_claim(doc: Payment, event: ReversalEvent, amount: int) -> None:
+    """Undo one reversal's claim after its debit raised, so a redelivery can retry.
+
+    GUARDED ON THE LEDGER, because ``credits.debit`` can also raise AFTER the
+    money moved — it stamps the entry and emits once the balance ``$inc`` has
+    landed. Releasing then would hand the remainder back to a later reversal on
+    top of credits already taken, which is the over-reversal the claim-first
+    ordering exists to prevent. "Recorded" is the conservative answer: keep the
+    claim and let the redelivery's identity check classify it.
+
+    Never raises. A release that fails leaves exactly the state a hard kill
+    leaves, which the redelivery already alarms on, and swallowing the original
+    exception to report this one would lose the reason the debit failed.
+    """
+    try:
+        if await credits_service.is_recorded(doc.workspace, event.event_id):
+            return
+        await Payment.get_pymongo_collection().find_one_and_update(
+            {"_id": doc.id, "reversal_event_ids": event.event_id},
+            {
+                "$inc": {"credits_reversed": -amount},
+                "$pull": {"reversal_event_ids": event.event_id},
+                "$currentDate": {"updatedAt": True},
+            },
+        )
+    except Exception:
+        logger.exception(
+            "billing.webhook: could not release the reversal claim for payment=%s "
+            "(event_id=%s) after its debit failed — the row now records %d credits that "
+            "were never taken; the redelivery will alarm",
+            event.payment_id,
+            event.event_id,
+            amount,
+        )
+
+
 async def _handle_reversal_event(event: ReversalEvent) -> dict:
     """Claw credits back for a VERIFIED reversal (signature already checked).
 
@@ -1003,18 +1052,30 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
     read-modify-write, so a refund and a lost dispute arriving together both read
     ``credits_reversed`` before either claimed it and both took the full grant.
     Claiming first — under a conditional ``credits_reversed <= granted - amount``
-    filter, in the same atomic operator that increments it — is the ledger's own
-    insert-first-then-apply discipline (``credits.service`` inserts the ledger row
-    before the balance moves for exactly this reason): contenders serialise at the
+    filter, in the same atomic operator that increments it — borrows the SHAPE of
+    the ledger's insert-first-then-apply discipline: contenders serialise at the
     write, not after the money has already moved.
 
-    THE TRADE that ordering makes is deliberate. A crash between the claim and
-    the debit now leaves a reversal recorded that never took the credits, and the
-    ``$ne`` filter stops the redelivery re-driving it, so it needs a human. The
-    old order healed that case and could over-reverse instead. This module's
-    posture, stated above for the unparseable partial, decides it: an
-    under-reversal is recoverable by hand, money taken from a customer who did
-    not owe it is not.
+    IT DOES NOT BORROW THE HEAL, and that difference is the whole of what follows.
+    ``credits.service`` can insert first because ``reconcile`` re-drives every
+    ``applied is False`` phantom it leaves behind. There is no equivalent for a
+    claimed-but-undebited reversal, and nothing calls ``reconcile`` on a schedule
+    in any case. So this path covers its own crash window twice over:
+
+      * the debit's failure path RELEASES the claim (``_release_reversal_claim``)
+        so the gateway's redelivery re-drives the reversal cleanly. The release is
+        keyed on this event's own id and is skipped when the ledger already
+        records the movement, so it can never hand back a share whose money moved;
+      * a hard kill runs no ``except``, so the claim survives with no debit behind
+        it. The redelivery detects that by identity plus ``is_recorded`` and logs
+        at ERROR instead of reporting the routine outcome — see the check above
+        the cap. It is the one state in which "already applied" would be false.
+
+    THE RESIDUAL TRADE is deliberate: a hard kill leaves an under-reversal for a
+    human to settle. The old order healed that case and could over-reverse
+    instead. This module's posture, stated above for the unparseable partial,
+    decides it — an under-reversal is recoverable by hand, money taken from a
+    customer who did not owe it is not.
 
     THE BALANCE IS ALLOWED TO GO NEGATIVE. ``debit(allow_negative=True)`` never
     raises, and a negative balance blocks further spend (``check_balance``
@@ -1062,6 +1123,56 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
             event.payment_id,
             event.event_id,
         )
+        return _reversal_ack()
+
+    # HAS THIS DELIVERY ALREADY CLAIMED? Answer it HERE, by identity, before any
+    # arithmetic — the ``remaining <= 0`` return below would otherwise swallow
+    # every redelivery of a FULL reversal and never reach the claim at all.
+    #
+    # Two states reach this line and they are not alike. Since the claim runs
+    # before the debit, a failure between the two leaves a reversal recorded that
+    # never took the credits, and this delivery's own id is already on the row —
+    # so it cannot be told from a routine replay by the row alone. The ledger is
+    # the second fact: ``is_recorded`` asks whether ANY movement exists under
+    # this event id, and the debit keys on exactly that id.
+    #
+    # The window is reachable without a process kill. ``handle_webhook`` is
+    # wrapped in no try/except, so an exception inside the debit is a 500; the
+    # gateway redelivers; the redelivery is acked 200 and it stops retrying. The
+    # release on the debit's own failure path below closes the ordinary case;
+    # this alarm is what covers a hard kill, which no release can.
+    #
+    # TWO HONEST LIMITS. A ledger entry is inserted before the balance moves, so
+    # a crash in that narrow window reads as recorded here and logs routine —
+    # that is ``credits.service``'s own phantom state, and ``reconcile`` is its
+    # named remedy, not this path's. And a SECOND copy of this event arriving
+    # while the first is still mid-debit can read "not recorded" and alarm
+    # spuriously; the window is one round-trip wide, and a false alarm is the
+    # right way to be wrong here.
+    if event.event_id in (doc.reversal_event_ids or []):
+        if await credits_service.is_recorded(doc.workspace, event.event_id):
+            logger.info(
+                "billing.webhook: %s for payment=%s (event_id=%s) was already applied — "
+                "nothing debited, balance unchanged",
+                event.type,
+                event.payment_id,
+                event.event_id,
+            )
+        else:
+            logger.error(
+                "billing.webhook: %s for payment=%s (event_id=%s) is RECORDED ON THE PAYMENT "
+                "ROW BUT NO CREDITS WERE EVER TAKEN, and this redelivery cannot take them — "
+                "the row already lists this event. The reversal died between claiming its "
+                "share and debiting the wallet. workspace=%s is holding credits it was "
+                "refunded for; the row reads credits_reversed=%d against granted=%d. Settle "
+                "it by hand: nothing retries this",
+                event.type,
+                event.payment_id,
+                event.event_id,
+                doc.workspace,
+                int(doc.credits_reversed or 0),
+                int(doc.amount_credits if doc.credits_granted is None else doc.credits_granted),
+            )
         return _reversal_ack()
 
     # A row written before ``credits_granted`` existed carries None. Those rows
@@ -1177,19 +1288,27 @@ async def _handle_reversal_event(event: ReversalEvent) -> dict:
             )
         return _reversal_ack()
 
-    balance = await credits_service.debit(
-        workspace=doc.workspace,
-        amount=amount,
-        cause=_REVERSAL_CAUSE,
-        idempotency_key=event.event_id,
-        allow_negative=True,
-        ref={
-            "gateway": _GATEWAY,
-            "event_id": event.event_id,
-            "payment_id": event.payment_id,
-            "reason": event.type,
-        },
-    )
+    try:
+        balance = await credits_service.debit(
+            workspace=doc.workspace,
+            amount=amount,
+            cause=_REVERSAL_CAUSE,
+            idempotency_key=event.event_id,
+            allow_negative=True,
+            ref={
+                "gateway": _GATEWAY,
+                "event_id": event.event_id,
+                "payment_id": event.payment_id,
+                "reason": event.type,
+            },
+        )
+    except Exception:
+        # RELEASE the claim just made, so the gateway's redelivery re-drives this
+        # reversal from scratch instead of finding its own id on the row and
+        # being refused forever. Both halves of the release are keyed on THIS
+        # event's id, so it can never free a claim some other reversal made.
+        await _release_reversal_claim(doc, event, amount)
+        raise
 
     logger.warning(
         "billing.webhook: %s reversed %d credits from workspace=%s (payment=%s, event_id=%s) — "
