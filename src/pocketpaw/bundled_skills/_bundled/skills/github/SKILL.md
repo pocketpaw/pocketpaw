@@ -12,6 +12,18 @@ description: |
   pocket, so you only see it when GitHub is actually available.
 ---
 
+<!--
+  Updated: 2026-07-16 (feat/senses-render-convention / SR-8) — added the
+  "Render results as a live pocket" section (the Ripple fusion): after a
+  connector_execute read, render the result as TYPED Ripple widgets pushed to
+  the pocket via POST /api/v1/pockets/<id>/spec/merge, instead of pasting raw
+  JSON into chat. Documents the two hard rules (typed widgets only / never raw
+  HTML from attacker-controllable connector payloads; value/label split), plus a
+  worked example (open PRs -> data-grid with a follow-up Refresh button wired
+  back via invoke_tool -> connector_execute). The static widget-recipes
+  home-rail fallback is untouched; the read surface is otherwise unchanged.
+-->
+
 # GitHub in a Room
 
 This room has the **GitHub connector** bound to it. You can read repositories,
@@ -144,6 +156,146 @@ The list actions take `per_page` (issues default 25, most others 10–100) and
 `page`. Don't pull everything — for "the open issues" the first page is usually
 enough. If the user wants a count or asks for "all", say how many the first page
 returned and offer to page further rather than fetching every page silently.
+
+## Render results as a live pocket (the Ripple fusion)
+
+Summarizing in chat is the floor, not the ceiling. When the result is a
+**set of records** — open PRs, issues, releases, CI runs — don't stop at a
+bulleted list and don't paste raw JSON. Render it as **typed Ripple widgets**
+on the canvas: a live table the user can sort, cards they can scan, a chart of
+counts. A table of PRs beats ten lines of text.
+
+The flow is: **`connector_execute` → build a typed rippleSpec → merge it into a
+pocket.**
+
+1. Run the read action (you already know how — see the examples above).
+2. Shape the returned records into a small state array (see value/label below).
+3. Deliver a typed spec to a pocket. In a room you do this the normal way —
+   the `pocketpaw-create-pocket` skill for a fresh canvas, or
+   `pocketpaw-edit-pocket` to add to the one already open. Both apply the spec
+   through the merge endpoint **`POST /api/v1/pockets/<id>/spec/merge`**; the
+   pocket specialist subagent is what actually posts it (see the
+   `pocketpaw-pocket-specialist` skill for the HTTP mechanics and the
+   merge-vs-replace rule). The payloads below are exactly what lands on that
+   wire — copy the shape.
+
+### Two hard rules
+
+**1. Typed widgets ONLY — never raw HTML.** A PR title, an issue body, a repo
+description, a committer name — every string a connector returns is
+**attacker-controllable**. Anyone can open a PR titled `<img src=x
+onerror=...>` on a public repo. So connector strings go ONLY into typed-widget
+props (`text`, `badge`, `data-grid` cell values, `stat`) where the Ripple
+renderer escapes them. NEVER assemble an HTML string from connector data, and
+NEVER route it into an `embed` (`mode: "srcdoc"`) node or any other HTML sink.
+There is no "html" widget to reach for — the merge endpoint's catalog gate
+rejects any node whose `type` isn't a known widget — but treat this as a
+security invariant you never try to route around, not just a validator you
+happen to trip. Raw HTML in the render path is a stored-XSS / injection vector.
+
+**2. value/label split.** Machine ids are lowercase and live in the id slot;
+human-facing text lives in the label. A `data-grid` column is
+`{"key": "<lowercase field id>", "label": "<header text>"}` — `key` matches the
+row-object field, `label` is what the header shows. A `select` filter's options
+are `{"value": "<lowercase id>", "label": "<text>"}` and the **bound state holds
+the value**, never the label. Same rule that governs kanban column ids: store
+`"open"`, not `"Open"`. Get it backwards and rows silently fail to resolve.
+
+### Worked example — "show my open PRs" → a live table
+
+Read, then merge. First the read:
+
+```
+connector_execute(connector_name="github", action="list_pull_requests",
+  params={"owner": "acme", "repo": "api", "state": "open"})
+```
+
+Then shape each PR into a row and merge a `data-grid`. This is the copyable
+`/spec/merge` payload:
+
+```json
+{
+  "merge": {
+    "state": {
+      "pr_rows": [
+        {"number": 142, "title": "Fix timeout in the retry loop",
+         "author": "octocat", "reviews": "changes_requested"},
+        {"number": 139, "title": "Paginate the search endpoint",
+         "author": "hubot", "reviews": "approved"}
+      ]
+    },
+    "ui": {
+      "id": "n_prroot01",
+      "type": "flex",
+      "props": {"direction": "column", "gap": "12px"},
+      "children": [
+        {"id": "n_prhdr01", "type": "page-header",
+         "props": {"title": "Open PRs — acme/api"}},
+        {
+          "id": "n_prgrid01",
+          "type": "data-grid",
+          "props": {
+            "columns": [
+              {"key": "number",  "label": "#",      "align": "right", "width": "70px"},
+              {"key": "title",   "label": "Title",  "sortable": true, "align": "left"},
+              {"key": "author",  "label": "Author", "align": "left"},
+              {"key": "reviews", "label": "Review", "align": "left"}
+            ],
+            "rows": "{state.pr_rows}",
+            "dense": true
+          }
+        },
+        {
+          "id": "n_prrefresh01",
+          "type": "button",
+          "props": {
+            "label": "Refresh",
+            "on_click": [
+              {
+                "action": "invoke_tool",
+                "tool": "connector_execute",
+                "args": {
+                  "connector_name": "github",
+                  "action": "list_pull_requests",
+                  "params": {"owner": "acme", "repo": "api", "state": "open"}
+                },
+                "on_success": [{"action": "set", "target": "pr_rows"}],
+                "on_error": [{"action": "toast",
+                  "message": "Couldn't refresh PRs", "variant": "error"}]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+Note the column `key`s (`number`, `title`, `author`, `reviews`) match the row
+fields exactly and are lowercase; the `label`s carry the human text — that IS
+the value/label split. The **Refresh** button wires a follow-up action back to
+the sense: `invoke_tool` re-runs `connector_execute` through the pocket's
+tool-run wire and `on_success` writes the fresh result into `pr_rows`, so the
+grid updates without a chat round-trip. (`set` with no `value` falls back to the
+tool result payload — make sure the sense returns the same row shape the columns
+bind to, or add a mapping step. If the tool-run wire isn't enabled for the
+pocket, drop the button and just re-run the read yourself and merge again — an
+agent-driven refresh.)
+
+For a second display kind: to show PR **counts by review state** instead of the
+list, merge a `chart` (`{"type": "chart", "props": {"type": "bar", "data":
+"{state.review_counts}", "title": "PRs by review state"}}`) over a
+`review_counts` array you tally from the same read.
+
+### This does not replace the static widget-recipes rail
+
+The connector also ships **pre-baked widget recipes** — the "From connectors"
+rail in the Add-Widget picker (`GET /api/v1/cloud/connectors/widget-recipes`),
+which lets a user drop a default GitHub widget onto a home dashboard with no
+agent involved. That no-agent fallback stays exactly as-is. The convention here
+is the **agent-driven** path: you render a bespoke, live-typed view in response
+to what the user actually asked for. Use both — they don't overlap.
 
 ## Guardrails
 
