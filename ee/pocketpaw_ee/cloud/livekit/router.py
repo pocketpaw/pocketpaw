@@ -704,5 +704,5 @@ async def revoke_invite(
 
     from pocketpaw_ee.cloud.livekit import invites as invite_service
 
-    result = await invite_service.revoke_meeting_invite(invite_id, str(user.id))
+    result = await invite_service.revoke_meeting_invite(invite_id, str(user.id), group_id)
     return RevokeInviteResponse(**result)

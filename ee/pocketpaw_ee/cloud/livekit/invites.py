@@ -284,12 +284,31 @@ async def list_meeting_invites(
 async def revoke_meeting_invite(
     invite_id: str,
     revoked_by: str,
+    group_id: str,
 ) -> dict[str, Any]:
-    """Revoke a meeting invite so it can no longer be used."""
+    """Revoke a meeting invite so it can no longer be used.
+
+    ``group_id`` is the group the CALLER proved membership of, and the check
+    below is why it is a required parameter. Until 2026-09-11 this function took
+    only ``invite_id`` and fetched by primary key, so the route's membership
+    check on the path ``{group_id}`` was decorative: satisfy it with a group you
+    created yourself, then pass any invite id on the deployment. Three response
+    classes made it sweepable rather than targeted — 404 for an unknown id, 200
+    carrying the victim's ``group_id`` for a valid foreign one — and every hit
+    set ``revoked=True`` permanently, so a sweep destroyed what it found.
+
+    This is the shape ``/rooms/{group_id}/leave`` had until 2026-08-11 (see the
+    module docstring in ``router.py``). It was fixed there and left standing
+    here. ``create_meeting_invite`` cross-checks its room against the group at
+    line 55; this is the same check on the other side.
+
+    NotFound rather than Forbidden, and the SAME NotFound an unknown id raises,
+    so the response cannot separate "exists elsewhere" from "does not exist".
+    """
     from beanie import PydanticObjectId
 
     doc = await _MeetingInviteDoc.get(PydanticObjectId(invite_id))
-    if doc is None:
+    if doc is None or doc.group_id != group_id:
         raise NotFound("meeting_invite", invite_id)
 
     doc.revoked = True
