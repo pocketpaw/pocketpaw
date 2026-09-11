@@ -39,6 +39,24 @@
     ]
   },
   {
+    "label": "a default app rides the launch line again — pulley's schema then makes `app` optional, the agent stops naming the run's repo, and blocks install into a fixed directory the station's diff never looks at while the tool call reports success",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/pulley.py",
+    "find": "\"args\": [str(server_ts)]}",
+    "replace": "\"args\": [str(server_ts), \"--app\", \"/srv/fixed-app\"]}",
+    "tests": [
+      "tests/cloud/test_pulley_mcp.py::test_launch_line_never_carries_a_default_app"
+    ]
+  },
+  {
+    "label": "the pulley_app_path setting comes back — a deploy can once again pin one app dir for every belt run, whatever repo each run bound",
+    "file": "src/pocketpaw/config.py",
+    "find": "    # No ``pulley_app_path``: see the A1b note in this module's changelog. The",
+    "replace": "    pulley_app_path: str | None = None\n    # No ``pulley_app_path``: see the A1b note in this module's changelog. The",
+    "tests": [
+      "tests/cloud/test_pulley_mcp.py::test_no_default_app_setting_exists"
+    ]
+  },
+  {
     "label": "stage 2 stops naming the catalog search — the pulley tools stay allowed on /belt and go unused, and the station hand-writes auth / org / roles exactly as it did before the block engine existed",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/belt.py",
     "find": "        \"be a block, call `mcp__pulley__search_catalog`. The published blocks are \"",
@@ -52,6 +70,15 @@
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/belt.py",
     "find": "        \"To install one, call `mcp__pulley__plan_install` (it writes nothing — \"",
     "replace": "        \"To install one, copy the block's files into place (read them first — \"",
+    "tests": [
+      "tests/cloud/surface/test_belt_handler.py::test_belt_handler_sends_the_agent_to_blocks_before_writing_code"
+    ]
+  },
+  {
+    "label": "the preamble stops telling the agent which app to install into — there is no server default, so every pulley call either fails on the missing argument or the agent guesses a directory outside the run's bound repo",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/belt.py",
+    "find": "        \"plan's id; a plan id applies once. EVERY pulley call takes an `app` \"\n        \"argument — pass the repo this run is bound to, the same path you pass \"\n        \"to `belt_propose_change`; there is no default and a call without it \"\n        \"fails. `apply_plan` writes the block's files into that repo, so carry \"\n        \"on exactly as with code you wrote: diff the worktree and propose \"\n        \"through the gate. Blocks do NOT bypass the gate. Write fresh code only \"",
+    "replace": "        \"plan's id; a plan id applies once. Write fresh code only \"",
     "tests": [
       "tests/cloud/surface/test_belt_handler.py::test_belt_handler_sends_the_agent_to_blocks_before_writing_code"
     ]
