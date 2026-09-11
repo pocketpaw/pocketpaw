@@ -124,6 +124,9 @@ async def test_belt_handler_sends_the_agent_to_blocks_before_writing_code() -> N
     # The published catalog, so the agent knows what NOT to hand-write.
     assert "auth, org, roles, notify, files and audit" in lower
     assert "do not hand-write" in lower
+    # ``pulley_path`` is optional, so the rule must degrade rather than command a
+    # tool a deploy may not have.
+    assert "not available in this run" in lower
 
     # ...and the three-stage station loop is untouched.
     assert "1. orient first" in lower

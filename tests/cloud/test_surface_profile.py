@@ -19,6 +19,11 @@
 # that case); the ripple-create + refine assertions are the RED drivers — they
 # expect ``ripple_mode="on"`` / empty deny but the static table returns "off"
 # with the deny set for every /sites meta today.
+#
+# Modified: 2026-09-12 (A1b, belt factory) — ``_own_deny`` strips the pulley tool
+# ids alongside the browser ones. The always-on deny FLOOR grew a second member
+# (the pulley block-engine ids, denied on every non-BELT surface), and these
+# assertions are exact-equality checks on a surface's OWN denies.
 
 from __future__ import annotations
 

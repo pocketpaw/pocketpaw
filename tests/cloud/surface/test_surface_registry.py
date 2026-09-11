@@ -10,6 +10,11 @@
 #      to prove the registry sources the EXACT pre-SR-2 behavior: svelte-create
 #      drops ripple + denies the two ripple-create tools; ripple-create and
 #      refine keep ripple and deny nothing (refine wins over engine).
+#
+# Modified: 2026-09-12 (A1b, belt factory) — ``_own_deny`` strips the pulley tool
+# ids alongside the browser ones. The always-on deny FLOOR grew a second member
+# (the pulley block-engine ids, denied on every non-BELT surface), and the /sites
+# assertions below are exact-equality checks on a surface's OWN denies.
 
 from __future__ import annotations
 

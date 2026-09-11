@@ -10,6 +10,12 @@
 # installed the tests SKIP rather than fail, so CI without one stays green.
 #
 # The surface-scoping test needs no browser and always runs.
+#
+# Modified: 2026-09-12 (A1b, belt factory) — docstring only. BR-1's
+# ``_deny_browser_off_surface`` became ``_deny_off_surface`` when the pulley
+# block-engine ids joined the same fold (denied off /belt), so the mutation
+# docstring below now names the function that exists. No assertion changed; the
+# browser floor is unchanged and still asserted for every kind.
 
 from __future__ import annotations
 

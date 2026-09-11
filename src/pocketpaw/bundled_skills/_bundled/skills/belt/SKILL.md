@@ -65,7 +65,9 @@ organizations, membership and invitations from `org`; permissions and CASL
 abilities from `roles`. **Do not hand-write those.** To install one, call
 **`mcp__pulley__plan_install`** — it writes nothing, so read the plan it returns
 — then **`mcp__pulley__apply_plan`** with that plan's id; a plan id applies once.
-Write fresh code only for what no block provides.
+Write fresh code only for what no block provides. If the pulley tools are not
+available in this run, say so once and write the code by hand — don't stall on
+them.
 
 Keep the diff **small and focused** — one task, one change. Don't gold-plate.
 If the task genuinely needs a large change, **tell the user to split it** into

@@ -41,7 +41,11 @@
 # apply_plan, and write fresh code only for the rest. Registering the pulley
 # tools on the surface did not make the agent reach for them — with the loop
 # silent about blocks it kept hand-writing auth / org / roles. The three-stage
-# loop is unchanged; this is a rule INSIDE develop, not a fourth stage.
+# loop is unchanged; this is a rule INSIDE develop, not a fourth stage. The rule
+# carries its own degrade clause because ``pulley_path`` is optional: on a deploy
+# without it the tools are simply absent, and a prompt that commands a tool the
+# agent does not have gets improvised around rather than erroring (the failure
+# mode CLAUDE.md's "prompt may not command a tool the agent doesn't have" names).
 #
 # Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
 # ``SurfacePreamble`` keyed on the route plus the repo binding
@@ -143,7 +147,8 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "To install one, call `mcp__pulley__plan_install` (it writes nothing — "
         "read the plan it returns), then `mcp__pulley__apply_plan` with that "
         "plan's id; a plan id applies once. Write fresh code only for what no "
-        "block provides. "
+        "block provides. If the pulley tools are not available in this run, say "
+        "so once and write the code by hand — do not stall on them. "
         "Run TARGETED "
         "tests for what you touched. Keep the diff SMALL and focused — one task, "
         "one change. If the task genuinely needs a large change, tell the user to "
