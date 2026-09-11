@@ -45,6 +45,24 @@
     ]
   },
   {
+    "label": "the LLM clear names a column the document does not declare — every delete on a row that also holds an image key raises",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "        for gateway_field in (\"base_url\", \"model\"):\n            if gateway_field in type(doc).model_fields:\n                setattr(doc, gateway_field, None)",
+    "replace": "        doc.base_url = None\n        doc.model = None",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestTheTwoCredentialsAreIndependent::test_removing_the_llm_key_keeps_the_image_key"
+    ]
+  },
+  {
+    "label": "provider error text is stored raw — a gateway that echoes the submitted key writes it into a field the status API hands back",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "    return redact_output(message)[:_PROVIDER_ERROR_MAX_LEN]",
+    "replace": "    return message[:_PROVIDER_ERROR_MAX_LEN]",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestStoredErrorTextCarriesNoCredential"
+    ]
+  },
+  {
     "label": "the fal hint prints the secret half — a credential is displayed in a settings panel",
     "file": "ee/pocketpaw_ee/cloud/byok/service.py",
     "find": "    return api_key.partition(\":\")[0] if \":\" in api_key else \"\"",

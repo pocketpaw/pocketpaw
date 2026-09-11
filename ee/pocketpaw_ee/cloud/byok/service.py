@@ -1,5 +1,17 @@
 # ee/pocketpaw_ee/cloud/byok/service.py — the only reader of ByokProviderKey.
 #
+# Updated 2026-09-11 (feat/byok-image-key), on review:
+#
+#   * ``delete_key`` clears the gateway columns only when the document
+#     declares them. They arrive with the sibling feat/byok-custom-gateway
+#     branch, and assigning a field pydantic does not know about raises — so
+#     the unguarded version failed every delete on a row that also held an
+#     image key, which is the exact case this function exists to handle.
+#   * Provider error text goes through ``_safe_provider_error`` before it is
+#     stored. ``last_error`` / ``image_last_error`` are returned by the status
+#     API and rendered verbatim, and the text is written by whoever refused
+#     the call.
+#
 # Updated 2026-09-01 (feat/byok-guest-backend): ``set_key`` gained
 # ``validate: bool = True`` so the guest-mint route (which validates BEFORE
 # minting anything) can store without a second provider round trip. Also added
@@ -32,6 +44,7 @@ from typing import Literal
 
 import httpx
 
+from pocketpaw.security.redact import redact_output
 from pocketpaw_ee.cloud._core import crypto
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.byok.dto import ByokStatus
@@ -199,15 +212,44 @@ async def delete_key(workspace_id: str) -> ByokStatus:
         doc.encrypted_key = ""
         doc.last4 = ""
         doc.key_hint = None
-        doc.base_url = None
-        doc.model = None
         doc.last_verified_at = None
         doc.last_error = None
+        # ``base_url`` / ``model`` belong to the gateway credential that
+        # feat/byok-custom-gateway adds to this row. That branch is a SIBLING
+        # of this one, so the columns are absent until it merges — and
+        # assigning a field the document does not declare RAISES in pydantic,
+        # which would fail this delete for every workspace that also has an
+        # image key. Ask the document instead of assuming, so the clear is
+        # correct on either side of that merge.
+        for gateway_field in ("base_url", "model"):
+            if gateway_field in type(doc).model_fields:
+                setattr(doc, gateway_field, None)
         await doc.save()
     else:
         await doc.delete()
     logger.info("byok: key removed for workspace=%s", workspace_id)
     return await get_status(workspace_id)
+
+
+#: How much provider error text is worth keeping. Long enough to say what went
+#: wrong, short enough that a stack trace or an echoed request body does not
+#: end up in a settings panel.
+_PROVIDER_ERROR_MAX_LEN = 300
+
+
+def _safe_provider_error(message: str) -> str:
+    """Provider error text, fit to be stored and handed back to the client.
+
+    ``last_error`` / ``image_last_error`` are returned by ``ByokStatus`` and
+    rendered verbatim in the settings panel, and the text comes from whoever
+    refused the call — fal, Anthropic, or a gateway the workspace named. Some
+    providers echo the submitted credential back in their error body, so this
+    goes through the same redactor the agent's output does before it is stored.
+
+    Redact THEN truncate: truncating first can cut a key in half and leave a
+    remnant no pattern matches.
+    """
+    return redact_output(message)[:_PROVIDER_ERROR_MAX_LEN]
 
 
 async def record_auth_failure(workspace_id: str, message: str) -> None:
@@ -219,7 +261,7 @@ async def record_auth_failure(workspace_id: str, message: str) -> None:
     try:
         doc = await ByokProviderKey.find_one(ByokProviderKey.workspace == workspace_id)
         if doc is not None:
-            doc.last_error = message[:300]
+            doc.last_error = _safe_provider_error(message)
             await doc.save()
     except Exception:  # noqa: BLE001 — diagnostics must not mask the real error
         logger.warning("byok: could not record auth failure", exc_info=True)
@@ -383,7 +425,7 @@ async def record_image_auth_failure(workspace_id: str | None, message: str) -> N
     try:
         doc = await ByokProviderKey.find_one(ByokProviderKey.workspace == workspace_id)
         if doc is not None and doc.image_encrypted_key:
-            doc.image_last_error = message[:300]
+            doc.image_last_error = _safe_provider_error(message)
             await doc.save()
     except Exception:  # noqa: BLE001
         logger.debug("byok: could not record image auth failure", exc_info=True)

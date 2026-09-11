@@ -3,6 +3,14 @@ Output-level redaction for API keys, tokens, and secrets.
 
 This module prevents accidental leakage of sensitive data in agent responses.
 It operates at the message bus level, making it backend-agnostic.
+
+Updated 2026-09-11 (feat/byok-image-key): added the fal.ai credential pattern.
+``cloud/byok/service.py`` now runs provider error text through
+``redact_output`` before storing it in ``last_error`` / ``image_last_error``,
+and those columns are returned by the status API and rendered in the settings
+panel. A fal key is ``<key-id>:<secret>`` and matched no pattern here, so a
+provider that echoes the submitted credential in its error body would have
+written it into a field the API hands straight back.
 """
 
 import re
@@ -105,6 +113,17 @@ REDACT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
         "Stripe API Key",
         re.compile(r"\b[rs]k_live_[0-9a-zA-Z]{24,}\b"),
+    ),
+    # fal.ai keys (<uuid key-id>:<hex secret>). Matched WHOLE rather than on
+    # the secret half alone: the key id is displayed on purpose (it is the
+    # ``image_key_hint`` column), and a bare uuid in a log line is usually an
+    # id we want to keep readable. The colon is what makes it a credential.
+    (
+        "fal.ai Key",
+        re.compile(
+            r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{16,}\b",
+            re.IGNORECASE,
+        ),
     ),
     # PocketPaw API keys (pp_...)
     (
