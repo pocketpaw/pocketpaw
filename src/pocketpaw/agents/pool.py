@@ -177,7 +177,11 @@ from typing import TYPE_CHECKING, Any
 # protocol. Re-imported (not re-implemented) so ``AgentPool``'s own call sites
 # below and the existing ``from pocketpaw.agents.pool import ...`` importers
 # resolve to the ONE definition.
-from pocketpaw.agents.backend import _accepts_prompt_digest, _accepts_prompt_digest_kwarg
+from pocketpaw.agents.backend import (
+    _accepts_prompt_digest,
+    _accepts_prompt_digest_kwarg,
+    _accepts_tools_enabled_kwarg,
+)
 from pocketpaw.agents.errors import (
     AgentBackendUnavailable,
     AgentDisabled,
@@ -892,13 +896,6 @@ class AgentPool:
             # False = legacy grant-union path, unchanged for every existing run.
             if exclusive_mcp_tools:
                 run_kwargs["exclusive_mcp_tools"] = exclusive_mcp_tools
-            # Per-send tool switch (2026-09-11). Same withhold-when-empty rule,
-            # and here the default carries real meaning: True is "the tool
-            # surface this run already resolved", so forwarding it always would
-            # say nothing while narrowing which backends can be called. Only an
-            # explicit False is a request, so only False rides.
-            if tools_enabled is False:
-                run_kwargs["tools_enabled"] = tools_enabled
             # BYOK: swap the SHARED backend for a private one, built for this
             # run alone. Anything that fails here (an unregistered backend, a
             # bad settings key) falls back to the shared instance rather than
@@ -926,6 +923,29 @@ class AgentPool:
                         exc_info=True,
                     )
                     run_backend = instance.backend
+
+            # Per-send tool switch (2026-09-11). TWO gates, and the first one
+            # alone was a bug in production.
+            #
+            # Withhold-when-empty: the default True means "the tool surface this
+            # run already resolved", which says nothing, so only an explicit
+            # False is a request and only False rides. With the signature gate
+            # below in place this half no longer prevents a crash — forwarding
+            # True would be harmless, and a mutation that does so escapes the
+            # suite on purpose. It stays because it keeps ``run_kwargs``
+            # byte-identical on an ordinary turn, which is the shape every other
+            # optional kwarg in this block has.
+            #
+            # AND ask the signature. Withholding narrows WHEN the kwarg is sent;
+            # it never narrows WHERE. The moment a user turned the switch off,
+            # that False went to whatever backend their agent runs on — a
+            # logged-in workspace is on ``claude_agent_sdk`` — and every
+            # tools-off turn died in ``TypeError: run() got an unexpected
+            # keyword argument 'tools_enabled'``. Asked of ``run_backend``
+            # rather than the cached one because a BYOK run is served by a
+            # different object.
+            if tools_enabled is False and _accepts_tools_enabled_kwarg(run_backend.run):
+                run_kwargs["tools_enabled"] = tools_enabled
 
             async for event in run_backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
