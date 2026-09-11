@@ -1,6 +1,6 @@
 [
   {
-    "label": "the purchase gate is deleted — any member charges the company card",
+    "label": "the purchase gate is deleted \u2014 any member charges the company card",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "        and requested_tier.key != _held_tier_key\n        and not purchase_authorized",
     "replace": "        and requested_tier.key != _held_tier_key\n        and False",
@@ -9,7 +9,7 @@
     ]
   },
   {
-    "label": "the gate stops exempting a same-tier republish — every content edit needs an admin",
+    "label": "the gate stops exempting a same-tier republish \u2014 every content edit needs an admin",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "        and requested_tier.key != _held_tier_key\n        and not purchase_authorized",
     "replace": "        and not purchase_authorized",
@@ -18,7 +18,7 @@
     ]
   },
   {
-    "label": "the gate also refuses a FREE publish — an employee cannot ship at all",
+    "label": "the gate also refuses a FREE publish \u2014 an employee cannot ship at all",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    if (\n        requested_tier is not None\n        and (is_paid or already_paying)",
     "replace": "    if (\n        requested_tier is not None",
@@ -27,7 +27,7 @@
     ]
   },
   {
-    "label": "purchase_authorized defaults True — the MCP path and any new caller buy by omission",
+    "label": "purchase_authorized defaults True \u2014 the MCP path and any new caller buy by omission",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "    purchase_authorized: bool = False,",
     "replace": "    purchase_authorized: bool = True,",
@@ -37,7 +37,7 @@
     ]
   },
   {
-    "label": "buying drops back to the publishing role — the hole reopens",
+    "label": "buying drops back to the publishing role \u2014 the hole reopens",
     "file": "ee/pocketpaw_ee/guards/actions.py",
     "find": "    \"sites.buy_plan\": ActionRule(WorkspaceRole.ADMIN, \"sites.plan_purchase_forbidden\"),",
     "replace": "    \"sites.buy_plan\": ActionRule(WorkspaceRole.MEMBER, \"sites.plan_purchase_forbidden\"),",
@@ -48,14 +48,14 @@
   {
     "label": "the router reports every caller as authorized to buy",
     "file": "ee/pocketpaw_ee/sites/router.py",
-    "find": "    try:\n        check_workspace_action(user, workspace_id, \"sites.buy_plan\")\n    except CloudError:\n        return False",
+    "find": "    try:\n        await check_workspace_action(user, workspace_id, \"sites.buy_plan\")\n    except CloudError:\n        return False",
     "replace": "    try:\n        pass\n    except CloudError:\n        return False",
     "tests": [
       "tests/cloud/sites/test_site_plan_purchase_authz.py::test_the_router_refuses_a_member_and_allows_an_admin"
     ]
   },
   {
-    "label": "the router's helper fails OPEN on an unreadable role — a stranger buys",
+    "label": "the router's helper fails OPEN on an unreadable role \u2014 a stranger buys",
     "file": "ee/pocketpaw_ee/sites/router.py",
     "find": "        return False\n    return True",
     "replace": "        return True\n    return True",

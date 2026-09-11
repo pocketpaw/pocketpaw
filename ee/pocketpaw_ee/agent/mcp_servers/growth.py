@@ -185,7 +185,7 @@ async def _gate(tool: str, action: str) -> tuple[str, str, Any] | dict[str, Any]
         return _error_response("could not resolve the calling user for the permission check.")
 
     try:
-        check_workspace_action(user, workspace_id, action)
+        await check_workspace_action(user, workspace_id, action)
     except Forbidden as exc:
         logger.info(
             "%s denied: user=%s workspace=%s code=%s", tool, user_id, workspace_id, exc.code

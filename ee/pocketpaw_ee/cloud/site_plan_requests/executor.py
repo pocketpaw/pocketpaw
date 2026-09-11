@@ -265,7 +265,7 @@ async def _recheck_approver_may_buy(workspace_id: str, approver_user_id: str) ->
             "sites.plan_purchase_forbidden",
             f"the approving user {approver_user_id} no longer exists",
         )
-    check_workspace_action(approver, workspace_id, "sites.buy_plan")
+    await check_workspace_action(approver, workspace_id, "sites.buy_plan")
 
 
 async def execute_approved_site_plan_request(

@@ -180,7 +180,7 @@ def resolve_workspace_role(user: Any, workspace_id: str) -> WorkspaceRole:
     )
 
 
-def check_workspace_action(user: Any, workspace_id: str, action: str) -> WorkspaceRole:
+async def check_workspace_action(user: Any, workspace_id: str, action: str) -> WorkspaceRole:
     """Enforce an ACTIONS entry against a user's workspace role.
 
     Returns the resolved role on success. Raises Forbidden on deny and
@@ -190,14 +190,48 @@ def check_workspace_action(user: Any, workspace_id: str, action: str) -> Workspa
     Also consults per-member ``action_permissions`` overrides stored on the
     workspace document — an explicit grant for ``action`` allows it even
     when the user's base role would not.
+
+    MEMBERSHIP IS RESOLVED FIRST, AND SEPARATELY. That is the shape of this
+    function, not a stylistic choice.
+
+    Both resolution and the action check used to sit in one ``try``, with the
+    override consulted from a single ``except Forbidden``. Two different
+    failures arrived at the same handler:
+
+      * ``check_action`` denied — the user IS a member, their role is just too
+        low. An override is exactly the right thing to consult.
+      * ``resolve_workspace_role`` denied ``workspace.not_member`` — there is
+        no role at all, and ``role`` was never bound.
+
+    The second case was unreachable only because ``_has_action_override``
+    always returned False (see below). Make the lookup work and that same code
+    either raises ``UnboundLocalError`` on ``return role``, or — if somebody
+    "fixes" the UnboundLocalError by giving ``role`` a default — hands a
+    NON-MEMBER of the workspace access on the strength of an override row.
+    Splitting the two checks makes that impossible to write by accident.
     """
+    user_id = str(getattr(user, "id", "") or "")
+
+    # 1. Membership. A non-member is denied outright; no override rescues it.
     try:
         role = resolve_workspace_role(user, workspace_id)
+    except Forbidden as exc:
+        log_denial(
+            actor=user_id,
+            action=action,
+            code=exc.code,
+            workspace_id=workspace_id,
+            detail=exc.detail,
+        )
+        raise
+
+    # 2. The action, against the role just resolved. ``role`` is bound for the
+    #    rest of this function, so the override branch cannot reference an
+    #    unbound name.
+    try:
         check_action(action, role)
     except Forbidden as exc:
-        # Check per-member action overrides before denying.
-        user_id = str(getattr(user, "id", "") or "")
-        if user_id and _has_action_override(workspace_id, user_id, action):
+        if user_id and await _has_action_override(workspace_id, user_id, action):
             return role
         log_denial(
             actor=user_id,
@@ -210,27 +244,75 @@ def check_workspace_action(user: Any, workspace_id: str, action: str) -> Workspa
     return role
 
 
-# In-memory cache for action override lookups. Keyed by (workspace_id, user_id).
-# Lives for process lifetime — fine for a low-cardinality permission store.
-_ACTION_OVERRIDE_CACHE: dict[tuple[str, str], list[str]] = {}
+#: Cached override lookups, keyed by (workspace_id, user_id) -> (expires_at, actions).
+#:
+#: The previous version had no expiry and said so: "Lives for process lifetime
+#: — fine for a low-cardinality permission store". Combined with the broken
+#: lookup below, that meant the FIRST failed read for a pair was cached as "no
+#: overrides", and every later check for that pair short-circuited on the
+#: poisoned entry until the process restarted. A TTL bounds that, and
+#: ``invalidate_action_overrides`` clears a pair the moment an admin changes it,
+#: so a grant made in the UI takes effect immediately rather than within a TTL.
+_ACTION_OVERRIDE_TTL_SECONDS = 60.0
+_ACTION_OVERRIDE_CACHE: dict[tuple[str, str], tuple[float, list[str]]] = {}
 
 
-def _has_action_override(workspace_id: str, user_id: str, action: str) -> bool:
-    """Return True if ``user_id`` has an explicit override for ``action``."""
+def invalidate_action_overrides(workspace_id: str, user_id: str | None = None) -> None:
+    """Drop cached overrides for a member, or for a whole workspace.
+
+    Called by ``workspace.service`` whenever ``action_permissions`` is written,
+    so an admin granting an action does not have to wait out the TTL.
+    """
+    if user_id is not None:
+        _ACTION_OVERRIDE_CACHE.pop((workspace_id, user_id), None)
+        return
+    for key in [k for k in _ACTION_OVERRIDE_CACHE if k[0] == workspace_id]:
+        _ACTION_OVERRIDE_CACHE.pop(key, None)
+
+
+async def _has_action_override(workspace_id: str, user_id: str, action: str) -> bool:
+    """Return True if ``user_id`` has an explicit override for ``action``.
+
+    This is ``async`` because the read it performs is, and that is the bug it
+    exists to fix. It used to be sync and reached the async service through
+    ``asyncio.get_event_loop().run_until_complete(...)``. Every caller is an
+    async request handler, so a loop is already running and that raises
+    ``RuntimeError: This event loop is already running``. A bare
+    ``except Exception`` swallowed it, ``overrides`` became ``[]``, and that
+    empty list was cached forever.
+
+    So every per-member grant an admin made in the UI silently did nothing. It
+    failed CLOSED — denying users an action they had been explicitly granted —
+    which surfaces as a permissions bug rather than a security one.
+
+    Errors are still swallowed, deliberately: a lookup failure must deny rather
+    than grant. It is logged now instead of being silent, and the failure is NOT
+    cached, so a transient database error cannot pin a member to "no overrides"
+    for the life of the process.
+    """
+    import time
+
     cache_key = (workspace_id, user_id)
-    if cache_key not in _ACTION_OVERRIDE_CACHE:
-        try:
-            import asyncio
+    cached = _ACTION_OVERRIDE_CACHE.get(cache_key)
+    now = time.monotonic()
+    if cached is not None and cached[0] > now:
+        return action in cached[1]
 
-            from pocketpaw_ee.cloud.workspace.service import get_member_action_overrides
+    from pocketpaw_ee.cloud.workspace.service import get_member_action_overrides
 
-            overrides = asyncio.get_event_loop().run_until_complete(
-                get_member_action_overrides(workspace_id, user_id)
-            )
-        except Exception:
-            overrides = []
-        _ACTION_OVERRIDE_CACHE[cache_key] = overrides
-    return action in _ACTION_OVERRIDE_CACHE[cache_key]
+    try:
+        overrides = await get_member_action_overrides(workspace_id, user_id)
+    except Exception:
+        logger.warning(
+            "guards: could not read action overrides for %s/%s - denying",
+            workspace_id,
+            user_id,
+            exc_info=True,
+        )
+        return False
+
+    _ACTION_OVERRIDE_CACHE[cache_key] = (now + _ACTION_OVERRIDE_TTL_SECONDS, overrides)
+    return action in overrides
 
 
 def resolve_group_role(
@@ -302,7 +384,7 @@ def make_require_action(
         workspace_id: str = Depends(workspace_dep),
     ) -> Any:
         try:
-            check_workspace_action(user, workspace_id, action)
+            await check_workspace_action(user, workspace_id, action)
         except Forbidden as exc:
             raise HTTPException(status_code=403, detail=exc.code) from exc
         return user

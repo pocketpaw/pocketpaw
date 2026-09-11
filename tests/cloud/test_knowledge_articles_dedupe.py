@@ -28,6 +28,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pocketpaw_ee.cloud.kb.knowledge_router as knowledge_router_module
 import pytest
@@ -187,7 +188,7 @@ def _build_client(monkeypatch, rows_by_scope: dict[str, list[dict]]) -> TestClie
 
     from pocketpaw_ee.guards import deps as guards_deps
 
-    monkeypatch.setattr(guards_deps, "check_workspace_action", lambda *a, **k: None)
+    monkeypatch.setattr(guards_deps, "check_workspace_action", AsyncMock(return_value=None))
 
     fake_user = SimpleNamespace(
         id="user-1",

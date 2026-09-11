@@ -112,7 +112,7 @@ def require_action(
         workspace_id: str = Depends(workspace_dep),
     ) -> User:
         try:
-            check_workspace_action(user, workspace_id, action)
+            await check_workspace_action(user, workspace_id, action)
         except GuardForbidden as exc:
             raise Forbidden(exc.code, exc.detail or "Access denied") from exc
         return user

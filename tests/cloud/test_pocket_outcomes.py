@@ -24,6 +24,8 @@ import pytest
 
 pytest.importorskip("pocketpaw_ee")
 
+from unittest.mock import AsyncMock
+
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from pocketpaw_ee.cloud._core.realtime.events import Event, PocketOutcomeEvent  # noqa: E402
@@ -297,7 +299,7 @@ def outcomes_client():
     app.dependency_overrides[current_active_user] = _fake_user_dep
 
     _orig = core_deps.check_workspace_action
-    core_deps.check_workspace_action = lambda *a, **k: None
+    core_deps.check_workspace_action = AsyncMock(return_value=None)
 
     with TestClient(app) as client:
         yield client

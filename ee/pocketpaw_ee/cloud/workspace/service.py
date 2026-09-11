@@ -2237,6 +2237,13 @@ async def set_member_action_permissions(
         {"$set": {"action_permissions": perms}},
     )
 
+    # The guard layer caches this read. Without invalidation an admin's change
+    # would not take effect until the TTL expired, which is exactly the kind of
+    # "I granted it and nothing happened" the broken lookup used to produce.
+    from pocketpaw_ee.guards.deps import invalidate_action_overrides
+
+    invalidate_action_overrides(workspace_id, user_id)
+
     logger.info(
         "action_permissions.set",
         extra={"workspace_id": workspace_id, "user_id": user_id, "actions": clean},
@@ -2259,6 +2266,13 @@ async def clear_member_action_permissions(
     await _WorkspaceDoc.find_one({"_id": doc.id}).update(
         {"$set": {"action_permissions": perms}},
     )
+
+    # The guard layer caches this read. Without invalidation an admin's change
+    # would not take effect until the TTL expired, which is exactly the kind of
+    # "I granted it and nothing happened" the broken lookup used to produce.
+    from pocketpaw_ee.guards.deps import invalidate_action_overrides
+
+    invalidate_action_overrides(workspace_id, user_id)
 
     logger.info(
         "action_permissions.clear",

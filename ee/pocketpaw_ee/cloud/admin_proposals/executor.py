@@ -782,7 +782,7 @@ async def _recheck_rbac(workspace_id: str, proposer_user_id: str, rbac_action: s
         )
     # Raises Forbidden if the proposer's CURRENT role is below the action minimum
     # (e.g. demoted to MEMBER since proposing). Audits the denial via log_denial.
-    check_workspace_action(proposer, workspace_id, rbac_action)
+    await check_workspace_action(proposer, workspace_id, rbac_action)
 
 
 async def execute_approved_admin_action(

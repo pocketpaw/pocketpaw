@@ -21,6 +21,7 @@ import pytest
 pytest.importorskip("pocketpaw_ee")
 
 from types import SimpleNamespace  # noqa: E402
+from unittest.mock import AsyncMock
 
 import pytest_asyncio  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
@@ -96,7 +97,7 @@ def _build_app(audit_store, *, workspace_id: str = "w1", user_id: str = "u1") ->
     # just need a permissive guard so the handler actually runs.
     from pocketpaw_ee.cloud._core import deps as core_deps
 
-    core_deps.check_workspace_action = lambda *a, **k: None  # type: ignore[assignment]
+    core_deps.check_workspace_action = AsyncMock(return_value=None)  # type: ignore[assignment]
 
     _install_service_seam(audit_store)
     return app

@@ -400,7 +400,7 @@ async def _gate_admin(tool: str, workspace_id: str, user_id: str | None) -> dict
         return _error_response(f"{tool} could not resolve the calling user for the RBAC check.")
 
     try:
-        check_workspace_action(user, workspace_id, "fabric.admin")
+        await check_workspace_action(user, workspace_id, "fabric.admin")
     except Forbidden as exc:
         logger.info(
             "%s denied: user=%s workspace=%s code=%s", tool, user_id, workspace_id, exc.code
