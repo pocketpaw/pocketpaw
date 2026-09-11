@@ -153,39 +153,70 @@ async def illustrate(
     from pocketpaw_ee.cloud.auth import guest_budget
     from pocketpaw_ee.cloud.other_hand import illustrate as illustrator
     from pocketpaw_ee.cloud.other_hand import illustration_budget
+    from pocketpaw_ee.cloud.other_hand import illustration_credentials as creds
     from pocketpaw_ee.cloud.other_hand.svg_to_ink import Box
-    from pocketpaw_ee.cloud.studio import fal_edit
 
-    # Guests do not get to spend platform money on pictures. The budget below
-    # is a cost CEILING, not an entitlement, and a guest can mint a fresh
-    # workspace to get a fresh ceiling, so the ceiling alone left an unbounded
-    # bill attached to a signup form that asks for nothing. Refused BEFORE the
-    # budget is claimed, so a refusal costs the workspace nothing.
-    if await guest_budget.load_guest(user_id) is not None:
-        from pocketpaw_ee.cloud._core.errors import GuestIllustrateForbidden
+    # Who pays, and whether this may happen at all. The same module the agent's
+    # ``illustrate`` tool asks, because these are money rules and two copies of
+    # a money rule drift. In short: the workspace's own fal key wins and is
+    # never capped by us; without one, an account gets the platform's key under
+    # the daily ceiling and a guest is refused — a guest can mint a fresh
+    # workspace for a fresh ceiling, so the ceiling alone left an unbounded bill
+    # attached to a signup form that asks for nothing.
+    grant = await creds.resolve(
+        workspace_id,
+        is_guest=await guest_budget.load_guest(user_id) is not None,
+    )
+    if isinstance(grant, creds.IllustrationRefusal):
+        if grant.guest_gate:
+            from pocketpaw_ee.cloud._core.errors import GuestIllustrateForbidden
 
-        raise GuestIllustrateForbidden()
+            raise GuestIllustrateForbidden()
+        # No generator anywhere. An empty op list, not an error: the page
+        # carries on and there is nothing useful to tell the user about a
+        # credential the operator has not set.
+        return {"ops": []}
 
     # A pressed button authorises ONE generation; it does not cap how many.
     # Scripted, the same button is a loop, so the ceiling has to live here and
-    # not in the UI. Claimed BEFORE the paid call and fail-closed, exactly like
-    # the MCP tool path -- this route was the one caller that skipped it.
-    allowed, spent, cap = await illustration_budget.try_spend(workspace_id)
-    if not allowed:
-        raise CloudError(
-            429,
-            "other_hand.illustration_limit",
-            f"Today's illustration limit is used up ({spent}/{cap}).",
-        )
+    # not in the UI. Claimed BEFORE the paid call and fail-closed — and only on
+    # the platform's key, because a workspace spending its own money has no
+    # reason to be inside our quota.
+    if not grant.byok:
+        allowed, spent, cap = await illustration_budget.try_spend(workspace_id)
+        if not allowed:
+            raise CloudError(
+                429,
+                "other_hand.illustration_limit",
+                f"Today's illustration limit is used up ({spent}/{cap}).",
+            )
 
     try:
         ops = await illustrator.illustrate_as_ops(
             body.prompt,
             Box(x=body.x, y=body.y, w=body.w, h=body.h),
-            api_key=fal_edit.fal_api_key(),
+            api_key=grant.api_key,
             # Budget claimed above; this flag is the generator's own gate.
             allowed=True,
         )
     except illustrator.IllustrateError as exc:
+        # The first refused generation is where a bad stored key becomes
+        # visible — there is no save-time check for a fal credential — so stamp
+        # the row rather than letting the panel show green over a dead key.
+        if grant.byok and _looks_like_auth(exc):
+            from pocketpaw_ee.cloud.byok import service as byok_service
+
+            await byok_service.record_image_auth_failure(workspace_id, str(exc))
         raise CloudError(502, "other_hand.illustrate_failed", str(exc)) from exc
     return {"ops": ops}
+
+
+def _looks_like_auth(exc: Exception) -> bool:
+    """Whether a failed generation blames the CREDENTIAL rather than the prompt.
+
+    fal's errors arrive as text through ``IllustrateError``, so this reads the
+    message. Deliberately narrow: a false positive marks a good key as broken,
+    which sends the user to re-paste a credential that was fine.
+    """
+    text = str(exc).lower()
+    return "401" in text or "403" in text or "unauthorized" in text or "forbidden" in text
