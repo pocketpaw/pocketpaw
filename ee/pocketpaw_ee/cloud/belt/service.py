@@ -296,7 +296,11 @@ async def emit_belt_stage(
     if not workspace_id:
         return None
     # Forward-only: a stage must be STRICTLY later than where the run already is.
-    # An unknown stage string (forward-compat) sorts as -1 and so never advances.
+    # An unknown ``prev`` (a value from a newer build) sorts as -1 — BEFORE
+    # everything — so a stage this build doesn't recognise can never mute the
+    # rest of the run. ``stage`` itself is typed, so an unknown one is
+    # unreachable from any real caller; it would raise ValueError, which the
+    # bridge swallows.
     if STAGE_ORDER.index(stage) <= (STAGE_ORDER.index(prev) if prev in STAGE_ORDER else -1):
         return None
 

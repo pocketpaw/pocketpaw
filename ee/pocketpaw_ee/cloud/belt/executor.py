@@ -1,6 +1,14 @@
 # executor.py — applies an approved Belt code-change Action and opens a PR.
 # Created: 2026-06-10 (feat/belt-gate, BS-3).
 #
+# Updated: 2026-09-12 (feat/belt-entity-events, stage slice) — ``_emit_run_updated``
+#   now declares ``stage: BeltStage`` instead of ``str``, so the executor's three
+#   terminals are checked against the ONE stage vocabulary defined in
+#   ``belt/service.py`` rather than passing free-form strings. Type-only change:
+#   all three call sites already pass ``"done"`` and still do, byte-identical. The
+#   import is under ``TYPE_CHECKING`` to keep the deliberately lazy
+#   ``belt_service`` import inside the function from becoming eager.
+#
 # Updated: 2026-06-11 (feat/belt-autopilot) — refuses a QUEUED station run loud.
 #   A ``code_change`` blob carrying ``station_pending=True`` (filed by the
 #   mandate ``StationTaskDispatcher`` with the task text but NO diff) is a
@@ -113,7 +121,13 @@ import logging
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    # Type-only: the stage vocabulary lives in ``belt.service``, but importing it
+    # at runtime here would turn the deliberately LAZY ``belt_service`` import
+    # inside ``_emit_run_updated`` into an eager module-level one.
+    from pocketpaw_ee.cloud.belt.service import BeltStage
 
 logger = logging.getLogger(__name__)
 
@@ -363,7 +377,7 @@ async def _emit_run_updated(
     workspace_id: str,
     action_id: str,
     status: str,
-    stage: str,
+    stage: BeltStage,
     pr_url: str | None = None,
 ) -> None:
     """Publish ``belt_run_updated`` for an executor lifecycle terminal.

@@ -378,7 +378,13 @@ import re
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Type-only: the stage vocabulary lives in the EE belt service, which this
+    # OSS-installable path must not import at runtime — the bridge call below is
+    # deliberately a guarded local import.
+    from pocketpaw_ee.cloud.belt.service import BeltStage
 
 from pocketpaw.agents.backend import (  # type: ignore[import-untyped]
     LeasedClient,
@@ -1490,7 +1496,7 @@ async def _drive_agent_loop(
     # cannot see each other's progress. The tool loop below advances it; the
     # emitter refuses anything that isn't strictly forward. Stays ``None`` for
     # every non-belt run — the bridge is a no-op off the BELT surface.
-    belt_stage: str | None = None
+    belt_stage: BeltStage | None = None
 
     if emit_stream_start:
         stream_start_payload: dict[str, Any] = {
