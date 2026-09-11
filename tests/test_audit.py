@@ -227,7 +227,6 @@ class TestAuditStoreQueryEntries:
 
     @pytest.mark.asyncio
     async def test_filter_by_date_range(self, audit_db):
-
         past = datetime.now(UTC) - timedelta(hours=2)
         future = datetime.now(UTC) + timedelta(hours=2)
 

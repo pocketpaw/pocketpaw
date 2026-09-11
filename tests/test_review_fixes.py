@@ -226,7 +226,6 @@ class TestIsMockPlaceholderNoneModule:
         assert _is_mock_placeholder(None) is False
 
     def test_mock_object_returns_true(self) -> None:
-
         from pocketpaw.budget import _is_mock_placeholder
 
         assert _is_mock_placeholder(MagicMock()) is True
