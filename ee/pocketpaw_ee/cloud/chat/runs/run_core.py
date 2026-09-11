@@ -1797,6 +1797,27 @@ async def _drive_agent_loop(
                     },
                 )
                 return
+            # Kiosk: an ACCOUNT must bring its own key too (2026-09-12).
+            #
+            # A sibling of the guest rule above, not a widening of it. The
+            # guest rule is unconditional and permanent; this one is
+            # flag-gated and scoped to ONE surface, for the window between
+            # launching the kiosk and switching billing on. Two rules, two
+            # codes: a guest is told to create an account, an account is told
+            # to add a key, and telling a logged-in user to sign up again is a
+            # dead end that reads as a broken product.
+            #
+            # The surface comes from ``ctx.surface_context``, resolved
+            # SERVER-side after scope resolution — not from the request body.
+            # A client-supplied surface would make a surface-scoped gate
+            # opt-out by omission. This is the enforcement seam; the router's
+            # fast-reject is UX only.
+            if _requires_own_key(ctx):
+                from pocketpaw_ee.cloud._core.errors import ByokKeyRequired
+
+                _exc = ByokKeyRequired()
+                yield ("error", {"code": _exc.code, "message": _exc.message})
+                return
         # --- Supervised native-resume wiring (feat/session-supervisor SS-5) -----
         # Flag-gated (default OFF). When ON, route this turn through the
         # SessionSupervisor: recover any prior native ``cli_session_id`` from the
@@ -2333,6 +2354,29 @@ async def _reject_if_over_daily_turns(spec: RunSpec, ctx: ScopeContext, transpor
     except Exception:
         logger.debug("turn-cap stream ttl set failed for %s", spec.run_id, exc_info=True)
     return True
+
+
+def _requires_own_key(ctx: ScopeContext) -> bool:
+    """Must THIS turn pay with the user's own key, having found none?
+
+    True only when every one of these holds, and the order is the cheap checks
+    first so an ordinary turn on any other surface pays one boolean:
+
+    * ``other_hand_require_byok`` is on (default OFF, so every existing deploy
+      and the whole of Paw OS are untouched until an operator sets it);
+    * the run resolved to the Otherhand surface, read from the SERVER-side
+      ``surface_context`` rather than anything the client sent.
+
+    Guests never reach here — the branch above already refused them, with
+    their own code. Callers reach this only after credential resolution came
+    back ``platform``.
+    """
+    from pocketpaw.config import get_settings
+
+    if not get_settings().other_hand_require_byok:
+        return False
+    sc = ctx.surface_context
+    return sc is not None and sc.kind is SurfaceKind.OTHER_HAND
 
 
 async def _reject_if_over_credit_quota(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:

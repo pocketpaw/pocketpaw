@@ -1305,6 +1305,22 @@ class Settings(BaseSettings):
             "AgentRouter.create_isolated_backend."
         ),
     )
+    other_hand_require_byok: bool = Field(
+        default=False,
+        description=(
+            "Otherhand/kiosk only: a SIGNED-UP user must also bring their own "
+            "provider key, with no platform fallback. Guests are already "
+            "refused a keyless turn unconditionally (guest_key_required); this "
+            "extends the same rule to accounts on that ONE surface, for the "
+            "window between launching the kiosk and switching billing on. "
+            "Default False so every existing deploy is unchanged and the "
+            "rollout is one env var, reverted by removing it. Scoped to the "
+            "surface, never workspace-wide: the same deployment serves the full "
+            "Paw OS, where the platform fallback is the product. Refuses with "
+            "402 byok_key_required, a DISTINCT code from the guest one because "
+            "the fix is different — add a key, not create an account."
+        ),
+    )
     litellm_model: str = Field(
         default="",
         description=(
