@@ -145,6 +145,19 @@
 #   Same defect the REST usage chart had, one hop further out — the tool renders the
 #   same ``billing.usage`` response, so it inherited the rounding and now inherits
 #   the fix. Additive: the whole-credit keys keep their names and meaning.
+#
+#   The unit guidance lives in the ``@tool`` DESCRIPTION, not in the handler's
+#   Python docstring. ``__doc__`` is never transmitted — the SDK serializes
+#   ``SdkMcpTool.description`` (the second positional arg to ``@tool``) and nothing
+#   else, so an instruction written in the docstring reaches the model as silence.
+#   Shipping the micro fields WITHOUT that description would have been worse than
+#   the zero it replaced: handed ``{"total_credits": 0, "total_credits_micro":
+#   750000}`` with no unit defined, the obvious wrong answer is "$750,000" against
+#   a real charge of $0.0075, and a customer can at least tell that 0 is wrong.
+#   The same edit corrects a PRE-EXISTING lie in that description and in the tool
+#   list above: both said any MEMBER may read usage, which stopped being true on
+#   2026-09-02 when the gate moved to ``billing.view`` (ADMIN). It was promising
+#   the model a read the gate then denied.
 """Agent-side MCP surface for workspace administration.
 
 Tools registered:
@@ -168,8 +181,9 @@ Tools registered:
     ``workspace.view`` (MEMBER); the service applies the caller's connector
     permissions.
   - ``billing_usage_read(start, end)`` — READ daily usage/spend over an optional
-    date window. Gated at ``workspace.view`` (MEMBER — matching the
-    membership-only REST usage route).
+    date window. Gated at ``billing.view`` (ADMIN — the same action the REST GET
+    /billing/usage route gates on, so the two cannot drift apart). Spend is
+    reported in BOTH micro-credits (exact) and whole credits (truncated).
   - ``audit_read(limit)`` — READ recent audit-log rows. Gated at ``audit.read``
     (ADMIN — same as the REST audit route).
 
@@ -811,8 +825,15 @@ async def _billing_usage_read_handler(args: dict) -> dict:
 
     Every credit figure is reported twice: ``*_credits`` truncated to whole credits
     for a human-readable answer, and ``*_credits_micro`` exact (1_000_000 micro ==
-    1 credit == $0.01). Read the MICRO field when the answer is about money — a
-    typical run is 375_000 micro, so a light day's whole-credit figures are all 0."""
+    1 credit == $0.01). A typical run is 375_000 micro, so a light day's
+    whole-credit figures are all 0 and only the micro ones carry the spend.
+
+    THIS DOCSTRING IS FOR READERS OF THIS FILE, NOT FOR THE MODEL. ``__doc__`` is
+    never transmitted — the SDK sends ``SdkMcpTool.description``, the second
+    positional arg to ``@tool``. The unit guidance the model actually needs lives
+    there (``build_admin_server``, the ``billing_usage_read`` tool) and is pinned
+    by ``test_billing_usage_read_description_defines_the_micro_unit``. Change both
+    together or the model silently keeps the old instruction."""
     start = args.get("start")
     end = args.get("end")
     if start is not None and not isinstance(start, str):
@@ -1521,11 +1542,20 @@ def build_admin_server() -> tuple[str, Any] | None:
     @tool(
         "billing_usage_read",
         (
-            "Read the CURRENT workspace's usage and spend (daily credits and "
+            "Read the CURRENT workspace's usage and spend (daily spend and "
             "request counts, broken down by model) over an optional date window. "
             "Call this when the user asks how much they've spent or used. Optional "
             "args: `start` and `end` (YYYY-MM-DD); omit both for the last 30 days. "
-            "Any workspace member may read their workspace's usage. If you don't "
+            "UNITS — every spend figure is returned twice and the two are not "
+            "interchangeable. The `credits_micro` / `total_credits_micro` fields "
+            "are EXACT, in micro-credits: 1000000 micro = 1 credit = $0.01, so "
+            "750000 micro = 0.75 credits = $0.0075. The plain `credits` / "
+            "`total_credits` fields are those same amounts truncated to whole "
+            "credits, and one ordinary run costs about 375000 micro, so they read "
+            "0 on a light day. Answer from the micro fields and convert them; "
+            "never repeat a micro number as a credit or dollar figure, and never "
+            "report 'nothing spent' from a 0 in a plain credits field. "
+            "Reading usage requires the ADMIN role. If you don't "
             "have permission, the result says so (denied) — relay that."
         ),
         {

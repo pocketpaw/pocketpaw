@@ -44,5 +44,32 @@
     "tests": [
       "tests/cloud/billing/test_usage_sub_credit_micro.py"
     ]
+  },
+  {
+    "label": "usage chart: the model is handed micro figures with no unit defined",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/workspace_admin.py",
+    "find": "            \"are EXACT, in micro-credits: 1000000 micro = 1 credit = $0.01, so \"",
+    "replace": "            \"are the exact ones, so \"",
+    "tests": [
+      "tests/ee/agent/test_workspace_admin_mcp/test_mcp_tool.py"
+    ]
+  },
+  {
+    "label": "usage chart: the model is not told which field to answer from",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/workspace_admin.py",
+    "find": "            \"0 on a light day. Answer from the micro fields and convert them; \"",
+    "replace": "            \"0 on a light day. \"",
+    "tests": [
+      "tests/ee/agent/test_workspace_admin_mcp/test_mcp_tool.py"
+    ]
+  },
+  {
+    "label": "usage chart: the description promises a MEMBER the read the gate denies",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/workspace_admin.py",
+    "find": "            \"Reading usage requires the ADMIN role. If you don't \"",
+    "replace": "            \"Any workspace member may read their workspace's usage. If you don't \"",
+    "tests": [
+      "tests/ee/agent/test_workspace_admin_mcp/test_mcp_tool.py"
+    ]
   }
 ]
