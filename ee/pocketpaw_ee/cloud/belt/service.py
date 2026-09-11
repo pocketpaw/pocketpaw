@@ -1,4 +1,39 @@
 # ee/pocketpaw_ee/cloud/belt/service.py
+# Updated: 2026-09-12 (feat/belt-entity-events, stage slice) — a run now reports
+#   the STAGES it reaches, not just its two lifecycle endpoints. The bus only
+#   ever carried ``stage="gate"`` (propose) and ``stage="done"`` (the executor
+#   terminals), while the REST read model already derived a third value
+#   (``station``, for a queued run) — so the console strip could never light
+#   orient / develop from proven data. Added:
+#     * ``BeltStage`` / ``STAGE_ORDER`` — the ONE place the stage vocabulary
+#       lives: ``station | orient | develop | verify | gate | done``, ordered
+#       earliest-first. ``emit_belt_run_updated`` and ``_STATUS_MAP`` are typed
+#       against it, so every existing emitter references the vocabulary through
+#       the type with no call-site edits. ``gate`` / ``done`` are UNCHANGED in
+#       both value and behaviour — this slice only ADDS reachable values.
+#     * ``_publish_run_updated`` — the two-path publish (workspace bus PRIMARY,
+#       in-turn SSE SECONDARY) lifted out of ``emit_belt_run_updated`` so the
+#       new stage emitter reuses it verbatim instead of a second copy.
+#     * ``emit_belt_stage`` — publishes an INTERMEDIATE stage transition.
+#       FORWARD-ONLY: it takes the caller's ``prev`` stage and returns the new
+#       stage when it advanced, or ``None`` when it did not (and then publishes
+#       nothing), so a late or duplicate emit cannot walk a run backwards. The
+#       guard state lives with the CALLER, per run — there is no module-level
+#       map and no process-global to reset.
+#     * ``maybe_emit_belt_stage`` — the bridge from one agent ``tool_use``
+#       event, mapping orientation tools to ``orient`` and Write/Edit to
+#       ``develop``. Sibling of ``maybe_emit_belt_entity_changed``; same BELT
+#       surface gate. Called from ``chat/runs/run_core.py``.
+#   Two honest limits, both deliberate and neither fixable from this package:
+#     1. The INTERACTIVE station has NO ``action_id`` during orient / develop —
+#        the Instinct Action is minted by ``belt_propose_change``, which runs
+#        AFTER all the file writes. Those emits carry ``run_id`` and a null
+#        ``action_id``, exactly like ``belt_entity_changed``. Only the HEADLESS
+#        runner (which develops an already-filed queued Action) can carry both.
+#     2. These events are EPHEMERAL, like their entity-change siblings. The REST
+#        read model derives stage from the Action blob, so a page re-fetch
+#        resets a live ``orient`` / ``develop`` back to the derived value. The
+#        runs read model stays the durable truth; this is the live nudge.
 # Updated: 2026-09-12 (feat/belt-entity-events) — a station run now reports the
 #   WORK, not just the outcome. ``belt_run_updated`` fires a handful of times at
 #   lifecycle boundaries, so between "the agent started" and the single
@@ -87,11 +122,37 @@ import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, get_args
 
 from pocketpaw_ee.cloud.surface.domain import SurfaceKind
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# The stage vocabulary — ONE definition, shared by every belt emitter
+# ---------------------------------------------------------------------------
+
+# Where a station run is in the belt flow. Ordered EARLIEST-FIRST; ``STAGE_ORDER``
+# is derived from this type so the vocabulary and its ordering can never drift
+# apart.
+#
+#   station — dispatched, waiting for a station to pick it up (a queued run).
+#   orient  — the station is reading the codebase before changing anything.
+#   develop — the station is producing changes.
+#   verify  — the propose-time MECHANICAL gate is checking the produced diff.
+#   gate    — the diff is at the HUMAN Instinct gate awaiting review.
+#   done    — terminal (landed / failed / rejected).
+#
+# ``gate`` and ``done`` predate this alias and are UNCHANGED: the existing
+# emitters in ``agent/mcp_servers/belt.py`` and ``belt/executor.py`` pass those
+# exact strings and mean exactly what they meant before. ``station`` was already
+# produced by ``_derive_status_stage`` for a queued run (REST only — it has never
+# been emitted on the bus). Only ``orient`` / ``develop`` / ``verify`` are new,
+# and each is only ever emitted when it is genuinely REACHED.
+BeltStage = Literal["station", "orient", "develop", "verify", "gate", "done"]
+
+# The same values as a tuple, earliest-first — the forward-only comparison key.
+STAGE_ORDER: tuple[BeltStage, ...] = get_args(BeltStage)
 
 # Cap the diff text returned on a run-detail read. Mirrors the propose-time
 # ``MAX_DIFF_BYTES`` cap so a read can never pull more than the gate accepted.
@@ -116,12 +177,39 @@ _REPO_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _MAX_REPO_NAME = 100
 
 
+async def _publish_run_updated(data: dict[str, Any]) -> None:
+    """Publish one ``belt_run_updated`` payload on both delivery paths.
+
+    PRIMARY — the WORKSPACE REALTIME BUS. SECONDARY — the per-stream SSE sink.
+    Each is independently guarded: one dead transport never disables the other,
+    and neither can raise into a caller. Extracted from ``emit_belt_run_updated``
+    so ``emit_belt_stage`` reuses the exact same delivery rather than a second
+    copy that could drift.
+    """
+    # PRIMARY — workspace realtime bus (async fan-out to every workspace member).
+    try:
+        from pocketpaw_ee.cloud._core.realtime.emit import emit
+        from pocketpaw_ee.cloud._core.realtime.events import BeltRunUpdated
+
+        await emit(BeltRunUpdated(data=dict(data)))
+    except Exception:  # noqa: BLE001 — bus publish must never break a lifecycle path
+        logger.debug("belt: belt_run_updated bus emit failed (non-fatal)", exc_info=True)
+
+    # SECONDARY — in-turn per-stream SSE (only reaches an active chat stream).
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import push_sse_event
+
+        push_sse_event("belt_run_updated", dict(data))
+    except Exception:  # noqa: BLE001 — SSE push must never break a lifecycle path
+        logger.debug("belt: belt_run_updated SSE push failed (non-fatal)", exc_info=True)
+
+
 async def emit_belt_run_updated(
     *,
     workspace_id: str,
     action_id: str,
     status: str,
-    stage: str,
+    stage: BeltStage,
     pr_url: str | None = None,
 ) -> None:
     """Publish ``belt_run_updated`` for a station run lifecycle change.
@@ -152,22 +240,161 @@ async def emit_belt_run_updated(
     if pr_url:
         data["pr_url"] = pr_url
 
-    # PRIMARY — workspace realtime bus (async fan-out to every workspace member).
+    await _publish_run_updated(data)
+
+
+# ---------------------------------------------------------------------------
+# Intermediate stage transitions (feat/belt-entity-events, stage slice)
+# ---------------------------------------------------------------------------
+
+
+async def emit_belt_stage(
+    *,
+    workspace_id: str,
+    stage: BeltStage,
+    prev: BeltStage | None,
+    run_id: str | None = None,
+    action_id: str | None = None,
+    status: str | None = None,
+) -> BeltStage | None:
+    """Publish an INTERMEDIATE stage transition, FORWARD-ONLY.
+
+    Returns the stage that was published, or ``None`` when nothing was — either
+    because ``stage`` is not strictly later than ``prev`` (a duplicate or a
+    late/out-of-order emit) or because ``workspace_id`` is missing. The return
+    value IS the guard: the caller keeps it as its next ``prev``, so the
+    forward-only state lives with the run that owns it and there is no
+    module-level map, no process-global, and nothing to reset between tests::
+
+        stage = await emit_belt_stage(..., stage="orient", prev=stage)
+
+    A stage that does not advance publishes NOTHING. This is what stops a run
+    that has started writing files from being walked back to ``orient`` by a
+    later ``Read``.
+
+    ``status`` is OPTIONAL and is never fabricated. The Action's lifecycle
+    status is a different axis from the stage, and the two must not be guessed
+    from each other: the headless runner passes ``"queued"`` because the Action
+    row genuinely still is, and the interactive station passes nothing at all
+    because no Action exists yet. Inventing a status here (a "working" say)
+    would make the console light a stage the data cannot prove — the exact
+    failure this whole slice exists to avoid.
+
+    ``action_id`` is likewise optional, and null on the interactive path for the
+    same reason: ``belt_propose_change`` mints the Action AFTER the file writes.
+
+    **The propose path should call this with ``stage="verify"`` immediately
+    before it runs the mechanical diff gate**, so the console shows the run
+    being checked rather than jumping straight from ``develop`` to ``gate``.
+    That call site lives in ``belt_propose_change`` (agent MCP server), next to
+    the ``verify_diff`` invocation; it is not wired from here because the emit
+    has to happen at the gate, not at a distance from it.
+
+    Best-effort like every other belt emit: delivery failures are swallowed by
+    ``_publish_run_updated``, so a live nudge can never break a station run.
+    """
+    if not workspace_id:
+        return None
+    # Forward-only: a stage must be STRICTLY later than where the run already is.
+    # An unknown stage string (forward-compat) sorts as -1 and so never advances.
+    if STAGE_ORDER.index(stage) <= (STAGE_ORDER.index(prev) if prev in STAGE_ORDER else -1):
+        return None
+
+    # Fixed shape — every documented key present, including the Nones, so a
+    # consumer reads one payload shape instead of probing for optional keys.
+    # Same discipline as ``belt_entity_changed``.
+    await _publish_run_updated(
+        {
+            "workspace_id": workspace_id,
+            "action_id": action_id,
+            "run_id": run_id,
+            "status": status,
+            "stage": stage,
+        }
+    )
+    return stage
+
+
+# Agent tool name -> the stage it PROVES. Only two transitions are claimed, and
+# each is the earliest moment the run has demonstrably reached that stage:
+#
+#   develop — a ``Write`` / ``Edit``. The run is producing changes; this is a
+#             FACT, not a heuristic (the same two tools the entity-change feed
+#             keys on).
+#   orient  — a read-only codebase lookup. This one IS a heuristic and is
+#             labelled as such: reading the codebase is what the station's
+#             orient step DOES (see the ``belt`` skill's orient -> develop ->
+#             propose loop), but a ``Read`` mid-development is the same tool
+#             call. The forward-only guard is what makes it safe: ``orient`` can
+#             only ever be claimed BEFORE the first write, because afterwards the
+#             run has already advanced past it and the emit is dropped.
+#
+# Everything else — Bash, WebFetch, the MCP tools, the belt gate tool itself —
+# proves nothing about the stage and is deliberately absent. A stage we cannot
+# prove is one we do not emit.
+_STAGE_TOOLS: dict[str, BeltStage] = {
+    "Write": "develop",
+    "Edit": "develop",
+    "Read": "orient",
+    "Glob": "orient",
+    "Grep": "orient",
+}
+
+# loom is the workspace's orientation core — any of its MCP tools is an explicit
+# orient step. Matched by prefix because the MCP tool names are namespaced
+# (``mcp__loom__orient``, ``mcp__loom__locate``, ``mcp__loom__what_depends_on``…).
+_ORIENT_TOOL_PREFIX = "mcp__loom__"
+
+
+async def maybe_emit_belt_stage(
+    *,
+    surface: str | None,
+    tool_name: str | None,
+    workspace_id: str | None,
+    run_id: str | None,
+    prev: BeltStage | None,
+) -> BeltStage | None:
+    """Bridge one agent ``tool_use`` event to a stage transition, if it proves one.
+
+    Returns the caller's NEXT ``prev`` — the new stage when this tool advanced
+    the run, otherwise the ``prev`` it was handed, so a caller can assign
+    unconditionally::
+
+        stage = await maybe_emit_belt_stage(..., prev=stage)
+
+    ALL the filtering lives here (BELT surface only, and only the tools that
+    prove a stage) so the call site in the agent loop stays one guarded line and
+    the rules are testable without driving that loop. Sibling of
+    ``maybe_emit_belt_entity_changed``, which feeds the per-file event from the
+    same tool stream.
+
+    Unlike its sibling this does NOT need the run's bound repo: an orientation
+    tool call proves the stage regardless of which path it touched, and a run
+    that has not bound a repo yet is still genuinely orienting.
+
+    Never raises — a live feed must not be able to abort the turn that fed it.
+    """
+    if surface != SurfaceKind.BELT.value or not workspace_id:
+        return prev
+
+    name = tool_name or ""
+    stage = _STAGE_TOOLS.get(name)
+    if stage is None and name.startswith(_ORIENT_TOOL_PREFIX):
+        stage = "orient"
+    if stage is None:
+        return prev
+
     try:
-        from pocketpaw_ee.cloud._core.realtime.emit import emit
-        from pocketpaw_ee.cloud._core.realtime.events import BeltRunUpdated
-
-        await emit(BeltRunUpdated(data=dict(data)))
-    except Exception:  # noqa: BLE001 — bus publish must never break a lifecycle path
-        logger.debug("belt: belt_run_updated bus emit failed (non-fatal)", exc_info=True)
-
-    # SECONDARY — in-turn per-stream SSE (only reaches an active chat stream).
-    try:
-        from pocketpaw_ee.cloud.chat.agent_service import push_sse_event
-
-        push_sse_event("belt_run_updated", dict(data))
-    except Exception:  # noqa: BLE001 — SSE push must never break a lifecycle path
-        logger.debug("belt: belt_run_updated SSE push failed (non-fatal)", exc_info=True)
+        # No ``action_id``: on the interactive station the Instinct Action does
+        # not exist until ``belt_propose_change`` runs, which is after every
+        # file write. No ``status`` either — there is no Action row to have one.
+        return (
+            await emit_belt_stage(workspace_id=workspace_id, stage=stage, prev=prev, run_id=run_id)
+            or prev
+        )
+    except Exception:  # noqa: BLE001 — a live feed never breaks a turn
+        logger.debug("belt: stage bridge failed (non-fatal)", exc_info=True)
+        return prev
 
 
 # ---------------------------------------------------------------------------
@@ -863,7 +1090,7 @@ def _code_change_blob(action: Any) -> dict[str, Any] | None:
 # gate awaiting human review; everything terminal is ``done``. ``approved`` is a
 # transient state (the executor runs immediately after approve) — kept at the
 # gate so a run caught mid-apply doesn't read as done.
-_STATUS_MAP: dict[str, tuple[str, str]] = {
+_STATUS_MAP: dict[str, tuple[str, BeltStage]] = {
     "pending": ("proposed", "gate"),
     "approved": ("approved", "gate"),
     "rejected": ("rejected", "done"),
