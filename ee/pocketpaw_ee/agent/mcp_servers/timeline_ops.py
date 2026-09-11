@@ -4,6 +4,15 @@
 # whose TS half is paw-enterprise/src/lib/core/studio/editor/agent-ops.ts.
 # Design: docs/design/drafts/2026-09-08-agentic-studio-editor.md in paw-workspace.
 #
+# 2026-09-11 (feat/agent-lane-ops): `add_lane`, and `track` resolving by lane
+# NAME as well as id. The name path is load-bearing — track ids are minted when
+# the batch applies in the browser, so a lane this batch creates has no id to
+# quote, and validating names against the summary alone would reject the very
+# sequence the verb exists for. Names are therefore checked against the lanes the
+# agent was shown PLUS the ones earlier ops in the batch claim, and a duplicate
+# is refused: two rows answering to one word makes placement a coin flip decided
+# by document order.
+#
 # Validates VERBS and IDS, never geometry — whether a transition fits or a split
 # lands too near an edge depends on document state this process does not have.
 # The store decides that and refuses per-op.
@@ -23,6 +32,7 @@ from typing import Any
 OP_KINDS: frozenset[str] = frozenset(
     {
         "add_caption",
+        "add_lane",
         "add_text",
         "move_clip",
         "place_audio",
@@ -96,6 +106,19 @@ _CAPTION_STYLES: frozenset[str] = frozenset({"plain", "boxed", "outlined"})
 # AnimatableProp in schema.ts.
 _ANIM_PROPS: frozenset[str] = frozenset({"x", "y", "scale", "rotation", "opacity", "volume"})
 
+# TrackKind in schema.ts. 'overlay' is in the enum and nothing authors one yet;
+# it stays accepted because the document already allows it and refusing here
+# would be this file inventing a narrower contract than the one it validates.
+_LANE_KINDS: frozenset[str] = frozenset({"video", "audio", "text", "overlay"})
+
+# TrackRole. One member, and it is the one that matters: a cue lane and a plain
+# text lane are different groups, and the store keeps titles out of the cue list.
+_LANE_ROLES: frozenset[str] = frozenset({"captions"})
+
+# Long enough to say what a lane carries, short enough to stay a chip on a
+# timeline row. Mirrors AddLaneOp's z.string().min(1).max(40).
+_MAX_LANE_NAME = 40
+
 # Named easings. The tuple form (cubic bezier) is deliberately not offered: it
 # is four numbers with a throwing domain and nothing an agent can reason about.
 _EASINGS: frozenset[str] = frozenset({"linear", "easeIn", "easeOut", "easeInOut", "hold"})
@@ -116,11 +139,18 @@ class TimelineSummary:
         clip_ids: set[str] | None = None,
         asset_ids: set[str] | None = None,
         track_ids: set[str] | None = None,
+        track_names: set[str] | None = None,
         has_timeline: bool = True,
     ) -> None:
         self.clip_ids = clip_ids or set()
         self.asset_ids = asset_ids or set()
         self.track_ids = track_ids or set()
+        # Lanes are addressable by NAME as well as id, which is what lets one
+        # batch create a lane and then put something on it: track ids are minted
+        # at apply time, so a lane the batch is adding has no id to quote. Kept
+        # case-folded because the agent is quoting a name it wrote in another op,
+        # not copying an id out of the preamble.
+        self.track_names = {n.strip().casefold() for n in (track_names or set()) if n.strip()}
         self.has_timeline = has_timeline
 
     @classmethod
@@ -150,10 +180,21 @@ class TimelineSummary:
                     out.add(row)
             return out
 
+        def _names(key: str) -> set[str]:
+            rows = timeline.get(key)
+            if not isinstance(rows, list):
+                return set()
+            return {
+                row["name"]
+                for row in rows
+                if isinstance(row, dict) and isinstance(row.get("name"), str)
+            }
+
         return cls(
             clip_ids=_ids("clips"),
             asset_ids=_ids("assets"),
             track_ids=_ids("tracks"),
+            track_names=_names("tracks"),
             has_timeline=True,
         )
 
@@ -257,6 +298,9 @@ def validate_ops(
         )
 
     clean: list[dict[str, Any]] = []
+    # Lane names minted by `add_lane` ops earlier in this batch. A later op may
+    # address them even though no id exists yet — see TimelineSummary.track_names.
+    batch_lane_names: set[str] = set()
 
     for i, raw in enumerate(ops):
         if not isinstance(raw, dict):
@@ -314,25 +358,79 @@ def validate_ops(
             op["after"] = full
 
         if raw.get("track") is not None:
-            full, err = _resolve(
-                raw["track"],
-                summary.track_ids,
-                field="track",
-                noun="a track on this timeline",
-                index=i,
-            )
-            if err:
-                return None, err
-            op["track"] = full
+            track_ref = raw["track"]
+            # A NAME resolves as-is and is passed through untouched — the client
+            # matches it against live track names. Checked against the lanes the
+            # agent was shown PLUS the ones earlier ops in this batch create, so
+            # "open a Score lane, put the music on it" validates as one batch
+            # even though the lane has no id until the batch applies.
+            if isinstance(track_ref, str) and track_ref.strip().casefold() in (
+                summary.track_names | batch_lane_names
+            ):
+                op["track"] = track_ref
+            else:
+                full, err = _resolve(
+                    track_ref,
+                    summary.track_ids,
+                    field="track",
+                    noun="a track on this timeline",
+                    index=i,
+                )
+                if err:
+                    known_names = sorted(summary.track_names | batch_lane_names)
+                    extra = (
+                        f" Lanes can also be named directly: {', '.join(known_names)}."
+                        if known_names
+                        else ""
+                    )
+                    return None, f"{err}{extra}"
+                op["track"] = full
 
         # ── per-verb argument checks ───────────────────────────────────────
         err = _validate_verb(kind, op, i, summary)
         if err:
             return None, err
 
+        if kind == "add_lane":
+            err = _check_lane_name(op, i, summary, batch_lane_names)
+            if err:
+                return None, err
+            name = op.get("name")
+            if isinstance(name, str) and name.strip():
+                batch_lane_names.add(name.strip().casefold())
+
         clean.append(op)
 
     return clean, None
+
+
+def _check_lane_name(
+    raw: dict[str, Any], i: int, summary: TimelineSummary, batch_names: set[str]
+) -> str | None:
+    """A lane name has to be unique, because `track` resolves by it.
+
+    Two rows answering to one word would make placement a coin flip decided by
+    document order, and the agent would be told the clip went somewhere it did
+    not. Checked against the lanes on the timeline AND the ones earlier ops in
+    this batch already claimed.
+    """
+    name = raw.get("name")
+    if name is None:
+        return None
+    if not isinstance(name, str) or not name.strip():
+        return f"ops[{i}].name must be a non-empty string when given."
+    if len(name.strip()) > _MAX_LANE_NAME:
+        return f"ops[{i}].name is longer than {_MAX_LANE_NAME} characters."
+    folded = name.strip().casefold()
+    if folded in summary.track_names:
+        return (
+            f"ops[{i}].name {name!r} is already a lane on this timeline. Pick a "
+            "different name, or target the existing lane with `track` instead of "
+            "opening a second one."
+        )
+    if folded in batch_names:
+        return f"ops[{i}].name {name!r} was already used by an earlier add_lane in this batch."
+    return None
 
 
 def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSummary) -> str | None:
@@ -346,6 +444,27 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
     if kind == "split_clip":
         if "atMs" not in raw or raw["atMs"] is None:
             return f"ops[{i}].atMs is required for split_clip — where should the cut land?"
+
+    elif kind == "add_lane":
+        lane_kind = raw.get("kind")
+        if not isinstance(lane_kind, str) or lane_kind not in _LANE_KINDS:
+            hint = _suggest(str(lane_kind), set(_LANE_KINDS))
+            return (
+                f"ops[{i}].kind {lane_kind!r} is not a lane kind.{hint} "
+                f"Valid kinds: {', '.join(sorted(_LANE_KINDS))}."
+            )
+        role = raw.get("role")
+        if role is not None and (not isinstance(role, str) or role not in _LANE_ROLES):
+            return (
+                f"ops[{i}].role {role!r} is not a lane role. The only role is "
+                "'captions', which makes a text lane a cue lane; omit it for a "
+                "plain lane."
+            )
+        if role == "captions" and lane_kind != "text":
+            return (
+                f"ops[{i}] asked for a {lane_kind} lane with role 'captions'. A cue "
+                "lane is a TEXT lane wearing that role — pass kind 'text'."
+            )
 
     elif kind == "set_transition":
         tk = raw.get("kind")
