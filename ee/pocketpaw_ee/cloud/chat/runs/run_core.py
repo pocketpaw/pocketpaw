@@ -9,6 +9,18 @@ Changes:
   credentials: reaching it with a rejected gateway address would put every
   such turn on OUR key, so a tenant's bad (or hostile) address would spend our
   money. A refused turn is the correct answer — the address is theirs to fix.
+- 2026-09-11 (feat/pydantic-ai-model-override) — a per-send ``model`` is checked
+  against the gateway's own catalog before it is forwarded. The edge validates a
+  SHAPE (a regex and a length) and the composer's picker is three hardcoded
+  presets plus a free-text field, so once the override became live on the
+  cloud's default backend the field was free-text model selection billed to the
+  platform key. ``_model_is_unknown_to_gateway`` rejects only what it positively
+  knows is unserved — an unreachable or empty catalog lets the turn through
+  rather than making the picker a dead control again, matching what
+  ``resolve_turn_credentials`` does with its own failure. It is NOT an
+  entitlement check: every model the gateway serves is in the catalog, so a
+  per-plan allowlist is still the thing that would put a ceiling on cost, and
+  this is the seam it plugs into.
 
 - 2026-09-08 (fix/attachment-only-turns) — ``_drive_agent_loop`` now runs its
   ``user_content`` through ``agent_service.resolve_user_content`` before
@@ -1418,6 +1430,63 @@ async def _prewarm_session(ctx: ScopeContext, flow_context: dict[str, Any] | Non
         logger.debug("prewarm_session skipped (swallowed): %s", exc)
 
 
+#: How long a per-send model check may hold up a turn. The catalog client's own
+#: timeout is 15s per read and it makes two, so an unreachable proxy could add
+#: half a minute to a turn that is going to run fine. A check that times out is
+#: a check that did not happen, which is the fail-open case below.
+_MODEL_CHECK_TIMEOUT_SECONDS = 5.0
+
+
+async def _model_is_unknown_to_gateway(model_id: str) -> bool:
+    """True only when we POSITIVELY know the gateway does not serve ``model_id``.
+
+    The per-send model is validated at the edge by a regex and nothing else, and
+    the composer's picker is three hardcoded presets plus a free-text field, so
+    without this a workspace names any model string it likes and the platform
+    key pays for whatever the gateway is willing to route.
+
+    The catalog is the right list to check against because it is the UNION of
+    what the proxy describes (``/model/info``) and what it routes
+    (``/v1/models``) — never narrower than the routable set. So an id missing
+    from it is an id the gateway would refuse anyway, and refusing here turns an
+    opaque upstream 400 into a typed error the composer can show.
+
+    It is deliberately NOT an entitlement check. Every model the gateway serves
+    is in the catalog, so this does not stop a workspace from picking an
+    expensive one; it stops free text. A per-plan allowlist is the thing that
+    puts a ceiling on cost, and this is the seam it plugs into.
+
+    Fail-open in two directions, both of which would otherwise make the picker a
+    dead control on a healthy deployment:
+
+    * the catalog is unreachable — ``/model/info`` is an admin route and can be
+      gated or down while chat routing is fine. Matches what
+      ``resolve_turn_credentials`` does with its own failure a few lines below.
+    * the catalog came back EMPTY — indistinguishable from "unknown id" on a
+      per-id lookup, and rejecting every send is far worse than the cost
+      exposure being checked for.
+    """
+    from pocketpaw_ee.catalog import service as catalog_service
+
+    try:
+        entries = await asyncio.wait_for(
+            catalog_service.list_models(), timeout=_MODEL_CHECK_TIMEOUT_SECONDS
+        )
+    except Exception:
+        logger.warning(
+            "model catalog unavailable — per-send model %r runs unchecked this turn",
+            model_id,
+            exc_info=True,
+        )
+        return False
+    if not entries:
+        logger.warning(
+            "model catalog is empty — per-send model %r runs unchecked this turn", model_id
+        )
+        return False
+    return not any(entry.id == model_id for entry in entries)
+
+
 async def _drive_agent_loop(
     ctx: ScopeContext,
     *,
@@ -1695,7 +1764,24 @@ async def _drive_agent_loop(
         # rest keep the narrower signature, so it is forwarded ONLY when the
         # client actually chose a model for this turn. ``None`` = legacy path,
         # byte-identical to today.
+        # The id itself is checked against the gateway's own model list before
+        # it is forwarded — the edge validates a SHAPE (a regex and a length),
+        # which says nothing about whether the model exists or whether we serve
+        # it. See ``_model_is_unknown_to_gateway`` for why this rejects only
+        # what we positively know is not served.
         if ctx.model_override:
+            if await _model_is_unknown_to_gateway(ctx.model_override):
+                yield (
+                    "error",
+                    {
+                        "code": "model.not_available",
+                        "message": (
+                            f"'{ctx.model_override}' isn't a model this workspace can "
+                            "run. Pick one from the model menu."
+                        ),
+                    },
+                )
+                return
             run_kwargs["model_override"] = ctx.model_override
         # Per-send tool switch. Same withhold-when-empty idiom: only an explicit
         # False is a request, so a client that never sends the field (every
