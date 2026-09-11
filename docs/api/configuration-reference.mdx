@@ -9,6 +9,20 @@ tags: ["api", "configuration"]
 
 {/*
   docs/api/configuration-reference.mdx
+  Updated 2026-09-12 (integration/belt-factory). Added the "Belt and Pulley"
+  section with the five settings this branch introduces: belt_verify_enabled,
+  belt_verify_timeout_s, belt_verify_commands, pulley_path and pulley_bin. The
+  Belt had no entry in this file at all, so the two pre-existing settings a
+  reader needs alongside them are named in the section's prose rather than given
+  rows: belt_repo_allowlist, because belt_verify_commands keys on a repo path the
+  same way, and loom_model_path, because unset it is why the live feed's
+  component field is always null. Two operator facts are stated up front because
+  neither is visible from a default value: the verify gate is ON by default, so
+  turning it off removes the only mechanical check there is rather than loosening
+  one, and the gate covers the interactive station ONLY, so the headless runner
+  records no verdict whatever these are set to. The pulley rows deliberately do
+  not document an app-path setting: there isn't one, on purpose, and the note
+  under the table says why.
   Updated 2026-09-02 (docs/sites-analytics, SA-7) — EXTENDED the SA-2/SA-3 section
   below rather than adding a second one, with the one operator fact the variables
   alone do not carry: the READ needs an Account Analytics Read token scope that the
@@ -263,6 +277,54 @@ The pocket specialist does NOT receive Composio — its tool surface stays narro
 | Setting | Env Variable | Type | Default | Description |
 |---------|-------------|------|---------|-------------|
 | `fabric_source_truth_mode` | `POCKETPAW_FABRIC_SOURCE_TRUTH_MODE` | enum | `off` | Rollout mode for Fabric source truth (`off`, `shadow`, `enforce`). `off` = pure last-writer-wins, no statements. `shadow` = provenance statements + divergence log lines recorded alongside the LWW cache. `enforce` = the trust-ladder resolver's winner owns the cache. Gate the flip to `enforce` with `python -m pocketpaw.fabric.divergence_report` — see [Fabric Source Truth](/concepts/architecture#fabric-source-truth). |
+
+## Belt and Pulley
+
+The Belt is the code assembly line. A station run develops a change in a
+worktree and proposes it as a diff through the Instinct gate, where a human
+approves it. These settings govern the two pieces that sit around that loop: the
+mechanical gate that checks a diff before a human ever sees it, and the pulley
+block engine the station agent installs reviewed blocks from.
+
+Two related settings are not new and are not repeated below.
+`POCKETPAW_BELT_REPO_ALLOWLIST` is the JSON list of roots a proposal's repo path
+must resolve inside; `belt_verify_commands` keys on a repo path the same way, and
+both sides are resolved before comparing, so a trailing slash, a `~`, or a
+symlinked checkout still matches. `POCKETPAW_LOOM_MODEL_PATH` is what the belt's
+live per-file feed reads to name the C4 component that owns a changed file; unset,
+which is the default, that field is always null.
+
+**The verify gate is on by default, and that is the point.** Before it, a human at
+the Instinct gate was approving work nothing had ever run. Turning it off does not
+loosen a check, it removes the only mechanical one there is.
+
+**The gate covers the interactive station only.** It has a single call site, the
+`belt_propose_change` tool. The headless develop runner writes its diff straight
+onto the queued Action, so it runs no checks and records no verdict regardless of
+these settings. The per-diff human gate still applies there.
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `belt_verify_enabled` | `POCKETPAW_BELT_VERIFY_ENABLED` | boolean | `true` | Run mechanical checks on a Belt code-change proposal **before** it reaches the human approval gate. The diff is applied with `git apply --3way` in a throwaway git worktree of the repo at its base branch, the checks that tree offers are run, and the worktree is torn down on every path. A failed check refuses the proposal outright: no Instinct Action is filed, and the failing check names and their output go back to the agent so it can fix and re-propose. A passing or "nothing to run" result files the Action and records the verdict on its `_code_change` blob under `verification`. Set to false and the proposal is filed unverified with `verification` recorded as `disabled`. |
+| `belt_verify_timeout_s` | `POCKETPAW_BELT_VERIFY_TIMEOUT_S` | integer | `600` | Per-check timeout in seconds. A check that exceeds it is killed and counts as **failed**, not skipped, because an unbounded suite proves nothing. It is per check, not per proposal, so a repo whose discovery finds a pytest run and a `pulley doctor` can spend this budget twice. |
+| `belt_verify_commands` | `POCKETPAW_BELT_VERIFY_COMMANDS` | JSON object | unset | Per-repo verification command, keyed by the repo's path, valued as one argv list. Set as a JSON object of path to argv, for example `{"/srv/repos/acme": ["make", "check"]}`. The command runs verbatim in the throwaway worktree after the diff applies, and it **replaces** generic discovery rather than adding to it. Three things to know before setting one. It runs exactly as written, with no diff-derived test paths appended, so a bare `pytest` runs the whole suite and will hit the timeout. Evidence is still required: a run that exits 0 without showing a passing count is recorded as `no_checks`, never as a pass. And a command that cannot launch is a **failed** check, not a skip, so a typo here refuses proposals rather than silently switching the gate off. The one non-zero exit that is not a refusal is `5`, read as pytest's "no tests collected", which records `no_checks`. These argv elements are operator-configured only and are never read from a diff or from agent text. |
+| `pulley_path` | `POCKETPAW_PULLEY_PATH` | string | unset | Path to a pulley checkout. Unset, which is the default, no pulley MCP server is registered and block assembly is simply absent: the station agent writes the code by hand. Set it and the `/belt` develop station gains five tools (`search_catalog`, `describe_block`, `plan_install`, `apply_plan`, `doctor`) for installing reviewed blocks instead of hand-writing auth, org, roles, notify, files and audit code. The server is served as `bun <this path>/mcp/server.ts` and the block registry defaults to `<this path>/registry`. Registration degrades to absent, without raising, when the `server.ts` is missing or bun cannot be resolved. |
+| `pulley_bin` | `POCKETPAW_PULLEY_BIN` | string | `bun` | The bun binary that runs the pulley MCP server. Resolved in three steps: this setting read as an explicit path if it points at an executable file, then a `PATH` lookup of the name, then `~/.bun/bin/bun`. The default relies on `PATH`; set an absolute path to pin one. |
+
+**`app` is a required argument on every pulley call and there is no server
+default.** That is deliberate. A belt run develops in its own station worktree and
+proposes the diff of that repo, so a fixed default app would install blocks into a
+directory the station's diff never sees, silently, because the tools would still
+report success. There is no setting for it.
+
+**The pulley tools are scoped to `/belt` and denied everywhere else.**
+`apply_plan` writes files to disk, and the server is ambient, meaning it registers
+for every run. Reaching those tools from an unrestricted surface such as `/chat`
+would be a privilege escalation off the develop station, so the deny is applied at
+the one chokepoint every surface profile passes through rather than row by row.
+Blocks do not bypass the human gate either: `apply_plan` writes into the bound
+repo like any other change, and that change still leaves the station only as a
+verified proposal.
 
 ## Paw Sites — visitor analytics
 
