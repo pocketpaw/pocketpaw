@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -292,6 +293,66 @@ async def test_pytest_collecting_nothing_is_skipped_not_passed(tmp_path):
     )
 
     assert [(c.name, c.ok, c.skipped) for c in result.checks] == [("pytest(ambient)", True, True)]
+    assert result.status == "no_checks"
+
+
+async def test_all_skipped_suite_is_not_a_pass(tmp_path):
+    """A suite that exits 0 having PASSED nothing proved nothing → skipped.
+
+    This is the pocketpaw shape, not a hypothetical: `uv run pytest` in a fresh
+    worktree syncs default groups only, so pocketpaw_ee is missing, every
+    tests/ee module importorskips, and the run exits 0 having exercised nothing.
+    On the exit code alone the gate would green the very change it is least able
+    to verify."""
+    repo = _seed(
+        tmp_path / "all-skipped",
+        {
+            "pyproject.toml": _PYPROJECT,
+            "app.py": "VALUE = 1\n",
+            # Collected and then skipped at RUNTIME — pytest exits 0, which the
+            # exit-5 rule does not catch. (A module-level importorskip exits 5
+            # instead and is already covered by the no-tests-collected case.)
+            "test_app.py": (
+                "import pytest\n\n\n"
+                '@pytest.mark.skip(reason="stands in for an ee importorskip")\n'
+                "def test_never_runs():\n    assert False\n"
+            ),
+        },
+    )
+    diff = _diff("app.py", "VALUE = 1\n", "VALUE = 2\n")
+
+    result = await belt_verify.verify_diff(
+        repo=str(repo), base_branch="main", diff=diff, timeout_s=120
+    )
+
+    check = result.checks[0]
+    assert (check.ok, check.skipped) == (True, True), check.output
+    assert "No test PASSED" in check.output
+    assert result.status == "no_checks"
+
+
+async def test_uv_lock_without_pytest_is_skipped_not_failed(tmp_path):
+    """A uv-locked repo whose lock has no pytest → skipped. Running `uv run
+    pytest` there exits non-zero on a missing command, which would refuse a
+    perfectly good diff."""
+    if not shutil.which("uv"):
+        pytest.skip("uv is not on PATH, so the uv branch cannot be reached")
+    repo = _seed(
+        tmp_path / "uv-no-pytest",
+        {
+            "pyproject.toml": _PYPROJECT,
+            # A lock that resolves something, but not pytest.
+            "uv.lock": 'version = 1\n\n[[package]]\nname = "idna"\nversion = "3.7"\n',
+            "app.py": "VALUE = 1\n",
+        },
+    )
+    diff = _diff("app.py", "VALUE = 1\n", "VALUE = 2\n")
+
+    result = await belt_verify.verify_diff(
+        repo=str(repo), base_branch="main", diff=diff, timeout_s=120
+    )
+
+    assert [(c.name, c.ok, c.skipped) for c in result.checks] == [("pytest(uv)", True, True)]
     assert result.status == "no_checks"
 
 

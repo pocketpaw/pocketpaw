@@ -84,6 +84,24 @@
     ]
   },
   {
+    "label": "a suite that passed nothing is counted as proof",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    if passed and int(passed.group(1)) > 0:\n        return check",
+    "replace": "    if True:\n        return check",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_all_skipped_suite_is_not_a_pass"
+    ]
+  },
+  {
+    "label": "a uv.lock without pytest is run anyway, reddening a good diff",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "        if not _locks_pytest(lock):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_uv_lock_without_pytest_is_skipped_not_failed"
+    ]
+  },
+  {
     "label": "a JS repo with no install is run anyway, reddening a good diff",
     "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
     "find": "    if not (tree / \"node_modules\").is_dir():",

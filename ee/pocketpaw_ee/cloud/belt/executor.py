@@ -11,10 +11,12 @@
 #       ``uv run`` inside the throwaway worktree can never sync that tree's
 #       editable install INTO the live server venv and then have the tree deleted
 #       under it.
-#     * process-group kill on timeout (``start_new_session=True`` +
-#       ``os.killpg``). ``proc.kill()`` alone kills ``uv`` and orphans the
-#       ``pytest`` grandchild, which keeps running inside the worktree the
-#       finally-block is about to remove.
+#     * process-group kill on timeout AND on cancellation
+#       (``start_new_session=True`` + ``os.killpg``). ``proc.kill()`` alone kills
+#       ``uv`` and orphans the ``pytest`` grandchild, which keeps running inside
+#       the worktree the finally-block is about to remove; and a cancelled
+#       ``wait_for`` does not kill the child at all, so a client disconnect left
+#       the same orphan.
 #   Every existing call site is unchanged in behaviour: both new params default
 #   to the old values.
 #
@@ -263,6 +265,13 @@ async def _run(
         raise RuntimeError(
             f"command timed out after {timeout or _SUBPROCESS_TIMEOUT}s: {argv[0]} {sub}"
         ) from None
+    except asyncio.CancelledError:
+        # The CALLER was cancelled (client disconnect, run interrupted). Only the
+        # timeout branch above kills the child, so without this a test suite keeps
+        # running inside a worktree the caller's finally-block is about to delete.
+        with _suppress():
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        raise
     return (
         proc.returncode or 0,
         out_b.decode("utf-8", "replace"),

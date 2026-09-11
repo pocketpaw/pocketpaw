@@ -31,6 +31,12 @@
 #   * A check that cannot RUN (no runner on PATH, no node_modules in the fresh
 #     worktree, pytest collected nothing) is ``skipped``, never a pass and never
 #     a failure — it does not count as proof.
+#   * A suite that exits 0 having PASSED nothing is demoted to skipped too
+#     (``_require_evidence``). This is not hypothetical: ``uv run pytest`` in a
+#     throwaway pocketpaw worktree syncs default groups only, so ``pocketpaw_ee``
+#     is absent, every ``tests/ee`` module ``importorskip``s, and the run exits 0
+#     having exercised nothing. On the exit code alone the gate would hand the
+#     approver a green stamp for the change it is least able to verify.
 #   * ``status="no_checks"`` is its own third state: not a pass, not a failure.
 #     The propose proceeds (a docs repo has nothing to run) but the human sees
 #     that nothing was proven.
@@ -40,11 +46,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -72,8 +79,8 @@ _ENV_STRIP = frozenset(
 )
 
 # pytest exit 5 = "no tests collected". Nothing was proven, so it is a SKIP —
-# never a pass. (Exit 0 with everything internally skipped is indistinguishable
-# from a real pass at the exit-code level; that ceiling is unfixable here.)
+# never a pass. Exit 0 on an all-SKIPPED suite is the same lie wearing a
+# different exit code; ``_require_evidence`` reads the counts line to catch it.
 _PYTEST_NO_TESTS = 5
 
 
@@ -187,6 +194,41 @@ async def _timed(
     return CheckResult(name=name, ok=code == 0, skipped=False, output=body, duration_s=duration)
 
 
+def _locks_pytest(lock: Path) -> bool:
+    """True when ``uv.lock`` resolves a pytest package. Without it ``uv run
+    pytest`` exits non-zero on a missing command and reds a good diff."""
+    try:
+        return re.search(r'^name = "pytest"$', lock.read_text(encoding="utf-8"), re.M) is not None
+    except OSError:
+        return False
+
+
+def _require_evidence(check: CheckResult) -> CheckResult:
+    """A pytest run that exits 0 having passed NOTHING proved nothing — demote it
+    to a skip.
+
+    Exit 0 covers "everything passed" AND "every test was skipped", and the live
+    case is pocketpaw itself: ``uv run pytest`` in a throwaway worktree syncs the
+    default groups only, so ``pocketpaw_ee`` is absent, every ``tests/ee`` module
+    ``importorskip``s, and the suite exits 0 having run nothing. On the exit code
+    alone that is a PASS, and the approver gets a green rubber stamp on a change
+    nothing exercised. ``-q`` still prints the counts line, so read it."""
+    if not check.ok or check.skipped:
+        return check
+    passed = re.search(r"\b(\d+) passed\b", check.output)
+    if passed and int(passed.group(1)) > 0:
+        return check
+    return replace(
+        check,
+        skipped=True,
+        output=_tail(
+            f"{check.output}\n\nNo test PASSED — the suite exited 0 without proving "
+            "anything (everything skipped, or nothing installed to run), so this "
+            "counts as SKIPPED, not a pass."
+        ),
+    )
+
+
 def _pytest_targets(tree: Path, diff: str) -> list[str]:
     """Test files the diff touches, filtered to what EXISTS in the applied tree.
 
@@ -221,15 +263,22 @@ async def _pytest_check(
         return None
     targets = _pytest_targets(tree, diff)
 
-    if (tree / "uv.lock").exists() and shutil.which("uv"):
+    lock = tree / "uv.lock"
+    if lock.exists() and shutil.which("uv"):
         # Correct by construction: uv resolves the tree's OWN dependencies.
-        return await _timed(
-            "pytest(uv)",
-            ["uv", "run", "pytest", *targets, "-q"],
-            cwd=tree,
-            timeout_s=timeout_s,
-            env=env,
-            skip_codes=(_PYTEST_NO_TESTS,),
+        if not _locks_pytest(lock):
+            # Running it would exit non-zero on "unknown command pytest" and red
+            # a perfectly good diff. A missing runner is a SKIP, not a failure.
+            return _skip("pytest(uv)", "the repo's uv.lock does not include pytest")
+        return _require_evidence(
+            await _timed(
+                "pytest(uv)",
+                ["uv", "run", "pytest", *targets, "-q"],
+                cwd=tree,
+                timeout_s=timeout_s,
+                env=env,
+                skip_codes=(_PYTEST_NO_TESTS,),
+            )
         )
 
     try:
@@ -242,13 +291,15 @@ async def _pytest_check(
     # never be exercised — so the applied tree goes on PYTHONPATH ahead of them.
     roots = [str(tree / "src")] if (tree / "src").is_dir() else []
     roots.append(str(tree))
-    return await _timed(
-        "pytest(ambient)",
-        [sys.executable, "-m", "pytest", *targets, "-q"],
-        cwd=tree,
-        timeout_s=timeout_s,
-        env={**env, "PYTHONPATH": os.pathsep.join(roots)},
-        skip_codes=(_PYTEST_NO_TESTS,),
+    return _require_evidence(
+        await _timed(
+            "pytest(ambient)",
+            [sys.executable, "-m", "pytest", *targets, "-q"],
+            cwd=tree,
+            timeout_s=timeout_s,
+            env={**env, "PYTHONPATH": os.pathsep.join(roots)},
+            skip_codes=(_PYTEST_NO_TESTS,),
+        )
     )
 
 
