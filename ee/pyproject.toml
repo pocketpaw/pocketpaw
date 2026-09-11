@@ -6,6 +6,9 @@
 # depends on the OSS core package `pocketpaw`.
 #
 # Changes:
+#   - 2026-09-12 (A1, belt factory): registered the `pulley` entry in
+#     `pocketpaw.mcp_servers` — `CloudPulleyMcpProvider`, the external pulley
+#     block-engine server (stdio, 5 tools) scoped to the /belt surface.
 #   - 2026-07-21 (ship-1): added `asyncssh` — SSH exec transport for the /ship
 #     deploy engine's Dokku driver (ee/pocketpaw_ee/ship_engine/). Lazy-imported
 #     by AsyncSSHTransport only; the port + transcript-replay tests never load it.
@@ -322,6 +325,7 @@ palette = "pocketpaw_ee.extensions:CloudPaletteMcpProvider"
 ask = "pocketpaw_ee.extensions:CloudAskMcpProvider"
 deliver = "pocketpaw_ee.extensions:CloudDeliverMcpProvider"
 loom = "pocketpaw_ee.extensions:CloudLoomMcpProvider"
+pulley = "pocketpaw_ee.extensions:CloudPulleyMcpProvider"
 belt = "pocketpaw_ee.extensions:CloudBeltMcpProvider"
 code = "pocketpaw_ee.extensions:CloudCodeMcpProvider"
 external_actions = "pocketpaw_ee.extensions:CloudExternalActionsMcpProvider"
