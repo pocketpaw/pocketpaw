@@ -764,12 +764,35 @@ async def archive_group(group_id: str, user_id: str) -> None:
     await emit(GroupUpdated(data={"group_id": group_id, "archived": True}))
 
 
-async def join_group(group_id: str, user_id: str) -> None:
+async def join_group(group_id: str, user_id: str, workspace_id: str) -> None:
     """Join a public group or public channel. Adds user to members list.
-    Private channels must be joined via an invite flow."""
+    Private channels must be joined via an invite flow.
+
+    ``workspace_id`` is the CALLER's workspace, and the first check below is why
+    it is a required parameter rather than an optional one. Until 2026-09-11 this
+    function verified group type, channel visibility and archived state — three
+    checks, none of them tenancy — and then appended the caller to
+    ``Group.members``. ``_get_group_domain_or_404`` loads by ``_id`` alone, and
+    every workspace is seeded a ``type="public"`` group named General
+    (``seed_default_group``, called from ``auth/core.py``), so one POST against a
+    foreign group id made an outsider a real member of another tenant's
+    workspace. Membership is what the rest of the chat surface gates on, so that
+    single write opened ``send_message`` and ``patch_ui_state`` behind it.
+
+    NotFound rather than Forbidden: a group in a workspace you are not in should
+    not confirm that it exists.
+    """
     from pocketpaw_ee.cloud.chat.dto import group_to_wire_dict
 
     group = await _get_group_domain_or_404(group_id)
+    if group.workspace_id != workspace_id:
+        log_denial(
+            actor=user_id,
+            action="group.join",
+            code="group.not_found",
+            resource_id=group_id,
+        )
+        raise NotFound("group", group_id)
     if group.type == "channel" and group.visibility == "private":
         raise Forbidden(
             "group.not_joinable",
