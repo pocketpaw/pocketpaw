@@ -79,6 +79,25 @@ mcp__pocketpaw_belt__belt_propose_change({
 If the call returns ok, the proposal is queued. If it is unavailable or returns
 an error, **say so plainly** — do not pretend the change was proposed.
 
+### The gate verifies before a human sees it
+
+The gate does not just file your diff. It applies the diff in a throwaway
+worktree off `base_branch` and runs whatever checks that repo offers — the test
+suite, `pulley doctor` for a Pulley app. **A failing check refuses the
+proposal**: no action is filed, no human is asked, and the error text you get
+back carries the failing check's name and output.
+
+That is a fix-and-retry loop, not a dead end. Read the failure, fix it in the
+worktree, and call the tool again. Two things follow:
+
+- **Run the tests yourself first.** Your own run is faster feedback than a
+  refused proposal, and a diff that breaks a test never reaches the Tray.
+- **Change the test alongside the code it covers.** If you change behaviour and
+  leave the old assertion standing, the gate reds your diff — correctly.
+
+A repo with nothing to run (no test command) still proposes; the human just sees
+that nothing was mechanically proven.
+
 ## After proposing
 
 Tell the user the change is **waiting in the Tray** for review. On **approve**,
