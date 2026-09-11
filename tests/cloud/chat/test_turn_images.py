@@ -1,6 +1,10 @@
 # tests/cloud/chat/test_turn_images.py — the images ONE turn looks at.
 #
 # Created 2026-09-09 (feat/other-hand-vision).
+# Updated 2026-09-11 (feat/other-hand-page-vision) — cover the PER-IMAGE cap.
+# The turn budget was the only size check, and it is the wrong shape to catch
+# the case that actually bites: one 5MB page snapshot sits well inside a 6MB
+# turn and is refused by the provider instead of by us.
 #
 # Two things are worth testing here, and neither is "the happy path works":
 #
@@ -111,3 +115,20 @@ class TestALostPictureNeverCostsTheTurn:
             p.write_bytes(PNG)
             paths.append(str(p))
         assert len(run_core._read_turn_images(_ctx(*paths))) == 3
+
+    def test_an_image_over_the_per_image_cap_is_skipped_and_the_rest_still_ride(
+        self, jail: Path
+    ) -> None:
+        # The per-image ceiling is NOT the turn budget, and this is the gap it
+        # closes: at 5MB+1 this page fits the 6MB turn budget with room to
+        # spare, so the budget check passes it and the provider rejects it —
+        # a failed turn with nothing useful said. It must be dropped HERE, and
+        # dropping it must not cost the turn the picture that was fine.
+        big = jail / "big.png"
+        big.write_bytes(PNG)
+        with big.open("r+b") as fh:  # sparse — the bytes are never read
+            fh.truncate(run_core._MAX_IMAGE_BYTES + 1)
+        assert big.stat().st_size < run_core._MAX_TURN_IMAGE_BYTES
+        small = jail / "small.png"
+        small.write_bytes(PNG)
+        assert run_core._read_turn_images(_ctx(str(big), str(small))) == ((PNG, "image/png"),)

@@ -18,6 +18,15 @@
     ]
   },
   {
+    "label": "the per-image cap is dropped — a 5MB page fits the turn budget and the provider rejects the turn instead",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            if size > _MAX_IMAGE_BYTES:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/cloud/chat/test_turn_images.py::TestALostPictureNeverCostsTheTurn::test_an_image_over_the_per_image_cap_is_skipped_and_the_rest_still_ride"
+    ]
+  },
+  {
     "label": "the image never reaches the prompt — the model answers about a page it cannot see",
     "file": "src/pocketpaw/agents/pydantic_ai.py",
     "find": "    parts.extend(BinaryContent(data=data, media_type=media_type) for data, media_type in usable)",

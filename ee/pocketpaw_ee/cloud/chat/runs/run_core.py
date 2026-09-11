@@ -21,6 +21,17 @@ Changes:
   entitlement check: every model the gateway serves is in the catalog, so a
   per-plan allowlist is still the thing that would put a ceiling on cost, and
   this is the seam it plugs into.
+- 2026-09-11 (feat/other-hand-page-vision) — ``_read_turn_images`` gained a
+  PER-IMAGE ceiling (``_MAX_IMAGE_BYTES``, 5MB) beside the existing per-turn
+  budget. The two answer different questions and both are kept: the budget
+  caps what one turn puts on the wire across up to three images, and until now
+  it was the only check — so a single 5–6MB page snapshot sailed through our
+  guard and was rejected by the provider instead, which the user saw as a
+  failed turn with no useful message. 5MB is Anthropic's documented per-image
+  limit and the safe floor across providers (OpenAI and Gemini allow more), so
+  it is not conditional on which backend the turn runs. An over-size image is
+  skipped exactly like every other bad path here — warn, ``continue``, never
+  raise — so the other images in the turn still ride.
 
 - 2026-09-08 (fix/attachment-only-turns) — ``_drive_agent_loop`` now runs its
   ``user_content`` through ``agent_service.resolve_user_content`` before
@@ -1493,6 +1504,13 @@ async def _model_is_unknown_to_gateway(model_id: str) -> bool:
 #: and every byte is billed to whoever is paying for the turn.
 _MAX_TURN_IMAGE_BYTES = 6 * 1024 * 1024
 _MAX_TURN_IMAGES = 3
+#: How big ONE image may be. The turn budget above answers a different
+#: question — what the whole turn costs — and a single 5MB page snapshot
+#: passes it with room to spare, then gets rejected upstream, which the user
+#: sees as a failed turn with nothing useful said. Anthropic documents 5MB per
+#: image; OpenAI and Gemini allow more, so this is the safe floor across
+#: providers and deliberately NOT provider-conditional.
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 _IMAGE_MEDIA_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -1551,6 +1569,13 @@ def _read_turn_images(ctx: ScopeContext) -> tuple[tuple[bytes, str], ...]:
             size = path.stat().st_size
             if size == 0 or size > budget:
                 logger.warning("surface image is empty or over the turn budget; skipping it")
+                continue
+            if size > _MAX_IMAGE_BYTES:
+                logger.warning(
+                    "surface image is %d bytes, over the %d-byte per-image limit; skipping it",
+                    size,
+                    _MAX_IMAGE_BYTES,
+                )
                 continue
             out.append((path.read_bytes(), media_type))
             budget -= size
