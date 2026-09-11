@@ -23,7 +23,10 @@
 # Every resource field defaults empty, so a physics file without the layer
 # validates and behaves exactly as before. Bundles live on the node and at the
 # top level, never inside ``Costs`` — ``_check_costs`` reads every Costs value
-# as one positive integer.
+# as one positive integer. ``costs.trade`` is the one optional cost: the fee an
+# offer, an accept or a spring swap charges, and it rides the speak price when
+# a file leaves it unset (a ``trade`` row must cost; ``None`` never reaches a
+# prompt or a check).
 #
 # Wire shape matches the frozen v0 contract exactly (YAML in, JSON out).
 
@@ -80,6 +83,9 @@ class Costs(BaseModel):
     # ``design`` (a citizen drawing its own building) rides the craft price when
     # a physics file predates the verb, so old files keep working unchanged.
     design: int | None = None
+    # The fee on an offer, an accept and a spring swap. Unset = the speak price
+    # (``world.trade_fee``); a credit gift still costs its ``amount``.
+    trade: int | None = None
 
     @model_validator(mode="after")
     def _design_defaults_to_craft(self) -> Costs:
@@ -157,7 +163,7 @@ class PhysicsFile(BaseModel):
 
 
 def _check_costs(physics: PhysicsFile) -> None:
-    for verb, value in physics.costs.model_dump().items():
+    for verb, value in physics.costs.model_dump(exclude_none=True).items():
         if value <= 0:
             raise PhysicsError(f"costs.{verb} must be a positive integer, got {value!r}")
     if physics.endowment.daily <= 0:

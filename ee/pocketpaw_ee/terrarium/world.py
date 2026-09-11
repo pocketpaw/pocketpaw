@@ -32,8 +32,16 @@
 #     The zero-ritual charter (a citizen's first ``write``) is exempt: nobody
 #     is born holding ink, and the charter is not a book.
 #     The SPRING is the bank: ``trade`` with ``to: "spring"`` swaps 4 of one
-#     resource for 1 of another against the citizen's own stock, at the speak
-#     price (a ``trade`` row must cost). Stock moves land in ``stock_delta``.
+#     resource for 1 of another against the citizen's own stock, at the trade
+#     fee (``costs.trade``, else the speak price: a ``trade`` row must cost).
+#     Stock moves land in ``stock_delta``.
+#   * OFFERS are citizen-to-citizen trade. ``trade`` with ``give`` and ``want``
+#     and no ``to`` posts an ``offer`` (the giver must hold ``give`` now; it is
+#     not escrowed); ``trade`` with ``offer_seq`` posts an ``accept``, checked
+#     here against the open-offer map the service passes in (``offers``) and
+#     settled by the service under the universe lock. Offer, accept and spring
+#     bodies are ENGINE-TEMPLATED, never citizen text, which is why none of
+#     them is a moderated kind.
 
 """The pure terrarium world engine: verbs, tech gating, and the write-policy."""
 
@@ -55,6 +63,9 @@ DESIGN_TECH = "workshop"
 # The bank. ``trade`` addressed here swaps resources instead of gifting credits.
 SPRING = "spring"
 SPRING_RATE = 4  # give 4 of A, get 1 of B
+
+# An offer is acceptable through ``expires_day = day + OFFER_DAYS``.
+OFFER_DAYS = 2
 
 # Verb -> Journal event kind. ``speak`` reads as ``say`` on the wire (the
 # contract's kind list), so the mapping is explicit rather than implied.
@@ -99,9 +110,11 @@ class Act(BaseModel):
     # ``design_id``: for ``build``, a design this citizen owns.
     design: Any = None
     design_id: str | None = None
-    # ``trade`` to the spring: give 4 of one resource, want 1 of another.
+    # ``trade``: ``give``/``want`` alone post an offer, with ``to: "spring"``
+    # swap at the bank, and ``offer_seq`` accepts another citizen's offer.
     give: dict[str, int] = Field(default_factory=dict)
     want: dict[str, int] = Field(default_factory=dict)
+    offer_seq: int | None = None
 
 
 class Decision(BaseModel):
@@ -158,6 +171,8 @@ class SenseDigest:
     weather: tuple[str, ...] = ()
     viewer_claims: tuple[str, ...] = ()
     memories: tuple[str, ...] = ()
+    # Open, unexpired offers: ``{seq, who, give, want, expires_day}`` each.
+    open_offers: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass
@@ -268,6 +283,7 @@ def build_digest(
     viewer_messages: list[ViewerMessage],
     memories: list[str],
     constitution: list[str],
+    open_offers: list[dict[str, Any]] | None = None,
 ) -> SenseDigest:
     """Assemble what one citizen perceives. Viewer text is labelled on the way in."""
     return SenseDigest(
@@ -285,6 +301,7 @@ def build_digest(
         weather=tuple(weather),
         viewer_claims=tuple(label_viewer_claim(m.voice, m.text) for m in viewer_messages),
         memories=tuple(memories),
+        open_offers=tuple(open_offers or ()),
     )
 
 
@@ -308,6 +325,22 @@ def unlockable(physics: PhysicsFile, citizen: CitizenSnapshot) -> list[str]:
     ]
 
 
+def trade_fee(physics: PhysicsFile) -> int:
+    """What an offer, an accept or a spring swap costs: ``costs.trade``, else speak."""
+    return physics.costs.trade if physics.costs.trade is not None else physics.costs.speak
+
+
+def _trade_kind(act: Act) -> str:
+    """Which of the four trades this act is: accept, spring, offer or a credit gift."""
+    if act.offer_seq is not None:
+        return "accept"
+    if act.to == SPRING:
+        return "spring"
+    if not act.to and (act.give or act.want):
+        return "offer"
+    return "gift"
+
+
 def _verb_cost(physics: PhysicsFile, act: Act) -> int:
     """What this act costs. A tech-node build costs the NODE's price."""
     if act.verb == "build" and act.node:
@@ -315,8 +348,8 @@ def _verb_cost(physics: PhysicsFile, act: Act) -> int:
         if node is not None:
             return node.cost
     if act.verb == "trade":
-        # A spring swap is a bank fee, not a gift: it rides the speak price.
-        return physics.costs.speak if act.to == SPRING else max(0, int(act.amount))
+        # Offers, accepts and spring swaps are fees, not gifts.
+        return max(0, int(act.amount)) if _trade_kind(act) == "gift" else trade_fee(physics)
     if act.verb == "vote":
         # ``vote`` has no entry in the contract's costs map but invariant 2
         # forbids a zero-cost vote, so it rides the speak price.
@@ -341,6 +374,24 @@ def _spring_error(physics: PhysicsFile, act: Act) -> str | None:
     return None
 
 
+def bundle_text(bundle: dict[str, int]) -> str:
+    """``{"grain": 3, "water": 1}`` -> ``3 grain, 1 water``. The one voice every trade row uses."""
+    return ", ".join(f"{v} {k}" for k, v in bundle.items())
+
+
+def _offer_error(physics: PhysicsFile, act: Act) -> str | None:
+    """Why this offer is malformed, or None: both sides named, declared, positive."""
+    if not act.give or not act.want:
+        return "an offer names what you give and what you want"
+    for side in (act.give, act.want):
+        for name, amount in side.items():
+            if name not in physics.resources:
+                return f"{name} is not a resource of this world"
+            if amount < 1:
+                return f"{name}: amounts must be positive"
+    return None
+
+
 def _move(outcome: TickOutcome, stock: dict[str, int], name: str, amount: int) -> None:
     stock[name] = stock.get(name, 0) + amount
     outcome.stock_delta[name] = outcome.stock_delta.get(name, 0) + amount
@@ -352,6 +403,8 @@ def apply_acts(
     decision: Decision,
     *,
     storm: bool = False,
+    day: int = 1,
+    offers: dict[int, dict[str, Any]] | None = None,
 ) -> TickOutcome:
     """Apply a citizen's chosen acts, re-validating each one server-side.
 
@@ -360,8 +413,13 @@ def apply_acts(
     it. An act the citizen cannot afford, whose verb this universe forbids, or
     whose tech prerequisites it does not hold, is DROPPED and recorded in
     ``outcome.dropped`` — never silently executed.
+
+    ``offers`` is the open-offer map (seq -> ``{who, give, want, expires_day}``)
+    the service loads once per tick; an accept is checked against it here and
+    re-checked at the write. ``day`` stamps an offer's ``expires_day``.
     """
     outcome = TickOutcome()
+    offers = offers or {}
     allowed = set(physics.verbs)
     held = set(citizen.unlocked)
     stock = dict(citizen.stock)  # running, so one tick cannot spend a unit twice
@@ -406,15 +464,25 @@ def apply_acts(
                 outcome.dropped.append(f"build {act.node}: needs {missing} first")
                 continue
 
-        if verb == "trade" and act.to != SPRING:
-            if not act.to or cost <= 0:
-                outcome.dropped.append("trade: needs a recipient and a positive amount")
-                continue
-            outcome.transfers.append((str(act.to), cost))
-        if verb == "trade" and act.to == SPRING:
+        trade = _trade_kind(act) if verb == "trade" else ""
+        offer: dict[str, Any] | None = None
+        if trade == "gift" and (not act.to or cost <= 0):
+            outcome.dropped.append("trade: needs a recipient and a positive amount")
+            continue
+        if trade == "spring":
             err = _spring_error(physics, act)
             if err is not None:
                 outcome.dropped.append(f"trade: {err}")
+                continue
+        if trade == "offer":
+            err = _offer_error(physics, act)
+            if err is not None:
+                outcome.dropped.append(f"trade: {err}")
+                continue
+        if trade == "accept":
+            offer = offers.get(int(act.offer_seq or 0))
+            if offer is None:
+                outcome.dropped.append(f"trade: no open offer #{act.offer_seq}")
                 continue
 
         design = None
@@ -447,8 +515,15 @@ def apply_acts(
             bundle = {}
         if verb == "build" and act.node:
             bundle = physics.tech_tree[act.node].stock_cost
-        if verb == "trade" and act.to == SPRING:
+        if trade == "spring":
             bundle = dict(act.give)
+        if trade == "offer":
+            # Checked, not escrowed: the giver must hold it now and again at accept.
+            bundle = dict(act.give)
+        if trade == "accept" and offer is not None:
+            # The acceptor hands over what the giver wanted; the service adds
+            # the giver's side once it has verified the offer under the lock.
+            bundle = dict(offer["want"])
         short = _short(bundle, stock)
         if short:
             outcome.dropped.append(f"{verb}: short of {short}")
@@ -464,15 +539,17 @@ def apply_acts(
                 )
             )
             continue
-        for name, amount in bundle.items():
-            _move(outcome, stock, name, -amount)
-        if verb == "trade" and act.to == SPRING:
+        if verb != "spawn" and trade != "offer":
+            # A spawn is checked but not charged: nothing lands until the gate
+            # approves it, and a refused child must not have eaten the bundle.
+            # ponytail: the executor charges credits only; charge the spawn
+            # bundle there when a physics file first sets stock_costs.spawn.
+            # An offer is not escrowed either (design: checked again at accept).
+            for name, amount in bundle.items():
+                _move(outcome, stock, name, -amount)
+        if trade == "spring":
             (b, wb) = next(iter(act.want.items()))
             _move(outcome, stock, b, wb)
-            (a, ga) = next(iter(act.give.items()))
-            act = act.model_copy(
-                update={"text": act.text or f"swapped {ga} {a} for {wb} {b} at the spring"}
-            )
 
         artifact_index: int | None = None
         if verb in VERB_ARTIFACT_KIND:
@@ -539,26 +616,52 @@ def apply_acts(
             continue
 
         body = (act.text or act.name or verb).strip()[:600]
+        kind = VERB_TO_KIND[verb]
+        data: dict[str, Any] | None = None
         if design is not None:
             body = f"{citizen.name} designed {design.name}"
         if verb == "build" and act.node:
             body = f"built {act.node}" + (f" — {body}" if body and body != verb else "")
+        # Trade rows are engine-templated, never citizen text: that is what
+        # keeps offer / accept / trade out of MODERATED_KINDS.
+        if trade == "spring":
+            body = f"swaps {bundle_text(act.give)} for {bundle_text(act.want)} at the spring"
+        elif trade == "offer":
+            kind = "offer"
+            body = f"offers {bundle_text(act.give)} for {bundle_text(act.want)}"
+            data = {
+                "give": dict(act.give),
+                "want": dict(act.want),
+                "expires_day": day + OFFER_DAYS,
+            }
+        elif trade == "accept" and offer is not None:
+            kind = "accept"
+            body = (
+                f"accepts {offer['who']}'s offer of {bundle_text(offer['give'])} "
+                f"for {bundle_text(offer['want'])}"
+            )
+            data = {"offer_seq": int(act.offer_seq or 0)}
         outcome.events.append(
             NewEvent(
-                kind=VERB_TO_KIND[verb],
+                kind=kind,
                 actor=citizen.name,
                 body=body,
                 cost=-cost,
                 artifact_index=artifact_index,
                 node=act.node or None,
+                data=data,
             )
         )
         balance -= cost
         outcome.balance_delta -= cost
-        if verb != "trade" or act.to == SPRING:
-            # Spent credits return to the world pool. Traded credits are the
-            # exception: they move citizen → citizen and never touch it. The
-            # spring's fee is not a gift, so it goes back to the pool.
+        if trade == "gift":
+            # Appended only once every check has passed: a dropped gift that
+            # still transferred would mint credits for the recipient.
+            outcome.transfers.append((str(act.to), cost))
+        if trade != "gift":
+            # Spent credits return to the world pool. Gifted credits are the
+            # exception: they move citizen → citizen and never touch it. Trade
+            # fees (spring, offer, accept) are not gifts, so they go back.
             outcome.pool_delta += cost
 
     return outcome
@@ -747,6 +850,7 @@ def rung_for(pop: int, unlocked: int) -> str:
 
 __all__ = [
     "DESIGN_TECH",
+    "OFFER_DAYS",
     "SPRING",
     "SPRING_RATE",
     "MOMENT_KIND_RANK",
@@ -766,11 +870,13 @@ __all__ = [
     "ViewerMessage",
     "apply_acts",
     "build_digest",
+    "bundle_text",
     "cluster_moments",
     "episodic_summary",
     "hibernates",
     "label_viewer_claim",
     "rung_for",
     "think_cost",
+    "trade_fee",
     "unlockable",
 ]

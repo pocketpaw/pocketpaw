@@ -37,6 +37,14 @@
 #      through ``_land_tick``, so the two paths harvest identically.
 #  10. the rung is a projection, but a CHANGE of rung is a Journal row: one
 #      zero-cost ``era`` (actor GATE, ``data.from`` / ``data.to``).
+#  11. trade offers: ``_open_offers`` (ONE query) feeds both the digest and
+#      ``apply_acts``; an ``accept`` is SETTLED in ``_persist_outcome`` under
+#      the universe lock — the offer is re-read by seq, must be open, unexpired
+#      and its giver alive and still holding ``give``; the offer is claimed
+#      (``data.taken_by``) before the giver's stock moves and un-claimed if
+#      that write fails, so a failing second write moves nothing. A failed
+#      accept lands as a zero-cost ``gate`` (``data.reason`` / ``data.short``)
+#      and its fee and stock are refunded before the ledger applies.
 
 """Terrarium service — persistence, souls, the gate and the bus."""
 
@@ -774,6 +782,8 @@ async def _sense(uni: UniverseDoc, physics: PhysicsFile) -> list[SensedRow]:
         ).to_list()
     ]
 
+    open_offers = await _open_offers(uni) if physics.resources else []
+
     rows: list[SensedRow] = []
     for doc in citizens:
         snap = _snapshot(doc)
@@ -794,10 +804,46 @@ async def _sense(uni: UniverseDoc, physics: PhysicsFile) -> list[SensedRow]:
                     viewer_messages=viewer_msgs,
                     memories=list(memories),
                     constitution=list(physics.constitution),
+                    open_offers=open_offers,
                 ),
             )
         )
     return rows
+
+
+async def _recent_offers(uni: UniverseDoc) -> list[dict[str, Any]]:
+    """Every offer of the last two days, taken or not, oldest first. One query.
+
+    The engine gets this map so an accept of a taken or expired offer still
+    builds and reaches ``_settle_accept``, which writes the gate row with the
+    reason; the digest gets the open subset (``_open_offers``).
+    """
+    docs = (
+        await EventDoc.find(
+            EventDoc.universe_id == str(uni.id),
+            EventDoc.kind == "offer",
+            EventDoc.day >= uni.day - world.OFFER_DAYS,
+        )
+        .sort("+seq")
+        .to_list()
+    )
+    return [
+        {
+            "seq": d.seq,
+            "who": d.actor,
+            "give": d.data.get("give", {}),
+            "want": d.data.get("want", {}),
+            "expires_day": int(d.data.get("expires_day", 0)),
+            "taken_by": d.data.get("taken_by"),
+        }
+        for d in docs
+    ]
+
+
+async def _open_offers(uni: UniverseDoc) -> list[dict[str, Any]]:
+    """The offers a citizen may accept today: unclaimed and not past ``expires_day``."""
+    offers = await _recent_offers(uni)
+    return [o for o in offers if not o["taken_by"] and o["expires_day"] >= uni.day]
 
 
 async def _drift_lines(uni: UniverseDoc, rows: list[SensedRow]) -> dict[str, str]:
@@ -852,9 +898,17 @@ async def _land_tick(
     storm = uni.storm_ticks > 0
     written: list[dict[str, Any]] = []
     placed: list[world.PlacedAct] = []
+    offers = {o["seq"]: o for o in await _recent_offers(uni)} if physics.resources else {}
+    # Every alive citizen is in ``pairs``, and each one's ``_persist_outcome``
+    # ends in a full-doc save — so a swap must move the giver's stock on THIS
+    # instance, or the giver's own save later in the loop overwrites it.
+    docs = {doc.name: doc for doc, _snap in pairs}
     for (doc, snap), decision in zip(pairs, decisions):
-        outcome = world.apply_acts(physics, snap, decision, storm=storm)
-        mine = await _persist_outcome(uni, physics, doc, outcome, user_id)
+        # The stock is re-read from the doc: an accept landed earlier this tick
+        # may already have taken part of it.
+        snap = replace(snap, stock=dict(doc.stock))
+        outcome = world.apply_acts(physics, snap, decision, storm=storm, day=uni.day, offers=offers)
+        mine = await _persist_outcome(uni, physics, doc, outcome, user_id, docs=docs)
         written.extend(mine)
         # ``_persist_outcome`` writes ``outcome.events`` FIRST and in order, so
         # the head of what it returns lines up with them one for one (the gain
@@ -994,14 +1048,93 @@ async def _owned_design(universe_id: str, author: str, design_id: str | None) ->
     return design_id if art.author == author else None
 
 
+async def _settle_accept(
+    uni: UniverseDoc,
+    doc: CitizenDoc,
+    ev: world.NewEvent,
+    outcome: world.TickOutcome,
+    docs: dict[str, CitizenDoc],
+) -> world.NewEvent:
+    """Land an accept under the lock, or turn it into a gate row.
+
+    The engine already charged the fee and the acceptor's side (``want``) into
+    the outcome; a failed accept refunds both so the Journal still sums to the
+    ledger. On success the giver's side lands in ``outcome.stock_delta`` (one
+    application point) and the giver's doc — the tick's own instance — moves.
+    """
+    seq = int((ev.data or {}).get("offer_seq", 0))
+    offer = await EventDoc.find_one(
+        EventDoc.universe_id == str(uni.id), EventDoc.kind == "offer", EventDoc.seq == seq
+    )
+    give = dict(offer.data.get("give", {})) if offer is not None else {}
+    want = dict(offer.data.get("want", {})) if offer is not None else {}
+    giver = docs.get(offer.actor) if offer is not None else None
+    reason: str | None = None
+    short: dict[str, int] = {}
+    if offer is None:
+        reason = f"no offer #{seq}"
+    elif offer.data.get("taken_by"):
+        reason = f"offer #{seq} was already taken"
+    elif int(offer.data.get("expires_day", 0)) < uni.day:
+        reason = f"offer #{seq} expired"
+    elif giver is None or giver.state != "alive":
+        reason = f"{offer.actor} is not here to trade"
+    elif giver.name == doc.name:
+        reason = "that is your own offer"
+    else:
+        short = world._short(give, giver.stock)
+        if short:
+            reason = f"{offer.actor} no longer holds " + world.bundle_text(short)
+    if reason is not None:
+        # Refund: the fee, the pool's share of it, and the acceptor's side.
+        outcome.balance_delta -= ev.cost
+        outcome.pool_delta += ev.cost
+        for name, amount in want.items():
+            outcome.stock_delta[name] = outcome.stock_delta.get(name, 0) + amount
+        return world.NewEvent(
+            kind="gate",
+            actor=doc.name,
+            body=f"could not accept offer #{seq}: {reason}",
+            cost=0,
+            data={"offer_seq": seq, "reason": reason, **({"short": short} if short else {})},
+        )
+    assert offer is not None and giver is not None
+    # Claim first, then move the giver. A failing second write un-claims, so
+    # the two docs change together or not at all.
+    offer.data = {**offer.data, "taken_by": doc.name}
+    await offer.save()
+    before = dict(giver.stock)
+    stock = dict(giver.stock)
+    for name, amount in give.items():
+        stock[name] = stock.get(name, 0) - amount
+    for name, amount in want.items():
+        stock[name] = stock.get(name, 0) + amount
+    giver.stock = {k: v for k, v in stock.items() if v > 0}
+    try:
+        await giver.save()
+    except Exception:
+        giver.stock = before
+        offer.data = {k: v for k, v in offer.data.items() if k != "taken_by"}
+        await offer.save()
+        raise
+    for name, amount in give.items():
+        outcome.stock_delta[name] = outcome.stock_delta.get(name, 0) + amount
+    return replace(ev, data={**(ev.data or {}), "from": giver.name, "give": give, "want": want})
+
+
 async def _persist_outcome(
     uni: UniverseDoc,
     physics: PhysicsFile,
     doc: CitizenDoc,
     outcome: world.TickOutcome,
     user_id: str,
+    docs: dict[str, CitizenDoc] | None = None,
 ) -> list[dict[str, Any]]:
-    """Write one citizen's tick: artifacts, Journal rows, ledger, soul, gates."""
+    """Write one citizen's tick: artifacts, Journal rows, ledger, soul, gates.
+
+    ``docs`` is the tick's own citizen instances by name (see ``_land_tick``);
+    an accept moves the giver on one of those.
+    """
     universe_id = str(uni.id)
     written: list[dict[str, Any]] = []
 
@@ -1038,6 +1171,10 @@ async def _persist_outcome(
         artifact_ids.append(str(a.id))
 
     for ev in outcome.events:
+        if ev.kind == "accept":
+            # Exactly one row lands in the accept's slot (accept or gate), so
+            # ``_land_tick``'s event-to-row alignment holds.
+            ev = await _settle_accept(uni, doc, ev, outcome, docs or {})
         art_id = (
             artifact_ids[ev.artifact_index]
             if ev.artifact_index is not None and ev.artifact_index < len(artifact_ids)

@@ -90,6 +90,9 @@ KIND_TOPIC: dict[str, type[Event]] = {
     # Resource rows are things that happened to a citizen; they ride the act feed.
     "harvest": WorldAct,
     "raid": WorldAct,
+    # Trade offers are public like balances: they ride the act feed too.
+    "offer": WorldAct,
+    "accept": WorldAct,
 }
 
 TERRARIUM_TOPICS: tuple[str, ...] = (

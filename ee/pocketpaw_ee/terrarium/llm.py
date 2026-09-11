@@ -16,10 +16,11 @@
 # (world brief, constitution, charter, values and OCEAN, the drift line saying
 # how a descendant differs from its parent, verbs, costs, tech tree, rules, and
 # the DESIGN block a citizen sees only once it holds the workshop, and a
-# RESOURCES block — names, bundles per node and verb, the spring's 4:1 rate —
-# present ONLY when the physics declares resources, so a world without them
-# keeps a byte-identical prefix) and a VOLATILE SUFFIX (ground truth including
-# the citizen's stock, speech, artifacts, weather, outside voices, memories).
+# RESOURCES block — names, bundles per node and verb, the spring's 4:1 rate,
+# the offer and accept JSON shapes — present ONLY when the physics declares
+# resources, so a world without them keeps a byte-identical prefix) and a
+# VOLATILE SUFFIX (ground truth including the citizen's stock, the OPEN OFFERS
+# it could accept, speech, artifacts, weather, outside voices, memories).
 # Both HTTP transports send them as two content blocks and mark the
 # prefix ``cache_control: ephemeral`` ONLY when it clears that model's minimum
 # cacheable length (``MIN_CACHEABLE_TOKENS``) — under it the marker is a silent
@@ -51,6 +52,7 @@ from pocketpaw_ee.terrarium.design import MAX_FEATURES, MAX_HEIGHT, MAX_PARTS, P
 from pocketpaw_ee.terrarium.physics import PhysicsFile
 from pocketpaw_ee.terrarium.world import (
     DESIGN_TECH,
+    OFFER_DAYS,
     SPRING,
     SPRING_RATE,
     Act,
@@ -660,9 +662,13 @@ def build_prompt_parts(
 == RESOURCES ==
 {json.dumps(physics.resources)}. A building that makes one yields a unit each day to whoever \
 holds it; you keep what you harvest. Verb bundles, paid from your stock on top of credits: \
-{json.dumps(physics.stock_costs)}. An act you cannot cover is dropped. The spring swaps \
+{json.dumps(physics.stock_costs)}. An act you cannot cover is dropped; your charter (your first \
+write) needs no bundle. The spring swaps \
 {SPRING_RATE} of one for 1 of another: verb "trade" with "to": "{SPRING}", \
-"give": {{"<a>": {SPRING_RATE}}}, "want": {{"<b>": 1}}.
+"give": {{"<a>": {SPRING_RATE}}}, "want": {{"<b>": 1}}. To trade with a citizen, post an \
+offer: {{"verb": "trade", "give": {{"<a>": n}}, "want": {{"<b>": m}}}} (you must hold what \
+you give; it stays yours until someone accepts, for {OFFER_DAYS} days). To take one from \
+OPEN OFFERS: {{"verb": "trade", "offer_seq": <seq>}}; you must hold what it wants.
 """
         if physics.resources
         else ""
@@ -707,7 +713,7 @@ temperament (OCEAN): {json.dumps(citizen.ocean, sort_keys=True)}
 
 == VERBS THIS WORLD ALLOWS ==
 {json.dumps(verbs)}
-costs: {json.dumps(physics.costs.model_dump())}
+costs: {json.dumps(physics.costs.model_dump(exclude_none=True))}
 Thinking already cost you {physics.costs.think} this tick.
 {design_block}{resource_block}
 == TECH TREE ==
@@ -728,6 +734,18 @@ everything it needs and be able to pay its cost.
     weather = "\n".join(f"- {w}" for w in digest.weather) or "(the sky is quiet)"
     claims = "\n".join(f"- {c}" for c in digest.viewer_claims) or "(no outside voice spoke)"
     memories = "\n".join(f"- {m}" for m in digest.memories) or "(you remember nothing yet)"
+    # Only when there is something to accept: an empty block would be noise.
+    offers_block = (
+        "\n== OPEN OFFERS ==\n"
+        + "\n".join(
+            f"- #{o['seq']} {o['who']} gives {json.dumps(o['give'], sort_keys=True)} "
+            f"for {json.dumps(o['want'], sort_keys=True)}, until day {o['expires_day']}"
+            for o in digest.open_offers
+        )
+        + "\n"
+        if digest.open_offers
+        else ""
+    )
     suffix = f"""
 == GROUND TRUTH (checkable, this is what IS) ==
 day {digest.day}, tick {digest.tick}
@@ -737,7 +755,7 @@ your stock: {json.dumps(citizen.stock, sort_keys=True)}
 you have unlocked: {list(citizen.unlocked) or "nothing"}
 ledger: {json.dumps(digest.ground_truth.get("ledger", []))}
 Within reach right now: {open_nodes}
-
+{offers_block}
 == WHAT YOU HEARD NEARBY ==
 {speech}
 

@@ -26,7 +26,9 @@
 # Resource layer: ``CitizenDoc.stock`` is what a citizen holds of each resource;
 # ``UniverseDoc.weather_marks`` is where rain / drought landed and until when.
 # ``harvest`` (daily production), ``raid`` (the robber), ``gate`` (a bundle
-# short) and ``era`` (the rung changed) are zero-cost kinds.
+# short) and ``era`` (the rung changed) are zero-cost kinds. ``offer`` (a
+# citizen posts give/want, ``data.taken_by`` once accepted) and ``accept`` are
+# citizen acts that cost the trade fee.
 
 """Terrarium documents (universe, citizen, event, artifact) + read-path views."""
 
@@ -70,6 +72,8 @@ EVENT_KINDS: tuple[str, ...] = (
     "batch",
     "harvest",
     "era",
+    "offer",
+    "accept",
 )
 
 # Contract invariant 2: every event costs or earns. ``cost: 0`` is legal only
