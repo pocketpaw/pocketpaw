@@ -202,8 +202,11 @@ async def get_usage(
     wallet's own meter) and scoped to that workspace — so the chart matches the
     wallet in every metering mode. When both dates are omitted the window defaults
     to the last 30 days. The response stays DAILY — the frontend aggregates to
-    weekly / monthly and filters by model client-side. (``tokens`` is reported as 0:
-    the ledger does not carry a per-entry token count.)
+    weekly / monthly and filters by model client-side, and it must aggregate the
+    ``*_micro`` figures: a chat run costs about 375_000 micro-credits, so the
+    whole-credit fields are 0 for a day of ordinary light usage. (``tokens`` is
+    real volume — the metering path stamps ``total_tokens`` on each debit ref;
+    only debits written before that contribute 0.)
 
     A workspace with no spend in the window returns an empty contract (no models,
     no buckets, total 0) at HTTP 200 — not an error.

@@ -28,6 +28,15 @@
 # ``ref.total_tokens`` the metering path now records. Defaults to 0 so a legacy
 # entry (written before the ref carried tokens) contributes nothing rather than
 # breaking the read; the credits + requests figures are unaffected.
+# Changed 2026-09-11 (fix/billing-usage-chart-micro): ``ModelSpendRow`` gained
+# ``credits_micro`` — the EXACT spend for the group, in micro-credits. ``credits``
+# truncates to whole credits, and since the micro migration a typical chat run is
+# 375_000 micro (0 whole credits), so a (day, model) group of ordinary light usage
+# was handed to the usage chart as a zero. Worse, the chart sums those per-group
+# zeros, so the error compounds across models and days instead of cancelling.
+# ``credits_micro`` carries the stored figure through untouched; ``credits`` stays
+# for display, the same split ``LedgerEntry`` already makes with
+# ``amount_delta_micro``.
 
 from __future__ import annotations
 
@@ -66,6 +75,13 @@ class ModelSpendRow:
     count); ``tokens`` is the real total token volume for the group, summed from
     each debit's ``ref.total_tokens`` (0 for legacy entries written before the ref
     carried tokens — the credits + requests figures stay accurate regardless).
+
+    ``credits_micro`` is the EXACT figure, in micro-credits, and it is the one to
+    reason about money with. ``credits`` truncates toward zero, so a group of
+    ordinary light usage — a chat run is about 375_000 micro — reports 0 whole
+    credits against real spend. Anything that aggregates these rows must fold
+    ``credits_micro`` and convert ONCE at the end; summing the truncated
+    ``credits`` compounds the shortfall over every group it touches.
     """
 
     day: str
@@ -73,6 +89,8 @@ class ModelSpendRow:
     credits: int
     requests: int
     tokens: int = 0
+    # Exact, positive, in micro-credits (1_000_000 == 1 credit == $0.01).
+    credits_micro: int = 0
 
 
 @dataclass(frozen=True)

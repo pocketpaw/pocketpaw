@@ -43,6 +43,12 @@
 #     sabotaged to raise, the read still returns correct rows.
 #   * the pipeline document itself is asserted, so the ``$group`` can't quietly
 #     regress into a client-side fold that still passes the behavioural cases.
+# Updated 2026-09-11 (fix/billing-usage-chart-micro): the rows now carry
+# ``credits_micro``, the group's EXACT micro-credit sum, and the three exact-row
+# assertions pin it. ``credits`` was the only figure the row returned, and it is
+# truncated — a group of ordinary chat runs (about 375_000 micro each) is 0 whole
+# credits, so the usage chart read zeros against a draining wallet. A new case
+# covers a purely sub-credit group: ``credits`` 0, ``credits_micro`` exact.
 
 from __future__ import annotations
 
@@ -342,7 +348,12 @@ async def test_non_negative_delta_is_skipped_not_clamped(mongo_db):
 
     assert len(rows) == 1  # the zero-delta row invented no second group
     assert rows[0] == ModelSpendRow(
-        day="2026-06-01", model=SONNET, credits=10, requests=1, tokens=100
+        day="2026-06-01",
+        model=SONNET,
+        credits=10,
+        requests=1,
+        tokens=100,
+        credits_micro=credits_to_micro(10),
     )
 
 
@@ -426,12 +437,34 @@ async def test_folds_a_mixed_window_into_the_exact_row_set(mongo_db):
     )
 
     assert rows == [
-        ModelSpendRow(day="2026-06-01", model=SONNET, credits=10, requests=2, tokens=1000),
-        ModelSpendRow(day="2026-06-01", model=GPT, credits=5, requests=1, tokens=250),
-        ModelSpendRow(day="2026-06-02", model="unknown", credits=25, requests=1, tokens=42),
+        ModelSpendRow(
+            day="2026-06-01",
+            model=SONNET,
+            credits=10,
+            requests=2,
+            tokens=1000,
+            credits_micro=credits_to_micro(10),
+        ),
+        ModelSpendRow(
+            day="2026-06-01",
+            model=GPT,
+            credits=5,
+            requests=1,
+            tokens=250,
+            credits_micro=credits_to_micro(5),
+        ),
+        ModelSpendRow(
+            day="2026-06-02",
+            model="unknown",
+            credits=25,
+            requests=1,
+            tokens=42,
+            credits_micro=credits_to_micro(25),
+        ),
     ]
     # The wallet's own total for the window: 4 + 6 + 5 + 25. The chart reconciles.
     assert sum(r.credits for r in rows) == 40
+    assert sum(r.credits_micro for r in rows) == credits_to_micro(40)
 
 
 async def test_reads_without_loading_ledger_documents(mongo_db, monkeypatch):
@@ -458,7 +491,55 @@ async def test_reads_without_loading_ledger_documents(mongo_db, monkeypatch):
         until=datetime(2026, 6, 2, tzinfo=UTC),
     )
 
-    assert rows == [ModelSpendRow(day="2026-06-01", model=SONNET, credits=8, requests=1, tokens=64)]
+    assert rows == [
+        ModelSpendRow(
+            day="2026-06-01",
+            model=SONNET,
+            credits=8,
+            requests=1,
+            tokens=64,
+            credits_micro=credits_to_micro(8),
+        )
+    ]
+
+
+async def test_sub_credit_group_keeps_its_exact_micro_figure(mongo_db):
+    """A group of ordinary chat runs reports 0 whole credits and the EXACT micro.
+
+    $0.0015 of compute is 375_000 micro; two of them is 750_000, under a credit.
+    ``credits`` truncating to 0 is correct display rounding — throwing the micro
+    figure away with it is what left the usage chart reading zeros while the
+    wallet drained. Mutation that breaks this: return ``credits_micro=0`` from
+    ``spend_by_model``.
+    """
+    for n, micro in enumerate((375_000, 375_000)):
+        entry = CreditLedgerEntry(
+            workspace=WS,
+            kind="spend",
+            amount_delta_micro=-micro,
+            balance_after_micro=0,
+            applied=True,
+            conditional=False,
+            cause="compute_spend",
+            ref={"model": SONNET},
+            idempotency_key=f"sub_credit_{n}",
+        )
+        await entry.insert()
+        await CreditLedgerEntry.get_pymongo_collection().update_one(
+            {"_id": entry.id},
+            {"$set": {"createdAt": datetime(2026, 6, 1, 9, 0, tzinfo=UTC)}},
+        )
+
+    rows = await credits.spend_by_model(
+        WS,
+        since=datetime(2026, 6, 1, tzinfo=UTC),
+        until=datetime(2026, 6, 2, tzinfo=UTC),
+    )
+
+    assert len(rows) == 1
+    assert rows[0].credits == 0  # honest display rounding
+    assert rows[0].credits_micro == 750_000  # the figure that must survive
+    assert rows[0].requests == 2  # the runs were real
 
 
 def test_pipeline_groups_server_side():
