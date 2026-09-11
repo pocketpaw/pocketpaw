@@ -726,19 +726,27 @@ def provider_allows_model(provider: str, model: str | None) -> bool:
     non-None ``model_override`` to WHATEVER backend is running
     (``agents/pool.py``) — the per-send chip in paw-enterprise #902 and the
     ``model_override`` field in #2140 both put a client-chosen name on that
-    wire. What makes the stored model win on a gateway turn is narrower: a
-    gateway turn runs on the pydantic_ai backend, and that backend declares
-    ``model_override`` only to ignore it (``agents/pydantic_ai.py``, the
-    ``# noqa: ARG002`` block — "consumed only by the Claude SDK backend"), so
-    the model that runs is the ``pydantic_ai_model`` this service pinned in
-    ``build_settings_override``.
+    wire. What makes the stored model win on a gateway turn is narrower: the
+    pydantic_ai backend declares ``model_override`` only to ignore it
+    (``agents/pydantic_ai.py``, the ``# noqa: ARG002`` block — "consumed only
+    by the Claude SDK backend"), so the model that runs is the
+    ``pydantic_ai_model`` this service pinned in ``build_settings_override``.
 
-    So the effect holds today, but it rests on one backend's deliberate
-    ignore, not on an invariant anything enforces. If pydantic_ai ever honours
-    ``model_override``, a client could name a model this function never
-    checked. No allowlist is added here on purpose — #2140 owns the per-send
-    model surface and is where a real check belongs; the consequence meanwhile
-    is confined to the tenant's own key against the tenant's own gateway.
+    That holds while a gateway turn runs on the pydantic_ai backend, which the
+    gateway design assumes but does not enforce:
+    ``AgentRouter.create_isolated_backend`` takes the backend NAME from the
+    agent's own config, not from this override. An agent configured for the
+    Claude SDK backend with a gateway key stored would build a Claude backend,
+    which ignores every ``openai_compatible_*`` setting here and honours
+    ``model_override``. That gap is upstream of this function and is not
+    addressed by this PR — recorded so the paragraph above is not read as a
+    guarantee.
+
+    So the effect holds in the intended configuration, but it rests on one
+    backend's deliberate ignore rather than on anything enforced. No allowlist
+    is added here on purpose — #2140 owns the per-send model surface and is
+    where a real check belongs; the consequence meanwhile is confined to the
+    tenant's own key against the tenant's own gateway.
 
     Any other provider returns False for every real model name — the pipeline
     cannot serve it end to end (see ``SUPPORTED_PROVIDERS``), and a loud
