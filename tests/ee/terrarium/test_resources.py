@@ -10,7 +10,11 @@
 # world days; the watched and the batched tick harvest the same Journal; the
 # robber halves a hoard over stock_cap only when raids is on; the stable
 # prefix is byte-identical to the pre-resource format when a world declares
-# none; a rung change writes exactly one era row.
+# none; a rung change writes exactly one era row. Review follow-ups: a credit
+# gift short of its bundle transfers nothing (no minted credits); a spawn's
+# bundle is checked, never charged (nothing lands before the gate); the prompt
+# says the charter needs no bundle; the day harvests before the robber, and
+# the robber visits a sleeping hoard too.
 #
 # Mutation anchors live in tests/mutations/terrarium_resources.json.
 
@@ -230,6 +234,31 @@ def test_a_credit_trade_is_unchanged_by_the_spring():
     assert out.transfers == [("Nim", 5)] and out.pool_delta == 2
 
 
+def test_a_gift_short_of_its_bundle_transfers_nothing():
+    """The transfer is appended after the bundle check; a dropped gift that
+    still paid the recipient would mint credits."""
+    out = world.apply_acts(
+        physics(stock_costs={"trade": {"timber": 1}}),
+        citizen(),
+        decide({"verb": "trade", "to": "Nim", "amount": 5}),
+    )
+    assert out.transfers == [] and out.balance_delta == -2
+    assert [e.kind for e in out.events] == ["think", "gate"]
+    assert out.events[1].data == {"short": {"timber": 1}}
+
+
+def test_a_spawns_bundle_is_checked_but_never_charged():
+    p = physics(stock_costs={"spawn": {"grain": 2}})
+    short = world.apply_acts(p, citizen(balance=500), decide({"verb": "spawn", "name": "kid"}))
+    assert [e.kind for e in short.events] == ["think", "gate"] and short.spawn_requests == []
+    assert short.events[1].data == {"short": {"grain": 2}}
+    out = world.apply_acts(
+        p, citizen(balance=500, stock={"grain": 2}), decide({"verb": "spawn", "name": "kid"})
+    )
+    assert len(out.spawn_requests) == 1
+    assert out.stock_delta == {}, "nothing lands until the gate approves"
+
+
 def test_the_new_kinds_are_zero_cost_and_a_world_without_resources_still_passes():
     assert {"harvest", "raid", "gate", "era"} <= ZERO_COST_KINDS
     out = world.apply_acts(
@@ -369,6 +398,42 @@ async def test_the_robber_halves_a_hoard_over_the_cap_only_when_raids_is_on(clie
     assert [(r.actor, r.cost, r.data) for r in rows] == [("Ada", 0, {"took": {"grain": 10}})]
 
 
+async def test_the_day_harvests_before_the_robber_and_the_robber_visits_sleepers(client):
+    uni = create_universe(
+        client,
+        founders=2,
+        raids=True,
+        stock_cap=4,
+        time=ONE_TICK_DAYS,
+        founder_cards=[_card(name="Ada"), _card(name="Bo")],
+    )
+    citizen_llm.set_mock_decision(BUILD_WELL)
+    client.post(f"/terrarium/universes/{uni['id']}/tick")  # tick 1: both build the well
+    docs = {d.name: d for d in await CitizenDoc.find(CitizenDoc.universe_id == uni["id"]).to_list()}
+    docs["Ada"].stock = {"water": 4}
+    docs["Bo"].stock = {"grain": 6}
+    docs["Bo"].state = "hibernating"
+    await docs["Ada"].save()
+    await docs["Bo"].save()
+    citizen_llm.set_mock_decision({"thought": "", "acts": []})
+    client.post(f"/terrarium/universes/{uni['id']}/tick")  # day 2 -> 3
+    docs = await CitizenDoc.find(CitizenDoc.universe_id == uni["id"]).to_list()
+    stocks = {d.name: d.stock for d in docs}
+    # Ada: 4 water at the cap, harvests to 5 (over), the robber halves: 2 taken.
+    assert stocks["Ada"] == {"water": 3}
+    # Bo sleeps: no harvest, but the hoard of 6 grain is still over the cap.
+    assert stocks["Bo"] == {"grain": 3}
+    rows = EventDoc.find(EventDoc.universe_id == uni["id"], EventDoc.day == 3).sort("+seq")
+    kinds = [
+        (r.kind, r.actor, r.data) for r in await rows.to_list() if r.kind in ("harvest", "raid")
+    ]
+    assert kinds == [
+        ("harvest", "Ada", {"got": {"water": 1}}),
+        ("raid", "Ada", {"took": {"water": 2}}),
+        ("raid", "Bo", {"took": {"grain": 3}}),
+    ]
+
+
 async def test_the_batched_day_harvests_what_the_watched_day_harvests(client, fake_batch):  # noqa: F811
     """Both paths reach _new_day through _land_tick; the Journals must match
     row for row, harvest rows included."""
@@ -457,6 +522,9 @@ def test_the_prefix_is_byte_identical_to_the_pre_resource_format_without_resourc
     assert "- well: cost 20, needs nothing, makes water\n" in rich
     assert "- farm: cost 40, needs ['well'], makes grain, also costs {\"water\": 2}\n" in rich
     assert '"to": "spring"' in rich and '{"write": {"ink": 1}' in rich
+    assert "your charter (your first write) needs no bundle" in rich
+    assert '"offer_seq"' not in prefix and '"offer_seq": <seq>' in rich
+    assert '"trade": null' not in prefix, "an unset costs.trade never reaches the prompt"
 
 
 def test_the_mock_citizen_builds_only_what_its_stock_covers():
