@@ -1,0 +1,114 @@
+[
+  {
+    "label": "drop the forward-only guard — a late emit could walk a run backwards",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    if STAGE_ORDER.index(stage) <= (STAGE_ORDER.index(prev) if prev in STAGE_ORDER else -1):\n        return None",
+    "replace": "    if False:\n        return None",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_a_backwards_or_duplicate_emit_is_ignored"]
+  },
+  {
+    "label": "make the guard non-strict — every repeat Write would re-emit develop",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    if STAGE_ORDER.index(stage) <= (STAGE_ORDER.index(prev) if prev in STAGE_ORDER else -1):",
+    "replace": "    if STAGE_ORDER.index(stage) < (STAGE_ORDER.index(prev) if prev in STAGE_ORDER else -1):",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_first_write_emits_develop_exactly_once"]
+  },
+  {
+    "label": "let an unknown prev sort last — one forward-compat value would mute the run",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "STAGE_ORDER.index(prev) if prev in STAGE_ORDER else -1",
+    "replace": "STAGE_ORDER.index(prev) if prev in STAGE_ORDER else len(STAGE_ORDER)",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_an_unknown_prev_does_not_block_a_real_stage"]
+  },
+  {
+    "label": "reorder the vocabulary — verify after gate would make the gate emit illegal",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "BeltStage = Literal[\"station\", \"orient\", \"develop\", \"verify\", \"gate\", \"done\"]",
+    "replace": "BeltStage = Literal[\"station\", \"orient\", \"develop\", \"gate\", \"verify\", \"done\"]",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_stage_vocabulary_and_its_order"]
+  },
+  {
+    "label": "drop the BELT surface gate — every /code turn would report belt stages",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    if surface != SurfaceKind.BELT.value or not workspace_id:\n        return prev",
+    "replace": "    if not workspace_id:\n        return prev",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_a_non_belt_run_emits_no_stage_events"]
+  },
+  {
+    "label": "claim a stage from Bash — a build or a test run is not a stage transition",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "_STAGE_TOOLS: dict[str, BeltStage] = {\n    \"Write\": \"develop\",",
+    "replace": "_STAGE_TOOLS: dict[str, BeltStage] = {\n    \"Bash\": \"develop\",\n    \"Write\": \"develop\",",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_a_tool_that_proves_nothing_emits_nothing"]
+  },
+  {
+    "label": "map a read tool to develop — reading the codebase is not producing changes",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    \"Read\": \"orient\",",
+    "replace": "    \"Read\": \"develop\",",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_orient_is_emitted_before_develop"]
+  },
+  {
+    "label": "stop matching the loom prefix — an explicit orient call would prove nothing",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "_ORIENT_TOOL_PREFIX = \"mcp__loom__\"",
+    "replace": "_ORIENT_TOOL_PREFIX = \"mcp__never_matches__\"",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_a_loom_call_proves_orient"]
+  },
+  {
+    "label": "fabricate a status on the stage emit — the console would light a stage it can't prove",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "            \"run_id\": run_id,\n            \"status\": status,",
+    "replace": "            \"run_id\": run_id,\n            \"status\": status or \"working\",",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_status_is_never_invented"]
+  },
+  {
+    "label": "leak run_id into the lifecycle payload — the old gate/done shape would change",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    if pr_url:\n        data[\"pr_url\"] = pr_url\n\n    await _publish_run_updated(data)",
+    "replace": "    if pr_url:\n        data[\"pr_url\"] = pr_url\n    data[\"run_id\"] = None\n\n    await _publish_run_updated(data)",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_gate_emit_is_unchanged"]
+  },
+  {
+    "label": "gate the lifecycle emitter too — a terminal event would be dropped",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    if pr_url:\n        data[\"pr_url\"] = pr_url\n\n    await _publish_run_updated(data)",
+    "replace": "    if pr_url:\n        data[\"pr_url\"] = pr_url\n    if stage != \"gate\":\n        return\n\n    await _publish_run_updated(data)",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_the_lifecycle_emitter_has_no_forward_only_guard"]
+  },
+  {
+    "label": "let a bus failure escape the stage emitter and abort the station run",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "        await emit(BeltRunUpdated(data=dict(data)))\n    except Exception:",
+    "replace": "        await emit(BeltRunUpdated(data=dict(data)))\n    except ZeroDivisionError:",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_bus_failure_does_not_raise"]
+  },
+  {
+    "label": "report develop AFTER the loop returns — the long step would go unreported while it ran",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "        await emit_belt_stage(\n            workspace_id=ws_id,\n            stage=\"develop\",\n            prev=stage,\n            action_id=action_id,\n            status=\"queued\",\n        )\n\n        try:\n            result = await self.develop_fn(request)",
+    "replace": "        try:\n            result = await self.develop_fn(request)\n            await emit_belt_stage(\n                workspace_id=ws_id,\n                stage=\"develop\",\n                prev=stage,\n                action_id=action_id,\n                status=\"queued\",\n            )",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_headless_run_emits_orient_then_develop"]
+  },
+  {
+    "label": "claim the headless run is proposed while it is still queued",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "            stage=\"orient\",\n            prev=None,\n            action_id=action_id,\n            status=\"queued\",",
+    "replace": "            stage=\"orient\",\n            prev=None,\n            action_id=action_id,\n            status=\"proposed\",",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_headless_run_emits_orient_then_develop"]
+  },
+  {
+    "label": "drop the headless action_id — the transitions would patch no run card",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "            stage=\"orient\",\n            prev=None,\n            action_id=action_id,",
+    "replace": "            stage=\"orient\",\n            prev=None,\n            action_id=None,",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_headless_run_emits_orient_then_develop"]
+  },
+  {
+    "label": "remove the run_core call site — the bridge would never see a tool_use event",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "                        belt_stage = await maybe_emit_belt_stage(",
+    "replace": "                        _unused_stage_call = (",
+    "tests": ["tests/cloud/test_belt_stage_events.py::test_run_core_calls_the_stage_bridge"]
+  }
+]

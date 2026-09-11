@@ -1,6 +1,12 @@
 # events.py — Realtime Event dataclass registry for the cloud bus.
 # Each subclass pins an EVENT_TYPE literal that routes both the WebSocket
 # fan-out and any in-process bus subscribers.
+# Updated: 2026-09-12 (feat/belt-entity-events) — added ``BeltEntityChanged``
+#   (type="belt_entity_changed"), the per-FILE companion to ``BeltRunUpdated``.
+#   A develop-station run previously went silent between "started" and the one
+#   ``proposed`` event at the end; this fires on every Write / Edit the station
+#   agent makes inside its bound repo so a UI can follow the work live.
+#   Workspace-scoped, ephemeral (nothing persists it).
 # Updated: 2026-05-22 (RFC 05 M2b.2) — added PocketOutcomeEvent
 #   (type="pocket.outcome"), emitted after a successful write action whose
 #   binding declared a named `outcome`. Feeds the outcomes JSONL ledger.
@@ -1089,6 +1095,36 @@ class TemporalSweepCompleted(Event):
 @dataclass
 class BeltRunUpdated(Event):
     EVENT_TYPE: ClassVar[str] = "belt_run_updated"
+
+
+# Belt & Pulley per-FILE change (feat/belt-entity-events, 2026-09-12). Fired
+# while a develop-station run is still WORKING — every ``Write`` / ``Edit`` the
+# station agent makes inside its bound repo — so a UI can follow the work live
+# instead of waiting for the single ``belt_run_updated(proposed)`` at the end.
+# Workspace-scoped for the same reason as ``belt_run_updated``: the /belt
+# console is a per-workspace view.
+#
+# EPHEMERAL by design: nothing persists these, so a page that joins mid-run
+# sees only the changes that follow. Replay is a later slice.
+#
+# Payload (carried under ``Event.data``):
+#   workspace_id — tenancy (drives the workspace fan-out).
+#   run_id       — the chat stream's run id (the join key the client already
+#                  holds from ``stream_start``).
+#   action_id    — the Instinct code-change Action id, or None. It is None for
+#                  every event on the interactive station: the Action does not
+#                  exist until ``belt_propose_change`` runs, which is AFTER all
+#                  the file writes. Not a bug — the field is here for a future
+#                  emitter that already has a run row.
+#   entity_id    — ``<repo_slug>:file:<relpath>``, the loom world-model id form.
+#   file         — the repo-relative path.
+#   change       — "write" | "edit".
+#   component    — the C4 component that owns the file, or None when unknown
+#                  (loom's file->component coverage is partial).
+#   ts           — UTC ISO-8601 emit time.
+@dataclass
+class BeltEntityChanged(Event):
+    EVENT_TYPE: ClassVar[str] = "belt_entity_changed"
 
 
 # Web Cursor sandbox registry (WC-1, feat/websandbox-registry). Emitted by

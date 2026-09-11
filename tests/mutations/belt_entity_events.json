@@ -1,0 +1,65 @@
+[
+  {
+    "label": "drop the BELT surface gate — every chat turn would feed the belt console",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "if surface != SurfaceKind.BELT.value or not repo_root or not workspace_id:",
+    "replace": "if not repo_root or not workspace_id:",
+    "tests": ["tests/cloud/test_belt_entity_events.py::test_a_non_belt_run_emits_nothing"]
+  },
+  {
+    "label": "widen the tool map to a read tool — reading a file is not a change",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "_ENTITY_CHANGE_TOOLS: dict[str, str] = {\"Write\": \"write\", \"Edit\": \"edit\"}",
+    "replace": "_ENTITY_CHANGE_TOOLS: dict[str, str] = {\"Write\": \"write\", \"Edit\": \"edit\", \"Read\": \"write\"}",
+    "tests": ["tests/cloud/test_belt_entity_events.py::test_non_mutating_tools_emit_nothing"]
+  },
+  {
+    "label": "collapse the write/edit verbs — the feed could no longer tell a new file from a change",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "_ENTITY_CHANGE_TOOLS: dict[str, str] = {\"Write\": \"write\", \"Edit\": \"edit\"}",
+    "replace": "_ENTITY_CHANGE_TOOLS: dict[str, str] = {\"Write\": \"write\", \"Edit\": \"write\"}",
+    "tests": ["tests/cloud/test_belt_entity_events.py::test_edit_emits_change_edit"]
+  },
+  {
+    "label": "leak paths outside the run's repo (fall back to the raw path)",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "        return str(candidate.resolve().relative_to(root))",
+    "replace": "        try:\n            return str(candidate.resolve().relative_to(root))\n        except ValueError:\n            return str(candidate)",
+    "tests": ["tests/cloud/test_belt_entity_events.py::test_path_outside_the_repo_emits_nothing"]
+  },
+  {
+    "label": "stop lowercasing the repo slug — ids would never join loom's world model",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    return Path(repo_root).name.lower()",
+    "replace": "    return Path(repo_root).name",
+    "tests": ["tests/cloud/test_belt_entity_events.py::test_repo_slug_is_the_lowercased_dir_name"]
+  },
+  {
+    "label": "let a failing component resolver escape — one loom hiccup would kill the feed",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    try:\n        component = resolve_component(entity_id)\n    except Exception:",
+    "replace": "    try:\n        component = resolve_component(entity_id)\n    except ZeroDivisionError:",
+    "tests": ["tests/cloud/test_belt_entity_events.py::test_component_seam_fills_the_field_and_never_breaks_the_emit"]
+  },
+  {
+    "label": "let a bus failure escape the emitter and abort the station run",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "        await emit(BeltEntityChanged(data=dict(data)))\n    except Exception:",
+    "replace": "        await emit(BeltEntityChanged(data=dict(data)))\n    except ZeroDivisionError:",
+    "tests": ["tests/cloud/test_belt_entity_events.py::test_bus_failure_does_not_raise"]
+  },
+  {
+    "label": "drop belt_entity_changed from the audience branch — nobody receives it",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "if t in (\"belt_run_updated\", \"belt_entity_changed\"):",
+    "replace": "if t in (\"belt_run_updated\",):",
+    "tests": ["tests/cloud/test_belt_entity_events.py::test_audience_is_workspace_scoped"]
+  },
+  {
+    "label": "remove the run_core call site — the bridge would never see a tool_use event",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "                        await maybe_emit_belt_entity_changed(",
+    "replace": "                        _unused_bridge_call = (",
+    "tests": ["tests/cloud/test_belt_entity_events.py::test_run_core_calls_the_bridge"]
+  }
+]
