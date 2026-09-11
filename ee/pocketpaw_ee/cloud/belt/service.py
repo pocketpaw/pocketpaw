@@ -1,4 +1,25 @@
 # ee/pocketpaw_ee/cloud/belt/service.py
+# Updated: 2026-09-12 (feat/belt-entity-events) — a station run now reports the
+#   WORK, not just the outcome. ``belt_run_updated`` fires a handful of times at
+#   lifecycle boundaries, so between "the agent started" and the single
+#   ``proposed`` event at the end the /belt page had nothing to show — on a
+#   multi-minute run that reads as a hang. Added the per-FILE companion:
+#     * ``emit_belt_entity_changed`` — publishes ``belt_entity_changed`` on the
+#       same two paths (workspace bus PRIMARY, in-turn SSE SECONDARY) with the
+#       same never-raise contract as ``emit_belt_run_updated``.
+#     * ``mint_entity_id`` / ``repo_slug_for`` — pure id minting in loom's
+#       ``<repo_slug>:file:<relpath>`` form, so a consumer joins a live change
+#       against the world model with no translation, and a later slice can swap
+#       in a real loom lookup without touching the emit path.
+#     * ``ComponentResolver`` / ``no_component`` — the C4-owner seam. This slice
+#       ships ONLY the ``None`` default: no loom binary is shelled, no
+#       world-model file is read.
+#     * ``maybe_emit_belt_entity_changed`` — the bridge from one agent
+#       ``tool_use`` event, filtering to BELT surface + Write/Edit + a path
+#       inside the run's bound repo. Called from ``chat/runs/run_core.py``.
+#   EPHEMERAL by design: nothing persists these events — no store, no table, no
+#   migration, no replay. A client joining mid-run sees only what follows. The
+#   runs read model stays the durable truth. Replay is a later slice.
 # Updated: 2026-06-11 (feat/belt-autopilot) — the runs read model now renders a
 #   QUEUED STATION RUN. A pending ``code_change`` Action whose blob carries
 #   ``station_pending=True`` (filed by the mandate ``StationTaskDispatcher`` with
@@ -64,8 +85,11 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
+
+from pocketpaw_ee.cloud.surface.domain import SurfaceKind
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +168,202 @@ async def emit_belt_run_updated(
         push_sse_event("belt_run_updated", dict(data))
     except Exception:  # noqa: BLE001 — SSE push must never break a lifecycle path
         logger.debug("belt: belt_run_updated SSE push failed (non-fatal)", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Per-FILE change events (feat/belt-entity-events) — the live feed within a run
+# ---------------------------------------------------------------------------
+
+# Tool name -> the ``change`` verb on the wire. ONLY the two SDK tools that
+# mutate a file. Read / Glob / Grep / Bash are not entity changes, and a Bash
+# ``sed -i`` is deliberately not chased: guessing paths out of a shell string
+# (``recent_files._extract_path_from_bash``) is a heuristic, and a live feed
+# that invents entities is worse than one that misses a few.
+#
+# Case is what the Claude Code SDK emits — see ``claude_sdk._extract_tool_info``,
+# which passes the block's ``name`` through verbatim.
+_ENTITY_CHANGE_TOOLS: dict[str, str] = {"Write": "write", "Edit": "edit"}
+
+# BOTH tools carry the path under ``file_path``. Confirmed against
+# ``src/pocketpaw/recent_files.py::_TOOL_PATH_KEYS``, the codebase's existing
+# reader of these same tool arguments.
+_TOOL_PATH_KEY = "file_path"
+
+
+def mint_entity_id(repo_slug: str, relpath: str) -> str:
+    """Mint the world-model entity id for a repo-relative file path.
+
+    The form mirrors loom's file nodes (``pocketpaw:file:<relpath>``) so a
+    consumer can join a live change against the world model with no
+    translation. Pure and total on purpose: a later slice can swap the whole
+    resolution step for a real loom lookup without touching the emit path.
+    """
+    return f"{repo_slug}:file:{relpath}"
+
+
+def repo_slug_for(repo_root: str) -> str:
+    """The ``<repo_slug>`` half of an entity id, from the repo's directory name.
+
+    Lowercased because loom's ids are (``pocketpaw:file:...`` for a checkout
+    that lives at ``.../pocketPaw``).
+    """
+    return Path(repo_root).name.lower()
+
+
+class ComponentResolver(Protocol):
+    """Seam: entity id -> the C4 component that owns it, or ``None``.
+
+    THIS SLICE SHIPS ``no_component`` AND NOTHING ELSE — the emitter never
+    shells out to the loom binary and never reads a world-model file. The seam
+    exists so a follow-up can inject a real resolver (loom's ~1,046
+    ``file -> component`` edges) at the call site with no change to the emitter
+    or its wire shape. Coverage there is partial (~54%), so ``None`` stays a
+    normal answer, not an error, even once a real resolver is wired.
+    """
+
+    def __call__(self, entity_id: str) -> str | None: ...
+
+
+def no_component(entity_id: str) -> str | None:
+    """The default ``ComponentResolver``: owner unknown. See ``ComponentResolver``."""
+    return None
+
+
+async def emit_belt_entity_changed(
+    *,
+    workspace_id: str,
+    run_id: str,
+    entity_id: str,
+    file: str,
+    change: str,
+    action_id: str | None = None,
+    resolve_component: ComponentResolver = no_component,
+) -> None:
+    """Publish ``belt_entity_changed`` for ONE file a station run just touched.
+
+    Same two paths and the same safety contract as ``emit_belt_run_updated``
+    above — PRIMARY the workspace realtime bus, SECONDARY the in-turn per-stream
+    SSE, and every failure swallowed. The difference is cadence: this fires many
+    times DURING a run (once per Write / Edit) where ``belt_run_updated`` fires a
+    handful of times at lifecycle boundaries.
+
+    EPHEMERAL: nothing persists these. There is no store, no table, no replay —
+    a client that joins mid-run sees only what follows. Replay is a later slice
+    and deliberately out of scope here; ``belt_run_updated`` + the runs read
+    model remain the durable truth about a run.
+
+    The full payload is always sent, including ``action_id`` / ``component``
+    when they are ``None``, so a consumer can read a fixed shape rather than
+    probe for optional keys. ``action_id`` is ``None`` for every event on the
+    interactive station (the Instinct Action is only minted by
+    ``belt_propose_change``, long after the writes).
+    """
+    try:
+        component = resolve_component(entity_id)
+    except Exception:  # noqa: BLE001 — a resolver is a seam; it must not break the emit
+        logger.debug("belt: component resolver failed (non-fatal)", exc_info=True)
+        component = None
+
+    data: dict[str, Any] = {
+        "workspace_id": workspace_id,
+        "run_id": run_id,
+        "action_id": action_id,
+        "entity_id": entity_id,
+        "file": file,
+        "change": change,
+        "component": component,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # PRIMARY — workspace realtime bus (async fan-out to every workspace member).
+    try:
+        from pocketpaw_ee.cloud._core.realtime.emit import emit
+        from pocketpaw_ee.cloud._core.realtime.events import BeltEntityChanged
+
+        await emit(BeltEntityChanged(data=dict(data)))
+    except Exception:  # noqa: BLE001 — bus publish must never break a station run
+        logger.debug("belt: belt_entity_changed bus emit failed (non-fatal)", exc_info=True)
+
+    # SECONDARY — in-turn per-stream SSE (the page driving this run).
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import push_sse_event
+
+        push_sse_event("belt_entity_changed", dict(data))
+    except Exception:  # noqa: BLE001 — SSE push must never break a station run
+        logger.debug("belt: belt_entity_changed SSE push failed (non-fatal)", exc_info=True)
+
+
+def _repo_relative(repo_root: str, raw_path: str) -> str | None:
+    """``raw_path`` as a path relative to ``repo_root``, or ``None`` if outside.
+
+    Both sides are resolved before comparison, so a symlinked root (``/tmp`` ->
+    ``/private/tmp`` on macOS) and a ``..`` traversal both land correctly — the
+    same realpath-first discipline the repo allowlist uses. A relative
+    ``raw_path`` is joined onto the root first.
+    """
+    try:
+        root = Path(repo_root).expanduser().resolve()
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        return str(candidate.resolve().relative_to(root))
+    except (ValueError, OSError, RuntimeError):
+        # ValueError — outside the repo (the whole point of this check).
+        return None
+
+
+async def maybe_emit_belt_entity_changed(
+    *,
+    surface: str | None,
+    tool_name: str,
+    tool_input: Any,
+    workspace_id: str,
+    run_id: str,
+    repo_root: str | None,
+    action_id: str | None = None,
+    resolve_component: ComponentResolver = no_component,
+) -> None:
+    """Bridge one agent ``tool_use`` event to ``emit_belt_entity_changed``.
+
+    The narrow filter that keeps this feed honest, in order: BELT surface only
+    (a normal chat turn writing a file must stay silent), a file-MUTATING tool
+    only, a readable ``file_path``, and a path INSIDE the run's bound repo. Any
+    one of those failing is a silent no-op, not an error.
+
+    ``repo_root`` is the /belt page's repo binding (``SurfaceMeta.repo``) — the
+    same path the agent is told to develop against and to pass into
+    ``belt_propose_change``. It is legitimately ``None`` early in a session
+    (the surface's ask-first behavior), which simply means no feed yet.
+
+    NEVER raises. A live-feed bridge sits on the hot path of every tool call in
+    every chat turn; the same best-effort contract as the emitters above applies,
+    one level out, so even a malformed event cannot break a run.
+    """
+    try:
+        if surface != SurfaceKind.BELT.value or not repo_root or not workspace_id:
+            return
+        change = _ENTITY_CHANGE_TOOLS.get(tool_name)
+        if change is None:
+            return
+        if not isinstance(tool_input, dict):
+            return
+        raw_path = tool_input.get(_TOOL_PATH_KEY)
+        if not raw_path or not isinstance(raw_path, str):
+            return
+        relpath = _repo_relative(repo_root, raw_path)
+        if relpath is None:
+            return
+        await emit_belt_entity_changed(
+            workspace_id=workspace_id,
+            run_id=run_id,
+            entity_id=mint_entity_id(repo_slug_for(repo_root), relpath),
+            file=relpath,
+            change=change,
+            action_id=action_id,
+            resolve_component=resolve_component,
+        )
+    except Exception:  # noqa: BLE001 — a live feed must never break the run it watches
+        logger.debug("belt: belt_entity_changed bridge failed (non-fatal)", exc_info=True)
 
 
 class BeltConsoleError(Exception):

@@ -1,4 +1,8 @@
 # audience.py — resolves an Event into the user_ids that should receive it.
+# Updated: 2026-09-12 (feat/belt-entity-events) — ``belt_entity_changed`` joins
+#   the workspace-scoped belt branch alongside ``belt_run_updated``. Same page
+#   (/belt), same per-workspace audience, same ``workspace_id`` key, so it is
+#   one branch rather than two identical ones.
 # Updated: 2026-09-04 — the member cache is now an LRU with single-flight.
 #   It was a plain dict whose 2-second TTL was only a freshness check on read,
 #   so nothing was ever removed and one entry per group/workspace/user ever
@@ -384,7 +388,9 @@ class AudienceResolver:
         # status change (propose / approve / reject / landed / failed) fires
         # asynchronously relative to the chat turn, so it must fan out to every
         # workspace member with the page open — not just the proposing session.
-        if t == "belt_run_updated":
+        # ``belt_entity_changed`` (the per-FILE live feed within a run) shares
+        # this branch: same page, same per-workspace audience, same key.
+        if t in ("belt_run_updated", "belt_entity_changed"):
             if wid := d.get("workspace_id"):
                 return await self._workspace(wid)
             return []
