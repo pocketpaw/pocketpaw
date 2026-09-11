@@ -1,0 +1,37 @@
+[
+  {
+    "label": "drop the group comparison — the shipped state",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "    if doc is None or doc.group_id != group_id:\n        raise NotFound(\"meeting_invite\", invite_id)",
+    "replace": "    if doc is None:\n        raise NotFound(\"meeting_invite\", invite_id)",
+    "tests": ["tests/cloud/livekit/test_revoke_invite_is_group_scoped.py"]
+  },
+  {
+    "label": "compare the doc's group to itself, which always passes",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "    if doc is None or doc.group_id != group_id:",
+    "replace": "    if doc is None or doc.group_id != doc.group_id:",
+    "tests": ["tests/cloud/livekit/test_revoke_invite_is_group_scoped.py"]
+  },
+  {
+    "label": "block the write but keep the oracle, with a distinct error",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "    doc = await _MeetingInviteDoc.get(PydanticObjectId(invite_id))\n    if doc is None or doc.group_id != group_id:\n        raise NotFound(\"meeting_invite\", invite_id)",
+    "replace": "    doc = await _MeetingInviteDoc.get(PydanticObjectId(invite_id))\n    if doc is None:\n        raise NotFound(\"meeting_invite\", invite_id)\n    if doc.group_id != group_id:\n        raise Forbidden(\"meeting_invite.not_yours\", \"Not your invite\")",
+    "tests": ["tests/cloud/livekit/test_revoke_invite_is_group_scoped.py"]
+  },
+  {
+    "label": "stop the route passing the group it checked membership of",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    result = await invite_service.revoke_meeting_invite(invite_id, str(user.id), group_id)",
+    "replace": "    result = await invite_service.revoke_meeting_invite(invite_id, str(user.id), invite_id)",
+    "tests": ["tests/cloud/livekit/test_revoke_invite_is_group_scoped.py"]
+  },
+  {
+    "label": "drop the route's membership check, leaving only the sink's",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    group = await _get_group_domain_or_404(group_id)\n    _require_domain_group_member(group, str(user.id))\n\n    from pocketpaw_ee.cloud.livekit import invites as invite_service\n\n    result = await invite_service.revoke_meeting_invite(invite_id, str(user.id), group_id)",
+    "replace": "    from pocketpaw_ee.cloud.livekit import invites as invite_service\n\n    result = await invite_service.revoke_meeting_invite(invite_id, str(user.id), group_id)",
+    "tests": ["tests/cloud/livekit/test_revoke_invite_is_group_scoped.py"]
+  }
+]
