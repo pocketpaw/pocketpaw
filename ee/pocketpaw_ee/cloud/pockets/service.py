@@ -4,6 +4,14 @@ Sole owner of writes to the ``Pocket`` Beanie document. Module-level
 ``async def`` API. The doc → domain mapping helpers (formerly in
 ``repositories.py``) live alongside the public API as private helpers.
 
+Updated: 2026-09-11 (SC-1, feat/sites-svelte-edit-create) —
+``set_svelte_source_file`` gained ``create`` (the inversion its react peer has
+carried since RX-3: without it the path must exist, with it the path must not) and
+now returns ``None`` for ``previous_source`` on a create, where there is no prior
+version to hand back for rollback. ``remove_svelte_source_file`` is new and exists
+for exactly that rollback: a failed create must remove the key rather than restore
+an empty string, which would leave a blank file at a real route.
+
 Updated: 2026-07-23 (SI-5, feat/sites-import-crawler) — added
 ``set_imported_source``: the sites URL-import crawler persists its harvested
 html source map on the imported pocket through THIS service (entity isolation —
@@ -2188,8 +2196,9 @@ async def set_svelte_source_file(
     *,
     component_path: str,
     new_source: str,
-) -> tuple[dict, str]:
-    """Rewrite ONE file in a svelte-engine pocket's ``source`` map and persist it.
+    create: bool = False,
+) -> tuple[dict, str | None]:
+    """Write ONE file in a svelte-engine pocket's ``source`` map and persist it.
 
     The svelte analog of editing a single component of a Paw Site: ``source`` is
     a ``{relative_path: file_contents}`` map (the hand-written SvelteKit files),
@@ -2199,18 +2208,30 @@ async def set_svelte_source_file(
 
     Access mirrors ``update``: explicit ``(pocket_id, user_id)`` with
     ``_check_domain_edit_access`` (owner / shared_with / workspace-visible). A
-    missing pocket raises ``NotFound``; a non-svelte pocket or a non-existent
-    component path raise the obvious cloud errors rather than silently creating a
-    file or dereferencing ``None``:
-      * not a svelte pocket (``engine != "svelte"`` or no ``source`` map) →
-        ``ValidationError`` (422);
-      * ``component_path`` absent from the map → ``NotFound`` (404) on the
-        component, so a typo'd path is not a silent create.
+    missing pocket raises ``NotFound``; a non-svelte pocket raises
+    ``ValidationError`` (422) rather than a write against the wrong content model.
+
+    ``create`` mirrors the react peer ``set_react_source_file``, and arrived for the
+    same reason: "add an about page" needs a NEW file (two, on this track — a
+    SvelteKit route is ``+page.svelte`` plus the ``+page.ts`` carrying its prerender
+    flag) plus an edit to a nav component, and with an existence-only contract the
+    agent could not add a page at all. It FLIPS the path check rather than relaxing
+    it, so exactly one of the two mistakes is impossible in each mode:
+
+      * ``create=False`` (default) — ``component_path`` MUST already exist, else
+        ``NotFound`` (404). A typo'd path is never a silent create.
+      * ``create=True`` — ``component_path`` must NOT already exist, else
+        ``ValidationError`` (422). Silently overwriting a real component the agent
+        thought it was adding is worse than a rejected call it can retry.
 
     Returns ``(resolved_wire_dict, previous_source)`` — the wire dict every other
     write returns, plus the file's PRIOR contents so the caller can roll the edit
     back if the downstream republish fails its smoke gate (the sites service does
     exactly this so a broken edit never leaves stale source on the pocket).
+    ``previous_source`` is ``None`` on a create, where there is no prior version to
+    restore: the caller rolls THAT back by removing the key outright
+    (:func:`remove_svelte_source_file`), because writing an empty string instead
+    would leave a blank route the build still has to serve.
     """
     doc = await _fetch_pocket(pocket_id)
     _check_domain_edit_access(_pocket_to_domain(doc), user_id)
@@ -2220,10 +2241,16 @@ async def set_svelte_source_file(
             "pocket.not_svelte_site",
             "This pocket is not a svelte Paw Site — it has no component source map to edit.",
         )
-    if component_path not in doc.source:
+    if create and component_path in doc.source:
+        raise ValidationError(
+            "pocket.svelte_component_exists",
+            f"`{component_path}` already exists in this site's source map. Edit it "
+            "without `create`, or choose a path that does not exist yet.",
+        )
+    if not create and component_path not in doc.source:
         raise NotFound("site_component", component_path)
 
-    previous_source = doc.source[component_path]
+    previous_source = doc.source[component_path] if not create else None
     # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a
     # dict field is not always detected as dirty by the ODM).
     updated = dict(doc.source)
@@ -2242,6 +2269,51 @@ async def set_svelte_source_file(
         doc, author=user_id, label=_edit_label(component_path)
     )
     return await _resolved_wire_dict(doc, user_id), previous_source
+
+
+async def remove_svelte_source_file(
+    pocket_id: str,
+    user_id: str,
+    *,
+    component_path: str,
+) -> dict:
+    """Drop ONE file from a svelte-engine pocket's ``source`` map and persist it.
+
+    Exists for exactly one caller: the sites service's smoke-gate rollback on a
+    CREATE. An ordinary edit rolls back by writing the prior contents, but a create
+    has no prior contents, and restoring ``""`` would leave the pocket carrying an
+    empty file at a real route — a blank page the next publish still has to serve,
+    which is the failure the rollback exists to prevent rather than a recovery from
+    it. Removing the key returns the map to precisely its pre-create state.
+
+    Access and engine checks mirror :func:`set_svelte_source_file`. A path that is
+    already absent is NOT an error: the rollback must be safe to run against a write
+    that never landed, and raising there would replace a recoverable smoke failure
+    with an unrecoverable one.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    if getattr(doc, "engine", "ripple") != "svelte" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_svelte_site",
+            "This pocket is not a svelte Paw Site — it has no component source map to edit.",
+        )
+    if component_path not in doc.source:
+        return await _resolved_wire_dict(doc, user_id)
+
+    # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a
+    # dict field is not always detected as dirty by the ODM) — same reason the
+    # sibling writer rebuilds the map rather than popping in place.
+    updated = dict(doc.source)
+    del updated[component_path]
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(
+        doc, author=user_id, label=_edit_label(component_path)
+    )
+    return await _resolved_wire_dict(doc, user_id)
 
 
 async def set_react_source_file(

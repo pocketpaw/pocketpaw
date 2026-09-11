@@ -195,7 +195,7 @@ async def test_targeted_edit_applies_and_reaches_build(beanie_test_db):
     pocket_id = await _make_svelte_pocket("ws1", "u1")
     gen, cf = _FakeGenerator(), _FakeCF()
 
-    site = await sites_service.edit_svelte_component(
+    site, _unreferenced = await sites_service.edit_svelte_component(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
@@ -259,7 +259,7 @@ async def test_full_new_source_path_still_works(beanie_test_db):
     gen, cf = _FakeGenerator(), _FakeCF()
     whole = "<section class='hero'><h1>Totally Rewritten</h1></section>"
 
-    site = await sites_service.edit_svelte_component(
+    site, _unreferenced = await sites_service.edit_svelte_component(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,

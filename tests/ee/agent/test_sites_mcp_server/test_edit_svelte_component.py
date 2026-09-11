@@ -96,7 +96,7 @@ class TestEditHandler:
         from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
 
         ws_patch, user_patch = _identity("ws1", "u1")
-        fake = AsyncMock(return_value=_FakeSiteDoc())
+        fake = AsyncMock(return_value=(_FakeSiteDoc(), False))
         with (
             ws_patch,
             user_patch,
@@ -141,7 +141,7 @@ class TestEditHandler:
             patch.object(mcp, "_identity", return_value=("ws1", "u1")),
             patch(
                 "pocketpaw_ee.sites.service.edit_svelte_component",
-                new=AsyncMock(return_value=_FakeSiteDoc()),
+                new=AsyncMock(return_value=(_FakeSiteDoc(), False)),
             ),
         ):
             out = await mcp._edit_svelte_component_handler(
@@ -184,7 +184,7 @@ class TestEditHandler:
         require ``new_source``."""
         from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
 
-        fake = AsyncMock(return_value=_FakeSiteDoc())
+        fake = AsyncMock(return_value=(_FakeSiteDoc(), False))
         with (
             patch.object(mcp, "_identity", return_value=("ws1", "u1")),
             patch("pocketpaw_ee.sites.service.edit_svelte_component", new=fake),
@@ -363,3 +363,172 @@ class TestEditHandler:
             )
         assert out.get("is_error") is True
         assert "site_component.not_found" in out["content"][0]["text"]
+
+
+class TestCreateLane:
+    """SC-1 — the tool can MINT a file, not only rewrite one.
+
+    Until this landed the svelte tool was existence-only, so "add an about page" had
+    no reachable tool on the sites server and the agent's remaining move was a second
+    ``create_svelte_site`` — a second pocket at a second url.
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_is_forwarded_to_the_service(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        fake = AsyncMock(return_value=(_FakeSiteDoc(), True))
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch("pocketpaw_ee.sites.service.edit_svelte_component", new=fake),
+        ):
+            out = await mcp._edit_svelte_component_handler(
+                {
+                    "pocket_id": "pk1",
+                    "component_path": "src/routes/about/+page.svelte",
+                    "new_source": "<h1>About</h1>",
+                    "create": True,
+                }
+            )
+
+        assert not out.get("is_error"), out
+        fake.assert_awaited_once()
+        assert fake.await_args.kwargs["create"] is True
+
+    @pytest.mark.asyncio
+    async def test_create_defaults_to_false(self) -> None:
+        """An ordinary edit must not accidentally mint a file."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        fake = AsyncMock(return_value=(_FakeSiteDoc(), False))
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch("pocketpaw_ee.sites.service.edit_svelte_component", new=fake),
+        ):
+            await mcp._edit_svelte_component_handler(
+                {
+                    "pocket_id": "pk1",
+                    "component_path": "src/lib/components/Hero.svelte",
+                    "new_source": "<section/>",
+                }
+            )
+
+        assert fake.await_args.kwargs["create"] is False
+
+    @pytest.mark.asyncio
+    async def test_create_without_new_source_is_rejected_before_the_service(self) -> None:
+        """``edits`` has nothing to search against in a file that does not exist."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        fake = AsyncMock(return_value=(_FakeSiteDoc(), False))
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch("pocketpaw_ee.sites.service.edit_svelte_component", new=fake),
+        ):
+            out = await mcp._edit_svelte_component_handler(
+                {
+                    "pocket_id": "pk1",
+                    "component_path": "src/routes/about/+page.svelte",
+                    "edits": [{"old_string": "a", "new_string": "b"}],
+                    "create": True,
+                }
+            )
+
+        assert out.get("is_error") is True
+        fake.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_unreferenced_create_is_narrated_not_only_flagged(self) -> None:
+        """The flag alone is not enough — the agent narrates ``message``, and a clean
+        success read as "done" over a page nothing links to is the exact incident the
+        react and html lanes each had before they grew this."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch(
+                "pocketpaw_ee.sites.service.edit_svelte_component",
+                new=AsyncMock(return_value=(_FakeSiteDoc(), True)),
+            ),
+        ):
+            out = await mcp._edit_svelte_component_handler(
+                {
+                    "pocket_id": "pk1",
+                    "component_path": "src/routes/about/+page.svelte",
+                    "new_source": "<h1>About</h1>",
+                    "create": True,
+                }
+            )
+
+        body = json.loads(out["content"][0]["text"])
+        assert body["created"] is True
+        assert body["unreferenced"] is True
+        message = (body.get("message") or "").lower()
+        assert "nothing in the site reaches this file yet" in message
+        assert "half-done" in message
+
+    @pytest.mark.asyncio
+    async def test_a_referenced_create_carries_no_orphan_warning(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch(
+                "pocketpaw_ee.sites.service.edit_svelte_component",
+                new=AsyncMock(return_value=(_FakeSiteDoc(), False)),
+            ),
+        ):
+            out = await mcp._edit_svelte_component_handler(
+                {
+                    "pocket_id": "pk1",
+                    "component_path": "src/routes/about/+page.ts",
+                    "new_source": "export const prerender = true",
+                    "create": True,
+                }
+            )
+
+        body = json.loads(out["content"][0]["text"])
+        assert body["unreferenced"] is False
+        assert "half-done" not in (body.get("message") or "").lower()
+
+
+class TestToolContractTeachesTheCreateFlow:
+    """The description is the only thing the agent reads before choosing a tool, so
+    the two gaps that made this bug reachable are pinned here."""
+
+    def _description(self) -> str:
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        captured = {}
+
+        def _tool(name, description, schema):
+            captured["name"] = name
+            captured["description"] = description
+            captured["schema"] = schema
+
+            def _decorator(fn):
+                return fn
+
+            return _decorator
+
+        mcp.make_edit_svelte_component_tool(_tool)
+        return captured
+
+    def test_the_schema_exposes_create(self) -> None:
+        schema = self._description()["schema"]
+        assert "create" in schema["properties"]
+        assert schema["properties"]["create"]["type"] == "boolean"
+
+    def test_the_description_warns_against_minting_a_second_site(self) -> None:
+        """The react and html descriptions both carry this warning; svelte's did not,
+        which is what turned "add a page" into a second pocket at a second url."""
+        description = self._description()["description"]
+        assert "NEVER call `create_svelte_site` again" in description
+
+    def test_the_description_teaches_the_two_file_route(self) -> None:
+        """A SvelteKit page is +page.svelte AND +page.ts — the root page's prerender
+        flag is page-level and does not cascade to a child route."""
+        description = self._description()["description"]
+        assert "+page.svelte" in description
+        assert "+page.ts" in description
+        assert "prerender" in description

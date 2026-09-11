@@ -267,7 +267,7 @@ async def test_consecutive_previews_serve_at_a_stable_url(beanie_test_db):
         _bundle_reader=lambda d: b"export default {}",
         _local_deploy=_recording_local_deploy,
     )
-    edit = await sites_service.edit_svelte_component(
+    edit, _unreferenced = await sites_service.edit_svelte_component(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,

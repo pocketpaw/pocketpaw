@@ -1,0 +1,180 @@
+[
+  {
+    "label": "the reserved-path guard is gone: a svelte edit can write package.json or shadow the session gate, and because the scaffold's throw is not a SmokeGateFailed the rollback never fires",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if (reason := svelte_path_rejection(component_path)) is not None:",
+    "replace": "    if False and (reason := svelte_path_rejection(component_path)) is not None:",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_every_reserved_path_spelling_is_rejected",
+      "tests/ee/sites/test_svelte_component_create.py::test_path_outside_src_is_rejected",
+      "tests/ee/sites/test_svelte_component_create.py::test_a_reserved_path_writes_nothing"
+    ]
+  },
+  {
+    "label": "the path guard stops running before the pocket read, so a reserved path is only caught after state has been touched",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if (reason := svelte_path_rejection(component_path)) is not None:\n        code = (\n            \"site_edit.reserved_path\"\n            if is_reserved_svelte_path(component_path)\n            else \"site_edit.path_outside_source\"\n        )\n        raise ValidationError(code, reason)",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_the_guard_runs_before_the_pocket_is_read"
+    ]
+  },
+  {
+    "label": "the path normalizer stops collapsing separators and dot segments, so `./package.json` and a backslash spelling walk straight past the reserved set",
+    "file": "ee/pocketpaw_ee/sites/svelte_paths.py",
+    "find": "    return posixpath.normpath(path.replace(\"\\\\\", \"/\"))",
+    "replace": "    return path",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_every_reserved_path_spelling_is_rejected"
+    ]
+  },
+  {
+    "label": "the build shell drops out of the reserved set, so the edit lane can rewrite the dependency manifest one call at a time",
+    "file": "ee/pocketpaw_ee/sites/svelte_paths.py",
+    "find": "SVELTE_RESERVED_SHELL_FILES: tuple[str, ...] = (\n    \"package.json\",\n    \"vite.config.ts\",\n    \"svelte.config.js\",\n)",
+    "replace": "SVELTE_RESERVED_SHELL_FILES: tuple[str, ...] = ()",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_every_reserved_path_spelling_is_rejected"
+    ]
+  },
+  {
+    "label": "the gated-site auth files drop out of the reserved set, so an author can shadow the session gate",
+    "file": "ee/pocketpaw_ee/sites/svelte_paths.py",
+    "find": "SVELTE_RESERVED_AUTH_FILES: tuple[str, ...] = (\n    \"src/hooks.server.ts\",\n    \"src/lib/auth.ts\",\n    \"src/app.d.ts\",\n)",
+    "replace": "SVELTE_RESERVED_AUTH_FILES: tuple[str, ...] = ()",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_every_reserved_path_spelling_is_rejected"
+    ]
+  },
+  {
+    "label": "the authorable-prefix rule is gone, so a create can mint a root-level file the build ignores or climb out of the project entirely",
+    "file": "ee/pocketpaw_ee/sites/svelte_paths.py",
+    "find": "    if not is_authorable_svelte_path(norm):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_path_outside_src_is_rejected"
+    ]
+  },
+  {
+    "label": "create stops requiring the path to be new, so `create=true` silently overwrites a real component the agent thought it was adding",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if create and component_path in doc.source:\n        raise ValidationError(\n            \"pocket.svelte_component_exists\",",
+    "replace": "    if False:\n        raise ValidationError(\n            \"pocket.svelte_component_exists\",",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_create_onto_an_existing_path_is_rejected",
+      "tests/ee/sites/test_svelte_component_create.py::test_pockets_service_enforces_the_inversion_itself"
+    ]
+  },
+  {
+    "label": "the write chokepoint stops requiring an existing path without create, so a typo'd component_path becomes a silent new file",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if not create and component_path not in doc.source:\n        raise NotFound(\"site_component\", component_path)",
+    "replace": "    if False:\n        raise NotFound(\"site_component\", component_path)",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_a_missing_path_without_create_is_still_not_found",
+      "tests/ee/sites/test_svelte_component_create.py::test_pockets_service_enforces_the_inversion_itself"
+    ]
+  },
+  {
+    "label": "the sites service stops requiring an existing path, so an `edits` call on a typo'd path is a KeyError instead of a relayable NotFound",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    # pockets service owns that rule for every caller.\n    if not create and component_path not in source_map:\n        raise NotFound(\"site_component\", component_path)",
+    "replace": "    # pockets service owns that rule for every caller.\n    if False:\n        raise NotFound(\"site_component\", component_path)",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_a_missing_path_with_edits_is_not_found_not_a_key_error"
+    ]
+  },
+  {
+    "label": "create no longer requires new_source, so `create` with `edits` reaches the write with nothing to write",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if create and new_source is None:\n        raise ValidationError(\n            \"site_edit.create_needs_source\",\n            \"Creating a new svelte file needs `new_source` — the full contents of \"\n            \"the new component or route. There is nothing for `edits` to search \"\n            \"against in a file that does not exist yet.\",\n        )",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_create_without_new_source_is_rejected"
+    ]
+  },
+  {
+    "label": "a failed create rolls back by blanking the file instead of removing it, leaving an empty page at a real route for the next publish to serve",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            await pockets_service.remove_svelte_source_file(\n                pocket_id,\n                user_id,\n                component_path=component_path,\n            )",
+    "replace": "            await pockets_service.set_svelte_source_file(\n                pocket_id,\n                user_id,\n                component_path=component_path,\n                new_source=\"\",\n            )",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_a_failed_create_removes_the_key_rather_than_blanking_it"
+    ]
+  },
+  {
+    "label": "the create branch of the rollback is gone, so a failed create restores nothing and the pocket keeps source the renderer rejected",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    except SmokeGateFailed:\n        if create:",
+    "replace": "    except SmokeGateFailed:\n        if False:",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_a_failed_create_removes_the_key_rather_than_blanking_it"
+    ]
+  },
+  {
+    "label": "the reachability advisory always reports referenced, so a create that nothing links to returns an unqualified success and the agent reports a page no visitor can reach",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    unreferenced = create and not svelte_path_is_referenced(\n        {**source_map, component_path: new_source}, component_path\n    )",
+    "replace": "    unreferenced = False",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_a_new_page_nothing_links_to_reports_unreferenced",
+      "tests/ee/sites/test_svelte_component_create.py::test_a_new_component_nothing_imports_reports_unreferenced",
+      "tests/ee/sites/test_svelte_component_create.py::test_a_near_miss_link_does_not_count_as_a_reference"
+    ]
+  },
+  {
+    "label": "a route's reachability falls back to the import scan, so every legitimately-linked page is called an orphan",
+    "file": "ee/pocketpaw_ee/sites/svelte_paths.py",
+    "find": "    url = route_url_for(norm)\n    if url is not None:",
+    "replace": "    url = route_url_for(norm)\n    if False:",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_a_new_page_is_referenced_once_something_links_it",
+      "tests/ee/sites/test_svelte_component_create.py::test_a_sibling_convention_file_is_reached_through_its_directory"
+    ]
+  },
+  {
+    "label": "the link matcher stops anchoring on the quoted attribute value, so a link to /about-us counts as a link to /about",
+    "file": "ee/pocketpaw_ee/sites/svelte_paths.py",
+    "find": "    pattern = r\"\"\"(?:href|action)\\s*=\\s*['\"]\"\"\" + re.escape(url) + r\"\"\"/?['\"]\"\"\"",
+    "replace": "    pattern = re.escape(url)",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_a_near_miss_link_does_not_count_as_a_reference"
+    ]
+  },
+  {
+    "label": "a sibling convention file is treated as the page itself, so a +page.ts is called an orphan unless something links to it directly",
+    "file": "ee/pocketpaw_ee/sites/svelte_paths.py",
+    "find": "        if norm.rsplit(\"/\", 1)[-1] != _ROUTE_PAGE_FILE:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_a_sibling_convention_file_is_reached_through_its_directory"
+    ]
+  },
+  {
+    "label": "the $lib alias stops resolving, so the dominant import spelling in a real site reports every imported component as unreferenced",
+    "file": "ee/pocketpaw_ee/sites/svelte_paths.py",
+    "find": "    if specifier.startswith(\"$lib/\"):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_svelte_component_create.py::test_a_new_component_is_referenced_once_imported"
+    ]
+  },
+  {
+    "label": "the MCP handler stops forwarding create, so every create call is silently an edit and fails as not-found",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "    create = bool(args.get(\"create\"))\n    if create and not has_new_source:\n        return _error_response(\n            \"edit_svelte_component `create` needs `new_source`",
+    "replace": "    create = False\n    if create and not has_new_source:\n        return _error_response(\n            \"edit_svelte_component `create` needs `new_source`",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_edit_svelte_component.py::TestCreateLane::test_create_is_forwarded_to_the_service"
+    ]
+  },
+  {
+    "label": "the orphan warning drops out of the narrated message, so the agent reads a clean success and reports a page nothing links to as added",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "        if unreferenced\n        else \"\"\n    )",
+    "replace": "        if False\n        else \"\"\n    )",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_edit_svelte_component.py::TestCreateLane::test_an_unreferenced_create_is_narrated_not_only_flagged"
+    ]
+  }
+]

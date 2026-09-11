@@ -77,8 +77,8 @@
   {
     "label": "the sites service stops requiring an existing path, so an `edits` call on a typo'd path is a KeyError instead of a relayable NotFound",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if not create and component_path not in source_map:\n        raise NotFound(\"site_component\", component_path)",
-    "replace": "    if False:\n        raise NotFound(\"site_component\", component_path)",
+    "find": "    # the chokepoint caught the write anyway.\n    if not create and component_path not in source_map:\n        raise NotFound(\"site_component\", component_path)",
+    "replace": "    # the chokepoint caught the write anyway.\n    if False:\n        raise NotFound(\"site_component\", component_path)",
     "tests": [
       "tests/ee/sites/test_react_component_edit.py::test_missing_path_with_edits_is_not_found_not_a_key_error"
     ]

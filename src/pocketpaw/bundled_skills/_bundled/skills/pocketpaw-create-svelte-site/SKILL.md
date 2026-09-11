@@ -379,6 +379,48 @@ did, publish the pocket:
 mcp__pocketpaw_sites_manager__publish(pocket_id = <the id from STEP 3>)
 ```
 
+### If the user then asks for a CHANGE — edit, never re-create
+
+"Shorten the headline", "make the nav sticky", "add a testimonials section",
+"add an about page" is an **edit of the site you just made**, not a new one.
+`create_svelte_site` has no update mode: calling it again mints a **second**
+site pocket at a **second url** and leaves the one the user is looking at
+untouched. Edit the existing pocket instead:
+
+```
+mcp__pocketpaw_sites_manager__edit_svelte_component(
+  pocket_id      = <the id from STEP 3>,
+  component_path = "src/lib/components/Hero.svelte",
+  edits          = [{"old_string": "<copied verbatim, must match exactly once>",
+                     "new_string": "<the replacement>"}]
+)
+```
+
+- Send a targeted **`edits`** diff, not the whole file. Pass `new_source`
+  instead only for a genuine rewrite — **exactly one** of the two per call.
+- Each `old_string` must match that file **exactly once**; include surrounding
+  context so it is unique. Read it first with `read_site_source` rather than
+  recalling it — a remembered `old_string` does not match.
+- **Adding a section is TWO calls**: `create=True` + `new_source` to write
+  `src/lib/components/Testimonials.svelte`, then a second call with `edits` on
+  `src/routes/+page.svelte` to import and render it. Stop after the first and
+  you have shipped a component nothing renders.
+- **Adding a page is THREE calls**, because a SvelteKit route is two files:
+  `create=True` for `src/routes/<slug>/+page.svelte`, again for
+  `src/routes/<slug>/+page.ts` containing `export const prerender = true;`
+  (the root page's flag is page-level and does **not** cascade to a child
+  route), then `edits` on the nav or footer to link `/<slug>`. Skip the link
+  and the page exists but nobody can find it — the tool tells you so with
+  `unreferenced: true`, and you must not report the page as added until you
+  have cleared it.
+- The generator-owned paths stay refused — `package.json`, `vite.config.ts`,
+  `svelte.config.js`, `src/lib/paw/` and the auth files — so an edit **cannot**
+  add a dependency, and everything you write lives under `src/`.
+- Every rule in this skill still binds — above all the **prerender rule**: an
+  edit that moves a resting value into `onMount` ships a blank section.
+- **The edit stages a DRAFT preview**; it does not publish. Say what changed
+  and publish only when they ask.
+
 The generator materializes your `source` onto the skeleton, prerenders to
 static HTML, runs the smoke gate, and deploys. Show the user the returned
 `url` plus a pointer to **/sites**. Relay any `ok: false` error — never

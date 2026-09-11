@@ -1,6 +1,19 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-11 (SC-1, feat/sites-svelte-edit-create): ``edit_svelte_component``
+# gained ``create`` and now returns ``(site_doc, unreferenced)`` rather than the doc
+# alone. Three things came with it. It reads the pocket UNCONDITIONALLY now (the create
+# branch needs the map for the reachability answer, where before only the ``edits``
+# branch read it). It checks ``svelte_path_rejection`` BEFORE the pocket is read, which
+# is load-bearing rather than tidy: the scaffold throws on a generator-owned path at
+# materialize time, that throw is not a ``SmokeGateFailed``, and so it would escape the
+# rollback below and leave the pocket permanently carrying source every future publish
+# chokes on. And the rollback FORKS by mode — an ordinary edit still restores the prior
+# contents, but a failed create REMOVES the key, because a create has no prior contents
+# and writing "" back would leave an empty file at a real route for the next publish to
+# serve.
+#
 # Updated 2026-09-04 (AD-4 — the overview chart's data): ``site_analytics`` answers a
 # ``series`` block, the same totals grouped by a time bucket. SEVEN queries per uncached
 # read now, up from six. The bucket is an HOUR for the 24-hour window and a DAY for the
@@ -1126,6 +1139,11 @@ from pocketpaw_ee.sites.react_paths import (
     is_reserved_react_path,
     react_path_is_referenced,
     react_path_rejection,
+)
+from pocketpaw_ee.sites.svelte_paths import (
+    is_reserved_svelte_path,
+    svelte_path_is_referenced,
+    svelte_path_rejection,
 )
 
 logger = logging.getLogger(__name__)
@@ -8070,12 +8088,13 @@ async def edit_svelte_component(
     component_path: str,
     new_source: str | None = None,
     edits: list[dict[str, str]] | None = None,
+    create: bool = False,
     name: str = "",
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
     _local_deploy: Callable[[str, str], str] | None = None,
-) -> _SiteDoc:
+) -> tuple[_SiteDoc, bool]:
     """Rewrite ONE component of a svelte Paw Site pocket and safely republish.
 
     The chat-agent entry point for a targeted component edit. The edit can be
@@ -8088,12 +8107,35 @@ async def edit_svelte_component(
         exactly once), and uses the COMPUTED new source. The agent sends only the
         diff — the dominant token / latency saving over a full rewrite.
       * ``new_source`` (full rewrite, the SE-2 fallback) — the whole new file
-        contents; used as-is. Reserve this for large rewrites.
+        contents; used as-is. Reserve this for large rewrites, and it is the ONLY
+        form accepted with ``create=True`` (there is nothing to diff against a file
+        that does not exist yet).
 
     Either way the resolved new source replaces the file at ``component_path`` in
     the pocket's svelte ``source`` map and the site is republished. The Pocket
     write is owned by the pockets service (``set_svelte_source_file`` — entity
     isolation); this function only orchestrates resolve → persist → republish.
+
+    ``create=True`` (SC-1) mints a NEW path instead of editing an existing one. It
+    exists because "add an about page" needs new FILES — on this track two, since a
+    SvelteKit route is ``+page.svelte`` plus the ``+page.ts`` carrying its own
+    ``prerender`` flag (the root page's flag is page-level and does not cascade) —
+    plus an edit to a nav component to link it. Without it the agent could not add a
+    page at all, and the react (RX-3) and html (HE-10) lanes both grew the same flag
+    for the same reason; svelte shipped first and was the last to get it. It INVERTS
+    the existence check rather than relaxing it: ``create=False`` requires the path
+    to exist (a typo is never a silent create), ``create=True`` requires it not to
+    (an accidental overwrite of a real component is worse than a rejected call).
+
+    The path guard is load-bearing, not hygiene, and it is NEW with ``create``:
+    while this lane could only overwrite keys that already existed, every writable
+    path had been vetted when ``create_svelte_site`` landed the map. A minted path
+    has not been, and a reserved one does not merely fail — it fails in the worst
+    place. ``svelte-scaffold.ts`` THROWS on a generator-owned path at materialize
+    time, which is not a ``SmokeGateFailed``, so it would slip past the rollback
+    below and leave the pocket permanently carrying source that every future publish
+    chokes on. :func:`pocketpaw_ee.sites.svelte_paths.svelte_path_rejection` is
+    therefore checked BEFORE the pocket is even read.
 
     Safety contract — a broken edit must leave NEITHER a broken deploy NOR stale
     source on the pocket:
@@ -8128,27 +8170,52 @@ async def edit_svelte_component(
             "edit_svelte_component requires exactly one of `edits` (a targeted "
             "search/replace diff) or `new_source` (a full file rewrite).",
         )
+    if create and new_source is None:
+        raise ValidationError(
+            "site_edit.create_needs_source",
+            "Creating a new svelte file needs `new_source` — the full contents of "
+            "the new component or route. There is nothing for `edits` to search "
+            "against in a file that does not exist yet.",
+        )
+
+    # The path guard. FIRST, before the pocket is even read: a call that names a
+    # generator-owned path is rejected on the path alone, so no amount of pocket
+    # state can make it land. See the docstring for why a reserved path is worse
+    # here than a rejected one — the scaffold's throw is not a SmokeGateFailed and
+    # would escape the rollback below.
+    if (reason := svelte_path_rejection(component_path)) is not None:
+        code = (
+            "site_edit.reserved_path"
+            if is_reserved_svelte_path(component_path)
+            else "site_edit.path_outside_source"
+        )
+        raise ValidationError(code, reason)
+
+    # Read the pocket's CURRENT source map. The read goes through the pockets
+    # service's PUBLIC ``get`` (wire dict — entity isolation; it raises
+    # NotFound/Forbidden itself) so everything below runs against the source of
+    # truth. Unconditional since SC-1: the ``edits`` branch needs the file to diff
+    # against, and the ``create`` branch needs the map to answer the reachability
+    # question at the end.
+    pocket = await pockets_service.get(pocket_id, user_id)
+    # KEPT svelte-specific (not is_source_engine): edits a single named SvelteKit
+    # component by ``component_path`` and persists via ``set_svelte_source_file``.
+    # html has no per-component model — it edits by uid splice (HE-9), not here.
+    if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
+        raise ValidationError(
+            "pocket.not_svelte_site",
+            "This pocket is not a svelte Paw Site — it has no component source map to edit.",
+        )
+    source_map = pocket["source"]
+    # The MISSING-path half of the inversion is enforced here as well as at the
+    # write, because the ``edits`` branch below indexes the map: without it a typo'd
+    # path is a KeyError instead of the NotFound the caller has to relay. The
+    # EXISTING-path half (``create`` onto a live component) is NOT duplicated —
+    # nothing here reads the file on the create path, so the write chokepoint in the
+    # pockets service owns that rule for every caller.
+    if not create and component_path not in source_map:
+        raise NotFound("site_component", component_path)
     if edits is not None:
-        # Targeted/diff edit: read the pocket's CURRENT component source and apply
-        # the blocks to compute the new source. The read goes through the pockets
-        # service's PUBLIC ``get`` (wire dict — entity isolation; it raises
-        # NotFound/Forbidden itself) so the apply runs against the source of truth.
-        # A missing component path is a NotFound (same contract as the full-rewrite
-        # path, where set_svelte_source_file raises it) — not a silent create.
-        pocket = await pockets_service.get(pocket_id, user_id)
-        # KEPT svelte-specific (not is_source_engine): edits a single named SvelteKit
-        # component by ``component_path`` and persists via ``set_svelte_source_file``.
-        # html has no per-component model — it edits by uid splice (HE-9), not here.
-        if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(
-            pocket.get("source"), dict
-        ):
-            raise ValidationError(
-                "pocket.not_svelte_site",
-                "This pocket is not a svelte Paw Site — it has no component source map to edit.",
-            )
-        source_map = pocket["source"]
-        if component_path not in source_map:
-            raise NotFound("site_component", component_path)
         # apply_edits raises ValidationError (clear, retry-able) on any match-count
         # violation, BEFORE anything is persisted or rebuilt.
         new_source = apply_edits(source_map[component_path], edits)
@@ -8160,12 +8227,15 @@ async def edit_svelte_component(
     builder_origin = prior.builder_origin if prior else ""
 
     # 1. Persist the edit (pockets service owns the Pocket write + validation).
-    #    ``previous_source`` is the file's prior contents, held for rollback.
+    #    ``previous_source`` is the file's prior contents, held for rollback — None
+    #    on a create, where the rollback removes the key instead.
+    assert new_source is not None  # narrowing: the arg checks above guarantee it
     _wire, previous_source = await pockets_service.set_svelte_source_file(
         pocket_id,
         user_id,
         component_path=component_path,
         new_source=new_source,
+        create=create,
     )
 
     # 2. Build a PREVIEW of the edit (Branch primitive). The persist above already
@@ -8193,12 +8263,24 @@ async def edit_svelte_component(
             _local_deploy=_local_deploy,
         )
     except SmokeGateFailed:
-        await pockets_service.set_svelte_source_file(
-            pocket_id,
-            user_id,
-            component_path=component_path,
-            new_source=previous_source,
-        )
+        if create:
+            # A create has no prior contents to restore. Writing ``""`` back would
+            # leave the pocket carrying an empty file at a real route — a blank page
+            # the next publish still has to serve, which is the state this rollback
+            # exists to prevent rather than a recovery from it. Remove the key so the
+            # map returns to precisely what it was before the create.
+            await pockets_service.remove_svelte_source_file(
+                pocket_id,
+                user_id,
+                component_path=component_path,
+            )
+        else:
+            await pockets_service.set_svelte_source_file(
+                pocket_id,
+                user_id,
+                component_path=component_path,
+                new_source=previous_source or "",
+            )
         raise
 
     # feat/sites-native-artifact-no-build: the component source changed → pre-warm the
@@ -8211,7 +8293,23 @@ async def edit_svelte_component(
         pocket_id=pocket_id,
         builder_origin=builder_origin or None,
     )
-    return doc
+
+    # Does anything reach the file we just wrote? A create is HALF of adding a page
+    # — the other half is the nav/footer edit that links it — and a create that
+    # landed call 1 and never got call 2 would otherwise return a flat success for a
+    # page no visitor can navigate to. The react and html lanes each learned this
+    # from a real orphan-create incident; svelte gets the answer from the start.
+    #
+    # Scoped to ``create`` deliberately. An ordinary edit touches a file that is
+    # already part of the site, and re-litigating its wiring on every headline change
+    # is noise on the common path — which is how the signal on the rare path gets
+    # skimmed. The map scanned is the POST-write one: the write set exactly this one
+    # key, so re-reading the pocket to learn what we just sent it would be a round
+    # trip for an answer we already hold.
+    unreferenced = create and not svelte_path_is_referenced(
+        {**source_map, component_path: new_source}, component_path
+    )
+    return doc, unreferenced
 
 
 async def edit_react_component(

@@ -193,7 +193,7 @@ async def test_edit_component_preserves_stored_builder_origin(beanie_test_db):
 
     # Now edit a component. The republish must re-apply the stored origin.
     gen = _FakeGenerator()
-    site = await sites_service.edit_svelte_component(
+    site, _unreferenced = await sites_service.edit_svelte_component(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,
@@ -223,7 +223,7 @@ async def test_edit_component_on_non_editable_site_stays_non_editable(beanie_tes
         _bundle_reader=lambda d: b"x",
     )
     gen = _FakeGenerator()
-    site = await sites_service.edit_svelte_component(
+    site, _unreferenced = await sites_service.edit_svelte_component(
         workspace_id="ws1",
         user_id="u1",
         pocket_id=pocket_id,

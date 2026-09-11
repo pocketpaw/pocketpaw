@@ -39,6 +39,17 @@ component model, and its paths are root-relative), and why this tool does not
 republish for a DIFFERENT reason than react's — html runs no build at all, so
 there is no gate that could catch a bad edit before it went live.
 
+Updated: 2026-09-11 (feat/sites-svelte-edit-create, SC-1) — added the
+`edit_svelte_component` section, which had no section of its own even though the
+table above has always listed it. That gap mirrored a gap in the tool: svelte was
+the first edit lane to ship and the last to be able to CREATE a file, so "add an
+about page" to a live svelte site was unanswerable and the agent's remaining move
+was a second `create_svelte_site` (a second pocket at a second url). The section
+documents the new `create` arg and the two things about this track that do not
+transfer from the react docs a reader would otherwise reach for: a page here is TWO
+files, and an unlinked route still exists (SvelteKit prerenders it) where an
+unimported react component does not.
+
 Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-4) — documented the build-lane
 fields now on the `publish` tool response and the new read-only
 `get_site_build_status` tool, in the same MCP section. Both are recorded here
@@ -2342,6 +2353,88 @@ A ripple or dynamic site is edited through the pocket specialist's rippleSpec
 merge instead. The leaf-edits REST route above is the *native editor's* html path
 (uid splice) and is a different entry point from `edit_html_file`, which is the
 chat agent's.
+
+### `edit_svelte_component`
+
+Write ONE file of a svelte site's `source` map and build a draft **preview**.
+
+| Arg | Type | Notes |
+|-----|------|-------|
+| `pocket_id` | string | Required. The svelte site pocket. |
+| `component_path` | string | Required. Project-relative, e.g. `src/lib/components/Hero.svelte`, `src/routes/about/+page.svelte`. Must already exist unless `create` is true. |
+| `edits` | array | A list of `{old_string, new_string}` blocks applied to the file's current contents. Each `old_string` must match **exactly once**. Exactly one of `edits` / `new_source`. |
+| `new_source` | string | The full new file contents (replaces the whole file). Required with `create`. |
+| `create` | boolean | Default `false`. Create a NEW file at `component_path`; the path must **not** already exist. |
+| `name` | string | Optional site name override on the republish. |
+
+Returns `{ok: true, status: "draft", is_live: false, site: {...}, component_path,
+created, unreferenced, message}`.
+
+**Adding a page takes three calls, not two.** A SvelteKit route is two files — the
+`+page.svelte` and a `+page.ts` carrying `export const prerender = true`, because
+the root page's prerender flag is declared at page level and does not cascade to a
+child route — and then an `edits` call on the nav or footer to link it. Adding a
+*section* is the familiar two: `create: true` for
+`src/lib/components/<Name>.svelte`, then `edits` on `src/routes/+page.svelte` to
+import and render it.
+
+**`unreferenced` is the outstanding call's reminder**, and svelte answers it two
+ways because a svelte source map holds two kinds of file. A `src/lib/**` module is
+reached by an import specifier, resolved rather than pattern-matched (`$lib/...`,
+relative and root-absolute forms all resolve to the file they mean). A
+`src/routes/**` page is reached by URL, so the question is whether anything links
+to it — an import scan would call every legitimate page an orphan. A `+page.ts` or
+`+layout.svelte` beside a `+page.svelte` counts as reached through its directory,
+since the file-system router claims it with nothing linking to it.
+
+Note the asymmetry with react: an unlinked svelte route still *exists*. SvelteKit's
+default prerender `entries` is every non-dynamic route, so the page is generated and
+reachable by typing the URL; what it lacks is a way for a visitor to find it. An
+unimported react component, by contrast, is absent from the bundle entirely. Either
+way `unreferenced` is advisory and never blocking — call 1 of a multi-call add is
+unreferenced at the instant it lands, so refusing it would make adding a page
+impossible — and it is always `false` for an ordinary edit.
+
+**It publishes a preview, and rolls back.** Unlike its react and html siblings this
+tool republishes: the edit is persisted, a preview is built behind the workerd smoke
+gate, and a `SmokeGateFailed` restores the pocket to its prior state before
+re-raising. The rollback shape differs by mode — an ordinary edit restores the
+file's previous contents, while a failed `create` **removes the key**, because a
+create has no previous contents and writing `""` back would leave an empty file at a
+real route for the next publish to serve.
+
+**Write scope is enforced, not advisory**, and the guard arrived with `create`:
+while the tool could only overwrite existing keys, every writable path had already
+been vetted when `create_svelte_site` landed the map. The resolved path must sit
+under `src/` (there is no `public/` or `static/` on this track), and the
+generator-owned paths are rejected: `src/lib/paw/`, the gated-site auth files
+(`src/hooks.server.ts`, `src/lib/auth.ts`, `src/app.d.ts`) and the build shell
+(`package.json`, `vite.config.ts`, `svelte.config.js`). Paths are normalized
+(backslashes, `.`/`..`) before the check. The policy lives in
+`ee/pocketpaw_ee/sites/svelte_paths.py`.
+
+The guard is checked *before the pocket is read*, and that ordering is load-bearing:
+`svelte-scaffold.ts` throws on a generator-owned path at materialize time, and that
+throw is not a `SmokeGateFailed`, so it would escape the rollback above and leave
+the pocket permanently carrying source every future publish chokes on.
+
+Errors (relayed to the agent as `is_error` with the code, so it can fix and retry):
+
+| Code | When |
+|------|------|
+| `site_edit.invalid_args` | Not exactly one of `edits` / `new_source`. |
+| `site_edit.create_needs_source` | `create` without `new_source`. |
+| `site_edit.reserved_path` | The resolved path is generator-owned. |
+| `site_edit.path_outside_source` | The resolved path is outside `src/`. |
+| `site_edit.no_match` / `site_edit.ambiguous_match` | An `old_string` matched 0 or >1 times. Make it more specific and retry. |
+| `pocket.not_svelte_site` | The pocket is not a svelte Paw Site. |
+| `pocket.svelte_component_exists` | `create` on a path that already exists. |
+| `site_component.not_found` | `create` is false and the path is not in the source map. |
+| `plan.feature_denied` | The workspace's plan lacks the `sites` feature. |
+
+Every write goes through `pockets_service.set_svelte_source_file` (or
+`remove_svelte_source_file` on a create rollback), which emits `PocketUpdated` and
+records a draft `ArtifactVersion` snapshotting the full edited source map.
 
 ### `edit_react_component`
 
