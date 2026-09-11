@@ -28,6 +28,8 @@ Updates:
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -156,10 +158,17 @@ WORKSPACE_HEADER: str = "X-PocketPaw-Workspace-Id"
 USER_HEADER: str = "X-PocketPaw-User-Id"
 
 # Hostnames / IPs the bypass trusts. The dashboard always binds to one of
-# these; outbound traffic from the chat agent inherits the same host. A
-# real attacker either has to forge ``X-Forwarded-For`` upstream of the
-# ASGI server (uvicorn doesn't honor the header by default) or land code
-# execution on the host, in which case the bypass isn't the weakest link.
+# these; outbound traffic from the chat agent inherits the same host.
+#
+# This comment used to claim that uvicorn ignores forwarded headers unless
+# configured. That is WRONG, and it was load-bearing for how safe this looked.
+# uvicorn's Config defaults ``proxy_headers=True``; what bounds it is
+# ``forwarded_allow_ips``, which defaults to ``127.0.0.1`` — and
+# ``_core/rate_limit.py`` already records that ours is unset. So a proxy on the
+# same host both terminates as loopback AND can set the forwarded header.
+#
+# That is why this trio is now refused outright in multi-tenant cloud
+# (``_header_bypass_allowed_here``) rather than relying on the peer address.
 _LOOPBACK_HOSTS: frozenset[str] = frozenset(
     {
         "127.0.0.1",
@@ -170,6 +179,49 @@ _LOOPBACK_HOSTS: frozenset[str] = frozenset(
         "::ffff:127.0.0.1",
     }
 )
+
+
+logger = logging.getLogger(__name__)
+
+_ALLOW_HEADER_BYPASS_ENV = "POCKETPAW_INTERNAL_HEADER_CONTEXT_ENABLED"
+
+
+def _header_bypass_allowed_here() -> bool:
+    """False when this deployment holds more than one tenant.
+
+    Mirrors ``pockets/router.py:_bypass_allowed_here`` (PR #2126) deliberately,
+    including the failure direction: if the signal cannot be read we refuse,
+    because opening the bypass is the dangerous answer.
+
+    A local desktop install has no cloud DB and is unaffected — which matters,
+    since that is the deployment where this bypass is how the local chat agent
+    reaches its own backend.
+    """
+    if os.environ.get(_ALLOW_HEADER_BYPASS_ENV, "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        logger.warning(
+            "%s is set — the internal header context is accepted in a "
+            "multi-tenant deployment. X-PocketPaw-Workspace-Id is then the whole "
+            "of the tenancy check for every route that uses it.",
+            _ALLOW_HEADER_BYPASS_ENV,
+        )
+        return True
+    try:
+        from pocketpaw_ee.cloud.shared.db import is_multi_tenant_cloud
+
+        if is_multi_tenant_cloud():
+            return False
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Could not determine whether this deployment is multi-tenant; "
+            "refusing the internal header context (fail-closed)."
+        )
+        return False
+    return True
 
 
 def _is_loopback_client(request: Request) -> bool:
@@ -199,8 +251,22 @@ def _try_loopback_context(request: Request) -> RequestContext | None:
     closes the loophole where a chained process on the same host could
     forge the headers; until then, the loopback host check is the only
     boundary between the local chat agent and full workspace access.
+
+    **Refused entirely in multi-tenant cloud since 2026-09-11.** The sentence
+    above is precise about what this is worth, and behind a reverse proxy on the
+    same host it is worth nothing — ``request.client.host`` resolves to the
+    proxy, so every external client presents as loopback and the header trio is
+    the whole of the tenancy. This dependency is bound on all 24 foresight
+    routes, and it has one FEWER factor than ``pockets/router.py``'s equivalent,
+    which also requires a ``compare_digest`` against a process-local secret and
+    was still judged insufficient in PR #2126. Same gate as that PR, same
+    reason: ``is_multi_tenant_cloud()`` is not a thing an operator has to
+    remember to set on the deployment that gains a second tenant.
     """
     if request.headers.get(INTERNAL_HEADER, "").strip().lower() != "true":
+        return None
+
+    if not _header_bypass_allowed_here():
         return None
 
     if not _is_loopback_client(request):
