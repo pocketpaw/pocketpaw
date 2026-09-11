@@ -130,6 +130,7 @@ routing them to a tombstone.
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -145,6 +146,7 @@ from pocketpaw_ee.cloud._core.errors import (
     NotFound,
     SeatLimitError,
     ValidationError,
+    WorkspaceLimitError,
 )
 from pocketpaw_ee.cloud._core.realtime.bus import get_resolver
 from pocketpaw_ee.cloud._core.realtime.emit import emit
@@ -383,7 +385,45 @@ async def slug_reason(slug: str) -> SlugReason | None:
     return "taken" if existing is not None else None
 
 
+#: How many workspaces one account may OWN (feat/abuse-budgets, 2026-09-11).
+#:
+#: Not a plan feature and not priced — an abuse ceiling. Every per-workspace
+#: bound in the product (the daily upload and turn budgets, the plan storage
+#: cap, the guest limits) is keyed on the workspace, so an account that can
+#: mint workspaces in a loop has no bound at all: each new one arrives with a
+#: fresh empty counter. This is what makes those ceilings mean something.
+#:
+#: ``0`` means uncapped, matching the budget modules and for the same reason —
+#: an env typo must not stop people creating a workspace. Owning is what counts:
+#: being INVITED to many workspaces is normal collaboration and is governed by
+#: the inviter's seat limit, not by this.
+_ENV_MAX_OWNED = "POCKETPAW_MAX_OWNED_WORKSPACES"
+_DEFAULT_MAX_OWNED = 10
+
+
+def max_owned_workspaces() -> int:
+    """Workspaces one account may own. ``0`` means uncapped."""
+    raw = (os.environ.get(_ENV_MAX_OWNED) or "").strip()
+    if not raw:
+        return _DEFAULT_MAX_OWNED
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("%s is not an integer (%r) — using the default", _ENV_MAX_OWNED, raw)
+        return _DEFAULT_MAX_OWNED
+
+
 async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace:
+    # Abuse ceiling on owned workspaces, checked BEFORE the slug work so a
+    # capped account never claims a slug it cannot use. Soft-deleted rows are
+    # excluded where the model carries the field, so deleting a workspace frees
+    # its slot.
+    cap = max_owned_workspaces()
+    if cap > 0:
+        owned = await _WorkspaceDoc.find({"owner": ctx.user_id, "deleted_at": None}).count()
+        if owned >= cap:
+            raise WorkspaceLimitError(cap)
+
     # Format is already enforced by the DTO validator; this catches reserved
     # handles and the uniqueness race so create() agrees with the live
     # slug-available check the UI runs first.

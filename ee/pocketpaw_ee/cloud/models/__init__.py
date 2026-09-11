@@ -10,6 +10,13 @@ Registering it here is load-bearing — an unregistered document makes
 ``get_pymongo_collection()`` raise inside that budget's fail-CLOSED except, so
 every transcription is refused and the feature reads as switched off.
 
+Updated: 2026-09-11 (feat/abuse-budgets) — added ``WorkspaceUploadUsage`` and
+``WorkspaceTurnUsage`` (one row per workspace per UTC day each, the atomic
+counters behind the upload and agent-run daily caps) to the imports and
+``get_all_documents()`` so both collections are wired into ``init_beanie``.
+Kept out of ``__all__``: only ``ee.cloud.uploads.upload_budget`` and
+``ee.cloud.chat.runs.turn_budget`` import the doc classes directly.
+
 Updated: 2026-08-28 (FC-3 "File comprehension") — added
 ``FileComprehensionUsage`` (one row per workspace per UTC day, the atomic
 counter behind the comprehension daily cap) to the imports and
@@ -278,6 +285,8 @@ from pocketpaw_ee.cloud.models.web_sandbox import WebSandbox
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 from pocketpaw_ee.cloud.models.workspace_automation_config import WorkspaceAutomationConfig
 from pocketpaw_ee.cloud.models.workspace_job import WorkspaceJobDoc
+from pocketpaw_ee.cloud.models.workspace_turn_usage import WorkspaceTurnUsage
+from pocketpaw_ee.cloud.models.workspace_upload_usage import WorkspaceUploadUsage
 from pocketpaw_ee.cloud.models.workspace_vm import WorkspaceVm
 
 # Lazy import to avoid circular imports
@@ -504,6 +513,8 @@ def get_all_documents():
         # bills, and one shared row would let a bulk photo import exhaust the
         # ceiling that exists to stop a podcast library.
         FileTranscriptionUsage,
+        WorkspaceTurnUsage,
+        WorkspaceUploadUsage,
         # file_versions edit history (ART-1). Only ``file_versions.service``
         # imports this class (import-linter "FileVersions" contract).
         FileVersionDoc,

@@ -1,0 +1,100 @@
+[
+  {
+    "label": "the turn cap never trips — one workspace can spend the platform's model budget all day",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
+    "find": "    if spent > cap:\n        try:\n            await coll.update_one({\"key\": key}, {\"$inc\": {\"used\": -1}})",
+    "replace": "    if False:\n        try:\n            await coll.update_one({\"key\": key}, {\"$inc\": {\"used\": -1}})",
+    "tests": ["tests/cloud/uploads/test_abuse_budgets.py::test_turns_are_refused_once_the_cap_is_reached"]
+  },
+  {
+    "label": "a refused turn keeps its slot — the counter inflates on every refusal and never recovers",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
+    "find": "        try:\n            await coll.update_one({\"key\": key}, {\"$inc\": {\"used\": -1}})\n        except Exception:\n            logger.debug(\"could not roll back an over-cap run claim\", exc_info=True)",
+    "replace": "        try:\n            pass\n        except Exception:\n            logger.debug(\"could not roll back an over-cap run claim\", exc_info=True)",
+    "tests": ["tests/cloud/uploads/test_abuse_budgets.py::test_a_refused_turn_does_not_hold_the_slot"]
+  },
+  {
+    "label": "cap 0 blocks every turn — an env typo takes chat off the air for every tenant at once",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
+    "find": "    cap = daily_cap()\n    if cap <= 0:\n        return True, 0, 0",
+    "replace": "    cap = daily_cap()\n    if cap <= 0:\n        return False, 0, 0",
+    "tests": ["tests/cloud/uploads/test_abuse_budgets.py::test_zero_means_uncapped_not_blocked"]
+  },
+  {
+    "label": "a workspace-less run is charged to nobody and allowed",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
+    "find": "    if not workspace_id:\n        # No tenant means no counter to charge, and an uncharged run is exactly\n        # what this file exists to prevent.\n        logger.warning(\"agent run refused — no workspace to charge\")\n        return False, 0, cap",
+    "replace": "    if not workspace_id:\n        return True, 0, cap",
+    "tests": ["tests/cloud/uploads/test_abuse_budgets.py::test_a_run_with_no_workspace_is_refused"]
+  },
+  {
+    "label": "the turn counter fails OPEN — a database blip becomes an open tab",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
+    "find": "        logger.warning(\n            \"turn budget unavailable for workspace=%s; refusing\", workspace_id, exc_info=True\n        )\n        return False, 0, cap",
+    "replace": "        logger.warning(\n            \"turn budget unavailable for workspace=%s; refusing\", workspace_id, exc_info=True\n        )\n        return True, 0, cap",
+    "tests": ["tests/cloud/uploads/test_abuse_budgets.py::test_an_unreadable_counter_fails_closed"]
+  },
+  {
+    "label": "a bad turn-cap env reads as 0 — the ceiling silently disappears",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
+    "find": "        logger.warning(\"%s is not an integer (%r) — using the default\", _ENV_CAP, raw)\n        return _DEFAULT_CAP",
+    "replace": "        logger.warning(\"%s is not an integer (%r) — using the default\", _ENV_CAP, raw)\n        return 0",
+    "tests": ["tests/cloud/uploads/test_abuse_budgets.py::test_a_bad_env_value_uses_the_default_not_zero"]
+  },
+  {
+    "label": "the file-count ceiling is dropped — fifty 25 MiB files a request, all day",
+    "file": "ee/pocketpaw_ee/cloud/uploads/upload_budget.py",
+    "find": "    if file_cap > 0 and spent_files > file_cap:\n        over = \"files\"",
+    "replace": "    if False:\n        over = \"files\"",
+    "tests": ["tests/cloud/uploads/test_abuse_budgets.py::test_the_file_count_ceiling_trips"]
+  },
+  {
+    "label": "the byte ceiling is dropped — the count cap alone is beaten by big files",
+    "file": "ee/pocketpaw_ee/cloud/uploads/upload_budget.py",
+    "find": "    elif byte_cap > 0 and spent_bytes > byte_cap:\n        over = \"bytes\"",
+    "replace": "    elif False:\n        over = \"bytes\"",
+    "tests": ["tests/cloud/uploads/test_abuse_budgets.py::test_the_byte_ceiling_trips_independently"]
+  },
+  {
+    "label": "an over-cap upload batch is not rolled back — one refused batch eats the day",
+    "file": "ee/pocketpaw_ee/cloud/uploads/upload_budget.py",
+    "find": "        await coll.update_one(\n            {\"key\": key}, {\"$inc\": {\"used\": -int(files), \"bytes_used\": -int(size_bytes)}}\n        )",
+    "replace": "        pass",
+    "tests": ["tests/cloud/uploads/test_abuse_budgets.py::test_an_over_cap_batch_rolls_back_both_counters"]
+  },
+  {
+    "label": "the upload counter fails OPEN — a database blip becomes an open bucket",
+    "file": "ee/pocketpaw_ee/cloud/uploads/upload_budget.py",
+    "find": "        return False, \"unavailable\"",
+    "replace": "        return True, \"unavailable\"",
+    "tests": ["tests/cloud/uploads/test_abuse_budgets.py::test_an_unreadable_upload_counter_fails_closed"]
+  },
+  {
+    "label": "a workspace-less upload is charged to nobody and allowed",
+    "file": "ee/pocketpaw_ee/cloud/uploads/upload_budget.py",
+    "find": "        logger.warning(\"upload refused — no workspace to charge\")\n        return False, \"workspace\"",
+    "replace": "        return True, \"workspace\"",
+    "tests": ["tests/cloud/uploads/test_abuse_budgets.py::test_an_upload_with_no_workspace_is_refused"]
+  },
+  {
+    "label": "the owned-workspace cap is dropped — every per-workspace ceiling is bypassed by a create loop",
+    "file": "ee/pocketpaw_ee/cloud/workspace/service.py",
+    "find": "        owned = await _WorkspaceDoc.find({\"owner\": ctx.user_id, \"deleted_at\": None}).count()\n        if owned >= cap:\n            raise WorkspaceLimitError(cap)",
+    "replace": "        owned = await _WorkspaceDoc.find({\"owner\": ctx.user_id, \"deleted_at\": None}).count()\n        if False:\n            raise WorkspaceLimitError(cap)",
+    "tests": ["tests/cloud/test_workspace_owned_cap.py::test_create_refuses_an_account_at_its_cap"]
+  },
+  {
+    "label": "the cap check moves BELOW the slug work — a capped account burns a slug it cannot use",
+    "file": "ee/pocketpaw_ee/cloud/workspace/service.py",
+    "find": "    cap = max_owned_workspaces()\n    if cap > 0:",
+    "replace": "    await slug_reason(body.slug)\n    cap = max_owned_workspaces()\n    if cap > 0:",
+    "tests": ["tests/cloud/test_workspace_owned_cap.py::test_create_refuses_an_account_at_its_cap"]
+  },
+  {
+    "label": "the owned cap refuses everyone — nobody under their cap can create a workspace",
+    "file": "ee/pocketpaw_ee/cloud/workspace/service.py",
+    "find": "        if owned >= cap:\n            raise WorkspaceLimitError(cap)",
+    "replace": "        if True:\n            raise WorkspaceLimitError(cap)",
+    "tests": ["tests/cloud/test_workspace_owned_cap.py::test_an_account_under_the_cap_proceeds"]
+  }
+]

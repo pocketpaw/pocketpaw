@@ -393,6 +393,61 @@ class StorageLimitError(CloudError):
         super().__init__(402, "billing.storage_limit", f"Storage limit: {label}")
 
 
+class WorkspaceLimitError(CloudError):
+    """Account already owns as many workspaces as it may (429).
+
+    An abuse ceiling, not a plan feature. Every per-workspace bound in the
+    product is keyed on the workspace, so an account that can mint workspaces
+    in a loop gets a fresh empty counter each time and is bounded by nothing.
+    Being INVITED to many workspaces is normal and unaffected — only owning is
+    counted, and deleting one frees a slot.
+    """
+
+    def __init__(self, cap: int) -> None:
+        super().__init__(
+            429,
+            "workspace.owned_limit",
+            f"You already own {cap} workspaces. Delete one to create another.",
+        )
+
+
+class DailyUploadLimitError(CloudError):
+    """Workspace hit its daily upload ceiling (429).
+
+    Distinct from ``StorageLimitError`` in both cause and cure. That one is a
+    PLAN cap, priced, cleared by upgrading, and only enforced when billing is
+    on. This is an ABUSE ceiling that is always on and clears at the next UTC
+    midnight, so the code is ``uploads.daily_limit`` and the status is 429
+    rather than 402 — nothing is for sale here, the answer is to wait.
+    """
+
+    def __init__(self, dimension: str) -> None:
+        label = {
+            "files": "too many files uploaded today",
+            "bytes": "too much uploaded today",
+            "workspace": "no workspace on this upload",
+            "unavailable": "upload budget unavailable",
+        }.get(dimension, "daily upload limit reached")
+        super().__init__(429, "uploads.daily_limit", f"Daily upload limit: {label}")
+
+
+class DailyTurnLimitError(CloudError):
+    """Workspace hit its daily agent-run ceiling (429).
+
+    Sibling of ``DailyUploadLimitError`` on the RUN seam, and deliberately not
+    ``credits.quota_exceeded``: that one is the priced quota and is gated on
+    ``billing_enforced``, while this is always on and resets at the next UTC
+    midnight.
+    """
+
+    def __init__(self, cap: int) -> None:
+        super().__init__(
+            429,
+            "runs.daily_limit",
+            f"Daily limit of {cap} agent runs reached for this workspace",
+        )
+
+
 class InsufficientCredits(CloudError):
     """Credit wallet has too few credits for the requested debit (402)."""
 
@@ -500,7 +555,10 @@ __all__ = [
     "QuotaExceeded",
     "RateLimited",
     "SeatLimitError",
+    "DailyTurnLimitError",
+    "DailyUploadLimitError",
     "StorageLimitError",
+    "WorkspaceLimitError",
     "ValidationError",
     "with_cause",
 ]
