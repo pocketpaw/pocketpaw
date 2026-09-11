@@ -1,0 +1,47 @@
+[
+  {
+    "label": "the day yields nothing, so no held building ever produces",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    n = 1\n    for m in marks:",
+    "replace": "    n = 0\n    for m in marks:",
+    "tests": [
+      "tests/ee/terrarium/test_resources.py"
+    ]
+  },
+  {
+    "label": "the bundle check is gone, so a citizen builds with stock it does not hold",
+    "file": "ee/pocketpaw_ee/terrarium/world.py",
+    "find": "        short = _short(bundle, stock)\n",
+    "replace": "        short = {}\n",
+    "tests": [
+      "tests/ee/terrarium/test_resources.py"
+    ]
+  },
+  {
+    "label": "harvest, raid and era are not zero-cost kinds, so the first harvest raises",
+    "file": "ee/pocketpaw_ee/terrarium/domain.py",
+    "find": "    {\"gate\", \"weather\", \"hibernate\", \"arrive\", \"moment\", \"batch\", \"harvest\", \"raid\", \"era\"}",
+    "replace": "    {\"gate\", \"weather\", \"hibernate\", \"arrive\", \"moment\", \"batch\"}",
+    "tests": [
+      "tests/ee/terrarium/test_resources.py"
+    ]
+  },
+  {
+    "label": "the robber never takes, so a hoard over the cap is kept",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        took = {k: v // 2 for k, v in c.stock.items() if cap and v > cap}",
+    "replace": "        took = {}",
+    "tests": [
+      "tests/ee/terrarium/test_resources.py"
+    ]
+  },
+  {
+    "label": "the resource block is printed for every world, so a resource-free prefix changes",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "        if physics.resources\n        else \"\"",
+    "replace": "        if True\n        else \"\"",
+    "tests": [
+      "tests/ee/terrarium/test_resources.py"
+    ]
+  }
+]
