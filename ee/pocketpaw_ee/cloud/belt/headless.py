@@ -1,6 +1,36 @@
 # ee/pocketpaw_ee/cloud/belt/headless.py — the HEADLESS develop runner.
 # Created: 2026-06-13 (feat/belt-headless-exec).
 #
+# Updated: 2026-09-12 (headless gate) — this runner now puts its produced diff
+#   through the MECHANICAL gate before attaching it. It did not before, and the
+#   asymmetry ran the wrong way: ``verify_diff`` had exactly ONE call site,
+#   ``belt_propose_change``, the INTERACTIVE station — where a human is already
+#   in the loop watching the run. This path, the mandate-driven autonomous one
+#   where nobody is watching at all, wrote the model's diff straight onto the
+#   queued Action. So "a human at the Instinct gate only ever approves VERIFIED
+#   work" was true of the station and false here.
+#
+#   The call sits between the base_branch check and ``_attach_diff``, and it is
+#   the SAME ``cloud.belt.verify.gate_diff`` the station calls (extracted from
+#   that handler in this change, not re-implemented — one gate, or it drifts).
+#   Two stages come with it: ``verify`` (emitted inside the helper, only when a
+#   check genuinely runs) and ``gate`` (emitted here, only once the diff is
+#   really on the row).
+#
+#   FAIL-CLOSED, in the only shape this path has. The station refuses the
+#   propose and hands the failure text to the agent that can fix it; there is no
+#   agent here and the Action already exists, so a red verdict lands on the
+#   state the run was ALREADY in — queued, ``station_pending``, no diff — with
+#   the failing check names on ``headless_error`` and the full output in the
+#   log. No diff is attached, no ``gate`` stage is emitted, and a human sees no
+#   proposal rather than an unverified one. ``passed`` / ``no_checks`` /
+#   ``disabled`` attach as before and carry the same ``verification`` blob key
+#   the station writes, so the Tray reads one evidence field either way.
+#
+#   What this does NOT change: the runner still never raises (a gate that blows
+#   up is caught and lands on the same safe state), still never approves, and
+#   still leaves every produced diff PENDING at the human gate.
+#
 # Updated: 2026-09-12 (feat/belt-entity-events, stage slice) — ``run`` now emits
 #   the two stages it genuinely reaches, via ``service.emit_belt_stage``:
 #   ``orient`` once the queued blob is validated and the ``DevelopRequest`` is
@@ -42,11 +72,13 @@
 #     test NEVER calls a real LLM or spawns a real agent. Production wires the
 #     real develop loop here (a follow-up; the runner is agnostic to it).
 #   * ``HeadlessDevelopRunner.run(action_id)`` — reads the queued ``code_change``
-#     blob, calls the ``DevelopFn`` for a diff, then back-writes the diff +
-#     base_branch onto the blob, CLEARS ``station_pending``, and mints a
+#     blob, calls the ``DevelopFn`` for a diff, puts that diff through the
+#     mechanical gate, then back-writes the diff + base_branch + the gate's
+#     verdict onto the blob, CLEARS ``station_pending``, and mints a
 #     Decision-Graph ``correlation_id`` so the gate closes the chain on approve.
-#     The action stays PENDING. NEVER raises — a ``DevelopFn`` failure (or an
-#     empty diff) leaves the run SAFE (still queued, no diff) and records a note.
+#     The action stays PENDING. NEVER raises — a ``DevelopFn`` failure, an empty
+#     diff, or a red verification leaves the run SAFE (still queued, no diff)
+#     and records a note.
 #   * ``HeadlessTaskDispatcher`` — a ``TaskDispatcher`` (the mandates seam) that
 #     files the queued run via the existing ``StationTaskDispatcher`` and then
 #     runs the headless runner on it, so one dispatch turns an approved plan task
@@ -125,9 +157,11 @@ class HeadlessDevelopRunner:
 
     Takes an injectable ``DevelopFn`` so tests pass a canned-diff fake and the
     runner never calls a real LLM. ``run(action_id)`` never raises — every
-    failure path leaves the queued run SAFE (no diff, ``station_pending`` intact)
-    and records a note on the blob. The produced diff is left PENDING: the
-    per-diff human gate is preserved (the runner never approves or executes)."""
+    failure path, a red mechanical verification included, leaves the queued run
+    SAFE (no diff, ``station_pending`` intact) and records a note on the blob.
+    The produced diff is left PENDING: the per-diff human gate is preserved (the
+    runner never approves or executes), and it is now a VERIFIED diff that gate
+    sees — the same ``gate_diff`` the interactive station runs."""
 
     develop_fn: DevelopFn
 
@@ -135,9 +169,10 @@ class HeadlessDevelopRunner:
         """Produce a diff for a queued ``code_change`` action and attach it.
 
         Returns the action id (a run reference) in every case — success or
-        handled failure. Never raises: a develop-loop crash or an empty diff
-        leaves the run queued and records ``headless_error`` on the blob so a
-        human can still drive the station or the dispatcher can retry.
+        handled failure. Never raises: a develop-loop crash, an empty diff, or a
+        FAILED mechanical verification leaves the run queued and records
+        ``headless_error`` on the blob so a human can still drive the station or
+        the dispatcher can retry.
 
         ``workspace_id`` scopes the store: this runs on a background dispatch
         path (no ``current_workspace`` ContextVar), so the caller threads the
@@ -258,23 +293,106 @@ class HeadlessDevelopRunner:
             await self._note_failure(store, action_id, "headless develop returned no base_branch")
             return action_id
 
+        # STAGE: verify, then THE MECHANICAL GATE — the same ``gate_diff`` the
+        # interactive station calls, so this path cannot drift open while that
+        # one stays shut. It emits the ``verify`` stage itself (only when a check
+        # genuinely runs) and reads the enable flag / timeout / per-repo commands
+        # from settings once, here as there.
+        #
+        # This is where the gate matters MOST: no human is driving this run, so
+        # an unverified diff would reach the Instinct gate with nothing behind it
+        # but a model's word. Imported inside the call like every other cross-
+        # module reach in this file — the verifier pulls in the executor, and a
+        # background dispatch path should not carry that at import time.
+        try:
+            from pocketpaw_ee.cloud.belt.verify import failed_check_names, gate_diff
+
+            verification, refusal = await gate_diff(
+                repo=request.repo,
+                base_branch=base_branch,
+                diff=diff,
+                workspace_id=ws_id,
+                # The real Action id — this path HAS one (see the orient emit
+                # above). No ``run_id``: there is no chat stream behind a
+                # headless run. ``status`` is still "queued" because the row is:
+                # the diff is not attached until the gate passes.
+                action_id=action_id,
+                status="queued",
+            )
+        except Exception as exc:  # noqa: BLE001 — a gate that explodes fails CLOSED
+            # ``verify_diff`` documents that it never raises, and ``gate_diff``
+            # only adds a settings read and a swallowed emit on top. This is the
+            # belt-and-braces: the runner's contract is that it NEVER raises, so
+            # even a broken verifier has to land on the safe state rather than
+            # escape into the dispatcher.
+            logger.warning(
+                "headless: the mechanical gate raised for action %s — leaving the run queued",
+                action_id,
+                exc_info=True,
+            )
+            await self._note_failure(store, action_id, f"headless verification errored: {exc}")
+            return action_id
+
+        if refusal is not None:
+            # FAIL CLOSED, the only way this path can: there is no agent here to
+            # hand the failure back to and re-propose, and the Action already
+            # exists. So we land on the state the run was ALREADY in — queued,
+            # station_pending, no diff — plus the failing check names on the
+            # blob. Nothing is attached, no ``gate`` stage is emitted, and a
+            # human at the Tray sees no proposal at all rather than an
+            # unverified one. The full check output goes to the log because
+            # nothing else on this path would ever read it.
+            names = failed_check_names(verification)
+            logger.warning(
+                "headless: verification FAILED for action %s (%s) — the diff was "
+                "NOT attached and the run stays queued.\n%s",
+                action_id,
+                names,
+                refusal,
+            )
+            await self._note_failure(store, action_id, f"headless verification failed ({names})")
+            return action_id
+
         # Back-write the produced diff onto the SAME action's blob — clearing
         # ``station_pending`` and minting a Decision-Graph ``correlation_id`` so
         # the run is the EXACT applyable shape the belt gate expects. The action
         # stays PENDING: the per-diff human gate is preserved.
-        await self._attach_diff(
+        attached = await self._attach_diff(
             store,
             action_id,
             diff=diff,
             base_branch=base_branch,
             summary=result.summary or request.summary,
             files_changed=result.files_changed,
+            verification=verification,
+        )
+        if not attached:
+            # The write failed; ``_attach_diff`` already recorded the note and
+            # left the run queued. Emitting ``gate`` here would tell the console
+            # a diff is waiting for review when none was stored.
+            return action_id
+
+        # STAGE: gate. The diff is attached and PENDING — it is now genuinely at
+        # the human Instinct gate, the same place ``belt_propose_change`` reports
+        # from when it files a proposal. ``status="proposed"`` is what the runs
+        # read model derives for this row (a pending code_change with a diff, see
+        # ``service._derive_status_stage``), not a guess. ``prev="verify"``: gate
+        # is later than both verify and develop, so the forward-only guard passes
+        # whether or not the gate was enabled, and nothing has to be threaded
+        # back out of the helper.
+        await emit_belt_stage(
+            workspace_id=ws_id,
+            stage="gate",
+            prev="verify",
+            action_id=action_id,
+            status="proposed",
         )
         logger.info(
-            "headless: produced a diff for action %s (base %s) — now a real "
-            "pending code_change awaiting the Instinct gate",
+            "headless: produced a diff for action %s (base %s) — verification %s, "
+            "now a real pending code_change awaiting the Instinct gate",
             action_id,
             base_branch,
+            verification.get("status"),
         )
         return action_id
 
@@ -287,13 +405,18 @@ class HeadlessDevelopRunner:
         base_branch: str,
         summary: str,
         files_changed: int,
-    ) -> None:
+        verification: dict[str, Any],
+    ) -> bool:
         """Populate the queued blob with the produced diff and clear
         ``station_pending``. Direct-SQL blob update — the SAME pattern as
         ``belt/executor.py::_persist_run_result`` and the MCP server's
         ``_persist_chain_ids`` (no new store method). The schema stays 2 so the
         belt executor's schema guard passes. Best-effort but loud: a write
-        failure records a note and leaves the run queued, never applyable."""
+        failure records a note and leaves the run queued, never applyable.
+
+        Returns whether the diff is actually ON the row. The caller emits the
+        ``gate`` stage off this: a swallowed write failure must not be reported
+        to the console as a proposal waiting for review."""
         import json as _json
 
         import aiosqlite
@@ -301,11 +424,11 @@ class HeadlessDevelopRunner:
         try:
             action = await store.get_action(action_id)
             if action is None:
-                return
+                return False
             params = dict(getattr(action, "parameters", None) or {})
             blob = params.get(_CODE_CHANGE_PARAM_KEY)
             if not isinstance(blob, dict):
-                return
+                return False
             blob = dict(blob)
             # Provenance for the audit trail below (read before mutating).
             workspace_id = str(blob.get("workspace_id") or "")
@@ -324,6 +447,12 @@ class HeadlessDevelopRunner:
             if not blob.get("correlation_id"):
                 blob["correlation_id"] = str(uuid4())
             blob.setdefault("proposed_event_id", None)
+            # The mechanical gate's verdict — the SAME key, in the same shape,
+            # that ``belt_propose_change`` writes, so a human in the Tray reads
+            # one evidence field regardless of which path produced the change.
+            # Optional key, no schema bump (the executor's guard tests ``schema``
+            # for equality).
+            blob["verification"] = verification
             # Provenance — record that this diff was produced headlessly.
             blob["headless"] = True
             blob.pop("headless_error", None)
@@ -345,7 +474,7 @@ class HeadlessDevelopRunner:
             await self._note_failure(
                 store, action_id, "headless failed to persist the produced diff"
             )
-            return
+            return False
 
         # Audit trail — this is the FIRST place LLM-produced content enters the
         # Instinct store without a human typing it, so leave an operator trail of
@@ -373,6 +502,9 @@ class HeadlessDevelopRunner:
                     "base_branch": base_branch,
                     "files_changed": files_changed,
                     "headless": True,
+                    # What was mechanically proven before the row went to a
+                    # human — the operator trail is the wrong place to omit it.
+                    "verification": verification.get("status"),
                 },
             )
         except Exception:  # noqa: BLE001 — the audit trail is best-effort here
@@ -382,6 +514,7 @@ class HeadlessDevelopRunner:
                 action_id,
                 exc_info=True,
             )
+        return True
 
     async def _note_failure(self, store: Any, action_id: str, reason: str) -> None:
         """Record a headless-develop failure ON the blob WITHOUT making the run

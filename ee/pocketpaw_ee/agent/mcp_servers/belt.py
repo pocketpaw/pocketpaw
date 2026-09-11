@@ -2,13 +2,22 @@
 # code-change gate to the claude_agent_sdk cloud chat backend. Created:
 # 2026-06-10 (feat/belt-gate, BS-3).
 #
+# Updated: 2026-09-12 (headless gate) — ``_verify_change`` MOVED to
+#   ``cloud/belt/verify.py::gate_diff``, unchanged in behaviour. It was this
+#   module's private helper while this handler was the gate's only call site;
+#   the headless develop runner now calls it too, and the cloud layer cannot
+#   import the agent layer (the OSS/EE boundary), so the shared function had to
+#   live below both. The handler keeps the decision that is genuinely its own:
+#   a refusal is returned to the agent as an error response and no Action is
+#   filed.
+#
 # Updated: 2026-09-12 (integration/belt-factory — the join key closes) — the
 #   propose path now speaks the stage vocabulary and carries the chat stream's
 #   run id onto the Action:
-#     * ``_verify_change`` emits ``stage="verify"`` (prev=``develop``) through
+#     * the gate helper emits ``stage="verify"`` (prev=``develop``) through
 #       ``belt.service.emit_belt_stage`` IMMEDIATELY BEFORE ``verify_diff``, so
 #       the console shows the run being CHECKED instead of jumping develop →
-#       gate. The emit sits INSIDE ``_verify_change``, after the
+#       gate. The emit sits INSIDE the helper, after the
 #       ``belt_verify_enabled`` guard, not in the handler before the call: a
 #       disabled gate never runs a check, and a stage we cannot prove is one we
 #       do not emit. Best-effort like every sibling — a bus failure can never
@@ -461,84 +470,6 @@ async def _persist_chain_ids(
         )
 
 
-async def _verify_change(
-    repo_path: Path,
-    base_branch: str,
-    diff: str,
-    *,
-    workspace_id: str,
-    run_id: str | None,
-) -> tuple[dict[str, Any], str | None]:
-    """Run the mechanical gate over a proposed diff.
-
-    Returns ``(verification_blob, refusal)``. ``refusal`` is non-None only when
-    verification FAILED — the caller must refuse the propose with it and file no
-    Action. The blob is what rides on ``_code_change.verification``: the status,
-    the per-check metadata and the one-line summary — NEVER the full logs (they
-    would bloat every Instinct row; the agent gets them in the refusal instead).
-
-    The gate is read per call from settings, not from a process-global, so a
-    workspace that turns it off can never leave a stale flag behind.
-    ``getattr`` defaults keep the fail-SAFE direction (gate ON) if an older
-    settings build has no field."""
-    from pocketpaw.config import get_settings
-
-    settings = get_settings()
-    if not getattr(settings, "belt_verify_enabled", True):
-        return {"status": "disabled"}, None
-
-    from pocketpaw_ee.cloud.belt.verify import verify_diff
-
-    # The run has REACHED ``verify`` — a check is about to run for real. Emitted
-    # here rather than at the handler's call site because the ``disabled``
-    # branch above returns without running anything: claiming ``verify`` there
-    # would light a stage the data cannot prove, the exact failure the stage
-    # vocabulary exists to avoid. ``prev="develop"`` because the only way to a
-    # propose is through the writes that emitted it; the forward-only guard in
-    # ``emit_belt_stage`` drops the emit if the run is somehow already past it.
-    # Best-effort, like every belt emit — a bus failure must never refuse a
-    # propose that the gate itself would have passed.
-    try:
-        from pocketpaw_ee.cloud.belt.service import emit_belt_stage
-
-        await emit_belt_stage(
-            workspace_id=workspace_id, stage="verify", prev="develop", run_id=run_id
-        )
-    except Exception:  # noqa: BLE001 — emit must never break the propose path
-        logger.debug("belt: verify stage emit failed (non-fatal)", exc_info=True)
-
-    result = await verify_diff(
-        repo=str(repo_path),
-        base_branch=base_branch,
-        diff=diff,
-        timeout_s=int(getattr(settings, "belt_verify_timeout_s", 600)),
-        commands=getattr(settings, "belt_verify_commands", None),
-    )
-    if result.status == "failed":
-        failed = [c for c in result.checks if not c.ok]
-        names = ", ".join(c.name for c in failed) or "unknown"
-        detail = "\n\n".join(f"--- {c.name} ---\n{c.output}" for c in failed)
-        return {}, (
-            f"verification FAILED ({names}) — the change was NOT proposed and no "
-            "human will see it. Fix the failure and propose again.\n\n"
-            f"{detail}"
-        )
-
-    return {
-        "status": result.status,
-        "checks": [
-            {
-                "name": c.name,
-                "ok": c.ok,
-                "skipped": c.skipped,
-                "duration_s": round(c.duration_s, 2),
-            }
-            for c in result.checks
-        ],
-        "summary": result.summary,
-    }, None
-
-
 async def _propose_change_handler(args: dict) -> dict:
     """MCP handler for ``belt__belt_propose_change``.
 
@@ -608,12 +539,19 @@ async def _propose_change_handler(args: dict) -> dict:
     # Read the stream's run id ONCE: the same value goes to the ``verify`` stage
     # emit and onto the blob, so the live event and the durable row can never
     # disagree about which run this was.
+    #
+    # ``gate_diff`` lives in ``cloud.belt.verify`` rather than here because the
+    # headless runner calls the SAME function — this station is no longer the
+    # only way to a diff, and a gate with one call site is a gate the other path
+    # walks around.
     stream_run_id = _stream_run_id()
 
-    verification, refusal = await _verify_change(
-        repo_path,
-        base_branch.strip(),
-        diff,
+    from pocketpaw_ee.cloud.belt.verify import gate_diff
+
+    verification, refusal = await gate_diff(
+        repo=str(repo_path),
+        base_branch=base_branch.strip(),
+        diff=diff,
         workspace_id=workspace_id,
         run_id=stream_run_id,
     )

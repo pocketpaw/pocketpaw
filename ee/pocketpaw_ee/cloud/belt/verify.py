@@ -1,5 +1,18 @@
 # verify.py — the develop station's MECHANICAL gate: does this diff actually work?
 # Created: 2026-09-12 (feat/belt-gate).
+# Updated: 2026-09-12 (headless gate) — the gate had exactly ONE call site,
+#   ``belt_propose_change``, so the MANDATE-DRIVEN AUTONOMOUS path
+#   (``belt/headless.py``) wrote its produced diff onto the queued Action with
+#   nothing checked: "a human only ever approves verified work" was true of the
+#   interactive station alone, and false on the path with no human in it at all.
+#   ``gate_diff`` (bottom of this file) is now the single entry point BOTH
+#   develop paths call — the settings read, the ``verify`` stage emit and the
+#   result shaping live in one function instead of being copied into the second
+#   caller, because two gates drift and the one that drifts open is invisible.
+#   Moved here from ``agent/mcp_servers/belt.py::_verify_change`` unchanged in
+#   behaviour, except that the verification blob is now shaped on a FAILED
+#   result too (the headless caller needs the check names; the interactive one
+#   still refuses before it can use them).
 # Updated: 2026-09-12 — per-repo verify commands (``belt_verify_commands``) plus
 #   a built-in targeted default for pocketpaw, so the gate BITES on our own
 #   primary repo instead of honestly reporting "nothing ran". See "Why (a) and
@@ -12,11 +25,18 @@
 # at the Instinct gate was approving unverified work.
 #
 # The design decision (captain's, BS-gate): gate BEFORE the human, not after.
-# ``belt_propose_change`` calls ``verify_diff`` after its structural validations
+# ``belt_propose_change`` calls ``gate_diff`` after its structural validations
 # and BEFORE it files the Instinct Action. A red result REFUSES the propose and
 # hands the failure text back to the agent — that is the feedback loop. A green
 # (or "nothing to run") result rides onto the ``_code_change`` blob under
 # ``verification`` so the Tray/console can show the human what was proven.
+#
+# The headless runner calls the SAME ``gate_diff`` before it attaches its diff,
+# and lands on the same fail-closed outcome by the only move it has: it has no
+# agent to hand the logs to and an Action row that already exists, so a red
+# result leaves that run QUEUED with no diff (the state it was already in) and
+# the failing check names on ``headless_error``. Either way the diff a human
+# sees at the Instinct gate has been through this file.
 #
 # How it works:
 #   1. Throwaway git worktree of ``repo`` at ``base_branch``, mirroring
@@ -110,7 +130,7 @@ import time
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pocketpaw_ee.cloud.belt.executor import (
     _force_remove_worktree,
@@ -682,4 +702,118 @@ async def verify_diff(
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-__all__ = ["CheckResult", "VerifyResult", "verify_diff"]
+# ---------------------------------------------------------------------------
+# THE GATE — the settings-reading wrapper BOTH develop paths call
+# ---------------------------------------------------------------------------
+
+
+async def gate_diff(
+    *,
+    repo: str,
+    base_branch: str,
+    diff: str,
+    workspace_id: str,
+    run_id: str | None = None,
+    action_id: str | None = None,
+    status: str | None = None,
+) -> tuple[dict[str, Any], str | None]:
+    """Run the mechanical gate over a produced diff, for EITHER develop path.
+
+    Returns ``(verification, refusal)``. ``refusal`` is non-None only when
+    verification FAILED. What a caller DOES with a refusal is the one thing the
+    two paths differ on — the interactive station refuses the propose and hands
+    the text back to the agent that can fix it; the headless runner has no agent
+    to hand it to, so it leaves the run queued and notes the failing check names
+    on the blob. Everything BEFORE that decision — the settings read, the
+    ``verify`` stage emit, the result shaping — lives here, once. Two copies of
+    a gate are two gates that can drift, and the one that drifts open is the one
+    nobody notices.
+
+    ``verification`` is the blob that rides on ``_code_change.verification``:
+    status, per-check metadata and the one-line summary — NEVER the full logs
+    (they would bloat every Instinct row; the agent gets them in the refusal
+    instead). It is shaped on EVERY status, ``failed`` included, so a caller
+    that does not refuse can still name what failed without parsing it back out
+    of the refusal prose.
+
+    The ``verify`` stage is emitted HERE rather than at either call site,
+    because the ``disabled`` branch returns without running anything: claiming
+    ``verify`` there would light a stage the data cannot prove. ``prev`` is
+    ``develop`` on both paths — the only way to a diff is through the writes
+    that emitted it — and the forward-only guard in ``emit_belt_stage`` drops
+    the emit if the run is somehow already past it.
+
+    The gate is read per call from settings, not from a process-global, so a
+    workspace that turns it off can never leave a stale flag behind.
+    ``getattr`` defaults keep the fail-SAFE direction (gate ON) if an older
+    settings build has no field."""
+    from pocketpaw.config import get_settings
+
+    settings = get_settings()
+    if not getattr(settings, "belt_verify_enabled", True):
+        return {"status": "disabled"}, None
+
+    # Best-effort, like every belt emit — a bus failure must never refuse a
+    # change that the gate itself would have passed.
+    try:
+        from pocketpaw_ee.cloud.belt.service import emit_belt_stage
+
+        await emit_belt_stage(
+            workspace_id=workspace_id,
+            stage="verify",
+            prev="develop",
+            run_id=run_id,
+            action_id=action_id,
+            status=status,
+        )
+    except Exception:  # noqa: BLE001 — emit must never break the gate path
+        logger.debug("belt verify: verify stage emit failed (non-fatal)", exc_info=True)
+
+    result = await verify_diff(
+        repo=repo,
+        base_branch=base_branch,
+        diff=diff,
+        timeout_s=int(getattr(settings, "belt_verify_timeout_s", 600)),
+        commands=getattr(settings, "belt_verify_commands", None),
+    )
+    verification: dict[str, Any] = {
+        "status": result.status,
+        "checks": [
+            {
+                "name": c.name,
+                "ok": c.ok,
+                "skipped": c.skipped,
+                "duration_s": round(c.duration_s, 2),
+            }
+            for c in result.checks
+        ],
+        "summary": result.summary,
+    }
+    if result.status != "failed":
+        return verification, None
+
+    failed = [c for c in result.checks if not c.ok]
+    names = ", ".join(c.name for c in failed) or "unknown"
+    detail = "\n\n".join(f"--- {c.name} ---\n{c.output}" for c in failed)
+    return verification, (
+        f"verification FAILED ({names}) — the change was NOT proposed and no "
+        "human will see it. Fix the failure and propose again.\n\n"
+        f"{detail}"
+    )
+
+
+def failed_check_names(verification: dict[str, Any]) -> str:
+    """The failing check names off a ``gate_diff`` verification blob, comma-
+    joined — what a caller with no agent to hand the logs to records instead.
+    ``"unknown"`` when the shape carries no named failure (an older blob, or a
+    refusal with an empty check list)."""
+    checks = verification.get("checks")
+    names = (
+        [str(c.get("name") or "") for c in checks if isinstance(c, dict) and not c.get("ok")]
+        if isinstance(checks, list)
+        else []
+    )
+    return ", ".join(n for n in names if n) or "unknown"
+
+
+__all__ = ["CheckResult", "VerifyResult", "failed_check_names", "gate_diff", "verify_diff"]
