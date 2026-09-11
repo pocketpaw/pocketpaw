@@ -1,0 +1,50 @@
+[
+  {
+    "label": "the Action is filed without the join key — the row can never be matched to the run's live events",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
+    "find": "        \"run_id\": stream_run_id,",
+    "replace": "        \"run_id\": None,",
+    "tests": [
+      "tests/cloud/test_belt_factory_e2e.py::test_the_gate_proved_it_and_the_action_carries_both_halves",
+      "tests/cloud/test_belt_factory_e2e.py::test_the_read_model_closes_the_join"
+    ]
+  },
+  {
+    "label": "the read model drops the join key — the blob has it, the console never sees it",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "        \"run_id\": str(blob.get(\"run_id\") or \"\") or None,",
+    "replace": "        \"run_id\": None,",
+    "tests": [
+      "tests/cloud/test_belt_factory_e2e.py::test_the_read_model_closes_the_join",
+      "tests/cloud/test_belt_factory_e2e.py::test_a_disabled_gate_never_claims_the_verify_stage"
+    ]
+  },
+  {
+    "label": "the propose path stops reporting verify — the run jumps develop to gate and the console shows a human gate nothing justified",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
+    "find": "            workspace_id=workspace_id, stage=\"verify\", prev=\"develop\", run_id=run_id",
+    "replace": "            workspace_id=workspace_id, stage=\"develop\", prev=\"develop\", run_id=run_id",
+    "tests": [
+      "tests/cloud/test_belt_factory_e2e.py::test_the_whole_chain_in_order",
+      "tests/cloud/test_belt_factory_e2e.py::test_verify_is_emitted_before_the_gate_runs_not_after"
+    ]
+  },
+  {
+    "label": "the verify event goes out with no run id — an orphan event on a refused run, with nothing to attach it to",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
+    "find": "            workspace_id=workspace_id, stage=\"verify\", prev=\"develop\", run_id=run_id",
+    "replace": "            workspace_id=workspace_id, stage=\"verify\", prev=\"develop\", run_id=None",
+    "tests": [
+      "tests/cloud/test_belt_factory_e2e.py::test_the_refused_run_still_joins"
+    ]
+  },
+  {
+    "label": "the verify stage is claimed even when the gate is switched off — a stage the data cannot prove",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
+    "find": "    if not getattr(settings, \"belt_verify_enabled\", True):\n        return {\"status\": \"disabled\"}, None",
+    "replace": "    if not getattr(settings, \"belt_verify_enabled\", True):\n        from pocketpaw_ee.cloud.belt.service import emit_belt_stage\n\n        await emit_belt_stage(\n            workspace_id=workspace_id, stage=\"verify\", prev=\"develop\", run_id=run_id\n        )\n        return {\"status\": \"disabled\"}, None",
+    "tests": [
+      "tests/cloud/test_belt_factory_e2e.py::test_a_disabled_gate_never_claims_the_verify_stage"
+    ]
+  }
+]
