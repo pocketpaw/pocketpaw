@@ -1488,6 +1488,7 @@ async def apply_leaf_edits(
     source: dict[str, str],
     edits: list[dict[str, Any]],
     *,
+    lane: str | None = None,
     _exec: Any = None,
 ) -> dict[str, Any]:
     """Splice native-editor leaf edits into a svelte source map via the paw-sites
@@ -1523,17 +1524,81 @@ async def apply_leaf_edits(
     # need its path to clean it up. ONE outer try/finally covers creation + write +
     # exec, and the finally is guarded (only unlink a path that was assigned AND still
     # exists) so it never NameErrors on an early failure and never leaks the tempfile.
+    payload: dict[str, Any] = {"source": source, "edits": edits}
+    # HE-9: only send `lane` when the caller asked for one. The CLI treats an absent
+    # lane as svelte, so omitting it keeps an old payload byte-identical rather than
+    # relying on both sides agreeing on a default they both spell out.
+    if lane is not None:
+        payload["lane"] = lane
+    return await _run_gen_json("apply-leaf-edit", payload, _exec=_exec)
+
+
+async def arm_html(
+    source: dict[str, str],
+    *,
+    _exec: Any = None,
+) -> dict[str, Any]:
+    """Stamp ``data-uid`` on an html source map's editable leaves and return the
+    stamped files plus the leaf manifest (HE-9).
+
+    The READ half of the html edit lane, and the reason it exists is an identity
+    mismatch the builder cannot paper over. An html pocket previews by assembling its
+    RAW ``source`` into a sandboxed srcdoc, so nothing in that document carries a uid:
+    the in-frame select agent resolves a click to a DOM-walk guess
+    (``<section>:<tag>:<ordinal>``) while the write path resolves by manifest uid
+    (``<page>:<role>:<ordinal>``). Two schemes over two documents — a pick could never
+    address a leaf. Arming emits the document the preview should actually render, so
+    both sides key off the SAME derived uids.
+
+    Returns ``{"source": {<relpath>: <stamped contents>}, "manifest": [leaf, ...]}``.
+    The stamping is an offset splice, so the returned files are byte-identical to the
+    input except the inserted attributes.
+
+    Like ``apply_leaf_edits`` this is a PURE transform — a parse and a splice, no
+    ``bun install``, no build — so it is safe to call inline when the operator opens
+    Design mode.
+
+    uids are DERIVED, never stored, so the caller must RE-ARM after a write rather than
+    cache: spans shift under a splice, which is exactly what makes a stale manifest
+    fail loudly instead of mis-targeting.
+
+    Failure surfaces as ``RuntimeError`` (non-zero exit or timeout), same contract as
+    ``apply_leaf_edits`` — the caller maps it to a structured CloudError.
+    """
+    return await _run_gen_json("arm-html", {"source": source}, _exec=_exec)
+
+
+async def _run_gen_json(
+    command: str,
+    payload: dict[str, Any],
+    *,
+    _exec: Any = None,
+) -> dict[str, Any]:
+    """Run a PURE generator subcommand that takes ``--input <json>`` and emits exactly
+    one JSON line, and return the parsed line.
+
+    Extracted (HE-9) when ``arm-html`` became the second caller of this plumbing. The
+    tempfile handling below is subtle enough that two copies would be two chances to
+    get it wrong, and the copy is what rots.
+
+    ``input_path`` is assigned BEFORE ``json.dump`` so a serialization failure cannot
+    leave the created temp file un-tracked: ``NamedTemporaryFile(delete=False)``
+    materializes the file immediately, so if ``json.dump`` raises mid-write we still
+    need its path to clean up. ONE outer try/finally covers creation + write + exec,
+    and the finally is guarded (only unlink a path that was assigned AND still exists)
+    so it never NameErrors on an early failure and never leaks the tempfile.
+    """
     input_path = ""
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
             input_path = fh.name
-            json.dump({"source": source, "edits": edits}, fh)
+            json.dump(payload, fh)
         timeout_s = _build_timeout_sec()
-        # start_new_session=True: own process group so a wedged splice (and any
-        # children it leaked) can be killed as a group on timeout — same as generate().
+        # start_new_session=True: own process group so a wedged run (and any children
+        # it leaked) can be killed as a group on timeout — same as generate().
         proc = await (_exec or asyncio.create_subprocess_exec)(
             *_gen_cmd_argv(),
-            "apply-leaf-edit",
+            command,
             "--input",
             input_path,
             stdout=asyncio.subprocess.PIPE,
@@ -1541,12 +1606,12 @@ async def apply_leaf_edits(
             start_new_session=True,
         )
         try:
-            stdout, stderr = await _communicate_bounded(proc, timeout_s, "apply-leaf-edit")
+            stdout, stderr = await _communicate_bounded(proc, timeout_s, command)
         except _BuildTimeout as exc:
-            # A timed-out splice is a failed splice (mirror generate()'s raise-on-timeout).
-            raise RuntimeError(f"apply-leaf-edit timed out after {exc.timeout_s}s") from exc
+            # A timed-out run is a failed run (mirror generate()'s raise-on-timeout).
+            raise RuntimeError(f"{command} timed out after {exc.timeout_s}s") from exc
         if proc.returncode != 0:
-            raise RuntimeError(f"apply-leaf-edit failed: {stderr.decode()}")
+            raise RuntimeError(f"{command} failed: {stderr.decode()}")
         return json.loads(stdout.decode().strip().splitlines()[-1])
     finally:
         if input_path and os.path.exists(input_path):

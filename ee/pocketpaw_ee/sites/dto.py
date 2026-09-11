@@ -841,6 +841,26 @@ class LeafEditsResponse(BaseModel):
     results: list[LeafEditVerdict]
 
 
+class HtmlArmedSourceResponse(BaseModel):
+    """Response of GET /sites/by-pocket/{pocket_id}/html-armed-source (HE-9).
+
+    ``source`` is the pocket's html source map with ``data-uid`` stamped on every
+    editable leaf — the document the builder should render in its srcdoc so a click
+    resolves to a uid the write path can address. Stamping is an offset splice, so it
+    is byte-identical to the authored source apart from the inserted attributes.
+
+    ``manifest`` is the leaf list behind those uids (file, spans, edit kind), which the
+    browser adapter reads to know what is editable and how.
+
+    Both are re-derived per call. A cached manifest is stale the moment an edit lands,
+    because spans shift under a splice — callers re-arm, they do not cache.
+    """
+
+    pocket_id: str
+    source: dict[str, str]
+    manifest: list[dict[str, Any]]
+
+
 class ImportFromUrlRequest(BaseModel):
     """Body for POST /sites/import/from-url (SI-4): the site URL to crawl-import.
     Shape validation (http(s), real host, length cap) runs in the import service so

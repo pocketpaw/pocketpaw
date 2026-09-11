@@ -262,6 +262,7 @@ from pocketpaw_ee.sites.dto import (
     ImportFromUrlRequest,
     ImportFromUrlResponse,
     LeafEditsRequest,
+    HtmlArmedSourceResponse,
     LeafEditsResponse,
     LeafEditVerdict,
     MakeEditableRequest,
@@ -516,6 +517,49 @@ async def apply_leaf_edits_by_pocket(
     return LeafEditsResponse(
         pocket_id=pocket_id,
         results=[LeafEditVerdict(**r) for r in results],
+    )
+
+
+@router.get(
+    "/sites/by-pocket/{pocket_id}/html-armed-source",
+    response_model=HtmlArmedSourceResponse,
+)
+async def get_html_armed_source_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> HtmlArmedSourceResponse:
+    """Serve an html pocket's source with ``data-uid`` stamped on its editable leaves,
+    plus the leaf manifest (HE-9).
+
+    The html peer of ``/native-artifact``, and deliberately a DIFFERENT endpoint rather
+    than a branch inside it. That one serves a BUILT, armed tree for shadow-rendering
+    and is gated on ``has_native_edit_lane``, which html sits outside of on purpose —
+    an html site's served artifact IS its source, so there is no build to arm. This is
+    a parse and a splice over the source map: no Bun build, no Daytona, no artifact
+    cache.
+
+    It exists because select and write did not share an identity. The builder assembles
+    the pocket's RAW source into a sandboxed srcdoc, so nothing in the previewed
+    document carries a uid and a click resolved to a DOM-walk guess that
+    ``apply_leaf_edits`` could never look up. Rendering THIS source instead closes that.
+
+    Gated on ``fabric.write`` like ``/leaf-edits``: arming is a step in an edit flow,
+    not a public read, and it returns the operator's unpublished draft content.
+
+    A non-html pocket is a 422 (``pocket.not_html_site``); a missing / cross-tenant
+    pocket is the pockets service's own 404 / 403. Callers RE-ARM after an edit rather
+    than caching — spans shift under a splice, so a held manifest goes stale.
+    """
+    out = await sites_service.get_html_armed_source(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+    )
+    return HtmlArmedSourceResponse(
+        pocket_id=pocket_id,
+        source=out["source"],
+        manifest=out["manifest"],
     )
 
 

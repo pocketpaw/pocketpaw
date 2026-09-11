@@ -1094,7 +1094,13 @@ from pocketpaw_ee.sites.dto import (
     SiteResponse,
     SiteStatusResponse,
 )
-from pocketpaw_ee.sites.engines import content_key, is_source_engine, normalize_engine
+from pocketpaw_ee.sites.engines import (
+    content_key,
+    has_write_back_lane,
+    is_source_engine,
+    normalize_engine,
+    write_back_lane,
+)
 from pocketpaw_ee.sites.export import (
     ExportUnavailable,
     collect_leads,
@@ -7668,6 +7674,69 @@ async def read_site_source(
     }
 
 
+async def get_html_armed_source(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    _arm: Any = None,
+) -> dict[str, Any]:
+    """Return an html pocket's source ARMED for direct editing (HE-9).
+
+    ``{"source": {<relpath>: <stamped contents>}, "manifest": [leaf, ...]}``.
+
+    WHY THIS ENDPOINT EXISTS. The builder previews an html pocket by assembling its
+    RAW ``source`` into a sandboxed srcdoc — no build, no server render, which is the
+    whole point of the html track. But that document carries no ``data-uid``, so the
+    in-frame select agent resolves a click by walking the DOM
+    (``<section>:<tag>:<ordinal>``) while ``apply_leaf_edits`` resolves by manifest uid
+    (``<page>:<role>:<ordinal>``). Two schemes over two documents: a pick could name a
+    thing the write path cannot find. This hands the builder the document it should
+    actually render, so select and write agree on an identity by construction.
+
+    It is NOT the svelte/react ``/native-artifact`` path. That serves a BUILT, armed
+    tree for shadow-rendering and is gated on ``has_native_edit_lane``, which html is
+    deliberately outside of. This is a parse and a splice over the source map — no
+    build, no Daytona, no artifact cache — so it is cheap enough to call when the
+    operator opens Design mode.
+
+    uids are DERIVED, so the caller must RE-ARM after a write rather than cache one
+    manifest across edits: spans shift under a splice. That is the same
+    re-stamp-per-cycle contract the write side has, and it is what makes a stale
+    manifest fail loudly instead of mis-targeting.
+
+    A non-html pocket is a 422; a missing / cross-tenant pocket surfaces as the pockets
+    service's own 404 / 403. ``_arm`` is an injectable bridge seam for tests.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import generator_client
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    engine = pocket.get("engine") or "ripple"
+    if normalize_engine(engine) != "html" or not isinstance(pocket.get("source"), dict):
+        raise ValidationError(
+            "pocket.not_html_site",
+            "This pocket is not an html Paw Site — it has no raw source map to arm.",
+        )
+
+    try:
+        out = await (_arm or generator_client.arm_html)(source=dict(pocket["source"]))
+    except CloudError:
+        raise
+    except (RuntimeError, KeyError, IndexError, TypeError) as exc:
+        logger.error("sites.get_html_armed_source: arm bridge failed", exc_info=True)
+        raise with_cause(
+            Internal(
+                "sites.arm_html_failed",
+                "Preparing the page for editing failed — the editing toolchain is "
+                "unavailable or returned an unexpected result. See server logs.",
+            ),
+            exc,
+        ) from exc
+
+    return {"source": out.get("source") or {}, "manifest": out.get("manifest") or []}
+
+
 async def apply_leaf_edits(
     *,
     workspace_id: str,
@@ -7726,16 +7795,20 @@ async def apply_leaf_edits(
     # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
     # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
     pocket = await pockets_service.get(pocket_id, user_id)
-    # KEPT svelte-specific (not is_source_engine): the body below runs the DSV-5
-    # ``_split_svelte_source`` split and the SvelteKit leaf-edit CLI, both svelte-only.
-    # HE-9 widens THIS guard to html (via is_source_engine) in the same change that
-    # teaches the CLI the html editing lane, so guard and body widen together.
-    if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
+    # HE-9 widened this guard from ``!= "svelte"`` to the write-back predicate, in the
+    # same change that taught the CLI the html lane — guard and body widen together,
+    # as the note that stood here promised. It is deliberately NOT ``is_source_engine``:
+    # react is a source engine whose TSX splice does not exist, so it must keep
+    # answering 422 rather than accept a save that can only fail.
+    engine = pocket.get("engine") or "ripple"
+    if not has_write_back_lane(engine) or not isinstance(pocket.get("source"), dict):
         raise ValidationError(
-            "pocket.not_svelte_site",
-            "This pocket is not a svelte Paw Site — it has no component source map to edit.",
+            "pocket.not_editable_site",
+            "This pocket is not a directly editable Paw Site — only svelte and html "
+            "sites have a source map a leaf edit can be spliced into.",
         )
     source_map = pocket["source"]
+    lane = write_back_lane(engine)
 
     # DSV-5 binding-key safety: a DYNAMIC svelte pocket's source envelope carries its
     # live-data bindings (objects/sources/actions/auth) as SIBLING keys of the
@@ -7745,7 +7818,17 @@ async def apply_leaf_edits(
     # splice), and the persist loop below is CONFINED to this input file keyspace so a
     # binding key is never written back as a component file and a brand-new key the
     # CLI might invent is never persisted.
-    files, _bindings = generator_client._split_svelte_source(source_map)
+    #
+    # HE-9: the split is SVELTE-ONLY, not merely svelte-shaped. An html pocket's source
+    # map is files and nothing else — there is no dynamic html track and therefore no
+    # binding keys to separate — and running the svelte splitter over it would be a
+    # guess about which keys are files. The confinement the split buys (persist only
+    # keys we sent) still applies to html: ``files`` is the whole map there, so the
+    # loop below is bounded either way.
+    if lane == "svelte":
+        files, _bindings = generator_client._split_svelte_source(source_map)
+    else:
+        files = dict(source_map)
 
     # Splice the {uid, op} edits into the file map via the apply-leaf-edit CLI. The
     # bridge raises a bare RuntimeError on a non-zero exit / timed-out splice, and the
@@ -7755,7 +7838,9 @@ async def apply_leaf_edits(
     # cloud error handler maps ONLY CloudError). A CloudError raised inside is
     # re-raised unchanged; the cause is chained for logs, never leaked to the client.
     try:
-        out = await (_apply or generator_client.apply_leaf_edits)(source=files, edits=edits)
+        out = await (_apply or generator_client.apply_leaf_edits)(
+            source=files, edits=edits, lane=lane
+        )
         new_map, results = out["source"], out["results"]
     except CloudError:
         raise
@@ -7778,14 +7863,25 @@ async def apply_leaf_edits(
     # otherwise overwrite a live-data binding or 404 on an unknown path). Each write
     # auto-writes a Branch draft snapshotting the FULL edited map, so after the loop
     # the draft == the fully edited source. Multi-file safe.
+    #
+    # HE-9: which writer depends on the lane. They are NOT interchangeable — each
+    # validates the pocket's engine and rejects the other's ("pocket.not_svelte_site" /
+    # "pocket.not_html_site") — and their keyword differs (``component_path`` vs
+    # ``file_path``) because an html site genuinely has no component model. Both record
+    # a draft ArtifactVersion, so the Branch behaviour above holds for either lane.
     changed = False
     for path, contents in new_map.items():
         if path not in files:
             continue
         if files.get(path) != contents:
-            await pockets_service.set_svelte_source_file(
-                pocket_id, user_id, component_path=path, new_source=contents
-            )
+            if lane == "html":
+                await pockets_service.set_html_source_file(
+                    pocket_id, user_id, file_path=path, new_source=contents
+                )
+            else:
+                await pockets_service.set_svelte_source_file(
+                    pocket_id, user_id, component_path=path, new_source=contents
+                )
             changed = True
 
     # feat/sites-native-artifact-no-build: source changed → pre-warm the native
