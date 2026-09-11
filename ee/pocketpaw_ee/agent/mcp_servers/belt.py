@@ -19,7 +19,11 @@
 #   Gate BEFORE the human, not after: an Instinct approver was previously
 #   approving work nothing had ever run. ``belt_verify_enabled`` (default True)
 #   turns it off, recording ``verification={"status":"disabled"}``;
-#   ``belt_verify_timeout_s`` (default 600) bounds each check. Both are read per
+#   ``belt_verify_timeout_s`` (default 600) bounds each check; and
+#   ``belt_verify_commands`` (default None) maps a repo path to the argv the
+#   gate should run there, WINNING over verify's generic discovery — the handler
+#   reads it and threads it in, the same way the timeout is threaded, so the
+#   verifier itself never touches settings. All three are read per
 #   call, never cached in a process-global. ``verification`` is an OPTIONAL blob
 #   key — the executor's guard tests ``schema`` for equality — so CODE_CHANGE_SCHEMA
 #   stays at 2 and an in-flight schema-2 blob without the key still applies.
@@ -440,6 +444,7 @@ async def _verify_change(
         base_branch=base_branch,
         diff=diff,
         timeout_s=int(getattr(settings, "belt_verify_timeout_s", 600)),
+        commands=getattr(settings, "belt_verify_commands", None),
     )
     if result.status == "failed":
         failed = [c for c in result.checks if not c.ok]

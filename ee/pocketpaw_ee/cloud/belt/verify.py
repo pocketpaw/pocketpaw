@@ -1,5 +1,9 @@
 # verify.py — the develop station's MECHANICAL gate: does this diff actually work?
 # Created: 2026-09-12 (feat/belt-gate).
+# Updated: 2026-09-12 — per-repo verify commands (``belt_verify_commands``) plus
+#   a built-in targeted default for pocketpaw, so the gate BITES on our own
+#   primary repo instead of honestly reporting "nothing ran". See "Why (a) and
+#   (b) exist" below.
 #
 # Why this exists: the belt develop station ran ZERO mechanical checks. The only
 # thing proven anywhere was ``git apply --3way`` in executor.py — and that proves
@@ -19,10 +23,44 @@
 #      executor.py's worktree + ``git apply --3way`` pattern (same base-ref
 #      resolution, same diff-as-a-FILE discipline, same ``_force_remove_worktree``
 #      teardown). ALWAYS torn down, including on exception.
-#   2. DISCOVER the checks from the applied tree — pytest (pyproject.toml),
-#      the package.json ``test`` script (package manager detected from lockfile),
-#      and ``pulley doctor`` (belt.lock). No stack is hardcoded as mandatory.
+#   2. Pick the check command, in precedence order:
+#        a. the operator's ``belt_verify_commands`` entry for this repo, or
+#        b. the built-in default for pocketpaw itself, or
+#        c. DISCOVERY from the applied tree — pytest (pyproject.toml), the
+#           package.json ``test`` script (package manager from the lockfile),
+#           ``pulley doctor`` (belt.lock). No stack is hardcoded as mandatory.
+#      (a) and (b) REPLACE discovery rather than adding to it.
 #   3. Run each check with a per-check timeout, capture the tail of its output.
+#
+# Why (a) and (b) exist — discovery was honest but toothless on our OWN repo.
+# Generic discovery runs ``uv run pytest``, which in a throwaway pocketpaw
+# worktree syncs the DEFAULT groups only: ``pocketpaw_ee`` is absent, every
+# ``tests/ee`` module ``importorskip``s, and ``addopts`` hides ``tests/cloud``
+# outright. ``_require_evidence`` correctly demoted that to ``no_checks`` instead
+# of a false pass — honest, but it meant a belt run changing ``ee/cloud`` code
+# got NO verification at all. The built-in default fixes the invocation:
+# ``uv run --group ee --group dev pytest <targets> -q`` (``uv run`` syncs those
+# groups before running, so sync and run are one command), targeted at the test
+# files the diff carries plus the conventional test file for each module it
+# touches. Targeted because a full pocketpaw suite is far past any propose-time
+# budget; explicit paths also beat the pyproject ``--ignore=tests/cloud``.
+#
+# The argv is OPERATOR-CONFIGURED ONLY. ``belt_verify_commands`` comes from
+# settings and the built-in is a literal in this module — no element of any
+# command is ever read from the diff, the proposal, or any other model-authored
+# text. The only diff-derived values are test PATHS, and those are filtered to
+# files that already exist in the applied tree.
+#
+# Two known-red spots in pocketpaw, both accepted rather than worked around:
+#   * ``tests/cloud/extraction`` fails COLLECTION on a missing ``pypdf``, which
+#     is in neither the ``ee`` nor the ``dev`` group. That is an install-state
+#     gap in the repo's own pyproject, not a gate bug, and it is out of reach
+#     unless a diff touches a test file in that directory — ``--ignore`` cannot
+#     help there, because pytest honours an explicitly-passed path over it
+#     (measured). The fix belongs in pyproject.toml.
+#   * ``tests/cloud/realtime/test_event_registry.py`` fails under a cross-tree
+#     ``-k`` sweep on origin/dev. The built-in never uses ``-k`` — it passes
+#     explicit paths — and the file passes standalone, so this cannot be hit.
 #
 # Fail-CLOSED discipline (the whole point of a gate):
 #   * ``verify_diff`` NEVER raises. An internal error becomes
@@ -40,6 +78,13 @@
 #   * ``status="no_checks"`` is its own third state: not a pass, not a failure.
 #     The propose proceeds (a docs repo has nothing to run) but the human sees
 #     that nothing was proven.
+#   * A CONFIGURED command that cannot launch (typo, binary not installed —
+#     including ``uv`` itself being off PATH for the built-in) is a FAILED
+#     check, NOT a skip. Skipping there would let one bad settings key silently
+#     switch the gate off, which is the exact failure this module exists to
+#     prevent. ``_timed`` already gives this: ``_run`` lets the OSError out.
+#   * A configured command is held to the same evidence rule as a discovered
+#     one. Runs, exits 0, shows no passing count → skipped → ``no_checks``.
 
 from __future__ import annotations
 
@@ -51,6 +96,7 @@ import shutil
 import sys
 import tempfile
 import time
+import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -82,6 +128,19 @@ _ENV_STRIP = frozenset(
 # never a pass. Exit 0 on an all-SKIPPED suite is the same lie wearing a
 # different exit code; ``_require_evidence`` reads the counts line to catch it.
 _PYTEST_NO_TESTS = 5
+
+# The built-in default for pocketpaw itself, identified by its ``[project].name``
+# rather than by a path (no operator would key ``paw-worktrees/belt-gate``, and
+# every checkout of the repo deserves the same treatment).
+#
+# ``--group ee --group dev`` is the load-bearing part: ``uv run`` syncs the
+# requested groups before running, and without ``ee`` the ``pocketpaw_ee``
+# package is absent, so every test that matters to a belt change importorskips
+# itself into a green nothing. Measured cold in a fresh worktree: venv created,
+# both packages built, 355 packages installed, suite run — all inside the
+# default 600s budget.
+_POCKETPAW_NAME = "pocketpaw"
+_POCKETPAW_ARGV = ["uv", "run", "--group", "ee", "--group", "dev", "pytest", "-q"]
 
 
 @dataclass(frozen=True)
@@ -229,13 +288,12 @@ def _require_evidence(check: CheckResult) -> CheckResult:
     )
 
 
-def _pytest_targets(tree: Path, diff: str) -> list[str]:
-    """Test files the diff touches, filtered to what EXISTS in the applied tree.
-
-    A path that doesn't exist would make pytest exit 4 (usage error) and red a
-    good diff, so the filter is load-bearing, not tidiness. Empty list → the
-    caller runs the repo default."""
-    targets: list[str] = []
+def _diff_paths(diff: str) -> list[str]:
+    """Repo-relative paths the diff WRITES to (the ``+++`` side), ``b/`` stripped
+    and deletions dropped. Pure parsing — the callers decide what to do with
+    them, and every one of them filters against the applied tree before a path
+    reaches a command line."""
+    paths: list[str] = []
     for line in diff.splitlines():
         if not line.startswith("+++ "):
             continue
@@ -244,14 +302,144 @@ def _pytest_targets(tree: Path, diff: str) -> list[str]:
             continue
         if raw.startswith("b/"):
             raw = raw[2:]
-        name = Path(raw).name
-        if not name.endswith(".py"):
-            continue
-        if not (name.startswith("test_") or name.endswith("_test.py")):
-            continue
-        if (tree / raw).exists():
-            targets.append(raw)
+        paths.append(raw)
+    return paths
+
+
+def _is_test_file(name: str) -> bool:
+    return name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
+
+
+def _pytest_targets(tree: Path, diff: str) -> list[str]:
+    """Test files the diff touches, filtered to what EXISTS in the applied tree.
+
+    A path that doesn't exist would make pytest exit 4 (usage error) and red a
+    good diff, so the filter is load-bearing, not tidiness. Empty list → the
+    caller runs the repo default."""
+    targets = [
+        raw for raw in _diff_paths(diff) if _is_test_file(Path(raw).name) and (tree / raw).exists()
+    ]
     return sorted(set(targets))
+
+
+def _resolved(raw: str) -> str | None:
+    """A repo path in the ONE canonical form, matching how the belt allowlist
+    identifies a repo (``Path(raw).expanduser().resolve()``). ``None`` when it
+    cannot be resolved, so an unusable settings key never collides with an
+    unusable repo path and accidentally matches."""
+    try:
+        return str(Path(raw).expanduser().resolve())
+    except (OSError, RuntimeError):
+        return None
+
+
+def _configured_argv(repo: str, commands: dict[str, list[str]] | None) -> list[str] | None:
+    """The operator's argv for THIS repo, or ``None``.
+
+    Both sides are resolved before comparing, so a trailing slash, a ``~``, or a
+    symlinked checkout in the settings key still matches the repo the proposal
+    named. Values come from settings only — never from the diff."""
+    if not commands:
+        return None
+    target = _resolved(repo)
+    if target is None:
+        return None
+    for key, argv in commands.items():
+        if argv and _resolved(key) == target:
+            return list(argv)
+    return None
+
+
+def _is_pocketpaw(tree: Path) -> bool:
+    """True when the applied tree is the pocketpaw repo itself. Read from
+    ``[project].name`` rather than a path, so every checkout and worktree of the
+    repo gets the built-in default."""
+    try:
+        with (tree / "pyproject.toml").open("rb") as fh:
+            return tomllib.load(fh).get("project", {}).get("name") == _POCKETPAW_NAME
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _pocketpaw_targets(tree: Path, diff: str) -> list[str]:
+    """Test paths for a pocketpaw diff: the test files it already carries, plus
+    the conventionally-named test file for each source module it touches.
+
+    Bounded BY CONSTRUCTION — the whole pocketpaw suite is far past any
+    propose-time budget, so this never widens to a directory. The naming
+    convention is the one the repo actually uses (``cloud/belt/verify.py`` →
+    ``tests/cloud/test_belt_verify.py``), which is why ``test_<parent>_<stem>``
+    is tried alongside ``test_<stem>``; a looser ``*<stem>*`` glob would drag in
+    half the suite on a module called ``service`` or ``models``."""
+    targets = set(_pytest_targets(tree, diff))
+
+    wanted: set[str] = set()
+    for raw in _diff_paths(diff):
+        path = Path(raw)
+        if path.suffix != ".py" or _is_test_file(path.name):
+            continue
+        wanted.add(f"test_{path.stem}.py")
+        if path.parent.name:
+            wanted.add(f"test_{path.parent.name}_{path.stem}.py")
+
+    tests_root = tree / "tests"
+    if wanted and tests_root.is_dir():
+        # One walk for every candidate name, not one glob per touched module.
+        for found in tests_root.rglob("test_*.py"):
+            if found.name in wanted:
+                targets.add(str(found.relative_to(tree)))
+    return sorted(targets)
+
+
+async def _configured_check(
+    tree: Path,
+    *,
+    repo: str,
+    diff: str,
+    commands: dict[str, list[str]] | None,
+    timeout_s: int,
+    env: dict[str, str],
+) -> CheckResult | None:
+    """The per-repo command for this repo — the operator's, else pocketpaw's
+    built-in. ``None`` means neither applies and the caller falls through to
+    generic discovery UNCHANGED.
+
+    A non-None result REPLACES discovery: when someone has said what to run
+    here, a guessed second runner adds noise, not proof."""
+    argv = _configured_argv(repo, commands)
+    name = "configured"
+
+    if argv is None:
+        if not _is_pocketpaw(tree):
+            return None
+        name = "pytest(pocketpaw)"
+        targets = _pocketpaw_targets(tree, diff)
+        if not targets:
+            # Honest floor. Running the whole suite instead would blow the
+            # timeout and prove nothing; calling it a pass would be a lie.
+            return _skip(
+                name,
+                "the diff carries no test file, and no tests/**/test_<module>.py "
+                "matches a module it touches — there is nothing targeted to run, "
+                "and the full pocketpaw suite is far past a propose-time budget. "
+                "Change a test alongside the code it covers and this bites.",
+            )
+        argv = [*_POCKETPAW_ARGV, *targets]
+
+    # Same evidence rule as a discovered check: exit 0 without a passing count
+    # is not proof. And an argv that cannot LAUNCH raises out of _run into
+    # _timed's handler as ok=False — a typo in settings must refuse proposals,
+    # never quietly switch the gate off.
+    return _require_evidence(
+        await _timed(
+            name,
+            argv,
+            cwd=tree,
+            timeout_s=timeout_s,
+            env=env,
+            skip_codes=(_PYTEST_NO_TESTS,),
+        )
+    )
 
 
 async def _pytest_check(
@@ -347,10 +535,21 @@ async def _pulley_check(tree: Path, *, timeout_s: int, env: dict[str, str]) -> C
 
 
 async def verify_diff(
-    *, repo: str, base_branch: str, diff: str, timeout_s: int = 600
+    *,
+    repo: str,
+    base_branch: str,
+    diff: str,
+    timeout_s: int = 600,
+    commands: dict[str, list[str]] | None = None,
 ) -> VerifyResult:
     """Apply ``diff`` in a throwaway worktree of ``repo`` at ``base_branch`` and
-    run whatever mechanical checks that tree offers.
+    run the mechanical checks for that repo.
+
+    ``commands`` is the operator's per-repo map (``belt_verify_commands``),
+    passed IN by the caller rather than read here — same as ``timeout_s``, so
+    this function stays free of settings and testable on its own. An entry for
+    ``repo`` wins; otherwise pocketpaw gets its built-in default and every other
+    repo falls through to discovery.
 
     NEVER raises: every failure path — including an internal one — comes back as
     a ``VerifyResult``. The worktree is ALWAYS removed."""
@@ -420,6 +619,17 @@ async def verify_diff(
             )
 
         env = _check_env()
+        configured = await _configured_check(
+            worktree_dir,
+            repo=repo,
+            diff=diff,
+            commands=commands,
+            timeout_s=timeout_s,
+            env=env,
+        )
+        if configured is not None:
+            return _result((configured,))
+
         checks = [
             await _pytest_check(worktree_dir, diff, timeout_s=timeout_s, env=env),
             await _node_check(worktree_dir, timeout_s=timeout_s, env=env),

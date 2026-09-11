@@ -227,6 +227,14 @@ Changes:
     BEFORE the human approval gate; a failure refuses the proposal outright.
     ON by default: the point is that the Instinct approver sees verified work.
     Env: POCKETPAW_BELT_VERIFY_ENABLED / POCKETPAW_BELT_VERIFY_TIMEOUT_S.
+  - 2026-09-12: Added ``belt_verify_commands`` (None) — the per-repo escape
+    from generic discovery, keyed by repo path like ``belt_repo_allowlist``.
+    Discovery guesses the runner from the tree's shape, which on pocketpaw
+    guesses WRONG: a bare ``uv run pytest`` in a throwaway worktree syncs the
+    default groups only, so ``pocketpaw_ee`` is absent and every ee test
+    skips. An entry here runs the operator's argv verbatim instead. Unset,
+    pocketpaw gets a built-in targeted default; other repos keep discovery.
+    Env: POCKETPAW_BELT_VERIFY_COMMANDS (JSON object of path -> argv list).
   - 2026-07-01: Added ``shield_api_socket`` + ``shield_api_token`` (SEC-5) —
     the same-box shield daemon's control-API UNIX socket + Bearer token. The
     cloud ``/api/v1/security/*`` proxy reads these to reach shield; the token
@@ -1696,6 +1704,28 @@ class Settings(BaseSettings):
             "Per-check timeout (seconds) for Belt proposal verification. A check "
             "that exceeds it is killed and counts as FAILED — an unbounded suite "
             "proves nothing."
+        ),
+    )
+    belt_verify_commands: dict[str, list[str]] | None = Field(
+        default=None,
+        description=(
+            "Per-repo verification command, keyed by the repo's PATH — the same "
+            "identifier form belt_repo_allowlist uses, resolved on both sides so "
+            "a symlink or trailing slash still matches. The value is one argv "
+            "list, run VERBATIM in the throwaway worktree after the diff applies, "
+            "INSTEAD of the generic discovery (pytest / package.json test / "
+            "pulley doctor). Operator-configured only: these argv elements never "
+            "come from a diff or from agent text. Three things to know before "
+            "setting one. The command runs as written — no diff-derived test "
+            "paths are appended, so a bare 'pytest' runs the WHOLE suite and will "
+            "hit belt_verify_timeout_s. Evidence still has to be visible: a run "
+            "that shows no pytest-style 'N passed' line is recorded as "
+            "'no_checks', never a pass. And a command that cannot launch is a "
+            "FAILED check, not a skip, so a typo here refuses proposals rather "
+            "than silently disabling the gate. Left unset, pocketpaw itself gets "
+            "a built-in targeted default (see verify.py) and every other repo "
+            "falls through to discovery. Set via POCKETPAW_BELT_VERIFY_COMMANDS "
+            'as a JSON object, e.g. {"/srv/repos/acme": ["make", "check"]}.'
         ),
     )
     # --- end belt verify gate ---
