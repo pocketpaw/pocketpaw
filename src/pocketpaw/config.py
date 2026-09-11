@@ -221,6 +221,20 @@ Changes:
     Belt & Pulley code-change gate (BS-3). A ``belt_propose_change`` proposal's
     repo path must resolve inside one of these roots; empty defaults to the
     cwd's parent. Env: POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
+  - 2026-09-12: Added ``belt_verify_enabled`` (True) + ``belt_verify_timeout_s``
+    (600) — the develop station's MECHANICAL gate. A ``belt_propose_change``
+    diff is applied in a throwaway worktree and the tree's own checks are run
+    BEFORE the human approval gate; a failure refuses the proposal outright.
+    ON by default: the point is that the Instinct approver sees verified work.
+    Env: POCKETPAW_BELT_VERIFY_ENABLED / POCKETPAW_BELT_VERIFY_TIMEOUT_S.
+  - 2026-09-12: Added ``belt_verify_commands`` (None) — the per-repo escape
+    from generic discovery, keyed by repo path like ``belt_repo_allowlist``.
+    Discovery guesses the runner from the tree's shape, which on pocketpaw
+    guesses WRONG: a bare ``uv run pytest`` in a throwaway worktree syncs the
+    default groups only, so ``pocketpaw_ee`` is absent and every ee test
+    skips. An entry here runs the operator's argv verbatim instead. Unset,
+    pocketpaw gets a built-in targeted default; other repos keep discovery.
+    Env: POCKETPAW_BELT_VERIFY_COMMANDS (JSON object of path -> argv list).
   - 2026-07-01: Added ``shield_api_socket`` + ``shield_api_token`` (SEC-5) —
     the same-box shield daemon's control-API UNIX socket + Bearer token. The
     cloud ``/api/v1/security/*`` proxy reads these to reach shield; the token
@@ -1709,6 +1723,54 @@ class Settings(BaseSettings):
             "refused. Empty → defaults to the cwd's parent (the workspace root)."
         ),
     )
+    # --- belt verify gate (feat/belt-gate, 2026-09-12) — keep contiguous ---
+    # The station's MECHANICAL gate. ON by default: that is the point — before
+    # this, a human at the Instinct gate approved work nothing had ever run.
+    # ``belt_propose_change`` applies the diff in a throwaway worktree and runs
+    # the checks that tree offers; a red result REFUSES the propose. Env auto-
+    # derives POCKETPAW_BELT_VERIFY_ENABLED / POCKETPAW_BELT_VERIFY_TIMEOUT_S.
+    belt_verify_enabled: bool = Field(
+        default=True,
+        description=(
+            "Run mechanical checks (tests / pulley doctor) on a Belt code-change "
+            "proposal before it reaches the human approval gate. A failed check "
+            "refuses the proposal. Off → the proposal is filed unverified and "
+            "records verification status 'disabled'."
+        ),
+    )
+    belt_verify_timeout_s: int = Field(
+        default=600,
+        description=(
+            "Per-check timeout (seconds) for Belt proposal verification. A check "
+            "that exceeds it is killed and counts as FAILED — an unbounded suite "
+            "proves nothing."
+        ),
+    )
+    belt_verify_commands: dict[str, list[str]] | None = Field(
+        default=None,
+        description=(
+            "Per-repo verification command, keyed by the repo's PATH — the same "
+            "identifier form belt_repo_allowlist uses, resolved on both sides so "
+            "a symlink or trailing slash still matches. The value is one argv "
+            "list, run VERBATIM in the throwaway worktree after the diff applies, "
+            "INSTEAD of the generic discovery (pytest / package.json test / "
+            "pulley doctor). Operator-configured only: these argv elements never "
+            "come from a diff or from agent text. Three things to know before "
+            "setting one. The command runs as written — no diff-derived test "
+            "paths are appended, so a bare 'pytest' runs the WHOLE suite and will "
+            "hit belt_verify_timeout_s. Evidence still has to be visible: a run "
+            "that shows no pytest-style 'N passed' line is recorded as "
+            "'no_checks', never a pass. And a command that cannot launch is a "
+            "FAILED check, not a skip, so a typo here refuses proposals rather "
+            "than silently disabling the gate — the one non-zero exit that is "
+            "NOT a refusal is 5, read as pytest's 'no tests collected', which "
+            "records 'no_checks'. Left unset, pocketpaw itself gets "
+            "a built-in targeted default (see verify.py) and every other repo "
+            "falls through to discovery. Set via POCKETPAW_BELT_VERIFY_COMMANDS "
+            'as a JSON object, e.g. {"/srv/repos/acme": ["make", "check"]}.'
+        ),
+    )
+    # --- end belt verify gate ---
 
     # Shield — the same-box Go security daemon (deny-by-default connector
     # egress + agent-decision control plane). shield serves a control API on a

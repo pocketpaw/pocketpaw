@@ -9,6 +9,15 @@
 # ok. Without this preamble the surface falls back to GENERIC and the agent
 # builds a dashboard pocket instead of running the station loop.
 #
+# Updated: 2026-09-12 (feat/belt-gate — the station's MECHANICAL gate) — the
+# PROPOSE stage now tells the agent that the gate VERIFIES before a human sees
+# anything (it applies the diff in a throwaway worktree and runs the repo's
+# checks) and that a failing check REFUSES the proposal. Without this the
+# preamble's existing "if the gate returns an error, say so plainly" line would
+# have the agent report defeat on a verification failure, when the right move is
+# to read the named failing check, fix it, and call the gate again. "Say so
+# plainly" now applies to an error it CANNOT fix.
+#
 # Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — ``build_preamble`` now
 # consumes ``meta.repo`` + ``meta.base_branch`` (the repo + branch the /belt page
 # bound for this run). When BOTH are present it injects a "Your repo / base
@@ -162,8 +171,13 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "3. PROPOSE VIA THE GATE. Produce a clean unified diff of your change and "
         f"{propose_instruction}This is the ONLY way a change leaves "
         "the station. NEVER apply your change to the user's branches directly, "
-        "NEVER `git push`, NEVER `git merge`. If the gate tool is unavailable or "
-        "returns an error, say so PLAINLY — do NOT claim the change was proposed "
+        "NEVER `git push`, NEVER `git merge`. The gate VERIFIES before a human "
+        "sees anything: it applies your diff in a throwaway worktree and runs the "
+        "repo's checks, and a failing check REFUSES the proposal — no action is "
+        "filed. That error names the failing check and carries its output, so FIX "
+        "it and call the gate again rather than reporting defeat. If the gate tool "
+        "is unavailable or returns an error you cannot fix, say so PLAINLY — do "
+        "NOT claim the change was proposed "
         "(no phantom successes). After the gate accepts the proposal, tell the "
         "user the change is waiting in the Tray for review, and that on approve it "
         "is applied in a worktree, branched, and opened as a PR.\n"
