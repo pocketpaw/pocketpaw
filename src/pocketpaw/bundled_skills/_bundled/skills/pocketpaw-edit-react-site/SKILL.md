@@ -297,9 +297,16 @@ Every edit is held to the bar the page was built to. Briefly:
 - **Other photography comes from `mcp__pocketpaw_stock__search_stock_images`** with a
   generic descriptive query. Embed the returned `url` directly, set `alt` from
   the returned `alt`, and render the returned `credit` — the providers' terms
-  require it. On an empty result, use a gradient or solid treatment. **Never
-  fabricate a photo URL**; a made-up `src` is a broken image on a live site.
-  Set `width`/`height` (or `aspect-ratio`) so the page does not jump.
+  require it. **Never fabricate a photo URL**; a made-up `src` is a broken image
+  on a live site. Set `width`/`height` (or `aspect-ratio`) so the page does not
+  jump.
+- **What stock cannot supply, generate** with
+  `mcp__pocketpaw_site_media__generate_site_image` (pass the `pocket_id` and a
+  concrete visual prompt): a bespoke hero, a product or concept shot, a brand
+  texture. It **costs money per image**, so use it deliberately and never for
+  photography stock already covers. It returns a permanent public `url`; embed it
+  verbatim. If it errors, relay the reason and fall back to a gradient or solid
+  treatment rather than a broken `<img>`.
 - **Video and other media are allowed.** A `video` asset from the manifest (or
   one the user supplies) belongs on the page at its native medium; there is no
   images-only rule. The only asset rule is that the URL is one you were given.
@@ -422,5 +429,6 @@ Never fall back to another engine's tool, and never fall back to
 - `mcp__pocketpaw_sites_manager__edit_svelte_component` — the svelte-track sibling
 - `mcp__pocketpaw_sites_manager__list_site_assets` — the owner's own uploaded images
 - `mcp__pocketpaw_stock__search_stock_images` — real photography for a new section
+- `mcp__pocketpaw_site_media__generate_site_image` — imagery stock cannot supply
 - `mcp__pocketpaw_icons__search_icons` — feature icons
 - `mcp__pocketpaw_palette__scale_from_color` / `extract_palette` — brand colour

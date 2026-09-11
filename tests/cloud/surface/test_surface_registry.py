@@ -264,10 +264,19 @@ def test_sites_all_modes_drop_file_and_shell_builtins():
 
 from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.palette import PALETTE_TOOL_IDS  # noqa: E402
+from pocketpaw_ee.agent.mcp_servers.site_media import SITE_MEDIA_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.stock_images import STOCK_TOOL_IDS  # noqa: E402
 
-_TOOLBELT_IDS = frozenset(STOCK_TOOL_IDS) | frozenset(ICON_TOOL_IDS) | frozenset(PALETTE_TOOL_IDS)
+# site_media joins the belt: generation is the rung BELOW stock in the sourcing
+# ladder (stock is free and instant), but an id absent from sites_allow is
+# silently filtered, so the ladder's last rung would simply never fire.
+_TOOLBELT_IDS = (
+    frozenset(STOCK_TOOL_IDS)
+    | frozenset(ICON_TOOL_IDS)
+    | frozenset(PALETTE_TOOL_IDS)
+    | frozenset(SITE_MEDIA_TOOL_IDS)
+)
 
 
 def _sites_create_metas():

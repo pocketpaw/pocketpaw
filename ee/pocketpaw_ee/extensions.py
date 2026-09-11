@@ -959,6 +959,38 @@ class CloudMediaMcpProvider:
         return list(MEDIA_TOOL_IDS)
 
 
+class CloudSiteMediaMcpProvider:
+    """`pocketpaw.mcp_servers` — the SITE-authoring media server
+    (``pocketpaw_site_media``). Hosts ``generate_site_image`` only.
+
+    Separate from ``CloudMediaMcpProvider`` because a site asset needs a
+    different SINK: media.py writes the private adapter and hands back a
+    backend-relative ``/api/v1/media/<name>``, which resolves against the
+    published site's own domain and 404s. This one writes ``sites.public_assets``
+    and returns an absolute public URL, skips the chat-canvas gallery pocket, and
+    records the generation in the /studio history tagged ``source="sites"``.
+
+    Ambient like the media server. NOTE that the /sites allow-list entry does not
+    confine it: ``allow_mcp_tool_ids`` is None (= unrestricted) on every surface
+    spec that sets no profile, so this is reachable from /chat as well. The tool
+    guards itself instead, by refusing a pocket the caller's workspace does not
+    own. Do not read the allow-list entry as a boundary.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.site_media import build_site_media_server
+
+            return build_site_media_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.site_media import SITE_MEDIA_TOOL_IDS
+
+        return list(SITE_MEDIA_TOOL_IDS)
+
+
 class CloudOtherHandMcpProvider:
     """`pocketpaw.mcp_servers` — the Otherhand illustration server
     (``pocketpaw_other_hand``). Hosts ``illustrate`` only.

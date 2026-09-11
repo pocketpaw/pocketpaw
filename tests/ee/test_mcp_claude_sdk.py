@@ -1,5 +1,21 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-09-11 (feat/site-media-tools) — ``_strip_builtin_servers`` now also
+  drops ``pocketpaw_site_media`` (generate_site_image / generate_site_video,
+  registered always-on via the ``site_media`` mcp_servers entry point, NOT in
+  ``OPT_IN_MCP_SERVERS``). Same regime as ``pocketpaw_stock`` /
+  ``pocketpaw_sites_manager``: ambient registration, and the /sites surface
+  profile is where it is scoped. Worth saying plainly, because this server is
+  the one where that sentence is least true — ``allow_mcp_tool_ids`` defaults to
+  None, which is NO restriction, so the profile is not a boundary at all and the
+  tools check pocket ownership themselves before they spend. Six external-config
+  assertions counted it as external config and CI went red.
+
+  Sixteenth entry. The 2026-07-27 note below asked for somewhere more specific
+  for "a builtin server landed" to fail, and nine months of entries later it
+  still fails here first — in a file whose name gives no hint that registering a
+  server is what broke it.
+
 Updated: 2026-09-10 (feat/agentic-studio-editor) — ``_strip_builtin_servers``
   now also drops ``pocketpaw_timeline`` (the /studio/editor timeline verbs
   edit_timeline / export_timeline, registered always-on via the
@@ -141,6 +157,7 @@ from pocketpaw_ee.agent.mcp_servers.planner import (
 from pocketpaw_ee.agent.mcp_servers.planner import SERVER_NAME as _PLANNER_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.ship import SERVER_NAME as _SHIP_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.site_media import SERVER_NAME as _SITE_MEDIA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME as _SITES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.stock_images import SERVER_NAME as _STOCK_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
@@ -184,6 +201,11 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``pocketpaw_sites_manager`` is always-on too — the bundled
     # pocketpaw-create-site skill calls it without an explicit opt-in.
     out.pop(_SITES_MCP_SERVER_NAME, None)
+    # ``pocketpaw_site_media`` is always-on too — the site-authoring skills call
+    # generate_site_image without an explicit opt-in. Registration is NOT the
+    # boundary here (the /sites allow-list defaults to no restriction); the tool
+    # checks the pocket belongs to the caller's workspace before it spends.
+    out.pop(_SITE_MEDIA_MCP_SERVER_NAME, None)
     # ``pocketpaw_connectors`` is always-on — the M3-derived connector skills
     # (gmail/github) call connector_execute without an explicit opt-in.
     out.pop(_CONNECTORS_MCP_SERVER_NAME, None)
