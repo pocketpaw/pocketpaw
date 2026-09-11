@@ -25,6 +25,13 @@
 #     frontend's schema), and an invalid one is dropped unpaid. A later
 #     ``build`` may name a design it owns (``Act.design_id``) so the frontend
 #     draws the citizen's own building; the service checks the ownership.
+#   * RESOURCES ride the same re-validation: a build or a verb with a bundle
+#     (``TechNode.stock_cost`` / ``physics.stock_costs[verb]``) is dropped when
+#     the citizen's stock is short, and the drop is written as a zero-cost
+#     ``gate`` row with ``data.short`` so the paper can name the bottleneck.
+#     The SPRING is the bank: ``trade`` with ``to: "spring"`` swaps 4 of one
+#     resource for 1 of another against the citizen's own stock, at the speak
+#     price (a ``trade`` row must cost). Stock moves land in ``stock_delta``.
 
 """The pure terrarium world engine: verbs, tech gating, and the write-policy."""
 
@@ -42,6 +49,10 @@ from pocketpaw_ee.terrarium.physics import PhysicsFile
 
 # The tech node that grants ``design``.
 DESIGN_TECH = "workshop"
+
+# The bank. ``trade`` addressed here swaps resources instead of gifting credits.
+SPRING = "spring"
+SPRING_RATE = 4  # give 4 of A, get 1 of B
 
 # Verb -> Journal event kind. ``speak`` reads as ``say`` on the wire (the
 # contract's kind list), so the mapping is explicit rather than implied.
@@ -86,6 +97,9 @@ class Act(BaseModel):
     # ``design_id``: for ``build``, a design this citizen owns.
     design: Any = None
     design_id: str | None = None
+    # ``trade`` to the spring: give 4 of one resource, want 1 of another.
+    give: dict[str, int] = Field(default_factory=dict)
+    want: dict[str, int] = Field(default_factory=dict)
 
 
 class Decision(BaseModel):
@@ -114,6 +128,7 @@ class CitizenSnapshot:
     generation: int = 1
     ocean: dict[str, float] = field(default_factory=dict)
     values: tuple[str, ...] = ()
+    stock: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -160,6 +175,7 @@ class NewEvent:
     origin: str = "citizen"
     viewer_origin: bool = False
     node: str | None = None
+    data: dict[str, Any] | None = None
 
 
 @dataclass
@@ -191,6 +207,8 @@ class TickOutcome:
     transfers: list[tuple[str, int]] = field(default_factory=list)
     spawn_requests: list[dict[str, Any]] = field(default_factory=list)
     dropped: list[str] = field(default_factory=list)
+    # Resource moves this tick, signed per resource (bundles charged, spring swaps).
+    stock_delta: dict[str, int] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -295,12 +313,35 @@ def _verb_cost(physics: PhysicsFile, act: Act) -> int:
         if node is not None:
             return node.cost
     if act.verb == "trade":
-        return max(0, int(act.amount))
+        # A spring swap is a bank fee, not a gift: it rides the speak price.
+        return physics.costs.speak if act.to == SPRING else max(0, int(act.amount))
     if act.verb == "vote":
         # ``vote`` has no entry in the contract's costs map but invariant 2
         # forbids a zero-cost vote, so it rides the speak price.
         return physics.costs.speak
     return int(getattr(physics.costs, act.verb, 0) or 0)
+
+
+def _short(bundle: dict[str, int], stock: dict[str, int]) -> dict[str, int]:
+    """What is missing to cover ``bundle`` — only the short amounts."""
+    return {k: v - stock.get(k, 0) for k, v in bundle.items() if stock.get(k, 0) < v}
+
+
+def _spring_error(physics: PhysicsFile, act: Act) -> str | None:
+    """Why this spring swap is malformed, or None. 4 of A for 1 of B, A != B."""
+    if len(act.give) != 1 or len(act.want) != 1:
+        return "the spring swaps one resource for one other"
+    (a, ga), (b, wb) = next(iter(act.give.items())), next(iter(act.want.items()))
+    if a not in physics.resources or b not in physics.resources or a == b:
+        return f"the spring does not swap {a} for {b}"
+    if wb < 1 or ga != SPRING_RATE * wb:
+        return f"the spring swaps {SPRING_RATE} {a} for 1 {b}"
+    return None
+
+
+def _move(outcome: TickOutcome, stock: dict[str, int], name: str, amount: int) -> None:
+    stock[name] = stock.get(name, 0) + amount
+    outcome.stock_delta[name] = outcome.stock_delta.get(name, 0) + amount
 
 
 def apply_acts(
@@ -321,6 +362,7 @@ def apply_acts(
     outcome = TickOutcome()
     allowed = set(physics.verbs)
     held = set(citizen.unlocked)
+    stock = dict(citizen.stock)  # running, so one tick cannot spend a unit twice
 
     tcost = think_cost(physics, storm=storm)
     outcome.events.append(
@@ -362,11 +404,16 @@ def apply_acts(
                 outcome.dropped.append(f"build {act.node}: needs {missing} first")
                 continue
 
-        if verb == "trade":
+        if verb == "trade" and act.to != SPRING:
             if not act.to or cost <= 0:
                 outcome.dropped.append("trade: needs a recipient and a positive amount")
                 continue
             outcome.transfers.append((str(act.to), cost))
+        if verb == "trade" and act.to == SPRING:
+            err = _spring_error(physics, act)
+            if err is not None:
+                outcome.dropped.append(f"trade: {err}")
+                continue
 
         design = None
         if verb == "design":
@@ -388,6 +435,38 @@ def apply_acts(
                 outcome.dropped.append(f"design: {checked}")
                 continue
             design = checked
+
+        # The bundle, on top of credits. A short one is DROPPED and written as
+        # a gate row naming only what is missing, so the drop reaches the paper.
+        bundle = physics.stock_costs.get(verb, {})
+        if verb == "build" and act.node:
+            bundle = physics.tech_tree[act.node].stock_cost
+        if verb == "trade" and act.to == SPRING:
+            bundle = dict(act.give)
+        short = _short(bundle, stock)
+        if short:
+            outcome.dropped.append(f"{verb}: short of {short}")
+            outcome.events.append(
+                NewEvent(
+                    kind="gate",
+                    actor=citizen.name,
+                    body=f"could not {verb}{' ' + act.node if act.node else ''}: short of "
+                    + ", ".join(f"{v} {k}" for k, v in short.items()),
+                    cost=0,
+                    node=act.node or None,
+                    data={"short": short},
+                )
+            )
+            continue
+        for name, amount in bundle.items():
+            _move(outcome, stock, name, -amount)
+        if verb == "trade" and act.to == SPRING:
+            (b, wb) = next(iter(act.want.items()))
+            _move(outcome, stock, b, wb)
+            (a, ga) = next(iter(act.give.items()))
+            act = act.model_copy(
+                update={"text": act.text or f"swapped {ga} {a} for {wb} {b} at the spring"}
+            )
 
         artifact_index: int | None = None
         if verb in VERB_ARTIFACT_KIND:
@@ -470,9 +549,10 @@ def apply_acts(
         )
         balance -= cost
         outcome.balance_delta -= cost
-        if verb != "trade":
+        if verb != "trade" or act.to == SPRING:
             # Spent credits return to the world pool. Traded credits are the
-            # exception: they move citizen → citizen and never touch it.
+            # exception: they move citizen → citizen and never touch it. The
+            # spring's fee is not a gift, so it goes back to the pool.
             outcome.pool_delta += cost
 
     return outcome
@@ -661,6 +741,8 @@ def rung_for(pop: int, unlocked: int) -> str:
 
 __all__ = [
     "DESIGN_TECH",
+    "SPRING",
+    "SPRING_RATE",
     "MOMENT_KIND_RANK",
     "MOMENT_RADIUS",
     "VERB_ARTIFACT_KIND",

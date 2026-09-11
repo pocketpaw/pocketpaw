@@ -22,6 +22,11 @@
 # EventDoc carries a free-form ``data`` payload so a story-layer row (a moment)
 # rides the same Journal as the acts it summarises rather than needing a second
 # collection and a second read path.
+#
+# Resource layer: ``CitizenDoc.stock`` is what a citizen holds of each resource;
+# ``UniverseDoc.weather_marks`` is where rain / drought landed and until when.
+# ``harvest`` (daily production), ``raid`` (the robber), ``gate`` (a bundle
+# short) and ``era`` (the rung changed) are zero-cost kinds.
 
 """Terrarium documents (universe, citizen, event, artifact) + read-path views."""
 
@@ -63,6 +68,8 @@ EVENT_KINDS: tuple[str, ...] = (
     "gain",
     "moment",
     "batch",
+    "harvest",
+    "era",
 )
 
 # Contract invariant 2: every event costs or earns. ``cost: 0`` is legal only
@@ -70,7 +77,7 @@ EVENT_KINDS: tuple[str, ...] = (
 # ``batch`` is the clock speaking, not a citizen: it is written when a dormant
 # world's half-price batch is abandoned and the world goes back to thinking live.
 ZERO_COST_KINDS: frozenset[str] = frozenset(
-    {"gate", "weather", "hibernate", "arrive", "moment", "batch"}
+    {"gate", "weather", "hibernate", "arrive", "moment", "batch", "harvest", "raid", "era"}
 )
 
 
@@ -103,6 +110,9 @@ class UniverseDoc(TimestampedDocument):
     seq: int = 0
     weather_pledges: dict[str, dict[str, Any]] = Field(default_factory=dict)
     storm_ticks: int = 0
+    # Where rain / drought landed: ``{kind, x, y, expires_day}``. Read by the
+    # day's harvest, pruned once expired.
+    weather_marks: list[dict[str, Any]] = Field(default_factory=list)
     # The clock (scheduler.py). ``last_tick_at`` is when the sweeper (or a manual
     # /tick) last advanced the world; ``last_viewed_at`` is when a viewer last
     # read the Journal — a world nobody watches for a world-day goes dormant.
@@ -155,6 +165,7 @@ class CitizenDoc(TimestampedDocument):
     born_day: int = 1
     earned_today: int = 0
     spent_today: int = 0
+    stock: dict[str, int] = Field(default_factory=dict)
 
     class Settings:
         name = "terrarium_citizens"
@@ -235,6 +246,7 @@ class LedgerRow:
     earned_today: int
     spent_today: int
     state: CitizenState
+    stock: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

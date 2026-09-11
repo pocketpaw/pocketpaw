@@ -26,6 +26,7 @@ def test_every_contract_topic_is_registered():
         "world.hibernate",
         "world.ledger",
         "world.moment",
+        "world.era",
     )
     for topic in world_events.TERRARIUM_TOPICS:
         assert topic in EVENT_REGISTRY, f"{topic} never reached EVENT_REGISTRY"
@@ -46,8 +47,20 @@ def test_journal_kinds_map_onto_the_right_topic():
     assert world_events.topic_for("spawn") is world_events.WorldSpawn
     assert world_events.topic_for("hibernate") is world_events.WorldHibernate
     assert world_events.topic_for("moment") is world_events.WorldMoment
+    assert world_events.topic_for("era") is world_events.WorldEra
     # Everything a citizen DOES shares world.act.
-    for kind in ("say", "write", "craft", "build", "explore", "vote", "trade", "arrive"):
+    for kind in (
+        "say",
+        "write",
+        "craft",
+        "build",
+        "explore",
+        "vote",
+        "trade",
+        "arrive",
+        "harvest",
+        "raid",
+    ):
         assert world_events.topic_for(kind) is world_events.WorldAct
 
 

@@ -9,6 +9,9 @@
 # is the contract's one Event shape, plus ``workspace_id`` for the audience
 # resolver's workspace fan-out (mirroring ``belt_plan``).
 #
+# ``world.era`` carries the rung change (camp -> town ...), the one system row
+# a viewer wants a banner for rather than a feed line.
+#
 # NOTE: registration happens at IMPORT time, so this module must be reachable
 # from app boot — it is, via service.py ← router.py ← cloud/__init__.
 
@@ -67,6 +70,11 @@ class WorldMoment(Event):
     EVENT_TYPE: ClassVar[str] = "world.moment"
 
 
+@dataclass
+class WorldEra(Event):
+    EVENT_TYPE: ClassVar[str] = "world.era"
+
+
 # Journal event kind -> the topic it rides. ``think`` is the only kind that
 # gets its own topic (thoughts are the cheap, high-volume stream a viewer can
 # turn off) and ``moment`` gets one because it is the stream a stranger watches
@@ -78,6 +86,10 @@ KIND_TOPIC: dict[str, type[Event]] = {
     "gate": WorldGate,
     "spawn": WorldSpawn,
     "hibernate": WorldHibernate,
+    "era": WorldEra,
+    # Resource rows are things that happened to a citizen; they ride the act feed.
+    "harvest": WorldAct,
+    "raid": WorldAct,
 }
 
 TERRARIUM_TOPICS: tuple[str, ...] = (
@@ -90,6 +102,7 @@ TERRARIUM_TOPICS: tuple[str, ...] = (
     "world.hibernate",
     "world.ledger",
     "world.moment",
+    "world.era",
 )
 
 
@@ -102,6 +115,7 @@ __all__ = [
     "KIND_TOPIC",
     "TERRARIUM_TOPICS",
     "WorldAct",
+    "WorldEra",
     "WorldGate",
     "WorldHibernate",
     "WorldLedger",
