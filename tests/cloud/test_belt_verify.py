@@ -1,5 +1,6 @@
 # tests/cloud/test_belt_verify.py — the develop station's MECHANICAL gate.
 # Created: 2026-09-12 (feat/belt-gate).
+# Updated: 2026-09-12 — per-repo verify commands. See the second section below.
 #
 # What this pins — verification runs BEFORE the human, on REAL git repos and
 # REAL pytest subprocesses (no mocking of git, no mocking of the runner; the
@@ -30,6 +31,17 @@
 #     * no_checks             → the Action IS filed
 #     * belt_verify_enabled=False → verify_diff is never called, the Action is
 #                               filed, `verification` records "disabled"
+#
+#   per-repo commands (belt_verify_commands + the built-in pocketpaw default)
+#     * an operator's argv REPLACES discovery, and is matched on a resolved path
+#     * it is held to the same evidence rule (proves nothing → no_checks) and
+#       FAILS rather than skipping when it cannot launch — a typo in settings
+#       must not switch the gate off
+#     * pocketpaw is recognised by [project].name and gets a real, targeted run
+#     * derivation trusts `test_<parent>_<stem>.py`, and a bare `test_<stem>.py`
+#       only in the module's mirrored directory — a same-named test in an
+#       unrelated tree is proof of nothing wearing a passing count
+#     * a repo with no configured command keeps discovery byte-for-byte
 #
 # Fixture style follows tests/cloud/test_belt_gate.py (local git repos, a tmp
 # InstinctStore, identity via the agent ContextVars). NOTE: pytest addopts hides
@@ -611,7 +623,8 @@ _PP_PYPROJECT = (
 _PP_MODULE = "def greet():\n    return 'hi'\n"
 _PP_MODULE_NEW = "def greet():\n    return 'hi there'\n"
 _PP_TEST = (
-    "from thing import greet\n\n\ndef test_greet():\n    assert greet() in ('hi', 'hi there')\n"
+    "from widgets.thing import greet\n\n\n"
+    "def test_greet():\n    assert greet() in ('hi', 'hi there')\n"
 )
 
 _needs_uv = pytest.mark.skipif(shutil.which("uv") is None, reason="the built-in default shells uv")
@@ -625,8 +638,9 @@ def pocketpaw_repo(tmp_path: Path) -> Path:
 
     Deliberately tiny: it declares the same `ee` and `dev` groups the real
     default syncs, so the REAL argv runs here in ~2s instead of the real suite's
-    forever. `tests/test_thing.py` is NOT in the diff below — the built-in has to
-    derive it from the touched module's name."""
+    forever. `widgets/thing.py` mirrors into `tests/widgets/test_thing.py` — the
+    layout the derivation trusts — and that test is NOT in the diff below, so
+    the built-in has to find it from the touched module."""
     return _seed(
         tmp_path / "pocketpaw",
         {
@@ -634,9 +648,10 @@ def pocketpaw_repo(tmp_path: Path) -> Path:
             # A root conftest puts the repo root on sys.path, so the test below
             # imports the APPLIED tree's module rather than failing to find it.
             "conftest.py": "",
-            "thing.py": _PP_MODULE,
-            "tests/test_thing.py": _PP_TEST,
-            # A module with no conventionally-named test — the skip case.
+            "widgets/__init__.py": "",
+            "widgets/thing.py": _PP_MODULE,
+            "tests/widgets/test_thing.py": _PP_TEST,
+            # A module nothing covers — the skip case.
             "orphan.py": "X = 1\n",
         },
     )
@@ -793,11 +808,10 @@ def test_pocketpaw_is_identified_by_project_name(pocketpaw_repo, py_repo):
 
 def test_pocketpaw_targets_follow_the_repo_naming_convention(pocketpaw_repo):
     """Targeting is derived from the diff two ways: test files it carries, and
-    the conventional test file for each module it touches.
+    the test that COVERS each module it touches.
 
     `test_<parent>_<stem>` is in there because that IS this repo's convention —
-    cloud/belt/verify.py is covered by tests/cloud/test_belt_verify.py. A looser
-    `*<stem>*` glob would drag half the suite in on a module named `service`."""
+    cloud/belt/verify.py is covered by tests/cloud/test_belt_verify.py."""
     (pocketpaw_repo / "ee/pocketpaw_ee/cloud/belt").mkdir(parents=True)
     (pocketpaw_repo / "ee/pocketpaw_ee/cloud/belt/verify.py").write_text("X = 1\n")
     (pocketpaw_repo / "tests/cloud").mkdir(parents=True)
@@ -808,10 +822,40 @@ def test_pocketpaw_targets_follow_the_repo_naming_convention(pocketpaw_repo):
         "tests/cloud/test_belt_verify.py"
     ]
 
-    # A module with no conventionally-named test finds nothing — the honest
-    # floor, rather than widening to a directory that would blow the budget.
+    # A module with no test covering it finds nothing — the honest floor, rather
+    # than widening to a directory that would blow the budget.
     orphan = _diff("ee/pocketpaw_ee/cloud/belt/orphan.py", "X = 1\n", "X = 2\n")
     assert belt_verify._pocketpaw_targets(pocketpaw_repo, orphan) == []
+
+
+def test_a_bare_test_name_only_counts_in_the_mirrored_directory(pocketpaw_repo):
+    """The bare `test_<stem>.py` form needs the module's own parent directory —
+    otherwise a same-named test somewhere unrelated becomes 'proof'.
+
+    Measured on origin/dev, matching the bare name anywhere hits 758 of 1591
+    modules, but 472 of those share no directory with the module: instinct/
+    store.py would pull in tests/atlas/test_store.py. Running that and reporting
+    its passing count is not a slow gate, it is a lying one — the same false
+    green _require_evidence refuses. Directory affinity cuts it to 286, nearly
+    all resolving to exactly one file."""
+    (pocketpaw_repo / "src/pocketpaw/browser").mkdir(parents=True)
+    (pocketpaw_repo / "src/pocketpaw/browser/driver.py").write_text("X = 1\n")
+    (pocketpaw_repo / "src/pocketpaw/instinct").mkdir(parents=True)
+    (pocketpaw_repo / "src/pocketpaw/instinct/store.py").write_text("X = 1\n")
+    # Mirrors the module's layout — trustworthy.
+    (pocketpaw_repo / "tests/browser").mkdir(parents=True)
+    (pocketpaw_repo / "tests/browser/test_driver.py").write_text("def test_x():\n    pass\n")
+    # Same file name, unrelated subsystem — must NOT be treated as coverage.
+    (pocketpaw_repo / "tests/atlas").mkdir(parents=True)
+    (pocketpaw_repo / "tests/atlas/test_store.py").write_text("def test_x():\n    pass\n")
+
+    mirrored = _diff("src/pocketpaw/browser/driver.py", "X = 1\n", "X = 2\n")
+    assert belt_verify._pocketpaw_targets(pocketpaw_repo, mirrored) == [
+        "tests/browser/test_driver.py"
+    ]
+
+    cross_tree = _diff("src/pocketpaw/instinct/store.py", "X = 1\n", "X = 2\n")
+    assert belt_verify._pocketpaw_targets(pocketpaw_repo, cross_tree) == []
 
 
 @_needs_uv
@@ -828,7 +872,7 @@ async def test_pocketpaw_default_runs_the_real_argv_and_passes(pocketpaw_repo):
     result = await belt_verify.verify_diff(
         repo=str(pocketpaw_repo),
         base_branch="main",
-        diff=_diff("thing.py", _PP_MODULE, _PP_MODULE_NEW),
+        diff=_diff("widgets/thing.py", _PP_MODULE, _PP_MODULE_NEW),
         timeout_s=300,
     )
 
@@ -837,7 +881,7 @@ async def test_pocketpaw_default_runs_the_real_argv_and_passes(pocketpaw_repo):
     assert (check.name, check.ok, check.skipped) == ("pytest(pocketpaw)", True, False)
     # The real command, and the derived target — not a discovered `uv run pytest`.
     assert "--group ee --group dev" in check.output
-    assert "tests/test_thing.py" in check.output
+    assert "tests/widgets/test_thing.py" in check.output
     assert _worktrees(pocketpaw_repo) == []
 
 
@@ -858,12 +902,22 @@ async def test_pocketpaw_default_selects_the_documented_argv(pocketpaw_repo, mon
     await belt_verify.verify_diff(
         repo=str(pocketpaw_repo),
         base_branch="main",
-        diff=_diff("thing.py", _PP_MODULE, _PP_MODULE_NEW),
+        diff=_diff("widgets/thing.py", _PP_MODULE, _PP_MODULE_NEW),
         timeout_s=120,
     )
 
     assert seen == [
-        ["uv", "run", "--group", "ee", "--group", "dev", "pytest", "-q", "tests/test_thing.py"]
+        [
+            "uv",
+            "run",
+            "--group",
+            "ee",
+            "--group",
+            "dev",
+            "pytest",
+            "-q",
+            "tests/widgets/test_thing.py",
+        ]
     ]
 
 
@@ -893,7 +947,7 @@ async def test_configured_command_beats_the_pocketpaw_default(pocketpaw_repo):
     result = await belt_verify.verify_diff(
         repo=str(pocketpaw_repo),
         base_branch="main",
-        diff=_diff("thing.py", _PP_MODULE, _PP_MODULE_NEW),
+        diff=_diff("widgets/thing.py", _PP_MODULE, _PP_MODULE_NEW),
         timeout_s=120,
         commands={str(pocketpaw_repo): [sys.executable, "-c", "import sys; sys.exit(7)"]},
     )

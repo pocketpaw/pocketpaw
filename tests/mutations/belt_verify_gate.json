@@ -196,5 +196,14 @@
       "tests/cloud/test_belt_verify.py::test_commands_setting_is_threaded_through",
       "tests/cloud/test_belt_verify.py::test_configured_failure_reaches_the_caller"
     ]
+  },
+  {
+    "label": "a same-named test in an unrelated tree counts as coverage, so the gate greens on proof of nothing",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    return (\n        Path(test_rel).name == f\"test_{module.stem}.py\"\n        and module.parent.name in Path(test_rel).parts[:-1]\n    )",
+    "replace": "    return Path(test_rel).name == f\"test_{module.stem}.py\"",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_a_bare_test_name_only_counts_in_the_mirrored_directory"
+    ]
   }
 ]

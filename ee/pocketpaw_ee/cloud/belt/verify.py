@@ -361,33 +361,57 @@ def _is_pocketpaw(tree: Path) -> bool:
         return False
 
 
+def _covers(module: Path, test_rel: str) -> bool:
+    """True when ``test_rel`` is plausibly the test FOR ``module`` — two forms,
+    both taken from the convention pocketpaw actually uses:
+
+      * ``test_<parent>_<stem>.py`` anywhere under tests/ —
+        ``cloud/belt/verify.py`` → ``tests/cloud/test_belt_verify.py``.
+      * a bare ``test_<stem>.py``, but ONLY under a directory named for the
+        module's own parent — ``browser/driver.py`` → ``tests/browser/
+        test_driver.py``, the mirrored-layout case.
+
+    The directory requirement on the bare form is the whole point. Measured over
+    origin/dev, matching ``test_<stem>.py`` anywhere hits 758 of 1591 modules —
+    but 472 of those hits share no directory with the module at all, and 305 are
+    ambiguous between several same-named files. ``instinct/store.py`` would pull
+    in ``tests/atlas/test_store.py``; ``cloud/belt/executor.py`` would pull in
+    ``tests/cloud/runs/test_executor.py``. Running an unrelated suite is not a
+    slow gate, it is a LYING one: it reports a passing count for a change that
+    file never touched, which is the same false green ``_require_evidence``
+    exists to refuse. With the directory rule it is 286 modules, 278 of them
+    resolving to exactly one file.
+
+    Missing a real test is the acceptable failure here — it lands on a named
+    skip, and the diff-carried test files above are exact and unaffected."""
+    if Path(test_rel).name == f"test_{module.parent.name}_{module.stem}.py":
+        return True
+    return (
+        Path(test_rel).name == f"test_{module.stem}.py"
+        and module.parent.name in Path(test_rel).parts[:-1]
+    )
+
+
 def _pocketpaw_targets(tree: Path, diff: str) -> list[str]:
     """Test paths for a pocketpaw diff: the test files it already carries, plus
-    the conventionally-named test file for each source module it touches.
+    the test that covers each source module it touches (see ``_covers``).
 
     Bounded BY CONSTRUCTION — the whole pocketpaw suite is far past any
-    propose-time budget, so this never widens to a directory. The naming
-    convention is the one the repo actually uses (``cloud/belt/verify.py`` →
-    ``tests/cloud/test_belt_verify.py``), which is why ``test_<parent>_<stem>``
-    is tried alongside ``test_<stem>``; a looser ``*<stem>*`` glob would drag in
-    half the suite on a module called ``service`` or ``models``."""
+    propose-time budget, so this never widens to a directory."""
     targets = set(_pytest_targets(tree, diff))
 
-    wanted: set[str] = set()
-    for raw in _diff_paths(diff):
-        path = Path(raw)
-        if path.suffix != ".py" or _is_test_file(path.name):
-            continue
-        wanted.add(f"test_{path.stem}.py")
-        if path.parent.name:
-            wanted.add(f"test_{path.parent.name}_{path.stem}.py")
-
+    modules = [
+        Path(raw)
+        for raw in _diff_paths(diff)
+        if Path(raw).suffix == ".py" and not _is_test_file(Path(raw).name)
+    ]
     tests_root = tree / "tests"
-    if wanted and tests_root.is_dir():
-        # One walk for every candidate name, not one glob per touched module.
+    if modules and tests_root.is_dir():
+        # One walk for every touched module, not one glob per module.
         for found in tests_root.rglob("test_*.py"):
-            if found.name in wanted:
-                targets.add(str(found.relative_to(tree)))
+            rel = str(found.relative_to(tree))
+            if any(_covers(m, rel) for m in modules):
+                targets.add(rel)
     return sorted(targets)
 
 
