@@ -123,3 +123,27 @@ class TestGenerateTitle:
         assert "how do I add a chart to my home?" in seen["prompt"]
         assert "Home page snapshot" not in seen["prompt"]
         assert "pinned widgets" not in seen["prompt"]
+
+
+class _Refused(Exception):
+    """Stands in for the SDK's AuthenticationError without importing it."""
+
+    status_code = 401
+
+
+class _Broken(Exception):
+    status_code = 500
+
+
+def test_an_auth_refusal_is_logged_without_a_traceback(caplog):
+    """A rejected key is an expected outcome, not a crash.
+
+    The titler already falls back, but it used to log the refusal with exc_info, and
+    the resulting traceback reads as a failed agent run. It sent someone debugging the
+    agent after a chat title quietly fell back, which was the only thing that happened.
+    """
+    from pocketpaw.memory.titler import _is_auth_failure
+
+    assert _is_auth_failure(_Refused()) is True
+    assert _is_auth_failure(_Broken()) is False
+    assert _is_auth_failure(ValueError("not an API failure at all")) is False
