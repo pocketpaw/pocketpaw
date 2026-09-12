@@ -141,9 +141,7 @@ async def test_cap_uncapped_enterprise_never_trips(mongo_db, billing_on) -> None
     assert limit is None
 
 
-async def test_the_cap_holds_with_billing_off(
-    mongo_db, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_the_cap_holds_with_billing_off(mongo_db, monkeypatch: pytest.MonkeyPatch) -> None:
     """The gate is NO LONGER behind ``billing_enforced`` (2026-09-12).
 
     This test used to assert the opposite, and it was right about the code and
