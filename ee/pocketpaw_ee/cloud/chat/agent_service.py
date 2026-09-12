@@ -275,6 +275,7 @@ if TYPE_CHECKING:
     # render an about-block.
     from pocketpaw_ee.cloud.people.domain import Person
 
+from pocketpaw.agents.backend import ImageAttachment
 from pocketpaw.ripple import (
     HOME_POCKET_PROMPT,
     INLINE_RIPPLE_SYSTEM_PROMPT,
@@ -2791,6 +2792,116 @@ async def _publish_media_attachment(
     )
 
 
+# Image mimes a model can be shown directly. This is the intersection of what the
+# Claude Messages API accepts as an image block and what pydantic-ai will hand a
+# provider — png, jpeg, gif, webp. Anything outside it either has to be converted
+# first (below) or is not an image at all.
+_MODEL_IMAGE_MIMES: frozenset[str] = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp"}
+)
+
+# Image mimes worth converting rather than refusing. HEIC is the one that
+# matters: it is what an iPhone shoots by default, so "images work now" would be
+# false for a large share of the photos people actually attach. Sending one
+# through unconverted is not an option — it is not on the API's list, and the
+# failure is a rejected request rather than a degraded answer.
+_TRANSCODE_TO_PNG_MIMES: frozenset[str] = frozenset(
+    {"image/heic", "image/heif", "image/tiff", "image/bmp"}
+)
+
+
+def _to_png(raw: bytes, *, mime: str) -> bytes:
+    """Decode ``raw`` and re-encode it as PNG. Raises if it cannot be read.
+
+    Runs in a worker thread at the call site: Pillow's decode is CPU-bound and
+    would otherwise stall the event loop for the whole turn on a large photo.
+    """
+    import io as _io
+
+    from PIL import Image
+
+    if mime in {"image/heic", "image/heif"}:
+        # Pillow has no native HEIF decoder (PIL.features.check("heif") is False
+        # on Pillow 12.2); without the opener this raises UnidentifiedImageError.
+        # Same registration ``extraction/local.py`` does, for the same reason.
+        import pillow_heif
+
+        pillow_heif.register_heif_opener()
+
+    buf = _io.BytesIO()
+    with Image.open(_io.BytesIO(raw)) as img:
+        # PNG carries no CMYK and no 16-bit palette; RGB(A) survives every source
+        # format here, and dropping an alpha channel a photo never had costs
+        # nothing.
+        img.convert("RGBA" if "A" in img.getbands() else "RGB").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def resolve_turn_images(
+    ctx: ScopeContext,
+    attachments: list[dict[str, Any]] | None,
+) -> tuple[ImageAttachment, ...]:
+    """Resolve the turn's image attachments into bytes the model can be shown.
+
+    THIS IS THE FIX FOR "the agent cannot see my image". Every attachment used to
+    become TEXT — the block was built from ``chain.run``, the default extraction
+    chain is ``["local"]``, and ``LocalExtractor`` answers an image by running
+    OCR. A photo of a person or a place OCRs to nothing, so the model was handed
+    "(no text extracted)" and reported the file was empty. Both SDKs beneath us
+    take images natively; nothing was translating for them.
+
+    Failures are per-file and quiet: an image that cannot be resolved, read or
+    converted is simply not in the returned tuple, and
+    ``_build_attachments_block`` still names it to the model so the turn says a
+    file arrived rather than pretending none did.
+
+    Never raises — a broken upload must not cost the user their turn.
+    """
+    if not attachments or not ctx.workspace_id:
+        return ()
+
+    try:
+        from pocketpaw_ee.cloud.uploads.resolver import default_resolver
+
+        resolver = default_resolver()
+    except Exception:
+        logger.debug("resolver unavailable; no images this turn", exc_info=True)
+        return ()
+
+    out: list[ImageAttachment] = []
+    for att in attachments:
+        if len(out) >= _ATTACHMENT_MAX_FILES:
+            break
+        if not isinstance(att, dict):
+            continue
+        url = att.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        try:
+            async with resolver.open_local_for_url(url, workspace=ctx.workspace_id) as resolved:
+                if resolved is None:
+                    continue
+                rec, path = resolved
+                mime = getattr(rec, "mime", "") or ""
+                if mime not in _MODEL_IMAGE_MIMES and mime not in _TRANSCODE_TO_PNG_MIMES:
+                    continue
+                raw = await asyncio.to_thread(Path(path).read_bytes)
+                if mime in _TRANSCODE_TO_PNG_MIMES:
+                    raw = await asyncio.to_thread(_to_png, raw, mime=mime)
+                    mime = "image/png"
+                out.append(
+                    ImageAttachment(
+                        data=raw,
+                        media_type=mime,
+                        filename=getattr(rec, "filename", "") or "attachment",
+                    )
+                )
+        except Exception:
+            logger.warning("could not prepare attachment %s as an image", url, exc_info=True)
+            continue
+    return tuple(out)
+
+
 async def _build_attachments_block(
     ctx: ScopeContext,
     attachments: list[dict[str, Any]] | None,
@@ -2863,6 +2974,21 @@ async def _build_attachments_block(
                 published = await _publish_media_attachment(ctx, rec, path, surface=surface)
                 if published:
                     entries.append(published)
+                    processed += 1
+                    continue
+
+                # An image the model is being SHOWN does not also get OCR'd.
+                # Running tesseract over a photo to paste its (empty) output
+                # beside the real thing is the behaviour this change exists to
+                # remove; the entry below just names the file so the model can
+                # refer to it the way the user does.
+                _mime = getattr(rec, "mime", "") or ""
+                if _mime in _MODEL_IMAGE_MIMES or _mime in _TRANSCODE_TO_PNG_MIMES:
+                    entries.append(
+                        f"### {rec.filename} ({_mime}, {rec.size} bytes)\n"
+                        "(attached to this turn as an image — it is in your input, "
+                        "look at it rather than guessing from the filename)"
+                    )
                     processed += 1
                     continue
 

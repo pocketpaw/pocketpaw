@@ -2294,6 +2294,12 @@ class PydanticAIBackend:
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
         allow_mcp_tool_ids: frozenset[str] | None = None,
         exclusive_mcp_tools: bool = False,
+        # Images the user attached to this turn. Consumed, not ignored: pydantic-ai
+        # takes multimodal input as a LIST prompt mixing strings with
+        # ``BinaryContent``, so ``build_multimodal_prompt`` below turns these into
+        # the prompt the agent actually runs on. Empty leaves the prompt a bare
+        # string, which is what every text turn has always sent.
+        image_attachments: tuple[ImageAttachment, ...] = (),
         # The assembled prompt's stable digest (PA-1). Unlike the kwargs above
         # this is NOT withhold-when-empty — it is set on every run — so the pool
         # gates it on this signature instead: declaring the parameter is how a
@@ -2460,7 +2466,12 @@ class PydanticAIBackend:
             # a run's accounting cannot live on it.
             kwargs["usage"] = run_usage
 
-            async with agent.run_stream_events(message, **kwargs) as stream:
+            # The prompt, not the message: with images attached this is a list
+            # carrying BinaryContent parts, which is the only shape pydantic-ai
+            # takes an image in. Without them it is ``message`` itself, so a text
+            # turn is unchanged.
+            prompt = build_multimodal_prompt(message, image_attachments)
+            async with agent.run_stream_events(prompt, **kwargs) as stream:
                 async for event in stream:
                     if handle.stopped:
                         break
