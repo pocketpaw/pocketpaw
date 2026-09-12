@@ -1,0 +1,201 @@
+[
+  {
+    "label": "anyone in the source workspace can give the site away, not just its owner",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "    if (getattr(site, \"owner\", \"\") or \"\") != actor_user_id:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "an admin's transfer lock is ignored, so a site leaves a workspace that forbids data egress",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "    if getattr(source_settings, \"site_transfers_allowed\", True) is False:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "a site on a paid tier can be offered, so the destination silently inherits a plan the source's credit balance is still being charged for",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "            \"This site is being moved right now.\",\n        )\n\n    _check_not_paying(site)",
+    "replace": "            \"This site is being moved right now.\",\n        )",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "the paid guard is not re-checked at accept, so a site upgraded while the offer sat unanswered moves anyway",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "    # destination a plan the source is still being charged for.\n    _check_not_paying(site)",
+    "replace": "    # destination a plan the source is still being charged for.",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "the receiving membership check is dropped, so anyone can pull a site into a workspace they do not belong to just by naming it",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "    if accepting_workspace_id not in tuple(member_workspace_ids or ()):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "an offer addressed to one workspace can be accepted by a different one",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "    if not offered_to or offered_to != (accepting_workspace_id or \"\").strip():",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "the ledger stops being consulted, so a resumed transfer re-runs steps that already completed instead of skipping them",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "        if step in ledger:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "the ledger is never persisted, so a crash part-way leaves no record of which half of the re-key already ran",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "        ledger[step] = outcome\n        site.transfer_ledger = dict(ledger)\n        await save(site)",
+    "replace": "        ledger[step] = outcome\n        site.transfer_ledger = dict(ledger)",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "the customer's leads move before the ownership record, so a transfer that fails and is abandoned leaves the destination holding contact data for a site it never owned",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "TRANSFER_STEPS: tuple[str, ...] = (\n    STEP_OWNERSHIP,\n    STEP_RECORDS,",
+    "replace": "TRANSFER_STEPS: tuple[str, ...] = (\n    STEP_RECORDS,\n    STEP_OWNERSHIP,",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "the minting workspace is never stamped, so the next publish in the new workspace forks the site into a second Worker at a second URL",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "    if not (getattr(site, \"identity_workspace\", \"\") or \"\"):\n        site.identity_workspace = getattr(site, \"workspace\", \"\") or \"\"",
+    "replace": "    if False:\n        site.identity_workspace = getattr(site, \"workspace\", \"\") or \"\"",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "a second transfer overwrites the minting workspace with the most recent source, so the id resolver later re-derives an id the live Worker has never been called",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "    if not (getattr(site, \"identity_workspace\", \"\") or \"\"):\n        site.identity_workspace = getattr(site, \"workspace\", \"\") or \"\"",
+    "replace": "    if True:\n        site.identity_workspace = getattr(site, \"workspace\", \"\") or \"\"",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "the retained public-asset prefix is not recorded, so the site's images become unreclaimable and stay world-readable after the site is deleted",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "    retained = list(getattr(site, \"asset_source_prefixes\", None) or [])\n    if prefix not in retained:\n        retained.append(prefix)\n    site.asset_source_prefixes = retained",
+    "replace": "    retained = list(getattr(site, \"asset_source_prefixes\", None) or [])\n    site.asset_source_prefixes = retained",
+    "tests": [
+      "tests/ee/sites/test_transfer.py",
+      "tests/cloud/sites/test_transfer_authz.py"
+    ]
+  },
+  {
+    "label": "the live-site id resolver ignores the transfer stamp, so a republish after a transfer inserts a second Site doc and uploads a second Worker while the custom domain keeps resolving to the first",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return moved.id if moved is not None else derived",
+    "replace": "    return derived",
+    "tests": [
+      "tests/cloud/sites/test_transfer_authz.py"
+    ]
+  },
+  {
+    "label": "the incoming-offers read loses its tenant filter, so every workspace lists every open transfer offer in the deployment",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            \"transfer_to_workspace\": workspace_id,\n            \"transfer_status\": transfer_mod.STATUS_OFFERED,",
+    "replace": "            \"transfer_status\": transfer_mod.STATUS_OFFERED,",
+    "tests": [
+      "tests/cloud/sites/test_transfer_authz.py"
+    ]
+  },
+  {
+    "label": "the offer moves the site immediately, collapsing the two phases so the destination never consents",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            \"transfer_status\": transfer_mod.STATUS_OFFERED,\n            \"transfer_to_workspace\": dest,",
+    "replace": "            \"transfer_status\": transfer_mod.STATUS_OFFERED,\n            \"workspace\": dest,\n            \"transfer_to_workspace\": dest,",
+    "tests": [
+      "tests/cloud/sites/test_transfer_authz.py"
+    ]
+  },
+  {
+    "label": "the accepting user's memberships are taken from the request header instead of their own record, so naming a workspace is the whole authorisation on the receiving end",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    members = await _member_workspace_ids(user_id)",
+    "replace": "    members = (workspace_id,)",
+    "tests": [
+      "tests/cloud/sites/test_transfer_authz.py"
+    ]
+  },
+  {
+    "label": "the source workspace's members keep their share on the pocket after it moves, which is a cross-tenant grant",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                \"owner\": new_owner_id,\n                \"shared_with\": [],",
+    "replace": "                \"owner\": new_owner_id,",
+    "tests": [
+      "tests/cloud/sites/test_transfer_authz.py"
+    ]
+  },
+  {
+    "label": "the leads are never actually re-keyed, so the site moves while its captured contact data stays in a workspace that can no longer see the site it belongs to",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        result = await _LeadDoc.find({\"workspace\": source_workspace_id, \"site_id\": site_id}).update(\n            {\"$set\": {\"workspace\": destination_workspace_id}}\n        )\n        return bool(getattr(result, \"modified_count\", 0) or 0)",
+    "replace": "        return False",
+    "tests": [
+      "tests/cloud/sites/test_transfer_authz.py"
+    ]
+  },
+  {
+    "label": "a failed or crashed transfer can never be accepted again, so ownership stays split across two tenants and the ledger that recorded exactly which steps ran is never allowed to be read",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "RESUMABLE_STATUSES: tuple[str, ...] = (STATUS_OFFERED, STATUS_IN_FLIGHT, STATUS_FAILED)",
+    "replace": "RESUMABLE_STATUSES: tuple[str, ...] = (STATUS_OFFERED,)",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "purge_prefix reports what it removed without removing it, so a teardown records a completed purge over a bucket still holding a transferred site's world-readable images",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "            await self._adapter.delete(f\"{prefix}{item.name}\")\n            removed += 1\n        return removed",
+    "replace": "            removed += 1\n        return removed",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "purge_prefix stops normalising the trailing separator, so purging one pocket's prefix also sweeps a sibling whose id it is a string prefix of",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "        if not prefix.endswith(\"/\"):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "the teardown skips a transferred site's retained asset prefixes, so deleting it leaves its images world-readable on a public bucket with the only record naming them destroyed in the same run",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "    for prefix in getattr(site, \"asset_source_prefixes\", None) or []:\n        await deps.assets.purge_prefix(prefix)",
+    "replace": "    for prefix in []:\n        await deps.assets.purge_prefix(prefix)",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  }
+]

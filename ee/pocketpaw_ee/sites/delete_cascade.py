@@ -284,6 +284,25 @@ async def _purge_assets(*, site: Any, deps: Any) -> str:
         # ``PublicAssetStore.purge`` raises on rather than reporting zero.
         return OUTCOME_SKIPPED
     await deps.assets.purge(workspace_id=site.workspace, pocket_id=site.pocket_id)
+
+    # A TRANSFERRED site's images are NOT under its current workspace. The object
+    # key embeds the workspace that minted them and is baked into an immutable,
+    # year-cached public URL inside the deployed HTML, so a transfer cannot move
+    # the bytes (``sites/transfer.py:_move_assets``) and records the prefixes they
+    # stayed at instead. The purge above derives its prefix from ``site.workspace``
+    # and therefore sweeps an EMPTY prefix on such a site.
+    #
+    # This runs BEFORE the ``records`` step and before the caller deletes the Site
+    # document, which is what makes it possible at all: that document is the only
+    # thing naming these objects, so missing them here does not leave an untidy
+    # bucket, it leaves world-readable customer images that nothing can ever
+    # enumerate again.
+    #
+    # An untransferred site has an empty list and is byte-identical to before.
+    # Failures propagate like any other step's, so a prefix that cannot be purged
+    # fails the cascade through ``_classify`` rather than being swallowed.
+    for prefix in getattr(site, "asset_source_prefixes", None) or []:
+        await deps.assets.purge_prefix(prefix)
     return OUTCOME_DONE
 
 

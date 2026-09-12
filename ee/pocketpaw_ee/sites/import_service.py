@@ -291,7 +291,9 @@ async def _plan_import(
     caller merges any path-specific extras (crawl stats, status)."""
     from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 
-    oid = sites_service._live_object_id(workspace_id, pocket_id)
+    # Resolved, not derived (wave 3) -- a transferred site keeps its minted id, and
+    # a miss here raises rather than degrading.
+    oid = await sites_service._resolve_live_site_oid(workspace_id, pocket_id)
     doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
     if doc is None or not doc.signed_key:
         raise Internal(

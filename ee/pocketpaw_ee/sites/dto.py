@@ -2,6 +2,14 @@
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
 #
+# Updated 2026-09-12 (sites lifecycle wave 3 — transfer): added
+# ``SiteTransferOfferRequest`` / ``SiteTransferResponse`` /
+# ``SiteTransferListResponse``. The response is DELIBERATELY THIN, and that is a
+# tenancy decision rather than an oversight: the DESTINATION reads it for a site
+# that still belongs to another workspace, so it carries only what somebody needs
+# in order to decide whether to accept — never the signed key, the capture config,
+# the lead count or the client record.
+#
 # Updated 2026-09-04 (AD-4 — the overview chart's data): added
 # ``SiteAnalyticsSeriesPoint`` / ``SiteAnalyticsSeries`` and ``SiteAnalyticsResponse.series``,
 # the per-bucket views and visitors the chart under the headline numbers draws. Two things
@@ -220,6 +228,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -1296,3 +1305,45 @@ class SiteAnalyticsResponse(BaseModel):
     countries: list[SiteAnalyticsBreakdown] | None = None
     devices: list[SiteAnalyticsBreakdown] | None = None
     unrecorded: list[str] = []
+
+
+# --- Wave 3: transferring a site to another workspace ----------------------
+#
+# Request and response stay separate, per the DTO rule — the offer takes one field
+# the client supplies, and the response carries several the client must never set.
+
+
+class SiteTransferOfferRequest(BaseModel):
+    """Offer this site to ``destination_workspace_id``."""
+
+    # The only thing the sender supplies. Everything else about the offer — who made
+    # it, when, from where — is read from the request context, because a client that
+    # can name the offerer can forge one.
+    destination_workspace_id: str = Field(min_length=1)
+
+
+class SiteTransferResponse(BaseModel):
+    """One transfer offer, from either end of it.
+
+    DELIBERATELY THIN, and that is a tenancy decision rather than an oversight. The
+    destination reads this for a site that still belongs to somebody else, so it
+    carries only what somebody needs to decide whether to accept: which site, where
+    it is now, who offered it. Not the signed key, not the capture config, not the
+    lead count, not the client record — those stay with the workspace that still
+    owns the site until the offer is answered.
+    """
+
+    site_id: str
+    name: str
+    url: str = ""
+    from_workspace_id: str
+    to_workspace_id: str = ""
+    offered_by: str = ""
+    offered_at: datetime | None = None
+    status: str = "none"
+
+
+class SiteTransferListResponse(BaseModel):
+    """Everything offered TO the calling workspace."""
+
+    transfers: list[SiteTransferResponse] = []

@@ -2037,6 +2037,98 @@ this" from "it does, and you have not republished since you upgraded". Those are
 different sentences and two different buttons. Use this field to disable the panel
 before the call; use `status` to decide what the panel says.
 
+## Sites — Transfer to Another Workspace
+
+Wave 3 of the sites lifecycle. A site could be created, published, edited and paid
+for, but never handed to anyone else. These four endpoints move one between
+workspaces.
+
+**It is an offer and an accept, not one call.** A single endpoint would authorise
+only the sender, which would let anyone who owns a site push it — with its leads and
+its custom domains — into any workspace whose id they could name. The receiving
+tenant consents by accepting.
+
+**Nothing on Cloudflare moves.** The Worker, the D1 database, the custom hostnames
+and the Worker routes are all untouched, and the site keeps serving throughout. What
+changes is which workspace the records belong to.
+
+| Resource | What happens |
+|---|---|
+| Site document, pocket | **Move.** `workspace` and `owner` are re-keyed; the pocket's `shared_with` is emptied, because those users belong to the workspace it just left |
+| Leads | **Move.** Re-keyed to the destination |
+| Site `_id`, Worker script name, public URL | **Preserved, deliberately.** The id IS the script name and the subdomain — see below |
+| Cloudflare Worker, D1 database | **Stay put.** The D1 binding is by database id, so ownership changes in our records only |
+| Custom hostnames, Worker routes | **Stay.** They live on our zone and point at a script that has not changed |
+| Public images (R2) | **Cannot move.** The object key contains the source workspace id and is baked into an immutable, year-cached URL inside the deployed HTML *and* the pocket's stored spec, which nothing rewrites. Copying them to a new prefix would buy nothing and purging the source would blank every image on a live site. The source prefix is recorded on `Site.asset_source_prefixes` so teardown can still reclaim them |
+| Concierge transcripts | **Stay with the source.** They live on `ChatRun` rows keyed on workspace and session, and they hold free text a visitor typed. Moving personal data into a tenant that has never held it is the direction that needs consent |
+| Analytics | **Cannot move.** Cloudflare Analytics Engine rows were written under the old ids and age out on their own three-month retention |
+
+**Why the site id is preserved.** `_live_object_id` derives the Site `_id` from
+`(workspace, pocket_id)`, and that same value is the Worker's script name and the
+subdomain the page is served at. Re-deriving it on transfer would rename a live
+Worker and move a public URL while every custom-domain route kept resolving to the
+old script. So the row keeps the id it was minted with, and `Site.identity_workspace`
+records which workspace minted it — without that stamp, the next publish in the new
+workspace would derive a different id, insert a second Site document, upload a second
+Worker and serve it at a second address, forking the site in two. Rows that have
+never been transferred carry `""` there and take the original derivation unchanged.
+
+**A paid site cannot be moved.** A paid site is charged against the *source*
+workspace's credit balance, and the renewal sweeper debits whichever workspace the
+row names — so re-keying it would start charging the destination for a plan its
+members never bought. Drop the site to the free plan first; the new workspace can
+upgrade it again from its own balance.
+
+### `POST /sites/{site_id}/transfer`
+
+Offer the site to another workspace. Requires `fabric.write`, and the caller must be
+the site's **owner** (not merely a workspace admin — the permission layers here are
+known to disagree with one another, and widening this needs its own audit).
+
+```json
+{ "destination_workspace_id": "665f1c2a9e4b7d3f8a1c2b04" }
+```
+
+Returns the offer. Refusals carry a stable code: `transfer.not_owner` (403),
+`transfer.blocked_by_workspace` (403), `transfer.site_is_paid` (409),
+`transfer.deleting` (409), `transfer.already_offered` (409),
+`transfer.same_workspace` (422). An unknown destination is a 404.
+
+### `DELETE /sites/{site_id}/transfer`
+
+Withdraw an offer that has not been accepted. Owner-only, source side.
+
+### `GET /sites/transfers/incoming`
+
+Sites other workspaces have offered to **this** one. Requires `fabric.read`.
+
+This is the one sites read not anchored on the caller's `workspace` — it cannot be,
+since an offered site still belongs to the sender until it is accepted.
+`transfer_to_workspace` is the tenant filter instead, and only an owner of the
+sending side can write it. The payload is deliberately thin (site id, name, url,
+source workspace, who offered it, when) and never carries the signed key, the capture
+config, the lead count or the client record.
+
+### `POST /sites/transfers/{site_id}/accept`
+
+Accept an offer and take ownership. Requires `fabric.write` in the destination, and
+the caller must be a **member** of it — checked against their own user record, not
+against the workspace named in the request header, since a header is a request rather
+than a credential. A workspace the offer does not name gets a 404 rather than a 403:
+saying "that site was offered elsewhere" would confirm the site exists to a tenant
+with no business knowing that it does.
+
+Synchronous, unlike delete — every step is a local write, so there is nothing to
+poll. The re-key is still ledgered (`Site.transfer_ledger`), because a crash part-way
+would leave ownership split across two tenants; accepting again resumes from the step
+that stopped rather than repeating the ones that finished.
+
+### Forbidding transfers out
+
+`WorkspaceSettings.site_transfers_allowed` (default `true`). A site leaving takes its
+leads with it, so an admin can forbid the outbound half outright. Only the source
+side is gated — the receiving side is governed by consent, not by a setting.
+
 ## Ship — Managed Deploys
 
 SHIP-3. The `/api/v1/ship` surface behind the /ship console: a workspace

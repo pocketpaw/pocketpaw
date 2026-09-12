@@ -2360,7 +2360,10 @@ async def create_draft_site(
     return above, so it fires once per real insert — a repeat create, or one against
     an already-live doc, stays silent.
     """
-    oid = _live_object_id(workspace_id, pocket_id)
+    # Resolved, not derived: a TRANSFERRED site keeps the id it was minted with,
+    # so a create against a moved pocket finds the real row instead of minting a
+    # second one beside it. Identical to the derivation for every other site.
+    oid = await _resolve_live_site_oid(workspace_id, pocket_id)
     # Idempotent + dedupe-safe: never mint a second doc for a pocket, and never reset
     # an already-published/live doc back to draft. If a doc already exists (this draft
     # on a repeat create, or a live one), return it untouched.
@@ -2611,7 +2614,12 @@ async def publish(
     # deploy folder / URL / CF worker / Site doc in place instead of minting a fresh
     # one each call. A PREVIEW build still uses the freshly-minted ObjectId for its
     # transient (never-persisted) doc id and serves at the stable preview path.
-    site_id = str(ObjectId()) if preview else str(_live_object_id(workspace_id, pocket_id))
+    # Wave 3: resolved rather than derived, because a TRANSFERRED site keeps the id
+    # it was minted with (that id is its live Worker's name and its public URL).
+    # Byte-identical to the derivation for every site that has never moved.
+    site_id = (
+        str(ObjectId()) if preview else str(await _resolve_live_site_oid(workspace_id, pocket_id))
+    )
     # PERF-1 fix (review finding): on a live RE-publish the upsert below preserves
     # the stored ``doc.signed_key``, so minting a fresh key here would bake a
     # ``captureSignedKey`` into the built HTML that no longer matches the doc the
@@ -2620,9 +2628,7 @@ async def publish(
     # new key only for a first publish or a preview (which never persists a doc).
     signed_key = f"site_key_{secrets.token_urlsafe(24)}"
     if not preview:
-        _existing = await _SiteDoc.find_one(
-            {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
-        )
+        _existing = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
         if _existing is not None and _existing.signed_key:
             signed_key = _existing.signed_key
 
@@ -4205,7 +4211,10 @@ async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | N
     Tenant-scoped on ``workspace``. Returns None when the pocket has no Site doc.
     """
     stable = await _SiteDoc.find_one(
-        {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
+        # Resolved, not derived (wave 3) -- a transferred site keeps its minted id.
+        # The legacy-dupe fallback below would eventually find it, but by the
+        # newest-with-a-url rule rather than by identity.
+        {"_id": await _resolve_live_site_oid(workspace_id, pocket_id), "workspace": workspace_id}
     )
     if stable is not None:
         return stable
@@ -6249,7 +6258,11 @@ async def publish_pocket(
     # still PENDING has never been paid for, so a republish there SHOULD open a
     # fresh checkout (the abandoned session simply expires unused).
     existing_doc = await _SiteDoc.find_one(
-        {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
+        # Resolved, not derived (wave 3). On a TRANSFERRED site the derivation no
+        # longer names the row, so this read would come back None and every later
+        # republish of a site already on a paid tier would read as "never paid" and
+        # open another purchase against the workspace balance.
+        {"_id": await _resolve_live_site_oid(workspace_id, pocket_id), "workspace": workspace_id}
     )
     # WHO IS ALLOWED TO SPEND. Publishing is a MEMBER action and stays one; buying
     # a paid tier is not. Since site plans became add-on lines on the workspace's
@@ -7224,7 +7237,9 @@ async def _publish_pending_site(
     if not site_name:
         site_name = "Untitled site"
 
-    oid = _live_object_id(workspace_id, pocket_id)
+    # Resolved, not derived — see ``_resolve_live_site_oid``. A transferred site
+    # upgraded from its new workspace must land on the row that is actually live.
+    oid = await _resolve_live_site_oid(workspace_id, pocket_id)
     site_id = str(oid)
     plan_key = tier.key
 
@@ -9925,6 +9940,416 @@ async def sweep_expired_site_exports() -> int:
     return removed
 
 
+# ---------------------------------------------------------------------------
+# Wave 3 — transfer a site to another workspace
+# ---------------------------------------------------------------------------
+#
+# Appended at end-of-file deliberately: this module is ten thousand lines and
+# several agents edit it at once, so the only mid-file changes wave 3 makes are the
+# four one-line call sites that route through ``_resolve_live_site_oid``. The ORDER
+# and the REASONING live in ``sites/transfer.py``; what is here is the Mongo half —
+# the loads, the field-scoped writes, and the mapping from a refusal to a status.
+
+
+async def _resolve_live_site_oid(workspace_id: str, pocket_id: str) -> ObjectId:
+    """The ``_id`` a live publish of this pocket must upsert.
+
+    Normally exactly ``_live_object_id(workspace_id, pocket_id)`` — the PERF-1
+    derivation, unchanged, for every site that has never moved.
+
+    A TRANSFERRED site is the one exception, and it has to be. That derived id is
+    ALSO the Cloudflare Worker's script name and the subdomain the site is served
+    at, so a transfer cannot re-derive it without renaming a live Worker and moving
+    a public URL. The row therefore keeps the id it was minted with — and without
+    this lookup the next publish in the new workspace would derive a DIFFERENT id,
+    insert a SECOND Site doc, upload a SECOND Worker and serve it at a SECOND
+    address, while every custom domain kept resolving to the first one. The site
+    would fork in two, silently, and the half the owner was editing would not be the
+    half their domain pointed at.
+
+    The query keys on ``identity_workspace``, which ONLY a transfer ever sets. Every
+    other row has "" there, matches nothing, and takes the derivation — so the
+    dedupe invariant PERF-1 and PERF-2 established is untouched for every site but a
+    transferred one.
+    """
+    derived = _live_object_id(workspace_id, pocket_id)
+    moved = await _SiteDoc.find_one(
+        {
+            "workspace": workspace_id,
+            "pocket_id": pocket_id,
+            "archived": False,
+            # Not ``{"$ne": ""}``: a site transferred BACK to the workspace that
+            # minted it sits at its derived id again, and diverting it would be
+            # wrong. Excluding this workspace by name covers that round trip.
+            "identity_workspace": {"$nin": ["", None, workspace_id]},
+        }
+    )
+    return moved.id if moved is not None else derived
+
+
+def _transfer_refusal_to_cloud_error(exc: Any) -> CloudError:
+    """Map a precondition refusal onto the status that actually describes it.
+
+    ``not_offered`` is a 404 rather than a 403 on purpose: answering "that site was
+    offered somewhere else" confirms the site exists to a tenant with no business
+    knowing that it does.
+    """
+    if exc.code in (
+        "transfer.not_owner",
+        "transfer.not_a_member",
+        "transfer.blocked_by_workspace",
+    ):
+        return Forbidden(exc.code, exc.message)
+    if exc.code == "transfer.not_offered":
+        return NotFound("site", "transfer")
+    if exc.code in ("transfer.no_destination", "transfer.same_workspace"):
+        return ValidationError(exc.code, exc.message)
+    return ConflictError(exc.code, exc.message)
+
+
+def _transfer_wire(doc: _SiteDoc) -> dict[str, Any]:
+    """The offer, as the wire sees it.
+
+    DELIBERATELY NARROW. The incoming-offers read is the one sites query that
+    crosses a tenancy boundary — the destination reads a row that still belongs to
+    the source — so it carries the few facts needed to decide whether to accept and
+    nothing else. No ``signed_key``, no capture config, no lead counts, no client
+    record: those belong to the workspace that still owns the site until somebody
+    says yes.
+    """
+    return {
+        "siteId": str(doc.id),
+        "name": doc.name or doc.script_name or "",
+        "url": doc.url or "",
+        "fromWorkspaceId": doc.workspace,
+        "offeredBy": doc.transfer_offered_by or "",
+        "offeredAt": doc.transfer_offered_at,
+        "status": doc.transfer_status or "none",
+        "toWorkspaceId": doc.transfer_to_workspace or "",
+    }
+
+
+async def _workspace_settings_for(workspace_id: str) -> Any:
+    """The workspace's settings, or a permissive default when the row is unreadable.
+
+    A missing workspace reads as permissive rather than blocked: the transfer lock
+    is an admin OPT-OUT, and turning an unreadable row into a hard refusal would
+    break transfers for a reason that has nothing to do with the policy.
+    """
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
+    from pocketpaw_ee.cloud.models.workspace import WorkspaceSettings as _WorkspaceSettings
+
+    try:
+        ws = await _WorkspaceDoc.get(workspace_id)
+    except (InvalidId, TypeError):
+        ws = None
+    if ws is None:
+        return _WorkspaceSettings()
+    return ws.settings
+
+
+async def offer_site_transfer(
+    *,
+    workspace_id: str,
+    user_id: str,
+    site_id: str,
+    destination_workspace_id: str,
+) -> dict[str, Any]:
+    """Offer this site to another workspace. Moves nothing yet.
+
+    TWO PHASES, because a one-shot transfer authorises only the sender — and that
+    would let anyone who owns a site push it, with its leads and its custom domains,
+    into any workspace whose id they can name. The destination has to say yes.
+    """
+    from pocketpaw_ee.sites import transfer as transfer_mod
+
+    doc = await _load(workspace_id, site_id)
+    settings = await _workspace_settings_for(workspace_id)
+
+    dest = (destination_workspace_id or "").strip()
+    try:
+        transfer_mod.check_can_offer(
+            site=doc,
+            actor_user_id=user_id,
+            source_settings=settings,
+            destination_workspace_id=dest,
+        )
+    except transfer_mod.TransferRefused as exc:
+        raise _transfer_refusal_to_cloud_error(exc) from exc
+
+    # The destination must EXIST. An offer into a typo would leave the site parked
+    # in ``offered`` forever, with nobody able to accept it and nobody told why.
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
+
+    try:
+        dest_ws = await _WorkspaceDoc.get(dest)
+    except (InvalidId, TypeError):
+        dest_ws = None
+    if dest_ws is None or dest_ws.deleted_at is not None:
+        raise NotFound("workspace", dest)
+
+    # Field-scoped, per the persistence rule: a whole-document save here would roll
+    # back a concurrent build-status write on the same row.
+    await doc.set(
+        {
+            "transfer_status": transfer_mod.STATUS_OFFERED,
+            "transfer_to_workspace": dest,
+            "transfer_offered_by": user_id,
+            "transfer_offered_at": datetime.now(UTC),
+            "transfer_ledger": {},
+            "transfer_reason": None,
+        }
+    )
+    # no-event: an offer changes nothing either gallery renders — the site is still
+    # live and still owned by the source, and the destination's incoming list is a
+    # pull. The emit that matters is on accept, where the card actually moves.
+    return _transfer_wire(doc)
+
+
+async def cancel_site_transfer(*, workspace_id: str, user_id: str, site_id: str) -> dict[str, Any]:
+    """Withdraw an offer. Source side only — the owner who made it takes it back."""
+    from pocketpaw_ee.sites import transfer as transfer_mod
+
+    doc = await _load(workspace_id, site_id)
+    if (doc.transfer_status or "none") != transfer_mod.STATUS_OFFERED:
+        raise ConflictError("transfer.not_offered", "There is no open offer on this site.")
+    if (doc.owner or "") != user_id:
+        raise Forbidden(
+            "transfer.not_owner",
+            "Only the person who owns this site can withdraw its transfer offer.",
+        )
+    await doc.set(
+        {
+            "transfer_status": transfer_mod.STATUS_NONE,
+            "transfer_to_workspace": "",
+            "transfer_offered_by": "",
+            "transfer_offered_at": None,
+            "transfer_ledger": {},
+            "transfer_reason": None,
+        }
+    )
+    # no-event: same reasoning as the offer — nothing rendered changed.
+    return _transfer_wire(doc)
+
+
+async def list_incoming_site_transfers(*, workspace_id: str) -> list[dict[str, Any]]:
+    """Sites another workspace has offered to this one.
+
+    # global-read: the one sites query that CANNOT be anchored on ``workspace``.
+    # The row still belongs to the SOURCE until the offer is accepted, so the
+    # destination's only claim on it is ``transfer_to_workspace`` — and that field
+    # IS the tenant filter here. It is written only by an owner of the sending side,
+    # so a workspace sees exactly what was addressed to it and nothing else.
+    """
+    from pocketpaw_ee.sites import transfer as transfer_mod
+
+    docs = await _SiteDoc.find(
+        {
+            "transfer_to_workspace": workspace_id,
+            "transfer_status": transfer_mod.STATUS_OFFERED,
+        }
+    ).to_list()
+    return [_transfer_wire(d) for d in docs]
+
+
+async def _member_workspace_ids(user_id: str) -> tuple[str, ...]:
+    """Every workspace this user actually belongs to, read from their own User row.
+
+    Read from the USER rather than trusted from the request's workspace header. The
+    header says which tenant the caller is ASKING to act as; this says which ones
+    they may. Without the distinction, accepting a site into a workspace needs only
+    its id, which is the whole authorisation on the receiving end.
+    """
+    from pocketpaw_ee.cloud.models.user import User as _UserDoc
+
+    try:
+        user = await _UserDoc.get(user_id)
+    except (InvalidId, TypeError):
+        user = None
+    if user is None:
+        return ()
+    return tuple(m.workspace for m in (user.workspaces or []))
+
+
+async def accept_site_transfer(*, workspace_id: str, user_id: str, site_id: str) -> dict[str, Any]:
+    """Take ownership of a site offered to this workspace, and run the re-key.
+
+    SYNCHRONOUS, unlike delete, and that is a consequence of the design rather than
+    a shortcut. Every step is a local Mongo write — nothing here calls Cloudflare,
+    because nothing on Cloudflare moves — so there is no external call that can
+    outlive a request and a job would add a poll to an operation that finishes in
+    milliseconds. The ledger still exists, because "milliseconds" is not "atomic":
+    a crash part-way leaves ownership split across two tenants, and the ledger is
+    what lets a second attempt finish it instead of guessing.
+    """
+    from pocketpaw_ee.sites import transfer as transfer_mod
+
+    try:
+        oid = ObjectId(site_id)
+    except (InvalidId, TypeError):
+        raise NotFound("site", site_id) from None
+    # Loaded through the OFFER, not through ``_load``: the row still lives in the
+    # source workspace, so a tenant-scoped read would not find it at all.
+    doc = await _SiteDoc.find_one({"_id": oid, "transfer_to_workspace": workspace_id})
+    if doc is None:
+        raise NotFound("site", site_id)
+
+    members = await _member_workspace_ids(user_id)
+    try:
+        transfer_mod.check_can_accept(
+            site=doc,
+            accepting_user_id=user_id,
+            accepting_workspace_id=workspace_id,
+            member_workspace_ids=members,
+        )
+    except transfer_mod.TransferRefused as exc:
+        raise _transfer_refusal_to_cloud_error(exc) from exc
+
+    source_workspace = doc.workspace
+    await doc.set({"transfer_status": transfer_mod.STATUS_IN_FLIGHT})
+
+    deps = _TransferDeps()
+
+    async def _save(site: _SiteDoc) -> None:
+        # Field-scoped, listing exactly what the re-key touches. A ``save()`` here
+        # would write back every field this document was loaded with, rolling over
+        # any concurrent build-status write on the same row.
+        await site.set(
+            {
+                "workspace": site.workspace,
+                "owner": site.owner,
+                "identity_workspace": site.identity_workspace,
+                "asset_source_prefixes": list(site.asset_source_prefixes or []),
+                "transfer_ledger": dict(site.transfer_ledger or {}),
+                "transfer_status": site.transfer_status,
+                "transfer_to_workspace": site.transfer_to_workspace,
+                "transfer_offered_by": site.transfer_offered_by,
+                "transfer_offered_at": site.transfer_offered_at,
+                "transfer_reason": site.transfer_reason,
+                "transferred_at": site.transferred_at,
+            }
+        )
+
+    try:
+        await transfer_mod.run_transfer(
+            site=doc,
+            destination_workspace_id=workspace_id,
+            accepting_user_id=user_id,
+            deps=deps,
+            save=_save,
+        )
+    except transfer_mod.TransferStepFailed as exc:
+        await doc.set(
+            {"transfer_status": transfer_mod.STATUS_FAILED, "transfer_reason": exc.reason}
+        )
+        raise Internal(
+            "transfer.failed",
+            "Moving this site did not finish. Nothing was destroyed — accept it "
+            "again and it resumes from the step that stopped.",
+        ) from exc
+
+    try:
+        await _emit_site_created(doc)
+    except Exception:  # noqa: BLE001 - realtime must never cost the transfer
+        logger.warning("sites.transfer: realtime emit failed for %s", site_id, exc_info=True)
+    logger.info(
+        "sites.transfer: site %s moved from workspace %s to %s",
+        site_id,
+        source_workspace,
+        workspace_id,
+    )
+    return _transfer_wire(doc)
+
+
+class _TransferDeps:
+    """The side effects ``run_transfer`` needs, bound to Mongo.
+
+    A class rather than free functions so a test can substitute a double of the same
+    shape — the seam ``delete_cascade``'s ``deps`` already establishes, and for the
+    same reason: the order and the ledger are what is worth testing, and they should
+    be testable without a database.
+    """
+
+    @staticmethod
+    def now() -> datetime:
+        return datetime.now(UTC)
+
+    @staticmethod
+    def asset_prefix_for(workspace_id: str, pocket_id: str) -> str:
+        from pocketpaw_ee.sites import public_assets
+
+        return public_assets.prefix_for(workspace_id, pocket_id)
+
+    @staticmethod
+    async def move_pocket(
+        *, pocket_id: str, destination_workspace_id: str, new_owner_id: str
+    ) -> None:
+        """Re-key the pocket, and cut the old tenant's people loose from it.
+
+        ``owner`` and ``shared_with`` name users of the workspace the pocket just
+        left, and a pocket read is an ``$or`` over exactly those two plus visibility.
+        Carrying them across would be a cross-tenant grant dressed up as a field
+        nobody thought about. ``shared_with`` is EMPTIED rather than translated:
+        there is no mapping from a source member to a destination one, and inventing
+        one would hand access to whoever happened to share a user id.
+        """
+        from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+
+        try:
+            pocket = await _PocketDoc.get(pocket_id)
+        except (InvalidId, TypeError):
+            pocket = None
+        if pocket is None:
+            # The site is published from a pocket that no longer exists. There is
+            # nothing to re-key, and refusing here would make such a site
+            # untransferable forever over a row that is already gone.
+            return
+        await pocket.set(
+            {
+                "workspace": destination_workspace_id,
+                "owner": new_owner_id,
+                "shared_with": [],
+            }
+        )
+
+    @staticmethod
+    async def move_records(
+        *, site_id: str, source_workspace_id: str, destination_workspace_id: str
+    ) -> bool:
+        """Re-key the site's LEADS, and only its leads.
+
+        WHAT MOVES: ``Lead`` rows. Keyed on (workspace, site_id), both indexed, and
+        they are the site's own captured submissions — the records that would be
+        invisible to the new owner and undeletable by the old one if they stayed.
+
+        WHAT DOES NOT, each deliberate rather than missed:
+
+          * ``SiteDesignBrief`` is keyed on (workspace, owner, source_url) and not on
+            a site at all. It is a captured page on its way to BECOMING a site, an
+            artifact of the source workspace's import panel, with no relationship to
+            this row to carry over;
+          * ``SiteRateCounter`` has no workspace field and a two-minute TTL. Nothing
+            to re-key, and nothing that outlives the request;
+          * CONCIERGE TRANSCRIPTS stay with the source, and this is the one worth
+            arguing about. They live on ``ChatRun`` rows in the chat subsystem, keyed
+            on workspace and session rather than on a site, and they hold free text a
+            visitor typed. Moving personal data into a tenant that has never held it
+            is the direction that needs consent, not the direction that gets a
+            default — so the new owner starts with a clean transcript history and the
+            old owner keeps what their own visitors said to them. The site's
+            concierge keeps working; only the back-history stays put.
+
+        Returns whether anything actually moved, so the ledger can record "there was
+        nothing here" separately from "I moved it".
+        """
+        if not source_workspace_id or not site_id:
+            return False
+        result = await _LeadDoc.find({"workspace": source_workspace_id, "site_id": site_id}).update(
+            {"$set": {"workspace": destination_workspace_id}}
+        )
+        return bool(getattr(result, "modified_count", 0) or 0)
+
+
 __all__ = [
     "apply_edits",
     "create_draft_site",
@@ -9954,4 +10379,8 @@ __all__ = [
     "list_site_exports",
     "open_site_export",
     "sweep_expired_site_exports",
+    "offer_site_transfer",
+    "accept_site_transfer",
+    "cancel_site_transfer",
+    "list_incoming_site_transfers",
 ]

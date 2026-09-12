@@ -358,7 +358,38 @@ class PublicAssetStore:
                 "assets cannot be enumerated or removed. Purging would report success "
                 "over a bucket it never touched."
             )
-        prefix = prefix_for(workspace_id, pocket_id)
+        return await self.purge_prefix(prefix_for(workspace_id, pocket_id))
+
+    async def purge_prefix(self, prefix: str) -> int:
+        """Delete every object under an explicit prefix. Returns the number removed.
+
+        THIS EXISTS FOR TRANSFERRED SITES, and the reason is worth stating because
+        the obvious reading of :meth:`purge` is that it already covers everything.
+        It does not. It derives the prefix from the site's CURRENT workspace, and a
+        transferred site's images are still under the workspace that MINTED them —
+        the object key embeds that id and is baked into an immutable, year-cached
+        public URL inside the deployed HTML, so moving the bytes would blank the
+        images on a live site (``sites/transfer.py:_move_assets``). The prefixes
+        left behind are recorded on ``Site.asset_source_prefixes``.
+
+        So a teardown that only calls :meth:`purge` reclaims an EMPTY prefix and
+        leaves the real objects world-readable forever. A caller tearing a site down
+        must purge this site's own prefix AND each retained one.
+
+        Same two guarantees as :meth:`purge`: it raises rather than reporting a
+        silent zero when the adapter cannot list, and every key is rebuilt from the
+        passed prefix rather than taken from the listing, so a hostile or odd name
+        cannot walk outside it."""
+        if not self.can_list():
+            raise PublicAssetError(
+                "This deployment's storage adapter cannot list objects, so a site's "
+                "assets cannot be enumerated or removed. Purging would report success "
+                "over a bucket it never touched."
+            )
+        if not prefix.endswith("/"):
+            # A prefix that does not end in a separator matches sibling directories
+            # by string prefix, so "…/pk1" would also sweep "…/pk10".
+            prefix = f"{prefix}/"
         removed = 0
         for item in await self._adapter.browse(prefix):
             if item.is_dir:
