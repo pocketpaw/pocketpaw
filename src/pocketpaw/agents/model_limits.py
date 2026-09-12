@@ -35,6 +35,29 @@
 # None means "send no cap", which is exactly today's behaviour — so a model
 # litellm has never heard of, or a deployment without litellm installed, is no
 # worse off than before this file existed.
+#
+# Updated 2026-09-12 (chore/abstain-agent-max-tokens) — **the default is now to
+# send nothing.** The clamp below is what made a single configured number behave
+# per-model, and it only fires for models already in the PINNED metadata. That
+# file trails new releases by design (the resolver's own test says so), so on a
+# gateway fronting 100+ models the clamp silently no-ops on exactly the models
+# just added and every one of them collapses onto the same flat 8192. Measured
+# 2026-09-12: kimi-k3, moonshot/kimi-k3 and moonshotai/kimi-k3 are all unknown to
+# the pinned map, and a kimi run died on
+#
+#   Model token limit (8192) exceeded before any response was generated.
+#
+# because a reasoning model spent the whole 8192 thinking and emitted no content
+# — pydantic_ai/_agent_graph.py raises there on finish_reason == 'length' with no
+# actionable parts. A provider's own default is per-model by construction and
+# needs no maintenance, so ``agent_max_output_tokens`` now defaults to -1.
+#
+# THE 402 IS NOT FIXED, IT IS TRADED. Everything above about OpenRouter's
+# pre-flight reservation is still true and still reachable; it is now opt-out
+# rather than opt-in. An OpenRouter-backed deployment sets
+# ``agent_max_output_tokens`` to 8192 (or its own number) and gets the old
+# behaviour back exactly. Nothing in this module changed — only which branch a
+# deployment lands on when it says nothing.
 
 from __future__ import annotations
 
@@ -48,7 +71,12 @@ logger = logging.getLogger(__name__)
 #: Returned by the settings reader to mean "the operator disabled this".
 _DISABLED = -1
 
-#: The cap sent when nothing more specific is known.
+#: The cap sent when an operator opts back in with ``agent_max_output_tokens=0``.
+#
+# No longer the default posture — see the "Updated 2026-09-12" note above for why
+# a fixed number stopped being defensible once the catalog outgrew the pinned
+# metadata. It remains the value a deployment gets by asking for a cap without
+# naming one, and the reasoning for the SIZE is unchanged:
 #
 # NOT the model's advertised ceiling, and this is the whole design decision.
 # The goal is a reservation that covers a real reply, not the largest reply the
