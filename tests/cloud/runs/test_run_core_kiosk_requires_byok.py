@@ -49,6 +49,7 @@ def _fresh_settings():
     yield
     get_settings.cache_clear()
 
+
 _PLAINTEXT = "sk-ant-api03-" + "kiosk" * 9
 
 
