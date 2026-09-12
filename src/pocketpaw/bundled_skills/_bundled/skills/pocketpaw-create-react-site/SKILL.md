@@ -54,7 +54,7 @@ components, assemble the `source` map, and call `create_react_site`.
 
 **Run `pocketpaw-design-taste` FIRST — before you author a line.** It is the
 engine-agnostic creative-director system: the Vision Ledger and the one-line
-Design Read, the Trend Engine identity, the aesthetic direction family, the
+Design Read, the aesthetic direction family, the
 three dials, the layout-variance and materiality rules, the CSS-first motion
 vocabulary, and the anti-slop copy discipline. Everything it says about taste
 applies here unchanged — this skill does not restate it and does not override

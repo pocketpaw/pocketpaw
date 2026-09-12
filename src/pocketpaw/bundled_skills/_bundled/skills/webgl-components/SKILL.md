@@ -9,14 +9,14 @@ description: "Build small, always-on WebGL visuals (identity avatars, ambient or
 > [flornkm/skills](https://github.com/flornkm/skills) (MIT) and true as written for
 > app UI. Two PocketPaw constraints come first and override anything below:
 >
-> 1. **A static Paw Site prunes its client bundle.** Static sites build with
->    `csr = false` and a post-build step deletes the orphan client JS, so
->    `onMount`, `use:` actions, IntersectionObserver and `requestAnimationFrame`
->    never run and a `<canvas>` stays blank. Everything in this skill needs JS,
->    so it applies ONLY where the bundle survives: a **dynamic** site, a site
->    that explicitly declared `keepsClientBundle`, or app UI (paw-enterprise,
->    ripple). On a plain static site, ship the CSS background alone. If you are
->    unsure which you are on, assume the bundle is pruned.
+> 1. **A Paw Site KEEPS its client bundle by default.** `keepsClientBundle`
+>    resolves from `sites_keep_client_bundle_default`, which is True, so the
+>    generator emits `csr = true` and `onMount`, `use:` actions,
+>    IntersectionObserver, `requestAnimationFrame` and a `<canvas>` all run. The
+>    page is still PRERENDERED, so everything here ENHANCES markup that already
+>    paints. Two cases prune the bundle and leave a `<canvas>` blank: a site that
+>    declared `keepsClientBundle: false`, and every **ripple** site, whose build
+>    deletes the emitted hydration bundle. There, ship the CSS fallback alone.
 > 2. **No npm imports on a Paw Site.** The generated `package.json` is
 >    generator-owned and your source map supplies files only, so `three`, `ogl`,
 >    `threlte` and `gsap` never resolve. Hand-written GLSL only. See

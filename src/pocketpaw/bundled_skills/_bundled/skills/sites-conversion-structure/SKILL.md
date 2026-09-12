@@ -101,7 +101,7 @@ one proof signal, and the field.
 1. Headline - the outcome, plus who it is for.
 2. Subheadline - how, with one specific.
 3. Primary CTA - a verb plus what they get.
-4. One proof signal - a logo strip, one number, or one short quote.
+4. One proof signal, only where the brief supplied one - a logo strip, one number, or one short quote. Omit the line rather than inventing proof (`pocketpaw-design-taste` MODULE 0).
 5. Hero visual - real product, real place, real person.
 
 **The middle (the argument itself)**
@@ -118,8 +118,10 @@ one proof signal, and the field.
 
 This is the ARGUMENT order, not a section-shape order. `pocketpaw-design-taste`
 MODULE 3.A / 3.B still governs how each is composed, and its section-repetition ban
-still applies: four or more different layout families across the page, no
-three-equal-card feature row, no eyebrow on every section.
+still applies: no two sections share a layout, no three-equal-card feature row,
+no eyebrow on every section. On a page of five or more sections that works out
+to four or more layout families; on a shorter page distinct shapes are the whole
+requirement and a family count is not (MODULE 0).
 
 ## 4. Conversion rules
 
