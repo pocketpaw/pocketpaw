@@ -765,7 +765,10 @@ async def test_create_embeds_design_system_inline() -> None:
     assert '<design-system name="pocketpaw-design-taste">' in out
     assert "</design-system>" in out
     assert "Vision Ledger" in out
-    assert "Trend Engine" in out
+    # MODULE 0 is the scope contract: sections come from the brief, and no
+    # real-world fact is invented. A preamble that loses it builds padded pages.
+    assert "MODULE 0" in out
+    assert "Aesthetic direction families" in out
     assert "PRE-FLIGHT" in out.upper()
     # It is framed as already-loaded so the agent doesn't wait on a skill call.
     assert "ALREADY LOADED" in out or "already in your context" in out.lower()

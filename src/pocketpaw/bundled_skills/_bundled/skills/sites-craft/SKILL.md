@@ -223,6 +223,13 @@ active.
 - **Alt text by purpose** — describe the job the image does, `alt=""` if it is
   decorative.
 - **Survive 200% zoom** without clipping or horizontal scroll.
+- **Contrast floors**: `4.5:1` for body text, `3:1` for large text and for the
+  edge of any control you have to find. Measure against the surface the element
+  actually sits on, and fix a failure by moving lightness, not hue.
+- **Size floors**: body copy starts near `16px` and interface text near `14px`.
+  A 9px legal line and a 12px nav link are both unreadable, not compact.
+- **Text never touches the viewport edge.** Give the page container side
+  padding of at least `16px` at every width, set once on one wrapper.
 
 ---
 

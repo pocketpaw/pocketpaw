@@ -19,12 +19,21 @@ in this exact class answered a lookup miss with 58,765 chars that did not
 contain the answer. Growth here is not free and it is not visible in review —
 a diff showing "+40 lines of guidance" looks like an improvement.
 
-WHY 34,000 AND NOT THE CURRENT SIZE. The file measured 32,599 before MT-3 and
-32,578 after. A ceiling pinned to the current size fails on the next honest
-one-line fix, which trains people to bump the constant reflexively and turns
-the gate into a formality. 34,000 leaves roughly 4% of headroom: enough for
-ordinary maintenance, far too little to absorb a new module. Raising it is
-allowed and should be argued for in the commit body, not done in passing.
+WHY 35,000 AND NOT THE CURRENT SIZE. A ceiling pinned to the current size fails
+on the next honest one-line fix, which trains people to bump the constant
+reflexively and turns the gate into a formality. The number leaves roughly 3%
+of headroom: enough for ordinary maintenance, far too little to absorb a new
+module. Raising it is allowed and should be argued for in the commit body, not
+done in passing.
+
+It was 34,000 until fix/sites-prompt-scope-and-slop, which added MODULE 0
+(scope: build only what the brief asked for) and widened MODULE 5's tell list.
+That is the "new module" case the paragraph above says 34,000 cannot absorb, so
+the ceiling moved rather than the module being trimmed to fit. It was paid for
+first: the Trend Engine identity menu, the mandatory background architecture,
+the WebGL tutorial and the ornament motion catalogue all came out, and MODULE 6
+stopped restating rules MODULE 1-5 already carry. Net growth across the whole
+change is 204 bytes.
 
 WHAT IT DOES NOT COVER. Only this one skill. The other bundled skills are
 invoked on demand rather than inlined, so their bytes are paid only when used;
@@ -48,7 +57,7 @@ from pocketpaw.bundled_skills.installer import bundled_skills_plugin_dir
 
 # The ceiling, in bytes, for the design-taste skill. See the module docstring
 # for why this number and not the file's current size.
-DESIGN_TASTE_MAX_BYTES = 34_000
+DESIGN_TASTE_MAX_BYTES = 35_000
 
 # A read that returns far less than this is a broken path, not a lean skill.
 # Without it, renaming the skill directory would make every assertion below
