@@ -34,6 +34,12 @@ moved. ``test_the_usage_event_carries_what_the_meter_actually_reads`` now expect
 be billed as ordinary input and are now billed at Anthropic's 1.25x write
 premium. The difference is a rounding error on that fixture and is not one on a
 write-heavy turn, which is the whole reason the write got its own line.
+
+Updated 2026-09-11 (feat/other-hand-page-vision) — the images section gained the
+two retention tests. ``test_a_retained_turn_never_replays_its_page_image`` is the
+one that matters: it COUNTS the attachments on turn 2 rather than asserting none,
+because turn 2's own picture is supposed to be there and a presence assertion
+would fail on working code. Pre-fix it saw 2.
 """
 
 from __future__ import annotations
@@ -3423,3 +3429,144 @@ def test_a_colon_in_a_model_name_is_still_allowed():
 
     assert [e for e in events if e.type == "error"] == []
     assert specs == ["minimax/minimax-m3:free"]
+
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+
+
+def test_a_turn_with_no_images_sends_a_plain_string():
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    assert _user_prompt("draw me a cat", ()) == "draw me a cat"
+
+
+def test_a_turn_with_an_image_sends_the_text_and_the_picture():
+    from pydantic_ai import BinaryContent
+
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    prompt = _user_prompt("what did I write?", ((_PNG, "image/png"),))
+    assert isinstance(prompt, list)
+    assert prompt[0] == "what did I write?"
+    assert isinstance(prompt[1], BinaryContent)
+    assert prompt[1].data == _PNG
+    assert prompt[1].media_type == "image/png"
+
+
+def test_every_image_rides_the_same_turn():
+    # Book mode shows three pictures. Dropping the tail would leave the agent
+    # reading about a source page it was never shown.
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    prompt = _user_prompt("x", ((_PNG, "image/png"), (_PNG, "image/jpeg")))
+    assert len(prompt) == 3
+    assert [p.media_type for p in prompt[1:]] == ["image/png", "image/jpeg"]
+
+
+def test_an_empty_image_is_dropped_rather_than_sent():
+    # Some providers answer a zero-byte part with an opaque 400, which reads as
+    # the model being broken rather than the attachment being empty.
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    assert _user_prompt("x", ((b"", "image/png"),)) == "x"
+
+
+def test_the_backend_accepts_the_images_kwarg_the_pool_forwards():
+    import inspect
+
+    from pocketpaw.agents.pool import AgentPool
+    from pocketpaw.agents.pydantic_ai import PydanticAIBackend
+
+    assert "images" in inspect.signature(AgentPool.run).parameters
+    assert "images" in inspect.signature(PydanticAIBackend.run).parameters
+
+
+def test_the_seven_backends_that_cannot_take_images_are_never_handed_one():
+    """The forward is gated on the SIGNATURE, not on truthiness alone.
+
+    Seven backends take a narrower ``run`` with no ``**kwargs``, and the surface
+    that sends images sends them on EVERY turn. An unconditional forward would
+    not be a rare edge — it would be every Otherhand turn on a self-hosted
+    install (whose default backend is the Claude SDK) ending in ``TypeError:
+    run() got an unexpected keyword argument 'images'``. This file already
+    records that exact failure with a different kwarg and a different surface.
+    """
+    import inspect
+
+    from pocketpaw.agents.backend import _accepts_images_kwarg
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+    from pocketpaw.agents.pydantic_ai import PydanticAIBackend
+
+    assert _accepts_images_kwarg(PydanticAIBackend.run)
+    # The one that would break: the OSS/self-hosted default.
+    assert not _accepts_images_kwarg(ClaudeSDKBackend.run)
+    assert "images" not in inspect.signature(ClaudeSDKBackend.run).parameters
+    assert not any(
+        p.kind is inspect.Parameter.VAR_KEYWORD
+        for p in inspect.signature(ClaudeSDKBackend.run).parameters.values()
+    ), "no **kwargs to absorb it, which is why the gate has to exist"
+
+
+async def test_a_retained_turn_never_replays_its_page_image():
+    """Turn N must carry ONE page — the one drawn now, not every earlier one.
+
+    ``_retain_session`` keeps pydantic-ai's own message objects, and with images
+    on the prompt that includes a ``UserPromptPart`` whose content is
+    ``[text, BinaryContent]``. ``_session_history`` prefers the retained
+    transcript over the cloud's text history, so without a strip on the way IN,
+    turn N ships N page snapshots: tokens against a feature whose whole point is
+    a per-turn byte budget, raw bytes held in a process-global map, and a model
+    shown every earlier version of the page with no way to tell which is
+    current.
+
+    Counting is what makes this test work. Asserting "no ``BinaryContent`` in
+    the messages" would fail even with the fix, because turn 2's own attachment
+    is supposed to be there.
+    """
+    from pydantic_ai import BinaryContent
+    from pydantic_ai.messages import UserPromptPart
+
+    seen: dict = {}
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        seen["messages"] = list(messages)
+        yield "ok"
+
+    backend = _backend_with_model(FunctionModel(stream_function=stream_fn))
+
+    await _collect(
+        backend, "what did I write?", images=((_PNG, "image/png"),), session_key="ws1:page"
+    )
+    await _collect(backend, "and now?", images=((_PNG, "image/png"),), session_key="ws1:page")
+
+    attached = [
+        item
+        for message in seen["messages"]
+        for part in getattr(message, "parts", ())
+        if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
+        for item in part.content
+        if isinstance(item, BinaryContent)
+    ]
+    assert len(attached) == 1, f"turn 2 replayed turn 1's page: {len(attached)} images on the wire"
+
+
+async def test_the_words_of_an_image_turn_survive_into_the_next_one():
+    """Stripping the bytes must not strip the sentence they arrived with.
+
+    The retained transcript is what turn 2 reasons over, so dropping the whole
+    part would trade a cost bug for an amnesia bug.
+    """
+    seen: dict = {}
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        seen["messages"] = str(messages)
+        yield "ok"
+
+    backend = _backend_with_model(FunctionModel(stream_function=stream_fn))
+
+    await _collect(
+        backend, "is this triangle right?", images=((_PNG, "image/png"),), session_key="ws1:page2"
+    )
+    await _collect(backend, "and now?", session_key="ws1:page2")
+
+    assert "is this triangle right?" in seen["messages"]

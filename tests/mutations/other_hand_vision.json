@@ -1,0 +1,102 @@
+[
+  {
+    "label": "the jail check is dropped — a client-supplied path reads any file the server can",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        if not path.is_relative_to(jail):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/chat/test_turn_images.py::TestTheJailIsTheBoundary"
+    ]
+  },
+  {
+    "label": "a missing image raises instead of being skipped — one stale path kills every turn",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            size = path.stat().st_size\n            if size == 0 or size > budget:",
+    "replace": "            size = path.stat().st_size\n            if size > budget:",
+    "tests": [
+      "tests/cloud/chat/test_turn_images.py::TestALostPictureNeverCostsTheTurn"
+    ]
+  },
+  {
+    "label": "the per-image cap is dropped — a 5MB page fits the turn budget and the provider rejects the turn instead",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            if size > _MAX_IMAGE_BYTES:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/cloud/chat/test_turn_images.py::TestALostPictureNeverCostsTheTurn::test_an_image_over_the_per_image_cap_is_skipped_and_the_rest_still_ride"
+    ]
+  },
+  {
+    "label": "the image never reaches the prompt — the model answers about a page it cannot see",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "    parts.extend(BinaryContent(data=data, media_type=media_type) for data, media_type in usable)",
+    "replace": "    pass",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_a_turn_with_an_image_sends_the_text_and_the_picture"
+    ]
+  },
+  {
+    "label": "an imageless turn sends a parts list — every other surface changes shape on the wire",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "    if not usable:\n        return message",
+    "replace": "    if False:\n        return message",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_a_turn_with_no_images_sends_a_plain_string"
+    ]
+  },
+  {
+    "label": "the handler stops declaring its images — the attachment path goes dark and OCR comes back",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/other_hand.py",
+    "find": "            images=tuple(p for p in (snapshot_path, book_path, mark_image_path) if p),",
+    "replace": "            images=(),",
+    "tests": [
+      "tests/cloud/surface/test_other_hand_handler.py"
+    ]
+  },
+  {
+    "label": "images forwarded to any backend — every Otherhand turn on the Claude SDK dies with TypeError",
+    "file": "src/pocketpaw/agents/backend.py",
+    "find": "        return \"images\" in inspect.signature(func).parameters",
+    "replace": "        return True",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_the_seven_backends_that_cannot_take_images_are_never_handed_one",
+      "tests/test_agent_pool_turn_images.py::test_a_blind_backend_is_never_handed_one"
+    ]
+  },
+  {
+    "label": "the pool never forwards the pictures — the backend can see and is handed nothing",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            if images and _accepts_images_kwarg(run_backend.run):",
+    "replace": "            if False:",
+    "tests": [
+      "tests/test_agent_pool_turn_images.py::test_a_seeing_backend_gets_the_pictures"
+    ]
+  },
+  {
+    "label": "the ink convention is dropped — the agent reads its own check-question as the student's answer",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/other_hand.py",
+    "find": "                \"Two hands write on this page and they use different pens: \"\n                \"YOUR ink is dark, the user's is BLUE. Anything blue is theirs \"",
+    "replace": "                \"Two hands write on this page. \"\n                \"\" ",
+    "tests": [
+      "tests/cloud/surface/test_other_hand_handler.py::test_preamble_carries_snapshot_path_and_free_y"
+    ]
+  },
+  {
+    "label": "the page is retained with its bytes — turn N replays every earlier snapshot",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            _without_attachments(message) for message in list(messages)[-_MAX_SESSION_MESSAGES:]",
+    "replace": "            message for message in list(messages)[-_MAX_SESSION_MESSAGES:]",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_a_retained_turn_never_replays_its_page_image"
+    ]
+  },
+  {
+    "label": "the strip takes the words with the bytes — the sentence the picture arrived with is lost",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        words = [item for item in content if isinstance(item, str)]",
+    "replace": "        words = []",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_the_words_of_an_image_turn_survive_into_the_next_one"
+    ]
+  }
+]

@@ -56,9 +56,10 @@ async def test_preamble_carries_snapshot_path_and_free_y() -> None:
     text = preamble.text
 
     assert '<surface kind="other_hand"' in text
-    # The path — the agent's only route to seeing the page.
+    # The path, for a backend that reads files itself (the Claude SDK's own
+    # ``Read``). It is no longer the ONLY route: see the attachment tests below.
     assert SNAPSHOT in text
-    assert "Read it" in text
+    assert "attached" in text
     # free_y, as the rule the agent must respect.
     assert "y=820" in text
     assert "y >= 820" in text
@@ -66,9 +67,49 @@ async def test_preamble_carries_snapshot_path_and_free_y() -> None:
     assert "page-ops" in text
     # The page is the surface, not a chat.
     assert "not a chat" in text.lower()
+    # The ink convention. Now that the page image is attached, the two pens are
+    # the agent's only reliable way to tell its own earlier writing from the
+    # user's — and an agent that reads its own check-question as the student's
+    # answer marks itself correct. The other half is paw-enterprise's USER_INK
+    # (src/lib/core/other-hand/types.ts); the word is "blue", never a hex.
+    assert "BLUE" in text
+    assert "YOUR ink is dark" in text
     # A key was claimed, and it names what the preamble depends on.
     assert preamble.cache_key
     assert "820" in preamble.cache_key
+    # The page is DECLARED as an attachment. This is the whole vision path on
+    # every backend but the Claude SDK: the cloud reads these and puts them on
+    # the turn. Empty here meant the model got a path it could not open and
+    # fell back to an OCR tool that flattens a drawing to bad text.
+    assert preamble.images == (SNAPSHOT,)
+
+
+async def test_preamble_declares_every_image_it_talks_about() -> None:
+    """Book mode shows three pictures. Naming two of them in the text and
+    attaching one is how an agent ends up describing a page it cannot see."""
+    preamble = await handler.build_preamble(
+        WORKSPACE,
+        USER,
+        SurfaceMeta(
+            route_path="/other-hand",
+            snapshot_path=SNAPSHOT,
+            free_y="820",
+            book_path="/jail/book.png",
+            mark_box="10,10,90,90",
+            mark_image_path="/jail/mark.png",
+        ),
+    )
+    # In the order the text mentions them: the notebook, the source, the crop.
+    assert preamble.images == (SNAPSHOT, "/jail/book.png", "/jail/mark.png")
+    for path in preamble.images:
+        assert path in preamble.text
+
+
+async def test_a_preamble_with_no_page_attaches_nothing() -> None:
+    """The no-snapshot fall-back talks about no images, so it must claim none —
+    an empty tuple is what keeps every other surface on the plain string path."""
+    preamble = await handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/other-hand"))
+    assert preamble.images == ()
 
 
 async def test_preamble_key_moves_when_the_page_does() -> None:

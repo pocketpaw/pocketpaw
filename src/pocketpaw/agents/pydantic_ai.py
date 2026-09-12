@@ -409,6 +409,18 @@ provider-prefixed one. A spec like ``litellm:anything`` would otherwise resolve
 the deployment's proxy key on a turn that is supposed to run on the tenant's —
 a credential switch wearing a model id, which ``provider_allows_model`` cannot
 catch because a gateway's model ids are its own namespace.
+
+Updated 2026-09-11 (feat/other-hand-page-vision) — **an attached page rode every
+later turn of the session.** Images go on the prompt, which was the whole claim,
+but ``_retain_session`` keeps pydantic-ai's OWN message objects and
+``_session_history`` prefers that transcript over the cloud's stored text. So a
+turn's ``UserPromptPart`` — now ``[text, BinaryContent]`` — came back on turn 2,
+turn 3 and turn 60: N snapshots by turn N, on the one surface that attaches a
+picture to EVERY turn. Cost, real RSS in a process-global map, and a model shown
+every past version of one page with nothing marking the current one.
+``_without_attachments`` rewrites those parts down to their words on the way
+INTO retention, so the guarantee holds for every caller instead of for whichever
+read path someone remembered.
 """
 
 from __future__ import annotations
@@ -419,6 +431,7 @@ import logging
 import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 from typing import Any
 
 from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
@@ -658,6 +671,71 @@ _TENANT_SAFE_TOOLS = frozenset(
 # ``<server>_<tool>``, and there are no SDK built-ins at all. Comparing the raw
 # strings therefore matches nothing, which is the dangerous failure: a surface
 # that removed shell access would run with the full tool set and report success.
+
+
+def _user_prompt(message: str, images: tuple[tuple[bytes, str], ...]) -> Any:
+    """The turn's user prompt: a bare string, or parts when images ride along.
+
+    Returning the STRING when there is nothing to attach is the contract every
+    other surface depends on — a parts list of one text element is not what
+    those runs have been sending, and this file has been bitten before by a
+    change that was "equivalent" on paper.
+
+    An image whose bytes are empty is dropped rather than sent: some providers
+    answer a zero-byte part with an opaque 400, which reads as the model being
+    broken rather than the attachment being empty.
+    """
+    usable = [(data, media_type) for data, media_type in images if data]
+    if not usable:
+        return message
+    from pydantic_ai import BinaryContent
+
+    parts: list[Any] = [message]
+    parts.extend(BinaryContent(data=data, media_type=media_type) for data, media_type in usable)
+    return parts
+
+
+def _without_attachments(message: Any) -> Any:
+    """A retained message with its attached bytes dropped and its words kept.
+
+    A turn that carried images leaves a ``UserPromptPart`` whose content is
+    ``[text, BinaryContent, ...]``. Retaining that verbatim makes turn N replay
+    every earlier turn's picture: tokens against a feature whose whole point is
+    a per-turn byte budget, raw bytes pinned in a process-global map for the
+    life of the session, and a model shown every past version of one page with
+    nothing to say which is current. The fresh snapshot on THIS turn's prompt is
+    the one the agent is meant to answer about.
+
+    Stripping on the way INTO retention, not on the way out, is what makes the
+    guarantee hold for every caller of ``_retain_session`` rather than for the
+    one read path someone remembered.
+
+    Narrow on purpose. Only ``UserPromptPart`` is rewritten: a ``ToolReturnPart``
+    may legitimately hold a non-string sequence, and filtering that down to its
+    ``str`` elements would destroy tool results — which is the very thing
+    retention exists to preserve.
+    """
+    parts = getattr(message, "parts", None)
+    if not parts:
+        return message
+    from pydantic_ai.messages import UserPromptPart
+
+    rewritten: list[Any] = []
+    stripped = False
+    for part in parts:
+        content = getattr(part, "content", None)
+        if not isinstance(part, UserPromptPart) or isinstance(content, str):
+            rewritten.append(part)
+            continue
+        words = [item for item in content if isinstance(item, str)]
+        if len(words) == len(content):
+            rewritten.append(part)
+            continue
+        stripped = True
+        rewritten.append(replace(part, content="\n".join(words)))
+    if not stripped:
+        return message
+    return replace(message, parts=rewritten)
 
 
 def _normalize_tool_id(tool_id: str) -> str:
@@ -2238,7 +2316,13 @@ class PydanticAIBackend:
         # Trailing window: the head of a conversation is the least useful part
         # to carry and the most expensive, and compaction capabilities already
         # operate inside a run.
-        self._session_messages[session_key] = list(messages)[-_MAX_SESSION_MESSAGES:]
+        #
+        # Attachments are dropped here rather than at the read: a turn's images
+        # belong to that turn only, and keeping them would replay every past
+        # picture on every later turn of the session.
+        self._session_messages[session_key] = [
+            _without_attachments(message) for message in list(messages)[-_MAX_SESSION_MESSAGES:]
+        ]
         self._session_messages.move_to_end(session_key)
         while len(self._session_messages) > _MAX_TRACKED_SESSIONS:
             self._session_messages.popitem(last=False)
@@ -2276,6 +2360,22 @@ class PydanticAIBackend:
         # ``AgentPool.run`` forwards it only when non-empty, so an empty set
         # means "no per-entity narrowing" and every bundled skill is offered.
         skill_names: frozenset[str] = frozenset(),
+        # Images the caller wants THIS turn to look at, already read into
+        # memory: (bytes, media_type) pairs. Same withhold-when-empty contract
+        # as the kwargs below, so a turn that sends none takes the byte-
+        # identical string path every other surface has always taken.
+        #
+        # Bytes rather than paths, deliberately. The caller is the cloud, which
+        # is the layer that knows a tenant's jail and can prove a path sits
+        # inside it; this backend is OSS and reads no path it was handed. It
+        # also cannot import the cloud to ask.
+        #
+        # pydantic-ai has taken image input for a long time — ``user_prompt``
+        # is ``str | Sequence[UserContent]``. What was missing was anything
+        # here ever passing one, so on the Otherhand surface the page image
+        # never reached the model and the agent fell back to an OCR tool call
+        # that flattens a drawing to bad text.
+        images: tuple[tuple[bytes, str], ...] = (),
         # -- per-surface tool gating (see ``_gate_mcp_toolsets``) ------------
         # These ride the same withhold-when-empty contract, which is why their
         # absence was invisible: the pool forwards them ONLY when a surface
@@ -2481,7 +2581,18 @@ class PydanticAIBackend:
             # a run's accounting cannot live on it.
             kwargs["usage"] = run_usage
 
-            async with agent.run_stream_events(message, **kwargs) as stream:
+            # The user prompt is a plain string unless this turn carries
+            # images, in which case it becomes the parts list pydantic-ai wants.
+            # The images ride the PROMPT, and ONE turn's prompt only: this run's
+            # transcript is retained for the next turn, so ``_retain_session``
+            # strips the attached bytes back out on the way in (see
+            # ``_without_attachments``). Without that, turn N would carry N
+            # snapshots of the same page. A fresh snapshot every turn is also
+            # the right semantics — the agent should see the page as it is now,
+            # not as it was.
+            prompt = _user_prompt(message, images)
+
+            async with agent.run_stream_events(prompt, **kwargs) as stream:
                 async for event in stream:
                     if handle.stopped:
                         break
