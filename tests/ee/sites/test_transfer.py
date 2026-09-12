@@ -617,3 +617,79 @@ async def test_a_resumed_transfer_after_a_failure_finishes_the_remaining_steps()
     assert second.pocket_moves == [], "the ownership step should have been skipped"
     assert set(site.transfer_ledger) == set(TRANSFER_STEPS)
     assert site.transfer_status == STATUS_NONE
+
+
+# ---------------------------------------------------------------------------
+# The retained prefixes need a consumer, or recording them proves nothing
+# ---------------------------------------------------------------------------
+
+
+class _Item:
+    def __init__(self, name, is_dir=False, size=1):
+        self.name = name
+        self.is_dir = is_dir
+        self.size = size
+
+
+class _Adapter:
+    """Stands in for a listable storage adapter."""
+
+    def __init__(self, tree):
+        self.tree = tree
+        self.deleted: list[str] = []
+
+    async def browse(self, prefix):
+        return [_Item(n) for n in self.tree.get(prefix, [])]
+
+    async def delete(self, key):
+        self.deleted.append(key)
+
+    def public_url(self, key):
+        return f"https://cdn.test/{key}"
+
+
+async def test_purge_prefix_removes_a_retained_transfer_prefix():
+    """THE CONSUMER THE TRANSFER'S LEDGER ENTRY DEPENDS ON.
+
+    ``purge`` derives the prefix from the site's CURRENT workspace, so on a
+    transferred site it sweeps an empty prefix while the real objects sit under the
+    workspace that minted them. Recording ``asset_source_prefixes`` is worth nothing
+    unless something can act on it.
+
+    Mutation that must break this: make ``purge_prefix`` return 0 without deleting.
+    """
+    from pocketpaw_ee.sites.public_assets import PublicAssetStore
+
+    source_prefix = "sites-assets/ws-source/pk-1/"
+    adapter = _Adapter({source_prefix: ["a-cat.png", "b-dog.jpg"]})
+    store = PublicAssetStore(adapter)
+
+    removed = await store.purge_prefix(source_prefix)
+    assert removed == 2
+    assert adapter.deleted == [f"{source_prefix}a-cat.png", f"{source_prefix}b-dog.jpg"]
+
+
+async def test_purge_prefix_refuses_to_report_a_silent_zero():
+    """An adapter that cannot list must raise, not report an empty prefix — the
+    same rule ``purge`` follows, and the reason it has a ``can_list`` check at all."""
+    from pocketpaw_ee.sites.public_assets import PublicAssetError, PublicAssetStore
+
+    class _Unlistable:
+        def public_url(self, key):
+            return f"https://cdn.test/{key}"
+
+        async def delete(self, key):  # pragma: no cover - never reached
+            raise AssertionError("must not delete")
+
+    with pytest.raises(PublicAssetError):
+        await PublicAssetStore(_Unlistable()).purge_prefix("sites-assets/ws/pk/")
+
+
+async def test_purge_prefix_does_not_sweep_a_sibling_pocket():
+    """``.../pk1`` without a trailing separator also prefix-matches ``.../pk10``."""
+    from pocketpaw_ee.sites.public_assets import PublicAssetStore
+
+    adapter = _Adapter({"sites-assets/ws/pk1/": ["only-mine.png"]})
+    store = PublicAssetStore(adapter)
+    await store.purge_prefix("sites-assets/ws/pk1")
+    assert adapter.deleted == ["sites-assets/ws/pk1/only-mine.png"]

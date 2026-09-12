@@ -170,5 +170,23 @@
     "tests": [
       "tests/ee/sites/test_transfer.py"
     ]
+  },
+  {
+    "label": "purge_prefix reports what it removed without removing it, so a teardown records a completed purge over a bucket still holding a transferred site's world-readable images",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "            await self._adapter.delete(f\"{prefix}{item.name}\")\n            removed += 1\n        return removed",
+    "replace": "            removed += 1\n        return removed",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
+  },
+  {
+    "label": "purge_prefix stops normalising the trailing separator, so purging one pocket's prefix also sweeps a sibling whose id it is a string prefix of",
+    "file": "ee/pocketpaw_ee/sites/public_assets.py",
+    "find": "        if not prefix.endswith(\"/\"):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
   }
 ]
