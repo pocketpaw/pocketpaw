@@ -1,0 +1,47 @@
+[
+  {
+    "label": "the gateway transport error is unguarded again \u2014 saving a key on an unreachable gateway is a 500 saying 'see server logs'",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "            resp = await client.post(f\"{base}/chat/completions\", json=payload, headers=headers)\n        except httpx.TransportError as exc:",
+    "replace": "            resp = await client.post(f\"{base}/chat/completions\", json=payload, headers=headers)\n        except _NeverRaised as exc:",
+    "tests": [
+      "tests/cloud/byok/test_gateway_unreachable.py::test_an_unreachable_gateway_is_a_clear_refusal"
+    ]
+  },
+  {
+    "label": "an unreachable gateway is reported as a rejected key \u2014 the user re-copies a key that was never the problem",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "                \"byok.gateway_unreachable\",",
+    "replace": "                \"byok.key_rejected\",",
+    "tests": [
+      "tests/cloud/byok/test_gateway_unreachable.py::test_an_unreachable_gateway_is_a_clear_refusal"
+    ]
+  },
+  {
+    "label": "the refusal stops saying the key was not judged",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "                \"your network. Your key was not saved and was not rejected.\",",
+    "replace": "                \"your network.\",",
+    "tests": [
+      "tests/cloud/byok/test_gateway_unreachable.py::test_the_refusal_says_the_key_was_not_judged"
+    ]
+  },
+  {
+    "label": "the anthropic path loses its guard \u2014 the same 500 returns for the default provider",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "            resp = await client.post(_VALIDATE_URL, json=payload, headers=headers)\n        except httpx.TransportError as exc:",
+    "replace": "            resp = await client.post(_VALIDATE_URL, json=payload, headers=headers)\n        except _NeverRaised as exc:",
+    "tests": [
+      "tests/cloud/byok/test_gateway_unreachable.py::test_anthropic_unreachable_is_also_a_refusal"
+    ]
+  },
+  {
+    "label": "every failure is called unreachable \u2014 a genuinely revoked key is reported as the gateway being down",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "    if resp.status_code == 401:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/byok/test_gateway_unreachable.py::test_a_real_rejection_still_reads_as_a_rejection"
+    ]
+  }
+]
