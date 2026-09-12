@@ -188,5 +188,14 @@
     "tests": [
       "tests/ee/sites/test_transfer.py"
     ]
+  },
+  {
+    "label": "the teardown skips a transferred site's retained asset prefixes, so deleting it leaves its images world-readable on a public bucket with the only record naming them destroyed in the same run",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "    for prefix in getattr(site, \"asset_source_prefixes\", None) or []:\n        await deps.assets.purge_prefix(prefix)",
+    "replace": "    for prefix in []:\n        await deps.assets.purge_prefix(prefix)",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
   }
 ]

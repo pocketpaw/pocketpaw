@@ -693,3 +693,98 @@ async def test_purge_prefix_does_not_sweep_a_sibling_pocket():
     store = PublicAssetStore(adapter)
     await store.purge_prefix("sites-assets/ws/pk1")
     assert adapter.deleted == ["sites-assets/ws/pk1/only-mine.png"]
+
+
+# ---------------------------------------------------------------------------
+# The teardown half: the retained prefixes have to actually be swept
+# ---------------------------------------------------------------------------
+
+
+class _CascadeSite:
+    """A site as the delete cascade sees it, already transferred."""
+
+    def __init__(self, **kw):
+        self.id = "site-1"
+        self.workspace = "ws-dest"
+        self.pocket_id = "pk-1"
+        self.asset_source_prefixes: list[str] = []
+        self.__dict__.update(kw)
+
+
+class _CascadeDeps:
+    def __init__(self, assets):
+        self.assets = assets
+
+
+async def test_deleting_a_transferred_site_sweeps_the_prefix_its_images_really_live_under():
+    """THE LEAK THE RETAINED LIST EXISTS TO CLOSE, asserted on the objects.
+
+    ``_purge_assets`` derives its prefix from the site's CURRENT workspace, so on a
+    transferred site it sweeps an empty prefix while the real images sit under the
+    workspace that minted them. Missing them does not leave an untidy bucket: the
+    Site document is the only thing naming those objects and the cascade deletes it
+    moments later, so they stay world-readable and unenumerable forever.
+
+    This asserts the adapter's DELETED KEYS rather than that a method was called —
+    the same gap the leads test closed earlier in this branch.
+
+    Mutation that must break this: drop the ``asset_source_prefixes`` loop from
+    ``delete_cascade._purge_assets``.
+    """
+    from pocketpaw_ee.sites.delete_cascade import _purge_assets
+    from pocketpaw_ee.sites.public_assets import PublicAssetStore
+
+    source_prefix = "sites-assets/ws-source/pk-1/"
+    dest_prefix = "sites-assets/ws-dest/pk-1/"
+    adapter = _Adapter({source_prefix: ["hero.png", "team.jpg"], dest_prefix: []})
+    site = _CascadeSite(asset_source_prefixes=[source_prefix])
+
+    outcome = await _purge_assets(site=site, deps=_CascadeDeps(PublicAssetStore(adapter)))
+
+    assert outcome == "done"
+    assert sorted(adapter.deleted) == [
+        f"{source_prefix}hero.png",
+        f"{source_prefix}team.jpg",
+    ]
+
+
+async def test_an_untransferred_site_still_purges_exactly_its_own_prefix():
+    """The retained list is empty for every site that has never moved, so this path
+    has to be byte-identical to what it was before the wiring."""
+    from pocketpaw_ee.sites.delete_cascade import _purge_assets
+    from pocketpaw_ee.sites.public_assets import PublicAssetStore
+
+    own_prefix = "sites-assets/ws-dest/pk-1/"
+    adapter = _Adapter({own_prefix: ["only.png"]})
+
+    outcome = await _purge_assets(site=_CascadeSite(), deps=_CascadeDeps(PublicAssetStore(adapter)))
+
+    assert outcome == "done"
+    assert adapter.deleted == [f"{own_prefix}only.png"]
+
+
+async def test_a_failure_on_a_retained_prefix_fails_the_step_rather_than_passing_quietly():
+    """A swallowed failure here records a completed teardown over a live bucket."""
+    from pocketpaw_ee.sites.delete_cascade import _purge_assets
+
+    class _Boom:
+        async def purge(self, **kw):
+            return 0
+
+        async def purge_prefix(self, prefix):
+            raise RuntimeError("bucket said no")
+
+    with pytest.raises(RuntimeError):
+        await _purge_assets(
+            site=_CascadeSite(asset_source_prefixes=["sites-assets/ws-source/pk-1/"]),
+            deps=_CascadeDeps(_Boom()),
+        )
+
+
+def test_the_r2_step_runs_before_the_records_step():
+    """The wiring above only works because of this order: ``records`` and the Site
+    deletion destroy ``asset_source_prefixes``, which is the only record naming
+    those objects."""
+    from pocketpaw_ee.sites.delete_cascade import CASCADE_STEPS, STEP_R2, STEP_RECORDS
+
+    assert CASCADE_STEPS.index(STEP_R2) < CASCADE_STEPS.index(STEP_RECORDS)
