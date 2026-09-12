@@ -10395,6 +10395,8 @@ class _TransferDeps:
             {"$set": {"workspace": destination_workspace_id}}
         )
         return bool(getattr(result, "modified_count", 0) or 0)
+
+
 # The delete lifecycle (sites lifecycle wave 1)
 # ---------------------------------------------------------------------------
 #
