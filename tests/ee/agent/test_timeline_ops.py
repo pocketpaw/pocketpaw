@@ -50,6 +50,7 @@ def summary() -> TimelineSummary:
         clip_ids={"clip_aaa", "clip_bbb", "clip_ccc"},
         asset_ids={"asset_one", "asset_two", "asset_three", "asset_music"},
         track_ids={"track_video", "track_audio"},
+        track_names={"Video", "Audio", "Lower thirds"},
     )
 
 
@@ -123,6 +124,7 @@ def test_every_contract_op_is_reachable(summary: TimelineSummary) -> None:
         "set_transform": {"clipId": "clip_aaa", "x": 384, "y": 389, "scale": 1.2},
         "add_keyframe": {"clipId": "clip_aaa", "prop": "opacity", "atMs": 500, "value": 0.5},
         "clear_keyframes": {"clipId": "clip_aaa", "prop": "opacity"},
+        "add_lane": {"kind": "audio", "name": "Score"},
     }
     assert set(minimal) == set(OP_KINDS), "a verb was added without a case here"
     for kind, args in minimal.items():
@@ -477,3 +479,121 @@ def test_the_motivating_request_validates_as_one_batch(summary: TimelineSummary)
     assert error is None
     assert clean is not None
     assert len(clean) == 6
+
+
+# ── 6. Lanes ───────────────────────────────────────────────────────────────
+#
+# `add_lane` is the verb that makes layering a decision rather than a side
+# effect of the store's collision stacking. What can go wrong is addressing: a
+# lane's id does not exist until the batch applies, so the batch has to be able
+# to name the lane it just asked for — and two lanes answering to one name would
+# make that a coin flip.
+
+
+def test_a_lane_can_be_opened_and_used_in_the_same_batch(summary: TimelineSummary) -> None:
+    """The whole reason lanes are addressable by name.
+
+    Mutation: validate `track` against summary.track_ids only, so the name of a
+    lane this batch creates is rejected as an unknown track."""
+    clean, error = validate_ops(
+        [
+            {"op": "add_lane", "kind": "audio", "name": "Score"},
+            {"op": "place_audio", "assetId": "asset_music", "track": "Score", "atMs": 0},
+        ],
+        summary,
+    )
+    assert error is None
+    assert clean is not None
+    # Passed through untouched — the client matches it against live track names.
+    assert clean[1]["track"] == "Score"
+
+
+def test_an_existing_lane_can_be_targeted_by_name(summary: TimelineSummary) -> None:
+    """Mutation: drop the name branch and resolve ids only."""
+    clean, error = validate_ops(
+        [{"op": "place_audio", "assetId": "asset_music", "track": "Audio"}], summary
+    )
+    assert error is None
+    assert clean is not None
+
+
+def test_lane_names_are_case_insensitive(summary: TimelineSummary) -> None:
+    """The agent is quoting a name it wrote in another op, or read off a
+    preamble row, not copying an id — so the case it sends back is not
+    guaranteed to match.
+
+    Both tables have to fold: the lanes already on the timeline, and the ones
+    this batch is creating.
+
+    Mutation: compare names without casefolding, in either table."""
+    # An EXISTING lane, addressed in the wrong case. Deliberately a name that
+    # is NOT a tail of any track id: `_resolve` matches id tails, so "audio"
+    # would resolve off "track_audio" and prove nothing about name folding.
+    clean, error = validate_ops(
+        [{"op": "add_text", "text": "hi", "fromMs": 0, "toMs": 1, "track": "LOWER THIRDS"}],
+        summary,
+    )
+    assert error is None, error
+    assert clean is not None
+
+    # A lane created by this batch, addressed in the wrong case.
+    clean, error = validate_ops(
+        [
+            {"op": "add_lane", "kind": "video", "name": "Overlay"},
+            {"op": "place_clip", "assetId": "asset_one", "track": "overlay"},
+        ],
+        summary,
+    )
+    assert error is None, error
+    assert clean is not None
+
+
+def test_a_duplicate_lane_name_is_refused(summary: TimelineSummary) -> None:
+    """Two rows answering to one word would make `track` a coin flip decided by
+    document order.
+
+    Mutation: drop the _check_lane_name collision branch."""
+    _, error = validate_ops([{"op": "add_lane", "kind": "audio", "name": "Audio"}], summary)
+    assert error is not None
+    assert "already a lane" in error
+
+    _, error = validate_ops(
+        [
+            {"op": "add_lane", "kind": "audio", "name": "Score"},
+            {"op": "add_lane", "kind": "audio", "name": "score"},
+        ],
+        summary,
+    )
+    assert error is not None
+    assert "earlier add_lane" in error
+
+
+def test_an_unknown_lane_kind_is_refused_with_the_valid_set(summary: TimelineSummary) -> None:
+    """Mutation: accept any string as a lane kind."""
+    _, error = validate_ops([{"op": "add_lane", "kind": "music"}], summary)
+    assert error is not None
+    assert "is not a lane kind" in error
+
+
+def test_a_cue_lane_must_be_a_text_lane(summary: TimelineSummary) -> None:
+    """A caption lane is a TEXT track wearing role 'captions' — an audio one
+    would be a row the cue list can never find.
+
+    Mutation: drop the kind check on the captions role."""
+    _, error = validate_ops([{"op": "add_lane", "kind": "audio", "role": "captions"}], summary)
+    assert error is not None
+    assert "TEXT lane" in error
+
+    clean, error = validate_ops([{"op": "add_lane", "kind": "text", "role": "captions"}], summary)
+    assert error is None
+    assert clean is not None
+
+
+def test_an_unknown_track_name_still_fails(summary: TimelineSummary) -> None:
+    """Name addressing must not turn every typo into a silently-accepted lane.
+
+    Mutation: accept any string as a track reference."""
+    _, error = validate_ops(
+        [{"op": "place_audio", "assetId": "asset_music", "track": "Scoer"}], summary
+    )
+    assert error is not None

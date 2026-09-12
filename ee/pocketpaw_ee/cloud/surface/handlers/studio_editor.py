@@ -152,7 +152,7 @@ def _timeline_block(timeline: dict[str, Any]) -> str:
     tracks = [t for t in (timeline.get("tracks") or []) if isinstance(t, dict)]
     if tracks:
         lines.append("")
-        lines.append("TRACKS (lanes clips sit on):")
+        lines.append("LANES (rows clips sit on — target one by id or by name, add_lane for more):")
         lines.extend(
             _rows(
                 tracks,
@@ -223,11 +223,12 @@ the result presses Ctrl+Z once.
 Operations (this list is closed — an invented verb is rejected):
 - place_clip    {assetId, atMs|after, track?, inMs?, outMs?}
 - move_clip     {clipId, atMs|after, track?}
+- add_lane      {kind: video|audio|text|overlay, role?: 'captions', name?}
 - trim_clip     {clipId, inMs?, outMs?}     absolute SOURCE points, not a delta
 - split_clip    {clipId, atMs}
 - remove_clip   {clipId}
 - set_transition{clipId, kind, durationMs?, direction?, color?, softness?}
-- add_text      {text, fromMs, toMs, + any style field below}
+- add_text      {text, fromMs, toMs, track?, + any style field below}
 - style_text    {clipId, text?, + any style field below}   restyle what exists
 - add_caption   {text, fromMs, toMs, anchorClip?, style?}
 - style_captions{style?, fontSize?, y?}                    the whole cue set
@@ -256,6 +257,29 @@ Rules that matter:
   id yet. `after: <clipId>` is for anchoring to a clip ALREADY on the timeline
   (one listed above); it is resolved against the live document, so it stays right
   even when an earlier op in the same batch changed a length.
+- LANES ARE THE LAYOUT. A timeline is rows, not one line. Things that play AT
+  THE SAME TIME go on DIFFERENT lanes; things that play one after another go on
+  ONE lane. Music under narration is two audio lanes. A logo over a shot is two
+  video lanes (the LATER lane draws on top). Three shots in a row is one lane.
+  Put a clip on a specific lane with `track`, and open a new one with add_lane
+  when the arrangement needs a row that is not there.
+- NAME A LANE YOU OPEN, AND ADDRESS IT BY THAT NAME. `track` takes a lane id OR
+  a lane name, and the name is the only way to use a lane in the batch that
+  creates it — lane ids, like clip ids, are minted when the batch applies. So
+  "score under the whole thing" is:
+      {op: add_lane, kind: audio, name: "Score"}
+      {op: place_audio, assetId: …, track: "Score", atMs: 0, volume: 0.3}
+  Name it for what it carries — Score, VO, Lower thirds — not Audio 2. A name
+  already on the timeline is rejected: target that lane instead of opening a
+  second one with the same name.
+- DO NOT OPEN A LANE YOU DO NOT NEED. Sequential clips belong on one lane, and
+  a row per clip makes a five-shot cut five rows tall. Open a lane when things
+  must overlap, or when the user asked for a separate one.
+- A CUE LANE IS A TEXT LANE WITH role 'captions'. add_lane {kind: text, role:
+  'captions'} when the timeline has no caption row yet. Loose titles never land
+  on it and cues never land off it, so a text lane and a cue lane are not
+  interchangeable. add_caption always fills the FIRST caption lane — a second
+  one is for cues the user drags there, not a thing to target.
 - ANCHOR CAPTIONS. Caption times are timeline-absolute and do NOT move when a
   clip moves. If a caption belongs to a clip's dialogue, pass
   `anchorClip: <clipId>` and give fromMs/toMs as offsets from that clip's start.
@@ -324,7 +348,8 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "The user is looking at a VIDEO TIMELINE EDITOR — tracks, clips, "
         "captions, transitions. Your job here is to ARRANGE what is already on "
         "the timeline: order clips, trim them, place titles and captions, and "
-        "lay audio into lanes. This is NOT a dashboard: do not build widgets, "
+        "lay things out across lanes — opening new ones when the arrangement "
+        "needs a row that is not there. This is NOT a dashboard: do not build widgets, "
         "charts, a pocket or a ui-spec. It is also NOT the generation surface: "
         "you cannot make new footage here. Talk about 'clips', 'tracks', "
         "'captions' and 'the timeline'.\n"

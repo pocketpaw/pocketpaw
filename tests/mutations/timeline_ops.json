@@ -194,5 +194,51 @@
     "tests": [
       "tests/ee/agent/test_timeline_ops.py::test_an_empty_transform_is_rejected"
     ]
+  },
+  {
+    "label": "resolve `track` by id only, so a lane the batch just opened is unusable",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "            if isinstance(track_ref, str) and track_ref.strip().casefold() in (",
+    "replace": "            if False and isinstance(track_ref, str) and track_ref.strip().casefold() in (",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_a_lane_can_be_opened_and_used_in_the_same_batch",
+      "tests/ee/agent/test_timeline_ops.py::test_an_existing_lane_can_be_targeted_by_name"
+    ]
+  },
+  {
+    "label": "compare lane names without casefolding",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        self.track_names = {n.strip().casefold() for n in (track_names or set()) if n.strip()}",
+    "replace": "        self.track_names = {n.strip() for n in (track_names or set()) if n.strip()}",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_lane_names_are_case_insensitive"
+    ]
+  },
+  {
+    "label": "let two lanes share a name, making `track` a coin flip",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "    if folded in summary.track_names:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_a_duplicate_lane_name_is_refused"
+    ]
+  },
+  {
+    "label": "accept any string as a lane kind",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        if not isinstance(lane_kind, str) or lane_kind not in _LANE_KINDS:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_an_unknown_lane_kind_is_refused_with_the_valid_set"
+    ]
+  },
+  {
+    "label": "allow a cue lane on a non-text kind, where the cue list can never find it",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
+    "find": "        if role == \"captions\" and lane_kind != \"text\":",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_ops.py::test_a_cue_lane_must_be_a_text_lane"
+    ]
   }
 ]

@@ -18,13 +18,20 @@
     "",
     "v2 (2026-09-08): the styling surface the Inspector exposes — text presets,",
     "colour, align, motion in/out, transform and keyframes — so the agent can do",
-    "what a person can do in that panel, not just place and trim."
+    "what a person can do in that panel, not just place and trim.",
+    "",
+    "v3 (2026-09-11): add_lane, plus `track` accepting a lane NAME as well as an",
+    "id. Lanes existed but nothing could ask for one, so layering was reachable",
+    "only as a side effect of the store's collision stacking. Names are what make",
+    "a lane usable in the batch that creates it — track ids are minted at apply",
+    "time, the same reason `after` cannot anchor to a clip the batch is adding."
   ],
-  "version": 2,
+  "version": 3,
   "maxOpsPerBatch": 50,
   "ops": [
     "add_caption",
     "add_keyframe",
+    "add_lane",
     "add_text",
     "clear_keyframes",
     "move_clip",
