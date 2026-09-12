@@ -299,11 +299,11 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   a dedicated deployment sets its workspace plan once. Free came down from 5 GB
   in the same change, because 5 GB of unbilled object storage per signup is a
   real bill the moment the product is public.
-  The read FAILS OPEN, unlike the daily upload budget beside it which fails
-  closed. Deliberate asymmetry: the daily budget is the bound against abuse,
-  while this is a plan ceiling, and refusing every upload in the product
-  because one aggregation could not run is a bigger outage than one workspace
-  briefly exceeding its plan. Refusal is 402 `billing.storage_limit`.
+  The read FAILS OPEN, logged at WARNING, like the daily budgets beside it:
+  refusing every upload in the product because one aggregation could not run
+  is a bigger outage than one workspace briefly exceeding its plan, and the
+  file's own metadata row is written to the same Mongo a statement later.
+  Refusal is 402 `billing.storage_limit`.
   Not to be confused with `POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY` above: that
   bounds throughput per day, this bounds total stored bytes.
 - **Concurrency / capacity config**: five ceilings that are easy to confuse. In a

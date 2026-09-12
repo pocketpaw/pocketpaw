@@ -118,10 +118,9 @@ async def storage_cap_exceeded(
             return (False, 0, None)
         used = await workspace_storage_usage(workspace_id)
     except Exception:
-        # Fails OPEN, and the asymmetry against its neighbours is deliberate.
-        # The daily upload budget on this same seam fails CLOSED because it is
-        # the bound against abuse. THIS one is a plan ceiling: a cost control,
-        # not a security boundary. If the database cannot say how much a
+        # Fails OPEN, like the daily upload budget on this same seam. This is
+        # a plan ceiling: a cost control, not a security boundary, and an
+        # unreadable counter is not an attack. If the database cannot say how much a
         # workspace stores, refusing every upload in the product is a larger
         # outage than letting one workspace briefly run past its plan — and the
         # statement after this gate writes the file's row to that same database,
