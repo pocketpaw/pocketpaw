@@ -26,6 +26,7 @@ import itertools
 
 import pytest
 from pocketpaw_ee.cloud._core.errors import CloudError
+from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
 from pocketpaw_ee.cloud.models.pocket import Pocket
 from pocketpaw_ee.cloud.models.site import Site
 from pocketpaw_ee.cloud.models.user import User, WorkspaceMembership
@@ -378,3 +379,51 @@ async def test_cancel_withdraws_the_offer():
 
 def _source_of(site: Site) -> str:
     return site.workspace
+
+
+async def test_the_sites_leads_move_with_it():
+    """THE STEP THAT IS EASIEST TO BELIEVE WITHOUT CHECKING.
+
+    ``move_records`` reads its result off a Beanie ``UpdateResult`` and reports a
+    boolean. If that attribute were absent or None the step would report "there was
+    nothing here", the ledger would record a skip, and the leads would stay in a
+    workspace that can no longer see the site they belong to — while every ordering
+    test still passed, because they assert the step was CALLED.
+
+    So this asserts the rows, not the call.
+
+    Mutation that must break this: have ``_TransferDeps.move_records`` return False
+    without running the update.
+    """
+    sender, recipient, source, dest, site = await _offered()
+    for i in range(2):
+        await Lead(
+            workspace=source,
+            site_id=str(site.id),
+            form_type="AppointmentRequest",
+            properties={"email": f"visitor{i}@example.test"},
+            source=LeadSource(form_type="AppointmentRequest", site_id=str(site.id)),
+        ).insert()
+    # A lead belonging to a DIFFERENT site in the same workspace, which must stay.
+    other = await _site(source, sender, name="Other")
+    await Lead(
+        workspace=source,
+        site_id=str(other.id),
+        form_type="AppointmentRequest",
+        properties={"email": "not-this-one@example.test"},
+        source=LeadSource(form_type="AppointmentRequest", site_id=str(other.id)),
+    ).insert()
+
+    await sites_service.accept_site_transfer(
+        workspace_id=dest, user_id=recipient, site_id=str(site.id)
+    )
+
+    moved = await Lead.find({"workspace": dest}).to_list()
+    assert {lead.site_id for lead in moved} == {str(site.id)}
+    assert len(moved) == 2
+
+    stayed = await Lead.find({"workspace": source}).to_list()
+    assert [lead.site_id for lead in stayed] == [str(other.id)]
+
+    fresh = await Site.get(site.id)
+    assert fresh.transfer_ledger["records"] == "done"

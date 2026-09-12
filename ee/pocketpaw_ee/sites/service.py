@@ -4211,7 +4211,10 @@ async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | N
     Tenant-scoped on ``workspace``. Returns None when the pocket has no Site doc.
     """
     stable = await _SiteDoc.find_one(
-        {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
+        # Resolved, not derived (wave 3) -- a transferred site keeps its minted id.
+        # The legacy-dupe fallback below would eventually find it, but by the
+        # newest-with-a-url rule rather than by identity.
+        {"_id": await _resolve_live_site_oid(workspace_id, pocket_id), "workspace": workspace_id}
     )
     if stable is not None:
         return stable
@@ -6255,7 +6258,11 @@ async def publish_pocket(
     # still PENDING has never been paid for, so a republish there SHOULD open a
     # fresh checkout (the abandoned session simply expires unused).
     existing_doc = await _SiteDoc.find_one(
-        {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
+        # Resolved, not derived (wave 3). On a TRANSFERRED site the derivation no
+        # longer names the row, so this read would come back None and every later
+        # republish of a site already on a paid tier would read as "never paid" and
+        # open another purchase against the workspace balance.
+        {"_id": await _resolve_live_site_oid(workspace_id, pocket_id), "workspace": workspace_id}
     )
     # WHO IS ALLOWED TO SPEND. Publishing is a MEMBER action and stays one; buying
     # a paid tier is not. Since site plans became add-on lines on the workspace's

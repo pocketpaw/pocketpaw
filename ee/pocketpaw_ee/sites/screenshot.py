@@ -614,11 +614,16 @@ async def safe_take_draft_screenshot_for_pocket(*, workspace_id: str, pocket_id:
     visitors actually see with a picture of an unapproved edit.
     """
     try:
-        from pocketpaw_ee.sites.service import _live_object_id
+        from pocketpaw_ee.sites.service import _resolve_live_site_oid
         from pocketpaw_ee.sites.service import _SiteDoc as _Doc
 
+        # Resolved, not derived (wave 3): a transferred site keeps the id it was
+        # minted with, and a miss here silently leaves its card without a picture.
         doc = await _Doc.find_one(
-            {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
+            {
+                "_id": await _resolve_live_site_oid(workspace_id, pocket_id),
+                "workspace": workspace_id,
+            }
         )
         if doc is None:
             return ""
