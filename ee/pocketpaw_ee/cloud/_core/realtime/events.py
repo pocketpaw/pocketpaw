@@ -60,6 +60,12 @@
 #   ``AgentPlanUpdated`` (type="agent.plan_updated") for the agent plan panel.
 #   Emitted by ``shared/agent_bridge.py`` when a backend's plan tool call
 #   normalizes to a plan that actually changed.
+# Updated: 2026-08-05 (feat/coupling-person-freshness, T-2) — added
+#   ``ProfileUpdated`` (type="profile.updated"), emitted by
+#   ``auth.service.update_profile`` after a profile write. Payload carries
+#   ``user_id`` + ``changed`` (list of field names). Subscribed by
+#   ``people/listeners.py`` to re-materialize the member's Fabric Person in
+#   every workspace so agents never orient on a stale name/avatar.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -155,6 +161,19 @@ class WorkspaceInviteAccepted(Event):
 @dataclass
 class WorkspaceInviteRevoked(Event):
     EVENT_TYPE: ClassVar[str] = "workspace.invite.revoked"
+
+
+# Auth / profile
+@dataclass
+class ProfileUpdated(Event):
+    """A user edited their auth profile (full_name / avatar / status).
+
+    Payload: ``{user_id, changed: [field, ...]}`` — field names only, not
+    values. Consumers that need the fresh values re-read the user record
+    (source of truth) rather than trusting an event snapshot.
+    """
+
+    EVENT_TYPE: ClassVar[str] = "profile.updated"
 
 
 # Groups
