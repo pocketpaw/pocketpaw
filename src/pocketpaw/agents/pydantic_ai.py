@@ -1502,7 +1502,12 @@ class PydanticAIBackend:
         """
         return None
 
-    def _build_capabilities(self, skill_names: frozenset[str] = frozenset()) -> list:
+    def _build_capabilities(
+        self,
+        skill_names: frozenset[str] = frozenset(),
+        *,
+        tools_enabled: bool = True,
+    ) -> list:
         """Build the ``pydantic-ai-harness`` capabilities for this backend.
 
         Four of the PRD's six are wired. The other two are dropped, with the
@@ -1535,12 +1540,27 @@ class PydanticAIBackend:
           ``agents`` FOLDER on disk, and we have no in-code subagents to
           register. Wiring it with an empty list would add a capability that
           can never fire. Revisit when there is a real subagent to declare.
+
+        **``tools_enabled=False`` drops every capability that puts a tool on
+        the wire** — ``ToolSearch`` (``search_tools``), the native web tools,
+        ``Planning`` (``write_plan``), ``OverflowingToolOutput``
+        (``read_tool_result``) and skills (``load_capability``). Gating
+        ``tools=``/``toolsets=`` alone is NOT enough: a capability registers its
+        own toolset, so the four above kept a ``tools`` field on the request and
+        a gateway profile that rejects the field still answered 400
+        ``unsupported_capability``. Measured with ``FunctionModel``; see
+        ``test_tools_off_puts_no_tool_on_the_wire``. The context-management
+        capabilities (``SlidingWindow``, ``ClearToolResults``,
+        ``StepPersistence``) carry no tools and stay on.
         """
         # Built first and outside the harness gate: tool search belongs to
         # pydantic-ai core, so turning the harness off must not silently drop
         # our ranking function back to the built-in one.
         capabilities: list = []
         for build in (
+            # ``ToolSearch`` is NOT gated on ``tools_enabled``: it ranks a
+            # corpus, and with tools off the corpus is empty, so it puts
+            # nothing on the wire. Measured — gating it changed no request.
             self._build_tool_search_capability,
             self._build_thinking_capability,
             self._build_select_model_capability,
@@ -1549,7 +1569,11 @@ class PydanticAIBackend:
             cap = build()
             if cap is not None:
                 capabilities.append(cap)
-        capabilities += self._build_web_capabilities()
+        if tools_enabled:
+            # These DO need the gate: the builder reads ``_build_custom_tools``
+            # itself, so without it a tools-off run still registers a native
+            # web tool on the request.
+            capabilities += self._build_web_capabilities()
 
         if not getattr(self.settings, "pydantic_ai_harness_enabled", True):
             return capabilities
@@ -1570,15 +1594,18 @@ class PydanticAIBackend:
         capabilities += [
             SlidingWindow(max_messages=self.settings.pydantic_ai_compaction_max_messages),
             ClearToolResults(max_messages=self.settings.pydantic_ai_compaction_max_messages),
-            Planning(),
             StepPersistence(store=InMemoryStepStore(), agent_name="pocketpaw"),
         ]
-        if limit:
-            capabilities.append(
-                OverflowingToolOutput(bands=[Band(over=limit, action=Truncate(max_chars=limit))])
-            )
+        if tools_enabled:
+            capabilities.append(Planning())
+            if limit:
+                capabilities.append(
+                    OverflowingToolOutput(
+                        bands=[Band(over=limit, action=Truncate(max_chars=limit))]
+                    )
+                )
 
-        skills = self._build_skills_capability(skill_names)
+        skills = self._build_skills_capability(skill_names) if tools_enabled else None
         if skills is not None:
             capabilities.append(skills)
         return capabilities
@@ -1989,6 +2016,7 @@ class PydanticAIBackend:
         allow_mcp_tool_ids: frozenset[str] | None = None,
         exclusive_mcp_tools: bool = False,
         system_prompt_digest: str = "",
+        tools_enabled: bool = True,
     ) -> Any:
         """Build (and cache) the pydantic-ai ``Agent``.
 
@@ -2023,7 +2051,9 @@ class PydanticAIBackend:
         # cache NEVER hits — every run re-instantiates the whole tool set. That
         # is not a slow path, it is a per-run cost on the thing whose entire
         # purpose is a low per-run cost, and it is invisible except as latency.
-        tools = list(self._build_custom_tools())
+        # Skipped entirely when the caller turned tools off — not built and
+        # then filtered, because the point is that none reach the wire.
+        tools = list(self._build_custom_tools()) if tools_enabled else []
 
         agent_key = (
             self.settings.pydantic_ai_model,
@@ -2058,6 +2088,10 @@ class PydanticAIBackend:
             # A DIGEST, never the key: this tuple is held in memory for the
             # process's life and lands in cache-miss logs.
             self._credential_fingerprint(),
+            # WHETHER there are tools at all. ``len(tools)`` above happens to
+            # move with it today, but it is a count and two different surfaces
+            # can share one — this says the thing itself.
+            tools_enabled,
         )
         if self._cached_agent is not None and self._cached_agent_key == agent_key:
             return self._cached_agent
@@ -2112,7 +2146,7 @@ class PydanticAIBackend:
             # appends to the (now empty) agent-level set per run.
             tools=tools,
             toolsets=list(mcp_toolsets) or None,
-            capabilities=self._build_capabilities(skill_names) or None,
+            capabilities=self._build_capabilities(skill_names, tools_enabled=tools_enabled) or None,
             # The agent is shared across concurrent runs; conversation state
             # rides in ``message_history`` per run, never on the agent.
             retries=2,
@@ -2219,6 +2253,19 @@ class PydanticAIBackend:
         # backend opts in. Folded into the agent cache key so an agent built
         # under one identity is never handed to another.
         system_prompt_digest: str = "",
+        # Per-send TOOL SWITCH (2026-09-11). ``False`` builds the agent with no
+        # custom tools and no MCP toolsets at all.
+        #
+        # Two reasons a caller asks for it, both observed live: a gateway
+        # profile that refuses the ``tools`` field outright and 400s the whole
+        # turn, and a weaker model that fixates on a tool instead of answering.
+        # It is also the surface's biggest token lever — the upstream prompt
+        # cache does not cover tool schemas, so a run carrying a tool surface
+        # reads zero cached tokens every turn (measured, see the header).
+        #
+        # In the agent cache key, necessarily: the cache is ONE slot, so without
+        # it a tools-off turn would be served the agent built WITH tools.
+        tools_enabled: bool = True,
         # Accepted and deliberately unused — each is Claude-SDK plumbing with no
         # analogue here, and each is safe to drop:
         #   ``allow_sdk_tools``   ADDITIVE grant of SDK built-ins. There are no
@@ -2326,7 +2373,7 @@ class PydanticAIBackend:
                 return
 
             instructions = system_prompt or _DEFAULT_IDENTITY
-            mcp_toolsets = await self._build_mcp_tools()
+            mcp_toolsets = await self._build_mcp_tools() if tools_enabled else []
             agent = self._get_or_create_agent(
                 model,
                 instructions,
@@ -2336,6 +2383,7 @@ class PydanticAIBackend:
                 allow_mcp_tool_ids=allow_mcp_tool_ids,
                 exclusive_mcp_tools=exclusive_mcp_tools,
                 system_prompt_digest=system_prompt_digest,
+                tools_enabled=tools_enabled,
             )
 
             kwargs: dict[str, Any] = {

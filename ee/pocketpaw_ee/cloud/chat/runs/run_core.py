@@ -344,6 +344,7 @@ import os
 import re
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -592,11 +593,62 @@ async def _resolve_entity_profile(ctx: ScopeContext) -> SurfaceProfile:
         return resolve_profile(SurfaceKind.GENERIC, SurfaceMeta())
 
     base = resolve_profile(ctx.surface_context.kind, ctx.surface_context.meta)
+    base = await _deny_tools_that_would_only_refuse(ctx, base)
     pocket_id = ctx.surface_context.meta.pocket_id
     if not pocket_id:
         return base
     override = await _load_entity_profile_override(ctx.workspace_id, pocket_id)
     return compose_entity_profile(base, override)
+
+
+#: The Otherhand drawing tools, as the bare names ``_expand_tool_ids`` resolves.
+_ILLUSTRATION_TOOLS: frozenset[str] = frozenset({"illustrate", "image_generate"})
+
+
+async def _deny_tools_that_would_only_refuse(
+    ctx: ScopeContext, base: SurfaceProfile
+) -> SurfaceProfile:
+    """Withdraw the drawing tools from a caller who cannot use them.
+
+    Observed 2026-09-11 on the live kiosk: a guest asked for a butterfly, the
+    agent called ``illustrate``, the tool refused ("needs an account"), and the
+    agent called it again — SIXTEEN times across 27 seconds, ending in a reply
+    that apologised sixteen times in one paragraph. The refusal text says "do
+    not try again this turn" and the bridge returns it rather than raising, so
+    nothing forces a stop; a weaker model simply keeps trying.
+
+    The wording was never the fix. A tool that will refuse every call is a tool
+    the agent should not have, so it is withdrawn before the run instead. The
+    turn then does the thing the page actually needs — ``page-ops`` are written
+    in ordinary text, not through a tool — and says nothing about a pen it was
+    never offered.
+
+    Only on this surface. Every other one carries neither tool, so asking
+    elsewhere would add a database read to every run in the product.
+
+    Costs one extra ``find_one`` on a turn that CAN illustrate, because the tool
+    asks the same module again when it fires. Cheaper than the alternative,
+    which is two copies of a money rule.
+    """
+    if ctx.surface_context is None or ctx.surface_context.kind is not SurfaceKind.OTHER_HAND:
+        return base
+    try:
+        from pocketpaw_ee.cloud.auth import guest_budget
+        from pocketpaw_ee.cloud.other_hand import illustration_credentials as creds
+
+        grant = await creds.resolve(
+            ctx.workspace_id,
+            is_guest=await guest_budget.load_guest(ctx.user_id) is not None,
+        )
+    except Exception:  # noqa: BLE001 — a tool surface must not fail a turn
+        logger.debug("other-hand: could not resolve illustration access", exc_info=True)
+        return base
+    if not isinstance(grant, creds.IllustrationRefusal):
+        return base
+    return replace(
+        base,
+        deny_mcp_tool_ids=frozenset(base.deny_mcp_tool_ids) | _ILLUSTRATION_TOOLS,
+    )
 
 
 def _pawbar_run_from_ctx(ctx: ScopeContext) -> dict[str, Any] | None:
@@ -1634,6 +1686,11 @@ async def _drive_agent_loop(
         # legacy path, byte-identical to today.
         if ctx.model_override:
             run_kwargs["model_override"] = ctx.model_override
+        # Per-send tool switch. Same withhold-when-empty idiom: only an explicit
+        # False is a request, so a client that never sends the field (every
+        # older one) produces a byte-identical run.
+        if ctx.tools_enabled is False:
+            run_kwargs["tools_enabled"] = False
         # --- BYOK per-turn credentials (feat/byok-guest-backend, 2026-09-01) ----
         # Resolve whose credential pays for THIS turn — the call the byok
         # service's own header always said the turn path makes, wired at last.
@@ -2294,6 +2351,7 @@ async def execute_run(spec: RunSpec) -> None:
     # model choice reaches ``_drive_agent_loop`` only via this copy. ``None`` (older
     # clients) leaves the backend's own model selection untouched.
     ctx.model_override = spec.model_override
+    ctx.tools_enabled = spec.tools_enabled
 
     # Mirror agent_router._ensure_scope_session so _drive_agent_loop's
     # title-gen guard (`if not history and ctx.session_id`) actually fires

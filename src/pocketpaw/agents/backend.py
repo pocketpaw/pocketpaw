@@ -148,6 +148,27 @@ def _accepts_prompt_digest_kwarg(func: Any) -> bool:
         return False
 
 
+def _accepts_tools_enabled_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``tools_enabled`` in its signature?
+
+    The same question ``_accepts_images_kwarg`` asks, for the per-send tool
+    switch (2026-09-11). Withhold-when-empty is NOT enough on its own, and this
+    is the second kwarg to learn that the hard way: only an explicit ``False``
+    rides, but the moment a user turns the switch OFF that False goes to
+    whatever backend the agent is configured for. A logged-in workspace runs on
+    ``claude_agent_sdk``, whose signature did not declare it, so every
+    tools-off turn died in ``TypeError: run() got an unexpected keyword
+    argument 'tools_enabled'``.
+
+    Withholding narrows WHEN the kwarg is forwarded; it never narrows WHERE.
+    Only the signature can do that.
+    """
+    try:
+        return "tools_enabled" in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
 def forward_prompt_digest(backend: Any, run_kwargs: dict[str, Any], digest: str) -> dict[str, Any]:
     """Return ``run_kwargs`` carrying ``digest`` iff ``backend`` declares it.
 
