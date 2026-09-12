@@ -251,6 +251,24 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   env-configurable), marking queued/running `ChatRunDoc`s older than 10 minutes as
   `interrupted` so runs abandoned by a backend restart surface a retry affordance
   instead of leaving clients subscribed forever.
+- **Storage caps are enforced, and free is 1 GB** (2026-09-12). The per-plan
+  workspace storage ceiling (`ee/pocketpaw_ee/cloud/billing/plans.py`,
+  `_MAX_STORAGE_BYTES`: free 1 GB, go 15 GB, pro 50 GB, pro_max 100 GB,
+  enterprise uncapped) is checked at UPLOAD time by
+  `cloud/storage/service.py`. It used to be gated on `billing_enforced`, which
+  defaults False and which nothing sets, so the number was shown on the
+  Settings storage page and enforced nowhere. The gate is now unconditional and
+  the opt-out is the PLAN, not a global flag: an uncapped plan returns early, so
+  a dedicated deployment sets its workspace plan once. Free came down from 5 GB
+  in the same change, because 5 GB of unbilled object storage per signup is a
+  real bill the moment the product is public.
+  The read FAILS OPEN, unlike the daily upload budget beside it which fails
+  closed. Deliberate asymmetry: the daily budget is the bound against abuse,
+  while this is a plan ceiling, and refusing every upload in the product
+  because one aggregation could not run is a bigger outage than one workspace
+  briefly exceeding its plan. Refusal is 402 `billing.storage_limit`.
+  Not to be confused with `POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY` above: that
+  bounds throughput per day, this bounds total stored bytes.
 - **Abuse ceilings (always on, NOT gated on billing)**: four knobs that bound what
   one account can do in a day, regardless of whether billing is configured. They
   exist because the priced ceilings — the per-plan storage cap in

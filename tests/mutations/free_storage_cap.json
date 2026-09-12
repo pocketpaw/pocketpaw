@@ -1,0 +1,56 @@
+[
+  {
+    "label": "the cap goes back behind billing_enforced \u2014 advertised on the Settings page, enforced nowhere",
+    "file": "ee/pocketpaw_ee/cloud/storage/service.py",
+    "find": "    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    try:\n        ent = await entitlements_service.resolve_entitlements(workspace_id)",
+    "replace": "    from pocketpaw.config import get_settings\n\n    if not get_settings().billing_enforced:\n        return (False, 0, None)\n\n    from pocketpaw_ee.cloud.entitlements import service as entitlements_service\n\n    try:\n        ent = await entitlements_service.resolve_entitlements(workspace_id)",
+    "tests": [
+      "tests/cloud/storage/test_storage_service.py::test_the_cap_holds_with_billing_off"
+    ]
+  },
+  {
+    "label": "the upload seam stops blocking \u2014 an over-cap workspace keeps filling the bucket",
+    "file": "ee/pocketpaw_ee/cloud/storage/service.py",
+    "find": "    return (used + incoming_bytes > limit, used, limit)",
+    "replace": "    return (False, used, limit)",
+    "tests": [
+      "tests/cloud/storage/test_upload_gate.py::test_the_upload_gate_holds_with_billing_off"
+    ]
+  },
+  {
+    "label": "only the incoming file is measured, not what is already stored \u2014 the cap never fills up",
+    "file": "ee/pocketpaw_ee/cloud/storage/service.py",
+    "find": "    return (used + incoming_bytes > limit, used, limit)",
+    "replace": "    return (incoming_bytes > limit, used, limit)",
+    "tests": [
+      "tests/cloud/storage/test_storage_service.py::test_cap_exceeded_when_incoming_pushes_over"
+    ]
+  },
+  {
+    "label": "free goes back to 5 GB \u2014 five times the unbilled storage per signup",
+    "file": "ee/pocketpaw_ee/cloud/billing/plans.py",
+    "find": "    \"free\": 1_000_000_000,",
+    "replace": "    \"free\": 5_000_000_000,",
+    "tests": [
+      "tests/cloud/storage/test_storage_router.py::test_get_storage_usage_empty_workspace_is_zero"
+    ]
+  },
+  {
+    "label": "an uncapped plan is capped too \u2014 a dedicated deployment loses its opt-out",
+    "file": "ee/pocketpaw_ee/cloud/storage/service.py",
+    "find": "        if limit is None:\n            return (False, 0, None)",
+    "replace": "        if limit is None:\n            limit = 1",
+    "tests": [
+      "tests/cloud/storage/test_storage_service.py::test_cap_uncapped_enterprise_never_trips"
+    ]
+  },
+  {
+    "label": "the cap read fails CLOSED \u2014 one unreadable counter takes file upload off the air for every tenant",
+    "file": "ee/pocketpaw_ee/cloud/storage/service.py",
+    "find": "            workspace_id,\n            exc_info=True,\n        )\n        return (False, 0, None)",
+    "replace": "            workspace_id,\n            exc_info=True,\n        )\n        return (True, 0, None)",
+    "tests": [
+      "tests/cloud/uploads/test_upload_emits_pocket.py::test_upload_many_omits_pocket_id_when_unset"
+    ]
+  }
+]
