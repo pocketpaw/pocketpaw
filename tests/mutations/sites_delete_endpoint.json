@@ -1,0 +1,210 @@
+[
+  {
+    "label": "the delete endpoint stops checking ownership, so any workspace member can destroy a site they did not create",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    site = await _load(workspace_id, site_id)\n    if site.owner != user_id:\n        from pocketpaw_ee.guards.audit import log_denial",
+    "replace": "    site = await _load(workspace_id, site_id)\n    if False:\n        from pocketpaw_ee.guards.audit import log_denial",
+    "tests": [
+      "tests/ee/sites/test_delete_endpoint.py"
+    ]
+  },
+  {
+    "label": "the delete-status poll stops checking ownership, so any member can read which teardown step failed on a site they do not administer",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    site = await _load(workspace_id, site_id)\n    if site.owner != user_id:\n        raise Forbidden(\"site.not_owner\", \"Only the site's owner can delete it.\")\n    return SiteDeleteStatusResponse(",
+    "replace": "    site = await _load(workspace_id, site_id)\n    if False:\n        raise Forbidden(\"site.not_owner\", \"Only the site's owner can delete it.\")\n    return SiteDeleteStatusResponse(",
+    "tests": [
+      "tests/ee/sites/test_delete_endpoint.py"
+    ]
+  },
+  {
+    "label": "a non-owner is refused with 404 instead of 403, so the client renders 'this site is gone' at someone whose site is very much alive",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        raise Forbidden(\"site.not_owner\", \"Only the site's owner can delete it.\")\n\n    job_id = await enqueue_site_delete(site)",
+    "replace": "        raise NotFound(\"site\", site_id)\n\n    job_id = await enqueue_site_delete(site)",
+    "tests": [
+      "tests/ee/sites/test_delete_endpoint.py"
+    ]
+  },
+  {
+    "label": "the delete answers 200 instead of 202, so a client reading the status code concludes the site is already gone while it is still serving",
+    "file": "ee/pocketpaw_ee/sites/router.py",
+    "find": "@router.delete(\"/sites/{site_id}\", response_model=SiteDeleteQueuedResponse, status_code=202)",
+    "replace": "@router.delete(\"/sites/{site_id}\", response_model=SiteDeleteQueuedResponse, status_code=200)",
+    "tests": [
+      "tests/ee/sites/test_delete_endpoint.py"
+    ]
+  },
+  {
+    "label": "THE FORCED EXPORT IS SKIPPED ENTIRELY, so a site is destroyed with no copy of the customer's data kept anywhere",
+    "file": "ee/pocketpaw_ee/sites/delete_job.py",
+    "find": "    await sites_service.mark_delete_stage(site, status=\"exporting\")\n    try:\n        export_id = await _force_export(site)",
+    "replace": "    await sites_service.mark_delete_stage(site, status=\"exporting\")\n    try:\n        export_id = \"\"",
+    "tests": [
+      "tests/ee/sites/test_delete_job.py"
+    ]
+  },
+  {
+    "label": "a failed export no longer stops the job, so the cascade runs on and destroys the data the export could not read",
+    "file": "ee/pocketpaw_ee/sites/delete_job.py",
+    "find": "        await sites_service.record_delete_failure(site, reason=reason)\n        return\n\n    await site.set({\"delete_export_id\": export_id})",
+    "replace": "        await sites_service.record_delete_failure(site, reason=reason)\n        export_id = \"\"\n\n    await site.set({\"delete_export_id\": export_id})",
+    "tests": [
+      "tests/ee/sites/test_delete_job.py"
+    ]
+  },
+  {
+    "label": "an export that is not ready satisfies the gate, so a pending row with no bytes is accepted as the customer's saved copy",
+    "file": "ee/pocketpaw_ee/sites/delete_job.py",
+    "find": "    if export.status != \"ready\":",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_delete_job.py"
+    ]
+  },
+  {
+    "label": "a FAILED export already on the row is reused as this delete's copy, so the gate is satisfied by the record of an attempt rather than by data",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return doc is not None and doc.status == \"ready\" and bool(doc.storage_key)",
+    "replace": "    return doc is not None",
+    "tests": [
+      "tests/ee/sites/test_delete_job.py"
+    ]
+  },
+  {
+    "label": "the export id is never written to the row, so the one surviving copy of the data is orphaned the moment the site document goes",
+    "file": "ee/pocketpaw_ee/sites/delete_job.py",
+    "find": "    await site.set({\"delete_export_id\": export_id})\n    site.delete_export_id = export_id",
+    "replace": "    site.delete_export_id = export_id",
+    "tests": [
+      "tests/ee/sites/test_delete_job.py"
+    ]
+  },
+  {
+    "label": "the cascade's save callback persists ONLY the ledger, so a stopped teardown leaves a row whose ledger says billing is done and whose subscription is still active and still charging",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "_CASCADE_MUTATED_FIELDS = (\n    \"delete_ledger\",\n    \"subscription_status\",\n    \"renewal_date\",\n    \"signed_key\",\n    \"revoked\",\n)",
+    "replace": "_CASCADE_MUTATED_FIELDS = (\"delete_ledger\",)",
+    "tests": [
+      "tests/ee/sites/test_delete_job.py"
+    ]
+  },
+  {
+    "label": "the claim precondition stops refusing an in-flight delete, so two workers run two cascades over one site at the same time",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            {\"delete_status\": {\"$nin\": sorted(DELETE_IN_FLIGHT_STATUSES)}},",
+    "replace": "            {\"delete_status\": {\"$nin\": []}},",
+    "tests": [
+      "tests/ee/sites/test_delete_endpoint.py"
+    ]
+  },
+  {
+    "label": "a failed delete counts as in flight, so one bad afternoon at Cloudflare leaves a site nobody can ever delete again",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "DELETE_IN_FLIGHT_STATUSES = frozenset({\"queued\", \"exporting\", \"tearing_down\"})",
+    "replace": "DELETE_IN_FLIGHT_STATUSES = frozenset({\"queued\", \"exporting\", \"tearing_down\", \"failed\"})",
+    "tests": [
+      "tests/ee/sites/test_delete_endpoint.py"
+    ]
+  },
+  {
+    "label": "the claim wipes the ledger, so a retry re-runs every destructive step the first attempt already finished",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        \"delete_job_id\": job_id,\n        \"delete_reason\": None,\n    }\n    collection = type(site).get_pymongo_collection()",
+    "replace": "        \"delete_job_id\": job_id,\n        \"delete_reason\": None,\n        \"delete_ledger\": {},\n    }\n    collection = type(site).get_pymongo_collection()",
+    "tests": [
+      "tests/ee/sites/test_delete_endpoint.py"
+    ]
+  },
+  {
+    "label": "the Site document is never removed, so a completed delete leaves a row and the poll never 404s — the client watches a finished delete until its deadline lapses",
+    "file": "ee/pocketpaw_ee/sites/delete_job.py",
+    "find": "    await sites_service.delete_site_document(site)\n    logger.info(\"sites.delete: site %s deleted (export %s)\", site_id, export_id)",
+    "replace": "    logger.info(\"sites.delete: site %s deleted (export %s)\", site_id, export_id)",
+    "tests": [
+      "tests/ee/sites/test_delete_job.py"
+    ]
+  },
+  {
+    "label": "the lead purge drops its site_id filter, so deleting one site destroys every other site's captured leads in the workspace",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    leads = await _LeadDoc.find({\"workspace\": workspace_id, \"site_id\": site_id}).delete()",
+    "replace": "    leads = await _LeadDoc.find({\"workspace\": workspace_id}).delete()",
+    "tests": [
+      "tests/ee/sites/test_delete_job.py"
+    ]
+  },
+  {
+    "label": "the rate-counter purge is unanchored, so deleting site-a also purges site-abc's counters",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        {\"scope_id\": {\"$regex\": f\"^{re.escape(site_id)}(:|$)\"}}",
+    "replace": "        {\"scope_id\": {\"$regex\": re.escape(site_id)}}",
+    "tests": [
+      "tests/ee/sites/test_delete_job.py"
+    ]
+  },
+  {
+    "label": "a failed enqueue no longer rolls the row back, so it sits in queued behind a job nobody will ever run and refuses every future delete of that site",
+    "file": "ee/pocketpaw_ee/sites/delete_job.py",
+    "find": "            await sites_service.record_delete_failure(site, reason=\"enqueue:pool_or_enqueue_raised\")",
+    "replace": "            pass",
+    "tests": [
+      "tests/ee/sites/test_delete_job.py"
+    ]
+  },
+  {
+    "label": "arq refusing the job id is read as a queued job, so the row waits forever on a delete that was never accepted",
+    "file": "ee/pocketpaw_ee/sites/delete_job.py",
+    "find": "            raise RuntimeError(f\"arq refused job id {job_id!r} — a job with that id exists\")",
+    "replace": "            pass",
+    "tests": [
+      "tests/ee/sites/test_delete_job.py"
+    ]
+  },
+  {
+    "label": "the delete job is not registered on the lane that consumes its queue, so every delete is enqueued to a queue no worker reads",
+    "file": "ee/pocketpaw_ee/sites/build_worker.py",
+    "find": "    functions = [site_build_fn, site_preview_build_fn, _site_delete_fn]",
+    "replace": "    functions = [site_build_fn, site_preview_build_fn]",
+    "tests": [
+      "tests/ee/sites/test_delete_job.py",
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "the job id goes back to being deterministic, so arq silently refuses the RETRY of a failed delete for as long as its result lives in Redis",
+    "file": "ee/pocketpaw_ee/sites/delete_job.py",
+    "find": "    return f\"site-delete-{site_id}-{uuid.uuid4().hex}\"",
+    "replace": "    return f\"site-delete-{site_id}\"",
+    "tests": [
+      "tests/ee/sites/test_delete_job.py"
+    ]
+  },
+  {
+    "label": "the export response reads created_at again — the snake_case field no document declares — so every export call raises AttributeError and the whole export surface 500s",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        created_at=doc.createdAt.isoformat() if doc.createdAt else None,",
+    "replace": "        created_at=doc.created_at.isoformat() if doc.created_at else None,",
+    "tests": [
+      "tests/ee/sites/test_site_export_service.py"
+    ]
+  },
+  {
+    "label": "the delete job is wrapped with the BUILD timeout, forking a budget sized for a remote sandbox compile onto a cascade that walks Cloudflare, D1 and R2 serially",
+    "file": "ee/pocketpaw_ee/sites/build_worker.py",
+    "find": "    timeout=site_delete_job_timeout_seconds(),\n    max_tries=1,\n)",
+    "replace": "    timeout=site_build_job_timeout_seconds(),\n    max_tries=1,\n)",
+    "tests": [
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "the delete job gains arq-level retries, so a cascade stopped by an outage is re-entered seconds later into the same outage and spends its one cheap ledger resume",
+    "file": "ee/pocketpaw_ee/sites/build_worker.py",
+    "find": "    timeout=site_delete_job_timeout_seconds(),\n    max_tries=1,\n)",
+    "replace": "    timeout=site_delete_job_timeout_seconds(),\n    max_tries=3,\n)",
+    "tests": [
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  }
+]

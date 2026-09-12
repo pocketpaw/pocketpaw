@@ -90,16 +90,47 @@ async def test_the_default_ceilings_leave_room_for_chat():
 async def test_the_sites_lane_registers_the_chat_lanes_own_wrapped_functions():
     """Identity, not equality.
 
-    Each site function is wrapped with its own timeout because a build's budget (1020s at
-    today's defaults) is wider than the workspace-jobs timeout it used to share. A second
-    wrapping here would fork that number, and an arq cancellation that lands before the
-    in-sandbox timeout fires destroys the sentinel the lane classifies from — a slow but
-    healthy build gets recorded as lost infrastructure.
+    Each BUILD function is wrapped with its own timeout because a build's budget (1020s
+    at today's defaults) is wider than the workspace-jobs timeout it used to share. A
+    second wrapping here would fork that number, and an arq cancellation that lands
+    before the in-sandbox timeout fires destroys the sentinel the lane classifies from —
+    a slow but healthy build gets recorded as lost infrastructure.
+
+    Asserted by IDENTITY rather than as an exact list, because the lane is allowed to own
+    functions of its own — the delete job below is one. What must never happen is a
+    re-wrapped COPY of a build function appearing here, and identity is what catches that;
+    an equality check on the whole list would also fail for the harmless case of a new
+    lane-owned job, which is how a list assertion turns into a rename tax.
     """
-    assert sites_worker.WorkerSettings.functions == [
-        chat_worker.site_build_fn,
-        chat_worker.site_preview_build_fn,
+    registered = sites_worker.WorkerSettings.functions
+
+    assert chat_worker.site_build_fn in registered
+    assert chat_worker.site_preview_build_fn in registered
+
+
+async def test_the_sites_lane_owns_the_delete_job_rather_than_borrowing_it():
+    """The delete job is this lane's own, and its budget is not a build's.
+
+    A delete walks Cloudflare, D1 and R2 serially; a build waits on a remote sandbox
+    compile. Wrapping the delete with the build timeout would be the same forking mistake
+    the test above exists to prevent, pointed the other way.
+
+    ``max_tries=1`` is asserted because it is load-bearing rather than stylistic: the
+    cascade resumes from its ledger, and an arq retry would re-enter it seconds after a
+    failure, spending that one cheap resume on an outage that has not cleared.
+    """
+    from pocketpaw_ee.sites.delete_job import SITE_DELETE_FUNCTION_NAME
+
+    delete_fns = [
+        f
+        for f in sites_worker.WorkerSettings.functions
+        if getattr(f, "name", None) == SITE_DELETE_FUNCTION_NAME
     ]
+
+    assert len(delete_fns) == 1, "the delete job must be registered exactly once"
+    assert delete_fns[0].max_tries == 1
+    # Its own budget, not the build lane's.
+    assert delete_fns[0].timeout_s != sites_worker.site_build_job_timeout_seconds()
 
 
 async def test_the_chat_lane_still_claims_site_jobs_left_on_the_default_queue():

@@ -16,6 +16,15 @@
 # its custom domains -- into any workspace whose id they can name. The receiving
 # tenant consents by accepting, and the service re-checks membership against the
 # accepting user's OWN record rather than trusting the workspace header.
+# Updated 2026-09-12 (sites lifecycle wave 1, feat/sites-delete-endpoint): the two
+# routes that make deleting a site real — DELETE ``/sites/{site_id}`` and GET
+# ``/sites/{site_id}/delete-status``. The delete UI shipped against this contract
+# before the backend existed, so the shapes are FIXED by the client and not ours to
+# re-pick: the delete answers 202 (the site is still serving when it returns, because
+# the teardown is a durable job) and the poll 404s ON SUCCESS (the cascade's last step
+# deletes the document the status field lives on). Both are OWNER-ONLY on top of the
+# usual fabric gate — a member who may edit a site may not destroy it — and the owner
+# check itself lives in the service, where the non-HTTP callers cannot walk past it.
 #
 # Updated 2026-09-02 (SA-4 — the visitor-analytics read): GET
 # ``/sites/{site_id}/analytics``, the read half of the counter SA-1/SA-2 deploy.
@@ -291,6 +300,8 @@ from pocketpaw_ee.sites.dto import (
     SiteClientUpdate,
     SiteDataRowsResponse,
     SiteDataTablesResponse,
+    SiteDeleteQueuedResponse,
+    SiteDeleteStatusResponse,
     SiteEntitlementsResponse,
     SiteExportResponse,
     SiteInvoiceCreate,
@@ -1106,6 +1117,59 @@ async def download_site_export(
         chunks,
         media_type="application/json",
         headers={"Content-Disposition": 'attachment; filename="' + filename + '"'},
+    )
+
+
+@router.delete("/sites/{site_id}", response_model=SiteDeleteQueuedResponse, status_code=202)
+async def delete_site(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteDeleteQueuedResponse:
+    """Destroy a site and everything it owns. OWNER ONLY, and IRREVERSIBLE.
+
+    202 AND NOT 204, which is the whole shape of this endpoint. The teardown is a
+    durable job over an ordered cascade — cancel the billing, revoke the key, pull the
+    routes, hostnames and Worker, then the D1, the bucket prefix and the dependent
+    rows — and the site is STILL SERVING when this call returns. A 204 would be a
+    simpler contract and a lie. Poll ``/delete-status`` from here.
+
+    A DATA EXPORT IS FORCED FIRST, inside the job, before anything destructive runs.
+    That is the entire recovery story for an action with no undo, and it is a hard
+    stop rather than a best effort: an export that cannot be vouched for leaves the
+    site completely untouched and settles the row at ``export:<cause>``.
+
+    ``fabric.write`` like every sibling write, and then OWNER-ONLY on top of it in the
+    service — a workspace member who may edit a site may not destroy it. The owner
+    check is in the service rather than here because jobs, bus handlers and MCP tools
+    reach services directly; see ``sites_service.start_site_delete``.
+    """
+    return await sites_service.start_site_delete(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, site_id=site_id
+    )
+
+
+@router.get("/sites/{site_id}/delete-status", response_model=SiteDeleteStatusResponse)
+async def site_delete_status(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteDeleteStatusResponse:
+    """How far a delete has got. 404 ONCE IT FINISHES — and that 404 is the success.
+
+    There is no terminal "deleted" status to return, by construction: the cascade's
+    last step removes the Site document, and ``delete_status`` is a field on that
+    document. A client that treats this 404 as an error reports every successful
+    delete as a broken one, so the shipped client reads it as completion instead.
+
+    Owner-only like the delete itself. ``delete_reason`` names which step of a
+    teardown stopped, which is operational detail about a site the reader may be able
+    to see but not administer. A site in ANOTHER workspace is a 404 from the service's
+    tenant-scoped load, which is a different answer from the 403 a non-owner inside
+    the workspace gets, on purpose.
+    """
+    return await sites_service.site_delete_status(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, site_id=site_id
     )
 
 
