@@ -21,19 +21,25 @@ a diff showing "+40 lines of guidance" looks like an improvement.
 
 WHY 35,000 AND NOT THE CURRENT SIZE. A ceiling pinned to the current size fails
 on the next honest one-line fix, which trains people to bump the constant
-reflexively and turns the gate into a formality. The number leaves roughly 3%
+reflexively and turns the gate into a formality. The number leaves roughly 2.8%
 of headroom: enough for ordinary maintenance, far too little to absorb a new
 module. Raising it is allowed and should be argued for in the commit body, not
 done in passing.
 
 It was 34,000 until fix/sites-prompt-scope-and-slop, which added MODULE 0
 (scope: build only what the brief asked for) and widened MODULE 5's tell list.
-That is the "new module" case the paragraph above says 34,000 cannot absorb, so
-the ceiling moved rather than the module being trimmed to fit. It was paid for
-first: the Trend Engine identity menu, the mandatory background architecture,
-the WebGL tutorial and the ornament motion catalogue all came out, and MODULE 6
-stopped restating rules MODULE 1-5 already carry. Net growth across the whole
-change is 204 bytes.
+That is the "new module" case the paragraph above says 34,000 cannot absorb.
+
+The ceiling did NOT move to make room for growth: the file ends that branch at
+34,019 bytes, 65 more than the 33,954 it started at. It moved because 34,000
+left 46 bytes of headroom, so the gate fired on any edit at all and taught
+exactly the reflexive bump it exists to prevent. 35,000 restores about 2.8%.
+
+The new material was paid for in the same branch. Out: the Trend Engine identity
+menu, the mandatory background architecture, the ornament motion catalogue, and
+MODULE 6's restatement of values MODULE 0-5 already carry (37 of its 38, the
+38th moved to 3.B where eyebrows are acted on). MODULE 5 also stopped repeating
+the bans that 2.F, 2.G, 3.B and 3.C state where they are acted on.
 
 WHAT IT DOES NOT COVER. Only this one skill. The other bundled skills are
 invoked on demand rather than inlined, so their bytes are paid only when used;

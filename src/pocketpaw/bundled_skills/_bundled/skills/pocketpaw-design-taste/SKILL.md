@@ -95,7 +95,7 @@ Pick ONE aesthetic family from 2.E and express it top to bottom, in tokens. Do n
 ### 2.B Grounding
 Ground the page in a tuned neutral matched to the palette's temperature: an off-black (`#0b0f14`, `#14110e`) or an off-white. Never flat `#fff` or `#000`, which carry no hue and read as unfinished.
 
-That is the whole requirement. A treatment on top of the ground is optional and has to earn its place. A quiet section-tint rhythm, or one soft field behind a single section, is usually enough, and a page grounded in one well-chosen neutral is finished rather than bare. Decorative grids, blueprint rules, radial spotlights, mesh blobs and grain overlays are the reflex reach here, so use one only where the family genuinely calls for it (Tactile Brutalism's visible structure, Dark-Tech's fixed scanline), and never more than one per page.
+That is the whole requirement. A treatment on top of the ground is optional and has to earn its place. A quiet section-tint rhythm, or one soft field behind a single section, is usually enough, and a page grounded in one well-chosen neutral is finished rather than bare. Decorative grids, blueprint rules, radial spotlights, mesh blobs and grain overlays are the reflex reach here, so use one only where the family genuinely calls for it (the Brutalist family's visible structure, Dark-Tech's fixed scanline), and never more than one per page.
 
 ### 2.C Canvas backgrounds
 A published Paw Site KEEPS its client bundle by default, so a hand-written WebGL canvas runs. Reach for one where the read genuinely wants it - immersive, technical, or a premium brand with something to show - rather than on every page, and never as filler behind copy that would read better on a quiet ground.
@@ -246,16 +246,14 @@ Shapes models reach for because other models reached for them, not because a pag
 
 ## MODULE 6: PRE-FLIGHT COMPLIANCE CHECK
 
-Every rule has a home above. This pass confirms you applied it; it does not restate it.
+Read the page back as a visitor, then confirm each module did its job. This is a
+confirmation pass, not a second statement of the rules: where one fails, the
+module named beside it is where the rule lives.
 
-- [ ] **Scope (M0):** every section traces to the brief. No invented price, hour, address, phone number, testimonial, client or certification. Placeholders are flagged in your reply, and anything the user supplied went in verbatim.
-- [ ] **Direction (M1):** the `<!-- Creative Direction Declaration -->` block sits at the top, the Design Read names a 2.E family, dials set from the read.
-- [ ] **Ground (2.B):** tuned off-black or off-white, never flat `#fff` / `#000`, at most one background treatment, a CSS fallback under any canvas, and media carrying width/height or aspect-ratio.
-- [ ] **Composition (3.A/3.B):** no two sections share a layout, no three-equal-card row, no third consecutive image+text split, eyebrows within `ceil(sectionCount / 3)` and none numbered.
-- [ ] **Static (3.E/3.F):** with all client JS disabled the page looks finished, resting state in markup rather than `onMount`, and no author JS at all without the client bundle.
-- [ ] **Hero (3.B):** not centered-over-gradient; headline ≤ 2 lines, subtext ≤ 20 words, CTA above the fold, ≤ 4 text elements, `min-height: 100dvh`.
-- [ ] **Colour (2.G):** one accent below ~80% saturation held page-wide, highest contrast on the primary CTA, not the beige+brass default.
-- [ ] **Type (2.F):** a distinctive display face, serif only where the family or brief justifies it, body near 62ch, one radius system throughout.
-- [ ] **Copy (M4):** zero em-dashes in visible text, the self-audit done, one label per CTA intent.
-- [ ] **Tells (M5):** re-read the page against MODULE 5. Edge treatments, the hero shape and the feature row are where the reflex lands most often.
-- [ ] Nav one line at 80px or less; asymmetric layouts collapse to one clean column below 768px; light and dark both hold if the family uses both.
+- [ ] **M0** - every section traces to the brief, nothing invented, placeholders flagged, supplied content verbatim.
+- [ ] **M1** - the Creative Direction Declaration is at the top, the Design Read names a 2.E family, dials set from the read.
+- [ ] **2.B / 2.F / 2.G** - tuned ground, one accent held page-wide, a distinctive display face, one radius system.
+- [ ] **3.A / 3.B** - no two sections share a layout, hero discipline holds, eyebrows within budget and none numbered.
+- [ ] **3.E / 3.F** - with client JS disabled the page looks finished; media carries width/height or aspect-ratio.
+- [ ] **M4 / M5** - zero em dashes in visible text, the copy self-audit done, and one deliberate pass against the tells list.
+- [ ] Nav on one line at 80px or less; asymmetric layouts collapse to one clean column below 768px.

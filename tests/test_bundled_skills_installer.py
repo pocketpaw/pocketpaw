@@ -249,9 +249,14 @@ def test_install_includes_design_taste(tmp_path: Path) -> None:
     assert "MOTION_INTENSITY" in body
     assert "VISUAL_DENSITY" in body
 
-    # The Creative Director engine + Trend Engine identities are present.
+    # The Creative Director engine + the aesthetic direction families are
+    # present. This asserted "Tactile Brutalism" until 2026-09-12, a name from
+    # the deleted Trend Engine menu that survived only in a stray parenthetical
+    # -- so the test went green on the one orphan reference rather than on the
+    # system it meant to pin.
     assert "Vision Ledger" in body
-    assert "Tactile Brutalism" in body
+    assert "Aesthetic direction families" in body
+    assert "MODULE 0: SCOPE" in body
 
     # The static-prerender resting-state rule survives (folded-in Svelte track).
     assert "onMount" in body
