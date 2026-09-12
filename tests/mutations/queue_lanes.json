@@ -84,8 +84,8 @@
   {
     "label": "the sites lane stops registering the preview function, so preview jobs enqueued onto the sites queue have no worker willing to claim them and arq says nothing",
     "file": "ee/pocketpaw_ee/sites/build_worker.py",
-    "find": "    functions = [site_build_fn, site_preview_build_fn]",
-    "replace": "    functions = [site_build_fn]",
+    "find": "    functions = [site_build_fn, site_preview_build_fn, _site_delete_fn]",
+    "replace": "    functions = [site_build_fn, _site_delete_fn]",
     "tests": [
       "tests/cloud/runs/test_worker_lanes.py"
     ]

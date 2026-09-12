@@ -9,6 +9,13 @@
 # that still belongs to another workspace, so it carries only what somebody needs
 # in order to decide whether to accept — never the signed key, the capture config,
 # the lead count or the client record.
+# Updated 2026-09-12 (sites lifecycle wave 1, feat/sites-delete-endpoint): added
+# ``SiteDeleteQueuedResponse`` and ``SiteDeleteStatusResponse``, the two wire
+# shapes of the site-delete lane. Both carry status as a plain ``str`` rather than
+# a literal, and the poll has NO terminal success value — the cascade's last step
+# deletes the document the status field lives on, so success is the 404. Read the
+# class docstrings before tightening either, because both looseness calls are
+# load-bearing against the shipped client.
 #
 # Updated 2026-09-04 (AD-4 — the overview chart's data): added
 # ``SiteAnalyticsSeriesPoint`` / ``SiteAnalyticsSeries`` and ``SiteAnalyticsResponse.series``,
@@ -477,6 +484,61 @@ class SiteExportResponse(BaseModel):
     # When the sweeper will purge these bytes. Surfaced so the UI can say how long
     # the owner has to download it rather than implying it is kept forever.
     expires_at: str | None = None
+
+
+class SiteDeleteQueuedResponse(BaseModel):
+    """Answer of ``DELETE /sites/{site_id}`` — 202, with the job handle.
+
+    202 AND NOT 204. The site is still serving when this returns: the teardown is a
+    durable job over an ordered cascade, and a 204 would be a simpler contract and a
+    lie. The client polls ``GET /sites/{site_id}/delete-status`` from here.
+
+    ``status`` is typed ``str`` rather than a literal for the same reason the poll's
+    is — see :class:`SiteDeleteStatusResponse`.
+    """
+
+    site_id: str
+    #: ``"queued"`` on the happy path. A request that arrives while an earlier attempt
+    #: still holds the slot reports THAT attempt's status instead, because the site is
+    #: already being deleted and a conflict the caller cannot act on would be noise.
+    status: str = "queued"
+    #: Mirrors ``Site.delete_job_id``. Persisted rather than transient because a queued
+    #: destructive job is exactly when someone reloads the page.
+    job_id: str | None = None
+
+
+class SiteDeleteStatusResponse(BaseModel):
+    """Answer of ``GET /sites/{site_id}/delete-status``.
+
+    THIS ENDPOINT 404s ON SUCCESS, and that is the contract rather than an edge case.
+    The cascade's last step deletes the Site document, and ``delete_status`` is a field
+    on that document — so a completed delete has nothing left to report a status on.
+    There is deliberately no terminal ``"deleted"`` value here; adding one would mean
+    keeping the row the delete exists to remove, and the shipped client reads the 404
+    as its success signal.
+
+    ``delete_status`` is a plain ``str`` on purpose. The client treats any value it
+    does not recognise as STILL RUNNING, which only works if an unknown value can
+    reach it — a stricter type here would push a future status through validation and
+    turn "we added a phase" into "the poll stops on a live teardown".
+    """
+
+    site_id: str
+    #: none | queued | exporting | tearing_down | failed. Read via the client's
+    #: helpers, never by comparing the string at a call site.
+    delete_status: str = "none"
+    #: WHY a delete stopped, as ``"<step>:<cause>"`` — the same two-part shape
+    #: ``build_reason`` uses, so a consumer parses it once. The cause half is a fixed
+    #: machine token from ``delete_cascade._classify``, never raw provider text.
+    delete_reason: str | None = None
+    #: Step name -> outcome: the resume ledger. A re-entered job skips every step
+    #: recorded here, which is what makes a retry a resume rather than a repeat.
+    delete_ledger: dict[str, str] = Field(default_factory=dict)
+    #: The ``SiteExport`` holding the customer's data, captured before anything was
+    #: destroyed. An ID and not a URL: the export outlives the site precisely because
+    #: it is NOT stored on the document the cascade deletes.
+    delete_export_id: str = ""
+    delete_job_id: str | None = None
 
 
 class SiteMetadataUpdate(BaseModel):

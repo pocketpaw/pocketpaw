@@ -5,6 +5,12 @@
 # builder's own honesty is covered in test_site_export.py; what is tested here is
 # that the SERVICE routes a static site to the legitimate empty and a dynamic site
 # with no reachable D1 to a failure, rather than collapsing both into "no tables".
+#
+# Updated 2026-09-12 (feat/sites-delete-endpoint): added the response-mapping test at
+# the bottom. Every test above it exercises a PURE helper and none had ever built a
+# document, which is exactly how ``_export_response`` shipped reading a ``created_at``
+# field no document declares — an ``AttributeError`` on every call, so the whole export
+# surface answered 500 and the delete lane's forced export could never pass its gate.
 
 from __future__ import annotations
 
@@ -88,3 +94,35 @@ def test_a_static_site_is_recognised_by_its_error_code_not_by_guessing() -> None
     starts reporting its export as failed — so the contract is pinned here."""
     exc = ValidationError("sites.not_dynamic", "not a dynamic site")
     assert exc.code == "sites.not_dynamic"
+
+
+@pytest.mark.asyncio
+async def test_an_export_can_actually_be_rendered_as_a_response(beanie_test_db) -> None:
+    """The export response maps ``createdAt``, and nothing had ever built one.
+
+    ``_export_response`` read ``doc.created_at`` — a snake_case spelling that
+    ``TimestampedDocument`` does not declare and nothing aliases — so it raised
+    ``AttributeError`` on EVERY call from the day the export shipped. The whole feature
+    was unreachable behind it: ``POST /sites/{id}/export`` did all of its work and then
+    answered 500, ``GET /sites/exports`` could not list, and the delete lane's forced
+    export could never satisfy its own gate.
+
+    It survived review because every existing test in this file exercises the PURE
+    helpers (``retention_days``, ``export_key``, ``export_filename``, ``store_export``)
+    and none of them builds a document. This one does, which is the only reason it
+    catches it.
+    """
+    from pocketpaw_ee.cloud.models.site_export import SiteExport
+    from pocketpaw_ee.sites.service import _export_response
+
+    doc = SiteExport(
+        workspace="w1", owner="u1", site_id="s1", status="ready", storage_key="k", size_bytes=12
+    )
+    await doc.insert()
+
+    out = _export_response(doc)
+
+    assert out.id == str(doc.id)
+    assert out.status == "ready"
+    assert out.created_at is not None, "createdAt must reach the wire"
+    assert out.created_at == doc.createdAt.isoformat()

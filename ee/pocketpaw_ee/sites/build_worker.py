@@ -30,12 +30,25 @@
 # await on a remote exec. So these four slots cost the worker container almost nothing,
 # and the number is about how many sandboxes the account should be paying for at once
 # rather than about memory. Raise it with the Daytona quota, not with the memory limit.
-"""The site-build lane's arq WorkerSettings (backend-perf C1)."""
+# Updated 2026-09-12 (sites lifecycle wave 1, feat/sites-delete-endpoint): the lane
+# grew a THIRD job — ``run_site_delete``, the forced export plus the teardown cascade.
+# It rides this queue rather than opening a fourth one: this is already the consumer
+# of site work, and a third ``build:`` service cannot be added to the Coolify compose
+# file anyway (paw-workspace #193/#194).
+#
+# THERE IS EXACTLY ONE ``functions = [...]`` ASSIGNMENT IN THIS CLASS, and it must stay
+# that way. A second one silently wins over the first — ``chat/runs/worker.py`` carries
+# a comment about the merge that produced two there and would have registered NEITHER
+# ship job. Adding a lane means editing the existing list, never appending a new
+# assignment.
+"""The site lane's arq WorkerSettings (backend-perf C1): builds, previews, deletes."""
 
 from __future__ import annotations
 
 import logging
 import os
+
+from arq import func
 
 from pocketpaw_ee.cloud.chat.runs.worker import (
     arq_health_check_interval_seconds,
@@ -46,6 +59,11 @@ from pocketpaw_ee.cloud.chat.runs.worker import (
     worker_startup,
 )
 from pocketpaw_ee.sites.build_job import SITE_BUILD_QUEUE_NAME, site_build_job_timeout_seconds
+from pocketpaw_ee.sites.delete_job import (
+    SITE_DELETE_FUNCTION_NAME,
+    run_site_delete,
+    site_delete_job_timeout_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +104,24 @@ def _sites_max_jobs() -> int:
     return val
 
 
+# The DELETE job rides this same lane, wrapped like the build jobs and for the same
+# reasons: its OWN timeout (a cascade walks Cloudflare, D1 and R2 serially and must not be
+# clipped by a budget sized for a sandbox build), and ``max_tries=1``.
+#
+# ``max_tries=1`` is load-bearing here rather than conventional. ``run_cascade`` is
+# resumable from its ledger, but the resume belongs to a PERSON: a cascade that stopped
+# because Cloudflare was returning 500s would be re-entered by an automatic retry seconds
+# later, into the same outage, spending the one cheap resume on a failure that has not
+# cleared. The row settles at ``failed`` naming the step, and the owner pressing delete
+# again is what re-claims it — ``failed`` is deliberately not an in-flight status.
+_site_delete_fn = func(
+    run_site_delete,
+    name=SITE_DELETE_FUNCTION_NAME,
+    timeout=site_delete_job_timeout_seconds(),
+    max_tries=1,
+)
+
+
 class WorkerSettings:
     """arq worker configuration for the site-build queue."""
 
@@ -94,7 +130,7 @@ class WorkerSettings:
     # carries its own timeout and ``max_tries=1``; re-wrapping them here would fork the
     # build timeout, and a build that arq cancels before its in-sandbox timeout fires is
     # recorded as lost infrastructure rather than as the slow-but-healthy build it was.
-    functions = [site_build_fn, site_preview_build_fn]
+    functions = [site_build_fn, site_preview_build_fn, _site_delete_fn]
     on_startup = worker_startup
     on_shutdown = worker_shutdown
     # No auto-retry, matching every other lane: a build is billed per attempt in a

@@ -1,6 +1,25 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-12 (sites lifecycle wave 1, feat/sites-delete-endpoint): the
+# DELETE lifecycle — ``start_site_delete`` / ``site_delete_status`` (the two
+# owner-only seams the REST routes call) plus the writes the delete job drives the
+# row through: ``claim_delete_queued``, ``mark_delete_stage``,
+# ``record_delete_failure``, ``record_delete_progress``, ``purge_site_records`` and
+# ``delete_site_document``. The cascade and the export already existed and had no
+# caller; this is the half that gives them one.
+#
+# THE OWNER CHECK LIVES HERE, not in the router, for the reason
+# ``pockets.service.delete`` records against the same decision: jobs, bus handlers
+# and MCP tools reach services directly, so a guard in the router is one they walk
+# past. A non-owner inside the workspace is 403 and a site outside it is 404 — two
+# different answers, because confirming a stranger's site exists is itself a leak.
+#
+# ``record_delete_progress`` PERSISTS MORE THAN THE LEDGER, and the tuple it reads
+# is load-bearing: the cascade stops billing by clearing ``subscription_status`` in
+# memory, so a ledger-only save would leave a failed teardown whose ledger says
+# billing is done and whose row still bills. See ``_CASCADE_MUTATED_FIELDS``.
+#
 # Updated 2026-09-11 (SC-1, feat/sites-svelte-edit-create): ``edit_svelte_component``
 # gained ``create`` and now returns ``(site_doc, unreferenced)`` rather than the doc
 # alone. Three things came with it. It reads the pocket UNCONDITIONALLY now (the create
@@ -1077,7 +1096,8 @@ from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.cloud.models.site import SiteInvoice as _SiteInvoiceDoc
 from pocketpaw_ee.cloud.models.site_export import SiteExport as _SiteExportDoc
-from pocketpaw_ee.sites.build_state import claim_precondition
+from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter as _SiteRateCounterDoc
+from pocketpaw_ee.sites.build_state import claim_precondition, stale_after
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
     ANALYTICS_STATUS_NEVER_COUNTED,
@@ -1097,6 +1117,8 @@ from pocketpaw_ee.sites.dto import (
     SiteDataRowsResponse,
     SiteDataTableInfo,
     SiteDataTablesResponse,
+    SiteDeleteQueuedResponse,
+    SiteDeleteStatusResponse,
     SiteEntitlementsResponse,
     SiteExportResponse,
     SiteInvoiceCreate,
@@ -9739,7 +9761,13 @@ def _export_response(doc: _SiteExportDoc) -> SiteExportResponse:
         size_bytes=doc.size_bytes,
         table_counts=dict(doc.table_counts or {}),
         lead_count=doc.lead_count,
-        created_at=doc.created_at.isoformat() if doc.created_at else None,
+        # ``createdAt``, not ``created_at``. ``TimestampedDocument`` declares the
+        # camelCase field and nothing aliases it, so the snake_case spelling this
+        # line carried since the export shipped raised ``AttributeError`` on EVERY
+        # call — which meant ``POST /sites/{id}/export`` answered 500 after doing all
+        # its work, and the delete lane's forced export could never satisfy its own
+        # gate. Nothing caught it because no test had ever built an export response.
+        created_at=doc.createdAt.isoformat() if doc.createdAt else None,
         expires_at=doc.expires_at.isoformat() if doc.expires_at else None,
     )
 
@@ -9880,6 +9908,25 @@ async def _fail_export(export: _SiteExportDoc, exc: Exception, site_id: str) -> 
     )
     await export.save()
     logger.warning("sites.export failed for site=%s: %s", site_id, exc, exc_info=True)
+
+
+async def site_export_is_ready(*, workspace_id: str, export_id: str) -> bool:
+    """Whether ONE export holds bytes, tenant-scoped. The delete lane's resume check.
+
+    A direct read rather than a scan of ``list_site_exports``: the question is about one
+    row, and answering it by listing a workspace's whole export history — then mapping
+    every row through a response DTO — does strictly more work and fails on strictly
+    more things than the question needs.
+    """
+    try:
+        oid = ObjectId(export_id)
+    except (InvalidId, TypeError):
+        return False
+    doc = await _SiteExportDoc.find_one({"_id": oid, "workspace": workspace_id})
+    # ``ready`` and nothing else. A ``pending`` or ``failed`` row records an ATTEMPT,
+    # not a copy of anyone's data, and treating either as satisfying the gate is how a
+    # delete proceeds over data nobody kept.
+    return doc is not None and doc.status == "ready" and bool(doc.storage_key)
 
 
 async def list_site_exports(*, workspace_id: str, site_id: str = "") -> list[SiteExportResponse]:
@@ -10348,6 +10395,278 @@ class _TransferDeps:
             {"$set": {"workspace": destination_workspace_id}}
         )
         return bool(getattr(result, "modified_count", 0) or 0)
+# The delete lifecycle (sites lifecycle wave 1)
+# ---------------------------------------------------------------------------
+#
+# These are the seams ``sites/delete_job.py`` writes a delete through. They live here
+# rather than in the job for the reason every other Site write does: the job is not
+# the only caller this will ever have, and a guard a second caller can walk past is
+# not a guard.
+#
+# EVERY WRITE BELOW IS FIELD-SCOPED. Not a style preference — a delete runs for
+# minutes against a document a BUILD also writes to, and a ``save()`` here would push
+# a stale whole-document snapshot back and silently roll ``build_status`` backwards.
+# ``update_site_metadata`` documents the same rule for a human-paced edit; it binds
+# harder for a job that holds its in-memory doc across a multi-minute cascade.
+
+#: The delete statuses that CLAIM an attempt is running. ``failed`` is deliberately
+#: not among them: the cascade is resumable from its ledger, so a stopped delete must
+#: be re-claimable or a site that failed once could never be deleted again. ``none``
+#: is the never-asked row.
+DELETE_IN_FLIGHT_STATUSES = frozenset({"queued", "exporting", "tearing_down"})
+
+
+def delete_claim_precondition(
+    timeout_seconds: int, *, now: datetime | None = None
+) -> dict[str, Any]:
+    """The Mongo filter that lets a caller CLAIM the delete slot, as a query fragment.
+
+    The same shape — and the same asymmetry — as ``build_state.claim_precondition``,
+    and for the same reason: the decision has to live INSIDE the write, or two
+    concurrent deletes of one site both read a claimable row and both enqueue.
+
+    A MISSING OR UNREADABLE STAMP READS AS CLAIMABLE. That is the safe direction here
+    exactly as it is for builds, and the cost of getting it wrong is not symmetric: a
+    redundant claim costs one idempotent pass over a ledger that skips every finished
+    step, while a stuck guard leaves a site that can never be deleted — still serving,
+    still ingesting leads, and (on a paid tier) still charging.
+    """
+    reference = now or datetime.now(UTC)
+    if reference.tzinfo is None:  # pragma: no cover - defensive
+        reference = reference.replace(tzinfo=UTC)
+    return {
+        "$or": [
+            {"delete_status": {"$nin": sorted(DELETE_IN_FLIGHT_STATUSES)}},
+            {"delete_started_at": {"$not": {"$type": "date"}}},
+            {"delete_started_at": {"$lt": reference - stale_after(timeout_seconds)}},
+        ]
+    }
+
+
+async def claim_delete_queued(
+    site: _SiteDoc,
+    *,
+    job_id: str,
+    timeout_seconds: int,
+    now: datetime | None = None,
+) -> bool:
+    """CLAIM the delete slot for ``site`` and stamp it ``queued``. False means lost.
+
+    One conditional write, mirroring ``claim_build_queued`` — see that function and
+    :func:`delete_claim_precondition` for why the gate cannot be a read followed by a
+    write.
+
+    ``delete_reason`` is cleared so a retry never shows the previous attempt's step,
+    and ``delete_ledger`` is deliberately LEFT ALONE: it is what makes the retry a
+    resume rather than a repeat, and clearing it here would re-run every destructive
+    step the last attempt already completed.
+    """
+    stamp = now or datetime.now(UTC)
+    values: dict[str, Any] = {
+        "delete_status": "queued",
+        "delete_started_at": stamp,
+        "delete_job_id": job_id,
+        "delete_reason": None,
+    }
+    collection = type(site).get_pymongo_collection()
+    won = await collection.find_one_and_update(
+        {"_id": site.id, **delete_claim_precondition(timeout_seconds, now=stamp)},
+        {"$set": values},
+    )
+    if won is None:
+        return False
+    # The DB is now ahead of the in-memory doc, and every later step of the enqueue
+    # reads this object. A caller that won the claim but still saw the pre-claim row
+    # would log — and roll back to — the wrong status.
+    for field, value in values.items():
+        setattr(site, field, value)
+    return True
+
+
+async def mark_delete_stage(site: _SiteDoc, *, status: str) -> None:
+    """Advance a claimed delete to its next phase and RE-STAMP the clock.
+
+    Re-stamping matches ``mark_build_running``: ``delete_started_at`` means "when the
+    current phase began", so a job that waited behind the lane's concurrency ceiling
+    does not spend its staleness window on queue wait and get declared stale while it
+    is actively tearing a site down.
+    """
+    stamp = datetime.now(UTC)
+    await site.set({"delete_status": status, "delete_started_at": stamp})
+    site.delete_status = status
+    site.delete_started_at = stamp
+
+
+async def record_delete_failure(site: _SiteDoc, *, reason: str) -> None:
+    """Stop the delete at ``failed`` and say WHERE, as ``"<step>:<cause>"``.
+
+    ``delete_job_id`` is left in place, like ``record_build_outcome`` leaves
+    ``build_job_id``: a client polling with that handle must still find the row it was
+    watching. ``delete_ledger`` is left in place too — it is the resume.
+    """
+    await site.set({"delete_status": "failed", "delete_reason": reason})
+    site.delete_status = "failed"
+    site.delete_reason = reason
+
+
+#: The fields the cascade mutates ON THE DOC, written back alongside the ledger.
+#:
+#: THIS TUPLE IS NOT COSMETIC, and a ledger-only save would be a live bug rather than
+#: an incomplete one. ``delete_cascade._stop_billing`` stops the money by clearing
+#: ``subscription_status`` IN MEMORY — that local write IS the mechanism on the
+#: credits rail, because ``renewal_sweeper`` selects the rows it charges on exactly
+#: that field. ``_revoke_key`` closes the public lead-ingest surface the same way. If
+#: this callback persisted only ``delete_ledger``, a cascade that failed at a later
+#: step would leave a row whose ledger says billing is done and whose
+#: ``subscription_status`` still says ``active``; the resume would SKIP the billing
+#: step on the strength of that ledger, and the customer would keep being charged for
+#: a half-destroyed site. That is precisely the failure putting billing first exists
+#: to prevent, re-introduced by the persistence layer.
+_CASCADE_MUTATED_FIELDS = (
+    "delete_ledger",
+    "subscription_status",
+    "renewal_date",
+    "signed_key",
+    "revoked",
+)
+
+
+async def record_delete_progress(site: _SiteDoc) -> None:
+    """Persist one cascade step's effects: the ledger PLUS what that step changed.
+
+    This is the ``save`` callback ``delete_cascade.run_cascade`` invokes after EVERY
+    step, and it is field-scoped for the reason at the top of this section. See
+    :data:`_CASCADE_MUTATED_FIELDS` for why it is not ledger-only.
+    """
+    await site.set({field: getattr(site, field) for field in _CASCADE_MUTATED_FIELDS})
+
+
+async def purge_site_records(*, workspace_id: str, site_id: str) -> int:
+    """Delete the dependent rows a destroyed site leaves behind. Returns the count.
+
+    Scoped on ``(workspace, site_id)`` — the compound index ``Lead`` already declares —
+    so this can never reach another site's submissions. The tenancy is IN the query
+    rather than checked after it, because a purge that filtered in Python would still
+    have read the other tenant's rows.
+
+    WHAT THIS DOES NOT PURGE, said here rather than discovered later:
+
+      * VISITOR ANALYTICS. They live in Cloudflare Analytics Engine on a three-month
+        retention this product does not control. The confirm dialog says so out loud
+        and the export bundle repeats it — implying a full wipe would be a
+        completeness we cannot deliver.
+      * CONCIERGE TRANSCRIPTS. They are ``ChatRun`` rows keyed on the POCKET and owned
+        by the Paw Bar surface; reaching into another subsystem's collection from here
+        would put a second writer on rows only that surface knows the shape of.
+        Tracked as follow-up. The site's signed key is revoked in cascade step 2, so
+        no NEW transcript can be written once a delete starts.
+      * SITE DESIGN BRIEFS. They carry no ``site_id`` at all — a brief belongs to an
+        import, not to the site an import eventually became — so there is no query
+        that could select this site's.
+    """
+    removed = 0
+    leads = await _LeadDoc.find({"workspace": workspace_id, "site_id": site_id}).delete()
+    removed += getattr(leads, "deleted_count", 0) or 0
+    # The per-minute capture counters. They carry a 120s TTL and would expire on their
+    # own, but a site being destroyed should not leave rows behind that name it.
+    # ``scope_id`` is the site id for the overall scope and ``"{site_id}:{rate_key}"``
+    # for the per-IP one, so one anchored prefix selects both and nothing else — an
+    # unanchored match would also select a different site whose id merely contains
+    # this one.
+    counters = await _SiteRateCounterDoc.find(
+        {"scope_id": {"$regex": f"^{re.escape(site_id)}(:|$)"}}
+    ).delete()
+    removed += getattr(counters, "deleted_count", 0) or 0
+    return removed
+
+
+async def delete_site_document(site: _SiteDoc) -> None:
+    """Remove the Site row — the LAST thing a delete does, and the success signal.
+
+    There is no terminal ``delete_status`` because this row is where that field lives.
+    A reader that finds no Site has found a completed delete, which is why
+    ``GET /sites/{id}/delete-status`` answering 404 is what the client treats as
+    success rather than as an error.
+    """
+    # no-event: there is no ``SiteDeleted`` event type, and this is not the place to
+    # mint one. ``SitePublished`` exists because a publish has downstream consumers
+    # (knowledge sync, the screenshot capture); a delete has none today, and an event
+    # emitted for nobody is a contract to keep for no reason. If a consumer appears —
+    # a workspace activity feed is the likely one — add the type WITH it, so the
+    # payload is shaped by a real reader rather than guessed at here.
+    await site.delete()
+
+
+async def start_site_delete(
+    *, workspace_id: str, user_id: str, site_id: str
+) -> SiteDeleteQueuedResponse:
+    """Queue the destruction of one site. OWNER ONLY. Answers before it is done.
+
+    The owner check is HERE and not in the router, following the reasoning
+    ``pockets.service.delete`` records: the router is not the only caller (jobs, bus
+    handlers and MCP tools reach services directly), so a guard in the router is one
+    those callers walk past.
+
+    A non-owner in the SAME workspace gets 403 — they can see the site, they simply
+    may not destroy it — while a site in another workspace is a 404 from ``_load``,
+    because confirming a stranger's site exists is itself a leak. Two different
+    answers, on purpose.
+    """
+    from pocketpaw_ee.sites.delete_job import enqueue_site_delete
+
+    site = await _load(workspace_id, site_id)
+    if site.owner != user_id:
+        from pocketpaw_ee.guards.audit import log_denial
+
+        log_denial(
+            actor=user_id,
+            action="site.delete",
+            code="site.not_owner",
+            resource_id=str(site.id),
+        )
+        raise Forbidden("site.not_owner", "Only the site's owner can delete it.")
+
+    job_id = await enqueue_site_delete(site)
+    if job_id is None:
+        # Another attempt holds the slot. NOT an error: the site is already being
+        # deleted, which is what this caller asked for, so report the in-flight
+        # attempt rather than a conflict they cannot act on.
+        return SiteDeleteQueuedResponse(
+            site_id=site_id,
+            status=site.delete_status or "queued",
+            job_id=site.delete_job_id,
+        )
+    # no-event: queuing a delete mutates only this row's own lifecycle fields, and the
+    # client learns the outcome by polling rather than through the realtime bus. The
+    # destroy itself is covered by ``delete_site_document``'s note above.
+    return SiteDeleteQueuedResponse(site_id=site_id, status="queued", job_id=job_id)
+
+
+async def site_delete_status(
+    *, workspace_id: str, user_id: str, site_id: str
+) -> SiteDeleteStatusResponse:
+    """Where a delete has got to. OWNER ONLY, and a 404 once it FINISHED.
+
+    The 404 is not an edge case, it is the contract: the cascade's last step deletes
+    the document this read lives on, so ``_load`` raising ``NotFound`` is how a client
+    learns the delete succeeded. There is deliberately no terminal status to return
+    instead — inventing one would mean keeping the row the delete exists to remove.
+
+    Owner-only for the same reason the delete is: ``delete_reason`` names which step of
+    a teardown failed, which is operational detail about a site the reader may not
+    administer.
+    """
+    site = await _load(workspace_id, site_id)
+    if site.owner != user_id:
+        raise Forbidden("site.not_owner", "Only the site's owner can delete it.")
+    return SiteDeleteStatusResponse(
+        site_id=site_id,
+        delete_status=site.delete_status or "none",
+        delete_reason=site.delete_reason,
+        delete_ledger=dict(site.delete_ledger or {}),
+        delete_export_id=site.delete_export_id or "",
+        delete_job_id=site.delete_job_id,
+    )
 
 
 __all__ = [
@@ -10377,10 +10696,19 @@ __all__ = [
     "update_site_metadata",
     "create_site_export",
     "list_site_exports",
+    "site_export_is_ready",
     "open_site_export",
     "sweep_expired_site_exports",
     "offer_site_transfer",
     "accept_site_transfer",
     "cancel_site_transfer",
     "list_incoming_site_transfers",
+    "start_site_delete",
+    "site_delete_status",
+    "claim_delete_queued",
+    "mark_delete_stage",
+    "record_delete_failure",
+    "record_delete_progress",
+    "purge_site_records",
+    "delete_site_document",
 ]

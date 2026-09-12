@@ -2128,6 +2128,89 @@ that stopped rather than repeating the ones that finished.
 `WorkspaceSettings.site_transfers_allowed` (default `true`). A site leaving takes its
 leads with it, so an admin can forbid the outbound half outright. Only the source
 side is gated — the receiving side is governed by consent, not by a setting.
+## Deleting a site
+
+Wave 1 of the sites lifecycle. Deleting a site is **irreversible**, **owner-only**, and
+**not one request** — it is a durable job over an ordered cascade (stop the billing,
+revoke the signed key, pull the routes / hostnames / Worker, then the D1, the bucket
+prefix and the dependent rows, and the Site document last). Source:
+`ee/pocketpaw_ee/sites/router.py`, `ee/pocketpaw_ee/sites/delete_job.py`.
+
+**A data export is forced first.** Before anything destructive runs, the job captures the
+site's D1 tables and captured leads to a `SiteExport` row in private storage. An export
+that cannot be vouched for is a hard stop: the cascade never starts, the site is left
+exactly as it was, and the row settles at `export:<cause>`. That export is the entire
+recovery story, which is why it is a precondition rather than a courtesy — see
+[the export endpoint](#post-sitessite_idexport) for the standalone version of the same
+capture.
+
+**Visitor analytics are not purged and cannot be.** They live in Cloudflare Analytics
+Engine on a three-month retention this product does not control. The delete says so
+rather than implying a completeness it cannot deliver.
+
+### `DELETE /sites/{site_id}`
+
+Auth: `fabric.write`, plus **owner-only** on top of it — a workspace member who may edit
+a site may not destroy it. A non-owner inside the workspace gets `403`
+(`site.not_owner`); a site in another workspace gets `404`, because confirming a
+stranger's site exists is itself a leak.
+
+Response **`202`** — deliberately not `204`. The site is **still serving** when this
+returns:
+
+```json
+{
+  "site_id": "68b6f2c1a4d3e50012ab34cd",
+  "status": "queued",
+  "job_id": "site-delete-68b6f2c1a4d3e50012ab34cd-9f2c..."
+}
+```
+
+A second delete of a site whose teardown is already running does not conflict: it answers
+`202` reporting the in-flight attempt, because the site is already being deleted, which
+is what the caller asked for. A delete that previously **failed** can be started again —
+the cascade resumes from its ledger and skips every step the earlier attempt finished.
+
+### `GET /sites/{site_id}/delete-status`
+
+Auth: `fabric.read`, owner-only for the same reason (`delete_reason` names which teardown
+step stopped).
+
+Response `200` while the delete is running or stopped:
+
+```json
+{
+  "site_id": "68b6f2c1a4d3e50012ab34cd",
+  "delete_status": "tearing_down",
+  "delete_reason": null,
+  "delete_ledger": { "billing": "done", "revoke": "done" },
+  "delete_export_id": "68b7a1...",
+  "delete_job_id": "site-delete-..."
+}
+```
+
+**This endpoint `404`s when the delete SUCCEEDS, and that 404 is the success signal.**
+There is no terminal `"deleted"` status by construction: the cascade's last step removes
+the Site document, and `delete_status` is a field on that document, so a completed delete
+has nothing left to report a status on. A client that reads this `404` as an error
+reports every successful delete as a broken one.
+
+`delete_status` is one of `none`, `queued`, `exporting`, `tearing_down`, `failed`. Treat
+an **unrecognised** value as still running rather than terminal — a client that stops
+polling on a status it has not heard of abandons a live teardown and leaves the user
+looking at a half-destroyed site that claims it finished.
+
+`delete_reason` is a two-part `"<step>:<cause>"` string reusing `build_reason`'s exact
+format. Render the **step** half; the cause half is a fixed machine token written for a
+log, never raw provider text. `export` is the step worth its own sentence — it is the one
+failure where nothing was destroyed and the user's site is untouched.
+
+### Deleting the pocket instead
+
+You cannot. `DELETE /pockets/{id}` **refuses** with `409 pocket.has_site` while a site is
+published from it, rather than cascading — a cascade from there would bypass the forced
+export, so the one path that can destroy a site stays the one path that preserves its
+data first. Delete the site, then the pocket.
 
 ## Ship — Managed Deploys
 
