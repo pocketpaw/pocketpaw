@@ -208,7 +208,13 @@ _MAX_CALL_SECONDS_PER_DAY: dict[str, int | None] = {
 # The workspace S3 STORAGE cap, in BYTES (feat/billing-storage-caps, 2026-08-08).
 # The approved consumer numbers — the Files → Knowledge Base / memory store a
 # workspace may hold (decimal GB, the SI convention Google/consumer storage uses):
-#   * free      =          5 GB — 5_000_000_000 bytes — a generous starter stash
+#   * free      =          1 GB — 1_000_000_000 bytes — a trial, not a stash
+#
+# Free was 5 GB until 2026-09-12 and was never enforced, because the gate in
+# ``storage.service`` was behind ``billing_enforced`` and nothing sets that.
+# 5 GB of unbilled object storage per signup is a real bill the moment the
+# product is public, so the number came down to 1 GB and the gate came off the
+# flag in the same change. Every paid rung is unchanged.
 #   * go        =         15 GB — everyday file + KB usage
 #   * pro       =         50 GB — ~3.3× Go, for daily drivers
 #   * pro_max   =        100 GB — ~2× Pro, for power users
@@ -217,9 +223,9 @@ _MAX_CALL_SECONDS_PER_DAY: dict[str, int | None] = {
 # workspace's live ``FileUpload`` blob sizes are summed and a new upload is
 # blocked with ``StorageLimitError`` when it would push the total over the cap.
 # The ``_build`` default for an unknown key FAILS CLOSED to the Free value
-# (5 GB), never None/uncapped.
+# (1 GB), never None/uncapped.
 _MAX_STORAGE_BYTES: dict[str, int | None] = {
-    "free": 5_000_000_000,
+    "free": 1_000_000_000,
     "go": 15_000_000_000,
     "pro": 50_000_000_000,
     "pro_max": 100_000_000_000,

@@ -8,7 +8,7 @@
 #     Files → Knowledge Base store.
 #   * GATE — ``storage_cap_exceeded`` / ``assert_storage_available`` decide
 #     whether ``incoming_bytes`` of NEW uploads would push the workspace over its
-#     plan's ``max_storage_bytes`` (Free = 5 GB, Go = 15 GB, Pro = 50 GB, Pro
+#     plan's ``max_storage_bytes`` (Free = 1 GB, Go = 15 GB, Pro = 50 GB, Pro
 #     Max = 100 GB, Enterprise = None). GATED on ``billing_enforced``: OSS /
 #     self-host (billing off) always pass through with no cap. The upload seam
 #     raises ``StorageLimitError`` (402, ``billing.storage_limit``) when over.
@@ -111,14 +111,14 @@ async def test_usage_is_zero_for_empty_workspace(mongo_db) -> None:
 
 
 async def test_cap_exceeded_when_incoming_pushes_over(mongo_db, billing_on) -> None:
-    """Free (5 GB) with 5 GB stored and a 1-byte new file IS over."""
+    """Free (1 GB) with 1 GB stored and a 1-byte new file IS over."""
     ws = await _make_workspace("free")
-    await _seed_file(ws, 5_000_000_000)
+    await _seed_file(ws, 1_000_000_000)
 
     exceeded, used, limit = await storage_service.storage_cap_exceeded(ws, incoming_bytes=1)
     assert exceeded is True
-    assert used == 5_000_000_000
-    assert limit == 5_000_000_000
+    assert used == 1_000_000_000
+    assert limit == 1_000_000_000
 
 
 async def test_cap_allows_exactly_at_the_limit(mongo_db, billing_on) -> None:
@@ -141,8 +141,23 @@ async def test_cap_uncapped_enterprise_never_trips(mongo_db, billing_on) -> None
     assert limit is None
 
 
-async def test_gate_is_noop_when_billing_off(mongo_db, monkeypatch: pytest.MonkeyPatch) -> None:
-    """billing_enforced off (OSS / self-host) → no cap, no extra DB read."""
+async def test_the_cap_holds_with_billing_off(
+    mongo_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate is NO LONGER behind ``billing_enforced`` (2026-09-12).
+
+    This test used to assert the opposite, and it was right about the code and
+    wrong about the product: the flag defaults False and nothing sets it, so
+    every plan's storage ceiling was shown on the Settings page and enforced
+    nowhere. A number the product displays and does not keep is worse than no
+    number at all.
+
+    The opt-out is now the PLAN, not a global flag — see the uncapped case
+    below. A dedicated deployment sets its workspace plan once.
+
+    Mutation that must break this: restore the ``billing_enforced`` early
+    return.
+    """
     import pocketpaw.config as ppconfig
 
     monkeypatch.setattr(
@@ -151,23 +166,24 @@ async def test_gate_is_noop_when_billing_off(mongo_db, monkeypatch: pytest.Monke
         lambda: SimpleNamespace(billing_enforced=False, dodo_plan_products=None),
     )
     ws = await _make_workspace("free")
-    await _seed_file(ws, 5_000_000_000)
+    await _seed_file(ws, 1_000_000_000)
 
-    exceeded, used, limit = await storage_service.storage_cap_exceeded(ws, incoming_bytes=10**9)
-    assert exceeded is False
-    assert used == 0  # no usage was even summed — short-circuit
-    assert limit is None
+    exceeded, used, limit = await storage_service.storage_cap_exceeded(ws, incoming_bytes=1)
+
+    assert exceeded is True
+    assert used == 1_000_000_000
+    assert limit == 1_000_000_000
 
 
 async def test_assert_storage_available_raises_only_when_exceeded(mongo_db, billing_on) -> None:
     ws = await _make_workspace("free")
-    await _seed_file(ws, 5_000_000_000)
+    await _seed_file(ws, 1_000_000_000)
 
     with pytest.raises(StorageLimitError) as exc:
         await storage_service.assert_storage_available(ws, incoming_bytes=1)
     assert exc.value.status_code == 402
     assert exc.value.code == "billing.storage_limit"
-    assert "5 GB" in exc.value.message
+    assert "1 GB" in exc.value.message
 
     # Within budget → no raise.
     await storage_service.assert_storage_available(ws, incoming_bytes=0)

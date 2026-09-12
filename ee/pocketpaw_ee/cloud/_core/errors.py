@@ -386,11 +386,19 @@ class StorageLimitError(CloudError):
     """
 
     def __init__(self, limit_bytes: int | None) -> None:
+        # Says what to DO, not only what happened. A cap with no way out reads
+        # as a broken upload; there are exactly two ways out and both belong in
+        # the sentence. "Storage limit: storage limit of 1 GB reached" was the
+        # old text, which managed to say the same thing twice and neither of
+        # them useful.
         if limit_bytes is None:  # pragma: no cover - uncapped plans never raise
-            label = "storage limit reached"
+            message = "Storage limit reached. Delete some files to free space."
         else:
-            label = f"storage limit of {_human_bytes(limit_bytes)} reached"
-        super().__init__(402, "billing.storage_limit", f"Storage limit: {label}")
+            message = (
+                f"You've used all {_human_bytes(limit_bytes)} of storage. "
+                "Delete some files, or upgrade for more room."
+            )
+        super().__init__(402, "billing.storage_limit", message)
 
 
 class WorkspaceLimitError(CloudError):

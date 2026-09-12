@@ -119,7 +119,7 @@ async def test_upload_over_cap_raises_and_rolls_back(
 
     _billing(monkeypatch, on=True)
     ws = await _make_workspace("free")
-    await _seed_file(ws, 5_000_000_000)
+    await _seed_file(ws, 1_000_000_000)
 
     adapter = _MemAdapter()
     store = MongoFileStore()
@@ -162,25 +162,34 @@ async def test_upload_within_budget_succeeds(mongo_db, monkeypatch: pytest.Monke
     assert len(rows) == 2  # seeded old file + the new one
 
 
-async def test_upload_gate_is_noop_when_billing_off(
+async def test_the_upload_gate_holds_with_billing_off(
     mongo_db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """billing off (OSS / self-host) → an over-cap upload is NOT blocked."""
+    """The upload seam blocks an over-cap workspace whatever billing says.
+
+    The inverse of what this test asserted until 2026-09-12, and the whole
+    point of that change: a storage cap only behind ``billing_enforced`` is a
+    cap nobody has, because the flag defaults False and nothing sets it.
+
+    Mutation that must break this: restore the ``billing_enforced`` early
+    return in ``storage_service.storage_cap_exceeded``.
+    """
+    from pocketpaw_ee.cloud._core.errors import StorageLimitError
     from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 
     _billing(monkeypatch, on=False)
     ws = await _make_workspace("free")
-    await _seed_file(ws, 5_000_000_000)  # Free cap fully consumed
+    await _seed_file(ws, 1_000_000_000)  # Free cap fully consumed
 
     adapter = _MemAdapter()
     store = MongoFileStore()
     svc = _svc(adapter, store)
 
-    rec = await svc.upload(
-        _upload(PNG, "cat.png", "image/png"), owner_id="u1", chat_id="c1", workspace=ws
-    )
-    assert rec.size == len(PNG)
-    assert len(adapter.blobs) == 1  # the over-cap upload still landed
+    with pytest.raises(StorageLimitError):
+        await svc.upload(
+            _upload(PNG, "cat.png", "image/png"), owner_id="u1", chat_id="c1", workspace=ws
+        )
+    assert adapter.blobs == {}, "an over-cap blob was left behind after the refusal"
 
 
 async def test_write_text_file_over_cap_raises_and_rolls_back(
@@ -192,7 +201,7 @@ async def test_write_text_file_over_cap_raises_and_rolls_back(
 
     _billing(monkeypatch, on=True)
     ws = await _make_workspace("free")
-    await _seed_file(ws, 5_000_000_000)
+    await _seed_file(ws, 1_000_000_000)
 
     with pytest.raises(StorageLimitError):
         await write_text_file(
