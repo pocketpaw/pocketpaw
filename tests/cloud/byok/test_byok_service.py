@@ -305,6 +305,8 @@ def _intercepted_row(monkeypatch) -> tuple[ByokProviderKey, dict, list]:
         last4="zzzz",
         key_hint="sk-ant-api03",
         provider="anthropic",
+        base_url="https://gw.example.com/v1",
+        model="some-model",
         last_verified_at=None,
         last_error=None,
         image_encrypted_key="image-token",
@@ -318,6 +320,10 @@ def _intercepted_row(monkeypatch) -> tuple[ByokProviderKey, dict, list]:
         saved["image_encrypted_key"] = self.image_encrypted_key
         saved["last_error"] = self.last_error
         saved["image_last_error"] = self.image_last_error
+        # The gateway half of the LLM credential. Recorded so a delete can be
+        # shown to take the address with the key rather than stranding it.
+        saved["base_url"] = self.base_url
+        saved["model"] = self.model
 
     async def _delete(self):
         deleted.append(True)
@@ -351,6 +357,12 @@ class TestTheTwoCredentialsAreIndependent:
         assert deleted == [], "the row was dropped, taking the image key with it"
         assert saved["encrypted_key"] == "", "the LLM key was not actually removed"
         assert saved["image_encrypted_key"] == "image-token"
+        # The gateway half of the same credential goes with it. Leaving a
+        # stale base_url behind would point a later turn at an address whose
+        # key no longer exists, which reads as "the gateway is broken" rather
+        # than "you deleted the key".
+        assert saved["base_url"] is None, "the gateway address outlived its key"
+        assert saved["model"] is None, "the gateway model outlived its key"
 
     @pytest.mark.asyncio
     async def test_removing_the_image_key_keeps_the_llm_key(self, monkeypatch):
@@ -368,14 +380,21 @@ class TestTheTwoCredentialsAreIndependent:
         ``delete_key`` clears the LLM half of a shared row by assigning each
         of its columns. Naming one the document does not declare is not a
         no-op — pydantic raises, and the delete fails for every workspace that
-        also has an image key. The sibling gateway branch adds ``base_url``
-        and ``model``; until it merges they are absent here, so the clear has
-        to ask the document rather than assume.
+        also has an image key.
+
+        Written on the image-key branch, where ``base_url`` was the undeclared
+        name that proved the point, with a note that the sibling gateway
+        branch would add it. That branch has now merged, so the probe moved to
+        a name nothing declares. The assertion below it is the part that
+        matters: every column the clear touches has to be declared, and the
+        set grows as the row takes on more credentials.
         """
         declared = set(ByokProviderKey.model_fields)
         assert {"encrypted_key", "last4", "key_hint", "last_verified_at", "last_error"} <= declared
+        # The gateway branch's two columns, now that it has landed.
+        assert {"base_url", "model"} <= declared
         with pytest.raises(ValueError, match="no field"):
-            ByokProviderKey.model_construct(workspace="ws-1").base_url = None
+            ByokProviderKey.model_construct(workspace="ws-1").not_a_real_column = None
 
 
 class TestStoredErrorTextCarriesNoCredential:
@@ -463,6 +482,7 @@ class TestImageKeyResolution:
 
         monkeypatch.setattr(byok, "ByokProviderKey", _Exploding)
         assert await byok.resolve_image_key(None) is None
+
 
 # ── Custom OpenAI-compatible gateway (2026-09-09, feat/byok-custom-gateway) ──
 #
