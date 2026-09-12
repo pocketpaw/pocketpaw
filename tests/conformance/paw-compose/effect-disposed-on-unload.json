@@ -1,0 +1,47 @@
+{
+  "id": "effect-disposed-on-unload",
+  "asserts": "Disposers run on unload in reverse registration order (LIFO).",
+  "semantics": "\u00a73",
+  "plugins": {
+    "a": {
+      "effects": [
+        "e1",
+        "e2",
+        "e3"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "a"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "op": "dispose",
+      "plugin": "a"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "a": "DISPOSED"
+      }
+    }
+  ],
+  "expect_trace": [
+    "a:LOADING",
+    "a:effect:e1:setup",
+    "a:effect:e2:setup",
+    "a:effect:e3:setup",
+    "a:ACTIVE",
+    "a:UNLOADING",
+    "a:effect:e3:dispose",
+    "a:effect:e2:dispose",
+    "a:effect:e1:dispose",
+    "a:DISPOSED"
+  ]
+}

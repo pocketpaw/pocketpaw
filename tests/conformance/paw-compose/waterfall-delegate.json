@@ -1,0 +1,59 @@
+{
+  "id": "waterfall-delegate",
+  "asserts": "A waterfall listener that calls next() delegates and may wrap the result; the value propagates back out through each wrapper.",
+  "semantics": "\u00a75",
+  "plugins": {
+    "a": {
+      "listeners": [
+        {
+          "event": "wf",
+          "mode": "waterfall",
+          "id": "L1",
+          "action": "wrap",
+          "wrap": "A"
+        }
+      ]
+    },
+    "b": {
+      "listeners": [
+        {
+          "event": "wf",
+          "mode": "waterfall",
+          "id": "L2",
+          "action": "wrap",
+          "wrap": "B"
+        }
+      ]
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "a"
+    },
+    {
+      "op": "mount",
+      "plugin": "b"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "op": "dispatch",
+      "event": "wf",
+      "mode": "waterfall",
+      "value": "base",
+      "expect_result": "A(B(base))"
+    }
+  ],
+  "expect_trace": [
+    "a:LOADING",
+    "a:ACTIVE",
+    "b:LOADING",
+    "b:ACTIVE",
+    "a:listener:L1:enter",
+    "b:listener:L2:enter",
+    "b:listener:L2:exit",
+    "a:listener:L1:exit"
+  ]
+}

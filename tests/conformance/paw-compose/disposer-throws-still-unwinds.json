@@ -1,0 +1,53 @@
+{
+  "id": "disposer-throws-still-unwinds",
+  "asserts": "A throwing disposer MUST NOT abort the rest of the LIFO chain. Every remaining disposer still runs, the fiber still reaches its target state, and the error is observable rather than swallowed. One bad plugin must not leak every effect registered before it. The error MUST also reach the caller who asked for cleanup: dispose() raises or rejects after the fiber has reached its target state.",
+  "semantics": "\u00a73, \u00a74",
+  "plugins": {
+    "a": {
+      "effects": [
+        "e1",
+        "e2"
+      ],
+      "disposer_throws": "e2"
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "a"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "a": "ACTIVE"
+      }
+    },
+    {
+      "op": "dispose",
+      "plugin": "a",
+      "expect_raises": true
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "a": "DISPOSED"
+      }
+    }
+  ],
+  "expect_trace": [
+    "a:LOADING",
+    "a:effect:e1:setup",
+    "a:effect:e2:setup",
+    "a:ACTIVE",
+    "a:UNLOADING",
+    "a:effect:e2:dispose",
+    "a:effect:e2:dispose:error",
+    "a:effect:e1:dispose",
+    "a:DISPOSED"
+  ],
+  "regression_note": "Added 2026-08-24 (third pass). Found by the TypeScript runtime while writing its \u00a77a tests, then reproduced independently on Python. BOTH runtimes leaked e1 and stranded the fiber in UNLOADING, and they DIVERGED on whether dispose() raised (Python) or resolved silently (TypeScript) \u2014 the exact class of drift this suite exists to catch. Neither was wrong; the spec was silent. Amended 2026-08-25: expect_raises added. The dispose:error token fires at CONTAINMENT time, so it proved the error was observed but not that it reached the caller \u2014 swallowing at the dispose boundary left the whole suite green."
+}
