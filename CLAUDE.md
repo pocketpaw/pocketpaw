@@ -288,6 +288,19 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   deliberately not the 402 `billing.*` / `credits.*` codes, because nothing is
   for sale here and the answer is to wait, not to upgrade.
   Crude flood protection belongs at the proxy (Traefik on Coolify), not here.
+- **Social sign-in needs two URLs set, and returns to the face it started on**:
+  `POCKETPAW_PUBLIC_BASE_URL` (no default beyond `http://localhost:8888`) builds
+  the OAuth `redirect_uri` the provider is handed, so an unset value sends Google
+  and GitHub a localhost callback and every social login fails on a deployed
+  host. It must match a redirect URI registered in the provider's console.
+  `POCKETPAW_FRONTEND_BASE_URL` is where the browser lands after consent.
+  Since 2026-09-12 it is only the FALLBACK: the origin the login started from
+  (read from `Referer` in `auth/social/router.py`) is validated against the CORS
+  allowlist and pinned into the single-use OAuth state, then honoured at the
+  callback. One deployment serves two faces on two hostnames, so a single global
+  value landed kiosk users on the Paw OS. Validation is not optional — without
+  it this is an open redirect that also delivers the session cookie — and it runs
+  on the way in AND out, failing closed to the configured default.
 - **Storage caps are enforced, and free is 1 GB** (2026-09-12). The per-plan
   workspace storage ceiling (`ee/pocketpaw_ee/cloud/billing/plans.py`,
   `_MAX_STORAGE_BYTES`: free 1 GB, go 15 GB, pro 50 GB, pro_max 100 GB,

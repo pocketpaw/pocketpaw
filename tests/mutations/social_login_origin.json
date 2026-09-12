@@ -1,0 +1,44 @@
+[
+  {
+    "label": "the origin is not validated — an attacker's page receives the redirect that carries the session cookie",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "        return candidate if origin_allowed(candidate, allowed_origins()) else \"\"",
+    "replace": "        return candidate",
+    "tests": ["tests/cloud/auth/test_social_login_origin.py::test_an_unknown_origin_is_dropped"]
+  },
+  {
+    "label": "a broken allowlist fails OPEN — a settings error turns validation off instead of degrading the landing page",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "        logger.warning(\"could not validate social login origin %r\", candidate, exc_info=True)\n        return \"\"",
+    "replace": "        logger.warning(\"could not validate social login origin %r\", candidate, exc_info=True)\n        return candidate",
+    "tests": ["tests/cloud/auth/test_social_login_origin.py::test_a_broken_allowlist_does_not_break_login"]
+  },
+  {
+    "label": "the pinned origin is ignored — a kiosk sign-in still lands on the Paw OS, which is the bug",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "    if pinned_origin:\n        return pinned_origin.rstrip(\"/\")",
+    "replace": "    if False:\n        return pinned_origin.rstrip(\"/\")",
+    "tests": ["tests/cloud/auth/test_social_login_origin.py::test_a_pinned_origin_wins_over_the_env_var"]
+  },
+  {
+    "label": "the env fallback is dropped — a single-face deployment redirects to nothing",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "    return os.environ.get(\"POCKETPAW_FRONTEND_BASE_URL\", \"http://localhost:1420\").rstrip(\"/\")",
+    "replace": "    return \"\"",
+    "tests": ["tests/cloud/auth/test_social_login_origin.py::test_no_pinned_origin_keeps_the_configured_default"]
+  },
+  {
+    "label": "the trailing slash survives — the redirect becomes protocol-relative and leaves the origin",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "    if pinned_origin:\n        return pinned_origin.rstrip(\"/\")",
+    "replace": "    if pinned_origin:\n        return pinned_origin",
+    "tests": ["tests/cloud/auth/test_social_login_origin.py::test_a_trailing_slash_does_not_double_up"]
+  },
+  {
+    "label": "the origin never reaches the state — the callback has nothing to honour",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "            \"origin\": safe_frontend_origin(origin),",
+    "replace": "            \"origin\": \"\",",
+    "tests": ["tests/cloud/auth/test_social_login_origin.py::test_begin_login_pins_the_validated_origin"]
+  }
+]

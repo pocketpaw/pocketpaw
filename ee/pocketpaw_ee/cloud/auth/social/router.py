@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 
 from fastapi import APIRouter, Depends, Request
 from starlette.responses import RedirectResponse, Response
@@ -117,19 +117,53 @@ async def list_providers() -> SocialProvidersResponse:
 
 @router.get("/auth/social/{provider}/login")
 async def social_login(
+    request: Request,
     provider: str,
     flow: str = "web",
     next: str | None = None,  # noqa: A002 — matches the query-param name
 ) -> RedirectResponse:
-    """Begin consent. Redirects to the provider."""
+    """Begin consent. Redirects to the provider.
+
+    The caller's ORIGIN is read here and pinned into the state, because one
+    deployment serves two faces on two hostnames and the callback otherwise
+    returns everyone to a single configured origin. This is a top-level
+    navigation, so there is no ``Origin`` header to read — ``Referer`` is what
+    a browser sends, and its scheme+host is all we keep. Unrecognised or
+    absent degrades to the configured default, never to a redirect this
+    deployment has not approved.
+    """
     try:
-        url = await social_service.begin_login(provider, flow=flow, next_path=next)
+        url = await social_service.begin_login(
+            provider,
+            flow=flow,
+            next_path=next,
+            origin=_referer_origin(request),
+        )
     except CloudError as exc:
         return _error_redirect(exc.code)
     except Exception:  # noqa: BLE001 — discovery / network failure
         logger.exception("social.begin_login failed for provider=%s", provider)
         return _error_redirect("social.begin_failed")
     return RedirectResponse(url=url, status_code=302)
+
+
+def _referer_origin(request: Request) -> str:
+    """The scheme+host the login button was clicked on, or "".
+
+    Only the origin is kept: the path can carry anything and we never want it
+    in a redirect. Validation is the service's job, against the CORS allowlist,
+    so this stays a pure read with no policy in it.
+    """
+    referer = request.headers.get("referer") or ""
+    if not referer:
+        return ""
+    try:
+        parsed = urlparse(referer)
+    except ValueError:
+        return ""
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _link_redirect(next_path: Any, **params: str) -> RedirectResponse:
@@ -225,7 +259,7 @@ async def social_callback(
     # — never from this request's query string.
     if result["flow"] == "desktop":
         xc = await social_service.issue_exchange_code(str(result["user"].id))
-        base = social_service.frontend_base_url()
+        base = social_service.frontend_base_url(result.get("origin"))
         return RedirectResponse(url=f"{base}/oauth-callback?xc={quote(xc)}", status_code=302)
 
     response = await mint_and_record(cookie_backend, result["user"], request)
@@ -237,7 +271,8 @@ async def social_callback(
     # the same host only when both are served from one domain. In production
     # they are; in local dev they are not, and the user lands on the API root.
     redirect = RedirectResponse(
-        url=f"{social_service.frontend_base_url()}{safe_next}", status_code=302
+        url=f"{social_service.frontend_base_url(result.get('origin'))}{safe_next}",
+        status_code=302,
     )
     for key, value in response.headers.items():
         if key.lower() == "set-cookie":
