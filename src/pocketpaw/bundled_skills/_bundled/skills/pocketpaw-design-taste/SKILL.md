@@ -222,9 +222,9 @@ These pages render to HTML before any JS runs. Taste must never depend on JS to 
 
 ---
 
-## MODULE 5: AI TELLS - forbidden patterns (avoid unless the brief asks)
+## MODULE 5: AI TELLS - off by default, built well on request
 
-Shapes models reach for because other models reached for them, not because a page needed them. A brief overrides any of these; a reflex does not. Bans already stated where they are acted on (Inter and serif in 2.F, purple/neon/pure-black in 2.G, the centered hero and the three-card row in 3.B, card overuse in 3.C, decorative grounds in 2.B) are tells too and are not repeated here.
+Shapes models reach for because other models reached for them, not because a page needed them. Read every NO below as **never unprompted**, not as never: when the brief ASKS for a marquee, a gradient headline, a glow, a halo or an eyebrow chip, build it, and build it better than the default version - a named request is the spec (MODULE 0), and only a reflex is a tell. Two things no brief can ask you to break, because they are defects rather than defaults: the legibility floor (contrast, text that fits its container and is not occluded, headings in order) and asset honesty (never a fabricated `src`, never an invented fact). Bans already stated where they are acted on (Inter and serif in 2.F, purple/neon/pure-black in 2.G, the centered hero and the three-card row in 3.B, card overuse in 3.C, decorative grounds in 2.B) are tells too and are not repeated here.
 
 **Borders and edges.** NO accent stripe down one edge of a card (`border-left: 4px solid`): a coloured bar on one side is how an alert is drawn, so a plain card wearing one reads as a warning that never resolves. NO heavy coloured border on a rounded element, which fights the radius it sits on. NO hairline border AND a wide shadow defining the same edge; one treatment per edge. NO `border-top` + `border-bottom` on every row of a long list. NO radius past ~32px on a card, which squeezes the content into a blob. NO card nested inside a card (3.C.A is the one sanctioned nesting).
 
