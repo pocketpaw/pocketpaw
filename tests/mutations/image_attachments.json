@@ -1,0 +1,51 @@
+[
+  {
+    "label": "IMG-1: the image blocks are never appended, so the turn reaches the model as text only — the original bug, restored one layer down",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    content: list[dict] = [{\"type\": \"text\", \"text\": message}]\n    for img in images:\n        content.append(",
+    "replace": "    content: list[dict] = [{\"type\": \"text\", \"text\": message}]\n    for img in []:\n        content.append(",
+    "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-2: the loop assigns instead of appending, so only the last of several attachments survives and a five-image turn shows the model one",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    for img in images:\n        content.append(\n            {\n                \"type\": \"image\",",
+    "replace": "    for img in images:\n        content[1:] = [\n            {\n                \"type\": \"image\",",
+    "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-3: raw bytes go on the wire instead of base64, which the SDK cannot serialize — and the failure surfaces deep inside the SDK, not here",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                    \"data\": base64.b64encode(img.data).decode(\"ascii\"),",
+    "replace": "                    \"data\": img.data,",
+    "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-4: every attachment is declared png regardless of what it is, so a jpeg is decoded as a png and the model is shown nothing",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                    \"media_type\": img.media_type,",
+    "replace": "                    \"media_type\": \"application/octet-stream\",",
+    "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-5: the payload is handed over bare instead of as an async iterable, which is the only form streaming input accepts — and streaming is the only mode that carries images",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "async def stream_one_message(payload: dict):",
+    "replace": "async def stream_one_message(payload: dict):\n    return\n    yield payload\n\n\nasync def _unused_stream_one_message(payload: dict):",
+    "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-6: pydantic-ai is handed a list prompt even with nothing attached, changing the prompt type of every text turn the product already sends",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "    if not images:\n        return message\n    from pydantic_ai import BinaryContent",
+    "replace": "    if False:\n        return message\n    from pydantic_ai import BinaryContent",
+    "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-7: the pydantic-ai images are dropped from the prompt list, so the model gets the question without the picture it is about",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "    parts.extend(BinaryContent(data=img.data, media_type=img.media_type) for img in images)",
+    "replace": "    parts.extend(BinaryContent(data=img.data, media_type=img.media_type) for img in [])",
+    "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  }
+]
