@@ -2,6 +2,15 @@
 # plane. Distinct request and response shapes per the cloud 4-file rules.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
 #
+# Updated 2026-09-12 (sites lifecycle wave 4 — pause/resume): added
+# ``SiteLifecycleResponse`` and a ``lifecycle_state`` field on ``SiteResponse``. The
+# field is the ONLY thing that separates "the owner took this site down on purpose"
+# from "this was never published" — a paused site carries ``deployed=False`` and an
+# empty ``url``, exactly like a draft. It is POPULATED in ``service._to_response``
+# and not merely declared here; ``build_status`` shipped on this DTO once with
+# nothing passing it and read its default forever, which is the same omission that
+# would render every paused site as live.
+#
 # Updated 2026-09-12 (sites lifecycle wave 3 — transfer): added
 # ``SiteTransferOfferRequest`` / ``SiteTransferResponse`` /
 # ``SiteTransferListResponse``. The response is DELIBERATELY THIN, and that is a

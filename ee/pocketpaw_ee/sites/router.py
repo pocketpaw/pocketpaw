@@ -3,6 +3,17 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# Updated 2026-09-12 (sites lifecycle wave 4 -- pause/resume): POST
+# ``/sites/{site_id}/pause`` and POST ``/sites/{site_id}/resume``, the reversible
+# counterpart of the DELETE above. Both are ``fabric.write`` plus owner-only in the
+# service, like the delete.
+#
+# NEITHER IS A 202. A pause is four bounded Cloudflare calls over things that can all
+# be rebuilt, so it finishes inside the request and there is nothing to poll. Resume
+# is the asymmetric one: it answers ``resuming``, NOT ``live``, because it republishes
+# and the site is only serving once that deploy lands. A client that reads the answer
+# as "done" puts a working link in front of a page that does not exist yet.
+#
 # Updated 2026-09-12 (sites lifecycle wave 3 -- transfer): four endpoints for
 # moving a site to another workspace, appended at end-of-file.
 # POST/DELETE ``/sites/{site_id}/transfer`` are the SOURCE half (offer, withdraw);

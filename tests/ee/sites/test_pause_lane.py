@@ -339,3 +339,96 @@ def test_lifecycle_state_is_actually_populated_on_the_site_response():
 
     source = inspect.getsource(service._to_response)
     assert "lifecycle_state=" in source
+
+
+# ---------------------------------------------------------------------------
+# 4. Pause meets transfer — the two lanes that both walk ``domains``
+# ---------------------------------------------------------------------------
+
+
+class _XferSite:
+    def __init__(self, **kw):
+        self.workspace = "w1"
+        self.owner = "u1"
+        self.delete_status = "none"
+        self.transfer_status = "none"
+        self.lifecycle_state = "live"
+        self.subscription_status = "none"
+        self.plan_tier = None
+        self.billing_rail = "credits"
+        self.__dict__.update(kw)
+
+
+class _Settings:
+    site_transfers_allowed = True
+
+
+def _offer(site):
+    from pocketpaw_ee.sites import transfer as transfer_mod
+
+    transfer_mod.check_can_offer(
+        site=site,
+        actor_user_id="u1",
+        source_settings=_Settings(),
+        destination_workspace_id="w2",
+    )
+
+
+@pytest.mark.parametrize("state", ["pausing", "resuming"])
+def test_a_site_mid_pause_or_mid_resume_cannot_be_transferred(state):
+    """Mutation: drop the lifecycle guard from ``check_can_offer``.
+
+    Both lanes write this row's ``domains`` list and call Cloudflare against the ids
+    on it. A transfer landing inside a pause moves the document out from under a
+    cascade still writing to it, and the two then disagree about which workspace owns
+    the hostnames being created.
+    """
+    from pocketpaw_ee.sites import transfer as transfer_mod
+
+    with pytest.raises(transfer_mod.TransferRefused) as caught:
+        _offer(_XferSite(lifecycle_state=state))
+    assert caught.value.code == "transfer.lifecycle_in_flight"
+
+
+def test_a_settled_paused_site_is_still_transferable():
+    """Deliberately allowed, and the cheapest kind of site to move: no Worker, no
+    routes, no hostname bindings, so nothing is serving for a move to interrupt."""
+    _offer(_XferSite(lifecycle_state="paused"))
+
+
+def test_the_two_in_flight_vocabularies_cannot_drift():
+    """``transfer`` spells the in-flight states itself rather than importing them, to
+    avoid an import cycle. This is what stops the copy going stale."""
+    from pocketpaw_ee.sites import pause as pause_lane
+    from pocketpaw_ee.sites import transfer as transfer_mod
+
+    assert set(transfer_mod._LIFECYCLE_IN_FLIGHT) == set(pause_lane.IN_FLIGHT_STATES)
+
+
+@pytest.mark.parametrize("status", ["offered", "in_flight"])
+def test_pause_and_resume_refuse_while_a_transfer_is_open(status):
+    """The mirror half. Mutation: delete either ``_refuse_if_transfer_open`` call.
+
+    ``offered`` counts as well as ``in_flight``: an open offer is a decision the
+    destination has not answered, and taking the site off the internet underneath it
+    changes what they are being asked to accept.
+    """
+    from pocketpaw_ee.cloud._core.errors import ConflictError
+    from pocketpaw_ee.sites import service
+
+    for verb in ("pause", "resume"):
+        with pytest.raises(ConflictError) as caught:
+            service._refuse_if_transfer_open(_XferSite(transfer_status=status), verb)
+        assert caught.value.code == "site.transfer_open"
+
+    import inspect
+
+    for fn in (service.pause_site, service.resume_site):
+        assert "_refuse_if_transfer_open(site," in inspect.getsource(fn)
+
+
+def test_a_site_with_no_open_transfer_pauses_freely():
+    from pocketpaw_ee.sites import service
+
+    for status in ("none", "failed", ""):
+        service._refuse_if_transfer_open(_XferSite(transfer_status=status), "pause")

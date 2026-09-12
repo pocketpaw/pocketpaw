@@ -1,6 +1,27 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-09-12 (sites lifecycle wave 4, feat/sites-pause): PAUSE / RESUME --
+# ``pause_site`` / ``resume_site`` (the owner-only seams the new routes call),
+# ``finish_resume_if_pending`` (phase two, driven off the deploy's own tail) and
+# ``record_pause_progress``. Also: ``purge_site_records`` now takes a ``pocket_id``
+# and purges the concierge transcripts through ``paw_bar.purge``, closing a gap the
+# delete cascade had left open deliberately.
+#
+# RESUME IS TWO PHASES AND THAT IS FORCED, not chosen. Re-creating a worker route
+# names a script, and Cloudflare rejects a route naming one that does not exist -- so
+# the routes and hostnames cannot be restored until the republish has landed. Phase
+# one re-mints the key, moves the billing clock and republishes; phase two runs from
+# ``_deploy_site_doc``'s tail. That is why ``resume_site`` answers ``resuming`` and
+# never ``live``.
+#
+# BILLING PAUSES BY DEFERRAL. The rail is workspace credits and there is no gateway,
+# so clearing ``subscription_status`` the way ``_stop_billing`` does for a delete
+# would leave nothing to re-activate and make resume a REPURCHASE. Instead the
+# renewal sweeper skips a paused row and resume advances ``renewal_date`` by exactly
+# the time the site was dark. Read ``sites/pause.py``'s header before touching any of
+# it.
+#
 # Updated 2026-09-12 (sites lifecycle wave 1, feat/sites-delete-endpoint): the
 # DELETE lifecycle — ``start_site_delete`` / ``site_delete_status`` (the two
 # owner-only seams the REST routes call) plus the writes the delete job drives the
@@ -10783,6 +10804,7 @@ async def pause_site(*, workspace_id: str, user_id: str, site_id: str) -> SiteLi
         raise Forbidden("site.not_owner", "Only the site's owner can pause it.")
     if (site.delete_status or "none") in DELETE_IN_FLIGHT_STATUSES:
         raise ConflictError("site.delete_in_flight", "This site is being deleted.")
+    _refuse_if_transfer_open(site, "pause")
 
     state = site.lifecycle_state or pause_lane.STATE_LIVE
     if state == pause_lane.STATE_PAUSED:
@@ -10859,6 +10881,7 @@ async def resume_site(*, workspace_id: str, user_id: str, site_id: str) -> SiteL
         raise Forbidden("site.not_owner", "Only the site's owner can resume it.")
     if (site.delete_status or "none") in DELETE_IN_FLIGHT_STATUSES:
         raise ConflictError("site.delete_in_flight", "This site is being deleted.")
+    _refuse_if_transfer_open(site, "resume")
 
     if (site.lifecycle_state or pause_lane.STATE_LIVE) == pause_lane.STATE_LIVE:
         return _lifecycle_response(site)
@@ -10948,6 +10971,31 @@ async def finish_resume_if_pending(site: _SiteDoc) -> None:
     site.pause_ledger = {}
     site.pause_reason = None
     logger.info("sites.resume: site %s is live again", site.id)
+
+
+def _refuse_if_transfer_open(site: _SiteDoc, verb: str) -> None:
+    """Refuse a pause or a resume while this site is being moved to another workspace.
+
+    THE MIRROR OF ``transfer.check_can_offer``'s lifecycle guard, and both halves are
+    needed because neither lane can see the other's decision once it has been made. A
+    transfer moves the Site document and the R2 prefix; a pause walks the SAME row's
+    ``domains`` list, calling Cloudflare against the ids stored on it. Run them
+    together and hostnames get created or destroyed under whichever workspace the row
+    happened to name when that step read it.
+
+    ``offered`` counts, not only ``in_flight``. An open offer is a decision the
+    destination has not answered yet, and taking the site off the internet underneath
+    it changes what they are being asked to accept.
+    """
+    from pocketpaw_ee.sites import transfer as transfer_mod
+
+    status = getattr(site, "transfer_status", transfer_mod.STATUS_NONE) or transfer_mod.STATUS_NONE
+    if status in (transfer_mod.STATUS_OFFERED, transfer_mod.STATUS_IN_FLIGHT):
+        raise ConflictError(
+            "site.transfer_open",
+            "This site is being moved to another workspace. Finish or cancel that "
+            f"before you {verb} it.",
+        )
 
 
 def _pause_cause(exc: Exception) -> str:

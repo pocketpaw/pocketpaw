@@ -3,6 +3,12 @@
 #
 # Created 2026-09-12 (sites lifecycle wave 3, feat/sites-transfer).
 #
+# Updated 2026-09-12 (wave 4, feat/sites-pause): ``check_can_offer`` refuses a site
+# that is mid-PAUSE or mid-RESUME. Both lanes write this row's ``domains`` list and
+# call Cloudflare against the ids stored on it, so a transfer landing inside one moves
+# the document out from under a cascade still writing to it. A SETTLED pause is
+# allowed, and is the cheapest kind of site to move — see the guard's own comment.
+#
 # TRANSFER IS A RE-KEY, NOT A REDEPLOY, AND THAT IS THE WHOLE DESIGN. A Paw Site is
 # reached through a Cloudflare Worker whose SCRIPT NAME is the Site document's
 # ``_id``, and served at ``https://<that same id>.<sites domain>``. So the one thing
@@ -106,6 +112,12 @@ RESUMABLE_STATUSES: tuple[str, ...] = (STATUS_OFFERED, STATUS_IN_FLIGHT, STATUS_
 # that is being torn down under them is not a transfer.
 _DELETE_TERMINAL = ("none", "")
 
+#: The ``lifecycle_state`` values that mean a pause or a resume is mid-flight.
+#: Spelt here rather than imported from ``sites.pause``, which imports the delete
+#: cascade this module's own service sits beside. A test pins the two together so
+#: a state added to one cannot go missing from the other.
+_LIFECYCLE_IN_FLIGHT = ("pausing", "resuming")
+
 
 class TransferRefused(Exception):
     """A precondition said no. Carries a stable code plus a sentence for the user.
@@ -190,6 +202,37 @@ def check_can_offer(
         raise TransferRefused(
             "transfer.deleting",
             "This site is being deleted. It cannot be moved.",
+        )
+
+    # A pause or resume IN FLIGHT blocks the move; a settled PAUSE does not.
+    #
+    # The distinction is the point. ``pausing`` and ``resuming`` are windows in which
+    # another lane is walking this row's ``domains`` list and calling Cloudflare
+    # against the ids stored on it. A transfer landing inside one moves the document
+    # out from under a cascade that is still writing to it, and the two then disagree
+    # about which workspace owns the hostnames being created or destroyed.
+    #
+    # ``paused`` is settled and deliberately ALLOWED. A paused site has no Worker, no
+    # routes and no hostname bindings, which makes it the cheapest kind of site to
+    # move — there is nothing serving for a move to interrupt. The destination resumes
+    # it, and because ``identity_workspace`` pins the minted id (see this module's
+    # header) that resume rebuilds the same Worker under the new owner rather than
+    # forking the site into two.
+    #
+    # A paid paused site is still refused, by ``_check_not_paying`` below rather than
+    # here: pause DEFERS the renewal instead of cancelling the subscription, so
+    # ``subscription_status`` is still ``active`` and that guard fires on its own.
+    #
+    # THE ACCEPT SIDE NEEDS NO SUCH GUARD, unlike the delete one above it. A delete
+    # can begin while an offer is open, because nothing in the delete lane consults
+    # the transfer state — so ``check_can_accept`` has to re-check it. A pause cannot:
+    # ``service._refuse_if_transfer_open`` blocks one while a site is ``offered``, so
+    # by the time anybody accepts, the lifecycle state cannot have moved. Adding it
+    # there would be a guard that can never fire.
+    if (getattr(site, "lifecycle_state", "live") or "live") in _LIFECYCLE_IN_FLIGHT:
+        raise TransferRefused(
+            "transfer.lifecycle_in_flight",
+            "This site is being paused or resumed. Wait for that to finish, then move it.",
         )
 
     status = getattr(site, "transfer_status", STATUS_NONE) or STATUS_NONE

@@ -8,6 +8,12 @@
 # ``service.create_site_export`` could capture the customer's data and nothing required
 # it. This module is what joins them, and it is the FIRST caller either has ever had.
 #
+# Updated 2026-09-12 (sites lifecycle wave 4, feat/sites-pause): ``_DeleteDeps`` carries
+# the site's ``pocket_id`` so the cascade's ``records`` step can purge the concierge
+# transcripts. They are keyed on the POCKET — a concierge run has never carried a site
+# id — so without it the purge has nothing to scope on and skips, which is exactly how
+# those rows used to outlive the site they were captured on.
+#
 # THE FORCED EXPORT IS STEP ZERO OF THIS JOB, AND NOT A PRECONDITION ON THE ENDPOINT.
 # That is the load-bearing decision in this file, so the reasoning is here rather than in
 # a commit message:

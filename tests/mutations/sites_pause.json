@@ -169,5 +169,50 @@
     "tests": [
       "tests/ee/sites/test_pause_lane.py"
     ]
+  },
+  {
+    "label": "a transfer is allowed to land mid-pause, moving the row out from under a live cascade",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "    if (getattr(site, \"lifecycle_state\", \"live\") or \"live\") in _LIFECYCLE_IN_FLIGHT:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "a settled paused site is refused a transfer it should be allowed",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "_LIFECYCLE_IN_FLIGHT = (\"pausing\", \"resuming\")",
+    "replace": "_LIFECYCLE_IN_FLIGHT = (\"pausing\", \"resuming\", \"paused\")",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "pause stops refusing while a transfer offer is open",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    _refuse_if_transfer_open(site, \"pause\")\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "resume stops refusing while a transfer offer is open",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    _refuse_if_transfer_open(site, \"resume\")\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "only in_flight blocks a pause, so an open offer is silently overtaken",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if status in (transfer_mod.STATUS_OFFERED, transfer_mod.STATUS_IN_FLIGHT):",
+    "replace": "    if status in (transfer_mod.STATUS_IN_FLIGHT,):",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
   }
 ]

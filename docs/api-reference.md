@@ -2205,6 +2205,109 @@ format. Render the **step** half; the cause half is a fixed machine token writte
 log, never raw provider text. `export` is the step worth its own sentence — it is the one
 failure where nothing was destroyed and the user's site is untouched.
 
+### `POST /sites/{site_id}/pause`
+
+Auth: `fabric.write`, plus **owner-only** — same split as the delete, and for the same
+reason: a workspace member who may edit a site may not decide it stops serving.
+
+Takes the site off the internet **without destroying anything**. It runs the delete
+cascade's serving half and none of its reclaims:
+
+| Removed | Kept |
+|---|---|
+| the signed capture key | the D1 database and every row in it |
+| the worker routes | the R2 assets and the build artifacts |
+| the custom hostname bindings | the captured leads |
+| the Worker script | the pocket, the concierge agent, the Site document |
+
+Response **`200`**, not `202`. Four bounded Cloudflare calls finish inside the request,
+so there is nothing to poll:
+
+```json
+{
+  "site_id": "68b6f2c1a4d3e50012ab34cd",
+  "lifecycle_state": "paused",
+  "paused_at": "2026-09-12T11:04:22Z",
+  "pause_reason": null,
+  "pause_ledger": { "revoke": "done", "routes": "done", "hostnames": "done", "script": "done" },
+  "url": ""
+}
+```
+
+A pause that stops part-way answers `200` with `lifecycle_state: "pausing"` and a
+`pause_reason` of `"<step>:<cause>"`. Call it again — the ledger makes the retry a
+resume rather than a repeat. Pausing an already-paused site is a no-op, not an error.
+
+**Billing pauses with the site.** The renewal sweeper skips a paused row, and resume
+advances `renewal_date` by exactly the time the site was dark. The subscription is
+never cancelled, which is what keeps resume from being a repurchase — there is no
+payment gateway, and on the credits rail a cancelled subscription has nothing to
+re-activate.
+
+Refused with `409` while a delete is running (`site.delete_in_flight`) or while a
+transfer offer is open (`site.transfer_open`).
+
+### `POST /sites/{site_id}/resume`
+
+Auth: `fabric.write`, owner-only.
+
+**Answers `resuming`, never `live`, and that is the contract.** Resume republishes,
+because the Worker was deleted and re-uploading it is a build — so when this returns
+the site is building, not serving. A client that treats the answer as "done" puts a
+working link in front of a page that does not exist yet. Poll the site read until
+`lifecycle_state` reaches `live`.
+
+```json
+{
+  "site_id": "68b6f2c1a4d3e50012ab34cd",
+  "lifecycle_state": "resuming",
+  "paused_at": null,
+  "pause_reason": null,
+  "pause_ledger": {},
+  "url": ""
+}
+```
+
+What resume restores, and what it cannot:
+
+| | |
+|---|---|
+| the signed key | a **new** one. The old value is gone from the row, and honouring a key from before the site went dark would accept ingest signed against a page that has not existed for weeks. The republish carries the new key into the page. |
+| the Worker | via the ordinary publish lane. This is the expensive half, and the one that can fail — the row then stays `resuming` with the failing step in `pause_reason`. |
+| the worker routes | re-created once the script exists. Immediate. |
+| the custom hostnames | re-created, but **they come back `pending`**. The TLS certificate went with the binding the pause surrendered, so validation starts over and the domain stays dark until Cloudflare reissues. The site's own URL has no such delay. Read each domain's real state from the Domains panel. |
+
+A resume buys nothing: the subscription was never cancelled, so no plan key and no
+purchase authorization are involved.
+
+`lifecycle_state` is one of `live`, `pausing`, `paused`, `resuming`. It also appears on
+every site in the gallery list. Treat an **unrecognised or absent** value as `live` —
+absent is what every row written before this shipped carries, and stripping a serving
+site of its live affordance on the strength of a word you do not recognise takes a
+feature away from a site that is working fine.
+
+### Pause and transfer
+
+A site that is **mid-pause or mid-resume** cannot be offered to another workspace
+(`transfer.lifecycle_in_flight`): both lanes write the same row's `domains` list and
+call Cloudflare against the ids on it. A **settled paused** site transfers fine, and is
+the cheapest kind to move — nothing is serving for the move to interrupt. A paid paused
+site is still refused, by the existing active-subscription rule: pause defers the
+renewal rather than cancelling, so the subscription is still active.
+
+### What a delete purges that a pause does not
+
+A delete removes the dependent rows a pause leaves entirely alone: the captured leads,
+the rate counters, and the **concierge transcripts** — the visitor's own lines
+(`ChatRun.user_text`), the agent's replies, the owner's out-of-band replies, and the
+conversation index carrying the visitor's contact email and the owner's notes. Those
+are visitor free text, and before this they outlived the site they were captured on.
+
+Still **not** purged, and said out loud rather than discovered: visitor analytics (they
+live in Cloudflare Analytics Engine on a retention this product does not control) and
+site design briefs (they carry no site id — a brief belongs to an import, not to the
+site an import became).
+
 ### Deleting the pocket instead
 
 You cannot. `DELETE /pockets/{id}` **refuses** with `409 pocket.has_site` while a site is

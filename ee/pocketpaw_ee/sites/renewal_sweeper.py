@@ -21,6 +21,14 @@
 # lose the paid extras, not have their public web presence deleted. Republishing
 # after a top-up buys the tier again through the ordinary purchase path.
 #
+# Updated 2026-09-12 (sites lifecycle wave 4, feat/sites-pause): the selection now
+# skips a PAUSED site. Charging one bills for a page nobody can reach. The row is
+# SKIPPED and never cancelled — pause defers the renewal rather than ending the
+# subscription, and ``pause.deferred_renewal_date`` pushes the date forward by the
+# length of the pause when the owner resumes, so the dark days are neither charged for
+# nor given away. Cancelling instead would make resume a repurchase, because on the
+# credits rail there is nothing to re-activate.
+#
 # It NEVER deletes, never redeploys and never touches a site on another rail: a
 # site with a Dodo subscription id or an add-on cart line renews at the gateway,
 # and debiting it here would charge the customer twice for one month. The rail
