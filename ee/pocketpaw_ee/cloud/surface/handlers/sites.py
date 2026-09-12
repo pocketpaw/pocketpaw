@@ -773,6 +773,16 @@ _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
         "bleed-through, dead gutters, the mobile floor.",
     ),
     (
+        "sites-design-sources",
+        "both",
+        "When you are about to hand-write a BACKGROUND, texture, canvas shader, "
+        "CSS animation or text effect, when the brief NAMES an effect you want to "
+        "build well rather than by reflex, or when picking type and Inter is not "
+        "allowed. Real techniques filtered to what this surface can build: no npm "
+        "and no file downloads, so everything there is CSS, inline SVG or GLSL "
+        "you retype.",
+    ),
+    (
         "sites-interface-review",
         "refine",
         "When the user asks to review, critique or audit the page, or asks why it "
