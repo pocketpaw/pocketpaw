@@ -80,7 +80,7 @@ the design skills to get there:
   engine-agnostic, static-safe taste brain (with the Svelte-track specifics
   folded in), and its opening steps are what stop every site looking the same:
   (1) declare the Vision Ledger and a one-line **Design Read** (business kind,
-  audience, vibe), (2) pick a Trend Engine identity and an aesthetic
+  audience, vibe), (2) pick an aesthetic
   **direction/family** (clean-tech / soft-premium / editorial-luxury /
   warm-minimalist / brutalist / dark-tech) that sets the palette, type,
   materiality, and motion, (3) set the three dials from the read. THEN author

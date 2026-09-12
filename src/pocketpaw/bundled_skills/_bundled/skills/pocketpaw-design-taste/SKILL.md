@@ -104,7 +104,7 @@ A WebGL canvas is never the default: it is decoration nobody asked for, and it c
 Never isolate a single family. Rotate display-to-body pairings: `Space Grotesk` or `Cabinet Grotesk` + `General Sans` + `Fira Code` for numbers; `Clash Display` + `Satoshi` + `Geist Mono`; `PP Editorial New` + `Switzer` + `Space Mono`; `Instrument Sans` + `Manrope` + `SF Mono`.
 
 ### 2.E Aesthetic direction families (full palette / type / materiality / motion)
-The Trend Engine primitive sets the surface; the family below sets the whole token system so each site looks *designed for this business* rather than "clean AI landing page No. 47". Commit to ONE family, top to bottom. Do not blend two. Express it in tokens (`--ink`, `--bg`, `--accent`, `--radius`, `--shadow`, font faces).
+The family below sets the whole token system so each site looks *designed for this business* rather than "clean AI landing page No. 47". Commit to ONE family, top to bottom. Do not blend two. Express it in tokens (`--ink`, `--bg`, `--accent`, `--radius`, `--shadow`, font faces).
 
 **A. Clean-Tech (Linear / Vercel)** - SaaS, dev-tools, AI. Cool graphite/zinc neutrals, off-black `#0b0f14` ground, ONE saturated accent (electric blue, emerald; no purple). Geometric grotesk (Geist, General Sans, Space Grotesk), mono for numbers. Hairline borders, 1px inner-light edges, near-flat cards, small radius (8-12px). Crisp short motion (150-300ms), reveal-on-scroll, no bounce.
 
@@ -205,7 +205,7 @@ These pages render to HTML before any JS runs. Taste must never depend on JS to 
 
 ## MODULE 4: COPY & CONTENT ANTI-SLOP RULES
 
-*   **The Em-Dash Prohibition:** Explicitly banned (`-` and `-` as separators) - the single loudest text tell, no "sparingly" allowance. Use clean punctuation (colons, commas, periods); restructure body into two sentences or parentheses; use ` - ` (spaced hyphen) in attribution. Ranges use a hyphen (`2018-2026`, `$40-80`). A single `-`/`-` visible fails pre-flight.
+*   **The Em-Dash Prohibition:** The em dash (`—`, U+2014) and the en dash (`–`, U+2013) are banned as separators in visible copy, the single loudest text tell, with no "sparingly" allowance. Use clean punctuation (colons, commas, periods); split the sentence in two, or use parentheses; use a spaced hyphen ` - ` in attribution. Ranges take a plain hyphen (`2018-2026`, `$40-80`). One visible `—` or `–` fails pre-flight.
 *   **Copy self-audit before ship.** Re-read every visible string (headlines, subheads, eyebrows, buttons, body, captions, alt, footer). Rewrite anything grammatically broken, with unclear referents, or that reads like an LLM trying to sound thoughtful (forced wordplay, mock-poetic micro-meta, fake-craftsman labels like "From the field").
 *   **Organic Metrics Only:** BANNED: `99.99%`, `50%`, `1,000+ users`. Use exact, realistic numbers (`87.4%`, `2,140 businesses`, `+1 (312) 847-1928`). Don't fake engineering-precision specs the brand doesn't actually claim.
 *   **Zero Empty Filler Words:** Completely omit verbs like *Elevate, Revolutionize, Next-Gen, Empower, Supercharge, Seamless, Unleash*. Write explicit, cold technical or practical outcomes. Specificity is the conversion lever: "Cut invoice time from 3 days to 20 minutes" beats "Streamline your workflow."
