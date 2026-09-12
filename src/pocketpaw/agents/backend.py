@@ -303,6 +303,40 @@ class LeasedClient:
     busy: bool = False
 
 
+@dataclass(frozen=True)
+class ImageAttachment:
+    """One image the user attached to a turn, as bytes the model can see.
+
+    WHY THIS EXISTS. ``run``'s first parameter is ``message: str``, and that one
+    annotation is why an attached image never reached any model. Both SDKs under
+    us take images natively — the Claude Agent SDK as an ``{"type": "image",
+    "source": {"type": "base64", ...}}`` content block in streaming input mode,
+    pydantic-ai as a ``BinaryContent`` entry in a list prompt — but a turn was
+    flattened to a string before it got to either, so the cloud chat path filled
+    the gap by running OCR over the pixels and inlining whatever text came back.
+    A photo of a person or a place OCRs to nothing, which is how "the agent
+    cannot see my image" happened while every test passed.
+
+    Deliberately NOT either SDK's shape. This is the neutral middle the protocol
+    can carry; each backend translates it into its own native form, so a backend
+    that cannot take images simply never declares the parameter and is unaffected
+    (the withhold-when-empty contract below).
+
+    ``data`` is raw bytes, not base64 — the encoding is a property of the wire
+    format each backend targets, and doing it here would mean the pydantic-ai
+    path decodes what the Claude path encoded.
+
+    ``media_type`` must be one both the API and the backend accept: png, jpeg,
+    gif or webp. HEIC is what an iPhone shoots by default and is NOT on that
+    list, so the resolver transcodes before building one of these rather than
+    handing a backend bytes it will reject.
+    """
+
+    data: bytes
+    media_type: str
+    filename: str = ""
+
+
 @runtime_checkable
 class AgentBackend(Protocol):
     """Protocol that all agent backends must implement."""
@@ -328,6 +362,15 @@ class AgentBackend(Protocol):
         # accept it (the Claude SDK backend) let it win over their own model
         # selection; any other backend that grows the kwarg may simply ignore it.
         model_override: str | None = None,
+        # Images the user attached to this turn, passed to the model AS IMAGES.
+        # Rides the withhold-when-empty contract: ``AgentPool.run`` forwards it
+        # ONLY when non-empty, so a backend that cannot take images keeps the
+        # narrower signature and never receives it. Declaring the parameter is
+        # how a backend opts in — the same shape ``model_override`` uses, and
+        # for the same reason: there is no central list of which backends
+        # support what, so the signature IS the capability declaration and a
+        # new backend cannot silently drop images it never mentioned.
+        image_attachments: tuple[ImageAttachment, ...] = (),
         # PA-1 — the assembled system prompt's stable digest. The ONE kwarg here
         # that does not ride the withhold-when-empty contract: it is set on every
         # run, so ``AgentPool.run`` gates it on the backend's SIGNATURE instead

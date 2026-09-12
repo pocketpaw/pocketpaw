@@ -354,6 +354,7 @@ Uses the official Claude Agent SDK (pip install claude-agent-sdk) which provides
 """
 
 import asyncio
+import base64
 import hashlib
 import logging
 import os
@@ -366,6 +367,7 @@ from pocketpaw.agents.backend import (
     BackendInfo,
     BaseAgentBackend,
     Capability,
+    ImageAttachment,
     LeasedClient,
     SessionHandle,
 )
@@ -745,6 +747,52 @@ def _mcp_result_text(content: object) -> str:
                     parts.append(_t)
         return "\n".join(parts)
     return ""
+
+
+def build_streaming_user_message(message: str, images: "tuple[ImageAttachment, ...]") -> dict:
+    """Build the SDK streaming-input message carrying ``images`` alongside the text.
+
+    Shape is the one the Agent SDK documents for streaming input mode:
+
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "text",  "text": ...},
+            {"type": "image", "source": {"type": "base64",
+                                         "media_type": ..., "data": ...}},
+        ]}}
+
+    STREAMING INPUT IS NOT OPTIONAL HERE. The SDK's single-message mode
+    explicitly does not support image attachments, so a turn carrying images has
+    to go down the persistent-client path; sending it as a plain string is how
+    an image silently becomes no image at all.
+
+    The text block comes FIRST. The API's vision guidance puts the image before
+    the question when there is one image and a question about it, but here the
+    text is the user's turn and the images are what they attached to it — and
+    with several images the model needs the framing before the pile.
+    """
+    content: list[dict] = [{"type": "text", "text": message}]
+    for img in images:
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.media_type,
+                    "data": base64.b64encode(img.data).decode("ascii"),
+                },
+            }
+        )
+    return {"type": "user", "message": {"role": "user", "content": content}}
+
+
+async def stream_one_message(payload: dict):
+    """Yield ``payload`` as the async iterable ``ClaudeSDKClient.query`` wants.
+
+    The SDK takes an async iterable for streaming input; a bare dict is not one,
+    and passing it raises rather than degrading — which is the behaviour we want
+    over silently dropping the images.
+    """
+    yield payload
 
 
 class ClaudeSDKBackend(BaseAgentBackend):
