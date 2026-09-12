@@ -1,0 +1,104 @@
+[
+  {
+    "label": "the day yields nothing, so no held building ever produces",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    n = 1\n    for m in marks:",
+    "replace": "    n = 0\n    for m in marks:",
+    "tests": [
+      "tests/ee/terrarium/test_resources.py"
+    ]
+  },
+  {
+    "label": "the bundle check is gone, so a citizen builds with stock it does not hold",
+    "file": "ee/pocketpaw_ee/terrarium/world.py",
+    "find": "        short = _short(bundle, stock)\n",
+    "replace": "        short = {}\n",
+    "tests": [
+      "tests/ee/terrarium/test_resources.py"
+    ]
+  },
+  {
+    "label": "harvest, raid and era are not zero-cost kinds, so the first harvest raises",
+    "file": "ee/pocketpaw_ee/terrarium/domain.py",
+    "find": "    {\"gate\", \"weather\", \"hibernate\", \"arrive\", \"moment\", \"batch\", \"harvest\", \"raid\", \"era\"}",
+    "replace": "    {\"gate\", \"weather\", \"hibernate\", \"arrive\", \"moment\", \"batch\"}",
+    "tests": [
+      "tests/ee/terrarium/test_resources.py"
+    ]
+  },
+  {
+    "label": "the robber never takes, so a hoard over the cap is kept",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        took = {k: v // 2 for k, v in c.stock.items() if cap and v > cap}",
+    "replace": "        took = {}",
+    "tests": [
+      "tests/ee/terrarium/test_resources.py"
+    ]
+  },
+  {
+    "label": "the resource block is printed for every world, so a resource-free prefix changes",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "        if physics.resources\n        else \"\"",
+    "replace": "        if True\n        else \"\"",
+    "tests": [
+      "tests/ee/terrarium/test_resources.py"
+    ]
+  },
+  {
+    "label": "the gift transfer is appended before the bundle check, so a dropped gift still pays the recipient",
+    "file": "ee/pocketpaw_ee/terrarium/world.py",
+    "find": "        if trade == \"gift\" and (not act.to or cost <= 0):\n            outcome.dropped.append(\"trade: needs a recipient and a positive amount\")\n            continue\n",
+    "replace": "        if trade == \"gift\" and (not act.to or cost <= 0):\n            outcome.dropped.append(\"trade: needs a recipient and a positive amount\")\n            continue\n        if trade == \"gift\":\n            outcome.transfers.append((str(act.to), cost))\n",
+    "tests": [
+      "tests/ee/terrarium/test_resources.py"
+    ]
+  },
+  {
+    "label": "the giver-still-holds check is gone, so an accept moves stock the giver no longer has",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        short = world._short(give, giver.stock)\n",
+    "replace": "        short = {}\n",
+    "tests": [
+      "tests/ee/terrarium/test_resources.py",
+      "tests/ee/terrarium/test_trade_offers.py"
+    ]
+  },
+  {
+    "label": "taken_by is never written, so an offer can be accepted twice",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    offer.data = {**offer.data, \"taken_by\": doc.name}\n",
+    "replace": "    offer.data = {**offer.data}\n",
+    "tests": [
+      "tests/ee/terrarium/test_resources.py",
+      "tests/ee/terrarium/test_trade_offers.py"
+    ]
+  },
+  {
+    "label": "the expiry check is gone, so an expired offer is still accepted",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    elif int(offer.data.get(\"expires_day\", 0)) < uni.day:\n",
+    "replace": "    elif False:\n",
+    "tests": [
+      "tests/ee/terrarium/test_resources.py",
+      "tests/ee/terrarium/test_trade_offers.py"
+    ]
+  },
+  {
+    "label": "a gift's recipient is read fresh, so the settle's save of the tick instance overwrites the gain",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        other = (docs or {}).get(to_name) or await CitizenDoc.find_one(\n",
+    "replace": "        other = await CitizenDoc.find_one(\n",
+    "tests": [
+      "tests/ee/terrarium/test_trade_offers.py"
+    ]
+  },
+  {
+    "label": "the giver is read fresh instead of the tick's own instance, so a giver persisted after the acceptor keeps the bundle",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    giver = docs.get(offer.actor) if offer is not None else None\n",
+    "replace": "    giver = (\n        await CitizenDoc.find_one(\n            CitizenDoc.universe_id == str(uni.id), CitizenDoc.name == offer.actor\n        )\n        if offer is not None\n        else None\n    )\n",
+    "tests": [
+      "tests/ee/terrarium/test_trade_offers.py"
+    ]
+  }
+]

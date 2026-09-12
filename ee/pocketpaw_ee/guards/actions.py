@@ -355,6 +355,17 @@ ACTIONS: dict[str, ActionRule] = {
     # diffs), mirroring connector.manage / skills.manage.
     "belt.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "belt.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Terrarium — the agent-civilization surface (ee.terrarium.router), mirroring
+    # belt.read / belt.manage. read is MEMBER: reading a universe's journal,
+    # citizens and ledger is a spectator act, and speaking / pledging ride it
+    # because they cost the SPEAKER tokens, not the workspace anything. manage
+    # is ADMIN because creating a universe seeds Souls and ticking one spends
+    # model budget per citizen per tick — a cost commitment, like belt.manage
+    # extending the code-change boundary. The ANONYMOUS public read surface is
+    # NOT covered by either action: it is a separate router with no auth at
+    # all, gated by TERRARIUM_PUBLIC_ENABLED plus per-universe opt-in.
+    "terrarium.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "terrarium.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Notifications external-delivery config (ee.cloud.notifications.router,
     # feat/external-alerting-delivery). ADMIN because the config sets where the
     # server POSTs on EVERY notification (a Slack / generic webhook URL) — it

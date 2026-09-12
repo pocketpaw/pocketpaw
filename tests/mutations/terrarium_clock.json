@@ -1,0 +1,407 @@
+[
+  {
+    "label": "clock registered with the dead @app.on_event instead of the drained hook list",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "        @on_startup\n        async def _start_terrarium_clock() -> None:",
+    "replace": "        @app.on_event(\"startup\")\n        async def _start_terrarium_clock() -> None:",
+    "tests": [
+      "tests/ee/terrarium/test_scheduler.py"
+    ]
+  },
+  {
+    "label": "child OCEAN shifted by one shared delta instead of drifting per trait",
+    "file": "ee/pocketpaw_ee/terrarium/executor.py",
+    "find": "        delta = (h / 0xFFFFFFFF) * 2 * width - width",
+    "replace": "        delta = width",
+    "tests": [
+      "tests/ee/terrarium/test_spawn_gate.py"
+    ]
+  },
+  {
+    "label": "rung ignores population, the bug that printed town above 5 souls",
+    "file": "ee/pocketpaw_ee/terrarium/world.py",
+    "find": "        if pop >= _RUNG_POP[rung] and unlocked >= _RUNG_TECH[rung]:",
+    "replace": "        if unlocked >= _RUNG_TECH[rung]:",
+    "tests": [
+      "tests/ee/terrarium/test_world.py"
+    ]
+  },
+  {
+    "label": "the fan-out's decisions are zipped back onto the citizens out of order",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    for (doc, snap, _digest), action in zip(rows, fanned):",
+    "replace": "    for (doc, snap, _digest), action in zip(rows, list(reversed(fanned))):",
+    "tests": [
+      "tests/ee/terrarium/test_concurrent_tick.py"
+    ]
+  },
+  {
+    "label": "every decision degrades to empty, so the fan-out's answers are thrown away",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        decision = world.Decision.model_validate(action) if action.get(\"ok\") else world.Decision()",
+    "replace": "        decision = world.Decision()",
+    "tests": [
+      "tests/ee/terrarium/test_concurrent_tick.py"
+    ]
+  },
+  {
+    "label": "lineage drift reported in raw trait points instead of drift widths",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "                (float(value) - float(parent[letter])) / DRIFT_WIDTH, 3",
+    "replace": "                (float(value) - float(parent[letter])), 3",
+    "tests": [
+      "tests/ee/terrarium/test_concurrent_tick.py"
+    ]
+  },
+  {
+    "label": "the drift line is dropped, so a descendant's prompt reads like a founder's",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "        f\"\\nCompared with the parent you came from, you are {drift_line}.\\n\" if drift_line else \"\"",
+    "replace": "        \"\"",
+    "tests": [
+      "tests/ee/terrarium/test_concurrent_tick.py"
+    ]
+  },
+  {
+    "label": "birth leaves personality frozen, so every fork of a founder is a clone",
+    "file": "ee/pocketpaw_ee/terrarium/soul_link.py",
+    "find": "        _unfreeze_personality(soul)\n        if world_brief.strip():",
+    "replace": "        if world_brief.strip():",
+    "tests": [
+      "tests/ee/terrarium/test_soul_seeding.py"
+    ]
+  },
+  {
+    "label": "awaken stops repairing, so a soul born frozen elsewhere stays frozen",
+    "file": "ee/pocketpaw_ee/terrarium/soul_link.py",
+    "find": "    soul = await Soul.awaken(path)\n    _unfreeze_personality(soul)\n    return soul",
+    "replace": "    soul = await Soul.awaken(path)\n    return soul",
+    "tests": [
+      "tests/ee/terrarium/test_soul_seeding.py"
+    ]
+  },
+  {
+    "label": "a moment needs only one citizen, so every solo act becomes a story",
+    "file": "ee/pocketpaw_ee/terrarium/world.py",
+    "find": "        if len(actors) < 2:",
+    "replace": "        if len(actors) < 1:",
+    "tests": [
+      "tests/ee/terrarium/test_world.py"
+    ]
+  },
+  {
+    "label": "the cluster takes the FIRST kind it saw instead of the loudest one",
+    "file": "ee/pocketpaw_ee/terrarium/world.py",
+    "find": "        kind = max(group, key=lambda a: MOMENT_KIND_RANK[a.kind]).kind",
+    "replace": "        kind = group[0].kind",
+    "tests": [
+      "tests/ee/terrarium/test_world.py"
+    ]
+  },
+  {
+    "label": "the watched hour DIVIDES by the world's clock instead of scaling by it",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    calls_per_hour = max(0, pop) * ticks_per_day * 3600.0 / day_seconds",
+    "replace": "    calls_per_hour = max(0, pop) * ticks_per_day * day_seconds / 3600.0",
+    "tests": [
+      "tests/ee/terrarium/test_cost.py"
+    ]
+  },
+  {
+    "label": "the meter is replaced each tick instead of accrued, so cost never adds up",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        total[key] = int(total.get(key, 0)) + int(tick_cost.get(key, 0))",
+    "replace": "        total[key] = int(tick_cost.get(key, 0))",
+    "tests": [
+      "tests/ee/terrarium/test_cost.py"
+    ]
+  },
+  {
+    "label": "the public events route ignores the kind filter and hands back everything",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        universe_id, since, limit, kind, max_seq=uni.seq - public_delay_events()\n",
+    "replace": "        universe_id, since, limit, max_seq=uni.seq - public_delay_events()\n",
+    "tests": [
+      "tests/ee/terrarium/test_public_surface.py"
+    ]
+  },
+  {
+    "label": "an unknown public event kind is accepted instead of rejected",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    if kind is not None and kind not in EVENT_KINDS:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/terrarium/test_public_surface.py"
+    ]
+  },
+  {
+    "label": "the kind is validated BEFORE the gates, so a 400 confirms a hidden universe",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    uni = await _public_universe(universe_id)\n    await _touch_viewed(uni)\n    if kind is not None and kind not in EVENT_KINDS:\n        raise BadRequest(\"terrarium.bad_event_kind\", f\"no such event kind: {kind!r}\")",
+    "replace": "    if kind is not None and kind not in EVENT_KINDS:\n        raise BadRequest(\"terrarium.bad_event_kind\", f\"no such event kind: {kind!r}\")\n    uni = await _public_universe(universe_id)\n    await _touch_viewed(uni)",
+    "tests": [
+      "tests/ee/terrarium/test_public_surface.py"
+    ]
+  },
+  {
+    "label": "the inbound filter is bypassed, so a viewer slur lands in the Journal",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    if not moderation.allowed(body):\n        raise ValidationError(\"terrarium.line_rejected\"",
+    "replace": "    if False:\n        raise ValidationError(\"terrarium.line_rejected\"",
+    "tests": [
+      "tests/ee/terrarium/test_moderation.py"
+    ]
+  },
+  {
+    "label": "the outbound check is skipped, so a citizen slur is served as written",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    if kind in moderation.MODERATED_KINDS and not moderation.allowed(body):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/terrarium/test_moderation.py"
+    ]
+  },
+  {
+    "label": "the public buffer is zero, so a stranger reads the live edge",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        universe_id, since, limit, kind, max_seq=uni.seq - public_delay_events()\n",
+    "replace": "        universe_id, since, limit, kind, max_seq=uni.seq\n",
+    "tests": [
+      "tests/ee/terrarium/test_kill_switch.py"
+    ]
+  },
+  {
+    "label": "the sweep ignores pause and ticks a paused world",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    docs = await UniverseDoc.find({\"status\": {\"$in\": [\"running\", \"dormant\"]}}).to_list()",
+    "replace": "    docs = await UniverseDoc.find(\n        {\"status\": {\"$in\": [\"running\", \"dormant\", \"paused\"]}}\n    ).to_list()",
+    "tests": [
+      "tests/ee/terrarium/test_kill_switch.py"
+    ]
+  },
+  {
+    "label": "a paused world is still served on the public surface",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    if doc is None or not doc.public or doc.status == \"paused\":",
+    "replace": "    if doc is None or not doc.public:",
+    "tests": [
+      "tests/ee/terrarium/test_kill_switch.py"
+    ]
+  },
+  {
+    "label": "the prefix is rebuilt with the digest inside it, so nothing caches",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "    prefix = f\"\"\"You are {citizen.name}",
+    "replace": "    prefix = f\"\"\"day {digest.day}. You are {citizen.name}",
+    "tests": [
+      "tests/ee/terrarium/test_prompt_cache.py"
+    ]
+  },
+  {
+    "label": "the cache marker is put on every model, not just Claude",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "            if cache_marker_fits(self.model, prefix):",
+    "replace": "            if True:",
+    "tests": [
+      "tests/ee/terrarium/test_prompt_cache.py"
+    ]
+  },
+  {
+    "label": "cache reads are priced at the full input rate",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "_CACHE_READ_RATE = 0.1",
+    "replace": "_CACHE_READ_RATE = 1.0",
+    "tests": [
+      "tests/ee/terrarium/test_prompt_cache.py"
+    ]
+  },
+  {
+    "label": "a moment's data still echoes the withheld headline",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        data = {k: (moderation.WITHHELD if v == body else v) for k, v in data.items()}\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/terrarium/test_moderation.py"
+    ]
+  },
+  {
+    "label": "the charter skips the check and lands on the public citizen wire as written",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        doc.charter = outcome.charter if moderation.clean(outcome.charter) else moderation.WITHHELD",
+    "replace": "        doc.charter = outcome.charter",
+    "tests": [
+      "tests/ee/terrarium/test_moderation.py"
+    ]
+  },
+  {
+    "label": "an artifact's public name is served unchecked",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        if not (moderation.clean(art.name) and moderation.clean(art.body)):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/terrarium/test_moderation.py"
+    ]
+  },
+  {
+    "label": "the minimum cacheable prefix is halved for every model",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "MIN_CACHEABLE_TOKENS: dict[str, int] = {\n    \"claude-opus-5\": 512,\n    \"claude-sonnet-5\": 1024,\n    \"claude-sonnet-4-6\": 1024,\n    \"claude-haiku-4-5\": 4096,\n}",
+    "replace": "MIN_CACHEABLE_TOKENS: dict[str, int] = {\n    \"claude-opus-5\": 256,\n    \"claude-sonnet-5\": 512,\n    \"claude-sonnet-4-6\": 512,\n    \"claude-haiku-4-5\": 2048,\n}",
+    "tests": [
+      "tests/ee/terrarium/test_prompt_cache.py"
+    ]
+  },
+  {
+    "label": "the cache marker goes out on every Claude model regardless of length",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "            if cache_marker_fits(self.model, prefix):",
+    "replace": "            if self.model.startswith(\"claude\"):",
+    "tests": [
+      "tests/ee/terrarium/test_prompt_cache.py"
+    ]
+  },
+  {
+    "label": "the meter never records that a prefix was marked",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "            self.meter.record(prefix + suffix, out, usage, cache_marked=marked)",
+    "replace": "            self.meter.record(prefix + suffix, out, usage, cache_marked=False)",
+    "tests": [
+      "tests/ee/terrarium/test_prompt_cache.py"
+    ]
+  },
+  {
+    "label": "sonnet-5 is priced as the dearer model it replaced",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "    \"claude-sonnet-5\": (2.00, 10.00),",
+    "replace": "    \"claude-sonnet-5\": (3.00, 15.00),",
+    "tests": [
+      "tests/ee/terrarium/test_prompt_cache.py"
+    ]
+  },
+  {
+    "label": "the batch's results are applied by position instead of by custom_id",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    ordered = [landed.get(str(doc.id)) for doc, _snap in pairs]",
+    "replace": "    ordered = list(landed.values())",
+    "tests": [
+      "tests/ee/terrarium/test_dormant_batch.py"
+    ]
+  },
+  {
+    "label": "the half-price discount is applied to the watched path as well",
+    "file": "ee/pocketpaw_ee/terrarium/llm.py",
+    "find": "        return (live + batched * _BATCH_RATE) / 1_000_000",
+    "replace": "        return (live + batched) * _BATCH_RATE / 1_000_000",
+    "tests": [
+      "tests/ee/terrarium/test_dormant_batch.py"
+    ]
+  },
+  {
+    "label": "TERRARIUM_BATCH_DORMANT is ignored, so every dormant world batches",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    return (os.environ.get(\"TERRARIUM_BATCH_DORMANT\") or \"\").strip().lower() in {",
+    "replace": "    return (os.environ.get(\"TERRARIUM_BATCH_DORMANT\") or \"on\").strip().lower() in {",
+    "tests": [
+      "tests/ee/terrarium/test_dormant_batch.py"
+    ]
+  },
+  {
+    "label": "an expired entry is treated as a success and its text is acted on",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    if res is None or res.status != \"succeeded\":",
+    "replace": "    if res is None or res.status in (\"errored\", \"canceled\"):",
+    "tests": [
+      "tests/ee/terrarium/test_dormant_batch.py"
+    ]
+  },
+  {
+    "label": "the founder card is ignored, so a named founder is seeded generically anyway",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        card = cards[i] if cards else None",
+    "replace": "        card = None",
+    "tests": [
+      "tests/ee/terrarium/test_founder_cards.py"
+    ]
+  },
+  {
+    "label": "the founders-equals-cards count check is dropped",
+    "file": "ee/pocketpaw_ee/terrarium/physics.py",
+    "find": "    if len(cards) != physics.founders:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/terrarium/test_founder_cards.py"
+    ]
+  },
+  {
+    "label": "a founder card's text skips moderation, so a slur founds a world",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "            if not moderation.allowed(text):",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/terrarium/test_founder_cards.py"
+    ]
+  },
+  {
+    "label": "the workshop gate on design is gone, so any citizen may draw",
+    "file": "ee/pocketpaw_ee/terrarium/world.py",
+    "find": "            if DESIGN_TECH not in held:\n                outcome.dropped.append(f\"design: needs {DESIGN_TECH} first\")\n                continue\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/terrarium/test_design.py"
+    ]
+  },
+  {
+    "label": "an invalid design is charged and persisted instead of dropped",
+    "file": "ee/pocketpaw_ee/terrarium/world.py",
+    "find": "                outcome.dropped.append(f\"design: {checked}\")\n                continue\n",
+    "replace": "                outcome.dropped.append(f\"design: {checked}\")\n",
+    "tests": [
+      "tests/ee/terrarium/test_design.py"
+    ]
+  },
+  {
+    "label": "a build accepts another citizen's design_id",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "    return design_id if art.author == author else None",
+    "replace": "    return design_id",
+    "tests": [
+      "tests/ee/terrarium/test_design.py"
+    ]
+  },
+  {
+    "label": "a design's name skips the outbound moderation a book gets",
+    "file": "ee/pocketpaw_ee/terrarium/service.py",
+    "find": "        if not (moderation.clean(art.name) and moderation.clean(art.body)):",
+    "replace": "        if art.kind != \"design\" and not (moderation.clean(art.name) and moderation.clean(art.body)):",
+    "tests": [
+      "tests/ee/terrarium/test_design.py"
+    ]
+  },
+  {
+    "label": "weather always lands at the centre of the map",
+    "file": "ee/pocketpaw_ee/terrarium/weather.py",
+    "find": "    return Place(float(x), float(y), RADIUS[kind], label or region(x, y))",
+    "replace": "    return Place(MAP_W / 2, MAP_H / 2, RADIUS[kind], label or region(x, y))",
+    "tests": [
+      "tests/ee/terrarium/test_weather.py"
+    ]
+  },
+  {
+    "label": "the body says south when the cell is in the north third",
+    "file": "ee/pocketpaw_ee/terrarium/weather.py",
+    "find": "    if y < MAP_H / 3:\n        return \"the north field\"",
+    "replace": "    if y < MAP_H / 3:\n        return \"the south field\"",
+    "tests": [
+      "tests/ee/terrarium/test_weather.py"
+    ]
+  },
+  {
+    "label": "a storm's radius is halved",
+    "file": "ee/pocketpaw_ee/terrarium/weather.py",
+    "find": "\"storm\": 28.0,",
+    "replace": "\"storm\": 14.0,",
+    "tests": [
+      "tests/ee/terrarium/test_weather.py"
+    ]
+  }
+]
