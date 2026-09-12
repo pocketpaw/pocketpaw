@@ -105,9 +105,12 @@ def test_an_unknown_model_sends_nothing_by_default():
 def test_an_unknown_model_still_gets_the_default_when_a_cap_is_asked_for():
     """Opting in must not depend on the map knowing the model — otherwise the
     OpenRouter 402 comes back on precisely the newest models."""
-    assert resolve_max_output_tokens(
-        "litellm", "no-such-model-xyz", _settings(agent_max_output_tokens=0)
-    ) == DEFAULT_MAX_OUTPUT_TOKENS
+    assert (
+        resolve_max_output_tokens(
+            "litellm", "no-such-model-xyz", _settings(agent_max_output_tokens=0)
+        )
+        == DEFAULT_MAX_OUTPUT_TOKENS
+    )
 
 
 def test_a_smaller_model_ceiling_lowers_the_cap():
@@ -229,7 +232,9 @@ async def test_the_cap_reaches_run_stream_events():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("overrides", [{}, {"agent_max_output_tokens": -1}], ids=["default", "explicit"])
+@pytest.mark.parametrize(
+    "overrides", [{}, {"agent_max_output_tokens": -1}], ids=["default", "explicit"]
+)
 async def test_a_run_sends_no_model_settings_at_all(overrides):
     """The default and the explicit opt-out must both OMIT the key, not send
     ``max_tokens=0`` — which is a request for an empty completion on several
