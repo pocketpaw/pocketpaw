@@ -126,6 +126,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from pocketpaw_ee.sites.bun_supply_chain import BUILD_BUNFIG, BUILD_BUNFIG_REL
 from pocketpaw_ee.sites.daytona_build import (
     BUILD_RESULT_FILENAME,
     BuildClassification,
@@ -153,36 +154,21 @@ SANDBOX_ARTIFACT_PATH = "/tmp/paw-artifact.tgz"
 
 #: SL-3 — the install-time supply-chain floor, uploaded INTO the sandbox project.
 #:
-#: WHY THIS FILE HAS TO EXIST HERE AT ALL. This workspace's protections live in the
-#: DEVELOPER'S HOME DIR (``~/.npmrc``, ``~/.bunfig.toml``) and are not in any repo, so a
-#: fresh container inherits NONE of them: no release-age floor, no ``ignore-scripts``. A
-#: build box that resolves from the open registry with lifecycle scripts enabled is
-#: strictly weaker than the runtime image beside it, and once Daytona is the ONLY build
-#: host that inversion is the whole exposure rather than a note.
+#: MOVED 2026-09-12 to ``bun_supply_chain`` and re-exported here under the original
+#: names, so nothing that imported ``dr.SANDBOX_BUNFIG`` had to change. The sandbox
+#: was never the only host that runs ``bun install``, and the other one had no copy
+#: of this floor. One constant with two call sites cannot drift; two constants that
+#: agree today can. Read ``bun_supply_chain``'s module docstring for why each control
+#: is here, and why the file is written at the build boundary rather than templated
+#: into the generated project.
 #:
-#: ``minimumReleaseAge`` is the same 7-day floor the dev machines enforce, expressed in
-#: SECONDS because that is bun's unit — 604800. It is the control that would have caught
-#: a compromised fresh publish of an already-vetted package, which the allowlist cannot:
-#: the allowlist pins WHICH packages and a caret pin still floats the VERSION.
-#:
-#: ``ignore-scripts`` matters more here than on a laptop. A postinstall script in a build
-#: container runs with the sandbox's network and its filesystem, next to the artifact we
-#: are about to deploy. Nothing in the vetted set needs one.
-#:
-#: DELIBERATELY UPLOADED, NOT TEMPLATED INTO THE GENERATED PROJECT. Two reasons: it is a
-#: property of the BUILD HOST, not of the customer's site, so it has no business in their
-#: source tree; and injecting it at this boundary means a template change cannot silently
-#: drop it. It lands in the project dir because that is where bun looks.
-SANDBOX_BUNFIG_REL = "bunfig.toml"
-SANDBOX_BUNFIG = """# Written by pocketpaw's build lane — NOT part of your site's source.
-# Install-time supply-chain floor for this sandbox. See daytona_runner.SANDBOX_BUNFIG.
-[install]
-# 7 days, in seconds. Matches the floor the dev machines enforce via ~/.bunfig.toml.
-minimumReleaseAge = 604800
-# No lifecycle scripts. Nothing in the vetted dependency set needs one, and a
-# postinstall here would run beside the artifact we are about to deploy.
-ignoreScripts = true
-"""
+#: Deliberately NOT naming that other runner here: this module is the Daytona lane,
+#: and ``test_fault_ladder_build`` text-scans it to keep a local build fallback from
+#: being reintroduced. Sharing a supply-chain constant is not a build fallback, but
+#: the guard reads source text, and a guard that has to reason about intent is worth
+#: less than one that does not.
+SANDBOX_BUNFIG_REL = BUILD_BUNFIG_REL
+SANDBOX_BUNFIG = BUILD_BUNFIG
 
 #: Seconds added to the in-sandbox timeout for our own ``execute_command`` budget.
 #: The inner ``timeout(1)`` should always fire first, because that path still runs the
