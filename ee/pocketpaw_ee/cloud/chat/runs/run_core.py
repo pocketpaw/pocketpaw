@@ -398,6 +398,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     mark_cloud_chat_run,
     push_sse_event,
     register_stream_sink,
+    resolve_turn_images,
     resolve_user_content,
     session_key_for,
     unbind_pawbar_run,
@@ -1788,6 +1789,15 @@ async def _drive_agent_loop(
         # older one) produces a byte-identical run.
         if ctx.tools_enabled is False:
             run_kwargs["tools_enabled"] = False
+        # Images the user attached, as bytes the model is SHOWN rather than text
+        # scraped off them. Resolved here (not inside build_knowledge_context)
+        # because the knowledge context is a string and an image is not — the
+        # two travel to the backend by different channels and only meet in the
+        # request. Same withhold-when-empty idiom: a turn with no images sends
+        # nothing extra and is byte-identical to before.
+        turn_images = await resolve_turn_images(ctx, attachments_in)
+        if turn_images:
+            run_kwargs["image_attachments"] = turn_images
         # --- BYOK per-turn credentials (feat/byok-guest-backend, 2026-09-01) ----
         # Resolve whose credential pays for THIS turn — the call the byok
         # service's own header always said the turn path makes, wired at last.

@@ -421,7 +421,12 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
+from pocketpaw.agents.backend import (
+    _DEFAULT_IDENTITY,
+    BackendInfo,
+    Capability,
+    ImageAttachment,
+)
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.agents.spend_attribution import end_user_id_for
 from pocketpaw.config import Settings
@@ -901,6 +906,32 @@ class _RunHandle:
 
     def __init__(self) -> None:
         self.stopped = False
+
+
+def build_multimodal_prompt(message: str, images: tuple[ImageAttachment, ...]) -> str | list[Any]:
+    """Build the pydantic-ai prompt carrying ``images`` alongside the text.
+
+    pydantic-ai takes multimodal input as a LIST prompt mixing strings with
+    content objects — ``agent.run(["what is this?", BinaryContent(...)])``. With
+    no images the prompt stays the bare string, so every existing run is
+    byte-identical and the multimodal path cannot regress a text turn.
+
+    ``BinaryContent``, never ``ImageUrl``. pydantic-ai's own docs warn not to
+    build URL parts from untrusted input: providers fetch cloud-storage URLs
+    (``s3://``, ``gs://``) using OUR credentials, and an attachment URL is
+    user-controlled. We already hold the resolved bytes, so handing over a URL
+    would trade a safe path for an SSRF-shaped one to save a read.
+
+    The import is local: ``pydantic_ai`` is an optional extra, and this module
+    imports on installs that do not have it.
+    """
+    if not images:
+        return message
+    from pydantic_ai import BinaryContent
+
+    parts: list[Any] = [message]
+    parts.extend(BinaryContent(data=img.data, media_type=img.media_type) for img in images)
+    return parts
 
 
 class PydanticAIBackend:
@@ -2287,6 +2318,12 @@ class PydanticAIBackend:
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
         allow_mcp_tool_ids: frozenset[str] | None = None,
         exclusive_mcp_tools: bool = False,
+        # Images the user attached to this turn. Consumed, not ignored: pydantic-ai
+        # takes multimodal input as a LIST prompt mixing strings with
+        # ``BinaryContent``, so ``build_multimodal_prompt`` below turns these into
+        # the prompt the agent actually runs on. Empty leaves the prompt a bare
+        # string, which is what every text turn has always sent.
+        image_attachments: tuple[ImageAttachment, ...] = (),
         # The assembled prompt's stable digest (PA-1). Unlike the kwargs above
         # this is NOT withhold-when-empty — it is set on every run — so the pool
         # gates it on this signature instead: declaring the parameter is how a
@@ -2481,7 +2518,12 @@ class PydanticAIBackend:
             # a run's accounting cannot live on it.
             kwargs["usage"] = run_usage
 
-            async with agent.run_stream_events(message, **kwargs) as stream:
+            # The prompt, not the message: with images attached this is a list
+            # carrying BinaryContent parts, which is the only shape pydantic-ai
+            # takes an image in. Without them it is ``message`` itself, so a text
+            # turn is unchanged.
+            prompt = build_multimodal_prompt(message, image_attachments)
+            async with agent.run_stream_events(prompt, **kwargs) as stream:
                 async for event in stream:
                     if handle.stopped:
                         break

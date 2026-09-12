@@ -354,6 +354,7 @@ Uses the official Claude Agent SDK (pip install claude-agent-sdk) which provides
 """
 
 import asyncio
+import base64
 import hashlib
 import logging
 import os
@@ -366,6 +367,7 @@ from pocketpaw.agents.backend import (
     BackendInfo,
     BaseAgentBackend,
     Capability,
+    ImageAttachment,
     LeasedClient,
     SessionHandle,
 )
@@ -745,6 +747,52 @@ def _mcp_result_text(content: object) -> str:
                     parts.append(_t)
         return "\n".join(parts)
     return ""
+
+
+def build_streaming_user_message(message: str, images: "tuple[ImageAttachment, ...]") -> dict:
+    """Build the SDK streaming-input message carrying ``images`` alongside the text.
+
+    Shape is the one the Agent SDK documents for streaming input mode:
+
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "text",  "text": ...},
+            {"type": "image", "source": {"type": "base64",
+                                         "media_type": ..., "data": ...}},
+        ]}}
+
+    STREAMING INPUT IS NOT OPTIONAL HERE. The SDK's single-message mode
+    explicitly does not support image attachments, so a turn carrying images has
+    to go down the persistent-client path; sending it as a plain string is how
+    an image silently becomes no image at all.
+
+    The text block comes FIRST. The API's vision guidance puts the image before
+    the question when there is one image and a question about it, but here the
+    text is the user's turn and the images are what they attached to it — and
+    with several images the model needs the framing before the pile.
+    """
+    content: list[dict] = [{"type": "text", "text": message}]
+    for img in images:
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.media_type,
+                    "data": base64.b64encode(img.data).decode("ascii"),
+                },
+            }
+        )
+    return {"type": "user", "message": {"role": "user", "content": content}}
+
+
+async def stream_one_message(payload: dict):
+    """Yield ``payload`` as the async iterable ``ClaudeSDKClient.query`` wants.
+
+    The SDK takes an async iterable for streaming input; a bare dict is not one,
+    and passing it raises rather than degrading — which is the behaviour we want
+    over silently dropping the images.
+    """
+    yield payload
 
 
 class ClaudeSDKBackend(BaseAgentBackend):
@@ -2798,6 +2846,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         resume_active: bool,
         warm_client: LeasedClient | None,
         on_client_built: Callable[[Any, str, Callable], None] | None,
+        image_attachments: tuple[ImageAttachment, ...] = (),
     ) -> tuple[Any, LeasedClient | None]:
         """feat/warm-reuse WH-1 — route a turn against a caller-LEASED warm client.
 
@@ -2854,7 +2903,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     "WH-1: reusing leased warm client (key match) — "
                     "no connect, no resume, no history injection"
                 )
-                await warm_client.client.query(message)
+                await warm_client.client.query(
+                    stream_one_message(build_streaming_user_message(message, image_attachments))
+                    if image_attachments
+                    else message
+                )
                 return self._resilient_receive(warm_client.client), warm_client
             except Exception as exc:  # noqa: BLE001
                 # The leased client failed mid-send. Release its busy flag (we no
@@ -2904,7 +2957,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     "WH-1: supervised fresh client built + bound (resume=%s) — driving query",
                     bool(getattr(options, "resume", None)),
                 )
-                await fresh.query(message)
+                await fresh.query(
+                    stream_one_message(build_streaming_user_message(message, image_attachments))
+                    if image_attachments
+                    else message
+                )
                 # The supervisor now OWNS the client; the backend does not tear it
                 # down here even if the stream later aborts.
                 return self._resilient_receive(fresh), None
@@ -2938,6 +2995,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
         exclusive_mcp_tools: bool = False,
         system_prompt_digest: str = "",
         tools_enabled: bool = True,
+        # Images the user attached to this turn. They ride the PERSISTENT-client
+        # paths only: the SDK's single-message mode explicitly does not support
+        # image attachments, so a stateless fresh-launch turn carrying images
+        # would drop them silently. See where this is consumed below.
+        image_attachments: tuple[ImageAttachment, ...] = (),
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
@@ -3174,6 +3236,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     resume_active=_resume_active,
                     warm_client=warm_client,
                     on_client_built=on_client_built,
+                    image_attachments=image_attachments,
                 )
             # fix/claude-sdk-warm-client-skills: the warm-client bypass for skill
             # runs is REMOVED. ``_client_cache_key`` now folds in

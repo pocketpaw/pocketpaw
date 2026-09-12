@@ -167,7 +167,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -178,6 +178,7 @@ from typing import TYPE_CHECKING, Any
 # below and the existing ``from pocketpaw.agents.pool import ...`` importers
 # resolve to the ONE definition.
 from pocketpaw.agents.backend import (
+    ImageAttachment,
     _accepts_prompt_digest,
     _accepts_prompt_digest_kwarg,
     _accepts_tools_enabled_kwarg,
@@ -683,6 +684,7 @@ class AgentPool:
         model_override: str | None = None,
         exclusive_mcp_tools: bool = False,
         tools_enabled: bool = True,
+        image_attachments: Sequence[ImageAttachment] = (),
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
         byok_api_key: str | None = None,
@@ -906,6 +908,16 @@ class AgentPool:
             # False = legacy grant-union path, unchanged for every existing run.
             if exclusive_mcp_tools:
                 run_kwargs["exclusive_mcp_tools"] = exclusive_mcp_tools
+            # Images the user attached to this turn. Same withhold-when-empty
+            # rule, and the reason is sharper here than for the kwargs above: a
+            # backend that cannot show a model an image must not be handed one
+            # and left to decide what to do with it. Declaring the parameter is
+            # the opt-in, so the set of backends that can carry images is
+            # whatever the signatures say — there is no second list to drift.
+            # Empty = every turn that came without an attachment, byte-identical
+            # to before.
+            if image_attachments:
+                run_kwargs["image_attachments"] = tuple(image_attachments)
             # BYOK: swap the SHARED backend for a private one, built for this
             # run alone. Anything that fails here (an unregistered backend, a
             # bad settings key) falls back to the shared instance rather than
