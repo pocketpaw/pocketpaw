@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+from pocketpaw_ee.agent.mcp_servers.other_hand import ILLUSTRATE_TOOL_ID
 from pocketpaw_ee.cloud.surface import (
     SurfaceKind,
     SurfaceMeta,
@@ -243,6 +244,28 @@ def test_profile_carries_the_page_ops_output_contract() -> None:
     assert "48 at size 54" in override
     # The pointer to the other half, so whoever changes a number finds it.
     assert "other-hand/types.ts" in override
+
+
+def test_profile_offers_only_the_tools_the_prompt_names() -> None:
+    """The bridged tool surface is derived from the OSS allow-list and pinned.
+
+    Otherhand's prompt names two tools, ``illustrate`` and ``image_generate``,
+    and every other bridged builtin was still offered on every turn: ~6.6k
+    tokens of schema, the one block the upstream prompt cache has been measured
+    not to cover. What is LEFT after the deny is computed from the backend's
+    own ``_TENANT_SAFE_TOOLS`` and pinned to those two names. Mutations: drop
+    ``_OTHER_HAND_BRIDGED_DENY`` from the profile and 70 names are offered;
+    widen the deny by one and the prompt commands a tool the agent lacks.
+    """
+    from pocketpaw.agents.pydantic_ai import _TENANT_SAFE_TOOLS
+
+    profile = resolve_profile(SurfaceKind.OTHER_HAND, SurfaceMeta())
+    offered = _TENANT_SAFE_TOOLS - profile.deny_mcp_tool_ids
+    assert offered == {"illustrate", "image_generate"}, sorted(offered)
+    # The pocket MCP deny is still in the same field — one union, both halves.
+    assert "mcp__pocketpaw_pocket_specialist__create" in profile.deny_mcp_tool_ids
+    # And the illustration tool is still the ONE permitted MCP id.
+    assert profile.allow_mcp_tool_ids == frozenset({ILLUSTRATE_TOOL_ID})
 
 
 def test_profile_keeps_read_available() -> None:
