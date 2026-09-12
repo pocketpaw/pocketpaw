@@ -889,10 +889,7 @@ class _RunHandle:
         self.stopped = False
 
 
-
-def build_multimodal_prompt(
-    message: str, images: tuple[ImageAttachment, ...]
-) -> str | list[Any]:
+def build_multimodal_prompt(message: str, images: tuple[ImageAttachment, ...]) -> str | list[Any]:
     """Build the pydantic-ai prompt carrying ``images`` alongside the text.
 
     pydantic-ai takes multimodal input as a LIST prompt mixing strings with

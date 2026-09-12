@@ -749,7 +749,6 @@ def _mcp_result_text(content: object) -> str:
     return ""
 
 
-
 def build_streaming_user_message(message: str, images: "tuple[ImageAttachment, ...]") -> dict:
     """Build the SDK streaming-input message carrying ``images`` alongside the text.
 

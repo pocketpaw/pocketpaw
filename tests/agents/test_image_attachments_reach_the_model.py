@@ -78,9 +78,7 @@ class TestClaudeAgentSDKShape:
         msg = claude_sdk.build_streaming_user_message("five", imgs)
         blocks = [b for b in msg["message"]["content"] if b["type"] == "image"]
         assert len(blocks) == 5
-        assert [base64.b64decode(b["source"]["data"]) for b in blocks] == [
-            i.data for i in imgs
-        ]
+        assert [base64.b64decode(b["source"]["data"]) for b in blocks] == [i.data for i in imgs]
 
     @pytest.mark.asyncio
     async def test_the_payload_is_offered_as_an_async_iterable(self) -> None:
