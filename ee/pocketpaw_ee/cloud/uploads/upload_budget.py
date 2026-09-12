@@ -32,9 +32,10 @@
 # workspace can live without for a day, whereas uploading IS the product. An
 # env typo that reads as ``0`` must not take file upload off the air.
 #
-# It fails CLOSED on a database error, like its siblings. That costs nothing
-# here: the upload path writes its metadata row to the same Mongo, so a
-# database that cannot serve this counter cannot complete the upload either.
+# It fails OPEN on a database error, logged at WARNING. The upload path writes
+# its metadata row to the same Mongo on the next statement, so a database that
+# cannot serve this counter cannot complete the upload either — refusing here
+# would protect nothing (see ``turn_budget`` for the harness that proved it).
 #
 # Structure copied from ``uploads/comprehension_budget.py``, including the
 # increment-then-compare ordering and the rollback of an over-cap claim.
@@ -148,10 +149,16 @@ async def try_spend(workspace_id: str | None, files: int, size_bytes: int) -> tu
         spent_files = int(doc.get("used", 0))
         spent_bytes = int(doc.get("bytes_used", 0))
     except Exception:
+        # Fails OPEN — same reasoning and same reversal as ``turn_budget``:
+        # the metadata row is written to this Mongo on the very next
+        # statement, so an unreadable counter never lets an upload through
+        # that the database itself would not have accepted.
         logger.warning(
-            "upload budget unavailable for workspace=%s; refusing", workspace_id, exc_info=True
+            "upload budget unavailable for workspace=%s; allowing this batch",
+            workspace_id,
+            exc_info=True,
         )
-        return False, "unavailable"
+        return True, ""
 
     over = ""
     if file_cap > 0 and spent_files > file_cap:

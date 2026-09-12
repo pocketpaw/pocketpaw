@@ -17,7 +17,6 @@ import uuid
 
 import pytest
 from mongomock_motor import AsyncMongoMockClient
-
 from pocketpaw_ee.cloud._core.errors import WorkspaceLimitError
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
 from pocketpaw_ee.cloud.workspace import service as workspace_service
@@ -203,9 +202,7 @@ async def test_a_soft_deleted_workspace_frees_its_slot(workspace_db, monkeypatch
     monkeypatch.setenv("POCKETPAW_MAX_OWNED_WORKSPACES", "2")
 
     await _WorkspaceDoc(name="A", slug="a", owner="u1").insert()
-    await _WorkspaceDoc(
-        name="B", slug="b", owner="u1", deleted_at=datetime.now(UTC)
-    ).insert()
+    await _WorkspaceDoc(name="B", slug="b", owner="u1", deleted_at=datetime.now(UTC)).insert()
 
     reached: list[str] = []
 

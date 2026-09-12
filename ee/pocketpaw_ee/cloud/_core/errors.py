@@ -426,7 +426,6 @@ class DailyUploadLimitError(CloudError):
             "files": "too many files uploaded today",
             "bytes": "too much uploaded today",
             "workspace": "no workspace on this upload",
-            "unavailable": "upload budget unavailable",
         }.get(dimension, "daily upload limit reached")
         super().__init__(429, "uploads.daily_limit", f"Daily upload limit: {label}")
 

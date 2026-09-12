@@ -11,7 +11,7 @@
 #     consume the slot a later one could have used;
 #   * ``0`` means UNCAPPED here, the opposite of comprehension_budget, so an
 #     env typo cannot take upload or chat off the air;
-#   * a database error fails CLOSED.
+#   * a database error fails OPEN, with a warning — see the two tests for why.
 #
 # Mutations: tests/mutations/abuse_budgets.json.
 
@@ -21,7 +21,6 @@ import uuid
 
 import pytest
 from mongomock_motor import AsyncMongoMockClient
-
 from pocketpaw_ee.cloud.chat.runs import turn_budget
 from pocketpaw_ee.cloud.models.workspace_turn_usage import WorkspaceTurnUsage
 from pocketpaw_ee.cloud.models.workspace_upload_usage import WorkspaceUploadUsage
@@ -107,16 +106,21 @@ async def test_a_run_with_no_workspace_is_refused(budget_db, monkeypatch):
     assert (await turn_budget.try_spend(""))[0] is False
 
 
-async def test_an_unreadable_counter_fails_closed(budget_db, monkeypatch):
-    """The database raises. Fails CLOSED, and that costs nothing extra: a run
-    persists its messages to the same database, so one that cannot serve this
-    counter cannot serve the run either.
+async def test_an_unreadable_counter_fails_open(budget_db, monkeypatch):
+    """The database raises. Fails OPEN, with a warning.
 
-    Raising explicitly rather than leaving Beanie unbound — an unbound document
-    happens to raise today, which makes the test pass for a reason that is not
-    the one it names.
+    This test asserted the opposite until 2026-09-12, before the change ever
+    shipped: the fail-closed draft refused every run in
+    ``test_run_core_plan_surface``, a hermetic harness with no Beanie binding,
+    with a cap message and no hint why. An unreadable counter is not an
+    attack, and the run's own message persistence fails on the same database
+    a statement later, so refusing here protected nothing. The guest gate
+    beside this one already answers "not a guest" on any error.
 
-    Mutation that must break this: return ``(True, 0, cap)`` from the except.
+    Raising explicitly rather than leaving Beanie unbound, so the test passes
+    for the reason it names.
+
+    Mutation that must break this: return ``(False, 0, cap)`` from the except.
     """
     monkeypatch.setenv("POCKETPAW_WORKSPACE_TURNS_DAILY", "10")
 
@@ -127,12 +131,12 @@ async def test_an_unreadable_counter_fails_closed(budget_db, monkeypatch):
 
     allowed, _spent, cap = await turn_budget.try_spend("w-no-db")
 
-    assert allowed is False
+    assert allowed is True
     assert cap == 10
 
 
-async def test_an_unreadable_upload_counter_fails_closed(budget_db, monkeypatch):
-    """The upload sibling of the gate above."""
+async def test_an_unreadable_upload_counter_fails_open(budget_db, monkeypatch):
+    """The upload sibling of the gate above, same reversal."""
     monkeypatch.setenv("POCKETPAW_WORKSPACE_UPLOAD_FILES_DAILY", "10")
 
     def _boom():
@@ -142,8 +146,8 @@ async def test_an_unreadable_upload_counter_fails_closed(budget_db, monkeypatch)
 
     allowed, over = await upload_budget.try_spend("w-no-db", 1, 1)
 
-    assert allowed is False
-    assert over == "unavailable"
+    assert allowed is True
+    assert over == ""
 
 
 def test_a_bad_env_value_uses_the_default_not_zero(monkeypatch):

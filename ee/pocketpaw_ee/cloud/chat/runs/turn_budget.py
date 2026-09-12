@@ -27,9 +27,11 @@
 # IS the product. An env typo that reads as ``0`` must not take chat off the
 # air for every tenant at once.
 #
-# It fails CLOSED on a database error. That costs nothing here: a run persists
-# its messages to the same Mongo, so a database that cannot serve this counter
-# cannot serve the run either.
+# It fails OPEN on a database error, logged at WARNING. A run persists its
+# messages to the same Mongo, so a database that cannot serve this counter
+# cannot serve the run either — refusing here would protect nothing and, as the
+# first draft proved, refuses every run in any harness that has not bound the
+# collection.
 #
 # Structure copied from ``uploads/comprehension_budget.py``, including the
 # increment-then-compare ordering and the rollback of an over-cap claim.
@@ -145,10 +147,23 @@ async def try_spend(workspace_id: str | None) -> tuple[bool, int, int]:
         # reading it as "0 spent" would be a permanently open gate.
         spent = int((doc or {}).get("used", cap + 1))
     except Exception:
+        # Fails OPEN (reversed 2026-09-12, before this ever shipped). The first
+        # draft refused the run here, on the argument that a database that
+        # cannot serve this counter cannot serve the run either. True in
+        # production, and irrelevant to the case that actually bit: a hermetic
+        # test harness with no Beanie binding, where every run was refused
+        # with a cap message and nothing said why. An unreadable counter is
+        # not an attack — an attacker cannot make Mongo unreachable without
+        # also taking the run down at message persistence — so refusing here
+        # buys no protection and leaves a trap for the next harness. The guest
+        # gate beside this one made the same call: ``load_guest`` answers "not
+        # a guest" on any error. Logged at WARNING so a real outage is visible.
         logger.warning(
-            "turn budget unavailable for workspace=%s; refusing", workspace_id, exc_info=True
+            "turn budget unavailable for workspace=%s; allowing this run",
+            workspace_id,
+            exc_info=True,
         )
-        return False, 0, cap
+        return True, 0, cap
 
     if spent > cap:
         try:

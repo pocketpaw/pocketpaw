@@ -36,12 +36,12 @@
     ]
   },
   {
-    "label": "the turn counter fails OPEN \u2014 a database blip becomes an open tab",
+    "label": "the turn counter fails CLOSED \u2014 every run in any harness without the collection bound is refused with a cap message",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/turn_budget.py",
-    "find": "        logger.warning(\n            \"turn budget unavailable for workspace=%s; refusing\", workspace_id, exc_info=True\n        )\n        return False, 0, cap",
-    "replace": "        logger.warning(\n            \"turn budget unavailable for workspace=%s; refusing\", workspace_id, exc_info=True\n        )\n        return True, 0, cap",
+    "find": "            workspace_id,\n            exc_info=True,\n        )\n        return True, 0, cap",
+    "replace": "            workspace_id,\n            exc_info=True,\n        )\n        return False, 0, cap",
     "tests": [
-      "tests/cloud/uploads/test_abuse_budgets.py::test_an_unreadable_counter_fails_closed"
+      "tests/cloud/uploads/test_abuse_budgets.py::test_an_unreadable_counter_fails_open"
     ]
   },
   {
@@ -81,12 +81,12 @@
     ]
   },
   {
-    "label": "the upload counter fails OPEN \u2014 a database blip becomes an open bucket",
+    "label": "the upload counter fails CLOSED \u2014 an unbound collection refuses every upload",
     "file": "ee/pocketpaw_ee/cloud/uploads/upload_budget.py",
-    "find": "        return False, \"unavailable\"",
-    "replace": "        return True, \"unavailable\"",
+    "find": "            workspace_id,\n            exc_info=True,\n        )\n        return True, \"\"",
+    "replace": "            workspace_id,\n            exc_info=True,\n        )\n        return False, \"\"",
     "tests": [
-      "tests/cloud/uploads/test_abuse_budgets.py::test_an_unreadable_upload_counter_fails_closed"
+      "tests/cloud/uploads/test_abuse_budgets.py::test_an_unreadable_upload_counter_fails_open"
     ]
   },
   {

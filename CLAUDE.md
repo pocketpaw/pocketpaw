@@ -279,8 +279,11 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   workspace can live without for a day, whereas uploading, chatting and creating
   a workspace are the product, and an env typo must not take them off the air.
   A non-integer value warns and uses the default rather than reading as `0`.
-  The two daily counters fail CLOSED on a database error, which costs nothing
-  because both paths persist to the same Mongo. Rejections are 429 with codes
+  The two daily counters fail OPEN on a database error, logged at WARNING.
+  Both paths persist to the same Mongo a statement later, so an unreadable
+  counter never lets through work the database would have refused, and a
+  fail-closed draft refused every run in any harness that had not bound the
+  collection. Rejections are 429 with codes
   `runs.daily_limit`, `uploads.daily_limit` and `workspace.owned_limit` —
   deliberately not the 402 `billing.*` / `credits.*` codes, because nothing is
   for sale here and the answer is to wait, not to upgrade.
