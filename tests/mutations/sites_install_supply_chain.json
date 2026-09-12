@@ -1,0 +1,57 @@
+[
+  {
+    "label": "the local runner spawns bun install with no bunfig - the Coolify build path resolves from the open registry with lifecycle scripts enabled, which is the state this change exists to end",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "        write_build_bunfig(project_dir)  # the floor, laid at the spawn",
+    "replace": "        pass  # floor removed",
+    "tests": [
+      "tests/ee/sites/test_generator_client_supply_chain.py::test_install_writes_the_supply_chain_bunfig_before_spawning"
+    ]
+  },
+  {
+    "label": "the floor respects a project-supplied bunfig instead of displacing it - a template change could switch minimumReleaseAge off and nothing would notice",
+    "file": "ee/pocketpaw_ee/sites/bun_supply_chain.py",
+    "find": "    target.write_text(BUILD_BUNFIG, encoding=\"utf-8\")",
+    "replace": "    target.write_text(target.read_text(encoding=\"utf-8\") if target.is_file() else BUILD_BUNFIG, encoding=\"utf-8\")",
+    "tests": [
+      "tests/ee/sites/test_generator_client_supply_chain.py::test_a_project_supplied_bunfig_is_displaced_so_the_floor_wins"
+    ]
+  },
+  {
+    "label": "bunfig drops out of the install fingerprint - introducing the floor moves no hash, so every already-built site skips the reinstall and keeps its unfloored node_modules while the suite stays green",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "    BUILD_BUNFIG_REL,",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_generator_client_supply_chain.py::test_the_floor_participates_in_the_install_cache_decision"
+    ]
+  },
+  {
+    "label": "daytona re-derives the floor instead of aliasing it - two constants that agree today and drift the first time one is edited",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "SANDBOX_BUNFIG = BUILD_BUNFIG",
+    "replace": "SANDBOX_BUNFIG = \"\".join(list(BUILD_BUNFIG))",
+    "tests": [
+      "tests/ee/sites/test_generator_client_supply_chain.py::test_both_runners_enforce_one_policy_not_two"
+    ]
+  },
+  {
+    "label": "lifecycle scripts are re-enabled in the floor - the file is still written, still named bunfig.toml, and a postinstall runs beside the artifact we are about to deploy",
+    "file": "ee/pocketpaw_ee/sites/bun_supply_chain.py",
+    "find": "ignoreScripts = true",
+    "replace": "ignoreScripts = false",
+    "tests": [
+      "tests/ee/sites/test_generator_client_supply_chain.py::test_install_writes_the_supply_chain_bunfig_before_spawning",
+      "tests/ee/sites/test_generator_client_supply_chain.py::test_a_project_supplied_bunfig_is_displaced_so_the_floor_wins"
+    ]
+  },
+  {
+    "label": "the release-age floor is cut to a minute - a compromised fresh publish of an already-vetted package resolves, which is the exact attack the allowlist cannot catch",
+    "file": "ee/pocketpaw_ee/sites/bun_supply_chain.py",
+    "find": "minimumReleaseAge = 604800",
+    "replace": "minimumReleaseAge = 60",
+    "tests": [
+      "tests/ee/sites/test_generator_client_supply_chain.py::test_install_writes_the_supply_chain_bunfig_before_spawning"
+    ]
+  }
+]
