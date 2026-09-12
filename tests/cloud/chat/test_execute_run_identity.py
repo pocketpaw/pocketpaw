@@ -19,15 +19,25 @@
 # The fix must (1) fall back to the trusted spec workspace when the doc's is
 # empty, (2) reject a spec that DISAGREES with a non-empty doc workspace
 # (cross-tenant guard), and (3) make attach_agent_identity reject empty ids.
+#
+# Updated: 2026-08-01 (Sense Phase 2, SP2-1) — added the agent-identity block at
+# the bottom of this module: attach binds the running agent's id, an in-process
+# MCP-tool-shaped callee reads it back through current_agent_id() (including from
+# a spawned task, the shape an SDK tool call actually runs in), an unbound caller
+# still sees None, and detach leaves NO residue. The leak guard is the point: a
+# stale agent id surviving a detach is the same class of bug as the warm-client
+# role bleed, where one caller's identity froze onto a later caller's turn.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from pocketpaw_ee.cloud.chat.agent_service import (
     attach_agent_identity,
+    current_agent_id,
     current_user_id,
     current_workspace_id,
     detach_agent_identity,
@@ -219,3 +229,92 @@ def test_attach_agent_identity_rejects_empty_workspace():
 def test_attach_agent_identity_rejects_empty_user():
     with pytest.raises(ValueError):
         attach_agent_identity(workspace_id=SPEC_WORKSPACE, user_id="")
+
+
+# ===========================================================================
+# SP2-1 — the running agent's id reaches the in-process MCP layer.
+#
+# An in-process MCP tool has no FastAPI request scope; it resolves who it is
+# running for off the identity ContextVars (the same way the fabric / connector
+# servers resolve workspace and pocket). These tests drive the real attach seam
+# and read the id back from a callee shaped like one of those tools.
+# ===========================================================================
+
+RUNNING_AGENT = "agent_pp"
+
+
+def _mcp_tool_reads_running_agent() -> str | None:
+    """Stand-in for an in-process MCP tool handler: no arguments, no request
+    scope, resolves the running agent purely from the ambient identity."""
+    return current_agent_id()
+
+
+def test_attach_binds_the_running_agent_for_mcp_tools():
+    tokens = attach_agent_identity(
+        workspace_id=SPEC_WORKSPACE, user_id=SPEC_USER, agent_id=RUNNING_AGENT
+    )
+    try:
+        assert _mcp_tool_reads_running_agent() == RUNNING_AGENT
+    finally:
+        detach_agent_identity(tokens)
+
+
+def test_agent_id_is_none_when_the_caller_binds_none():
+    """Every pre-SP2-1 caller omits ``agent_id``; they must keep binding None."""
+    tokens = attach_agent_identity(workspace_id=SPEC_WORKSPACE, user_id=SPEC_USER)
+    try:
+        assert _mcp_tool_reads_running_agent() is None
+        # The rest of the identity is untouched by the wider tuple.
+        assert current_workspace_id() == SPEC_WORKSPACE
+        assert current_user_id() == SPEC_USER
+    finally:
+        detach_agent_identity(tokens)
+
+
+def test_detach_leaves_no_agent_id_behind():
+    """Leak guard: an agent id that survives its own run would bleed onto the
+    next caller in the same context — the failure mode the warm-client role
+    bleed already cost us once."""
+    assert current_agent_id() is None
+    tokens = attach_agent_identity(
+        workspace_id=SPEC_WORKSPACE, user_id=SPEC_USER, agent_id=RUNNING_AGENT
+    )
+    assert current_agent_id() == RUNNING_AGENT
+    detach_agent_identity(tokens)
+    assert current_agent_id() is None
+
+
+def test_nested_binds_restore_the_outer_agent():
+    """A second agent bound inside the first's window must not outlive it."""
+    outer = attach_agent_identity(
+        workspace_id=SPEC_WORKSPACE, user_id=SPEC_USER, agent_id="agent_outer"
+    )
+    try:
+        inner = attach_agent_identity(
+            workspace_id=SPEC_WORKSPACE, user_id=SPEC_USER, agent_id="agent_inner"
+        )
+        assert current_agent_id() == "agent_inner"
+        detach_agent_identity(inner)
+        assert current_agent_id() == "agent_outer"
+    finally:
+        detach_agent_identity(outer)
+    assert current_agent_id() is None
+
+
+@pytest.mark.asyncio
+async def test_agent_id_propagates_into_a_spawned_task():
+    """MCP tool calls run inside tasks the SDK spawns under the run, so the
+    binding has to survive ``create_task``'s context copy — the same property
+    workspace/pocket rely on."""
+
+    async def _tool_call() -> str | None:
+        await asyncio.sleep(0)
+        return _mcp_tool_reads_running_agent()
+
+    tokens = attach_agent_identity(
+        workspace_id=SPEC_WORKSPACE, user_id=SPEC_USER, agent_id=RUNNING_AGENT
+    )
+    try:
+        assert await asyncio.create_task(_tool_call()) == RUNNING_AGENT
+    finally:
+        detach_agent_identity(tokens)
