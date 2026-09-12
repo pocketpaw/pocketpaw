@@ -261,7 +261,17 @@ async def validate_key(
         "content-type": "application/json",
     }
     async with httpx.AsyncClient(timeout=_VALIDATE_TIMEOUT_S) as client:
-        resp = await client.post(_VALIDATE_URL, json=payload, headers=headers)
+        try:
+            resp = await client.post(_VALIDATE_URL, json=payload, headers=headers)
+        except httpx.TransportError as exc:
+            # Same hole as the gateway path below, same answer. This one points
+            # at Anthropic rather than a user-supplied address, so it is far
+            # likelier to be our egress than their key.
+            raise ValidationError(
+                "byok.provider_unreachable",
+                "This server could not reach Anthropic to check the key. Your "
+                "key was not saved and was not rejected — try again shortly.",
+            ) from exc
 
     if resp.status_code in (401, 403):
         raise ValidationError(
@@ -322,7 +332,26 @@ async def _validate_gateway_key(api_key: str, base_url: str, model: str) -> str:
         follow_redirects=False,
         transport=PinnedTransport(target.pinned_ip),
     ) as client:
-        resp = await client.post(f"{base}/chat/completions", json=payload, headers=headers)
+        try:
+            resp = await client.post(f"{base}/chat/completions", json=payload, headers=headers)
+        except httpx.TransportError as exc:
+            # A gateway this server cannot REACH is not a bad key, and it is not
+            # an internal error either. Unguarded, this was a 500 and the panel
+            # said "Internal server error — see server logs for details", which
+            # is both alarming and useless to the person holding a working key.
+            # Seen live on 2026-09-13: the address resolved and the box could
+            # not open a connection to it, so every save failed this way.
+            #
+            # The docstring above says network trouble is not a bad key and
+            # lets the transport error out "so the caller can decide". No
+            # caller decided — the route has no handler, so it reached the
+            # generic 500. Deciding here is what that sentence always meant.
+            raise ValidationError(
+                "byok.gateway_unreachable",
+                f"This server could not reach {base}. The address resolves, so "
+                "check the gateway is up and accepts connections from outside "
+                "your network. Your key was not saved and was not rejected.",
+            ) from exc
 
     if resp.status_code == 401:
         # Measured against api.experientiallabs.ai on 2026-09-09: a base URL
