@@ -1,0 +1,257 @@
+[
+  {
+    "label": "the gate stops gating: a failed verification refuses neither develop path",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    if result.status != \"failed\":\n        return verification, None",
+    "replace": "    if True:\n        return verification, None",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_propose_is_refused_when_verification_fails",
+      "tests/cloud/test_belt_headless.py::test_gate_failure_leaves_the_run_queued_and_unproposed"
+    ]
+  },
+  {
+    "label": "verification runs but is never attached to the blob",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
+    "find": "        \"verification\": verification,",
+    "replace": "        \"verification\": {},",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_propose_files_the_action_and_attaches_verification",
+      "tests/cloud/test_belt_verify.py::test_disabled_setting_skips_verification_entirely"
+    ]
+  },
+  {
+    "label": "the gate runs even when the workspace turned it off",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    if not getattr(settings, \"belt_verify_enabled\", True):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_disabled_setting_skips_verification_entirely",
+      "tests/cloud/test_belt_headless.py::test_gate_disabled_behaves_exactly_as_before"
+    ]
+  },
+  {
+    "label": "nothing ran, but call it a pass anyway",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    if any(not c.skipped for c in checks):\n        return \"passed\"",
+    "replace": "    if True:\n        return \"passed\"",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_repo_with_no_test_command_is_no_checks",
+      "tests/cloud/test_belt_verify.py::test_pytest_collecting_nothing_is_skipped_not_passed"
+    ]
+  },
+  {
+    "label": "an exploding verifier fails OPEN instead of closed",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "                ok=False,\n                skipped=False,\n                output=_tail(message),",
+    "replace": "                ok=True,\n                skipped=True,\n                output=_tail(message),",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_internal_error_fails_closed_and_still_cleans_up"
+    ]
+  },
+  {
+    "label": "pytest collected nothing, but count it as proof",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "_PYTEST_NO_TESTS = 5",
+    "replace": "_PYTEST_NO_TESTS = -1",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_pytest_collecting_nothing_is_skipped_not_passed"
+    ]
+  },
+  {
+    "label": "the throwaway worktree is left behind",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "        if worktree_dir is not None:\n            with _suppress():\n                await _force_remove_worktree(repo_path, worktree_dir)",
+    "replace": "        if worktree_dir is not None and False:\n            with _suppress():\n                await _force_remove_worktree(repo_path, worktree_dir)",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_passing_diff_verifies_green_and_cleans_up",
+      "tests/cloud/test_belt_verify.py::test_internal_error_fails_closed_and_still_cleans_up"
+    ]
+  },
+  {
+    "label": "the check imports from the editable install, not the applied tree",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    roots = [str(tree / \"src\")] if (tree / \"src\").is_dir() else []",
+    "replace": "    roots = []",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_src_layout_repo_imports_from_the_applied_tree"
+    ]
+  },
+  {
+    "label": "a timeout is swallowed as a pass",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    except Exception as exc:  # noqa: BLE001 \u2014 _run raises RuntimeError on timeout\n        return CheckResult(\n            name=name,\n            ok=False,",
+    "replace": "    except Exception as exc:  # noqa: BLE001 \u2014 _run raises RuntimeError on timeout\n        return CheckResult(\n            name=name,\n            ok=True,",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_timeout_is_a_failure"
+    ]
+  },
+  {
+    "label": "a suite that passed nothing is counted as proof",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    if passed and int(passed.group(1)) > 0:\n        return check",
+    "replace": "    if True:\n        return check",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_all_skipped_suite_is_not_a_pass"
+    ]
+  },
+  {
+    "label": "a uv.lock without pytest is run anyway, reddening a good diff",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "        if not _locks_pytest(lock):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_uv_lock_without_pytest_is_skipped_not_failed"
+    ]
+  },
+  {
+    "label": "a JS repo with no install is run anyway, reddening a good diff",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    if not (tree / \"node_modules\").is_dir():",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_node_repo_without_an_install_is_skipped_not_failed"
+    ]
+  },
+  {
+    "label": "a package.json with no test script invents a check",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    if not scripts.get(\"test\"):\n        return None",
+    "replace": "    if False:\n        return None",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_node_repo_without_a_test_script_discovers_nothing"
+    ]
+  },
+  {
+    "label": "a stale diff reads as an opaque internal error, not actionable feedback",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "                        name=\"git_apply\",",
+    "replace": "                        name=\"verify_internal\",",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_non_applying_diff_is_a_named_git_apply_check"
+    ]
+  },
+  {
+    "label": "the operator's per-repo command is ignored and discovery runs anyway",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    argv = _configured_argv(repo, commands)\n    name = \"configured\"",
+    "replace": "    argv = None\n    name = \"configured\"",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_configured_command_wins_over_discovery",
+      "tests/cloud/test_belt_verify.py::test_configured_command_matches_an_unresolved_key",
+      "tests/cloud/test_belt_verify.py::test_configured_failure_reaches_the_caller"
+    ]
+  },
+  {
+    "label": "a configured command escapes the evidence rule, so a run that proved nothing passes",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    # Same evidence rule as a discovered check: exit 0 without a passing count\n    # is not proof. And an argv that cannot LAUNCH raises out of _run into\n    # _timed's handler as ok=False \u2014 a typo in settings must refuse proposals,\n    # never quietly switch the gate off.\n    return _require_evidence(\n        await _timed(",
+    "replace": "    return (\n        await _timed(",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_configured_command_that_proves_nothing_is_no_checks"
+    ]
+  },
+  {
+    "label": "pocketpaw is not recognised, so our own repo falls back to the toothless discovery",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "_POCKETPAW_NAME = \"pocketpaw\"",
+    "replace": "_POCKETPAW_NAME = \"not-pocketpaw\"",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_pocketpaw_is_identified_by_project_name",
+      "tests/cloud/test_belt_verify.py::test_pocketpaw_default_runs_the_real_argv_and_passes",
+      "tests/cloud/test_belt_verify.py::test_pocketpaw_default_selects_the_documented_argv"
+    ]
+  },
+  {
+    "label": "precedence flipped: the built-in default beats the operator's explicit command",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    if argv is None:\n        if not _is_pocketpaw(tree):",
+    "replace": "    if argv is None or _is_pocketpaw(tree):\n        if not _is_pocketpaw(tree):",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_configured_command_beats_the_pocketpaw_default"
+    ]
+  },
+  {
+    "label": "the built-in drops --group ee, the one flag that stops every ee test skipping",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "_POCKETPAW_ARGV = [\"uv\", \"run\", \"--group\", \"ee\", \"--group\", \"dev\", \"pytest\", \"-q\"]",
+    "replace": "_POCKETPAW_ARGV = [\"uv\", \"run\", \"--group\", \"dev\", \"pytest\", \"-q\"]",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_pocketpaw_default_selects_the_documented_argv",
+      "tests/cloud/test_belt_verify.py::test_pocketpaw_default_runs_the_real_argv_and_passes"
+    ]
+  },
+  {
+    "label": "no derivable target silently becomes a pass instead of a named skip",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "        targets = _pocketpaw_targets(tree, diff)\n        if not targets:",
+    "replace": "        targets = _pocketpaw_targets(tree, diff)\n        if False:",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_pocketpaw_default_with_no_derivable_target_is_a_named_skip"
+    ]
+  },
+  {
+    "label": "the settings map never reaches the verifier, so no repo is ever configured",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "        commands=getattr(settings, \"belt_verify_commands\", None),",
+    "replace": "        commands=None,",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_commands_setting_is_threaded_through",
+      "tests/cloud/test_belt_verify.py::test_configured_failure_reaches_the_caller"
+    ]
+  },
+  {
+    "label": "a same-named test in an unrelated tree counts as coverage, so the gate greens on proof of nothing",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    return (\n        Path(test_rel).name == f\"test_{module.stem}.py\"\n        and module.parent.name in Path(test_rel).parts[:-1]\n    )",
+    "replace": "    return Path(test_rel).name == f\"test_{module.stem}.py\"",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_a_bare_test_name_only_counts_in_the_mirrored_directory"
+    ]
+  },
+  {
+    "label": "the headless runner walks around the gate again, as it did on day one",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "            verification, refusal = await gate_diff(",
+    "replace": "            verification, refusal = ({\"status\": \"disabled\"}, None) or await gate_diff(",
+    "tests": [
+      "tests/cloud/test_belt_verify.py::test_the_gate_is_reached_from_both_develop_paths",
+      "tests/cloud/test_belt_headless.py::test_gate_failure_leaves_the_run_queued_and_unproposed"
+    ]
+  },
+  {
+    "label": "a red verdict is read and ignored: the unverified diff is attached anyway",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "        if refusal is not None:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_gate_failure_leaves_the_run_queued_and_unproposed"
+    ]
+  },
+  {
+    "label": "the headless verdict never reaches the blob, so the Tray sees no evidence",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "            blob[\"verification\"] = verification",
+    "replace": "            blob[\"verification\"] = {}",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_gate_passes_attaches_a_verified_diff"
+    ]
+  },
+  {
+    "label": "a swallowed write failure still reports a proposal waiting at the gate",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "                store, action_id, \"headless failed to persist the produced diff\"\n            )\n            return False",
+    "replace": "                store, action_id, \"headless failed to persist the produced diff\"\n            )\n            return True",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_a_write_failure_does_not_report_a_proposal"
+    ]
+  },
+  {
+    "label": "the gate stage is emitted from behind the forward-only guard, so it never publishes",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "            prev=\"verify\",",
+    "replace": "            prev=\"done\",",
+    "tests": [
+      "tests/cloud/test_belt_headless.py::test_gate_passes_attaches_a_verified_diff"
+    ]
+  }
+]

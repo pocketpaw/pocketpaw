@@ -1,0 +1,86 @@
+[
+  {
+    "label": "the pulley deny stops folding — every surface with no allow-list (/chat and every unmapped kind, which is the default) can call mcp__pulley__apply_plan and write files into a repo from outside the develop station, with nothing in the logs",
+    "file": "ee/pocketpaw_ee/cloud/surface/service.py",
+    "find": "    if surface_kind is not SurfaceKind.BELT:\n        ids |= pulley_tool_ids()",
+    "replace": "    if False:\n        ids |= pulley_tool_ids()",
+    "tests": [
+      "tests/cloud/test_pulley_mcp.py::test_unmapped_surface_denies_pulley",
+      "tests/cloud/test_pulley_mcp.py::test_every_non_belt_surface_denies_pulley"
+    ]
+  },
+  {
+    "label": "the BELT exemption goes — deny is subtracted from the allow-list before the SDK launches, so the one surface that is supposed to install blocks silently loses the whole engine while the allow-list still names it",
+    "file": "ee/pocketpaw_ee/cloud/surface/service.py",
+    "find": "    if surface_kind is not SurfaceKind.BELT:\n        ids |= pulley_tool_ids()",
+    "replace": "    if True:\n        ids |= pulley_tool_ids()",
+    "tests": [
+      "tests/cloud/test_pulley_mcp.py::test_belt_allows_pulley_and_does_not_deny_it",
+      "tests/cloud/test_pulley_mcp.py::test_every_non_belt_surface_denies_pulley"
+    ]
+  },
+  {
+    "label": "the browser floor is lost to the A1b generalization — BR-1's deny survives in name only, and the agentic browser is reachable from /chat again beside the send-capable connector tools",
+    "file": "ee/pocketpaw_ee/cloud/surface/service.py",
+    "find": "    if surface_kind is not SurfaceKind.BROWSER:\n        ids |= browser_tool_ids()",
+    "replace": "    if False:\n        ids |= browser_tool_ids()",
+    "tests": [
+      "tests/cloud/test_pulley_mcp.py::test_browser_deny_fold_still_applies",
+      "tests/test_browser/test_browser_surface.py::TestSurfaceScoping::test_every_other_surface_denies_the_tools"
+    ]
+  },
+  {
+    "label": "the pulley ids come from the shared _mcp_tool_ids block again — one unrelated sibling module failing to import empties the deny while CloudPulleyMcpProvider still registers the server, so the fail-open BR-1 found for the browser reopens for a tool that writes to disk",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "            from pocketpaw_ee.agent.mcp_servers.pulley import PULLEY_TOOL_IDS\n\n            _PULLEY_TOOL_IDS_CACHE = frozenset(PULLEY_TOOL_IDS)",
+    "replace": "            _PULLEY_TOOL_IDS_CACHE = frozenset(_mcp_tool_ids().belt_allow or ())",
+    "tests": [
+      "tests/cloud/test_pulley_mcp.py::test_unrelated_import_failure_still_denies_pulley"
+    ]
+  },
+  {
+    "label": "a default app rides the launch line again — pulley's schema then makes `app` optional, the agent stops naming the run's repo, and blocks install into a fixed directory the station's diff never looks at while the tool call reports success",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/pulley.py",
+    "find": "\"args\": [str(server_ts)]}",
+    "replace": "\"args\": [str(server_ts), \"--app\", \"/srv/fixed-app\"]}",
+    "tests": [
+      "tests/cloud/test_pulley_mcp.py::test_launch_line_never_carries_a_default_app"
+    ]
+  },
+  {
+    "label": "the pulley_app_path setting comes back — a deploy can once again pin one app dir for every belt run, whatever repo each run bound",
+    "file": "src/pocketpaw/config.py",
+    "find": "    # No ``pulley_app_path``: see the A1b note in this module's changelog. The",
+    "replace": "    pulley_app_path: str | None = None\n    # No ``pulley_app_path``: see the A1b note in this module's changelog. The",
+    "tests": [
+      "tests/cloud/test_pulley_mcp.py::test_no_default_app_setting_exists"
+    ]
+  },
+  {
+    "label": "stage 2 stops naming the catalog search — the pulley tools stay allowed on /belt and go unused, and the station hand-writes auth / org / roles exactly as it did before the block engine existed",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/belt.py",
+    "find": "        \"be a block, call `mcp__pulley__search_catalog`. The published blocks are \"",
+    "replace": "        \"be a block, read the surrounding code. The published blocks are \"",
+    "tests": [
+      "tests/cloud/surface/test_belt_handler.py::test_belt_handler_sends_the_agent_to_blocks_before_writing_code"
+    ]
+  },
+  {
+    "label": "the install pair stops being named — the agent finds a block in the catalog and then has no told way to install it, so it copies the files by hand and the plan-id gate never runs",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/belt.py",
+    "find": "        \"To install one, call `mcp__pulley__plan_install` (it writes nothing — \"",
+    "replace": "        \"To install one, copy the block's files into place (read them first — \"",
+    "tests": [
+      "tests/cloud/surface/test_belt_handler.py::test_belt_handler_sends_the_agent_to_blocks_before_writing_code"
+    ]
+  },
+  {
+    "label": "the preamble stops telling the agent which app to install into — there is no server default, so every pulley call either fails on the missing argument or the agent guesses a directory outside the run's bound repo",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/belt.py",
+    "find": "        \"plan's id; a plan id applies once. EVERY pulley call takes an `app` \"\n        \"argument — pass the repo this run is bound to, the same path you pass \"\n        \"to `belt_propose_change`; there is no default and a call without it \"\n        \"fails. `apply_plan` writes the block's files into that repo, so carry \"\n        \"on exactly as with code you wrote: diff the worktree and propose \"\n        \"through the gate. Blocks do NOT bypass the gate. Write fresh code only \"",
+    "replace": "        \"plan's id; a plan id applies once. Write fresh code only \"",
+    "tests": [
+      "tests/cloud/surface/test_belt_handler.py::test_belt_handler_sends_the_agent_to_blocks_before_writing_code"
+    ]
+  }
+]

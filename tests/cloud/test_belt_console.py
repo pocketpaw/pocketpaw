@@ -651,7 +651,10 @@ async def test_propose_publishes_on_bus_and_sse(
             {
                 "repo": str(roots / "acme-api"),
                 "base_branch": "main",
-                "diff": "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-x\n+y\n",
+                # Must APPLY to the seeded app.py: since feat/belt-gate the
+                # propose path verifies the diff in a throwaway worktree first,
+                # and a diff that cannot apply never reaches the bus at all.
+                "diff": "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-print('hi')\n+print('hello')\n",
                 "summary": "tweak",
                 "task": "tweak the file",
             }

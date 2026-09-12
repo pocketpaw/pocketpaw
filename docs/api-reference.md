@@ -2,6 +2,33 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-12 (headless gate). The "What the gate does not cover" section
+recorded a real hole — the gate had one call site and the headless develop
+runner walked around it — and that hole is now closed, so the section is
+rewritten to say what the second path actually does. Also corrected: the stage
+table's `verify` and `gate` emitter column (both paths reach them now), and the
+claim that `failed` never appears on a stored blob (still true of the blob's
+`verification` key; a headless refusal records the check names under
+`headless_error` on a run that stays queued). The changelog entry below is left
+as written — it was accurate the day the gate shipped.
+
+Updated: 2026-09-12 (integration/belt-factory). Added the "Belt: the develop
+station console" section. The Belt console's REST surface had no entry in this file at
+all, so the branch's wire change (a new nullable `run_id` on the runs read
+model) had nowhere to land, and a reader looking for "how do I follow a station
+run" found nothing. The section documents the two run reads, the join key and
+why it exists (a run's early events carry a run_id and no action_id, the gate
+event carries an action_id and no run_id, and the REST row is the only place
+both meet), both workspace-bus events, the propose-time mechanical gate, and
+the pulley block engine's surface scoping. Written to record the limits a field
+list cannot show, because each of them looks like a bug to whoever hits it
+first: the runs row does NOT carry the gate's verdict (that is on the Instinct
+blob), the gate has ONE call site so the headless runner bypasses it entirely,
+`belt_run_updated` now has two payload shapes that differ in whether `run_id`
+is present at all, `orient` is a documented heuristic rather than proven, and
+neither live event is persisted, so a page joining mid-run has no way to
+recover what it missed.
+
 Updated: 2026-09-02 (SA-7) — finished the Visitor Analytics section with the two
 things a reader could not get from the endpoint's own fields. First, what the
 `analytics` grant actually buys: which tiers carry it, that it needs an active
@@ -3960,3 +3987,405 @@ not compiled.
   "scope": "workspace:w1"
 }
 ```
+
+---
+
+## Belt: the develop station console
+
+The Belt is the code assembly line. A human binds a repo on the `/belt` page,
+gives the station agent a task, and the agent runs an orient / develop /
+propose loop. A change never leaves the station by being applied. It leaves as
+a unified diff filed as an Instinct `code_change` Action, which a human
+approves in the Tray, and only then does the executor apply it in a worktree,
+branch it, and open a PR.
+
+Every route below is mounted at `/api/v1/belt`, license-gated, and RBAC-gated:
+`belt.read` (any member) on the reads, `belt.manage` (admin) on the mutations.
+The mandate primitive, which is the standing-job counterpart to a one-shot
+station run, has its own routes under `/api/v1/belt/mandates` and its own page at
+`docs/internal/2026-06-belt-mandates.md`.
+
+| Method | Path | Gate | What |
+|--------|------|------|------|
+| GET | `/belt/repos` | `belt.read` | Git repos discovered under the allowlist roots |
+| POST | `/belt/repos` | `belt.manage` | Add a repo root |
+| POST | `/belt/repos/init` | `belt.manage` | Create a new git repo under an allowlist root, optional GitHub remote |
+| GET | `/belt/runs` | `belt.read` | This workspace's station runs, newest-first |
+| GET | `/belt/runs/{action_id}` | `belt.read` | One run plus its proposed diff, capped at 200 KB |
+
+### `GET /belt/runs`
+
+Returns `{"runs": [...]}`, newest-first. One row per Instinct Action in the
+workspace that carries a `_code_change` blob. The row is built from that blob
+plus the Action's lifecycle status:
+
+```json
+{
+  "action_id": "act-91f2",
+  "run_id": "run-7c31",
+  "task": "add a retry to the webhook sender",
+  "summary": "one guard in the shared send path",
+  "status": "proposed",
+  "stage": "gate",
+  "repo": "/srv/repos/acme",
+  "repo_name": "acme",
+  "base_branch": "dev",
+  "branch": null,
+  "pr_url": null,
+  "commit_sha": null,
+  "created_at": "2026-09-12T10:00:00+00:00",
+  "correlation_id": "corr-4a10"
+}
+```
+
+`GET /belt/runs/{action_id}` returns the same row plus `diff` and
+`diff_truncated`. A run in another workspace, and any Action without a
+`_code_change` blob, is a 404. The two cases are not distinguished, so a caller
+can never confirm that a cross-tenant Action exists.
+
+Two landing shapes fill the tail of the row. With a remote, `pr_url` and
+`branch` are set. Local-only, with no origin, `branch` and `commit_sha` are set
+and `pr_url` is null. The key is always present with an explicit null, so a
+client can switch on the value rather than probe for the key.
+
+#### `run_id` (2026-09-12)
+
+`run_id` is the chat stream's run id, the same value the client already holds
+from `agent.stream_start`. `belt_propose_change` reads it off the request
+context and stamps it on the `_code_change` blob; the read model returns it.
+
+It is the join key between a run's live events and its durable row. The events
+a run emits while it is still working carry `run_id` and a null `action_id`,
+because the Instinct Action is not minted until the propose call, which happens
+after the last file write. The events from `gate` onward carry `action_id` and
+no `run_id`. Neither half can be matched to the other on its own. This row is
+the only place both halves are present.
+
+`run_id` is null in two cases, and both are honest rather than missing data:
+
+- A headless run. The headless develop runner has no chat stream, so there is
+  no stream run id to stamp.
+- Any Action filed before this key shipped.
+
+The row does **not** carry the mechanical gate's verdict. That lives on the
+Instinct Action's `_code_change` blob under `verification` (below), which the
+Tray reads. A client that wants the verdict has to read the Action, not the
+runs row.
+
+### Live events on the workspace bus
+
+Two event types reach every workspace member with the `/belt` page open. Both
+are resolved by the same workspace-scoped audience branch, keyed on
+`workspace_id`. Both are best-effort: a dead bus can never fail a station run,
+and the runs read model above stays the durable truth.
+
+#### `belt_run_updated`: lifecycle and stage
+
+The stage vocabulary is `station | orient | develop | verify | gate | done`.
+The 2026-09-12 widening added `orient`, `develop` and `verify`. The other three
+keep the exact values and meanings they already had.
+
+| Stage | Emitted by | Status on the wire | Proven or heuristic |
+|-------|-----------|--------------------|---------------------|
+| `station` | the mandate plan executor, when it dispatches or queues a task as a station run | `dispatched`, `queued` | proven |
+| `orient` | interactive: a `Read`, `Glob`, `Grep`, or any `mcp__loom__*` tool call. Headless: once the queued blob is validated | null interactive, `queued` headless | **heuristic** on the interactive station |
+| `develop` | interactive: a `Write` or `Edit`. Headless: immediately before the develop loop is awaited | null interactive, `queued` headless | proven |
+| `verify` | both develop paths, immediately before the mechanical gate runs — the emit lives inside `verify.gate_diff`, after the enabled check, so a disabled gate emits nothing | null interactive, `queued` headless | proven |
+| `gate` | `belt_propose_change` on a filed proposal, the headless runner once its verified diff is on the row, and the Instinct router on approve | `proposed`, `approved` | proven |
+| `done` | the Instinct router on reject, and the belt executor on its terminals | `rejected`, `landed`, `failed` | proven |
+
+`orient` is the one heuristic and is labelled as such in the code. Reading the
+codebase is what the station's orient step does, but a `Read` in the middle of
+development is the same tool call. What makes it safe is that stage emits are
+forward-only. A stage is published only when it is strictly later than where
+the run already is, so `orient` can only ever be claimed before the first
+write. A later `Read` publishes nothing. The guard state is a local on the run
+that owns it, not a shared map, so concurrent runs cannot see each other.
+
+Everything else the agent can call proves nothing about the stage and emits
+nothing. Bash, WebFetch, the MCP tools other than loom's, and the gate tool
+itself are all deliberately absent from the mapping.
+
+There are **two payload shapes** on this event type and a consumer has to
+handle both. A lifecycle emit carries no `run_id` key at all:
+
+```json
+{ "workspace_id": "w1", "action_id": "act-91f2", "status": "proposed", "stage": "gate" }
+```
+
+A `done` emit from the executor adds `pr_url` when there is one. A stage emit
+carries the fixed five-key shape, with nulls left in:
+
+```json
+{ "workspace_id": "w1", "action_id": null, "run_id": "run-7c31", "status": null, "stage": "develop" }
+```
+
+`action_id` and `status` are null for every stage emit from the interactive
+station. The Action does not exist yet, so there is no id and no lifecycle
+status to report, and inventing either would light a stage the data cannot
+prove. The headless runner is the one develop path that carries a real
+`action_id`, because a mandate filed its Action before the runner ever saw it;
+it reports `status: "queued"`, which the Action row genuinely still is. It
+carries a null `run_id`, because it has no chat stream, so on that path the
+`action_id` is the join key from the first event and there is nothing to
+reconcile later.
+
+Stage emits are ephemeral. The REST read model derives stage from the Action
+blob and only ever returns `station`, `gate` or `done`, so a page refetch snaps
+a live `orient` or `develop` back to the derived value.
+
+#### `belt_entity_changed`: the per-file feed
+
+Fires once per `Write` or `Edit` the station agent makes inside the run's bound
+repo, so a page can follow the work instead of waiting several minutes for the
+single `proposed` event at the end.
+
+```json
+{
+  "workspace_id": "w1",
+  "run_id": "run-7c31",
+  "action_id": null,
+  "entity_id": "acme:file:src/webhooks/send.py",
+  "file": "src/webhooks/send.py",
+  "change": "write",
+  "component": "webhooks",
+  "ts": "2026-09-12T10:00:03.412000+00:00"
+}
+```
+
+- `change` is `"write"` or `"edit"`. Only those two tools count. A shell
+  in-place edit such as `sed -i` is deliberately not tracked, because guessing
+  paths out of a shell string is a heuristic and a live feed that invents
+  entities is worse than one that misses a few.
+- `entity_id` is `<repo_slug>:file:<relpath>`, matching loom's world-model file
+  ids, so a consumer joins against the world model with no translation. The
+  slug is the repo directory's name, lowercased.
+- `action_id` is null for every event on the interactive station, for the same
+  reason it is null on a stage emit.
+- `component` is the C4 component that owns the file, or null. It is resolved
+  from loom's world model at `POCKETPAW_LOOM_MODEL_PATH`, by looking up the
+  `composes` edge from the file id to a component id, and it returns the bare
+  component name rather than the prefixed id.
+
+Four honest limits on `component`, all of which produce a plain null:
+
+1. `loom_model_path` is unset. That is the default, so a deployment that has
+   never built a world model gets null on every event.
+2. The file has no owner in the model. Coverage is partial by nature. Measured
+   on the pocketpaw model: 1,046 file-to-component edges against 1,923 file
+   entities, so roughly 54% of files resolve.
+3. The model is missing, unreadable, or malformed. All three resolve to null
+   rather than raising, and they are indistinguishable from case 2 by design,
+   because they mean the same thing to the consumer.
+4. Freshness is whatever the last world-model rebuild left on disk. The parse
+   is memoized on the file's path and mtime, so a rebuild is picked up on the
+   next lookup with no restart, but nothing rebuilds the model on this path.
+
+The bridge is a no-op, silently, whenever the surface is not `/belt`, the tool
+is not `Write` or `Edit`, the page has not bound a repo yet, or the written
+path resolves outside that repo.
+
+**These events are not persisted.** There is no store, no table, and no replay.
+A page that joins mid-run sees only the changes that follow it and misses every
+one before. The runs read model is the durable record.
+
+### The mechanical gate
+
+Before 2026-09-12 the station ran no mechanical checks at all. The only thing
+proven anywhere was that a patch applied, which is not the same as the change
+working, so a human at the Instinct gate was approving work nothing had ever
+run.
+
+`belt_propose_change` now verifies before it files. The order inside the
+handler is: the four structural checks (identity, non-empty diff, size cap,
+repo allowlist), then verification, then the Instinct Action. The gate sits
+before the human, so an approver only ever sees verified work.
+
+Verification applies the diff with `git apply --3way` in a throwaway git
+worktree of the repo at its base branch, runs the checks that tree offers, and
+tears the worktree down on every path including an exception.
+
+The command is picked in precedence order, and the first two **replace**
+discovery rather than adding to it:
+
+1. The operator's `belt_verify_commands` entry for this repo, run verbatim.
+2. A built-in default when the tree is pocketpaw itself, identified by
+   `[project].name` rather than by a path. It is
+   `uv run --group ee --group dev pytest -q` plus targeted paths: the test
+   files the diff carries, plus the conventional test file for each source
+   module it touches.
+3. Discovery from the applied tree. `pytest` when there is a `pyproject.toml`,
+   the `package.json` `test` script with the package manager the lockfile
+   names, and `pulley doctor` when there is a `belt.lock`.
+
+Outcomes:
+
+| Status | What it means | What happens |
+|--------|---------------|--------------|
+| `passed` | at least one check ran and every check that ran was green | the Action is filed |
+| `failed` | any check was red, timed out, could not launch, or the diff did not apply | the propose is **refused** and no Action is filed |
+| `no_checks` | nothing runnable was found, or everything that ran proved nothing | the Action is filed |
+| `disabled` | `belt_verify_enabled` is false | the Action is filed, nothing ran |
+
+`no_checks` is **not a pass.** It is its own third state and it means the
+propose went through with nothing proven. A docs repo has nothing to run, which
+is a legitimate reason to reach it. So is a suite that exits 0 having passed
+nothing, which the gate demotes on purpose: a run whose output shows no passing
+count is recorded as skipped, never as green. That case is real rather than
+theoretical, and the built-in pocketpaw default exists because of it.
+
+On pocketpaw the most common route to `no_checks` is a diff with nothing to
+target. The built-in is targeted by construction, because the full suite is far
+past any propose-time budget, so a diff that carries no test file and touches no
+module with a matching `tests/**/test_<module>.py` lands on a named skip. Change
+a test alongside the code it covers and the gate bites.
+
+A `failed` verification refuses the propose and hands the failure back to the
+agent, naming the failing checks and carrying their output. That is the
+feedback loop. The agent fixes the failure and calls the gate again, and the
+station preamble tells it so, because the alternative is an agent that reports
+defeat on a red test.
+
+Two directions are deliberate and neither is an oversight:
+
+- A check that **cannot run** is skipped, never a pass and never a failure. No
+  runner on PATH, no `node_modules` in the fresh worktree, pytest collecting
+  nothing. None of them count as proof.
+- A **configured** command that cannot launch is a **failure**, not a skip. A
+  typo in `belt_verify_commands` refuses proposals rather than quietly
+  switching the gate off, which is the exact failure the gate exists to
+  prevent. The one non-zero exit that is not a refusal is pytest's 5, "no tests
+  collected", which records `no_checks`.
+- An internal error in the verifier is a failed check named `verify_internal`.
+  A verifier that explodes refuses the propose. It never raises into the
+  propose path.
+- A diff that does not apply is a named failed check called `git_apply`, not an
+  internal error, so the agent gets an actionable "re-propose against the
+  current base" rather than a stack trace.
+
+#### The `verification` key on the code-change blob
+
+On `passed`, `no_checks` and `disabled` the verdict is written onto the
+`_code_change` blob, which is where a reviewer surface reads what was proven.
+It is on the Instinct Action and nowhere else. The runs read model above does
+not return it.
+
+```json
+{
+  "verification": {
+    "status": "passed",
+    "checks": [
+      { "name": "pytest(pocketpaw)", "ok": true, "skipped": false, "duration_s": 8.56 }
+    ],
+    "summary": "passed: pytest(pocketpaw) ok (8.6s)"
+  }
+}
+```
+
+Status, per-check metadata and a one-line summary only. The full logs are never
+stored; they would bloat every Instinct row, and the agent already got them in
+the refusal. A `disabled` verdict is the bare `{"status": "disabled"}`.
+
+`failed` never appears under `verification`. On the interactive path a failed
+verification files no Action at all. On the headless path the Action already
+exists, so a failure leaves it queued with no diff and writes the failing check
+names to `headless_error` on the same blob — a different key, because a run
+with no diff has proposed nothing and should not read as a verdict on one.
+
+`verification` is an optional blob key and needs no schema bump. The executor's
+guard compares the blob's `schema` for equality, so `CODE_CHANGE_SCHEMA` stays
+at 2 and an in-flight blob filed without the key still applies. `run_id` rides
+on the same terms.
+
+#### Both develop paths go through the gate
+
+The gate shipped with one call site, `belt_propose_change`, the interactive
+station's MCP tool. The headless develop runner wrote its produced diff straight
+onto the queued Action, so for its first day the promise that a human only ever
+approves verified work held on the station and not on the mandate-driven path
+where no human is driving at all. Both now call the same
+`cloud.belt.verify.gate_diff`.
+
+What differs is only what a refusal can mean on each path, because their
+starting states differ:
+
+| | interactive station | headless runner |
+|---|---|---|
+| on `failed` | the propose is refused, the failing checks and their output go back to the agent, and **no Action is filed** | **no diff is attached**; the run stays queued with `station_pending` set, the check names land on `headless_error`, and the output goes to the log — there is no agent here to hand it to |
+| on `passed` / `no_checks` / `disabled` | the Action is filed with `verification` on its blob | the diff is attached with the same `verification` key on the same blob |
+| stages | `verify`, then `gate` on the filed proposal | `verify`, then `gate` once the diff is really on the row |
+| `run_id` | the chat stream's | still null — a headless run has no stream |
+
+A headless run that fails verification is therefore indistinguishable from one
+whose develop loop failed: queued, no diff, a note saying why. That is the
+existing safe state, and it is deliberate — a human can still open the station
+and drive the task, or the dispatcher can retry it.
+
+Settings: `belt_verify_enabled`, `belt_verify_timeout_s` and
+`belt_verify_commands`, all documented in
+`docs/api/configuration-reference.mdx`. All three are read per call inside
+`gate_diff`, never cached in a process global, and threaded into `verify_diff`
+from there, so the verifier itself never touches settings.
+
+### The pulley block engine on `/belt`
+
+pulley is the block engine. Rather than hand-write auth, org, roles, notify,
+files and audit code for every client app, the station agent installs reviewed
+blocks. pulley is an external TypeScript server that already speaks MCP over
+stdio, so PocketPaw registers it as a stdio pass-through rather than
+re-implementing its tools: `bun <pulley_path>/mcp/server.ts`, server name
+`pulley`.
+
+Five tools, namespaced `mcp__pulley__*`:
+
+| Tool | Writes | What |
+|------|--------|------|
+| `search_catalog` | no | find a block for a capability |
+| `describe_block` | no | what one block installs |
+| `plan_install` | no | produce an install plan, and refuse here if it must refuse |
+| `apply_plan` | **yes** | re-plan against current disk and write only when the fresh plan matches |
+| `doctor` | no | health check an app |
+
+The plan and apply split is what keeps the human gate meaningful.
+`plan_install` writes nothing and every refusal happens there. `apply_plan`
+writes the block's files into the app repo, and a plan id applies once.
+
+**`app` is a required argument on every call.** There is no server default, and
+that is deliberate rather than an omission. pulley's tool schema marks `app`
+required whenever the server starts without an `--app` flag, and PocketPaw
+starts it without one. A belt run develops in its own station worktree and
+proposes the diff of that repo, so a fixed default app would install blocks
+into a directory the station's diff never sees, silently, because the tools
+would still report success. Making the agent name the repo on every call is
+what keeps the two in step. The station preamble tells it to pass the same repo
+it passes to `belt_propose_change`.
+
+Blocks do not bypass the gate. `apply_plan` writes into the bound repo like any
+other change, and the diff still goes through `belt_propose_change`, still gets
+verified, and still waits for a human.
+
+**Scoping.** `/belt` is the only surface that may use these tools, and the
+scoping is enforced from both directions. The BELT surface profile lists the
+pulley tool ids in its allow-list, alongside the loom orientation tools and the
+gate tool. Every other surface gets them added to its **deny** set at the one
+chokepoint every surface profile passes through. The deny is the load-bearing
+half: the pulley server is ambient, meaning it registers for every run, and a
+surface with no allow-list at all (`/chat`, and every unmapped kind) would
+otherwise reach `apply_plan` and write files to disk from outside the develop
+station.
+
+The deny ids load through their own import rather than riding the shared
+tool-id loader. If they shared it, an unrelated module failing to import would
+empty the deny set while the pulley server still registered, which is a
+fail-open. The only import failure that can empty the set is pulley's own
+module, and that one also stops the server from being built, so there is
+nothing left to reach.
+
+pulley is **off by default.** `pulley_path` is unset, so no server is
+registered and the tools are simply absent. Registration also degrades to
+absent, without raising, when the `server.ts` is missing or bun cannot be
+resolved. The station preamble carries its own degrade clause for this: if the
+tools are not available, the agent says so once and writes the code by hand.
+
+Settings: `pulley_path` and `pulley_bin`, in
+`docs/api/configuration-reference.mdx`.

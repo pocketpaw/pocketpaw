@@ -221,10 +221,37 @@ Changes:
     Belt & Pulley code-change gate (BS-3). A ``belt_propose_change`` proposal's
     repo path must resolve inside one of these roots; empty defaults to the
     cwd's parent. Env: POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
+  - 2026-09-12: Added ``belt_verify_enabled`` (True) + ``belt_verify_timeout_s``
+    (600) — the develop station's MECHANICAL gate. A ``belt_propose_change``
+    diff is applied in a throwaway worktree and the tree's own checks are run
+    BEFORE the human approval gate; a failure refuses the proposal outright.
+    ON by default: the point is that the Instinct approver sees verified work.
+    Env: POCKETPAW_BELT_VERIFY_ENABLED / POCKETPAW_BELT_VERIFY_TIMEOUT_S.
+  - 2026-09-12: Added ``belt_verify_commands`` (None) — the per-repo escape
+    from generic discovery, keyed by repo path like ``belt_repo_allowlist``.
+    Discovery guesses the runner from the tree's shape, which on pocketpaw
+    guesses WRONG: a bare ``uv run pytest`` in a throwaway worktree syncs the
+    default groups only, so ``pocketpaw_ee`` is absent and every ee test
+    skips. An entry here runs the operator's argv verbatim instead. Unset,
+    pocketpaw gets a built-in targeted default; other repos keep discovery.
+    Env: POCKETPAW_BELT_VERIFY_COMMANDS (JSON object of path -> argv list).
   - 2026-07-01: Added ``shield_api_socket`` + ``shield_api_token`` (SEC-5) —
     the same-box shield daemon's control-API UNIX socket + Bearer token. The
     cloud ``/api/v1/security/*`` proxy reads these to reach shield; the token
     is never logged. Env: POCKETPAW_SHIELD_API_SOCKET / POCKETPAW_SHIELD_API_TOKEN.
+  - 2026-09-12: Added ``pulley_bin`` + ``pulley_path`` — the pulley
+    block-engine MCP server settings (A1, belt factory). ``pulley_path``
+    defaults to None, which disables the server; set it to a pulley checkout
+    to give the /belt develop station search_catalog / describe_block /
+    plan_install / apply_plan / doctor. Env: POCKETPAW_PULLEY_BIN /
+    POCKETPAW_PULLEY_PATH.
+  - 2026-09-12 (A1b): REMOVED ``pulley_app_path``, which A1 shipped as the
+    default ``--app`` target. There is deliberately no server-level default
+    app: pulley's tool schema makes ``app`` REQUIRED on every call when the
+    server starts without ``--app`` (``PulleyTools.definitions`` builds
+    ``appRequired`` from ``defaultApp``), and a belt run installs into the
+    repo IT bound, not into a fixed directory. A default would have landed
+    blocks somewhere the station's diff never sees.
   - 2026-06-10: Added ``loom_bin`` + ``loom_model_path`` — the codebase
     orientation (loom) MCP server settings. ``loom_model_path`` defaults
     to None, which disables the loom MCP server; set it to a built
@@ -1652,6 +1679,33 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Block assembly (pulley) — the pulley checkout serves an MCP server over
+    # stdio that drives the belt block engine for the /belt develop station
+    # (search_catalog / describe_block / plan_install / apply_plan / doctor), so
+    # the agent installs reviewed blocks instead of hand-writing auth, org,
+    # roles, notify, files and audit code. Wired into the claude_agent_sdk
+    # backend via CloudPulleyMcpProvider. Env auto-derives POCKETPAW_PULLEY_PATH
+    # / POCKETPAW_PULLEY_BIN.
+    pulley_bin: str = Field(
+        default="bun",
+        description=(
+            "Path to the bun binary that runs the pulley MCP server. Resolved "
+            "as: this explicit setting → PATH lookup → ~/.bun/bin/bun fallback. "
+            "The default 'bun' relies on PATH; set an absolute path to pin one."
+        ),
+    )
+    pulley_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to a pulley checkout. When unset, the pulley MCP server is "
+            "not registered — block assembly is disabled. The server is served "
+            "as `bun <this path>/mcp/server.ts`; the block registry defaults to "
+            "<this path>/registry."
+        ),
+    )
+    # No ``pulley_app_path``: see the A1b note in this module's changelog. The
+    # app directory is a PER-CALL argument, never a server default.
+
     # Belt & Pulley — the develop station's code-change gate. The
     # ``belt_propose_change`` MCP tool proposes a unified diff through Instinct
     # (the human approve/reject layer); on approval the executor applies it in a
@@ -1669,6 +1723,54 @@ class Settings(BaseSettings):
             "refused. Empty → defaults to the cwd's parent (the workspace root)."
         ),
     )
+    # --- belt verify gate (feat/belt-gate, 2026-09-12) — keep contiguous ---
+    # The station's MECHANICAL gate. ON by default: that is the point — before
+    # this, a human at the Instinct gate approved work nothing had ever run.
+    # ``belt_propose_change`` applies the diff in a throwaway worktree and runs
+    # the checks that tree offers; a red result REFUSES the propose. Env auto-
+    # derives POCKETPAW_BELT_VERIFY_ENABLED / POCKETPAW_BELT_VERIFY_TIMEOUT_S.
+    belt_verify_enabled: bool = Field(
+        default=True,
+        description=(
+            "Run mechanical checks (tests / pulley doctor) on a Belt code-change "
+            "proposal before it reaches the human approval gate. A failed check "
+            "refuses the proposal. Off → the proposal is filed unverified and "
+            "records verification status 'disabled'."
+        ),
+    )
+    belt_verify_timeout_s: int = Field(
+        default=600,
+        description=(
+            "Per-check timeout (seconds) for Belt proposal verification. A check "
+            "that exceeds it is killed and counts as FAILED — an unbounded suite "
+            "proves nothing."
+        ),
+    )
+    belt_verify_commands: dict[str, list[str]] | None = Field(
+        default=None,
+        description=(
+            "Per-repo verification command, keyed by the repo's PATH — the same "
+            "identifier form belt_repo_allowlist uses, resolved on both sides so "
+            "a symlink or trailing slash still matches. The value is one argv "
+            "list, run VERBATIM in the throwaway worktree after the diff applies, "
+            "INSTEAD of the generic discovery (pytest / package.json test / "
+            "pulley doctor). Operator-configured only: these argv elements never "
+            "come from a diff or from agent text. Three things to know before "
+            "setting one. The command runs as written — no diff-derived test "
+            "paths are appended, so a bare 'pytest' runs the WHOLE suite and will "
+            "hit belt_verify_timeout_s. Evidence still has to be visible: a run "
+            "that shows no pytest-style 'N passed' line is recorded as "
+            "'no_checks', never a pass. And a command that cannot launch is a "
+            "FAILED check, not a skip, so a typo here refuses proposals rather "
+            "than silently disabling the gate — the one non-zero exit that is "
+            "NOT a refusal is 5, read as pytest's 'no tests collected', which "
+            "records 'no_checks'. Left unset, pocketpaw itself gets "
+            "a built-in targeted default (see verify.py) and every other repo "
+            "falls through to discovery. Set via POCKETPAW_BELT_VERIFY_COMMANDS "
+            'as a JSON object, e.g. {"/srv/repos/acme": ["make", "check"]}.'
+        ),
+    )
+    # --- end belt verify gate ---
 
     # Shield — the same-box Go security daemon (deny-by-default connector
     # egress + agent-decision control plane). shield serves a control API on a

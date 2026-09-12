@@ -10,6 +10,11 @@
 #      to prove the registry sources the EXACT pre-SR-2 behavior: svelte-create
 #      drops ripple + denies the two ripple-create tools; ripple-create and
 #      refine keep ripple and deny nothing (refine wins over engine).
+#
+# Modified: 2026-09-12 (A1b, belt factory) — ``_own_deny`` strips the pulley tool
+# ids alongside the browser ones. The always-on deny FLOOR grew a second member
+# (the pulley block-engine ids, denied on every non-BELT surface), and the /sites
+# assertions below are exact-equality checks on a surface's OWN denies.
 
 from __future__ import annotations
 
@@ -36,16 +41,19 @@ _SITES_SVELTE_CREATE_DENY = frozenset(
 _SITES_BUILTIN_DENY = frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"})
 
 
-# Every non-BROWSER surface now carries the agentic-browser tool ids in its deny
-# set (BR-1, ``service._deny_browser_off_surface``). The assertions below are
-# about each SURFACE'S OWN denies, so strip that always-on floor rather than
-# restating it in every expected set — and rather than narrowing the deny, which
-# is the boundary /chat depends on. ``test_browser_surface.py`` asserts the floor
-# itself, for every kind.
+# Every surface carries an always-on deny FLOOR of the tool sets owned by some
+# OTHER surface (``service._deny_off_surface``): the agentic-browser ids on every
+# non-BROWSER kind (BR-1), the pulley block-engine ids on every non-BELT kind
+# (A1b — ``apply_plan`` writes to disk). The assertions below are about each
+# SURFACE'S OWN denies, so strip that floor rather than restating it in every
+# expected set — and rather than narrowing the deny, which is the boundary /chat
+# depends on. ``test_browser_surface.py`` and ``test_pulley_mcp.py`` assert the
+# floor itself, for every kind.
 def _own_deny(profile) -> frozenset[str]:
     from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
+    from pocketpaw_ee.agent.mcp_servers.pulley import PULLEY_TOOL_IDS
 
-    return profile.deny_mcp_tool_ids - frozenset(BROWSER_TOOL_IDS)
+    return profile.deny_mcp_tool_ids - frozenset(BROWSER_TOOL_IDS) - frozenset(PULLEY_TOOL_IDS)
 
 
 # ---------------------------------------------------------------------------

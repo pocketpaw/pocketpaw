@@ -57,6 +57,24 @@ Implement the change in the **station worktree** using the built-in tools:
 - **`Write`** — create a new file (or fully replace one you've read).
 - **`Bash`** — run commands and **targeted tests** for what you touched.
 
+**Blocks first.** Before writing code for a capability that might already be a
+block, call **`mcp__pulley__search_catalog`**. The published blocks are `auth`,
+`org`, `roles`, `notify`, `files` and `audit` (plus `hello`, an example).
+Sessions, email+password sign-in and one OAuth provider come from `auth`;
+organizations, membership and invitations from `org`; permissions and CASL
+abilities from `roles`. **Do not hand-write those.** To install one, call
+**`mcp__pulley__plan_install`** — it writes nothing, so read the plan it returns
+— then **`mcp__pulley__apply_plan`** with that plan's id; a plan id applies once.
+
+Every pulley call takes an **`app`** argument: pass the repo this run is bound
+to — the same path you pass to `belt_propose_change`. There is no default, and a
+call without it fails. `apply_plan` writes the block's files into that repo, so
+carry on exactly as you would with code you wrote yourself: diff the worktree and
+propose through the gate. **Blocks do not bypass the gate.**
+
+Write fresh code only for what no block provides. If the pulley tools aren't in
+this run, say so once and write the code by hand — don't stall on them.
+
 Keep the diff **small and focused** — one task, one change. Don't gold-plate.
 If the task genuinely needs a large change, **tell the user to split it** into
 smaller tasks rather than proposing a sprawling diff.
@@ -78,6 +96,25 @@ mcp__pocketpaw_belt__belt_propose_change({
 
 If the call returns ok, the proposal is queued. If it is unavailable or returns
 an error, **say so plainly** — do not pretend the change was proposed.
+
+### The gate verifies before a human sees it
+
+The gate does not just file your diff. It applies the diff in a throwaway
+worktree off `base_branch` and runs whatever checks that repo offers — the test
+suite, `pulley doctor` for a Pulley app. **A failing check refuses the
+proposal**: no action is filed, no human is asked, and the error text you get
+back carries the failing check's name and output.
+
+That is a fix-and-retry loop, not a dead end. Read the failure, fix it in the
+worktree, and call the tool again. Two things follow:
+
+- **Run the tests yourself first.** Your own run is faster feedback than a
+  refused proposal, and a diff that breaks a test never reaches the Tray.
+- **Change the test alongside the code it covers.** If you change behaviour and
+  leave the old assertion standing, the gate reds your diff — correctly.
+
+A repo with nothing to run (no test command) still proposes; the human just sees
+that nothing was mechanically proven.
 
 ## After proposing
 

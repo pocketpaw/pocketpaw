@@ -83,6 +83,12 @@
 # tool (``_BELT_GATE_TOOL_IDS``). The gate tool id is a literal here because its
 # constant lives in a SIBLING branch's ``agent/mcp_servers/belt.py`` — the
 # import reconciles when both PRs land.
+# Changes: 2026-09-12 (A1, belt factory) — BELT's ``allow_mcp_tool_ids`` also
+# carries ``PULLEY_TOOL_IDS`` (the block engine: search_catalog /
+# describe_block / plan_install / apply_plan / doctor). NOTE FOR THE NEXT
+# READER: that union is BUILT in ``surface_registry._load_mcp_tool_ids``, not in
+# this module — the paragraph above is a description of it, not the code. Go
+# there to change it.
 # Changes: 2026-07-23 (feat/ship-surface-kind, SHIP-8a) — the declarative
 # ``SURFACES`` registry gains the SHIP row (the managed-deploy control plane).
 # ``resolve_profile`` sources it like every other row (SR-2): SHIP carries a
@@ -97,6 +103,16 @@
 # this chokepoint, not per registry row, so the default/unmapped chat case — the
 # one that matters, since it is otherwise unrestricted — is covered along with
 # every future row.
+# Changes: 2026-09-12 (A1b, belt factory) — the pulley block-engine tool ids get
+# the SAME treatment, denied on every surface EXCEPT ``SurfaceKind.BELT``. The
+# pulley server is ambient like the browser's, and ``mcp__pulley__apply_plan``
+# writes files to disk, so an unrestricted surface (``allow_mcp_tool_ids=None``
+# — /chat and every unmapped kind) could otherwise install blocks into a repo
+# from outside the develop station. Second instance of one rule, so
+# ``_deny_browser_off_surface`` became ``_deny_off_surface``: one fold over the
+# surface-exclusive tool sets, each still loaded by its OWN independent id
+# loader (``browser_tool_ids`` / ``pulley_tool_ids``) so one module's import
+# failure can never quietly unlock the other.
 
 from __future__ import annotations
 
@@ -204,32 +220,45 @@ def resolve_profile(surface_kind: SurfaceKind, meta: SurfaceMeta) -> SurfaceProf
         profile = spec.profile
     else:
         profile = _DEFAULT_PROFILE
-    return _deny_browser_off_surface(surface_kind, profile)
+    return _deny_off_surface(surface_kind, profile)
 
 
-def _deny_browser_off_surface(surface_kind: SurfaceKind, profile: SurfaceProfile) -> SurfaceProfile:
-    """Add the agentic-browser tool ids to the deny set of every NON-browser surface.
+def _deny_off_surface(surface_kind: SurfaceKind, profile: SurfaceProfile) -> SurfaceProfile:
+    """Deny each surface-EXCLUSIVE MCP tool set on every surface but its owner.
 
-    The browser drives a real Chromium as the tenant. It belongs on /browser and
-    nowhere else — least of all /chat, which is otherwise unrestricted
+    Two sets qualify today, each owned by exactly one surface:
+
+      * the agentic-browser tools (/browser) — they drive a real Chromium as the
+        tenant;
+      * the pulley block-engine tools (/belt) — ``apply_plan`` WRITES FILES TO
+        DISK, so reaching it anywhere else is a privilege escalation off the
+        develop station, not a stray verb.
+
+    Both servers are ambient (registered for every run), so the scoping is the
+    only thing standing between them and /chat — which is otherwise unrestricted
     (``allow_mcp_tool_ids=None``) and carries the send-capable connector tools.
-    An allow-list alone cannot express that: the surfaces that need blocking are
+    An allow-list alone cannot express this: the surfaces that need blocking are
     exactly the ones that declare no allow-list.
 
     Applied HERE rather than row-by-row deliberately. This is the one chokepoint
     every ``(kind, meta)`` passes through, so it also covers ``_DEFAULT_PROFILE``,
-    an unmapped/future kind, and any row added later without a thought for the
-    browser. Deny is subtracted from ``allowed_tools`` before the SDK launches
+    an unmapped/future kind, and any row added later without a thought for either
+    server. Deny is subtracted from ``allowed_tools`` before the SDK launches
     (``claude_sdk``), so the tools are physically unreachable, not discouraged.
-    """
-    if surface_kind is SurfaceKind.BROWSER:
-        return profile
-    from pocketpaw_ee.cloud.surface.surface_registry import browser_tool_ids
 
-    ids = browser_tool_ids()
+    An empty id set means THAT module failed to import — which also means its
+    server could not have been built, so there is nothing to reach and nothing
+    to deny. See ``browser_tool_ids`` / ``pulley_tool_ids`` for why each loads on
+    its own rather than through the shared ``_mcp_tool_ids()`` try/except.
+    """
+    from pocketpaw_ee.cloud.surface.surface_registry import browser_tool_ids, pulley_tool_ids
+
+    ids: frozenset[str] = frozenset()
+    if surface_kind is not SurfaceKind.BROWSER:
+        ids |= browser_tool_ids()
+    if surface_kind is not SurfaceKind.BELT:
+        ids |= pulley_tool_ids()
     if not ids:
-        # The tool-id import degraded; there is nothing to deny (and nothing to
-        # allow either — the BROWSER profile's allow is None on the same path).
         return profile
     return dataclasses.replace(profile, deny_mcp_tool_ids=profile.deny_mcp_tool_ids | ids)
 

@@ -1,6 +1,32 @@
 # executor.py — applies an approved Belt code-change Action and opens a PR.
 # Created: 2026-06-10 (feat/belt-gate, BS-3).
 #
+# Updated: 2026-09-12 (feat/belt-entity-events, stage slice) — ``_emit_run_updated``
+#   now declares ``stage: BeltStage`` instead of ``str``, so the executor's three
+#   terminals are checked against the ONE stage vocabulary defined in
+#   ``belt/service.py`` rather than passing free-form strings. Type-only change:
+#   all three call sites already pass ``"done"`` and still do, byte-identical. The
+#   import is under ``TYPE_CHECKING`` to keep the deliberately lazy
+#   ``belt_service`` import inside the function from becoming eager.
+# Updated: 2026-09-12 (feat/belt-gate — the develop station's mechanical gate) —
+#   ``_run`` grew three things so ``verify.py`` can reuse it as THE subprocess
+#   chokepoint instead of growing a second runner:
+#     * ``timeout`` — a per-call override of ``_SUBPROCESS_TIMEOUT``. A verify
+#       check (a whole test suite) runs far longer than any git op here.
+#     * ``env`` — an explicit environment. verify scrubs ``VIRTUAL_ENV`` /
+#       ``UV_PROJECT_ENVIRONMENT`` / ``PYTHONPATH`` before running a check, so a
+#       ``uv run`` inside the throwaway worktree can never sync that tree's
+#       editable install INTO the live server venv and then have the tree deleted
+#       under it.
+#     * process-group kill on timeout AND on cancellation
+#       (``start_new_session=True`` + ``os.killpg``). ``proc.kill()`` alone kills
+#       ``uv`` and orphans the ``pytest`` grandchild, which keeps running inside
+#       the worktree the finally-block is about to remove; and a cancelled
+#       ``wait_for`` does not kill the child at all, so a client disconnect left
+#       the same orphan.
+#   Every existing call site is unchanged in behaviour: both new params default
+#   to the old values.
+#
 # Updated: 2026-06-11 (feat/belt-autopilot) — refuses a QUEUED station run loud.
 #   A ``code_change`` blob carrying ``station_pending=True`` (filed by the
 #   mandate ``StationTaskDispatcher`` with the task text but NO diff) is a
@@ -110,10 +136,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
+import signal
 import tempfile
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    # Type-only: the stage vocabulary lives in ``belt.service``, but importing it
+    # at runtime here would turn the deliberately LAZY ``belt_service`` import
+    # inside ``_emit_run_updated`` into an eager module-level one.
+    from pocketpaw_ee.cloud.belt.service import BeltStage
 
 logger = logging.getLogger(__name__)
 
@@ -200,32 +234,57 @@ class GhCliPrOpener:
 
 
 async def _run(
-    argv: list[str], *, cwd: Path | None = None, stdin: bytes | None = None
+    argv: list[str],
+    *,
+    cwd: Path | None = None,
+    stdin: bytes | None = None,
+    timeout: float | None = None,
+    env: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
     """Run a subprocess from an ARG LIST (never a shell), bounded by a timeout.
 
     Returns ``(returncode, stdout, stderr)``. NEVER uses ``shell=True`` and
     never interpolates user input into a command string — every element of
     ``argv`` is passed literally. This is the single subprocess chokepoint for
-    the executor."""
+    the executor AND for ``verify.py``'s mechanical checks.
+
+    ``timeout`` overrides ``_SUBPROCESS_TIMEOUT`` for one call (verify's checks
+    run far longer than a git op); ``env`` replaces the inherited environment
+    (verify scrubs the venv vars so a check can never sync into the LIVE venv).
+    The child gets its OWN process group (``start_new_session``) and the timeout
+    path kills the GROUP: a test runner launched through ``uv run`` leaves an
+    orphaned grandchild otherwise, still holding the worktree we are about to
+    delete."""
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=str(cwd) if cwd else None,
         stdin=asyncio.subprocess.PIPE if stdin is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
+        start_new_session=True,
     )
     try:
         out_b, err_b = await asyncio.wait_for(
-            proc.communicate(input=stdin), timeout=_SUBPROCESS_TIMEOUT
+            proc.communicate(input=stdin), timeout=timeout or _SUBPROCESS_TIMEOUT
         )
     except TimeoutError:
-        proc.kill()
+        with _suppress():
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with _suppress():
+            proc.kill()
         await proc.wait()
         sub = argv[1] if len(argv) > 1 else ""
         raise RuntimeError(
-            f"command timed out after {_SUBPROCESS_TIMEOUT}s: {argv[0]} {sub}"
+            f"command timed out after {timeout or _SUBPROCESS_TIMEOUT}s: {argv[0]} {sub}"
         ) from None
+    except asyncio.CancelledError:
+        # The CALLER was cancelled (client disconnect, run interrupted). Only the
+        # timeout branch above kills the child, so without this a test suite keeps
+        # running inside a worktree the caller's finally-block is about to delete.
+        with _suppress():
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        raise
     return (
         proc.returncode or 0,
         out_b.decode("utf-8", "replace"),
@@ -363,7 +422,7 @@ async def _emit_run_updated(
     workspace_id: str,
     action_id: str,
     status: str,
-    stage: str,
+    stage: BeltStage,
     pr_url: str | None = None,
 ) -> None:
     """Publish ``belt_run_updated`` for an executor lifecycle terminal.

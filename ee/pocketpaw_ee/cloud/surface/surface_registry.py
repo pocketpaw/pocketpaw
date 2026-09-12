@@ -126,6 +126,23 @@
 # placeholder BR-1 parked there. The profile (``_browser_profile``, ripple
 # "trim" + the browser tool allow-list) is unchanged.
 
+# Changes: 2026-09-12 (A1, belt factory) — ``_load_mcp_tool_ids`` also loads
+# ``PULLEY_TOOL_IDS`` and folds them into ``belt_allow``, so the /belt develop
+# station can drive the pulley block engine (search_catalog / describe_block /
+# plan_install / apply_plan / doctor) instead of hand-writing auth / org /
+# roles / notify / files / audit. BELT is the only surface that gets them —
+# ``apply_plan`` writes to disk. The import rides the EXISTING try/except, so a
+# pulley module that fails to import degrades the whole block to "no MCP
+# restriction" exactly as before rather than breaking chat.
+#
+# Changes: 2026-09-12 (A1b, belt factory) — added ``pulley_tool_ids()``, the
+# INDEPENDENTLY loaded + memoized twin of ``browser_tool_ids()``. The allow-list
+# above says which surface may USE the pulley tools; this says which ids to DENY
+# everywhere else, and ``service._deny_off_surface`` reads it for every non-BELT
+# surface. It must not ride ``_load_mcp_tool_ids``'s shared try/except: an
+# unrelated sibling import failing there would empty the deny while the server
+# still registers — the exact fail-open BR-1 found for the browser.
+
 # Changes: 2026-09-08 (feat/sites-design-skills) — ``_sites_profile``'s
 # svelte/react-create branch now names the four create-scoped design skills
 # alongside the engine's authoring brain, via ``_SITES_CREATE_DESIGN_SKILLS``.
@@ -501,6 +518,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
         from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.media import MEDIA_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.palette import PALETTE_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.pulley import PULLEY_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.ship import SHIP_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.site_media import SITE_MEDIA_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS
@@ -543,9 +561,13 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             # the OSS surface service.
             studio_allow=frozenset(MEDIA_TOOL_IDS),
             # /belt (the develop station) scopes to the loom orientation tools
-            # (so the agent grounds itself before coding) UNION the Instinct
-            # gate tool (so it proposes the diff through the gate).
-            belt_allow=frozenset(LOOM_TOOL_IDS) | _BELT_GATE_TOOL_IDS,
+            # (so the agent grounds itself before coding) UNION the pulley
+            # block-engine tools (so it installs reviewed blocks instead of
+            # hand-writing auth / org / roles / notify / files / audit) UNION
+            # the Instinct gate tool (so it proposes the diff through the gate).
+            # BELT is the only surface that gets the pulley ids — apply_plan
+            # writes to disk.
+            belt_allow=frozenset(LOOM_TOOL_IDS) | frozenset(PULLEY_TOOL_IDS) | _BELT_GATE_TOOL_IDS,
             # /ship (the managed-deploy control plane) scopes to the ship verb
             # tools (list/provision boxes, list/create/deploy apps, add domain,
             # create db, logs, metrics, request-destroy). Crossed over as a plain
@@ -625,6 +647,48 @@ def browser_tool_ids() -> frozenset[str]:
             )
             _BROWSER_TOOL_IDS_CACHE = frozenset()
     return _BROWSER_TOOL_IDS_CACHE
+
+
+# Loaded and memoized SEPARATELY from ``_mcp_tool_ids()``, for the same reason
+# ``_BROWSER_TOOL_IDS_CACHE`` is — see ``pulley_tool_ids``.
+_PULLEY_TOOL_IDS_CACHE: frozenset[str] | None = None
+
+
+def pulley_tool_ids() -> frozenset[str]:
+    """The pulley block-engine MCP tool ids, or an empty set if THEIR import failed.
+
+    Read by ``service.resolve_profile`` to DENY these ids on every non-BELT
+    surface. ``mcp__pulley__apply_plan`` WRITES FILES TO DISK, so reaching it
+    from an unrestricted surface (``allow_mcp_tool_ids=None`` — /chat and every
+    unmapped kind) is a privilege escalation off the belt, not a stray verb.
+
+    Imports on its OWN rather than riding ``_mcp_tool_ids()`` — the same
+    fail-open ``browser_tool_ids`` documents: that block wraps a dozen sibling
+    imports in one ``try/except``, so an unrelated module (palette,
+    stock_images, ...) failing would empty this set and silently turn the deny
+    into a no-op, while ``CloudPulleyMcpProvider`` — which imports
+    ``mcp_servers.pulley`` on its own path — still registers the server.
+
+    The only failure that empties this set is ``mcp_servers.pulley`` itself
+    failing, which also breaks ``build_pulley_server``: no pulley server
+    registers, so there is nothing to reach and the empty deny is safe.
+    """
+    global _PULLEY_TOOL_IDS_CACHE
+    if _PULLEY_TOOL_IDS_CACHE is None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.pulley import PULLEY_TOOL_IDS
+
+            _PULLEY_TOOL_IDS_CACHE = frozenset(PULLEY_TOOL_IDS)
+        except Exception:  # noqa: BLE001 — the server cannot have loaded either
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "surface: could not load pulley tool ids; pulley deny disabled "
+                "(the pulley MCP server cannot have loaded either)",
+                exc_info=True,
+            )
+            _PULLEY_TOOL_IDS_CACHE = frozenset()
+    return _PULLEY_TOOL_IDS_CACHE
 
 
 # --- Per-row profile resolvers -------------------------------------------------

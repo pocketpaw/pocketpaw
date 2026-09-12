@@ -1,0 +1,88 @@
+[
+  {
+    "label": "the Action is filed without the join key \u2014 the row can never be matched to the run's live events",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
+    "find": "        \"run_id\": stream_run_id,",
+    "replace": "        \"run_id\": None,",
+    "tests": [
+      "tests/cloud/test_belt_factory_e2e.py::test_the_gate_proved_it_and_the_action_carries_both_halves",
+      "tests/cloud/test_belt_factory_e2e.py::test_the_read_model_closes_the_join"
+    ]
+  },
+  {
+    "label": "the read model drops the join key \u2014 the blob has it, the console never sees it",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "        \"run_id\": str(blob.get(\"run_id\") or \"\") or None,",
+    "replace": "        \"run_id\": None,",
+    "tests": [
+      "tests/cloud/test_belt_factory_e2e.py::test_the_read_model_closes_the_join",
+      "tests/cloud/test_belt_factory_e2e.py::test_a_disabled_gate_never_claims_the_verify_stage"
+    ]
+  },
+  {
+    "label": "the propose path stops reporting verify \u2014 the run jumps develop to gate and the console shows a human gate nothing justified",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "            stage=\"verify\",\n            prev=\"develop\",",
+    "replace": "            workspace_id=workspace_id, stage=\"develop\", prev=\"develop\", run_id=run_id",
+    "tests": [
+      "tests/cloud/test_belt_factory_e2e.py::test_the_whole_chain_in_order",
+      "tests/cloud/test_belt_factory_e2e.py::test_verify_is_emitted_before_the_gate_runs_not_after"
+    ]
+  },
+  {
+    "label": "the verify event goes out with no run id \u2014 an orphan event on a refused run, with nothing to attach it to",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "            run_id=run_id,\n            action_id=action_id,",
+    "replace": "            workspace_id=workspace_id, stage=\"verify\", prev=\"develop\", run_id=None",
+    "tests": [
+      "tests/cloud/test_belt_factory_e2e.py::test_the_refused_run_still_joins"
+    ]
+  },
+  {
+    "label": "the verify stage is claimed even when the gate is switched off \u2014 a stage the data cannot prove",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "    if not getattr(settings, \"belt_verify_enabled\", True):\n        return {\"status\": \"disabled\"}, None",
+    "replace": "    if not getattr(settings, \"belt_verify_enabled\", True):\n        from pocketpaw_ee.cloud.belt.service import emit_belt_stage\n\n        await emit_belt_stage(\n            workspace_id=workspace_id, stage=\"verify\", prev=\"develop\", run_id=run_id\n        )\n        return {\"status\": \"disabled\"}, None",
+    "tests": [
+      "tests/cloud/test_belt_factory_e2e.py::test_a_disabled_gate_never_claims_the_verify_stage"
+    ]
+  },
+  {
+    "label": "the bridge default reverts to no_component \u2014 every event unattributed again, the exact bug this branch found",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "    resolve_component: ComponentResolver = loom_component,",
+    "replace": "    resolve_component: ComponentResolver = no_component,",
+    "tests": [
+      "tests/cloud/test_belt_component_map.py::test_the_production_bridge_defaults_to_the_real_resolver",
+      "tests/cloud/test_belt_factory_e2e.py::test_a_write_carries_the_component_that_owns_the_file"
+    ]
+  },
+  {
+    "label": "the resolver returns the namespaced component id \u2014 matches no Factory Map node, so everything silently unattributed",
+    "file": "ee/pocketpaw_ee/cloud/belt/component_map.py",
+    "find": "        mapping[source] = target.rsplit(\":\", 1)[-1]",
+    "replace": "        mapping[source] = target",
+    "tests": [
+      "tests/cloud/test_belt_component_map.py::test_the_component_id_is_bare",
+      "tests/cloud/test_belt_component_map.py::test_a_known_file_resolves_to_its_component"
+    ]
+  },
+  {
+    "label": "the parse cache drops the mtime \u2014 a world model rebuilt under a running process is never picked up",
+    "file": "ee/pocketpaw_ee/cloud/belt/component_map.py",
+    "find": "        return _mapping(str(configured), Path(configured).stat().st_mtime_ns)",
+    "replace": "        return _mapping(str(configured), 0)",
+    "tests": [
+      "tests/cloud/test_belt_component_map.py::test_a_rebuilt_model_is_picked_up_without_a_restart"
+    ]
+  },
+  {
+    "label": "the parse stops filtering on edge type \u2014 imports edges become bogus component ownership",
+    "file": "ee/pocketpaw_ee/cloud/belt/component_map.py",
+    "find": "        if not isinstance(edge, dict) or edge.get(\"type\") != _COMPOSES:",
+    "replace": "        if not isinstance(edge, dict):",
+    "tests": [
+      "tests/cloud/test_belt_component_map.py::test_only_composes_file_to_component_edges_count"
+    ]
+  }
+]

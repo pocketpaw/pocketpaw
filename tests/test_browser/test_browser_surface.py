@@ -10,6 +10,12 @@
 # installed the tests SKIP rather than fail, so CI without one stays green.
 #
 # The surface-scoping test needs no browser and always runs.
+#
+# Modified: 2026-09-12 (A1b, belt factory) — docstring only. BR-1's
+# ``_deny_browser_off_surface`` became ``_deny_off_surface`` when the pulley
+# block-engine ids joined the same fold (denied off /belt), so the mutation
+# docstring below now names the function that exists. No assertion changed; the
+# browser floor is unchanged and still asserted for every kind.
 
 from __future__ import annotations
 
@@ -316,8 +322,10 @@ class TestSurfaceScoping:
         """Including /chat and the unmapped default, which carry no allow-list
         and would otherwise reach the browser.
 
-        THE MUTATION THAT BREAKS THIS: drop the ``_deny_browser_off_surface``
-        call from ``resolve_profile`` — /chat's deny set comes back empty.
+        THE MUTATION THAT BREAKS THIS: drop the ``_deny_off_surface`` call from
+        ``resolve_profile`` — /chat's deny set comes back empty. (That fold was
+        ``_deny_browser_off_surface`` until A1b generalized it to cover the
+        pulley block-engine ids off /belt as well.)
         """
         from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
         from pocketpaw_ee.cloud.surface import SurfaceKind, SurfaceMeta, resolve_profile

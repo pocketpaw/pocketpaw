@@ -17,6 +17,12 @@
 # pass exactly those into belt_propose_change); without them it keeps the
 # ask-first behavior.
 #
+# Updated: 2026-09-12 (A1b, belt factory) — added the BLOCKS FIRST test. Stage 2
+# now tells the agent to search the pulley catalog before writing code for a
+# capability that might already be a reviewed block, and to install through
+# plan_install → apply_plan. Registering the tools on the allow-list did not make
+# the station use them; the preamble is what does.
+#
 # Mirrors test_studio_code_handlers.py. pytest-asyncio runs in auto mode (see
 # pyproject [tool.pytest] asyncio_mode), so async tests are detected
 # automatically — no module-level mark (it would wrongly tag the sync tests).
@@ -93,6 +99,46 @@ async def test_belt_handler_names_builtin_dev_tools() -> None:
 
     for tool in ("Bash", "Read", "Write", "Edit", "Glob", "Grep"):
         assert tool in preamble, f"preamble should name the {tool} tool"
+
+
+async def test_belt_handler_sends_the_agent_to_blocks_before_writing_code() -> None:
+    """Stage 2 opens with BLOCKS FIRST: search the catalog, install through the
+    plan/apply pair, hand-write only what no block covers.
+
+    Registering the pulley tools on the surface allow-list does not make the
+    agent USE them — with the loop silent about blocks it kept hand-writing
+    auth / org / roles, which is the whole reason the block engine is here.
+
+    THE MUTATION THAT BREAKS THIS: drop the BLOCKS FIRST segment from
+    ``build_preamble``. The tools stay allowed and go unused.
+    """
+    preamble = (
+        await belt_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/belt"))
+    ).text
+    lower = preamble.lower()
+
+    # Search before writing, then the plan/apply install pair.
+    assert "mcp__pulley__search_catalog" in preamble
+    assert "mcp__pulley__plan_install" in preamble
+    assert "mcp__pulley__apply_plan" in preamble
+    # The published catalog, so the agent knows what NOT to hand-write.
+    assert "auth, org, roles, notify, files and audit" in lower
+    assert "do not hand-write" in lower
+    # ``pulley_path`` is optional, so the rule must degrade rather than command a
+    # tool a deploy may not have.
+    assert "not available in this run" in lower
+    # The app argument is per-call and has no server default, so the preamble is
+    # the only thing that points the install at THIS run's repo — without it the
+    # blocks land where the station's diff never looks (or the call just fails).
+    assert "`app` argument" in preamble
+    assert "belt_propose_change" in preamble
+    # ...and installed blocks still leave through the gate like any other change.
+    assert "do not bypass the gate" in lower
+
+    # ...and the three-stage station loop is untouched.
+    assert "1. orient first" in lower
+    assert "2. develop" in lower
+    assert "3. propose via the gate" in lower
 
 
 # --- Meta-aware repo binding (SC-1) ---

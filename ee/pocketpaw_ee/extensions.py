@@ -49,6 +49,15 @@ the registration loop passes it through untouched. Ambient (not opt-in); the
 loop skips it — when ``loom_model_path`` is unset or the binary is missing,
 so chat never breaks.
 
+Updated: 2026-09-12 (A1, belt factory) — added ``CloudPulleyMcpProvider``
+(``pocketpaw.mcp_servers`` entry ``pulley``) registering the external pulley
+block-engine server as a STDIO MCP server (server name ``pulley``; 5 tools:
+search_catalog / describe_block / plan_install / apply_plan / doctor) on the
+claude_agent_sdk cloud chat backend. Same Path A config-dict shape as
+``CloudLoomMcpProvider``. Ambient (not opt-in); the /belt surface scopes access
+via its profile allowlist. Returns None — and the loop skips it — when
+``pulley_path`` is unset, the server file is missing, or bun can't be resolved.
+
 Updated: 2026-06-10 (feat/belt-gate, BS-3) — added ``CloudBeltMcpProvider``
 (``pocketpaw.mcp_servers`` entry ``belt``) exposing the Belt & Pulley
 code-change gate in-process server (``pocketpaw_belt``; one tool
@@ -1214,6 +1223,39 @@ class CloudLoomMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
 
         return list(LOOM_TOOL_IDS)
+
+
+class CloudPulleyMcpProvider:
+    """`pocketpaw.mcp_servers` — the pulley block-engine MCP server.
+
+    Registers the external pulley server (``bun <pulley>/mcp/server.ts``) as a
+    STDIO MCP server — server name ``pulley``, 5 tools (search_catalog /
+    describe_block / plan_install / apply_plan / doctor). Same Path A shape as
+    its sibling ``CloudLoomMcpProvider``: ``build_server`` returns a stdio
+    CONFIG DICT, not an in-process SDK server object, and the pocketpaw
+    registration loop passes the dict through untouched.
+
+    Gives the /belt develop station reviewed blocks (auth, org, roles, notify,
+    files, audit) instead of hand-written ones, with the plan/apply split
+    keeping the human gate: ``plan_install`` writes nothing and every refusal
+    happens there.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — the /belt surface scopes access
+    via its profile allowlist, exactly as loom does; surfaces whose allowlists
+    don't name the pulley tool ids never see them. ``build_pulley_server``
+    returns None (loop skips it) when ``pulley_path`` is unset, the server file
+    is missing, or bun can't be resolved, so chat keeps working.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        from pocketpaw_ee.agent.mcp_servers.pulley import build_pulley_server
+
+        return build_pulley_server()
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.pulley import PULLEY_TOOL_IDS
+
+        return list(PULLEY_TOOL_IDS)
 
 
 class CloudBeltMcpProvider:

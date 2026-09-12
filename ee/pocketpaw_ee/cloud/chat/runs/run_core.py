@@ -1,6 +1,39 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-09-12 (feat/belt-entity-events, stage slice) — the same ``tool_use``
+  branch now also reports WHICH STAGE a belt run has reached, via
+  ``belt.service.maybe_emit_belt_stage``. The per-file feed added below says
+  what changed; this says where the run is, so the /belt strip can light
+  ``orient`` and ``develop`` from proven data instead of inferring them. A
+  read-only codebase lookup (Read / Glob / Grep / any ``mcp__loom__*``) proves
+  ``orient``; a Write / Edit proves ``develop``.
+
+  The forward-only guard is the local ``belt_stage``, minted next to
+  ``stream_run_id`` and passed back in on every call: per-run by construction,
+  no module-level map, nothing to reset. It is what makes the ``orient``
+  heuristic safe — a ``Read`` during development cannot walk the run backwards,
+  because the run has already advanced past ``orient`` and the emit is dropped.
+
+  These emits carry ``run_id`` and a NULL ``action_id``: on the interactive
+  station the Instinct Action does not exist until ``belt_propose_change``
+  runs, which is after every file write. Same limitation, same reason, as the
+  entity-change feed below.
+
+- 2026-09-12 (feat/belt-entity-events) — the ``tool_use`` branch now also feeds
+  the /belt console's per-FILE live feed. A develop-station run went silent
+  between "started" and the single ``belt_run_updated(proposed)`` at the end,
+  which on a multi-minute run reads as a hang, so each ``Write`` / ``Edit``
+  additionally calls ``belt.service.maybe_emit_belt_entity_changed``. This loop
+  is the only place the agent's tool stream meets the surface binding it needs
+  (``ctx.surface_context`` carries both the BELT kind and ``meta.repo``, the
+  repo the /belt page bound for the run) — the headless runner takes an
+  injectable ``DevelopFn`` and never sees an ``AgentEvent``. ALL the filtering
+  lives in the bridge, so this stays one guarded call and a non-belt turn is a
+  no-op. Skips the provisional ``input_pending`` announcement, whose ``input``
+  is ``{}`` — the resolved ``AssistantMessage`` event carries the real
+  ``file_path`` and emitting on both would double every change.
+
 - 2026-09-08 (fix/attachment-only-turns) — ``_drive_agent_loop`` now runs its
   ``user_content`` through ``agent_service.resolve_user_content`` before
   anything reads it. A send with attachments and no typed text arrives as the
@@ -345,7 +378,13 @@ import re
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Type-only: the stage vocabulary lives in the EE belt service, which this
+    # OSS-installable path must not import at runtime — the bridge call below is
+    # deliberately a guarded local import.
+    from pocketpaw_ee.cloud.belt.service import BeltStage
 
 from pocketpaw.agents.backend import (  # type: ignore[import-untyped]
     LeasedClient,
@@ -367,6 +406,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     attach_agent_identity,
     attach_sse_event_sink,
     bind_pawbar_run,
+    bind_stream_run_id,
     bind_timeline,
     build_behavior_instructions,
     build_knowledge_context,
@@ -379,6 +419,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     resolve_user_content,
     session_key_for,
     unbind_pawbar_run,
+    unbind_stream_run_id,
     unbind_timeline,
     unregister_stream_sink,
 )
@@ -1451,6 +1492,13 @@ async def _drive_agent_loop(
     # bridge where ``run_id`` equals the id on ``agent.stream_start``.
     stream_run_id = _new_run_id()
     plan_tracker = PlanTracker(run_id=stream_run_id)
+    # The furthest belt stage THIS run has proven (``None`` until it proves one).
+    # Deliberately a local rather than shared state: it is minted alongside
+    # ``stream_run_id``, so its lifetime is exactly one run and concurrent runs
+    # cannot see each other's progress. The tool loop below advances it; the
+    # emitter refuses anything that isn't strictly forward. Stays ``None`` for
+    # every non-belt run — the bridge is a no-op off the BELT surface.
+    belt_stage: BeltStage | None = None
 
     if emit_stream_start:
         stream_start_payload: dict[str, Any] = {
@@ -1483,6 +1531,9 @@ async def _drive_agent_loop(
     pawbar_token = bind_pawbar_run(_pawbar_run_from_ctx(ctx))
     # Same lifetime as the pawbar context: bound here, reset in the same finally.
     timeline_token = bind_timeline(_timeline_from_ctx(ctx))
+    # Same lifetime again: the belt MCP server reads this to stamp its ``verify``
+    # stage emit with the run id the develop/orient emits already carry.
+    stream_run_token = bind_stream_run_id(stream_run_id)
 
     if not history and ctx.session_id:
         asyncio.create_task(_generate_session_title(ctx, user_content))
@@ -1869,6 +1920,69 @@ async def _drive_agent_loop(
                         tool_input = econtent
                     elif isinstance(econtent, str):
                         name = econtent
+                # feat/belt-entity-events: on the BELT surface, a Write / Edit
+                # inside the run's bound repo also rides the workspace bus as
+                # ``belt_entity_changed`` so the /belt page can follow the work
+                # live instead of waiting for the one ``proposed`` event at the
+                # end. Every other surface, and every other tool, is a no-op
+                # inside the bridge — the gating lives there so it is testable
+                # without driving this loop.
+                #
+                # Skips the PROVISIONAL announcement: ``content_block_start``
+                # names the tool before a single argument has streamed, so its
+                # ``input`` is ``{}`` and the resolved ``AssistantMessage``
+                # event that follows carries the real ``file_path``. Emitting on
+                # both would double every change. Same ``input_pending`` idiom
+                # as ``agents/loop.py``.
+                #
+                # Fire-and-forget on purpose: this must not add latency to the
+                # tool chip, and it cannot fail the run (the bridge swallows its
+                # own errors; the import is guarded for an OSS-only install).
+                _input_pending = isinstance(meta, dict) and meta.get("input_pending") is True
+                if not _input_pending:
+                    try:
+                        from pocketpaw_ee.cloud.belt.service import (
+                            maybe_emit_belt_entity_changed,
+                        )
+
+                        _sc = ctx.surface_context
+                        await maybe_emit_belt_entity_changed(
+                            surface=_sc.kind.value if _sc else None,
+                            tool_name=name,
+                            tool_input=tool_input,
+                            workspace_id=ctx.workspace_id,
+                            run_id=stream_run_id,
+                            repo_root=_sc.meta.repo if _sc else None,
+                        )
+                    except Exception:  # noqa: BLE001 — a live feed never breaks a turn
+                        logger.debug("belt: entity-change bridge failed", exc_info=True)
+
+                    # Same tool stream, the other axis: WHICH STAGE the run has
+                    # reached. The per-file feed above says what changed; this
+                    # says where the run is — a codebase lookup proves
+                    # ``orient``, a Write / Edit proves ``develop``.
+                    #
+                    # ``belt_stage`` is a LOCAL of this function, and
+                    # ``stream_run_id`` is minted once per call, so the
+                    # forward-only guard is scoped to exactly one run with no
+                    # module-level map and nothing to reset. The bridge returns
+                    # the next value to hold, so a tool that proves nothing (or
+                    # a stage the run is already past) leaves it untouched — and
+                    # that is what stops a ``Read`` after the first write from
+                    # walking the run back to ``orient``.
+                    try:
+                        from pocketpaw_ee.cloud.belt.service import maybe_emit_belt_stage
+
+                        _sc = ctx.surface_context
+                        belt_stage = await maybe_emit_belt_stage(
+                            surface=_sc.kind.value if _sc else None,
+                            tool_name=name,
+                            workspace_id=ctx.workspace_id,
+                            run_id=stream_run_id,
+                            prev=belt_stage,
+                        )
+                    except Exception:  # noqa: BLE001 — a live feed never breaks a turn
+                        logger.debug("belt: stage bridge failed", exc_info=True)
                 if name == _ASK_USER_TOOL_ID:
                     # Interactive question: emit an ``ask_user_question`` frame the
                     # client renders as clickable option chips (service.ts ->
@@ -2069,6 +2183,10 @@ async def _drive_agent_loop(
             pass
         try:
             unbind_timeline(timeline_token)
+        except Exception:
+            pass
+        try:
+            unbind_stream_run_id(stream_run_token)
         except Exception:
             pass
         try:

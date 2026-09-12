@@ -9,6 +9,15 @@
 # ok. Without this preamble the surface falls back to GENERIC and the agent
 # builds a dashboard pocket instead of running the station loop.
 #
+# Updated: 2026-09-12 (feat/belt-gate — the station's MECHANICAL gate) — the
+# PROPOSE stage now tells the agent that the gate VERIFIES before a human sees
+# anything (it applies the diff in a throwaway worktree and runs the repo's
+# checks) and that a failing check REFUSES the proposal. Without this the
+# preamble's existing "if the gate returns an error, say so plainly" line would
+# have the agent report defeat on a verification failure, when the right move is
+# to read the named failing check, fix it, and call the gate again. "Say so
+# plainly" now applies to an error it CANNOT fix.
+#
 # Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — ``build_preamble`` now
 # consumes ``meta.repo`` + ``meta.base_branch`` (the repo + branch the /belt page
 # bound for this run). When BOTH are present it injects a "Your repo / base
@@ -32,8 +41,20 @@
 #
 # The /belt SurfaceProfile sets ``ripple_mode="off"`` (so the agent doesn't
 # inherit the ~20k-char "default to ui-spec" ripple LAW and build a dashboard)
-# and scopes ``allow_mcp_tool_ids`` to the loom orientation tools + the gate
-# tool (see service.py).
+# and scopes ``allow_mcp_tool_ids`` to the loom orientation tools + the pulley
+# block-engine tools + the gate tool (built in ``surface_registry``).
+#
+# Changes: 2026-09-12 (A1b, belt factory) — stage 2 (DEVELOP) opens with a
+# BLOCKS FIRST rule: search the pulley catalog before writing code for a
+# capability that might already be a reviewed block, install via plan_install →
+# apply_plan, and write fresh code only for the rest. Registering the pulley
+# tools on the surface did not make the agent reach for them — with the loop
+# silent about blocks it kept hand-writing auth / org / roles. The three-stage
+# loop is unchanged; this is a rule INSIDE develop, not a fourth stage. The rule
+# carries its own degrade clause because ``pulley_path`` is optional: on a deploy
+# without it the tools are simply absent, and a prompt that commands a tool the
+# agent does not have gets improvised around rather than erroring (the failure
+# mode CLAUDE.md's "prompt may not command a tool the agent doesn't have" names).
 #
 # Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
 # ``SurfacePreamble`` keyed on the route plus the repo binding
@@ -125,15 +146,38 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "start reading or editing code until you have oriented.\n"
         "2. DEVELOP. Implement the change in the station worktree using the "
         "built-in tools: `Bash` to run commands, `Read` to read files, `Write` / "
-        "`Edit` to change them, and `Glob` / `Grep` to find code. Run TARGETED "
+        "`Edit` to change them, and `Glob` / `Grep` to find code. "
+        "BLOCKS FIRST: before writing code for a capability that might already "
+        "be a block, call `mcp__pulley__search_catalog`. The published blocks are "
+        "auth, org, roles, notify, files and audit (plus `hello`, an example). "
+        "Sessions, email+password sign-in and one OAuth provider come from "
+        "`auth`; organizations, membership and invitations from `org`; "
+        "permissions and CASL abilities from `roles` — do NOT hand-write those. "
+        "To install one, call `mcp__pulley__plan_install` (it writes nothing — "
+        "read the plan it returns), then `mcp__pulley__apply_plan` with that "
+        "plan's id; a plan id applies once. EVERY pulley call takes an `app` "
+        "argument — pass the repo this run is bound to, the same path you pass "
+        "to `belt_propose_change`; there is no default and a call without it "
+        "fails. `apply_plan` writes the block's files into that repo, so carry "
+        "on exactly as with code you wrote: diff the worktree and propose "
+        "through the gate. Blocks do NOT bypass the gate. Write fresh code only "
+        "for what no block provides. If the pulley tools are not available in "
+        "this run, say so once and write the code by hand — do not stall on "
+        "them. "
+        "Run TARGETED "
         "tests for what you touched. Keep the diff SMALL and focused — one task, "
         "one change. If the task genuinely needs a large change, tell the user to "
         "split it into smaller tasks rather than proposing a sprawling diff.\n"
         "3. PROPOSE VIA THE GATE. Produce a clean unified diff of your change and "
         f"{propose_instruction}This is the ONLY way a change leaves "
         "the station. NEVER apply your change to the user's branches directly, "
-        "NEVER `git push`, NEVER `git merge`. If the gate tool is unavailable or "
-        "returns an error, say so PLAINLY — do NOT claim the change was proposed "
+        "NEVER `git push`, NEVER `git merge`. The gate VERIFIES before a human "
+        "sees anything: it applies your diff in a throwaway worktree and runs the "
+        "repo's checks, and a failing check REFUSES the proposal — no action is "
+        "filed. That error names the failing check and carries its output, so FIX "
+        "it and call the gate again rather than reporting defeat. If the gate tool "
+        "is unavailable or returns an error you cannot fix, say so PLAINLY — do "
+        "NOT claim the change was proposed "
         "(no phantom successes). After the gate accepts the proposal, tell the "
         "user the change is waiting in the Tray for review, and that on approve it "
         "is applied in a worktree, branched, and opened as a PR.\n"

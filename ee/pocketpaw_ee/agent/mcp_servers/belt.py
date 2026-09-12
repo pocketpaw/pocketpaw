@@ -2,6 +2,63 @@
 # code-change gate to the claude_agent_sdk cloud chat backend. Created:
 # 2026-06-10 (feat/belt-gate, BS-3).
 #
+# Updated: 2026-09-12 (headless gate) — ``_verify_change`` MOVED to
+#   ``cloud/belt/verify.py::gate_diff``, unchanged in behaviour. It was this
+#   module's private helper while this handler was the gate's only call site;
+#   the headless develop runner now calls it too, and the cloud layer cannot
+#   import the agent layer (the OSS/EE boundary), so the shared function had to
+#   live below both. The handler keeps the decision that is genuinely its own:
+#   a refusal is returned to the agent as an error response and no Action is
+#   filed.
+#
+# Updated: 2026-09-12 (integration/belt-factory — the join key closes) — the
+#   propose path now speaks the stage vocabulary and carries the chat stream's
+#   run id onto the Action:
+#     * the gate helper emits ``stage="verify"`` (prev=``develop``) through
+#       ``belt.service.emit_belt_stage`` IMMEDIATELY BEFORE ``verify_diff``, so
+#       the console shows the run being CHECKED instead of jumping develop →
+#       gate. The emit sits INSIDE the helper, after the
+#       ``belt_verify_enabled`` guard, not in the handler before the call: a
+#       disabled gate never runs a check, and a stage we cannot prove is one we
+#       do not emit. Best-effort like every sibling — a bus failure can never
+#       break a propose.
+#     * the ``_code_change`` blob carries ``run_id`` — ``current_stream_run_id()``,
+#       the same value the per-file ``belt_entity_changed`` and the ``orient`` /
+#       ``develop`` stage events ride with. Those early events have no
+#       ``action_id`` (the Action does not exist until this handler runs), so
+#       without this key nothing could ever match a live run's events to its
+#       Tray row. The runs read model returns it (``service._run_summary``) and
+#       the console joins on it. OPTIONAL / nullable — a headless run has no
+#       chat stream — and, like ``verification``, needs NO schema bump because
+#       the executor's guard tests ``schema`` for equality.
+#   Both are read ONCE per call from the ContextVar, never a process-global.
+#
+# Updated: 2026-09-12 (feat/belt-gate — the station's first MECHANICAL gate) —
+#   ``belt_propose_change`` no longer files a proposal on structural validation
+#   alone. After the four structural checks (identity, non-empty diff, size cap,
+#   repo allowlist) and BEFORE the Instinct Action is filed, it calls
+#   ``cloud.belt.verify.verify_diff``, which applies the diff in a throwaway
+#   worktree and runs the checks that tree offers (pytest / package.json test /
+#   pulley doctor).
+#     * ``failed``   → the propose is REFUSED with the failing check names and
+#                      their output, and NO Action is filed. The agent reads the
+#                      failure, fixes it, and re-proposes — the feedback loop.
+#     * ``passed`` / ``no_checks`` → the Action is filed as before and the
+#                      verdict rides on the blob under ``verification`` (status,
+#                      per-check metadata, summary — never the full logs), so the
+#                      Tray/console can show the human what was PROVEN.
+#   Gate BEFORE the human, not after: an Instinct approver was previously
+#   approving work nothing had ever run. ``belt_verify_enabled`` (default True)
+#   turns it off, recording ``verification={"status":"disabled"}``;
+#   ``belt_verify_timeout_s`` (default 600) bounds each check; and
+#   ``belt_verify_commands`` (default None) maps a repo path to the argv the
+#   gate should run there, WINNING over verify's generic discovery — the handler
+#   reads it and threads it in, the same way the timeout is threaded, so the
+#   verifier itself never touches settings. All three are read per
+#   call, never cached in a process-global. ``verification`` is an OPTIONAL blob
+#   key — the executor's guard tests ``schema`` for equality — so CODE_CHANGE_SCHEMA
+#   stays at 2 and an in-flight schema-2 blob without the key still applies.
+#
 # Updated: 2026-06-10 (feat/belt-trace, BS-4 — Decision-Graph chain) —
 #   ``belt_propose_change`` now MINTS a Decision-Graph ``correlation_id``
 #   at propose time and emits the chain-opening ``agent.proposed`` event
@@ -105,6 +162,14 @@ CODE_CHANGE_PARAM_KEY = "_code_change"
 #     ``human.corrected`` can chain its ``causation_id`` back to it). The
 #     executor's schema-mismatch guard fails a stale schema-1 blob approved
 #     post-deploy loud (same discipline as the pocket-write bridge).
+#
+# Two OPTIONAL keys ride on a schema-2 blob without bumping it, because the
+# executor's guard compares ``schema`` for EQUALITY — an in-flight blob missing
+# either still applies, and adding one can't strand a pending Action:
+#   * ``verification`` — the mechanical gate's verdict (feat/belt-gate).
+#   * ``run_id`` — the chat stream's run id (integration/belt-factory), the join
+#     key tying this Action to the ``belt_entity_changed`` / stage events the
+#     run emitted before it existed. ``None`` on a headless run (no stream).
 CODE_CHANGE_SCHEMA = 2
 
 # Diff size cap. A proposal over EITHER bound is refused with a "split the task"
@@ -151,6 +216,21 @@ def _identity() -> tuple[str | None, str | None, str | None]:
         return current_workspace_id(), current_user_id(), current_session_mongo_id()
     except Exception:  # noqa: BLE001
         return None, None, None
+
+
+def _stream_run_id() -> str | None:
+    """The chat stream's run id, from the same ``agent_service`` ContextVars
+    ``_identity`` reads. ``None`` off a stream (a headless run has none).
+
+    Kept separate from ``_identity``'s tuple deliberately: this is the LIVE-FEED
+    join key, not identity, and every existing caller of ``_identity`` would
+    otherwise have to unpack a value it does not use."""
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import current_stream_run_id
+
+        return current_stream_run_id()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _count_changed_lines(diff: str) -> int:
@@ -450,6 +530,34 @@ async def _propose_change_handler(args: dict) -> dict:
     if repo_err is not None or repo_path is None:
         return _error_response(repo_err or "could not resolve the repo path.")
 
+    # THE MECHANICAL GATE — before the human, not after. The four checks above
+    # are structural (identity, size, allowlist); none of them prove the change
+    # WORKS. Verification applies the diff in a throwaway worktree and runs
+    # whatever checks that tree offers, and a red result REFUSES the propose, so
+    # the Instinct approver only ever sees verified work. The failure text goes
+    # back to the agent, which fixes and re-proposes — that is the feedback loop.
+    # Read the stream's run id ONCE: the same value goes to the ``verify`` stage
+    # emit and onto the blob, so the live event and the durable row can never
+    # disagree about which run this was.
+    #
+    # ``gate_diff`` lives in ``cloud.belt.verify`` rather than here because the
+    # headless runner calls the SAME function — this station is no longer the
+    # only way to a diff, and a gate with one call site is a gate the other path
+    # walks around.
+    stream_run_id = _stream_run_id()
+
+    from pocketpaw_ee.cloud.belt.verify import gate_diff
+
+    verification, refusal = await gate_diff(
+        repo=str(repo_path),
+        base_branch=base_branch.strip(),
+        diff=diff,
+        workspace_id=workspace_id,
+        run_id=stream_run_id,
+    )
+    if refusal is not None:
+        return _error_response(refusal)
+
     orient_clean = (
         orient_ref.strip() if isinstance(orient_ref, str) and orient_ref.strip() else None
     )
@@ -484,6 +592,19 @@ async def _propose_change_handler(args: dict) -> dict:
         # RFC 09 chain-correlation fields (schema 2).
         "correlation_id": str(correlation_id),
         "proposed_event_id": None,
+        # The mechanical gate's verdict — what was mechanically PROVEN before a
+        # human was asked. Status + per-check metadata + summary only, no logs.
+        # An OPTIONAL key: the executor's guard compares ``schema`` for equality,
+        # so adding it needs no schema bump and an older blob still applies.
+        "verification": verification,
+        # The chat stream's run id — the JOIN KEY. The run's live events
+        # (``belt_entity_changed``, the orient / develop / verify stages) carry
+        # it and NO ``action_id``, because this Action is minted after the last
+        # of them. Stamping it here is what lets the console match those events
+        # to this row (the runs read model returns it). Optional / nullable: a
+        # headless run has no chat stream. Like ``verification``, an optional
+        # key needs no schema bump — the executor's guard tests equality.
+        "run_id": stream_run_id,
     }
 
     from pocketpaw.instinct.models import ActionCategory, ActionPriority, ActionTrigger
