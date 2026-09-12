@@ -195,6 +195,29 @@ class GuestUploadForbidden(CloudError):
         return base
 
 
+class ByokKeyRequired(CloudError):
+    """A signed-up kiosk turn found no usable BYOK key (402, ``byok_key_required``).
+
+    Added 2026-09-12 (feat/kiosk-require-byok). The account sibling of
+    ``GuestKeyRequired``, and deliberately a DIFFERENT code: a guest is told to
+    create an account, while someone who already has one must be told to add a
+    key. Reusing the guest code would show a logged-in user a "create an
+    account" prompt, which is the kind of dead end that reads as a broken
+    product rather than a missing setting.
+
+    Only ever raised on the Otherhand surface, and only while
+    ``other_hand_require_byok`` is on — the window between launching the kiosk
+    and switching billing on. Everywhere else the platform fallback stands.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            402,
+            "byok_key_required",
+            "Add your own API key in Settings to keep going.",
+        )
+
+
 class GuestKeyRequired(CloudError):
     """A guest turn found no usable BYOK key (402, ``guest_key_required``).
 
@@ -544,6 +567,7 @@ def with_cause(error: CloudError, cause: BaseException) -> CloudError:
 
 
 __all__ = [
+    "ByokKeyRequired",
     "GuestKeyRequired",
     "GuestLimitError",
     "GuestUploadForbidden",

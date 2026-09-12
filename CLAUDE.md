@@ -319,6 +319,21 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   Refusal is 402 `billing.storage_limit`.
   Not to be confused with `POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY` above: that
   bounds throughput per day, this bounds total stored bytes.
+- **Kiosk BYOK gate (`POCKETPAW_OTHER_HAND_REQUIRE_BYOK`)**: default OFF. When
+  on, a SIGNED-UP user on the Otherhand surface must have their own provider
+  key and gets no platform fallback, refused with 402 `byok_key_required`.
+  Guests already have this rule unconditionally (`guest_key_required`,
+  feat/byok-guest-backend) and are untouched — two rules, two codes, because a
+  guest is told to create an account and an account is told to add a key.
+  Scoped to the SURFACE, never the workspace: the same deployment serves the
+  full Paw OS, where the platform fallback is the product, so a workspace-wide
+  gate would take chat off the air for every non-kiosk user the moment the
+  variable is set. The surface is read from the server-resolved
+  `ctx.surface_context`; the fast-reject in `agent_router` reads the
+  client-supplied hint and is therefore UX only, with the executor
+  (`run_core._requires_own_key`) as the enforcement. Exists for the window
+  between launching the kiosk and switching billing on; remove the variable to
+  revert.
 - **Concurrency / capacity config**: five ceilings that are easy to confuse. In a
   cloud deploy the first two are the ones that bound how much work executes at once.
   `POCKETPAW_ARQ_MAX_JOBS` (default `10`, arq's own) — the **chat lane's** ceiling:
