@@ -2418,6 +2418,12 @@ class PydanticAIBackend:
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
         allow_mcp_tool_ids: frozenset[str] | None = None,
         exclusive_mcp_tools: bool = False,
+        # Images the user attached to this turn. Consumed, not ignored: pydantic-ai
+        # takes multimodal input as a LIST prompt mixing strings with
+        # ``BinaryContent``, so ``build_multimodal_prompt`` below turns these into
+        # the prompt the agent actually runs on. Empty leaves the prompt a bare
+        # string, which is what every text turn has always sent.
+        image_attachments: tuple[ImageAttachment, ...] = (),
         # The assembled prompt's stable digest (PA-1). Unlike the kwargs above
         # this is NOT withhold-when-empty — it is set on every run — so the pool
         # gates it on this signature instead: declaring the parameter is how a
@@ -2621,7 +2627,24 @@ class PydanticAIBackend:
             # snapshots of the same page. A fresh snapshot every turn is also
             # the right semantics — the agent should see the page as it is now,
             # not as it was.
-            prompt = _user_prompt(message, images)
+            #
+            # TWO sources meet here and both are pictures for the model to look
+            # at: ``images`` is the snapshot the surface chose to show, already
+            # (bytes, media_type); ``image_attachments`` is what the USER
+            # attached, an ``ImageAttachment`` carrying the same two fields plus
+            # the filename. They are flattened to the one shape ``_user_prompt``
+            # takes rather than built by two different helpers, so the
+            # empty-bytes drop below applies to a user's upload as much as to a
+            # snapshot — a zero-byte part comes back from some providers as an
+            # opaque 400, which reads as the model being broken.
+            #
+            # Surface snapshot first, attachments after: the snapshot is the
+            # context the preamble is already talking about, and the user's own
+            # files should land nearest their words.
+            prompt = _user_prompt(
+                message,
+                tuple(images) + tuple((img.data, img.media_type) for img in image_attachments),
+            )
 
             async with agent.run_stream_events(prompt, **kwargs) as stream:
                 async for event in stream:

@@ -164,6 +164,30 @@ def _accepts_images_kwarg(func: Any) -> bool:
         return False
 
 
+def _accepts_image_attachments_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``image_attachments`` in its signature?
+
+    The same question ``_accepts_images_kwarg`` asks, for the files the USER
+    attached to a turn (2026-09-12, fix/chat-image-attachments). Two kwargs
+    carry pictures for two different reasons — ``images`` is a snapshot the
+    surface chose to show, ``image_attachments`` is what the user deliberately
+    attached — and only the two SDK backends translate the latter into a shape
+    a model can see.
+
+    Asked rather than assumed, for the reason the three guards above it were
+    each written the hard way: seven of the backends take a narrower signature
+    with no ``**kwargs``. An attachment is rarer than an Otherhand snapshot, but
+    rarity is not a guard — the first user to attach a photo on an install
+    running one of those backends would end their turn in ``TypeError: run() got
+    an unexpected keyword argument 'image_attachments'``. Withholding narrows
+    WHEN the kwarg is forwarded; only the signature narrows WHERE.
+    """
+    try:
+        return "image_attachments" in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
 def _accepts_tools_enabled_kwarg(func: Any) -> bool:
     """Does ``func`` name ``tools_enabled`` in its signature?
 
