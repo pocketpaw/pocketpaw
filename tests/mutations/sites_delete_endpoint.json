@@ -167,7 +167,8 @@
     "find": "    functions = [site_build_fn, site_preview_build_fn, _site_delete_fn]",
     "replace": "    functions = [site_build_fn, site_preview_build_fn]",
     "tests": [
-      "tests/ee/sites/test_delete_job.py"
+      "tests/ee/sites/test_delete_job.py",
+      "tests/cloud/runs/test_worker_lanes.py"
     ]
   },
   {
@@ -186,6 +187,24 @@
     "replace": "        created_at=doc.created_at.isoformat() if doc.created_at else None,",
     "tests": [
       "tests/ee/sites/test_site_export_service.py"
+    ]
+  },
+  {
+    "label": "the delete job is wrapped with the BUILD timeout, forking a budget sized for a remote sandbox compile onto a cascade that walks Cloudflare, D1 and R2 serially",
+    "file": "ee/pocketpaw_ee/sites/build_worker.py",
+    "find": "    timeout=site_delete_job_timeout_seconds(),\n    max_tries=1,\n)",
+    "replace": "    timeout=site_build_job_timeout_seconds(),\n    max_tries=1,\n)",
+    "tests": [
+      "tests/cloud/runs/test_worker_lanes.py"
+    ]
+  },
+  {
+    "label": "the delete job gains arq-level retries, so a cascade stopped by an outage is re-entered seconds later into the same outage and spends its one cheap ledger resume",
+    "file": "ee/pocketpaw_ee/sites/build_worker.py",
+    "find": "    timeout=site_delete_job_timeout_seconds(),\n    max_tries=1,\n)",
+    "replace": "    timeout=site_delete_job_timeout_seconds(),\n    max_tries=3,\n)",
+    "tests": [
+      "tests/cloud/runs/test_worker_lanes.py"
     ]
   }
 ]
