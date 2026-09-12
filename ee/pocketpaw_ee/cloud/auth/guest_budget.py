@@ -11,12 +11,12 @@
 # reset the meter — so both caps live server-side, on the guest's own rows.
 # Two caps, two shapes:
 #
-#   * SESSIONS (default 2) — a plain count of the guest's session rows,
+#   * SESSIONS (default 20) — a plain count of the guest's session rows,
 #     checked at explicit session-create. Not atomic (a race could mint a 3rd
 #     session), and the auto-create path (``ensure_for_agent_scope``) is NOT
 #     gated — deliberate porosity: the TURNS counter below is the money
 #     backstop, and a surplus empty session costs nothing.
-#   * TURNS/DAY (default 40) — one atomic increment-then-compare row per guest
+#   * TURNS/DAY (default 200) — one atomic increment-then-compare row per guest
 #     per UTC day, cloned from ``uploads/comprehension_budget.py`` including
 #     the over-cap rollback and the beanie-2.x ``get_pymongo_collection``
 #     accessor (NEVER ``get_motor_collection`` — that exact bug shipped twice;
@@ -47,7 +47,7 @@ from pocketpaw_ee.cloud.models.user import GuestLimits, User
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LIMITS = GuestLimits()  # sessions=2, turns_per_day=40
+DEFAULT_LIMITS = GuestLimits()  # sessions=20, turns_per_day=200
 
 
 def _today() -> str:

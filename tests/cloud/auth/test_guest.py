@@ -342,8 +342,13 @@ class TestMintGuest:
 
         assert user.is_guest is True
         assert user.guest_limits is not None
-        assert user.guest_limits.sessions == 2
-        assert user.guest_limits.turns_per_day == 40
+        # The launch numbers, asserted against the model rather than retyped:
+        # a mint must stamp whatever the defaults currently are, and hard-coding
+        # them here is how a raise silently reaches new guests but not this test.
+        assert user.guest_limits.sessions == GuestLimits().sessions
+        assert user.guest_limits.turns_per_day == GuestLimits().turns_per_day
+        assert user.guest_limits.sessions == 20, "sessions default moved unintentionally"
+        assert user.guest_limits.turns_per_day == 200, "turns default moved unintentionally"
         # /auth/me must NOT route the guest into the workspace funnel.
         assert user.active_workspace, "active_workspace must be set at mint"
         assert user.workspaces and user.workspaces[0].role == "owner"
