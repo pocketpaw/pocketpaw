@@ -2255,6 +2255,53 @@ async def _reject_if_over_jail_quota(spec: RunSpec, ctx: ScopeContext, transport
     return True
 
 
+async def _reject_if_over_daily_turns(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
+    """Per-workspace daily agent-run ceiling (feat/abuse-budgets).
+
+    The always-on sibling of ``_reject_if_over_credit_quota``. That gate is the
+    priced ceiling and is a no-op unless ``billing_enforced``, which defaults
+    off — so on a deployment that has not configured billing, nothing bounds
+    what one signed-up account can spend on models. Guests have had a daily
+    turn cap since ``guest_budget``; this is its signed-up equivalent, and it
+    is deliberately NOT flag-gated.
+
+    Sits with the other run-start gates so it covers every path into the
+    executor (HTTP, WebSocket, queued, resumed) and fires BEFORE prewarm,
+    mark-running and any model call. Only this seam increments, so a turn costs
+    exactly one. Rejection uses the same shape as its neighbours: a terminal
+    ``error`` frame, ``mark_terminal(failed)``, then the stream TTL.
+
+    Returns ``True`` when the run was rejected.
+    """
+    from pocketpaw_ee.cloud.chat.runs import turn_budget
+
+    allowed, spent, cap = await turn_budget.try_spend(ctx.workspace_id)
+    if allowed:
+        if cap:
+            logger.debug("workspace turn %d/%d for %s", spent, cap, ctx.workspace_id)
+        return False
+
+    from pocketpaw_ee.cloud._core.errors import DailyTurnLimitError
+
+    exc = DailyTurnLimitError(cap)
+    logger.warning("run %s rejected — workspace daily turn cap (%d)", spec.run_id, cap)
+    try:
+        await transport.append_event(
+            spec.run_id, "error", {"code": exc.code, "message": exc.message}
+        )
+    except Exception:
+        logger.debug("turn-cap error frame append failed for %s", spec.run_id, exc_info=True)
+    try:
+        await run_service.mark_terminal(spec.run_id, status="failed", error=exc.message)
+    except Exception:
+        logger.exception("mark_terminal(failed) failed for turn-capped run %s", spec.run_id)
+    try:
+        await transport.set_ttl(spec.run_id, _stream_ttl())
+    except Exception:
+        logger.debug("turn-cap stream ttl set failed for %s", spec.run_id, exc_info=True)
+    return True
+
+
 async def _reject_if_over_credit_quota(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
     """Universal run-start BILLING gate on the worker/executor path.
 
@@ -2424,6 +2471,16 @@ async def execute_run(spec: RunSpec) -> None:
     # turn costs exactly one. No-op for non-guest users; fail-CLOSED for
     # guests (an unreadable counter refuses the run).
     if await _reject_if_guest_over_limit(spec, ctx, transport):
+        return
+
+    # Workspace daily turn ceiling (feat/abuse-budgets) — the always-on abuse
+    # bound, sitting LAST of the four run-start gates so a more specific and
+    # more actionable rejection wins: over jail quota, out of credit, or a
+    # guest over their allowance all say something the user can act on, where
+    # this one only says "come back tomorrow". No-op when the cap is 0;
+    # fail-CLOSED on an unreadable counter, which costs nothing because the run
+    # persists to the same database.
+    if await _reject_if_over_daily_turns(spec, ctx, transport):
         return
 
     # Mark this dispatch as a live cloud CHAT run for the per-tenant cwd jail's

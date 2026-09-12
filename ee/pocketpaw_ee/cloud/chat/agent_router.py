@@ -221,6 +221,19 @@ async def post_agent_chat(
 
     await assert_guest_turn_allowed(user_id, ctx.workspace_id)
 
+    # Workspace daily turn ceiling, CHECK-ONLY (feat/abuse-budgets). Same
+    # reason as the two fast-rejects above: without it a capped account still
+    # creates a run doc, opens a stream and sets a TTL on every send, and the
+    # per-IP limiter allows ten of those a second. Does NOT increment — the
+    # executor owns the single atomic spend — and fails OPEN, because the
+    # executor's gate is the one that has to be right.
+    from pocketpaw_ee.cloud.chat.runs import turn_budget
+
+    if await turn_budget.is_over_cap(ctx.workspace_id):
+        from pocketpaw_ee.cloud._core.errors import DailyTurnLimitError
+
+        raise DailyTurnLimitError(turn_budget.daily_cap())
+
     transport = get_stream_transport()
     # Resolve the surface-aware context preamble AFTER scope is resolved
     # (so we have ``workspace_id`` / ``user_id`` confirmed) and BEFORE any
