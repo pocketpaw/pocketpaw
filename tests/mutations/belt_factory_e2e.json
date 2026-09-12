@@ -21,8 +21,8 @@
   },
   {
     "label": "the propose path stops reporting verify \u2014 the run jumps develop to gate and the console shows a human gate nothing justified",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
-    "find": "            workspace_id=workspace_id, stage=\"verify\", prev=\"develop\", run_id=run_id",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "            stage=\"verify\",\n            prev=\"develop\",",
     "replace": "            workspace_id=workspace_id, stage=\"develop\", prev=\"develop\", run_id=run_id",
     "tests": [
       "tests/cloud/test_belt_factory_e2e.py::test_the_whole_chain_in_order",
@@ -31,8 +31,8 @@
   },
   {
     "label": "the verify event goes out with no run id \u2014 an orphan event on a refused run, with nothing to attach it to",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
-    "find": "            workspace_id=workspace_id, stage=\"verify\", prev=\"develop\", run_id=run_id",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
+    "find": "            run_id=run_id,\n            action_id=action_id,",
     "replace": "            workspace_id=workspace_id, stage=\"verify\", prev=\"develop\", run_id=None",
     "tests": [
       "tests/cloud/test_belt_factory_e2e.py::test_the_refused_run_still_joins"
@@ -40,7 +40,7 @@
   },
   {
     "label": "the verify stage is claimed even when the gate is switched off \u2014 a stage the data cannot prove",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
+    "file": "ee/pocketpaw_ee/cloud/belt/verify.py",
     "find": "    if not getattr(settings, \"belt_verify_enabled\", True):\n        return {\"status\": \"disabled\"}, None",
     "replace": "    if not getattr(settings, \"belt_verify_enabled\", True):\n        from pocketpaw_ee.cloud.belt.service import emit_belt_stage\n\n        await emit_belt_stage(\n            workspace_id=workspace_id, stage=\"verify\", prev=\"develop\", run_id=run_id\n        )\n        return {\"status\": \"disabled\"}, None",
     "tests": [

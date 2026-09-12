@@ -70,9 +70,7 @@ def test_bind_unbind_and_bridge_share_one_scope() -> None:
     assert len(unbind) == 1, f"expected exactly one unbind site, found {unbind}"
     assert bridge, "the belt entity bridge call vanished from run_core"
 
-    owners = {
-        _enclosing_function(tree, line).name for line in (bind + unbind + bridge)
-    }
+    owners = {_enclosing_function(tree, line).name for line in (bind + unbind + bridge)}
     assert len(owners) == 1, (
         "the run-id bind, its reset and the belt entity bridge must live in one "
         f"function or the ContextVar is not reachable at emit time; found {owners}"

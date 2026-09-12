@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
 from pocketpaw_ee.cloud.chat.agent_service import (
     bind_stream_run_id,
     current_stream_run_id,
