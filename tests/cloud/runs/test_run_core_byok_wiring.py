@@ -19,6 +19,18 @@
 #
 # Harness cloned from test_run_core_session_supervisor.py (capture pool +
 # stubbed collaborators; hermetic, no mongod).
+#
+# Updated 2026-09-11 (feat/byok-custom-gateway, review B2): ``_drive`` RAISES a
+# ``creds`` that is an exception, so the resolver's failure branches go through
+# the same harness. Three tests added:
+#
+#   * a GatewayEgressRejected  -> ``byok.base_url_rejected`` frame, no pool.run.
+#   * the same, asserted on the BILL: it must not fall through to the broad
+#     handler's degrade-to-platform, which would run a tenant's bad gateway
+#     address on our credential.
+#   * a generic resolver crash -> still degrades to platform, unchanged. That
+#     one keeps the other two honest: a catch written too wide would start
+#     refusing turns that used to run.
 
 from __future__ import annotations
 
@@ -127,6 +139,11 @@ async def _drive(
         monkeypatch.setattr(run_core, "get_session_supervisor", lambda: SessionSupervisor())
 
     async def _resolve(workspace_id):
+        # An exception passed as ``creds`` is RAISED rather than returned, so a
+        # test can drive the resolver's failure branches through the same
+        # harness. That is how the egress refusal below is exercised.
+        if isinstance(creds, BaseException):
+            raise creds
         return creds
 
     monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _resolve)
@@ -262,6 +279,60 @@ async def test_the_supervisor_still_wires_on_a_platform_turn(monkeypatch):
     assert "session_handle" in pool.run_kwargs, (
         "harness must make the supervisor path viable, or the byok-skip test is vacuous"
     )
+
+
+async def test_a_rejected_gateway_address_refuses_the_turn(monkeypatch):
+    """Review B2. ``resolve_turn_credentials`` raises when the stored gateway
+    address no longer passes the egress guard, and this loop has to turn that
+    into a refusal.
+
+    The distance between fixed and broken here is one deleted ``except``
+    clause: the broad handler immediately below degrades to platform
+    credentials, so losing the typed catch silently runs every turn with a bad
+    gateway address on OUR key. Nothing else in this file would notice."""
+    from pocketpaw_ee.cloud.byok.service import GatewayEgressRejected
+
+    pool, out = await _drive(
+        monkeypatch,
+        _ctx(),
+        creds=GatewayEgressRejected("that gateway address resolves to an internal host"),
+    )
+    assert pool.run_called is False, "a rejected gateway address must never reach the model"
+    errors = [d for name, d in out if name == "error"]
+    assert errors and errors[0]["code"] == "byok.base_url_rejected"
+
+
+async def test_a_rejected_gateway_address_does_not_fall_back_to_platform(monkeypatch):
+    """The cost half of the same guard, kept separate because it is the part a
+    well-meaning refactor removes. Falling through to the broad handler would
+    put the tenant's broken address on the platform's bill, which is exactly
+    what the review retracted its own first suggestion over."""
+    from pocketpaw_ee.cloud.byok.service import GatewayEgressRejected
+
+    pool, out = await _drive(
+        monkeypatch,
+        _ctx(),
+        creds=GatewayEgressRejected("rejected"),
+    )
+    assert pool.run_kwargs is None, (
+        "the turn ran on platform credentials instead of refusing — a tenant's "
+        "bad gateway address must not spend the platform's money"
+    )
+    assert [name for name, _ in out] == ["error"]
+
+
+async def test_an_unrelated_resolver_crash_still_degrades_to_platform(monkeypatch):
+    """The counterpart that keeps the two tests above honest: the broad
+    handler's degrade-to-platform behaviour is UNCHANGED for everything that is
+    not an egress rejection. If the new catch were written too wide, this would
+    start refusing turns that used to run."""
+    pool, out = await _drive(
+        monkeypatch,
+        _ctx(),
+        creds=RuntimeError("mongo blinked"),
+    )
+    assert pool.run_called is True, "a generic resolver crash must still degrade, not refuse"
+    assert "byok_api_key" not in pool.run_kwargs
 
 
 async def test_the_plaintext_key_never_reaches_a_log_record(monkeypatch, caplog):

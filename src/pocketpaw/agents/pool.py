@@ -686,6 +686,7 @@ class AgentPool:
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
         byok_api_key: str | None = None,
+        byok_settings_override: dict[str, object] | None = None,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -772,6 +773,15 @@ class AgentPool:
         the model object it builds. Passing one tenant's key to a shared backend
         would leave it there for the next tenant's turn, billing a stranger's
         account. An isolated instance cannot outlive the run that made it.
+
+        ``byok_settings_override`` (2026-09-09) is what to substitute, when the
+        answer is more than one key. A key for an OpenAI-compatible gateway also
+        needs the gateway's address and model id, and those are as
+        tenant-specific as the key itself. The cloud builds this dict; when it
+        is absent the pool falls back to substituting ``byok_api_key`` alone,
+        which is byte-identical to the 2026-08-28 behaviour.
+
+        ``byok_api_key`` remains the GATE for both: no key, no isolated backend.
 
         None (the default) = the shared cached instance, unchanged for every
         existing run.
@@ -913,7 +923,9 @@ class AgentPool:
                             instance.backend.settings.agent_backend,
                         ),
                         instance.backend.settings,
-                        settings_override={"byok_provider_api_key": byok_api_key},
+                        settings_override=(
+                            byok_settings_override or {"byok_provider_api_key": byok_api_key}
+                        ),
                     )
                 except Exception:
                     logger.warning(

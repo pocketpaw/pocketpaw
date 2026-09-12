@@ -1,6 +1,15 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-09-11 (feat/byok-custom-gateway, review B2) — ``_iter_agent_events``
+  catches ``byok_service.GatewayEgressRejected`` from
+  ``resolve_turn_credentials`` and yields a terminal
+  ``byok.base_url_rejected`` instead of running the turn. The catch sits ABOVE
+  the existing broad ``except Exception``, which degrades to platform
+  credentials: reaching it with a rejected gateway address would put every
+  such turn on OUR key, so a tenant's bad (or hostile) address would spend our
+  money. A refused turn is the correct answer — the address is theirs to fix.
+
 - 2026-09-08 (fix/attachment-only-turns) — ``_drive_agent_loop`` now runs its
   ``user_content`` through ``agent_service.resolve_user_content`` before
   anything reads it. A send with attachments and no typed text arrives as the
@@ -1714,6 +1723,23 @@ async def _drive_agent_loop(
 
         try:
             byok_creds = await byok_service.resolve_turn_credentials(ctx.workspace_id)
+        except byok_service.GatewayEgressRejected as exc:
+            # The stored gateway address no longer passes the egress guard —
+            # it resolves somewhere this server must not dial (2026-09-11,
+            # review B2). Caught BEFORE the broad handler below on purpose:
+            # that one degrades to platform credentials, which here would run
+            # the tenant's turn on OUR key every time their address is bad.
+            # Refuse the turn and say why; the user fixes the address.
+            logger.warning(
+                "byok: gateway address rejected by the egress guard for workspace=%s — "
+                "refusing the turn",
+                ctx.workspace_id,
+            )
+            yield (
+                "error",
+                {"code": "byok.base_url_rejected", "message": exc.message},
+            )
+            return
         except Exception:
             logger.exception(
                 "byok: resolve_turn_credentials failed for workspace=%s — "
@@ -1740,6 +1766,13 @@ async def _drive_agent_loop(
                 )
                 return
             run_kwargs["byok_api_key"] = byok_creds.api_key
+            # What to substitute, when the answer is more than one key. A
+            # gateway key also carries the address and the model id; the pool
+            # falls back to the key alone when this is empty, so anthropic keys
+            # take exactly the path they took before (2026-09-09).
+            override = byok_service.build_settings_override(byok_creds)
+            if override:
+                run_kwargs["byok_settings_override"] = override
         else:
             from pocketpaw_ee.cloud.auth import guest_budget
 

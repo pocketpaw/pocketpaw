@@ -2971,7 +2971,7 @@ here is local verification, not a production hole.
 
 | Endpoint | Notes |
 |---|---|
-| `POST /auth/guest` | `{api_key, provider?="anthropic"}`. Rate-limited per IP (429). Validates the key against the provider FIRST (422 `byok.key_rejected` / `byok.provider_unavailable` / `byok.provider_unsupported` — Anthropic only in v1); a dead key mints **nothing**. On success mints an anonymous user (`is_guest`) + workspace + default agent, stores the key encrypted (the same per-workspace Fernet store the `/byok` routes use), and answers exactly like `POST /auth/login` (204 + cookies). Public by necessity — a guest has no account yet; on the route-auth-audit allowlist with that reason. |
+| `POST /auth/guest` | `{api_key, provider?="anthropic", base_url?, model?}`. Rate-limited per IP (429). Validates the key against the provider FIRST (422 `byok.key_rejected` / `byok.key_rate_limited` / `byok.provider_unavailable` / `byok.provider_unsupported`); a dead key mints **nothing**. `provider` is `anthropic` or `openai_compatible`; the latter REQUIRES `base_url` and `model` (422 `byok.base_url_required` / `byok.model_required`) and the URL must be https on a host that is external **after DNS resolution** — the name is resolved and every address it answers with is checked, so a public hostname pointing at a private range is refused like the private address itself (422 `byok.base_url_rejected`). The request that verifies the key is then sent to that exact resolved address, with redirects off. On success mints an anonymous user (`is_guest`) + workspace + default agent, stores the key encrypted (the same per-workspace Fernet store the `/byok` routes use), and answers exactly like `POST /auth/login` (204 + cookies). Public by necessity — a guest has no account yet; on the route-auth-audit allowlist with that reason. |
 | `POST /auth/guest/upgrade` | Authenticated guest only. `{email, password}` attaches real credentials to the **same user id** (workspace, sessions, key all stay) and flips `is_guest` off. 409 `auth.email_taken` / `auth.not_a_guest`. The stock `/auth/register` always creates a NEW user, hence the dedicated route. |
 
 Guest limits are server-side and fail-CLOSED: 2 sessions and 40 turns/day by
@@ -2985,7 +2985,36 @@ Turn billing: every workspace with a stored BYOK key (guest or not) now runs
 its chat turns on that key — the executor resolves credentials per turn and
 threads them into the agent pool's isolated backend. The turn's model must
 belong to the key's provider (402-style `byok.model_provider_mismatch` error
-frame on a mismatch, never a silent upstream 401).
+frame on a mismatch, never a silent upstream 401). A gateway key
+(`openai_compatible`, 2026-09-09) is exempt from that check: a gateway's model
+ids are its own namespace, so there is no name shape the server could check
+against, and the model that actually runs is the `pydantic_ai_model` the
+credential resolver pins — the pydantic_ai backend, which is the one a gateway
+turn runs on, accepts a per-send `model_override` only to ignore it.
+
+**The gateway address is re-checked on every turn** (2026-09-11). A stored
+`base_url` is resolved again before the turn runs, and every address it
+resolves to must be external. A row written before this check existed, or a
+host whose DNS later points inside, gets a terminal
+`byok.base_url_rejected` error frame. The turn is refused, not quietly moved
+onto platform credentials — a tenant's bad address must not spend the
+platform's money.
+
+**A gateway turn does not go through the LiteLLM proxy.** An Anthropic key
+rides as a forwarded `x-api-key`, which works because the proxy knows where
+Anthropic is; there is no model group pointing at a URL a user typed, so a
+gateway turn is sent straight to `base_url` through the runtime's own
+`openai_compatible` provider. Those turns therefore produce no spend-log row
+and skip the proxy's guardrails. Weigh that before a paid tier rides the same
+seam.
+
+### BYOK key management
+
+| Endpoint | Notes |
+|---|---|
+| `GET /byok/key` | `ByokStatus` — `configured`, `provider`, `base_url`, `model`, `last4`, `key_hint`, `last_verified_at`, `last_error`. Built from display-only columns; answering never decrypts, and no route ever returns the key. |
+| `PUT /byok/key` | `{provider?="anthropic", api_key, base_url?, model?}`. Validates against the provider (or the gateway's own `/chat/completions`), then encrypts and upserts. Same shape rules and error codes as `POST /auth/guest`. An `anthropic` body carrying `base_url` or `model` is refused rather than silently ignored. |
+| `DELETE /byok/key` | Idempotent. Removing an absent key succeeds. |
 
 ### BYOK key management
 
