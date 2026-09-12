@@ -163,15 +163,24 @@ class _DeleteDeps:
     ``run_cascade`` takes ``deps`` at all.
     """
 
-    def __init__(self, *, cloudflare: Any, assets: Any) -> None:
+    def __init__(self, *, cloudflare: Any, assets: Any, pocket_id: str = "") -> None:
         self.cloudflare = cloudflare
         self.assets = assets
+        # The concierge transcripts are keyed on the POCKET, not the site — a
+        # concierge run has never carried a site id — so the purge step needs it
+        # here. Carried on the deps rather than read off the doc inside
+        # ``purge_records`` because ``run_cascade`` hands that method only the two
+        # ids it was already passing, and widening the cascade's own call shape to
+        # thread a third would make every deps double in the suite wrong at once.
+        self.pocket_id = pocket_id
 
     async def purge_records(self, *, workspace_id: str, site_id: str) -> None:
-        await sites_service.purge_site_records(workspace_id=workspace_id, site_id=site_id)
+        await sites_service.purge_site_records(
+            workspace_id=workspace_id, site_id=site_id, pocket_id=self.pocket_id
+        )
 
 
-def _build_deps() -> _DeleteDeps:
+def _build_deps(*, pocket_id: str = "") -> _DeleteDeps:
     from pocketpaw_ee.sites.public_assets import public_asset_store
 
     cloudflare: Any
@@ -186,7 +195,7 @@ def _build_deps() -> _DeleteDeps:
     # ``None`` is what the cascade's R2 step reads as "no public rail on this
     # deployment", which is a deployment fact and a legitimate skip. Distinct from an
     # adapter that exists and cannot list, which ``PublicAssetStore.purge`` raises on.
-    return _DeleteDeps(cloudflare=cloudflare, assets=public_asset_store())
+    return _DeleteDeps(cloudflare=cloudflare, assets=public_asset_store(), pocket_id=pocket_id)
 
 
 def _cause_of(exc: Exception) -> str:
@@ -289,7 +298,7 @@ async def run_site_delete(
 
     # ── The cascade: everything from here is destructive ─────────────────────
     await sites_service.mark_delete_stage(site, status="tearing_down")
-    deps = _deps if _deps is not None else _build_deps()
+    deps = _deps if _deps is not None else _build_deps(pocket_id=getattr(site, "pocket_id", ""))
     try:
         await run_cascade(site=site, deps=deps, save=sites_service.record_delete_progress)
     except CascadeStepFailed as exc:

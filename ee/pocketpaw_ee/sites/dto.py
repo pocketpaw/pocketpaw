@@ -320,6 +320,12 @@ class SiteResponse(BaseModel):
     # the pocket has no pattern or could not be resolved. Lets the frontend badge
     # dynamic sites in the gallery without a second fetch.
     pattern: str = ""
+    # Wave 4: live | pausing | paused | resuming. A paused site carries
+    # ``deployed=False`` and an empty ``url`` exactly like one that was never
+    # published, so this is the ONLY field that tells the gallery the owner took it
+    # down on purpose and can put it back. "live" on every pre-existing row and the
+    # do-nothing value for every reader, so a client that predates it is unchanged.
+    lifecycle_state: str = "live"
     # SR-9: the source pocket's authoring engine ("svelte" | "ripple"), resolved
     # from Pocket.engine (it lives on the pocket, not the Site) — the sibling of
     # ``pattern`` above. Lets the gallery badge each card's engine (Custom vs
@@ -505,6 +511,43 @@ class SiteDeleteQueuedResponse(BaseModel):
     #: Mirrors ``Site.delete_job_id``. Persisted rather than transient because a queued
     #: destructive job is exactly when someone reloads the page.
     job_id: str | None = None
+
+
+class SiteLifecycleResponse(BaseModel):
+    """Answer of ``POST /sites/{site_id}/pause`` and ``.../resume``.
+
+    NOT a 202 with a job handle, unlike delete, because pause is not a job. Its four
+    Cloudflare calls are bounded and fast, so the work is done by the time this
+    returns and there is nothing to poll.
+
+    RESUME IS THE ASYMMETRIC ONE, and the reason ``lifecycle_state`` is on the wire
+    rather than a bare ``ok``. A resume answers ``resuming``, not ``live``: it
+    republishes, and the site is only serving once that deploy lands. A client that
+    read this as "done" would show a working link to a page that is still building.
+    Poll the site read until the state reaches ``live``.
+
+    ``lifecycle_state`` is a plain ``str`` for the reason
+    :class:`SiteDeleteStatusResponse` gives for its own: the client must treat a value
+    it does not recognise as "still working", which only holds if an unknown value can
+    reach it.
+    """
+
+    site_id: str
+    #: live | pausing | paused | resuming.
+    lifecycle_state: str = "live"
+    #: When the current pause began, or None for a site that is not paused. The input
+    #: to the billing deferral — resume advances ``renewal_date`` by exactly this
+    #: window, so a paused site is not charged for the days it was dark.
+    paused_at: datetime | None = None
+    #: WHY a pause or a resume stopped, as ``"<step>:<cause>"`` — the same two-part
+    #: shape ``delete_reason`` and ``build_reason`` use. None when nothing failed.
+    pause_reason: str | None = None
+    #: Step name -> outcome: the pause/resume ledger. A re-entered pause or resume
+    #: skips every step recorded here.
+    pause_ledger: dict[str, str] = Field(default_factory=dict)
+    #: The live URL, or "" while paused. Cleared by a pause because nothing answers
+    #: there any more, not as a second way of saying "paused".
+    url: str = ""
 
 
 class SiteDeleteStatusResponse(BaseModel):

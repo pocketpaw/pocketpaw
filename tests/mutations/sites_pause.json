@@ -1,0 +1,173 @@
+[
+  {
+    "label": "pause reclaims the D1 (a reversible action that destroys data)",
+    "file": "ee/pocketpaw_ee/sites/pause.py",
+    "find": "PAUSE_STEPS: tuple[str, ...] = (STEP_REVOKE, STEP_ROUTES, STEP_HOSTNAMES, STEP_SCRIPT)",
+    "replace": "PAUSE_STEPS: tuple[str, ...] = (STEP_REVOKE, STEP_ROUTES, STEP_HOSTNAMES, STEP_SCRIPT, \"d1\")",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "pause shares the delete ledger (a later delete skips revoking a re-minted key)",
+    "file": "ee/pocketpaw_ee/sites/pause.py",
+    "find": "PAUSE_LEDGER_FIELD = \"pause_ledger\"",
+    "replace": "PAUSE_LEDGER_FIELD = \"delete_ledger\"",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "run_cascade ignores the steps it was given and always runs the full teardown",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "    for step in steps:",
+    "replace": "    for step in CASCADE_STEPS:",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "run_cascade writes every ledger to delete_ledger regardless of the field asked for",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "        setattr(site, ledger_field, dict(ledger))",
+    "replace": "        site.delete_ledger = dict(ledger)",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "the billing deferral is a no-op (the customer pays for the dark days)",
+    "file": "ee/pocketpaw_ee/sites/pause.py",
+    "find": "    return current + dark",
+    "replace": "    return current",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "the deferral moves the renewal backwards on a clock that went back",
+    "file": "ee/pocketpaw_ee/sites/pause.py",
+    "find": "    if dark.total_seconds() <= 0:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "the renewal sweeper charges a paused site",
+    "file": "ee/pocketpaw_ee/sites/renewal_sweeper.py",
+    "find": "                \"lifecycle_state\": {\"$in\": [\"live\", \"resuming\", None]},",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "resume writes the route before the hostname the route needs",
+    "file": "ee/pocketpaw_ee/sites/pause.py",
+    "find": "        (STEP_RESUME_HOSTNAMES, _restore_hostnames),\n        (STEP_RESUME_ROUTES, _restore_routes),",
+    "replace": "        (STEP_RESUME_ROUTES, _restore_routes),\n        (STEP_RESUME_HOSTNAMES, _restore_hostnames),",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "a resumed hostname is optimistically reported live while its cert reissues",
+    "file": "ee/pocketpaw_ee/sites/pause.py",
+    "find": "        domain.status = created.status.value",
+    "replace": "        domain.status = \"live\"",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "resume writes a route for a wfp site, which 404s and reads as success",
+    "file": "ee/pocketpaw_ee/sites/pause.py",
+    "find": "    if not domains or not script:",
+    "replace": "    if not domains:",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "resume re-honours the key the pause revoked",
+    "file": "ee/pocketpaw_ee/sites/pause.py",
+    "find": "    site.revoked = False\n    return str(site.signed_key)",
+    "replace": "    site.revoked = False\n    return \"site_key_old\"",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  },
+  {
+    "label": "the transcript purge drops its tenancy predicate",
+    "file": "ee/pocketpaw_ee/paw_bar/purge.py",
+    "find": "            \"workspace\": workspace_id,\n            \"context_type\": _concierge_context_type(),",
+    "replace": "            \"context_type\": _concierge_context_type(),",
+    "tests": [
+      "tests/ee/sites/test_transcript_purge.py"
+    ]
+  },
+  {
+    "label": "the transcript purge drops context_type and destroys the owner's own chat history",
+    "file": "ee/pocketpaw_ee/paw_bar/purge.py",
+    "find": "            \"context_type\": _concierge_context_type(),\n            \"scope_id\": pocket_id,",
+    "replace": "            \"scope_id\": pocket_id,",
+    "tests": [
+      "tests/ee/sites/test_transcript_purge.py"
+    ]
+  },
+  {
+    "label": "the transcript purge drops scope_id and forgets every site in the workspace",
+    "file": "ee/pocketpaw_ee/paw_bar/purge.py",
+    "find": "            \"scope_id\": pocket_id,\n        }",
+    "replace": "        }",
+    "tests": [
+      "tests/ee/sites/test_transcript_purge.py"
+    ]
+  },
+  {
+    "label": "an empty scope is accepted instead of refused",
+    "file": "ee/pocketpaw_ee/paw_bar/purge.py",
+    "find": "        raise ValueError(\"purge_site_transcripts needs both a workspace and a pocket\")",
+    "replace": "        return {\"runs\": 0, \"owner_messages\": 0, \"conversations\": 0}",
+    "tests": [
+      "tests/ee/sites/test_transcript_purge.py"
+    ]
+  },
+  {
+    "label": "the purge stops at chat_runs and leaves the SQLite half alive",
+    "file": "ee/pocketpaw_ee/paw_bar/purge.py",
+    "find": "    widgets = await store.list_widgets(pocket_id=pocket_id, workspace_id=workspace_id)",
+    "replace": "    widgets = []",
+    "tests": [
+      "tests/ee/sites/test_transcript_purge.py"
+    ]
+  },
+  {
+    "label": "the delete cascade stops handing the pocket id to the transcript purge",
+    "file": "ee/pocketpaw_ee/sites/delete_job.py",
+    "find": "            workspace_id=workspace_id, site_id=site_id, pocket_id=self.pocket_id",
+    "replace": "            workspace_id=workspace_id, site_id=site_id",
+    "tests": [
+      "tests/ee/sites/test_transcript_purge.py"
+    ]
+  },
+  {
+    "label": "purge_site_records skips the transcript purge on every site",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if pocket_id:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/ee/sites/test_transcript_purge.py"
+    ]
+  },
+  {
+    "label": "lifecycle_state is declared on the DTO but never populated (every paused site reads live)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        lifecycle_state=getattr(doc, \"lifecycle_state\", \"\") or \"live\",",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_pause_lane.py"
+    ]
+  }
+]

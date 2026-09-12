@@ -2,8 +2,8 @@
   {
     "label": "the delete endpoint stops checking ownership, so any workspace member can destroy a site they did not create",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    site = await _load(workspace_id, site_id)\n    if site.owner != user_id:\n        from pocketpaw_ee.guards.audit import log_denial",
-    "replace": "    site = await _load(workspace_id, site_id)\n    if False:\n        from pocketpaw_ee.guards.audit import log_denial",
+    "find": "    if site.owner != user_id:\n        from pocketpaw_ee.guards.audit import log_denial\n\n        log_denial(\n            actor=user_id,\n            action=\"site.delete\",",
+    "replace": "    if False:\n        from pocketpaw_ee.guards.audit import log_denial\n\n        log_denial(\n            actor=user_id,\n            action=\"site.delete\",",
     "tests": [
       "tests/ee/sites/test_delete_endpoint.py"
     ]

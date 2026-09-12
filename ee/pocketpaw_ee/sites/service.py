@@ -1123,6 +1123,7 @@ from pocketpaw_ee.sites.dto import (
     SiteExportResponse,
     SiteInvoiceCreate,
     SiteInvoiceOut,
+    SiteLifecycleResponse,
     SiteMetadataUpdate,
     SitePreviewRefreshResponse,
     SitePreviewResponse,
@@ -2184,6 +2185,11 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         deployed=doc.deployed,
         signed_key=doc.signed_key,
         url=doc.url,
+        # PASSED, not merely declared. The comment five lines up records how
+        # ``build_status`` shipped on this DTO with nothing populating it and read
+        # its default forever; the gallery badge is the only consumer of this
+        # field, so the same omission would render every paused site as live.
+        lifecycle_state=getattr(doc, "lifecycle_state", "") or "live",
         # SE-2b: surface whether the site is editable (non-empty = carries the
         # edit-bridge) so the UI can show/hide the inline-edit affordance.
         builder_origin=getattr(doc, "builder_origin", ""),
@@ -3201,6 +3207,11 @@ async def _deploy_site_doc(
     # slow, and a publish must not wait on it — the site goes live immediately and
     # the concierge catches up a moment later. A preview publish never reaches here
     # (it returns earlier), so a draft never rewrites the live KB.
+    # PHASE 2 OF A RESUME, and it runs BEFORE the backgrounded tail steps because it
+    # is the only one of them that is not cosmetic: a route naming this script could
+    # not be written until the script existed, which it now does. A no-op on every
+    # publish that is not completing a resume, and failure-soft when it is not.
+    await finish_resume_if_pending(doc)
     _schedule_site_knowledge_sync(doc)
     # SC-1: the page the gallery card shows is now a different page, so re-shoot
     # it. Same placement and the same rule as the sync above — the site is
@@ -10543,7 +10554,7 @@ async def record_delete_progress(site: _SiteDoc) -> None:
     await site.set({field: getattr(site, field) for field in _CASCADE_MUTATED_FIELDS})
 
 
-async def purge_site_records(*, workspace_id: str, site_id: str) -> int:
+async def purge_site_records(*, workspace_id: str, site_id: str, pocket_id: str = "") -> int:
     """Delete the dependent rows a destroyed site leaves behind. Returns the count.
 
     Scoped on ``(workspace, site_id)`` — the compound index ``Lead`` already declares —
@@ -10557,11 +10568,17 @@ async def purge_site_records(*, workspace_id: str, site_id: str) -> int:
         retention this product does not control. The confirm dialog says so out loud
         and the export bundle repeats it — implying a full wipe would be a
         completeness we cannot deliver.
-      * CONCIERGE TRANSCRIPTS. They are ``ChatRun`` rows keyed on the POCKET and owned
-        by the Paw Bar surface; reaching into another subsystem's collection from here
-        would put a second writer on rows only that surface knows the shape of.
-        Tracked as follow-up. The site's signed key is revoked in cascade step 2, so
-        no NEW transcript can be written once a delete starts.
+      * SITE ANALYTICS ARE STILL NOT PURGED, and neither are design briefs — see the
+        two bullets around this one. CONCIERGE TRANSCRIPTS, which used to be the
+        third entry in that list, now ARE purged, through the surface that owns
+        them rather than from here. The refusal this bullet replaced was right that
+        reaching into ``chat_runs`` and the Paw Bar tables from the sites package
+        would put a second writer on rows only that surface knows the shape of; it
+        was wrong to leave the rows alive, because they are a visitor's free text
+        and they were outliving the site captured on. ``paw_bar.purge`` is the seam
+        that resolves both: this function asks Paw Bar to forget a site, and Paw Bar
+        decides what forgetting means (three stores, not one — read its header).
+        Keyed on ``pocket_id``, because a concierge run has never carried a site id.
       * SITE DESIGN BRIEFS. They carry no ``site_id`` at all — a brief belongs to an
         import, not to the site an import eventually became — so there is no query
         that could select this site's.
@@ -10579,6 +10596,29 @@ async def purge_site_records(*, workspace_id: str, site_id: str) -> int:
         {"scope_id": {"$regex": f"^{re.escape(site_id)}(:|$)"}}
     ).delete()
     removed += getattr(counters, "deleted_count", 0) or 0
+
+    # The concierge transcripts, through Paw Bar's own purge. NOT failure-soft and
+    # not conditional on anything but having a pocket to name: a raise here fails
+    # the cascade's ``records`` step, which leaves the ledger without it and makes
+    # the owner's retry resume into this call again. Swallowing it would record a
+    # destroyed transcript over live personal data, which is the failure this whole
+    # step exists to stop.
+    #
+    # ``pocket_id`` defaults to "" so the signature stays compatible with a caller
+    # that has only the two ids, and an empty one SKIPS rather than guesses — a
+    # purge with no pocket would have to match on workspace alone, which is every
+    # concierge conversation in the tenant.
+    if pocket_id:
+        from pocketpaw_ee.paw_bar.purge import purge_site_transcripts
+
+        forgotten = await purge_site_transcripts(workspace_id=workspace_id, pocket_id=pocket_id)
+        removed += sum(forgotten.values())
+    else:
+        logger.warning(
+            "sites.purge_site_records: site %s carries no pocket id; its concierge "
+            "transcripts are NOT purged and hold visitor free text",
+            site_id,
+        )
     return removed
 
 
@@ -10671,6 +10711,299 @@ async def site_delete_status(
     )
 
 
+# Pause / resume (sites lifecycle wave 4)
+# ---------------------------------------------------------------------------
+#
+# The REVERSIBLE answer to the irreversible feature above. Pause is the delete
+# cascade's serving half with the reclaims left out; resume puts it back. Read
+# ``sites/pause.py``'s header before touching any of this — it carries the two
+# decisions these functions only implement: why deleting the Worker is unavoidable
+# (and therefore why resume needs a redeploy), and why billing pauses by DEFERRAL
+# rather than cancellation.
+#
+# THE SAME FIELD-SCOPED WRITE RULE AS THE DELETE SECTION applies here and binds just
+# as hard: a pause holds its in-memory doc across several Cloudflare calls while a
+# BUILD may be writing to the same row, so a ``save()`` would push a stale
+# whole-document snapshot back and roll that build's status backwards.
+
+#: The fields a pause cascade step mutates ON THE DOC, written back with the ledger.
+#: The sibling of ``_CASCADE_MUTATED_FIELDS`` and not cosmetic for the same reason:
+#: ``_revoke_key`` closes the public ingest surface IN MEMORY, so a ledger-only save
+#: would record a revoked key over a row whose key is still live and accepting leads.
+#: ``domains`` is here for the resume half, which writes the new Cloudflare ids onto
+#: the embedded domain rows.
+_PAUSE_MUTATED_FIELDS = (
+    "pause_ledger",
+    "signed_key",
+    "revoked",
+    "domains",
+)
+
+
+async def record_pause_progress(site: _SiteDoc) -> None:
+    """Persist one pause or resume step's effects: the ledger PLUS what it changed.
+
+    The ``save`` callback both ``pause.run_pause`` and ``pause.restore_serving``
+    invoke after EVERY step. See :data:`_PAUSE_MUTATED_FIELDS` for why it is not
+    ledger-only.
+    """
+    await site.set({field: getattr(site, field) for field in _PAUSE_MUTATED_FIELDS})
+
+
+async def pause_site(*, workspace_id: str, user_id: str, site_id: str) -> SiteLifecycleResponse:
+    """Take a site off the internet. OWNER ONLY. Destroys nothing.
+
+    Owner-only for the reason ``start_site_delete`` records: a workspace member who
+    may edit a site may not decide it stops serving, and the check lives here rather
+    than in the router because jobs, bus handlers and MCP tools reach services
+    directly. Same two answers as delete — 403 for a non-owner inside the workspace,
+    404 from ``_load`` for a site in another one.
+
+    A DELETE IN FLIGHT REFUSES THE PAUSE, and that is an ordering rule rather than a
+    race guard. Both lanes run the same cascade steps; a pause landing mid-teardown
+    would revoke a key the delete had already recorded and leave two ledgers
+    disagreeing about what is finished. The delete wins — it has already taken the
+    customer's export, and pausing a site that is being destroyed changes nothing the
+    caller wanted.
+
+    A pause that FAILS part-way leaves the row at ``pausing`` carrying
+    ``"<step>:<cause>"``, with every completed step in ``pause_ledger``. Calling again
+    resumes from there rather than repeating, exactly like a re-entered delete.
+    """
+    from pocketpaw_ee.sites import pause as pause_lane
+    from pocketpaw_ee.sites.delete_cascade import CascadeStepFailed
+
+    site = await _load(workspace_id, site_id)
+    if site.owner != user_id:
+        from pocketpaw_ee.guards.audit import log_denial
+
+        log_denial(
+            actor=user_id, action="site.pause", code="site.not_owner", resource_id=str(site.id)
+        )
+        raise Forbidden("site.not_owner", "Only the site's owner can pause it.")
+    if (site.delete_status or "none") in DELETE_IN_FLIGHT_STATUSES:
+        raise ConflictError("site.delete_in_flight", "This site is being deleted.")
+
+    state = site.lifecycle_state or pause_lane.STATE_LIVE
+    if state == pause_lane.STATE_PAUSED:
+        # Already where the caller wants it. Reported rather than raised: a retry of a
+        # request whose answer was lost must not read as an error.
+        return _lifecycle_response(site)
+
+    await site.set({"lifecycle_state": pause_lane.STATE_PAUSING, "pause_reason": None})
+    site.lifecycle_state = pause_lane.STATE_PAUSING
+    site.pause_reason = None
+
+    try:
+        await pause_lane.run_pause(site=site, deps=_pause_deps(), save=record_pause_progress)
+    except CascadeStepFailed as exc:
+        logger.warning("sites.pause: stopped for site %s at %s", site_id, exc.reason)
+        await site.set({"pause_reason": exc.reason})
+        site.pause_reason = exc.reason
+        return _lifecycle_response(site)
+
+    # ``deployed`` / ``url`` are cleared because they are now FALSE, not as a way of
+    # signalling the pause: there is no Worker and nothing answers at that address.
+    # ``lifecycle_state`` is what says the owner MEANT it — see the Site model's
+    # comment on why the two cannot be collapsed into one field.
+    stamp = datetime.now(UTC)
+    await site.set(
+        {
+            "lifecycle_state": pause_lane.STATE_PAUSED,
+            "paused_at": stamp,
+            "deployed": False,
+            "url": "",
+            "pause_reason": None,
+        }
+    )
+    site.lifecycle_state = pause_lane.STATE_PAUSED
+    site.paused_at = stamp
+    site.deployed = False
+    site.url = ""
+    site.pause_reason = None
+    # no-event: the reasoning ``delete_site_document`` records. There is no
+    # ``SitePaused`` type and no consumer for one; the gallery reads the field.
+    logger.info("sites.pause: site %s is paused", site_id)
+    return _lifecycle_response(site)
+
+
+async def resume_site(*, workspace_id: str, user_id: str, site_id: str) -> SiteLifecycleResponse:
+    """Put a paused site back. OWNER ONLY. Answers before it is serving again.
+
+    PHASE 1 OF TWO, and the split is forced rather than chosen — see
+    ``sites/pause.py``'s header. This re-mints the signed key, hands back the billing
+    clock and republishes; the routes and custom hostnames are re-created by
+    ``restore_serving`` once that publish has landed, because Cloudflare rejects a
+    route naming a script that does not yet exist.
+
+    So this returns ``resuming``, NOT ``live``. A site is live when its deploy
+    completes, and claiming it here would put a working link in the gallery for a page
+    that is still building.
+
+    THE BILLING CLOCK MOVES BEFORE THE PUBLISH, deliberately. A publish can fail and
+    leave the row at ``resuming`` for a retry; a renewal date that had not moved yet
+    would then be charged at the old date against a pause the customer has already
+    ended. Moving it first costs nothing when the publish fails — ``paused_at`` is
+    cleared with it, so a second attempt finds no window and leaves the date alone
+    rather than deferring the same pause twice.
+    """
+    from pocketpaw_ee.sites import pause as pause_lane
+
+    site = await _load(workspace_id, site_id)
+    if site.owner != user_id:
+        from pocketpaw_ee.guards.audit import log_denial
+
+        log_denial(
+            actor=user_id, action="site.resume", code="site.not_owner", resource_id=str(site.id)
+        )
+        raise Forbidden("site.not_owner", "Only the site's owner can resume it.")
+    if (site.delete_status or "none") in DELETE_IN_FLIGHT_STATUSES:
+        raise ConflictError("site.delete_in_flight", "This site is being deleted.")
+
+    if (site.lifecycle_state or pause_lane.STATE_LIVE) == pause_lane.STATE_LIVE:
+        return _lifecycle_response(site)
+
+    key = pause_lane.remint_signed_key(site)
+    renewal = pause_lane.deferred_renewal_date(site)
+    await site.set(
+        {
+            "lifecycle_state": pause_lane.STATE_RESUMING,
+            "signed_key": key,
+            "revoked": False,
+            "renewal_date": renewal,
+            "paused_at": None,
+            "pause_reason": None,
+            # The pause ledger is CLEARED here rather than on success. It records what
+            # a pause tore down, and every one of those things is about to be rebuilt —
+            # keeping it would make a LATER pause skip the steps it names, leaving a
+            # site that reports paused while it is still serving. ``restore_serving``
+            # writes its own ``resume:`` keys into the now-empty field.
+            "pause_ledger": {},
+        }
+    )
+    site.lifecycle_state = pause_lane.STATE_RESUMING
+    site.renewal_date = renewal
+    site.paused_at = None
+    site.pause_reason = None
+    site.pause_ledger = {}
+
+    try:
+        # A RESUME BUYS NOTHING. The site still holds the tier it was paused on and its
+        # subscription was never cancelled, so passing no plan key and leaving
+        # ``purchase_authorized`` at its fail-closed default is what keeps an un-pause
+        # from becoming a charge.
+        await publish_pocket(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=site.pocket_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - recorded on the row, then re-raised
+        reason = f"resume:{_pause_cause(exc)}"
+        logger.warning("sites.resume: publish failed for site %s (%s)", site_id, reason)
+        await site.set({"pause_reason": reason})
+        site.pause_reason = reason
+        raise
+
+    # no-event: as above. The publish itself emits ``SitePublished``, which is already
+    # the event a resume's downstream consumers run on.
+    logger.info("sites.resume: site %s republished; awaiting deploy completion", site_id)
+    return _lifecycle_response(site)
+
+
+async def finish_resume_if_pending(site: _SiteDoc) -> None:
+    """PHASE 2: if this deploy completed a resume, put the serving layer back.
+
+    Called from ``_deploy_site_doc``'s tail — the moment a Worker exists again, which
+    is the earliest a route may name it. A site that is not ``resuming`` returns
+    immediately, so an ordinary publish pays one attribute read.
+
+    FAILURE-SOFT, and this is the one place in the pause lane that is. The site is
+    ALREADY BACK on its own URL by the time this runs, so raising here would fail a
+    publish that succeeded. The cost of the soft failure is bounded and visible: the
+    row stays ``resuming`` with the step that stopped it in ``pause_reason``, and the
+    owner's next resume re-enters ``restore_serving``, which skips whatever the first
+    attempt finished.
+    """
+    from pocketpaw_ee.sites import pause as pause_lane
+
+    if (getattr(site, "lifecycle_state", "") or "") != pause_lane.STATE_RESUMING:
+        return
+    try:
+        await pause_lane.restore_serving(site=site, deps=_pause_deps(), save=record_pause_progress)
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        reason = f"resume:{_pause_cause(exc)}"
+        logger.warning(
+            "sites.resume: site %s is serving again but its domains are not restored (%s)",
+            site.id,
+            reason,
+            exc_info=True,
+        )
+        await site.set({"pause_reason": reason})
+        site.pause_reason = reason
+        return
+    await site.set(
+        {"lifecycle_state": pause_lane.STATE_LIVE, "pause_ledger": {}, "pause_reason": None}
+    )
+    site.lifecycle_state = pause_lane.STATE_LIVE
+    site.pause_ledger = {}
+    site.pause_reason = None
+    logger.info("sites.resume: site %s is live again", site.id)
+
+
+def _pause_cause(exc: Exception) -> str:
+    """A short machine token for ``pause_reason``, never raw provider text.
+
+    The same rule and the same alphabet ``delete_job._cause_of`` uses, for the same
+    reason: one vocabulary across every ``"<step>:<cause>"`` this product writes, so an
+    operator grouping failures by cause is not grouping two alphabets.
+    """
+    from pocketpaw_ee.sites.delete_cascade import _classify
+
+    if isinstance(exc, CloudError):
+        code = getattr(exc, "code", "") or ""
+        flattened = "".join(c.lower() if c.isalnum() else "_" for c in code).strip("_")
+        if flattened:
+            return flattened
+    return _classify(exc)
+
+
+def _pause_deps() -> Any:
+    """The side effects the pause cascade calls. Cloudflare only — it reclaims nothing.
+
+    ``assets`` and ``purge_records`` are deliberately ABSENT rather than set to None:
+    pause never runs the ``r2`` or ``records`` steps, so a deps object carrying them
+    would imply a reach this lane does not have. An accidental widening of
+    ``PAUSE_STEPS`` then fails with an AttributeError here instead of quietly purging
+    a paused site's leads.
+    """
+    from pocketpaw_ee.sites.delete_job import _NoCloudflare
+
+    class _PauseDeps:
+        def __init__(self, cloudflare: Any) -> None:
+            self.cloudflare = cloudflare
+
+    if _local_mode():
+        return _PauseDeps(_NoCloudflare())
+    try:
+        return _PauseDeps(_cf_client())
+    except Exception as exc:  # noqa: BLE001 - an unconfigured deployment, not a bug
+        logger.warning("sites.pause: no Cloudflare client available (%s)", exc)
+        return _PauseDeps(_NoCloudflare())
+
+
+def _lifecycle_response(site: _SiteDoc) -> SiteLifecycleResponse:
+    from pocketpaw_ee.sites import pause as pause_lane
+
+    return SiteLifecycleResponse(
+        site_id=str(site.id),
+        lifecycle_state=site.lifecycle_state or pause_lane.STATE_LIVE,
+        paused_at=site.paused_at,
+        pause_reason=site.pause_reason,
+        pause_ledger=dict(site.pause_ledger or {}),
+        url=site.url or "",
+    )
+
+
 __all__ = [
     "apply_edits",
     "create_draft_site",
@@ -10712,5 +11045,9 @@ __all__ = [
     "record_delete_failure",
     "record_delete_progress",
     "purge_site_records",
+    "pause_site",
+    "resume_site",
+    "record_pause_progress",
+    "finish_resume_if_pending",
     "delete_site_document",
 ]

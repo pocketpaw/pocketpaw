@@ -30,6 +30,14 @@
 # WHAT THIS DELIBERATELY DOES NOT DO: it does not take the export. The export is a
 # PRECONDITION resolved before the cascade is ever enqueued, because an export taken
 # inside the cascade could fail after the first destructive step has already run.
+#
+# Updated 2026-09-12 (sites lifecycle wave 4, feat/sites-pause): ``run_cascade`` takes
+# ``steps`` and ``ledger_field``, both defaulted so the delete path is unchanged. PAUSE
+# is this cascade's serving half (revoke, routes, hostnames, script) with the reclaim
+# and records steps omitted, running through this same function so the two cannot
+# drift on which delete a wfp site needs or how a failure is classified. It writes its
+# own ledger -- see the docstring for why sharing one would let a later delete skip
+# revoking a re-minted key.
 """The delete cascade: tear one site down, in an order that survives failure."""
 
 from __future__ import annotations
@@ -106,8 +114,27 @@ async def run_cascade(
     site: Any,
     deps: Any,
     save: Any,
+    steps: tuple[str, ...] = CASCADE_STEPS,
+    ledger_field: str = "delete_ledger",
 ) -> None:
     """Tear the site down in order, recording each step in ``site.delete_ledger``.
+
+    ``steps`` AND ``ledger_field`` EXIST FOR PAUSE, and their defaults keep the
+    delete path byte-identical — a caller that passes neither gets exactly what this
+    function did before they were added.
+
+    Pause is this cascade's serving half with the reclaims left out, so it runs the
+    same code rather than a second copy that would eventually disagree about which
+    delete a wfp site needs or how a failure is classified. What it must NOT share is
+    the ledger: pause writes ``pause_ledger``, because a paused-then-resumed site
+    carrying ``revoke: done`` in ``delete_ledger`` would make a later DELETE skip
+    revoking the key the resume re-minted, leaving a live public ingest surface on a
+    destroyed site. One function, two ledgers.
+
+    ``steps`` is a subset, never a reordering. The order IS the design (see this
+    module's header) and every subset of a correct order is still correct; a caller
+    that reshuffled would lose the property that any failure leaves the site less
+    live than before.
 
     ``deps`` supplies the side effects (cancel_subscription, cloudflare, assets,
     purge_records) so the ordering and the ledger can be tested without Cloudflare,
@@ -118,14 +145,14 @@ async def run_cascade(
     Raises :class:`CascadeStepFailed` at the first failing step, leaving every
     earlier step recorded so a re-run resumes rather than repeats.
     """
-    ledger: dict[str, str] = dict(site.delete_ledger or {})
+    ledger: dict[str, str] = dict(getattr(site, ledger_field, None) or {})
 
     async def record(step: str, outcome: str) -> None:
         ledger[step] = outcome
-        site.delete_ledger = dict(ledger)
+        setattr(site, ledger_field, dict(ledger))
         await save(site)
 
-    for step in CASCADE_STEPS:
+    for step in steps:
         if step in ledger:
             # Already done on an earlier attempt. Skipping is the point of the
             # ledger; re-running would re-charge purges and re-cancel subscriptions.

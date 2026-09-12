@@ -11,8 +11,8 @@
   {
     "label": "the ledger is only persisted once the whole cascade finishes, so a crash records nothing about the steps it already ran and the resume repeats every destructive one",
     "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
-    "find": "        ledger[step] = outcome\n        site.delete_ledger = dict(ledger)\n        await save(site)",
-    "replace": "        ledger[step] = outcome\n        site.delete_ledger = dict(ledger)",
+    "find": "        ledger[step] = outcome\n        setattr(site, ledger_field, dict(ledger))\n        await save(site)",
+    "replace": "        ledger[step] = outcome\n        setattr(site, ledger_field, dict(ledger))",
     "tests": [
       "tests/ee/sites/test_delete_cascade.py"
     ]

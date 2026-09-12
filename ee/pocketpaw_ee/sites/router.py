@@ -305,6 +305,7 @@ from pocketpaw_ee.sites.dto import (
     SiteEntitlementsResponse,
     SiteExportResponse,
     SiteInvoiceCreate,
+    SiteLifecycleResponse,
     SiteMetadataUpdate,
     SitePlanRequestBody,
     SitePlanRequestResponse,
@@ -1169,6 +1170,68 @@ async def site_delete_status(
     the workspace gets, on purpose.
     """
     return await sites_service.site_delete_status(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, site_id=site_id
+    )
+
+
+@router.post("/sites/{site_id}/pause", response_model=SiteLifecycleResponse)
+async def pause_site(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteLifecycleResponse:
+    """Take a site off the internet. OWNER ONLY, and REVERSIBLE — nothing is destroyed.
+
+    The counterpart of the delete above, and deliberately a different shape. A delete
+    answers 202 with a job handle because its teardown takes minutes and destroys the
+    customer's data; a pause is four bounded Cloudflare calls over things that can all
+    be rebuilt, so it finishes inside the request and there is nothing to poll.
+
+    WHAT SURVIVES: the D1 and its rows, the bucket and its images, the leads, the
+    artifacts, the pocket, the concierge agent, the subscription, and the Site
+    document. WHAT GOES: the signed key, the worker routes, the custom hostname
+    bindings and the Worker script — the four things that make the page reachable.
+
+    Billing pauses WITH the site: the renewal sweeper skips a paused row, and resume
+    advances ``renewal_date`` by the length of the pause. The customer is neither
+    charged for dark days nor given them free, and the subscription is never
+    cancelled — which is what keeps resume from being a repurchase. See
+    ``sites/pause.py``.
+
+    ``fabric.write`` like every sibling write, then OWNER-ONLY in the service — a
+    workspace member who may edit a site may not decide it stops serving. The owner
+    check is in the service because jobs, bus handlers and MCP tools reach services
+    directly; see ``sites_service.pause_site``.
+    """
+    return await sites_service.pause_site(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, site_id=site_id
+    )
+
+
+@router.post("/sites/{site_id}/resume", response_model=SiteLifecycleResponse)
+async def resume_site(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteLifecycleResponse:
+    """Put a paused site back. OWNER ONLY. ANSWERS ``resuming``, NOT ``live``.
+
+    That is the contract rather than an edge case, and it is the one thing a client
+    must not get wrong here. Resume republishes, because the Worker was deleted and
+    re-uploading it is a build — so when this returns, the site is building, not
+    serving. Treating the answer as "done" puts a working link in front of a page that
+    does not exist yet. Poll the site read until ``lifecycle_state`` reaches ``live``.
+
+    CUSTOM DOMAINS COME BACK SLOWER THAN THE SITE. Their TLS certificates went with
+    the hostname bindings a pause surrendered, so re-creating them restarts validation
+    and the domain stays dark until Cloudflare re-issues. The site's own URL has no
+    such delay. Read each domain's status from the Domains panel, which already polls
+    for exactly this.
+
+    A resume BUYS NOTHING — the subscription was never cancelled — so this carries no
+    plan key and no purchase authorization.
+    """
+    return await sites_service.resume_site(
         workspace_id=ctx.workspace_id, user_id=ctx.user_id, site_id=site_id
     )
 

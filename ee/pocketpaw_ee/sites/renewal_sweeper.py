@@ -86,6 +86,19 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
       * ``renewal_date <= now`` — due. A site with no renewal date at all is
         skipped rather than charged: an absent date is an unknown, and guessing
         one bills somebody on a day nobody chose.
+      * ``lifecycle_state != "paused"`` — the site is deliberately off the
+        internet, so charging its next month bills for a page nobody can reach.
+        THE ROW IS SKIPPED, NOT CANCELLED, and that distinction is the whole
+        billing design of pause: the subscription survives untouched, and
+        ``pause.deferred_renewal_date`` pushes ``renewal_date`` forward by the
+        length of the pause when the owner resumes — so the dark days are neither
+        charged for nor given away. Cancelling instead (what a delete does) would
+        make resume a repurchase on the credits rail, where there is nothing to
+        re-activate; see ``sites/pause.py``'s header. The clause is written as a
+        positive match on the two live states rather than ``$ne: "paused"``
+        because a future state nobody has thought about yet should NOT start
+        charging by default — the same fail-closed direction the rail check above
+        takes.
 
     Each site is charged in its own try, so one failure cannot stop the rest of
     the batch. A gateway-shaped error (anything that is not
@@ -106,6 +119,14 @@ async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
                 "billing_rail": billing_service.CREDITS_BILLING_RAIL,
                 "subscription_status": "active",
                 "renewal_date": {"$ne": None, "$lte": at},
+                # ``live`` and ``resuming`` are the states that may be charged.
+                # ``pausing`` is excluded with ``paused``: a pause in flight has
+                # already started taking the site down, and a renewal landing in
+                # that window charges for a month the customer just ended. The
+                # ``None`` member carries rows written before this field existed
+                # -- they have no value at all, and Mongo's ``$in`` does not match
+                # a missing field against a string.
+                "lifecycle_state": {"$in": ["live", "resuming", None]},
             }
         )
         .limit(_SWEEP_BATCH_LIMIT)

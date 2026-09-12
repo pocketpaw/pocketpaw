@@ -1,4 +1,13 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-09-12 (sites lifecycle — concierge transcript purge) — new
+#   purge_widget_threads: the ONE way a conversation's stored lines are removed
+#   from this store, and the ONLY delete on paw_bar_owner_messages, which
+#   ``add_owner_message`` still calls append-only because nothing in the PRODUCT
+#   deletes a line. This is not the product deleting a line; it is the site the
+#   lines were said on being destroyed, so the rows that name it go with it. It
+#   lives here rather than in the caller because these two tables are this
+#   class's, and a second writer reaching into them from another package is the
+#   thing the sites delete cascade deliberately refused to do.
 # Updated: 2026-08-24 (inbox freshness) — new list_recent_owner_messages: the
 #   newest out-of-band lines for a PAGE of visitors in ONE bounded read, so the
 #   owner's conversation list can say what was said LAST instead of what the last
@@ -1974,6 +1983,51 @@ class PawBarStore:
                 params,
             ) as cur:
                 return [self._row_to_owner_message(row) async for row in cur]
+
+    async def purge_widget_threads(
+        self, widget_id: str, *, workspace_id: str | None = None
+    ) -> dict[str, int]:
+        """Delete every stored conversation line for one widget. Returns the counts.
+
+        THE ONE DELETE ON ``paw_bar_owner_messages``, and it is deliberately not a
+        product feature. ``add_owner_message`` is append-only because no owner and
+        no visitor may unsay a line; this exists because the SITE those lines were
+        said on is being destroyed, and a transcript that outlives its site is a
+        visitor's free text held by a tenant with nothing left to hold it for.
+
+        Both tables in ONE transaction. They are two halves of one thread — the
+        conversation row is the index, the message rows are the text — and a purge
+        that dropped one and kept the other would leave either orphaned lines no
+        read can reach or a conversation row that renders as an empty thread
+        forever. Neither is better than doing nothing.
+
+        TENANCY IS IN THE QUERY, not checked after it. ``workspace_id=None`` leaves
+        the read unscoped exactly as every sibling method does, but the sites caller
+        always passes one: a purge that filtered in Python would already have read
+        the other tenant's rows, and this is the one method here whose mistake is
+        unrecoverable.
+
+        The widget row itself is NOT deleted. A widget survives a paused site and is
+        re-bound by the next publish; ``delete_widget`` is the caller that removes
+        one, and folding it in here would make a transcript purge silently unbind a
+        live concierge.
+        """
+        ws_cond, ws_params = _conversation_workspace_scope(workspace_id)
+        suffix = f" AND {ws_cond}" if ws_cond else ""
+        await self._ensure_schema()
+        async with self._conn() as db:
+            cur = await db.execute(
+                f"DELETE FROM paw_bar_owner_messages WHERE widget_id = ?{suffix}",
+                [widget_id, *ws_params],
+            )
+            messages = cur.rowcount or 0
+            cur = await db.execute(
+                f"DELETE FROM paw_bar_conversations WHERE widget_id = ?{suffix}",
+                [widget_id, *ws_params],
+            )
+            conversations = cur.rowcount or 0
+            await db.commit()
+        return {"owner_messages": messages, "conversations": conversations}
 
     # ---------------- Carts (C1 — visitor-scoped commerce state) ----------------
 

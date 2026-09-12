@@ -4,6 +4,15 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-12 (sites lifecycle wave 4 -- pause/resume): added
+# ``lifecycle_state``, ``paused_at``, ``pause_ledger`` and ``pause_reason``. The
+# one worth reading before touching this document is ``pause_ledger``: it is a
+# SECOND ledger rather than a reuse of ``delete_ledger``, because pause runs a
+# subset of the delete cascade's steps and a shared ledger would make a later
+# delete skip the revoke step a resume had already undone -- leaving a live signed
+# key on a destroyed site. ``paused_at`` is load-bearing too: it is what resume
+# advances ``renewal_date`` by, so a paused site is not billed for dark days.
+#
 # Updated 2026-09-12 (sites lifecycle wave 3 -- transfer): added the
 # ``transfer_*`` lifecycle fields, ``transferred_at``, ``identity_workspace`` and
 # ``asset_source_prefixes``. Two of those carry the whole design and are worth
@@ -600,6 +609,48 @@ class Site(TimestampedDocument):
     # consumer parses once and can always split on the colon to group by step. A
     # failure with no reason is not a smaller error, it is an unactionable one.
     delete_reason: str | None = None
+    # -- Pause / resume: the REVERSIBLE answer to delete (wave 4) -----------
+    # ``lifecycle_state`` -- live | pausing | paused | resuming. The third state
+    # between "serving" and "gone" that this product lacked entirely, and the one
+    # most users reaching for delete actually want.
+    #
+    # IT IS A SEPARATE FIELD FROM ``deployed``, and that is the whole design. A
+    # paused site has ``deployed=False`` and no Worker, exactly like a site that was
+    # never published -- so ``deployed`` alone cannot tell "the owner took this down
+    # on purpose and wants it back" apart from "this has never been up". Every
+    # difference between pause and delete follows from that distinction being
+    # WRITTEN DOWN rather than inferred: the gallery badges it, the renewal sweeper
+    # skips it, and resume knows there is something to put back.
+    #
+    # ``pausing`` and ``resuming`` are the in-flight halves. They exist for the same
+    # reason ``delete_status`` has ``tearing_down``: a pause makes several Cloudflare
+    # calls and any of them can fail, so a row that is half-paused has to be able to
+    # say so instead of reading as either end state.
+    #
+    # "live" on every pre-existing row, and "live" is the do-nothing value for every
+    # reader, so there is no migration.
+    lifecycle_state: str = "live"
+    # When the CURRENT pause began (UTC), and the input to the billing deferral --
+    # see ``renewal_sweeper``. NOT merely informational: resume advances
+    # ``renewal_date`` by exactly (now - this), so the customer is not charged for
+    # the days the site was dark. Cleared on resume, because a stale stamp would
+    # make the NEXT resume defer a renewal by a window that already elapsed.
+    paused_at: datetime | None = None
+    # The pause cascade's ledger -- step name -> outcome, the same shape and the
+    # same resume semantics as ``delete_ledger``.
+    #
+    # A SEPARATE FIELD, AND NOT A REUSE OF ``delete_ledger``. Pause runs a SUBSET of
+    # the delete cascade's steps, so sharing the ledger would be tempting and wrong
+    # in the direction that destroys data: a paused-then-resumed site would carry
+    # ``revoke: done`` from its pause, and a later DELETE would skip revoking the key
+    # the resume re-minted -- leaving a live signed key on a destroyed site, which is
+    # a public ingest surface for a page nobody owns any more. Two ledgers, two
+    # lifecycles, no interference.
+    pause_ledger: dict[str, str] = Field(default_factory=dict)
+    # WHY a pause or a resume stopped, as ``"<step>:<cause>"`` -- the same two-part
+    # shape ``delete_reason`` and ``build_reason`` use, so one consumer parses every
+    # one of them. None when nothing has failed.
+    pause_reason: str | None = None
     # -- Transfer: moving this site to another workspace (wave 3) -----------
     # ``transfer_status`` -- none | offered | in_flight | failed. No terminal
     # success value, for the same reason ``delete_status`` has none: a finished
