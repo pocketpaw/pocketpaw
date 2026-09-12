@@ -2981,6 +2981,20 @@ default (per-user `guest_limits`). Over-limit responses are 402 with top-level
 or undecryptable gets 402 `{"code": "guest_key_required"}` — guests never fall
 back to platform credentials. `GET /auth/me` carries `is_guest`.
 
+`POCKETPAW_GUEST_SESSIONS` and `POCKETPAW_GUEST_TURNS_PER_DAY` raise those caps
+deployment-wide. They are FLOORS, not replacements: the larger of the env value
+and the guest's own `guest_limits` wins, so a single guest can still be lifted
+by their row. Both are unset in production and both ignore a non-integer, zero
+or negative value rather than applying it — there is deliberately no "disable
+guest limits" switch, because zero is what an operator types when they mean
+unlimited and `try_spend_turn` reads a cap of zero as *refuse every turn*. A dev
+box turns the caps off by setting them past anything it will reach:
+
+```bash
+export POCKETPAW_GUEST_SESSIONS=1000
+export POCKETPAW_GUEST_TURNS_PER_DAY=100000
+```
+
 Turn billing: every workspace with a stored BYOK key (guest or not) now runs
 its chat turns on that key — the executor resolves credentials per turn and
 threads them into the agent pool's isolated backend. The turn's model must
