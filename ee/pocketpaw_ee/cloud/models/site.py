@@ -4,6 +4,25 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-09-12 (sites lifecycle wave 3 -- transfer): added the
+# ``transfer_*`` lifecycle fields, ``transferred_at``, ``identity_workspace`` and
+# ``asset_source_prefixes``. Two of those carry the whole design and are worth
+# reading before touching this document.
+#
+# ``identity_workspace`` exists because ``_id`` IS INFRASTRUCTURE HERE, not just a
+# key: ``service._live_object_id`` derives it from ``(workspace, pocket_id)``, and
+# the same value is the Cloudflare Worker's script name and the subdomain the site
+# serves at. So a transfer must NOT re-derive it, and leaving it alone means the
+# next publish in the new workspace derives a different id and forks the site into
+# two Workers at two URLs with the custom domains still pointing at the first. This
+# field marks the row as moved so the resolver prefers the id it actually has. It is
+# "" for every site that has never been transferred, so their path is unchanged.
+#
+# ``asset_source_prefixes`` exists because public images DON'T move -- their object
+# key embeds the workspace id and is baked into an immutable public URL already
+# inside the deployed HTML -- so the delete cascade needs a record of where they
+# really are or they are unreclaimable and stay world-readable forever.
+#
 # Updated 2026-09-02 (SA-4 — the visitor-analytics read): added
 # ``analytics_since``, which says whether this site's visitors are being counted and,
 # if so, when that started. It is the ONLY thing on this document that separates "this
@@ -581,6 +600,52 @@ class Site(TimestampedDocument):
     # consumer parses once and can always split on the colon to group by step. A
     # failure with no reason is not a smaller error, it is an unactionable one.
     delete_reason: str | None = None
+    # -- Transfer: moving this site to another workspace (wave 3) -----------
+    # ``transfer_status`` -- none | offered | in_flight | failed. No terminal
+    # success value, for the same reason ``delete_status`` has none: a finished
+    # transfer returns the row to ``none`` and ``transferred_at`` is what records
+    # that it happened.
+    transfer_status: str = "none"
+    # The workspace the site has been OFFERED to, and the only key the destination
+    # can find this row by -- every other sites read is scoped on ``workspace``,
+    # which still names the SOURCE until the move completes. Indexed below with
+    # ``transfer_status``, because the incoming-offers list queries the pair and
+    # would otherwise scan every site in the deployment.
+    transfer_to_workspace: str = ""
+    transfer_offered_by: str = ""
+    transfer_offered_at: datetime | None = None
+    # Step name -> outcome, exactly like ``delete_ledger``, and resumable the same
+    # way. A transfer is short, but it is several writes across two tenants and a
+    # crash in the middle leaves ownership split -- which is the failure this
+    # records enough to finish rather than guess at.
+    transfer_ledger: dict[str, str] = Field(default_factory=dict)
+    transfer_reason: str | None = None
+    transferred_at: datetime | None = None
+    # THE WORKSPACE THIS ROW'S ``_id`` WAS MINTED FROM, and the field that stops a
+    # transferred site silently forking in two.
+    #
+    # ``service._live_object_id`` derives ``_id`` from ``(workspace, pocket_id)``
+    # (PERF-1), and that id is ALSO the Cloudflare Worker's script name and the
+    # subdomain the site is served at. A transfer therefore cannot re-derive it --
+    # doing so renames a live Worker and moves a public URL. But leaving it alone
+    # means the next publish in the destination derives a DIFFERENT id, inserts a
+    # SECOND Site row, uploads a SECOND Worker, and serves it at a SECOND address
+    # while every custom domain still resolves to the first.
+    #
+    # Set ONLY by a transfer, and only once (the minting workspace, not the most
+    # recent one). "" on every row that has never moved, which is what makes
+    # ``_resolve_live_site_oid`` a no-op for them -- the dedupe invariant PERF-1
+    # and PERF-2 established is untouched for every site but a transferred one.
+    identity_workspace: str = ""
+    # Public-asset prefixes this site's images are STILL stored under after a
+    # transfer, because the object key embeds the workspace id and that key is
+    # baked into an immutable, year-cached public URL inside the deployed HTML.
+    # Moving the bytes would blank every image on a live site; see
+    # ``sites/transfer.py:_move_assets``. Recorded because the delete cascade
+    # purges ``prefix_for(site.workspace, ...)`` -- which after a transfer names an
+    # empty prefix -- so without this list the real objects are unreclaimable and
+    # stay public forever.
+    asset_source_prefixes: list[str] = Field(default_factory=list)
     # SE-2b: the builder origin this site was published with, or "" when it was
     # published as a normal (non-editable) site. When set, the generated page
     # carries the gated edit-bridge keyed on this origin. Persisted so a
@@ -747,4 +812,9 @@ class Site(TimestampedDocument):
             # resolver rejects an empty key before it ever queries, so a blank
             # key never resolves against those rows.
             [("signed_key", 1)],
+            # Wave 3: the destination's "what has been offered to me" read. It
+            # is the one sites query NOT anchored on ``workspace`` -- it cannot
+            # be, since the row still belongs to the source until it is accepted
+            # -- so without this it scans the whole collection.
+            [("transfer_to_workspace", 1), ("transfer_status", 1)],
         ]

@@ -3,6 +3,20 @@
 # and gated by the same plan feature (fabric) + action (fabric.write/read) as
 # the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
+# Updated 2026-09-12 (sites lifecycle wave 3 -- transfer): four endpoints for
+# moving a site to another workspace, appended at end-of-file.
+# POST/DELETE ``/sites/{site_id}/transfer`` are the SOURCE half (offer, withdraw);
+# GET ``/sites/transfers/incoming`` and POST ``/sites/transfers/{site_id}/accept``
+# are the DESTINATION half, on their own prefix precisely BECAUSE they address a
+# site that still belongs to somebody else -- every route under
+# ``/sites/{site_id}/`` is tenant-scoped to the caller, and these two cannot be.
+#
+# TWO PHASES, NOT ONE CALL. A single ``POST /sites/{id}/transfer`` authorises only
+# the sender, which would let anyone who owns a site push it -- with its leads and
+# its custom domains -- into any workspace whose id they can name. The receiving
+# tenant consents by accepting, and the service re-checks membership against the
+# accepting user's OWN record rather than trusting the workspace header.
+#
 # Updated 2026-09-02 (SA-4 — the visitor-analytics read): GET
 # ``/sites/{site_id}/analytics``, the read half of the counter SA-1/SA-2 deploy.
 # Gated ``fabric.read`` and tenant-scoped through the service's ``_load`` like the
@@ -287,6 +301,9 @@ from pocketpaw_ee.sites.dto import (
     SitePreviewResponse,
     SiteResponse,
     SiteStatusResponse,
+    SiteTransferListResponse,
+    SiteTransferOfferRequest,
+    SiteTransferResponse,
     SiteVersionResponse,
     VersionHistoryResponse,
 )
@@ -1334,3 +1351,116 @@ async def get_import_brief(
     readable. A read, so no ``fabric.write`` — same shape as the sibling listings.
     """
     return await import_service.read_design_brief(workspace_id=ctx.workspace_id, brief_id=brief_id)
+
+
+# --- Wave 3: transferring a site to another workspace ----------------------
+#
+# Appended at end-of-file, and gated on BOTH ends. The send half is
+# ``fabric.write`` in the SOURCE workspace plus an owner check in the service; the
+# receive half is ``fabric.write`` in the DESTINATION plus a membership check read
+# from the accepting user's own record. Neither half alone is sufficient, which is
+# the whole reason this is an offer and an accept rather than one call.
+
+
+@router.post("/sites/{site_id}/transfer", response_model=SiteTransferResponse)
+async def offer_site_transfer(
+    site_id: str,
+    body: SiteTransferOfferRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteTransferResponse:
+    """Offer this site to another workspace. Nothing moves until it is accepted.
+
+    Tenant-scoped through the service's ``_load``, so the caller can only offer a
+    site their own workspace owns. Owner-only beyond that, and refused outright when
+    an admin has turned off outbound transfers — a site leaving takes its leads with
+    it, which makes this a data-egress control rather than a preference.
+    """
+    wire = await sites_service.offer_site_transfer(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        site_id=site_id,
+        destination_workspace_id=body.destination_workspace_id,
+    )
+    return _transfer_response(wire)
+
+
+@router.delete("/sites/{site_id}/transfer", response_model=SiteTransferResponse)
+async def cancel_site_transfer(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteTransferResponse:
+    """Withdraw an offer that has not been accepted yet."""
+    wire = await sites_service.cancel_site_transfer(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        site_id=site_id,
+    )
+    return _transfer_response(wire)
+
+
+@router.get("/sites/transfers/incoming", response_model=SiteTransferListResponse)
+async def list_incoming_site_transfers(
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteTransferListResponse:
+    """Sites other workspaces have offered to this one.
+
+    The one sites read not anchored on the caller's ``workspace`` — it cannot be,
+    since an offered site still belongs to the sender. ``transfer_to_workspace`` is
+    the tenant filter instead, and only an owner of the sending side can write it,
+    so a workspace sees exactly what was addressed to it.
+
+    Starlette matches routes in REGISTRATION order, not by specificity, so a
+    literal path registered after a parameterised one is not automatically safe.
+    This one is safe because nothing overlaps: ``/sites/{site_id}/transfer`` would
+    only swallow this if the final segment read ``transfer``, and it reads
+    ``incoming``. Adding a ``/sites/{site_id}/incoming`` later would break it.
+    """
+    rows = await sites_service.list_incoming_site_transfers(workspace_id=ctx.workspace_id)
+    return SiteTransferListResponse(transfers=[_transfer_response(r) for r in rows])
+
+
+@router.post("/sites/transfers/{site_id}/accept", response_model=SiteTransferResponse)
+async def accept_site_transfer(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteTransferResponse:
+    """Accept a site offered to this workspace, and take ownership of it.
+
+    Deliberately NOT under ``/sites/{site_id}/`` — every route on that prefix is
+    tenant-scoped to the caller's workspace, and this one addresses a site that
+    still belongs to somebody else. Putting it on its own prefix keeps that
+    difference visible at the URL rather than buried in a service function.
+
+    The receiving guard that matters is not this dependency: ``fabric.write`` says
+    the caller may write in the workspace the header names, and the service
+    re-checks that they are actually a MEMBER of it against their own user record.
+    A header is a request, not a credential.
+    """
+    wire = await sites_service.accept_site_transfer(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        site_id=site_id,
+    )
+    return _transfer_response(wire)
+
+
+def _transfer_response(wire: dict) -> SiteTransferResponse:
+    """Map the service's wire dict onto the response model.
+
+    Hand-written rather than ``model_validate`` because the service speaks camelCase
+    (the shape every other sites read returns) and the DTO is snake_case.
+    """
+    return SiteTransferResponse(
+        site_id=wire.get("siteId", ""),
+        name=wire.get("name", ""),
+        url=wire.get("url", "") or "",
+        from_workspace_id=wire.get("fromWorkspaceId", ""),
+        to_workspace_id=wire.get("toWorkspaceId", "") or "",
+        offered_by=wire.get("offeredBy", "") or "",
+        offered_at=wire.get("offeredAt"),
+        status=wire.get("status", "none"),
+    )

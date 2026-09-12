@@ -1,5 +1,13 @@
 """Workspace document — one per deployment/org.
 
+2026-09-12 (sites lifecycle wave 3 — transfer): added
+``WorkspaceSettings.site_transfers_allowed``. Moving a site to another workspace
+takes its leads and concierge transcripts with it, so an admin can forbid the
+outbound half outright. Defaults True so every existing workspace reads exactly
+as it did before the field existed — no migration, and nothing that worked
+yesterday stops. Only the SOURCE side is gated here; the receiving side is
+governed by consent (the accept step), not by a setting.
+
 2026-07-10 (compliance-starter): ``WorkspaceSettings.retention_days`` is no
 longer decorative. Added a field validator so a persisted value is always
 ``None`` (keep forever) or a POSITIVE day count — 0 / negative are rejected
@@ -57,6 +65,19 @@ class WorkspaceSettings(BaseModel):
     # ``workspace.service.enforce_retention``). Zero / negative is rejected so
     # a bad value can never silently disable retention or wipe everything.
     retention_days: int | None = None
+    # Whether a site owner may move one of this workspace's sites OUT to another
+    # workspace (sites lifecycle wave 3). A transfer carries the site's leads and
+    # its concierge transcripts with it, so this is a DATA-EGRESS control and
+    # belongs to the workspace rather than to whoever happens to own the site —
+    # the same reasoning Netlify applies to its team-level transfer lock.
+    #
+    # Defaults True, which keeps the feature self-serve for the ordinary case: a
+    # workspace that has never thought about this reads as permissive, exactly as
+    # it did before the field existed, so there is no migration and nothing that
+    # worked yesterday stops. An admin turning it off is making a deliberate
+    # choice, and only the SOURCE side is gated — receiving a site is governed by
+    # the recipient's own consent, which is the accept step.
+    site_transfers_allowed: bool = True
 
     @field_validator("retention_days")
     @classmethod
