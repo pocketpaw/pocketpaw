@@ -98,7 +98,11 @@ Ground the page in a tuned neutral matched to the palette's temperature: an off-
 That is the whole requirement. A treatment on top of the ground is optional and has to earn its place. A quiet section-tint rhythm, or one soft field behind a single section, is usually enough, and a page grounded in one well-chosen neutral is finished rather than bare. Decorative grids, blueprint rules, radial spotlights, mesh blobs and grain overlays are the reflex reach here, so use one only where the family genuinely calls for it (Tactile Brutalism's visible structure, Dark-Tech's fixed scanline), and never more than one per page.
 
 ### 2.C Canvas backgrounds
-A WebGL canvas is never the default: it is decoration nobody asked for, and it costs a client bundle. Where the read genuinely calls for one, hand-write it (`package.json` is generator-owned, so `three`, `ogl`, `threlte` and `gsap` never resolve): raw `canvas.getContext('webgl')`, one fragment shader over a full-screen quad driven by `u_time` / `u_resolution`, buffer capped at 2x DPR, loop stopped off-screen. It MUST sit over a polished CSS fallback, and it needs a site that keeps its client bundle (3.E). Without that, ship the CSS background alone.
+A published Paw Site KEEPS its client bundle by default, so a hand-written WebGL canvas runs. Reach for one where the read genuinely wants it - immersive, technical, or a premium brand with something to show - rather than on every page, and never as filler behind copy that would read better on a quiet ground.
+
+No npm: `package.json` is generator-owned and your source map supplies FILES ONLY, so `three`, `ogl`, `threlte` and `gsap` never resolve. Raw `canvas.getContext('webgl')`, a pass-through vertex shader and one fragment shader over a full-screen quad (`gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)`), driven by `u_time` / `u_resolution`, buffer capped at 2x DPR, loop stopped off-screen. That buys fluid colour mixing, noise fields, gradient flow and aurora warping; scene graphs and particle swarms are what the library bought you. The `webgl-components` skill carries the mechanics (DPR, aliasing, context loss, many-instances-per-page).
+
+*THE CANVAS GUARDRAIL:* the page is PRERENDERED, so the `<canvas>` MUST sit over a polished CSS fallback and look premium before the context ever initializes. Two cases prune the bundle and run no JS at all: a site that declared `keepsClientBundle: false`, and every ripple site. There, ship the CSS background alone.
 
 ### 2.D Typography Pairings 2.0
 Never isolate a single family. Rotate display-to-body pairings: `Cabinet Grotesk` + `General Sans` + `Fira Code` for numbers; `Clash Display` + `Satoshi` + `Geist Mono`; `PP Editorial New` + `Switzer` + `Space Mono`; `Instrument Sans` + `Manrope` + `SF Mono`.
@@ -134,7 +138,7 @@ The family below sets the whole token system so each site looks *designed for th
 - **No gradient text.** A gradient across a headline or a metric is decoration standing in for hierarchy, and it is among the most recognisable tells. Every string is a solid colour.
 - **Color-consistency lock.** Once an accent is chosen it is used on the WHOLE page. A warm-grey site does not get a blue CTA in section 7. Audit every component before shipping.
 - **Premium-consumer palette ban** (cookware / wellness / artisan / luxury / DTC): the LLM default is warm beige/cream + brass/clay/oxblood + espresso. It makes every premium brand invisible. Banned as the default reach. Rotate to cold-luxury (silver + chrome), forest (deep green + bone + amber), black-and-tan, cobalt + cream, terracotta + slate, or monochrome + one saturated pop. Only use beige+brass if the brand explicitly names it. Don't ship the same warm-craft palette twice in a row.
-- **No pure black or white.** Use a tuned off-black (`#14110e`, `#0b0f14`) matched to the palette's temperature, and nudge white grounds off-white. One palette top to bottom; don't drift warm↔cool between sections.
+- **One palette top to bottom**; don't drift warm↔cool between sections. The ground itself is 2.B's rule.
 
 ---
 
@@ -172,13 +176,12 @@ Baseline motion is CSS or SVG so it is correct on first paint: transitions on `t
 Ambient drift, self-drawing decorative vectors and light sweeps across static elements are ornament rather than motion. They read as a screensaver, and they are the first thing a visitor stops seeing.
 
 ### 3.E Motion principles + engine tracks
-**Motion vocabulary is gated by one fact: does this site keep its client bundle?** Default NO - the page prerenders with `csr = false` and on ripple the bundle is pruned, so `onMount`, `use:` actions, IntersectionObserver and WebGL NEVER run. Only the per-site `keepsClientBundle` flag keeps them, off unless this site declared it.
-- **Bundle off (assume this):** all motion is CSS - 3.D's vocabulary plus `animation-timeline: view()` for scroll reveal and `<details>` for accordions. Cap MOTION_INTENSITY at 4.
-- **Bundle on:** those JS paths run, and still only ENHANCE markup that already renders correctly (3.F).
+**Motion vocabulary is gated by one fact: does this site keep its client bundle?** It does BY DEFAULT (`sites_keep_client_bundle_default` is True), so `onMount`, `use:` actions, IntersectionObserver and WebGL DO run, and the page stays prerendered on top of them: hydration arms the motion, it does not paint the content. Two cases turn it off - a site that declared `keepsClientBundle: false`, and ripple, whose build deletes the emitted hydration bundle.
+- **Bundle on (the default):** those JS paths run, and still only ENHANCE markup that already renders correctly (3.F).
+- **Bundle off (ripple, or a site that declared it off):** all motion is CSS - 3.D's vocabulary plus `animation-timeline: view()` for scroll reveal and `<details>` for accordions. Cap MOTION_INTENSITY at 4.
 - **Motion must be motivated.** Name what it communicates (hierarchy, sequence, feedback, state change) before adding it. "It looked cool" is not a reason.
-- **Motion claimed = motion shown.** If MOTION_INTENSITY > 4 the page actually moves (hero entrance, scroll-reveal on key sections, CTA hover). Motion that needs JS this site doesn't keep is a claim, not a page: rebuild it in CSS or confirm the bundle. If you can't ship working motion, drop the dial to 3 and ship a clean static page - never half-built motion.
+- **Motion claimed = motion shown.** If MOTION_INTENSITY > 4 the page actually moves (hero entrance, scroll-reveal on key sections, CTA hover). On a bundle-off site, motion that needs JS is a claim rather than a page: rebuild it in CSS. If you can't ship working motion, drop the dial to 3 and ship a clean static page - never half-built motion.
 - **Hardware-accelerate.** Animate only `transform` and `opacity` - never `top`/`left`/`width`/`height`. `will-change` sparingly. No `window.addEventListener('scroll')` (re-runs every frame) - use IntersectionObserver, a `use:` action, or CSS scroll-driven animations. No custom cursors, scroll-hijacking, or mouse-follow. Blur/noise only on fixed, `pointer-events: none` overlays.
-- **Custom easing = premium.** For soft-premium use `cubic-bezier(0.32, 0.72, 0, 1)` and 600-800ms fade-up, not `linear`/`ease`.
 
 **Svelte-track specifics** (only on the Svelte engine): State → runes (`let open = $state(false)`, `const total = $derived(...)`) with the resting value set in the initializer so it prerenders - free either way. **The next two need the bundle kept:** scroll reveal → a `use:` action adding `.in` on viewport entry (CSS transitions `opacity`/`transform`; reveal immediately under `prefers-reduced-motion`). Count-ups → `tweened` seeded from the FINAL value so the markup prerenders the real total, then reset to 0 and animated up in `onMount` behind a `prefers-reduced-motion` check. Enter/leave within a section → Svelte `transition:`/`in:`/`out:` on elements whose *content* is already present - polish an existing frame, never gate it. Ambient motion → CSS keyframes (no JS, free at prerender).
 
@@ -215,7 +218,7 @@ These pages render to HTML before any JS runs. Taste must never depend on JS to 
 *   **No duplicate CTA intent.** "Get in touch" + "Contact us" + "Let's talk" on one page is a fail. One label per intent (≤ 3 words for a primary CTA), used in nav, hero, footer.
 *   **Quotes ≤ 3 lines** of body; a landing-page quote is a snippet. Real typographic quotes or none, no em-dash inside.
 *   **Content density is lean.** Per section: short headline (≤ 8 words) + short sub-paragraph (≤ 25 words) + one asset or one CTA. No 20-row spec tables or giant pricing matrices - top 3-5 + "view full".
-*   **Trust & conversion.** Proof ships only where the brief supplied it. Real testimonials, logo strips, certifications and security badges belong near the CTA and pricing rather than dumped in a wall, but a logo strip you invented is a false claim about the business, and a "clearly plausible" testimonial is a fabricated one. Never state a real-world fact you were not given (address, hours, price, a testimonial, a client, an award): leave the section out, or use an obviously generic placeholder and flag it in your reply (MODULE 0).
+*   **Trust & conversion.** Where the brief supplied proof, place it near the CTA and pricing rather than dumping it in a wall. Where it did not, MODULE 0 governs: a logo strip you invented is a false claim about the business, and a "clearly plausible" testimonial is a fabricated one.
 
 ---
 
@@ -235,7 +238,7 @@ Shapes models reach for because other models reached for them, not because a pag
 
 **Imagery.** NO hand-rolled SVG mascots, and no scene assembled from generic circles and blocks; NO jagged or torn image masks; NO image buried under a heavy overlay wash; NO div-based fake product screenshots; NO emoji as UI (use real SVG via `search_icons`); NO pills/labels overlaid on images (caption below if needed); NO pretentious photo-credit captions (`Frame XII | 35mm`).
 
-**Copy.** NO "John Doe", `99.99%`, "Acme", filler verbs, em-dash; NO "Not a feature. A platform." contrast constructions turning every point into a slogan; NO dismissing a thing as "theater" in place of explaining it; NO the same label repeated across two slots of one card; NO locale/time/weather strips (`Lisbon 14:23 | 18C`) unless the brand is genuinely place-focused; NO scroll cues (`Scroll`, a bare down arrow).
+**Copy.** NO "Not a feature. A platform." contrast constructions turning every point into a slogan; NO dismissing a thing as "theater" in place of explaining it; NO the same label repeated across two slots of one card; NO locale/time/weather strips (`Lisbon 14:23 | 18C`) unless the brand is genuinely place-focused; NO scroll cues (`Scroll`, a bare down arrow).
 
 **Assets.** NO fabricated asset URLs, since a made-up `src` is broken media on a live site. Check `list_site_assets` FIRST: the owner's own logo and photography beat any stock shot and are the whole reason they uploaded them. Then `search_stock_images`, rendering its `credit`. Then `generate_site_image` for what stock cannot supply (a bespoke hero, a product or concept shot, a brand texture), which costs money per image, so use it deliberately rather than for ordinary photography; and `generate_site_video` for a hero that MOVES, dearer again, one moment only. Fall back to a tasteful gradient. Any asset the brief's manifest hands you is fair game at its native medium, video included: there is no images-only rule and no approved-media list.
 
