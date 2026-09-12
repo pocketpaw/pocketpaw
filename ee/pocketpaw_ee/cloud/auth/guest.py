@@ -3,6 +3,19 @@
 #
 # Created 2026-09-01 (feat/byok-guest-backend).
 #
+# Updated 2026-09-09 (feat/byok-custom-gateway): a guest may also arrive with a
+# key for an OpenAI-compatible gateway, which brings its own ``base_url`` and
+# ``model``. Both ride through to validation and storage unchanged; the
+# provider gate below is now the only thing deciding what is accepted, and it
+# reads ``byok_service.SUPPORTED_PROVIDERS`` rather than naming a provider.
+#
+# Updated 2026-09-11 (review S6): ``mint_guest`` now stores the base URL
+# ``validate_key`` hands back rather than the raw body string. The validator
+# normalizes (``strip().rstrip("/")``) before it guards, and writing the
+# un-normalized copy meant the value in the database was not the value that
+# passed the check. This route also does not go through ``ByokSetRequest``, so
+# ``validate_key`` is the whole guard here, not a second opinion on one.
+#
 # Flow (the order is the security property):
 #   rate-limit -> validate the key against the provider -> mint user ->
 #   provision workspace (default agent + LiteLLM tenant key ride along) ->
@@ -48,7 +61,13 @@ def is_provider_supported(provider: str) -> bool:
     return provider in byok_service.SUPPORTED_PROVIDERS
 
 
-async def mint_guest(api_key: str, *, provider: str = "anthropic") -> User:
+async def mint_guest(
+    api_key: str,
+    *,
+    provider: str = "anthropic",
+    base_url: str | None = None,
+    model: str | None = None,
+) -> User:
     """Validate the key, then mint user + workspace + encrypted key row.
 
     Raises ``ValidationError`` (422) for an unsupported provider and lets
@@ -59,15 +78,36 @@ async def mint_guest(api_key: str, *, provider: str = "anthropic") -> User:
     if not is_provider_supported(provider):
         raise ValidationError(
             "byok.provider_unsupported",
-            "Only Anthropic keys are supported right now — OpenAI and "
-            "OpenRouter are coming. Paste a key from console.anthropic.com.",
+            "That key's provider is not supported yet. Paste an Anthropic key, "
+            "or pick the custom gateway option and give its address.",
         )
+    if provider == "openai_compatible":
+        if not (base_url or "").strip():
+            raise ValidationError(
+                "byok.base_url_required",
+                "A custom gateway needs its address, e.g. https://host/v1.",
+            )
+        if not (model or "").strip():
+            raise ValidationError(
+                "byok.model_required",
+                "A custom gateway needs the model id it serves.",
+            )
     if not api_key or not api_key.strip():
         raise ValidationError("byok.key_missing", "Enter an API key to try Otherhand.")
     api_key = api_key.strip()
 
-    # 1. Prove the key works BEFORE anything is created.
-    await byok_service.validate_key(api_key)
+    # 1. Prove the key works BEFORE anything is created. For a gateway this is
+    #    also the ONLY SSRF guard on this path — ``_GuestMintRequest`` carries
+    #    plain ``str`` fields and never touches ``ByokSetRequest`` — and the
+    #    route is unauthenticated, so a stranger picks the address.
+    #    Keep the URL it hands back: it normalized before guarding, and the
+    #    value that reaches the database must be the value that passed
+    #    (review S6). Previously the raw body string was stored instead.
+    canonical_base_url = await byok_service.validate_key(
+        api_key, provider=provider, base_url=base_url, model=model
+    )
+    if canonical_base_url:
+        base_url = canonical_base_url
 
     # 2. Mint the anonymous user. Synthetic unique email (fastapi-users
     #    requires one), random password nobody knows — the account is only
@@ -105,6 +145,8 @@ async def mint_guest(api_key: str, *, provider: str = "anthropic") -> User:
             ws.id,
             api_key,
             provider=provider,
+            base_url=base_url,
+            model=model,
             user_id=str(user.id),
             validate=False,
         )

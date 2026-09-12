@@ -47,6 +47,8 @@ async def set_byok_key(
         workspace_id,
         body.api_key,
         provider=body.provider,
+        base_url=body.base_url,
+        model=body.model,
         user_id=user_id,
     )
 

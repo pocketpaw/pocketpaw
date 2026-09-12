@@ -15,6 +15,12 @@
 #      server-side).
 #   5. The wire contract (top-level code/kind) is pinned byte-for-byte — the
 #      sibling frontend builds against it.
+#
+# Updated 2026-09-11 (review B1): added the unauthenticated-SSRF case to
+# ``TestMintGuest``. Every other mint test patches ``validate_key`` away, which
+# is right for what they assert and blinding for this one — the guard lives
+# inside that call, and this route never touches the DTO that would otherwise
+# back it up. The new test leaves ``validate_key`` alone and stubs DNS instead.
 
 from __future__ import annotations
 
@@ -200,7 +206,7 @@ class TestMintGuest:
     async def test_an_unsupported_provider_is_rejected_before_any_provider_call(
         self, mongo_db, monkeypatch
     ):
-        async def _must_not_run(api_key):
+        async def _must_not_run(api_key, **_kw):
             raise AssertionError("validate_key must not be called for an unsupported provider")
 
         monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.validate_key", _must_not_run)
@@ -208,8 +214,84 @@ class TestMintGuest:
             await guest_service.mint_guest(_KEY, provider="openai")
         assert exc.value.code == "byok.provider_unsupported"
 
+    async def test_a_gateway_mint_hands_validation_the_address_and_the_model(
+        self, mongo_db, monkeypatch
+    ):
+        # Drop the kwargs from mint_guest's validate_key call and validation
+        # silently runs as anthropic: an xpl_ key 401s at api.anthropic.com and
+        # the user is told "Anthropic rejected that key" about a key that never
+        # belonged to Anthropic. Nothing else in this file would notice.
+        seen: dict = {}
+
+        async def _capture(api_key, **kw):
+            seen["api_key"] = api_key
+            seen.update(kw)
+            # Stop here: what is under test is the call, not the mint that
+            # follows it, and the mint needs a provisioned realtime bus.
+            raise ValidationError("byok.key_rejected", "stop after capture")
+
+        monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.validate_key", _capture)
+        with pytest.raises(ValidationError):
+            await guest_service.mint_guest(
+                "xpl_" + "a" * 40,
+                provider="openai_compatible",
+                base_url="https://api.experientiallabs.ai/v1",
+                model="claude-opus-5",
+            )
+        assert seen["provider"] == "openai_compatible"
+        assert seen["base_url"] == "https://api.experientiallabs.ai/v1"
+        assert seen["model"] == "claude-opus-5"
+
+    async def test_a_gateway_mint_without_an_address_never_reaches_the_provider(
+        self, mongo_db, monkeypatch
+    ):
+        async def _must_not_run(api_key, **_kw):
+            raise AssertionError("validate_key must not run without a gateway address")
+
+        monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.validate_key", _must_not_run)
+        with pytest.raises(ValidationError) as exc:
+            await guest_service.mint_guest("xpl_" + "a" * 40, provider="openai_compatible")
+        assert exc.value.code == "byok.base_url_required"
+
+    async def test_a_gateway_address_that_resolves_INSIDE_mints_nothing(
+        self, mongo_db, monkeypatch
+    ):
+        """The unauthenticated SSRF (review B1). /auth/guest is on the
+        route-auth allowlist and rate-limited per IP only, so a signed-out
+        stranger picks this address. ``_GuestMintRequest`` carries plain ``str``
+        fields and never touches ``ByokSetRequest``, so ``validate_key`` is the
+        ONLY guard on this path — which is why ``validate_key`` is deliberately
+        NOT patched here. Patching it is what makes every other test in this
+        class blind to the guard.
+
+        PRE-FIX THIS MINTS A GUEST. ``validate_external_url_strict`` catches
+        internal IP literals and never resolves a name, so a public hostname
+        with an A record in RFC1918 passed, was stored, and was then POSTed to
+        — at mint and again on every turn.
+        """
+        import socket
+
+        def _resolves_inside(host, *_a, **_kw):
+            if host == "10-0-0-5.nip.io":
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))]
+            raise socket.gaierror(f"name resolution disabled in test: {host}")
+
+        monkeypatch.setattr(socket, "getaddrinfo", _resolves_inside)
+        # The operator's dev escape must not reach this boundary.
+        monkeypatch.setenv("POCKETPAW_ALLOW_INTERNAL_URLS", "true")
+
+        with pytest.raises(ValidationError) as exc:
+            await guest_service.mint_guest(
+                "xpl_" + "a" * 40,
+                provider="openai_compatible",
+                base_url="https://10-0-0-5.nip.io/v1",
+                model="claude-opus-5",
+            )
+        assert exc.value.code == "byok.base_url_rejected"
+        assert await User.find_all().count() == 0, "a rejected address must not mint a user row"
+
     async def test_a_dead_key_mints_NOTHING(self, mongo_db, monkeypatch):
-        async def _dead(api_key):
+        async def _dead(api_key, **_kw):
             raise ValidationError("byok.key_rejected", "Anthropic rejected that key.")
 
         monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.validate_key", _dead)
@@ -218,12 +300,40 @@ class TestMintGuest:
         assert exc.value.code == "byok.key_rejected"
         assert await User.find_all().count() == 0, "a dead key must not mint a user row"
 
+    async def test_a_gateway_mint_stores_the_url_that_passed_the_guard(
+        self, mongo_db, monkeypatch, _resolver_stub
+    ):
+        """Review S6. ``validate_key`` normalizes before it guards, and the
+        value written to the database must be the value that was checked — not
+        the raw body string, which is what this path used to store. The gap is
+        whitespace and a trailing slash today; it is the shape that a later
+        normalization change turns into a stored value nothing vetted."""
+        canonical = "https://api.experientiallabs.ai/v1"
+
+        async def _ok_returning_canonical(api_key, **_kw):
+            return canonical
+
+        monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.validate_key", _ok_returning_canonical)
+
+        user = await guest_service.mint_guest(
+            "xpl_" + "a" * 40,
+            provider="openai_compatible",
+            base_url=f"  {canonical}/  ",
+            model="claude-opus-5",
+        )
+
+        from pocketpaw_ee.cloud.models.byok_key import ByokProviderKey
+
+        row = await ByokProviderKey.find_one(ByokProviderKey.workspace == user.active_workspace)
+        assert row is not None
+        assert row.base_url == canonical, "the stored URL is not the one that passed the guard"
+
     async def test_a_good_key_mints_user_workspace_and_encrypted_key(
         self, mongo_db, monkeypatch, _resolver_stub
     ):
         calls: list[str] = []
 
-        async def _ok(api_key):
+        async def _ok(api_key, **_kw):
             calls.append("validated")
 
         monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.validate_key", _ok)
@@ -258,7 +368,7 @@ class TestMintGuest:
         capture and sweep every record. Break any logger call into including
         the key and this goes red."""
 
-        async def _ok(api_key):
+        async def _ok(api_key, **_kw):
             return None
 
         monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.validate_key", _ok)
