@@ -161,5 +161,14 @@
     "tests": [
       "tests/cloud/sites/test_transfer_authz.py"
     ]
+  },
+  {
+    "label": "a failed or crashed transfer can never be accepted again, so ownership stays split across two tenants and the ledger that recorded exactly which steps ran is never allowed to be read",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "RESUMABLE_STATUSES: tuple[str, ...] = (STATUS_OFFERED, STATUS_IN_FLIGHT, STATUS_FAILED)",
+    "replace": "RESUMABLE_STATUSES: tuple[str, ...] = (STATUS_OFFERED,)",
+    "tests": [
+      "tests/ee/sites/test_transfer.py"
+    ]
   }
 ]

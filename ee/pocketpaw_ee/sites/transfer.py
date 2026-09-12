@@ -84,6 +84,23 @@ STATUS_OFFERED = "offered"
 STATUS_IN_FLIGHT = "in_flight"
 STATUS_FAILED = "failed"
 
+# The states an accept may run over. ``offered`` is the ordinary one; the other two
+# are RESUMES, and leaving them out is what makes a ledger decorative.
+#
+# A failed transfer has a half-written ledger and is precisely the case the ledger
+# exists for, so refusing it would mean ownership stayed split across two tenants
+# with no way to finish the move. And ``in_flight`` is here for the crash that
+# leaves nothing to clear it: a process that dies mid-transfer pins the row there
+# forever, and a one-way door is a worse failure than a redundant pass. This is the
+# same asymmetry the delete cascade's single-flight comment argues for — a repeat
+# run costs one idempotent sweep over a ledger that skips finished steps, while a
+# stuck guard costs the transfer permanently.
+#
+# A repeat is safe because every step is idempotent and the ledger turns a
+# re-entry into a skip. A COMPLETED transfer is not here: success returns the row
+# to ``none`` and clears ``transfer_to_workspace``, so the offer cannot be replayed.
+RESUMABLE_STATUSES: tuple[str, ...] = (STATUS_OFFERED, STATUS_IN_FLIGHT, STATUS_FAILED)
+
 # A delete that has not started is the only delete state a transfer may run over.
 # Anything else means a cascade is queued or mid-flight, and handing a tenant a site
 # that is being torn down under them is not a transfer.
@@ -237,7 +254,7 @@ def check_can_accept(
     accept a site into it by naming it.
     """
     status = getattr(site, "transfer_status", STATUS_NONE) or STATUS_NONE
-    if status != STATUS_OFFERED:
+    if status not in RESUMABLE_STATUSES:
         raise TransferRefused(
             "transfer.not_offered",
             "There is no open offer for this site.",

@@ -24,6 +24,7 @@ from pocketpaw_ee.sites.transfer import (
     OUTCOME_ASSETS_RETAINED,
     OUTCOME_DONE,
     OUTCOME_SKIPPED,
+    RESUMABLE_STATUSES,
     STATUS_FAILED,
     STATUS_IN_FLIGHT,
     STATUS_NONE,
@@ -207,12 +208,12 @@ def test_cannot_offer_twice():
 
 
 def _offered(**kw):
-    return _Site(
-        transfer_status=STATUS_OFFERED,
-        transfer_to_workspace="ws-dest",
-        transfer_offered_by="user-sender",
-        **kw,
-    )
+    # setdefault rather than fixed kwargs so a test can pin a DIFFERENT
+    # transfer_status (the resume cases) without a duplicate-keyword TypeError.
+    kw.setdefault("transfer_status", STATUS_OFFERED)
+    kw.setdefault("transfer_to_workspace", "ws-dest")
+    kw.setdefault("transfer_offered_by", "user-sender")
+    return _Site(**kw)
 
 
 def test_a_member_of_the_destination_may_accept():
@@ -543,3 +544,76 @@ def test_status_values_do_not_collide():
     the same choice ``delete_status`` makes."""
     assert len({STATUS_NONE, STATUS_OFFERED, STATUS_IN_FLIGHT, STATUS_FAILED}) == 4
     assert STATUS_NONE == "none"
+
+
+def test_a_failed_transfer_can_be_accepted_again():
+    """THE THING THAT MAKES THE LEDGER WORTH HAVING.
+
+    A transfer that failed part-way has ownership split across two tenants and a
+    half-written ledger. If the accept guard only admitted ``offered``, that row
+    could never be finished: the ledger would record exactly which steps ran and
+    nothing would ever be allowed to read it.
+
+    Mutation that must break this: drop ``STATUS_FAILED`` from
+    ``RESUMABLE_STATUSES``.
+    """
+    check_can_accept(
+        site=_offered(transfer_status=STATUS_FAILED, transfer_reason="records:runtimeerror"),
+        accepting_user_id="user-recipient",
+        accepting_workspace_id="ws-dest",
+        member_workspace_ids=("ws-dest",),
+    )
+
+
+def test_a_crashed_in_flight_transfer_can_be_accepted_again():
+    """A process that dies mid-transfer leaves nothing to clear ``in_flight``.
+
+    Refusing it would pin the row there forever, which is a worse failure than a
+    redundant pass over a ledger that skips every finished step.
+    """
+    check_can_accept(
+        site=_offered(transfer_status=STATUS_IN_FLIGHT),
+        accepting_user_id="user-recipient",
+        accepting_workspace_id="ws-dest",
+        member_workspace_ids=("ws-dest",),
+    )
+
+
+def test_a_completed_transfer_cannot_be_replayed():
+    """Success returns the row to ``none``, which is not resumable."""
+    assert STATUS_NONE not in RESUMABLE_STATUSES
+    with pytest.raises(TransferRefused) as exc:
+        check_can_accept(
+            site=_Site(transfer_status=STATUS_NONE, transfer_to_workspace=""),
+            accepting_user_id="user-recipient",
+            accepting_workspace_id="ws-dest",
+            member_workspace_ids=("ws-dest",),
+        )
+    assert exc.value.code == "transfer.not_offered"
+
+
+async def test_a_resumed_transfer_after_a_failure_finishes_the_remaining_steps():
+    """End to end: fail at records, then re-run and watch it complete without
+    redoing the ownership step it already recorded."""
+    site = _offered()
+    with pytest.raises(TransferStepFailed):
+        await run_transfer(
+            site=site,
+            destination_workspace_id="ws-dest",
+            accepting_user_id="user-recipient",
+            deps=_Deps(fail_on="move_records"),
+            save=_saver([]),
+        )
+    assert site.transfer_ledger == {STEP_OWNERSHIP: OUTCOME_DONE}
+
+    second = _Deps()
+    await run_transfer(
+        site=site,
+        destination_workspace_id="ws-dest",
+        accepting_user_id="user-recipient",
+        deps=second,
+        save=_saver([]),
+    )
+    assert second.pocket_moves == [], "the ownership step should have been skipped"
+    assert set(site.transfer_ledger) == set(TRANSFER_STEPS)
+    assert site.transfer_status == STATUS_NONE
