@@ -31,6 +31,11 @@
 #   * a generic resolver crash -> still degrades to platform, unchanged. That
 #     one keeps the other two honest: a catch written too wide would start
 #     refusing turns that used to run.
+#
+# Updated 2026-09-11 (feat/pydantic-ai-model-override) — ``_drive`` now stubs
+# the model catalog permissively. A per-send model is checked against it before
+# the byok rules run, and without the stub the two ``model_override`` cases here
+# reach for a live proxy and pass only because that check fails open.
 
 from __future__ import annotations
 
@@ -39,6 +44,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
 from pocketpaw_ee.cloud.byok.service import TurnCredentials
 from pocketpaw_ee.cloud.chat.agent_service import ScopeContext, ScopeKind
 from pocketpaw_ee.cloud.chat.runs import run_core
@@ -148,6 +154,27 @@ async def _drive(
 
     monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _resolve)
     monkeypatch.setattr("pocketpaw_ee.cloud.auth.guest_budget.load_guest", guest_loader)
+
+    # A per-send model is now checked against the gateway's catalog before it is
+    # forwarded (2026-09-11). Stubbed PERMISSIVE here so these tests keep
+    # measuring the byok rules and nothing else — without it a
+    # ``model_override`` case reaches for a live proxy and passes only because
+    # that check fails open, which would hide a byok regression behind an
+    # unrelated outage path. ``test_run_core_model_catalog.py`` owns the check
+    # itself.
+    async def _catalog_serves_everything(**_kwargs):
+        model_id = ctx.model_override or "claude-opus-4-6"
+        return [
+            ModelCatalogEntry(
+                id=model_id,
+                display_name=model_id,
+                provider="anthropic",
+                modality=Modality.CHAT,
+                status="available",
+            )
+        ]
+
+    monkeypatch.setattr("pocketpaw_ee.catalog.service.list_models", _catalog_serves_everything)
 
     async def _never_cancelled():
         return False

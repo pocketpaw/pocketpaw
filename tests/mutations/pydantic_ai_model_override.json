@@ -1,0 +1,74 @@
+[
+  {
+    "label": "the override is dropped again — the composer picker silently runs the configured model",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            model = self._build_model(model_override)",
+    "replace": "            model = self._build_model()",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_model_override_reaches_the_model_factory_and_the_agent_key"
+    ]
+  },
+  {
+    "label": "the agent key ignores the spec — turn two is served turn one's agent, holding turn one's model",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            model_spec or self.settings.pydantic_ai_model,",
+    "replace": "            self.settings.pydantic_ai_model,",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_model_override_reaches_the_model_factory_and_the_agent_key"
+    ]
+  },
+  {
+    "label": "the spec stops reaching the parser — the override takes the gateway's endpoint with it or loses it",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        provider, model = self._parse_provider_model(model_spec)\n\n        if provider == \"agentapi\":",
+    "replace": "        provider, model = self._parse_provider_model()\n\n        if provider == \"agentapi\":",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_model_override_builds_the_model_it_names"
+    ]
+  },
+  {
+    "label": "the provider guard is removed — a free-text 'litellm:x' runs a guest's turn on the deployment's proxy key",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            if (model_override or \"\").partition(\":\")[0].strip() in _KNOWN_PROVIDERS:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_model_override_cannot_switch_provider"
+    ]
+  },
+  {
+    "label": "the guard widens to any colon — OpenRouter ':free' and Ollama ':latest' model ids become unpickable",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            if (model_override or \"\").partition(\":\")[0].strip() in _KNOWN_PROVIDERS:",
+    "replace": "            if \":\" in (model_override or \"\"):",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_a_colon_in_a_model_name_is_still_allowed"
+    ]
+  },
+  {
+    "label": "the catalog check is dropped — a per-send model is free text billed to the platform key",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            if await _model_is_unknown_to_gateway(ctx.model_override):",
+    "replace": "            if False:",
+    "tests": [
+      "tests/cloud/runs/test_run_core_model_catalog.py::test_a_model_the_gateway_never_heard_of_is_refused"
+    ]
+  },
+  {
+    "label": "an unreachable catalog refuses the turn — every override dies when /model/info is gated",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            exc_info=True,\n        )\n        return False\n    if not entries:",
+    "replace": "            exc_info=True,\n        )\n        return True\n    if not entries:",
+    "tests": [
+      "tests/cloud/runs/test_run_core_model_catalog.py::test_an_unreachable_catalog_does_not_kill_the_turn"
+    ]
+  },
+  {
+    "label": "an empty catalog refuses everything — a proxy that describes no models blocks every send",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    if not entries:\n        logger.warning(",
+    "replace": "    if False:\n        logger.warning(",
+    "tests": [
+      "tests/cloud/runs/test_run_core_model_catalog.py::test_an_empty_catalog_refuses_nothing"
+    ]
+  }
+]
