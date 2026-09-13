@@ -2,29 +2,36 @@
   {
     "label": "the BYOK skip is dropped — every custom-gateway model is refused against OUR catalog again",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
-    "find": "            if not _own_key and await _model_is_unknown_to_gateway(ctx.model_override):",
-    "replace": "            if await _model_is_unknown_to_gateway(ctx.model_override):",
+    "find": "            and byok_creds.source != \"byok\"\n            and await _model_is_unknown_to_gateway(ctx.model_override)",
+    "replace": "            and await _model_is_unknown_to_gateway(ctx.model_override)",
     "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_byok_model_is_not_checked_against_our_catalog"]
   },
   {
     "label": "the check is skipped for EVERYONE — free text bills the platform key again",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
-    "find": "            if not _own_key and await _model_is_unknown_to_gateway(ctx.model_override):",
-    "replace": "            if False and await _model_is_unknown_to_gateway(ctx.model_override):",
+    "find": "        if (\n            ctx.model_override\n            and byok_creds.source != \"byok\"",
+    "replace": "        if (\n            False\n            and byok_creds.source != \"byok\"",
     "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_platform_turn_is_still_checked"]
   },
   {
-    "label": "an unreadable byok status fails OPEN to byok — a broken read disables the free-text guard",
+    "label": "the skip keys on a stored-key probe again — a key that no longer decrypts skips the guard while OUR key pays",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
-    "find": "            exc_info=True,\n        )\n        return False\n    return bool(getattr(status, \"configured\", False))",
-    "replace": "            exc_info=True,\n        )\n        return True\n    return bool(getattr(status, \"configured\", False))",
-    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_an_unreadable_byok_status_keeps_the_check"]
+    "find": "            and byok_creds.source != \"byok\"",
+    "replace": "            and not bool(byok_creds.api_key or byok_creds.source)",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_stored_key_that_degrades_to_platform_is_still_checked"]
   },
   {
-    "label": "any workspace reads as byok — the guard never runs for anyone",
+    "label": "a BYOK turn still pays the catalog network call on its critical path",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
-    "find": "    return bool(getattr(status, \"configured\", False))",
-    "replace": "    return True",
-    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_workspace_with_no_key_is_platform"]
+    "find": "            and byok_creds.source != \"byok\"\n            and await _model_is_unknown_to_gateway(ctx.model_override)",
+    "replace": "            and await _model_is_unknown_to_gateway(ctx.model_override)\n            and byok_creds.source != \"byok\"",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_byok_turn_never_reads_the_catalog"]
+  },
+  {
+    "label": "the model id is never forwarded — the picker becomes a dead control",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        if ctx.model_override:\n            run_kwargs[\"model_override\"] = ctx.model_override",
+    "replace": "        if False:\n            run_kwargs[\"model_override\"] = ctx.model_override",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_catalogued_model_runs"]
   }
 ]
