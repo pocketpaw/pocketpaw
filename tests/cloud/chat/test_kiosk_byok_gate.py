@@ -141,9 +141,7 @@ async def test_an_unresolvable_plan_asks_for_a_key(monkeypatch):
     async def _boom(_ws):
         raise RuntimeError("mongo is having a day")
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.entitlements.service.resolve_entitlements", _boom
-    )
+    monkeypatch.setattr("pocketpaw_ee.cloud.entitlements.service.resolve_entitlements", _boom)
 
     assert await kiosk_byok.requires_own_key(_ctx()) is True
 
