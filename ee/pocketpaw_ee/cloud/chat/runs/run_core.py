@@ -1866,19 +1866,12 @@ async def _drive_agent_loop(
         # which says nothing about whether the model exists or whether we serve
         # it. See ``_model_is_unknown_to_gateway`` for why this rejects only
         # what we positively know is not served.
+        # The catalog check itself is DEFERRED until the credentials below are
+        # resolved — it belongs to a platform turn only, and until we know who
+        # pays we cannot know whether it applies. ``run_kwargs`` is not consumed
+        # until ``pool.run`` far below, so setting this here and judging it
+        # later is safe.
         if ctx.model_override:
-            if await _model_is_unknown_to_gateway(ctx.model_override):
-                yield (
-                    "error",
-                    {
-                        "code": "model.not_available",
-                        "message": (
-                            f"'{ctx.model_override}' isn't a model this workspace can "
-                            "run. Pick one from the model menu."
-                        ),
-                    },
-                )
-                return
             run_kwargs["model_override"] = ctx.model_override
         # Per-send tool switch. Same withhold-when-empty idiom: only an explicit
         # False is a request, so a client that never sends the field (every
@@ -1940,6 +1933,40 @@ async def _drive_agent_loop(
                 ctx.workspace_id,
             )
             byok_creds = byok_service.TurnCredentials(source="platform")
+        # The per-send model, judged now that we know WHOSE gateway runs it.
+        #
+        # The catalog is OUR gateway's model list. It is the right guard for a
+        # platform turn: without it a workspace names free text and our key pays
+        # for whatever gets routed. It is the WRONG list for a BYOK turn, which
+        # never touches our gateway — a live kiosk turn on `gpt-5.6-luna` was
+        # refused with "isn't a model this workspace can run" while the gateway
+        # serving it was perfectly healthy (2026-09-13).
+        #
+        # Keyed on ``byok_creds.source``, the SAME value that decides which key
+        # pays, so the two can never disagree. An earlier fix asked a second,
+        # weaker question — "is a key stored?" — and drifted from this one: a
+        # stored key that no longer decrypts reports configured, degrades to
+        # platform a few lines above, and would have skipped this check while
+        # spending our credential on free text.
+        #
+        # A BYOK turn is not left unchecked; ``provider_allows_model`` below is
+        # the check that belongs to it.
+        if (
+            ctx.model_override
+            and byok_creds.source != "byok"
+            and await _model_is_unknown_to_gateway(ctx.model_override)
+        ):
+            yield (
+                "error",
+                {
+                    "code": "model.not_available",
+                    "message": (
+                        f"'{ctx.model_override}' isn't a model this workspace can "
+                        "run. Pick one from the model menu."
+                    ),
+                },
+            )
+            return
         if byok_creds.source == "byok" and byok_creds.api_key:
             agent_model = (
                 str(instance.config.get("model") or "") if hasattr(instance, "config") else ""

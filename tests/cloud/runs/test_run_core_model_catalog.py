@@ -89,6 +89,7 @@ async def _drive(
     ctx: ScopeContext,
     *,
     catalog,
+    creds: TurnCredentials | None = None,
 ) -> tuple[_CapturePool, list[tuple[str, dict]]]:
     """Run the loop with *catalog* standing in for ``catalog_service.list_models``.
 
@@ -116,8 +117,10 @@ async def _drive(
 
     monkeypatch.setattr("pocketpaw_ee.catalog.service.list_models", _list_models)
 
+    resolved = creds or TurnCredentials(source="platform")
+
     async def _resolve(workspace_id):
-        return TurnCredentials(source="platform")
+        return resolved
 
     monkeypatch.setattr("pocketpaw_ee.cloud.byok.service.resolve_turn_credentials", _resolve)
 
@@ -214,3 +217,115 @@ async def test_an_empty_catalog_refuses_nothing(monkeypatch):
     )
     assert pool.run_called is True
     assert not [d for name, d in out if name == "error"]
+
+
+# ---------------------------------------------------------------------------
+# A BYOK turn is judged against the TENANT's gateway, never ours
+# ---------------------------------------------------------------------------
+# A BYOK turn is judged against the TENANT's gateway, never ours
+# ---------------------------------------------------------------------------
+
+
+_BYOK = TurnCredentials(source="byok", api_key="sk-" + "x" * 40, provider="openai_compatible")
+
+
+async def test_a_byok_model_is_not_checked_against_our_catalog(monkeypatch):
+    """The live regression, 2026-09-13.
+
+    A kiosk turn on a custom gateway serving `gpt-5.6-luna` was refused with
+    "isn't a model this workspace can run". Our catalog is the model list of
+    OUR gateway, and a BYOK turn never touches it — it goes to the tenant's own
+    endpoint with their own key. So every custom-gateway model that was not
+    coincidentally also one of ours was rejected, which is nearly all of them.
+
+    It hid because the catalog check fails OPEN when the catalog is unreachable
+    or empty, which is every local box. Only a healthy, populated deployment
+    makes it fail closed.
+
+    Drives the REAL resolver rather than a stubbed predicate: the credential
+    source is the thing the check now keys on, so stubbing anything nearer
+    would test the stub.
+
+    Mutation that must break this: drop the `byok_creds.source != "byok"` term.
+    """
+    pool, out = await _drive(
+        monkeypatch,
+        _ctx(model_override="gpt-5.6-luna"),
+        catalog=[_entry("claude-opus-4-8")],
+        creds=_BYOK,
+    )
+
+    assert [d for name, d in out if name == "error"] == []
+    assert pool.run_called is True
+    assert pool.run_kwargs.get("model_override") == "gpt-5.6-luna"
+
+
+async def test_a_platform_turn_is_still_checked(monkeypatch):
+    """The other half. Without it, skipping the check for everyone would pass
+    the test above and reopen the free-text hole the check exists to close.
+    """
+    pool, out = await _drive(
+        monkeypatch,
+        _ctx(model_override="gpt-9-ultra-expensive"),
+        catalog=[_entry("claude-opus-4-8")],
+        creds=TurnCredentials(source="platform"),
+    )
+
+    assert pool.run_called is False
+    errors = [d for name, d in out if name == "error"]
+    assert errors and errors[0]["code"] == "model.not_available"
+
+
+async def test_a_stored_key_that_degrades_to_platform_is_still_checked(monkeypatch):
+    """The hole an earlier draft of this fix shipped.
+
+    That draft asked a second, weaker question — "is a key stored?" — via the
+    display-column status, which never decrypts. A key stored before an
+    encryption-key rotation reports configured, `resolve_turn_credentials`
+    degrades it to platform, and the turn would have skipped this check while
+    spending OUR credential on free text. Keying on the resolver's own
+    `source` is what makes that impossible.
+
+    Mutation that must break this: key the skip on a stored-key probe again.
+    """
+    pool, out = await _drive(
+        monkeypatch,
+        _ctx(model_override="gpt-9-ultra-expensive"),
+        catalog=[_entry("claude-opus-4-8")],
+        creds=TurnCredentials(source="platform"),
+    )
+
+    assert pool.run_called is False
+    errors = [d for name, d in out if name == "error"]
+    assert errors and errors[0]["code"] == "model.not_available"
+
+
+async def test_a_byok_turn_never_reads_the_catalog(monkeypatch):
+    """Not just tolerated — not CONSULTED. The catalog read is a network call on
+    the turn's critical path and a BYOK turn has no use for its answer, so the
+    credential term must come first and short-circuit it.
+
+    Asserts the call never happens rather than handing the catalog an exception:
+    ``_model_is_unknown_to_gateway`` swallows its own failures and fails open, so
+    a raising catalog proves nothing about whether it was reached.
+
+    Mutation that must break this: put the catalog term before the credential
+    term in the condition.
+    """
+    consulted: list[str] = []
+
+    async def _must_not_run(model_id):
+        consulted.append(model_id)
+        return False
+
+    monkeypatch.setattr(run_core, "_model_is_unknown_to_gateway", _must_not_run)
+
+    pool, _ = await _drive(
+        monkeypatch,
+        _ctx(model_override="gpt-5.6-luna"),
+        catalog=[_entry("claude-opus-4-8")],
+        creds=_BYOK,
+    )
+
+    assert consulted == [], "a byok turn consulted our model catalog"
+    assert pool.run_called is True
