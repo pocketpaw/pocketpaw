@@ -535,7 +535,50 @@ async def _apply_link_policy(
     if decision.action == "noop":
         return user
 
+    # A GUEST reaching here is signing UP, not connecting a second credential,
+    # and the address has to be free before anything is written. Checked HERE
+    # rather than inside the promotion below because the promotion runs AFTER
+    # the attach: refusing there would leave the identity bolted to a row that
+    # is still a guest, which is a state nothing else in the system expects.
+    #
+    # ``decide_link`` deliberately does no email matching — the session already
+    # says who this is — so this is not a duplicate of anything it does. It is
+    # the uniqueness constraint on ``User.email``, which a guest is about to
+    # take a value for, and it answers with the same code /auth/guest/upgrade
+    # gives for a taken email.
+    if user.is_guest:
+        assert identity.email  # decide_link refuses an unverified identity
+        clash = await _find_by_email(identity.email)
+        if clash is not None and clash.id != user.id:
+            logger.info(
+                "social: refused to upgrade guest %s — %s is already an account",
+                user.id,
+                identity.provider,
+            )
+            await _audit(
+                user,
+                "auth.social.link_refused",
+                identity.provider,
+                reason=domain.REFUSE_EMAIL_TAKEN,
+            )
+            raise LinkRefused(
+                domain.REFUSE_EMAIL_TAKEN,
+                "That account's email address already belongs to a PocketPaw "
+                "account. Sign in to it instead.",
+                next_path=next_path,
+            )
+
     linked = await _attach_account(user, identity)
+
+    # Now that the identity is attached the guest has a way back in, so the
+    # promotion is safe to make. Same user id throughout, which is the whole
+    # point: the workspace, the pages and the stored key stay put.
+    if linked.is_guest:
+        from pocketpaw_ee.cloud.auth import guest as guest_service
+
+        linked = await guest_service.upgrade_guest_via_social(linked, email=identity.email)
+        await _audit(linked, "auth.social.guest_upgraded", identity.provider)
+
     await _audit(linked, "auth.social.linked", identity.provider)
     return linked
 

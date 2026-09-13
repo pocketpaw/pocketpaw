@@ -1,0 +1,51 @@
+[
+  {
+    "label": "the guest is never promoted — social sign-up leaves them a guest, which is the reported bug",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "    if linked.is_guest:\n        from pocketpaw_ee.cloud.auth import guest as guest_service",
+    "replace": "    if False:\n        from pocketpaw_ee.cloud.auth import guest as guest_service",
+    "tests": ["tests/cloud/auth/test_social_guest_upgrade.py::test_a_guest_who_signs_up_with_github_keeps_the_same_account"]
+  },
+  {
+    "label": "the promotion fires for EVERY link — connecting GitHub from Settings rewrites a registered user's email",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "    if linked.is_guest:\n        from pocketpaw_ee.cloud.auth import guest as guest_service",
+    "replace": "    if True:\n        from pocketpaw_ee.cloud.auth import guest as guest_service",
+    "tests": ["tests/cloud/auth/test_social_guest_upgrade.py::test_a_registered_user_linking_an_account_is_not_turned_into_anything"]
+  },
+  {
+    "label": "no email-collision check — a guest takes an address another account already owns",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "        clash = await _find_by_email(identity.email)\n        if clash is not None and clash.id != user.id:",
+    "replace": "        clash = await _find_by_email(identity.email)\n        if False:",
+    "tests": ["tests/cloud/auth/test_social_guest_upgrade.py::test_a_provider_email_owned_by_someone_else_refuses_and_changes_nothing"]
+  },
+  {
+    "label": "the collision check runs but the guest keeps the identity — a refusal leaves a half-upgraded row",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "    if user.is_guest:\n        assert identity.email  # decide_link refuses an unverified identity\n        clash = await _find_by_email(identity.email)",
+    "replace": "    if user.is_guest:\n        assert identity.email  # decide_link refuses an unverified identity\n        await _attach_account(user, identity)\n        clash = await _find_by_email(identity.email)",
+    "tests": ["tests/cloud/auth/test_social_guest_upgrade.py::test_a_provider_email_owned_by_someone_else_refuses_and_changes_nothing"]
+  },
+  {
+    "label": "guest_limits survive the promotion — the upgraded account keeps its guest caps",
+    "file": "ee/pocketpaw_ee/cloud/auth/guest.py",
+    "find": "    user.is_guest = False\n    user.guest_limits = None\n    user.is_verified = True\n    await user.save()\n    logger.info(\"guest upgraded via social: user=%s\", user.id)",
+    "replace": "    user.is_guest = False\n    user.is_verified = True\n    await user.save()\n    logger.info(\"guest upgraded via social: user=%s\", user.id)",
+    "tests": ["tests/cloud/auth/test_social_guest_upgrade.py::test_a_guest_who_signs_up_with_github_keeps_the_same_account"]
+  },
+  {
+    "label": "the provider address is never written — the upgraded account keeps its @guest.invalid email and cannot be found by it",
+    "file": "ee/pocketpaw_ee/cloud/auth/guest.py",
+    "find": "    user.email = email.strip().lower()\n    user.is_guest = False",
+    "replace": "    user.is_guest = False",
+    "tests": ["tests/cloud/auth/test_social_guest_upgrade.py::test_a_guest_who_signs_up_with_github_keeps_the_same_account"]
+  },
+  {
+    "label": "the identity is never attached — the upgraded account has no way to sign back in",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "    linked = await _attach_account(user, identity)\n\n    # Now that the identity is attached",
+    "replace": "    linked = user\n\n    # Now that the identity is attached",
+    "tests": ["tests/cloud/auth/test_social_guest_upgrade.py::test_the_upgraded_guest_can_come_back_through_plain_social_login"]
+  }
+]

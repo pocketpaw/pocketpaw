@@ -66,6 +66,11 @@ REFUSE_SSO_ENFORCED = "auth.sso_enforced"
 REFUSE_IDENTITY_CLAIMED = "auth.identity_claimed"
 #: The callback's session is not the account that started the link.
 REFUSE_LINK_SESSION_MISMATCH = "auth.link_session_mismatch"
+#: A GUEST tried to sign up with a provider whose verified address already
+#: belongs to another account. Deliberately the same code /auth/guest/upgrade
+#: answers with for a taken email: it is the same refusal reached through a
+#: different door, and the frontend should not have to learn two names for it.
+REFUSE_EMAIL_TAKEN = "auth.email_taken"
 #: Unlinking this would leave the account with no way to sign in.
 REFUSE_LAST_CREDENTIAL = "auth.last_credential"
 #: Nothing to unlink — no identity from that provider is attached.
