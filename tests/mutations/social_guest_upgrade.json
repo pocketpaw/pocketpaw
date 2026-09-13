@@ -1,51 +1,101 @@
 [
   {
-    "label": "the guest is never promoted — social sign-up leaves them a guest, which is the reported bug",
+    "label": "the guest is never promoted \u2014 social sign-up leaves them a guest, which is the reported bug",
     "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
-    "find": "    if linked.is_guest:\n        from pocketpaw_ee.cloud.auth import guest as guest_service",
-    "replace": "    if False:\n        from pocketpaw_ee.cloud.auth import guest as guest_service",
-    "tests": ["tests/cloud/auth/test_social_guest_upgrade.py::test_a_guest_who_signs_up_with_github_keeps_the_same_account"]
+    "find": "    if guest_email and linked.is_guest:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/auth/test_social_guest_upgrade.py::test_a_guest_who_signs_up_with_github_keeps_the_same_account"
+    ]
   },
   {
-    "label": "the promotion fires for EVERY link — connecting GitHub from Settings rewrites a registered user's email",
+    "label": "the promotion fires for EVERY link \u2014 connecting GitHub from Settings rewrites a registered user's email",
     "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
-    "find": "    if linked.is_guest:\n        from pocketpaw_ee.cloud.auth import guest as guest_service",
-    "replace": "    if True:\n        from pocketpaw_ee.cloud.auth import guest as guest_service",
-    "tests": ["tests/cloud/auth/test_social_guest_upgrade.py::test_a_registered_user_linking_an_account_is_not_turned_into_anything"]
+    "find": "    if guest_email and linked.is_guest:",
+    "replace": "    if True:",
+    "tests": [
+      "tests/cloud/auth/test_social_guest_upgrade.py::test_a_registered_user_linking_an_account_is_not_turned_into_anything"
+    ]
   },
   {
-    "label": "no email-collision check — a guest takes an address another account already owns",
+    "label": "no email-collision check \u2014 a guest takes an address another account already owns",
     "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
-    "find": "        clash = await _find_by_email(identity.email)\n        if clash is not None and clash.id != user.id:",
-    "replace": "        clash = await _find_by_email(identity.email)\n        if False:",
-    "tests": ["tests/cloud/auth/test_social_guest_upgrade.py::test_a_provider_email_owned_by_someone_else_refuses_and_changes_nothing"]
+    "find": "        clash = await _find_by_email(guest_email)\n        if clash is not None and clash.id != user.id:",
+    "replace": "        clash = await _find_by_email(guest_email)\n        if False:",
+    "tests": [
+      "tests/cloud/auth/test_social_guest_upgrade.py::test_a_provider_email_owned_by_someone_else_refuses_and_changes_nothing"
+    ]
   },
   {
-    "label": "the collision check runs but the guest keeps the identity — a refusal leaves a half-upgraded row",
+    "label": "the collision check runs but the guest keeps the identity \u2014 a refusal leaves a half-upgraded row",
     "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
-    "find": "    if user.is_guest:\n        assert identity.email  # decide_link refuses an unverified identity\n        clash = await _find_by_email(identity.email)",
-    "replace": "    if user.is_guest:\n        assert identity.email  # decide_link refuses an unverified identity\n        await _attach_account(user, identity)\n        clash = await _find_by_email(identity.email)",
-    "tests": ["tests/cloud/auth/test_social_guest_upgrade.py::test_a_provider_email_owned_by_someone_else_refuses_and_changes_nothing"]
+    "find": "    if guest_email:\n        clash = await _find_by_email(guest_email)",
+    "replace": "    if guest_email:\n        await _attach_account(user, identity)\n        clash = await _find_by_email(guest_email)",
+    "tests": [
+      "tests/cloud/auth/test_social_guest_upgrade.py::test_a_provider_email_owned_by_someone_else_refuses_and_changes_nothing"
+    ]
   },
   {
-    "label": "guest_limits survive the promotion — the upgraded account keeps its guest caps",
+    "label": "guest_limits survive the promotion \u2014 the upgraded account keeps its guest caps",
     "file": "ee/pocketpaw_ee/cloud/auth/guest.py",
     "find": "    user.is_guest = False\n    user.guest_limits = None\n    user.is_verified = True\n    await user.save()\n    logger.info(\"guest upgraded via social: user=%s\", user.id)",
     "replace": "    user.is_guest = False\n    user.is_verified = True\n    await user.save()\n    logger.info(\"guest upgraded via social: user=%s\", user.id)",
-    "tests": ["tests/cloud/auth/test_social_guest_upgrade.py::test_a_guest_who_signs_up_with_github_keeps_the_same_account"]
+    "tests": [
+      "tests/cloud/auth/test_social_guest_upgrade.py::test_a_guest_who_signs_up_with_github_keeps_the_same_account"
+    ]
   },
   {
-    "label": "the provider address is never written — the upgraded account keeps its @guest.invalid email and cannot be found by it",
+    "label": "the provider address is never written \u2014 the upgraded account keeps its @guest.invalid email and cannot be found by it",
     "file": "ee/pocketpaw_ee/cloud/auth/guest.py",
     "find": "    user.email = email.strip().lower()\n    user.is_guest = False",
     "replace": "    user.is_guest = False",
-    "tests": ["tests/cloud/auth/test_social_guest_upgrade.py::test_a_guest_who_signs_up_with_github_keeps_the_same_account"]
+    "tests": [
+      "tests/cloud/auth/test_social_guest_upgrade.py::test_a_guest_who_signs_up_with_github_keeps_the_same_account"
+    ]
   },
   {
-    "label": "the identity is never attached — the upgraded account has no way to sign back in",
+    "label": "the identity is never attached \u2014 the upgraded account has no way to sign back in",
     "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
     "find": "    linked = await _attach_account(user, identity)\n\n    # Now that the identity is attached",
     "replace": "    linked = user\n\n    # Now that the identity is attached",
-    "tests": ["tests/cloud/auth/test_social_guest_upgrade.py::test_the_upgraded_guest_can_come_back_through_plain_social_login"]
+    "tests": [
+      "tests/cloud/auth/test_social_guest_upgrade.py::test_the_upgraded_guest_can_come_back_through_plain_social_login"
+    ]
+  },
+  {
+    "label": "begin_link drops the pinned origin \u2014 a kiosk guest is returned to the Paw OS",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "            \"origin\": safe_frontend_origin(origin),\n            _LINK_KEY: str(user.id),",
+    "replace": "            \"origin\": \"\",\n            _LINK_KEY: str(user.id),",
+    "tests": [
+      "tests/cloud/auth/test_social_guest_upgrade.py::test_a_guest_upgrade_returns_to_the_host_it_started_on"
+    ]
+  },
+  {
+    "label": "the link redirect ignores the pinned origin it was handed",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/router.py",
+    "find": "    base = social_service.frontend_base_url(origin or None)\n    path = _safe_next(next_path)",
+    "replace": "    base = social_service.frontend_base_url()\n    path = _safe_next(next_path)",
+    "tests": [
+      "tests/cloud/auth/test_social_guest_upgrade.py::test_a_guest_upgrade_returns_to_the_host_it_started_on"
+    ]
+  },
+  {
+    "label": "a lost email race is not rolled back \u2014 the guest keeps an identity it failed to claim",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "            await _detach_account(linked, identity.provider)\n            raise LinkRefused(",
+    "replace": "            raise LinkRefused(",
+    "tests": [
+      "tests/cloud/auth/test_social_guest_upgrade.py::test_an_email_race_lost_after_the_attach_rolls_the_attach_back"
+    ]
+  },
+  {
+    "label": "the guest's stored BYOK key is dropped by the promotion",
+    "file": "ee/pocketpaw_ee/cloud/auth/guest.py",
+    "find": "    user.is_guest = False\n    user.guest_limits = None\n    user.is_verified = True\n    await user.save()\n    logger.info(\"guest upgraded via social",
+    "replace": "    user.is_guest = False\n    user.guest_limits = None\n    user.is_verified = True\n    user.workspaces = []\n    await user.save()\n    logger.info(\"guest upgraded via social",
+    "tests": [
+      "tests/cloud/auth/test_social_guest_upgrade.py::test_a_guest_who_signs_up_with_github_keeps_the_same_account"
+    ]
   }
 ]

@@ -22,6 +22,12 @@ Step 2 before step 3 is the account-takeover defence. Matching an unverified
 address against an existing account is how an attacker attaches victim@corp.com
 to their own provider profile and walks into the victim's account.
 
+Updated 2026-09-13 (feat/guest-social-upgrade): added ``REFUSE_EMAIL_TAKEN``.
+The policy here is unchanged — the check that raises it lives in the service,
+because it is a uniqueness constraint on a row rather than a decision about an
+identity — but the code belongs with its siblings so the frontend has one place
+to read them from.
+
 Updated 2026-08-01 (AM-6) with the SETTINGS-side policy — ``decide_link`` and
 ``decide_unlink``, for a user who already has a session and is managing their
 connected accounts. Two rules there are worth stating up front, because both

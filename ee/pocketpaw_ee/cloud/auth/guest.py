@@ -9,6 +9,13 @@
 # provider gate below is now the only thing deciding what is accepted, and it
 # reads ``byok_service.SUPPORTED_PROVIDERS`` rather than naming a provider.
 #
+# Updated 2026-09-13 (feat/guest-social-upgrade): added
+# ``upgrade_guest_via_social`` — the same in-place promotion as
+# ``upgrade_guest`` for the door that has no password. A guest signing up with
+# Google or GitHub used to run the LOGIN flow, which creates a new user when it
+# cannot match an identity, stranding their pages and stored key on an id
+# nobody could reach. They now come through the link flow instead.
+#
 # Updated 2026-09-11 (review S6): ``mint_guest`` now stores the base URL
 # ``validate_key`` hands back rather than the raw body string. The validator
 # normalizes (``strip().rstrip("/")``) before it guards, and writing the

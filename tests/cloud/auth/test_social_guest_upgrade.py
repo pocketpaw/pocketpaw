@@ -161,6 +161,14 @@ async def test_a_guest_who_signs_up_with_github_keeps_the_same_account(app, monk
     assert [a.oauth_name for a in after.oauth_accounts] == ["github"]
     assert list(after.workspaces or []) == workspace_before, "lost the workspace"
 
+    # The asset the whole feature exists to preserve. A cleanup keyed on
+    # is_guest flipping would strip this and every other assertion here would
+    # still pass: same id, same workspace, same identity, no key to run on.
+    from pocketpaw_ee.cloud.byok import service as byok_service
+
+    creds = await byok_service.resolve_turn_credentials(str(workspace_before[0].workspace))
+    assert creds.source == "byok", f"the stored key did not survive: {creds.source}"
+
     # And no second account was minted behind their back.
     assert await User.find(User.email == "newcomer@gmail.com").count() == 1
 
@@ -315,3 +323,129 @@ async def test_a_registered_user_linking_an_account_is_not_turned_into_anything(
     assert after.email == "alice@acme.com", "a plain link rewrote the account email"
     assert after.is_guest is False
     assert [a.oauth_name for a in after.oauth_accounts] == ["github"]
+
+
+# ---------------------------------------------------------------------------
+# The redirect has to come back to the face the guest started on
+# ---------------------------------------------------------------------------
+
+
+async def test_a_guest_upgrade_returns_to_the_host_it_started_on(app, monkeypatch):
+    """The bug this file's first draft shipped.
+
+    ``begin_login`` has pinned the starting origin into the OAuth state since
+    2026-09-12, because one deployment serves the kiosk and the Paw OS on two
+    hostnames. ``begin_link`` did not — harmless while linking only happened
+    inside Settings, where you are already on the face you started from, and
+    wrong the moment a guest used the link flow to SIGN UP: promoted correctly,
+    then dropped on the Paw OS with their notebook nowhere on screen.
+
+    Mutation that must break this: drop ``origin`` from ``begin_link``'s state,
+    or stop passing ``result["origin"]`` to ``_link_redirect``.
+    """
+    from pocketpaw.api import cors
+
+    monkeypatch.setenv("POCKETPAW_FRONTEND_BASE_URL", "https://paw.example.com")
+    monkeypatch.setattr(cors, "allowed_origins", lambda: ["https://kiosk.example.com"])
+
+    async with _client(app) as client:
+        await _mint_guest(client)
+
+        resp = await client.post(
+            "/api/v1/auth/social/github/link",
+            headers={"Origin": "https://kiosk.example.com"},
+        )
+        assert resp.status_code == 200, resp.text
+        state = resp.json()["authorize_url"].split("state=")[1].split("&")[0]
+
+        _stub_exchange(
+            monkeypatch,
+            SocialIdentity(provider="github", account_id="gh-kiosk", email="k@gmail.com"),
+        )
+        done = await client.get(
+            "/api/v1/auth/social/callback",
+            params={"code": "c", "state": state},
+            follow_redirects=False,
+        )
+
+    assert done.status_code == 302, done.text
+    assert done.headers["location"].startswith("https://kiosk.example.com"), (
+        "a kiosk guest was returned to " + done.headers["location"]
+    )
+
+
+async def test_an_unknown_origin_degrades_to_the_configured_default(app, monkeypatch):
+    """The validation half. An origin this deployment does not serve must not
+    become a redirect target — that is an open redirect that also hands over a
+    session cookie.
+
+    Deliberately NOT in social_guest_upgrade.json, and the reason is worth
+    stating: the origin is validated TWICE, once by ``begin_link`` at authorize
+    time and again by ``complete_callback`` on the way out. Either alone is
+    sufficient, so every single-point mutation escapes — the plan reported one
+    as ESCAPED until this was understood. Removing both by hand does fail this
+    test (verified 2026-09-13: the redirect became
+    ``https://attacker.example.net/?social_linked=github``), which is the proof
+    the plan cannot express.
+    """
+    from pocketpaw.api import cors
+
+    monkeypatch.setenv("POCKETPAW_FRONTEND_BASE_URL", "https://paw.example.com")
+    monkeypatch.setattr(cors, "allowed_origins", lambda: ["https://kiosk.example.com"])
+
+    async with _client(app) as client:
+        await _mint_guest(client)
+
+        resp = await client.post(
+            "/api/v1/auth/social/github/link",
+            headers={"Origin": "https://attacker.example.net"},
+        )
+        assert resp.status_code == 200, resp.text
+        state = resp.json()["authorize_url"].split("state=")[1].split("&")[0]
+
+        _stub_exchange(
+            monkeypatch,
+            SocialIdentity(provider="github", account_id="gh-evil", email="e@gmail.com"),
+        )
+        done = await client.get(
+            "/api/v1/auth/social/callback",
+            params={"code": "c", "state": state},
+            follow_redirects=False,
+        )
+
+    assert done.status_code == 302
+    assert done.headers["location"].startswith("https://paw.example.com")
+    assert "attacker.example.net" not in done.headers["location"]
+
+
+async def test_an_email_race_lost_after_the_attach_rolls_the_attach_back(app, monkeypatch):
+    """The window between the collision check and the write that takes the
+    address. Losing it must leave NOTHING behind — a row carrying the identity
+    but still flagged guest would refuse its own next attempt with
+    ``identity_claimed``, because it owns the identity it failed to claim.
+    """
+    from pymongo.errors import DuplicateKeyError
+
+    from pocketpaw_ee.cloud.auth import guest as guest_service
+
+    async def _lose_the_race(user, *, email):  # noqa: ANN001, ARG001
+        raise DuplicateKeyError("E11000 duplicate key error: email")
+
+    monkeypatch.setattr(guest_service, "upgrade_guest_via_social", _lose_the_race)
+
+    async with _client(app) as client:
+        guest = await _mint_guest(client)
+        guest_id = guest.id
+
+        done = await _link_through_callback(
+            client,
+            monkeypatch,
+            SocialIdentity(provider="github", account_id="gh-racer", email="racer@gmail.com"),
+        )
+        assert done.status_code == 302
+        assert "error" in done.headers["location"]
+
+    after = await User.get(guest_id)
+    assert after.is_guest is True
+    assert after.oauth_accounts == [], "the attach was not rolled back"
+    assert after.email.endswith("@guest.invalid")
