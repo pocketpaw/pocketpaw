@@ -9,6 +9,13 @@
 # provider gate below is now the only thing deciding what is accepted, and it
 # reads ``byok_service.SUPPORTED_PROVIDERS`` rather than naming a provider.
 #
+# Updated 2026-09-13 (feat/guest-social-upgrade): added
+# ``upgrade_guest_via_social`` — the same in-place promotion as
+# ``upgrade_guest`` for the door that has no password. A guest signing up with
+# Google or GitHub used to run the LOGIN flow, which creates a new user when it
+# cannot match an identity, stranding their pages and stored key on an id
+# nobody could reach. They now come through the link flow instead.
+#
 # Updated 2026-09-11 (review S6): ``mint_guest`` now stores the base URL
 # ``validate_key`` hands back rather than the raw body string. The validator
 # normalizes (``strip().rstrip("/")``) before it guards, and writing the
@@ -195,4 +202,44 @@ async def upgrade_guest(user: User, *, email: str, password: str) -> User:
     return user
 
 
-__all__ = ["is_provider_supported", "mint_guest", "upgrade_guest"]
+async def upgrade_guest_via_social(user: User, *, email: str) -> User:
+    """Promote a guest whose provider identity has just been attached.
+
+    The sibling of :func:`upgrade_guest`, for the door that has no password.
+    Same promotion, same user id, so the workspace, sessions, pages and stored
+    key stay exactly where they are — which is the only reason the kiosk can
+    offer "Continue with Google" at all.
+
+    No password is set. The account is reachable through the attached identity,
+    which ``_find_by_oauth_account`` matches on the provider's immutable id, and
+    the guest's original hash is a random string nobody has ever held. It stays
+    put rather than being blanked: ``_has_usable_password`` reads the field, and
+    an empty hash compares equal in some verifiers.
+
+    ``is_verified`` becomes True because the provider vouched for the address —
+    ``decide_link`` refuses an identity it will not vouch for, so by the time we
+    are here that is established, not assumed.
+
+    Callers MUST have checked the address is free first (see
+    ``social.service._apply_link_policy``). This function does not re-check:
+    the check has to happen BEFORE the identity is attached, or a refusal
+    leaves a half-upgraded row behind.
+    """
+    if not user.is_guest:
+        raise CloudError(409, "auth.not_a_guest", "This account is already registered.")
+
+    user.email = email.strip().lower()
+    user.is_guest = False
+    user.guest_limits = None
+    user.is_verified = True
+    await user.save()
+    logger.info("guest upgraded via social: user=%s", user.id)
+    return user
+
+
+__all__ = [
+    "is_provider_supported",
+    "mint_guest",
+    "upgrade_guest",
+    "upgrade_guest_via_social",
+]

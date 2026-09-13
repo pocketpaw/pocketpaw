@@ -2,6 +2,12 @@
 
 Created 2026-07-29 (AM-2/AM-3/AM-4).
 
+Updated 2026-09-13 (feat/guest-social-upgrade): ``_apply_link_policy`` can now
+promote a GUEST, and ``begin_link`` pins the caller's origin into the state the
+way ``begin_login`` has since 2026-09-12. The second half is not incidental:
+one deployment serves the kiosk and the Paw OS on two hostnames, and without it
+a guest was upgraded correctly and then returned to the wrong face.
+
 Updated 2026-08-01 (AM-6): the same OAuth dance now serves a SECOND purpose —
 attaching an identity to an account that is already signed in. Both purposes
 land on one callback, so the distinction has to be carried somewhere the
@@ -55,6 +61,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from beanie import PydanticObjectId
+from pymongo.errors import DuplicateKeyError
 
 from pocketpaw_ee.cloud._core.errors import (
     CloudError,
@@ -63,6 +70,7 @@ from pocketpaw_ee.cloud._core.errors import (
     ValidationError,
 )
 from pocketpaw_ee.cloud.auth import _oauth_state
+from pocketpaw_ee.cloud.auth import guest as guest_service
 from pocketpaw_ee.cloud.auth.social import domain
 from pocketpaw_ee.cloud.auth.social.providers import get_provider
 from pocketpaw_ee.cloud.auth.social.providers.base import SocialIdentity
@@ -261,6 +269,7 @@ async def begin_link(
     *,
     flow: str = "web",
     next_path: str | None = None,
+    origin: str | None = None,
 ) -> str:
     """Begin an OAuth flow that ATTACHES the result to ``user``.
 
@@ -309,6 +318,16 @@ async def begin_link(
             # selects which proof-of-identity the callback demands.
             "flow": flow,
             "next": next_path or "",
+            # The face the button was clicked on, validated here and carried in
+            # the single-use state — the same treatment ``begin_login`` gives it,
+            # and for the same reason: one deployment serves two faces on two
+            # hostnames. Until 2026-09-13 only the LOGIN path pinned it, so the
+            # link callback returned everyone to the single configured origin.
+            # That was invisible while linking was a Settings-only action (you
+            # are already on the origin you started from), and became a bug the
+            # moment a kiosk GUEST used this flow to sign up: promoted
+            # correctly, then dropped on the Paw OS instead of the notebook.
+            "origin": safe_frontend_origin(origin),
             _LINK_KEY: str(user.id),
         },
     )
@@ -535,7 +554,77 @@ async def _apply_link_policy(
     if decision.action == "noop":
         return user
 
+    # A GUEST reaching here is signing UP, not connecting a second credential,
+    # and the address has to be free before anything is written. Checked HERE
+    # rather than inside the promotion below because the promotion runs AFTER
+    # the attach: refusing there would leave the identity bolted to a row that
+    # is still a guest, which is a state nothing else in the system expects.
+    #
+    # ``decide_link`` deliberately does no email matching — the session already
+    # says who this is — so this is not a duplicate of anything it does. It is
+    # the uniqueness constraint on ``User.email``, which a guest is about to
+    # take a value for, and it answers with the same code /auth/guest/upgrade
+    # gives for a taken email.
+    # Resolved ONCE, before the attach, and used by both halves below. Not an
+    # ``assert``: those vanish under ``python -O``, and the value is consumed
+    # 30 lines and one database write away from where it would be checked.
+    guest_email = identity.email if user.is_guest else None
+    if user.is_guest and not guest_email:
+        raise LinkRefused(
+            domain.REFUSE_UNVERIFIED,
+            "We couldn't confirm a verified email from that account.",
+            next_path=next_path,
+        )
+
+    if guest_email:
+        clash = await _find_by_email(guest_email)
+        if clash is not None and clash.id != user.id:
+            logger.info(
+                "social: refused to upgrade guest %s — %s is already an account",
+                user.id,
+                identity.provider,
+            )
+            await _audit(
+                user,
+                "auth.social.link_refused",
+                identity.provider,
+                reason=domain.REFUSE_EMAIL_TAKEN,
+            )
+            raise LinkRefused(
+                domain.REFUSE_EMAIL_TAKEN,
+                "That account's email address already belongs to a PocketPaw "
+                "account. Sign in to it instead.",
+                next_path=next_path,
+            )
+
     linked = await _attach_account(user, identity)
+
+    # Now that the identity is attached the guest has a way back in, so the
+    # promotion is safe to make. Same user id throughout, which is the whole
+    # point: the workspace, the pages and the stored key stay put.
+    if guest_email and linked.is_guest:
+        try:
+            linked = await guest_service.upgrade_guest_via_social(linked, email=guest_email)
+        except DuplicateKeyError:
+            # The address was free when we checked and was taken between then
+            # and this write. Undo the attach rather than leaving a row that is
+            # neither guest nor account — and which would refuse its own next
+            # attempt with ``identity_claimed``, because it now owns the
+            # identity it failed to finish claiming.
+            logger.warning(
+                "social: guest %s lost an email race for %s; rolling the attach back",
+                linked.id,
+                identity.provider,
+            )
+            await _detach_account(linked, identity.provider)
+            raise LinkRefused(
+                domain.REFUSE_EMAIL_TAKEN,
+                "That account's email address already belongs to a PocketPaw "
+                "account. Sign in to it instead.",
+                next_path=next_path,
+            ) from None
+        await _audit(linked, "auth.social.guest_upgraded", identity.provider)
+
     await _audit(linked, "auth.social.linked", identity.provider)
     return linked
 
@@ -677,6 +766,19 @@ async def list_identities(user: _UserDoc) -> list[dict[str, Any]]:
         }
         for account in (user.oauth_accounts or [])
     ]
+
+
+async def _detach_account(user: _UserDoc, provider_name: str) -> None:
+    """Remove a provider identity with NO policy applied.
+
+    Strictly a rollback for a half-finished attach in this module. Not
+    ``unlink_identity``: that one refuses to remove the last way into an
+    account, which is precisely the state a failed guest promotion is in — no
+    usable password, one identity — so the guard written to protect users would
+    pin the broken row in place instead.
+    """
+    user.oauth_accounts = [a for a in (user.oauth_accounts or []) if a.oauth_name != provider_name]
+    await user.save()
 
 
 async def unlink_identity(user: _UserDoc, provider_name: str) -> None:
