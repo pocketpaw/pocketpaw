@@ -6,7 +6,8 @@
 # afternoon went into hunting a deploy bug that did not exist. Read the number
 # the build actually installed rather than keeping a second copy in sync by hand.
 
-from importlib.metadata import PackageNotFoundError, version as _installed_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _installed_version
 
 try:
     __version__ = _installed_version("pocketpaw")
