@@ -424,9 +424,8 @@ async def test_an_email_race_lost_after_the_attach_rolls_the_attach_back(app, mo
     but still flagged guest would refuse its own next attempt with
     ``identity_claimed``, because it owns the identity it failed to claim.
     """
-    from pymongo.errors import DuplicateKeyError
-
     from pocketpaw_ee.cloud.auth import guest as guest_service
+    from pymongo.errors import DuplicateKeyError
 
     async def _lose_the_race(user, *, email):  # noqa: ANN001, ARG001
         raise DuplicateKeyError("E11000 duplicate key error: email")
