@@ -121,13 +121,15 @@ async def _assert_own_key_if_kiosk_requires_it(ctx: Any) -> None:
     refused a keyless guest with their own code, and answering them twice with
     two different codes would make the prompt flicker between "create an
     account" and "add a key".
-    """
-    from pocketpaw.config import get_settings
 
-    if not get_settings().other_hand_require_byok:
-        return
-    sc = getattr(ctx, "surface_context", None)
-    if sc is None or sc.kind is not SurfaceKind.OTHER_HAND:
+    Shares ``kiosk_byok.requires_own_key`` with the executor as of 2026-09-13,
+    when the rule grew a plan term. Two copies were harmless while the rule was
+    flag-plus-surface; the moment it could differ, the seam that answers FIRST
+    would have refused a paying member the other was about to admit.
+    """
+    from pocketpaw_ee.cloud.chat import kiosk_byok
+
+    if not await kiosk_byok.requires_own_key(ctx):
         return
 
     from pocketpaw_ee.cloud.auth import guest_budget

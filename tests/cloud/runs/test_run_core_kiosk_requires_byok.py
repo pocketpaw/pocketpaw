@@ -271,3 +271,115 @@ async def test_an_account_with_a_key_proceeds(monkeypatch):
     assert pool.run_kwargs is not None
     assert pool.run_kwargs.get("byok_api_key") == _PLAINTEXT
     assert _codes(events) == []
+
+
+def _on_plan(monkeypatch, plan: str) -> None:
+    """Drive the REAL entitlements resolver, stubbed at its own data seam.
+
+    ``get_workspace_plan`` is the one read the resolver makes; stubbing
+    anything nearer (``resolve_entitlements`` itself, or the gate's own plan
+    lookup) would test the stub. The resolver's unknown-plan fallback to
+    ``free`` is part of what these tests are checking.
+    """
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    async def _plan(_ws):
+        return plan
+
+    monkeypatch.setattr(workspace_service, "get_workspace_plan", _plan)
+
+
+# ── the plan (2026-09-13) ────────────────────────────────────────────────
+
+
+async def test_a_paying_account_runs_on_the_platform_key(monkeypatch):
+    """The ask: paid tiers use OUR Claude Code subscription, no key needed.
+
+    Mutation that must break this: drop the plan term from the gate.
+    """
+    monkeypatch.setenv("POCKETPAW_OTHER_HAND_REQUIRE_BYOK", "1")
+    _on_plan(monkeypatch, "go")
+
+    pool, events = await _drive(
+        monkeypatch,
+        _ctx(surface=SurfaceKind.OTHER_HAND),
+        creds=TurnCredentials(source="platform"),
+    )
+
+    assert "byok_key_required" not in _codes(events), "a paying member was asked for a key"
+    assert pool.run_called
+
+
+@pytest.mark.parametrize("plan", ["go", "pro", "pro_max", "enterprise"])
+async def test_every_paid_tier_is_covered(monkeypatch, plan):
+    """Go $9 upward. The captain's call 2026-09-13: if you pay us anything we
+    cover the model. Parametrised so adding a tier to the catalog without
+    deciding which side of this line it sits on shows up here.
+    """
+    monkeypatch.setenv("POCKETPAW_OTHER_HAND_REQUIRE_BYOK", "1")
+    _on_plan(monkeypatch, plan)
+
+    pool, events = await _drive(
+        monkeypatch,
+        _ctx(surface=SurfaceKind.OTHER_HAND),
+        creds=TurnCredentials(source="platform"),
+    )
+
+    assert "byok_key_required" not in _codes(events)
+    assert pool.run_called
+
+
+async def test_free_still_has_to_bring_a_key(monkeypatch):
+    """The other half. Without it, opening the gate for everyone would pass the
+    tests above and hand every free signup our subscription.
+
+    Mutation that must break this: treat ``free`` as paid.
+    """
+    monkeypatch.setenv("POCKETPAW_OTHER_HAND_REQUIRE_BYOK", "1")
+    _on_plan(monkeypatch, "free")
+
+    pool, events = await _drive(
+        monkeypatch,
+        _ctx(surface=SurfaceKind.OTHER_HAND),
+        creds=TurnCredentials(source="platform"),
+    )
+
+    assert _codes(events) == ["byok_key_required"]
+    assert not pool.run_called
+
+
+async def test_an_unknown_plan_is_treated_as_free(monkeypatch):
+    """Fails CLOSED. A typo'd or stale tier string must not read as paid — this
+    gate decides who spends OUR money, so the unresolvable case is the cheap
+    one. The resolver already falls back to ``free``; this pins that the gate
+    inherits it rather than defaulting the other way on its own.
+    """
+    monkeypatch.setenv("POCKETPAW_OTHER_HAND_REQUIRE_BYOK", "1")
+    _on_plan(monkeypatch, "platinum-deluxe")
+
+    pool, events = await _drive(
+        monkeypatch,
+        _ctx(surface=SurfaceKind.OTHER_HAND),
+        creds=TurnCredentials(source="platform"),
+    )
+
+    assert _codes(events) == ["byok_key_required"]
+    assert not pool.run_called
+
+
+async def test_a_paying_account_with_its_own_key_still_uses_that_key(monkeypatch):
+    """Upgrading does not silently move a customer onto our subscription. The
+    gate only decides the NO-KEY case; a stored key still wins, and the spend
+    stays on the provider they chose.
+    """
+    monkeypatch.setenv("POCKETPAW_OTHER_HAND_REQUIRE_BYOK", "1")
+    _on_plan(monkeypatch, "pro")
+
+    pool, events = await _drive(
+        monkeypatch,
+        _ctx(surface=SurfaceKind.OTHER_HAND),
+        creds=TurnCredentials(source="byok", api_key=_PLAINTEXT, provider="anthropic"),
+    )
+
+    assert _codes(events) == []
+    assert pool.run_called
