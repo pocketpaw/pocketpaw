@@ -1,0 +1,30 @@
+[
+  {
+    "label": "the BYOK skip is dropped — every custom-gateway model is refused against OUR catalog again",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            if not _own_key and await _model_is_unknown_to_gateway(ctx.model_override):",
+    "replace": "            if await _model_is_unknown_to_gateway(ctx.model_override):",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_byok_model_is_not_checked_against_our_catalog"]
+  },
+  {
+    "label": "the check is skipped for EVERYONE — free text bills the platform key again",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            if not _own_key and await _model_is_unknown_to_gateway(ctx.model_override):",
+    "replace": "            if False and await _model_is_unknown_to_gateway(ctx.model_override):",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_platform_turn_is_still_checked"]
+  },
+  {
+    "label": "an unreadable byok status fails OPEN to byok — a broken read disables the free-text guard",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            exc_info=True,\n        )\n        return False\n    return bool(getattr(status, \"configured\", False))",
+    "replace": "            exc_info=True,\n        )\n        return True\n    return bool(getattr(status, \"configured\", False))",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_an_unreadable_byok_status_keeps_the_check"]
+  },
+  {
+    "label": "any workspace reads as byok — the guard never runs for anyone",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    return bool(getattr(status, \"configured\", False))",
+    "replace": "    return True",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_workspace_with_no_key_is_platform"]
+  }
+]

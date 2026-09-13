@@ -1449,6 +1449,34 @@ async def _prewarm_session(ctx: ScopeContext, flow_context: dict[str, Any] | Non
 _MODEL_CHECK_TIMEOUT_SECONDS = 5.0
 
 
+async def _turn_uses_own_key(workspace_id: str | None) -> bool:
+    """Will this turn run on the workspace's OWN gateway rather than ours?
+
+    A display-column read, never a decrypt: the turn path resolves the real
+    credentials later and is the authority. This only answers whether OUR model
+    catalog is the right list to judge the turn's model against, and it is not
+    the moment a stored key stops being platform-billed.
+
+    Fails OPEN to "platform" on any error, which keeps the catalog check running
+    — the conservative direction, because that check exists to stop a workspace
+    naming free text that our key would pay for.
+    """
+    if not workspace_id:
+        return False
+    try:
+        from pocketpaw_ee.cloud.byok import service as byok_service
+
+        status = await byok_service.get_status(workspace_id)
+    except Exception:
+        logger.warning(
+            "byok status unreadable for workspace=%s — treating the turn as platform",
+            workspace_id,
+            exc_info=True,
+        )
+        return False
+    return bool(getattr(status, "configured", False))
+
+
 async def _model_is_unknown_to_gateway(model_id: str) -> bool:
     """True only when we POSITIVELY know the gateway does not serve ``model_id``.
 
@@ -1867,7 +1895,26 @@ async def _drive_agent_loop(
         # it. See ``_model_is_unknown_to_gateway`` for why this rejects only
         # what we positively know is not served.
         if ctx.model_override:
-            if await _model_is_unknown_to_gateway(ctx.model_override):
+            # Skipped on a BYOK turn. The catalog is OUR gateway's model list,
+            # and a BYOK turn never touches our gateway — it goes to the
+            # tenant's own endpoint with their own key. Checking their model id
+            # against our catalog refuses every custom-gateway model that is not
+            # coincidentally one of ours, which is nearly all of them: a live
+            # kiosk turn on `gpt-5.6-luna` was rejected with "isn't a model this
+            # workspace can run" while the gateway serving it was perfectly
+            # healthy (2026-09-13).
+            #
+            # It stayed hidden because the function fails OPEN when the catalog
+            # is unreachable or empty, which is every local box. A populated
+            # catalog is what makes it fail closed, so the bug needed a healthy
+            # deployment to appear.
+            #
+            # The BYOK turn is not left unchecked: `provider_allows_model` below
+            # is the check that belongs to it, and it runs once the credentials
+            # are known — which is also why this one cannot simply move, since
+            # `run_kwargs` is assembled before that resolution.
+            _own_key = await _turn_uses_own_key(ctx.workspace_id)
+            if not _own_key and await _model_is_unknown_to_gateway(ctx.model_override):
                 yield (
                     "error",
                     {

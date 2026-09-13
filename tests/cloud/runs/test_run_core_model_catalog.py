@@ -214,3 +214,102 @@ async def test_an_empty_catalog_refuses_nothing(monkeypatch):
     )
     assert pool.run_called is True
     assert not [d for name, d in out if name == "error"]
+
+
+# ---------------------------------------------------------------------------
+# A BYOK turn is judged against the TENANT's gateway, never ours
+# ---------------------------------------------------------------------------
+
+
+async def test_a_byok_model_is_not_checked_against_our_catalog(monkeypatch):
+    """The live regression, 2026-09-13.
+
+    A kiosk turn on a custom gateway serving `gpt-5.6-luna` was refused with
+    "isn't a model this workspace can run". Our catalog is the model list of
+    OUR gateway, and a BYOK turn never touches it — it goes to the tenant's own
+    endpoint with their own key. So every custom-gateway model that is not
+    coincidentally also one of ours was rejected, which is nearly all of them.
+
+    It hid because the catalog check fails OPEN when the catalog is unreachable
+    or empty, which is every local box. Only a healthy, populated deployment
+    makes it fail closed.
+
+    Mutation that must break this: drop the `_turn_uses_own_key` guard.
+    """
+
+    async def _has_own_key(_ws):
+        return True
+
+    monkeypatch.setattr(run_core, "_turn_uses_own_key", _has_own_key)
+
+    pool, out = await _drive(
+        monkeypatch,
+        _ctx(model_override="gpt-5.6-luna"),
+        catalog=[_entry("claude-opus-4-8")],
+    )
+
+    assert [d for name, d in out if name == "error"] == []
+    assert pool.run_called is True
+    assert pool.run_kwargs.get("model_override") == "gpt-5.6-luna"
+
+
+async def test_a_platform_turn_is_still_checked(monkeypatch):
+    """The other half. Without it, skipping the check for everyone would pass
+    the test above and reopen the free-text hole the check exists to close.
+    """
+
+    async def _no_own_key(_ws):
+        return False
+
+    monkeypatch.setattr(run_core, "_turn_uses_own_key", _no_own_key)
+
+    pool, out = await _drive(
+        monkeypatch,
+        _ctx(model_override="gpt-9-ultra-expensive"),
+        catalog=[_entry("claude-opus-4-8")],
+    )
+
+    assert pool.run_called is False
+    errors = [d for name, d in out if name == "error"]
+    assert errors and errors[0]["code"] == "model.not_available"
+
+
+async def test_an_unreadable_byok_status_keeps_the_check(monkeypatch):
+    """`_turn_uses_own_key` fails OPEN to platform, which is the conservative
+    direction: an unreadable status must not disable a guard whose job is
+    stopping free text from spending OUR key.
+    """
+    from pocketpaw_ee.cloud.byok import service as byok_service
+
+    async def _boom(_ws):
+        raise RuntimeError("mongo is down")
+
+    monkeypatch.setattr(byok_service, "get_status", _boom)
+
+    assert await run_core._turn_uses_own_key("w1") is False
+
+
+async def test_a_workspace_with_no_key_is_platform(monkeypatch):
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.byok import service as byok_service
+
+    async def _unconfigured(_ws):
+        return SimpleNamespace(configured=False)
+
+    monkeypatch.setattr(byok_service, "get_status", _unconfigured)
+
+    assert await run_core._turn_uses_own_key("w1") is False
+
+
+async def test_a_workspace_with_a_key_is_byok(monkeypatch):
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.byok import service as byok_service
+
+    async def _configured(_ws):
+        return SimpleNamespace(configured=True)
+
+    monkeypatch.setattr(byok_service, "get_status", _configured)
+
+    assert await run_core._turn_uses_own_key("w1") is True
