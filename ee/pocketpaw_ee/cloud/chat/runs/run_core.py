@@ -2021,18 +2021,19 @@ async def _drive_agent_loop(
             #
             # A sibling of the guest rule above, not a widening of it. The
             # guest rule is unconditional and permanent; this one is
-            # flag-gated and scoped to ONE surface, for the window between
-            # launching the kiosk and switching billing on. Two rules, two
-            # codes: a guest is told to create an account, an account is told
-            # to add a key, and telling a logged-in user to sign up again is a
-            # dead end that reads as a broken product.
+            # flag-gated, scoped to ONE surface, and since 2026-09-13 scoped to
+            # the FREE plan — a paying member runs on the platform
+            # subscription. Two rules, two codes: a guest is told to create an
+            # account, an account is told to add a key, and telling a logged-in
+            # user to sign up again is a dead end that reads as a broken
+            # product.
             #
             # The surface comes from ``ctx.surface_context``, resolved
             # SERVER-side after scope resolution — not from the request body.
             # A client-supplied surface would make a surface-scoped gate
             # opt-out by omission. This is the enforcement seam; the router's
             # fast-reject is UX only.
-            if _requires_own_key(ctx):
+            if await _requires_own_key(ctx):
                 from pocketpaw_ee.cloud._core.errors import ByokKeyRequired
 
                 _exc = ByokKeyRequired()
@@ -2576,27 +2577,27 @@ async def _reject_if_over_daily_turns(spec: RunSpec, ctx: ScopeContext, transpor
     return True
 
 
-def _requires_own_key(ctx: ScopeContext) -> bool:
+async def _requires_own_key(ctx: ScopeContext) -> bool:
     """Must THIS turn pay with the user's own key, having found none?
 
-    True only when every one of these holds, and the order is the cheap checks
-    first so an ordinary turn on any other surface pays one boolean:
+    The ENFORCEMENT seam. Thin on purpose: the rule itself lives in
+    ``chat.kiosk_byok.requires_own_key`` because the router asks the same
+    question first, and a term added here alone would have the router refuse a
+    paying member the executor was about to let through.
 
-    * ``other_hand_require_byok`` is on (default OFF, so every existing deploy
-      and the whole of Paw OS are untouched until an operator sets it);
-    * the run resolved to the Otherhand surface, read from the SERVER-side
-      ``surface_context`` rather than anything the client sent.
+    What is local to this seam is the CONTEXT it asks with: ``ctx`` here was
+    resolved SERVER-side, so the surface cannot be omitted by a client the way
+    it can at the router. That is the whole reason this call survives.
 
     Guests never reach here — the branch above already refused them, with
     their own code. Callers reach this only after credential resolution came
     back ``platform``.
-    """
-    from pocketpaw.config import get_settings
 
-    if not get_settings().other_hand_require_byok:
-        return False
-    sc = ctx.surface_context
-    return sc is not None and sc.kind is SurfaceKind.OTHER_HAND
+    Async since 2026-09-13: the rule now reads the workspace's plan.
+    """
+    from pocketpaw_ee.cloud.chat import kiosk_byok
+
+    return await kiosk_byok.requires_own_key(ctx)
 
 
 async def _reject_if_over_credit_quota(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
