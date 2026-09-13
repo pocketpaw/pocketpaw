@@ -56,10 +56,29 @@ class GuestLimits(BaseModel):
     Stored on the user (not env-config) so an individual guest's caps can be
     raised without a deploy, and so the caps travel with the row the budget
     reads. Defaults are the captain's launch numbers.
+
+    Raised 2026-09-13 for the public launch: sessions 2 -> 20, turns 40 -> 200.
+
+    Two notebooks was the binding limit in practice — a visitor trying a few
+    pages hit it almost at once, which reads as the product being broken rather
+    than metered.
+
+    Turns went up because a guest CANNOT take a keyless turn: ``guest_gates``
+    refuses one with ``guest_key_required``, so every guest turn is billed to
+    the guest's own provider key. That makes this an abuse ceiling, not a cost
+    ceiling, and 40 was priced as though we were paying. Illustrations are the
+    one thing the platform does fund, and they keep their own separate
+    per-workspace daily cap.
+
+    NOTE these are minted ONTO the row (``auth/guest.py`` writes
+    ``GuestLimits()``), so raising them here reaches NEW guests only. Existing
+    guests are raised by the env floor — ``POCKETPAW_GUEST_SESSIONS`` /
+    ``POCKETPAW_GUEST_TURNS_PER_DAY`` — which ``guest_budget._floor`` takes the
+    MAX of against the stored value.
     """
 
-    sessions: int = 2
-    turns_per_day: int = 40
+    sessions: int = 20
+    turns_per_day: int = 200
 
 
 class WorkspaceMembership(BaseModel):
