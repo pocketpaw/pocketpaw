@@ -5,22 +5,26 @@
 # have?" with real names rather than handwaving. Tenancy enforced by
 # the service.
 #
-# Changes: 2026-08-03 (feat/prompt-entity-suffix) — renders through
-# ``unaddressed_line("file", ...)``, which carries NO id.
+# Changes: 2026-09-14 (fix/attachment-not-on-disk) — renders through
+# ``entity_line``, WITH the id. THE TRIPWIRE FIRED, exactly as designed.
 #
-# NO TOOL TAKES A FILE ID. Checked, not assumed: enumerating every MCP server's
-# schema found no ``file_id`` parameter anywhere, required or optional. An
-# earlier pass on this branch rendered the id anyway and justified it as helping
-# the agent tell two same-named uploads apart; review cut it, correctly — that
-# benefit was reasoned backwards from a change already made, and it was spending
-# ~10 chars a row on an identifier nothing accepts.
+# The note that stood here said "NO TOOL TAKES A FILE ID", checked against every
+# MCP schema, and pointed at ``tests/cloud/surface/test_entity_id_contract.py``
+# as the guard that would fail "the day a tool takes a ``file_id``". That day is
+# this commit: ``pocketpaw_files.read_upload`` takes a REQUIRED ``file_id``, so
+# the contract test stopped passing and this handler had to be looked at rather
+# than quietly under-informing the agent. It worked; leave the mechanism alone.
 #
-# The ``"file"`` literal is not decoration. ``tests/cloud/surface/
-# test_entity_id_contract.py`` reads it and fails if ``file`` ever appears among
-# the kinds derived from the tool schemas, so the day a tool takes a ``file_id``
-# this handler stops passing instead of quietly under-informing the agent. That
-# is what makes this an exemption with a tripwire rather than an allow-list entry
-# nobody revisits.
+# Why the id has to be here now: uploads live in object storage, and an
+# attachment is inlined into the prompt only for the turn it arrived on. From
+# the next turn, ``read_upload`` is the only way back to a document — and a row
+# that names a file without its id tells the agent a thing exists while
+# withholding the one value the tool needs.
+#
+# ``source`` rides along as a fact because this listing MERGES sources (uploads,
+# drive, local, kb) and only ``uploads`` ids resolve in ``read_upload``. Without
+# it the agent cannot tell which rows it can actually open, and a drive row
+# looks exactly like an upload.
 #
 # Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
 # ``SurfacePreamble``. Mutable state, read as a LIST (the most recent files'
@@ -32,7 +36,7 @@ from __future__ import annotations
 
 import logging
 
-from pocketpaw.prompt.entity import unaddressed_line
+from pocketpaw.prompt.entity import entity_line
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import (
     content_key,
@@ -73,10 +77,12 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         rows = []
         for f in files[:LIST_LIMIT]:
             rows.append(
-                unaddressed_line(
-                    "file",
+                entity_line(
                     getattr(f, "filename", None),
+                    getattr(f, "id", None),
                     mime=getattr(f, "mime", None),
+                    source=getattr(getattr(f, "source", None), "value", None)
+                    or getattr(f, "source", None),
                 )
             )
         parts.append("<files-list>\n" + "\n".join(rows) + "\n</files-list>")

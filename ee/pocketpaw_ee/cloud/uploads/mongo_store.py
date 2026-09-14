@@ -470,6 +470,7 @@ class MongoFileStore:
         limit: int = 200,
         chat_id: str | None = None,
         pocket_id: str | None | _Sentinel = None,
+        ai_visible_only: bool = False,
     ) -> list[FileRecord]:
         """Return live (non-deleted) file records in a workspace.
 
@@ -484,12 +485,25 @@ class MongoFileStore:
         - ``LIST_WORKSPACE_ONLY`` sentinel: filter to ``pocket_id IS None``
           rows (workspace-scoped uploads only — what the workspace Files
           panel surfaces).
+
+        ``ai_visible_only`` excludes rows whose owner set ``hide_from_ai``.
+        OFF by default so the Files panel keeps listing every file the user
+        owns — hiding a file from the AI does not hide it from its owner.
+        Pass it from any AI-facing caller (the ``pocketpaw_files`` MCP
+        server does).
         """
         capped = max(1, min(limit, 500))
         query: dict = {
             "workspace": workspace,
             "deleted_at": None,
         }
+        if ai_visible_only:
+            # ``$ne: True``, NOT ``== False``. Rows created before FL-1 have
+            # no ``hide_from_ai`` key at all, and an equality match does not
+            # match a missing key — the equality form would silently return
+            # nothing for every legacy row. Same reasoning, same spelling as
+            # ``list_by_kb_articles``; see its docstring.
+            query["hide_from_ai"] = {"$ne": True}
         if chat_id:
             query["chat_id"] = chat_id
         if pocket_id is LIST_WORKSPACE_ONLY:

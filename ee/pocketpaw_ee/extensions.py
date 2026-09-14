@@ -1043,6 +1043,40 @@ class CloudBrowserMcpProvider:
         return list(BROWSER_TOOL_IDS)
 
 
+class CloudFilesMcpProvider:
+    """`pocketpaw.mcp_servers` — the uploaded-files in-process server
+    (``pocketpaw_files``). Hosts ``list_uploads`` + ``read_upload``.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``), because the capability it adds is
+    one every chat agent is already assumed to have: answering a question about
+    a file the user uploaded. Attachments are inlined into the prompt only for
+    the turn they were attached to, so without these tools a document is
+    unreachable from the very next turn on — and the claude_agent_sdk backend,
+    whose Read/Glob/Bash point at a local jail while the files sit in S3, would
+    go looking on disk and report that no file exists. Gating that behind an
+    opt-in would leave the default chat agent with the same hole.
+
+    The cloud chat agent runs on the claude_agent_sdk backend, which only sees
+    in-process MCP servers (a plain BaseTool is invisible to it), so these MUST
+    be surfaced here.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.files import build_files_server
+
+            return build_files_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the files server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.files import FILES_TOOL_IDS
+
+        return list(FILES_TOOL_IDS)
+
+
 class CloudStockImagesMcpProvider:
     """`pocketpaw.mcp_servers` — the stock-photo search in-process server
     (``pocketpaw_stock``). Hosts ``search_stock_images`` only.

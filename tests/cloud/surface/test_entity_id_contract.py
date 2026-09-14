@@ -227,6 +227,13 @@ _KNOWN_ADDRESSABLE_KINDS = frozenset(
         # (dev landed these tools without extending this set, so the harvester
         # tripped on the first branch that merged both growth and a full lane.)
         "draft",
+        # ``file`` — ``pocketpaw_files.read_upload`` takes a required ``file_id``
+        # (2026-09-14). The /files preamble DOES list this kind, so it owes the id
+        # and now renders it via ``entity_line``; the matching claim was removed
+        # from the unaddressed set above. Uploads live in object storage, so from
+        # the turn after an attachment arrives this id is the only way back to the
+        # document.
+        "file",
         "from",
         "icp",
         "input",
@@ -364,6 +371,13 @@ class TestUnaddressedClaimsStayTrue:
         THE MUTATION THAT BREAKS THIS: add ``unaddressed_line("widget", ...)``
         anywhere in the scan. Run: reported as unexpected and this failed.
 
+        ``file`` REMOVED 2026-09-14 (fix/attachment-not-on-disk): the tripwire
+        this docstring predicted fired. ``pocketpaw_files.read_upload`` takes a
+        required ``file_id``, so handlers/files.py stopped claiming the kind is
+        unaddressed and renders the id through ``entity_line`` instead. It is in
+        ``_KNOWN_ADDRESSABLE_KINDS`` now, which is the other half of the same
+        decision.
+
         ``skill`` added 2026-09-08 (sites.py ``_design_skills_note``): a skill is
         invoked BY NAME through the ``Skill`` tool — the loader keys them in a
         dict, so the name is unique by construction and IS the address. No MCP
@@ -375,7 +389,7 @@ class TestUnaddressedClaimsStayTrue:
         found = {
             kind for path in _scanned_files() for kind, _ln in _unaddressed_claims(path) if kind
         }
-        assert found == {"agent", "calendar_event", "file", "kb_scope", "skill"}, (
+        assert found == {"agent", "calendar_event", "kb_scope", "skill"}, (
             f"the set of unaddressed-entity claims moved: {sorted(found)}"
         )
 
