@@ -285,14 +285,10 @@ async def _resolve_file_id(store: Any, raw: str, workspace_id: str) -> str:
         return raw
 
     try:
-        candidates = await store.list_by_workspace(
-            workspace_id, limit=500, ai_visible_only=True
-        )
+        candidates = await store.list_by_workspace(workspace_id, limit=500, ai_visible_only=True)
         return resolve_id(raw, list(candidates))
     except AmbiguousId as exc:
-        raise _Ambiguous(
-            f"{exc} Call list_uploads and pass the full file_id you want."
-        ) from exc
+        raise _Ambiguous(f"{exc} Call list_uploads and pass the full file_id you want.") from exc
     except Exception:  # noqa: BLE001
         logger.debug("files: id resolve fell through for %s", raw, exc_info=True)
         return raw

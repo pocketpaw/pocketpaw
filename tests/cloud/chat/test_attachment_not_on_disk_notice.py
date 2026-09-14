@@ -61,8 +61,9 @@ class _FakeResolver:
         @contextlib.asynccontextmanager
         async def _cm():
             yield (
-                FakeRec(id=url, filename="quarterly-report.pdf", mime="application/pdf",
-                        size=len(text)),
+                FakeRec(
+                    id=url, filename="quarterly-report.pdf", mime="application/pdf", size=len(text)
+                ),
                 url,
             )
 

@@ -1076,6 +1076,7 @@ class CloudFilesMcpProvider:
 
         return list(FILES_TOOL_IDS)
 
+
 class CloudStockImagesMcpProvider:
     """`pocketpaw.mcp_servers` — the stock-photo search in-process server
     (``pocketpaw_stock``). Hosts ``search_stock_images`` only.
