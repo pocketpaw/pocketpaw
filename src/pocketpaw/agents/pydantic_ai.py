@@ -7,6 +7,13 @@ self-hosted LiteLLM proxy.
 
 Design source: ``docs/design/drafts/2026-07-29-pydantic-ai-agent-backend-prd.md``.
 
+Changed 2026-09-11 (feat/byok-custom-gateway, review B2/N1): the shared HTTP
+client in ``_get_http_client`` pins ``follow_redirects=False``. It is httpx's
+default, so nothing changes today — but the OpenAI SDK's own client sets it
+True, and this is the client a BYOK gateway turn uses to dial a base URL the
+user supplied. A redirect there would carry the request, and the key in its
+header, to a host no egress guard vetted.
+
 Changed 2026-09-05: this file no longer calls ``logfire.configure`` itself. That
 call is process-global and this file is not — see
 ``_build_instrumentation_capability``. It now delegates to
@@ -383,6 +390,37 @@ are now the same object the parser consults, so the three cannot drift.
 ``deep_agents`` has the identical split and is deliberately NOT touched here.
 The claim in ``_parse_provider_model`` that the two mirror each other no longer
 holds, and fixing it there is its own change.
+
+Updated 2026-09-10 (feat/pydantic-ai-model-override) — **the per-send model was
+accepted and thrown away.** ``run`` declared ``model_override`` with a
+``noqa: ARG002`` and a comment saying only the Claude SDK backend consumed it.
+The cloud's default backend is this one, so a model picker in the composer was
+a dead control: the user chose a model, the turn ran on the configured one, and
+nothing said so. ``model_override`` is now the spec ``_build_model`` parses. A
+bare name keeps the configured provider, which is what makes it safe on a BYOK
+gateway — ``build_settings_override`` pins ``pydantic_ai_model`` to the STORED
+gateway model, and the per-send choice beats that name while the gateway's base
+URL and key stay put. It also rides the agent cache key and the per-run model
+settings: the cache is ONE slot, so a key that still read the setting would
+hand turn two the agent built for turn one, model and output cap included.
+
+The override names a MODEL, never a provider, and ``run`` refuses a
+provider-prefixed one. A spec like ``litellm:anything`` would otherwise resolve
+the deployment's proxy key on a turn that is supposed to run on the tenant's —
+a credential switch wearing a model id, which ``provider_allows_model`` cannot
+catch because a gateway's model ids are its own namespace.
+
+Updated 2026-09-11 (feat/other-hand-page-vision) — **an attached page rode every
+later turn of the session.** Images go on the prompt, which was the whole claim,
+but ``_retain_session`` keeps pydantic-ai's OWN message objects and
+``_session_history`` prefers that transcript over the cloud's stored text. So a
+turn's ``UserPromptPart`` — now ``[text, BinaryContent]`` — came back on turn 2,
+turn 3 and turn 60: N snapshots by turn N, on the one surface that attaches a
+picture to EVERY turn. Cost, real RSS in a process-global map, and a model shown
+every past version of one page with nothing marking the current one.
+``_without_attachments`` rewrites those parts down to their words on the way
+INTO retention, so the guarantee holds for every caller instead of for whichever
+read path someone remembered.
 """
 
 from __future__ import annotations
@@ -393,9 +431,15 @@ import logging
 import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 from typing import Any
 
-from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
+from pocketpaw.agents.backend import (
+    _DEFAULT_IDENTITY,
+    BackendInfo,
+    Capability,
+    ImageAttachment,
+)
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.agents.spend_attribution import end_user_id_for
 from pocketpaw.config import Settings
@@ -632,6 +676,71 @@ _TENANT_SAFE_TOOLS = frozenset(
 # ``<server>_<tool>``, and there are no SDK built-ins at all. Comparing the raw
 # strings therefore matches nothing, which is the dangerous failure: a surface
 # that removed shell access would run with the full tool set and report success.
+
+
+def _user_prompt(message: str, images: tuple[tuple[bytes, str], ...]) -> Any:
+    """The turn's user prompt: a bare string, or parts when images ride along.
+
+    Returning the STRING when there is nothing to attach is the contract every
+    other surface depends on — a parts list of one text element is not what
+    those runs have been sending, and this file has been bitten before by a
+    change that was "equivalent" on paper.
+
+    An image whose bytes are empty is dropped rather than sent: some providers
+    answer a zero-byte part with an opaque 400, which reads as the model being
+    broken rather than the attachment being empty.
+    """
+    usable = [(data, media_type) for data, media_type in images if data]
+    if not usable:
+        return message
+    from pydantic_ai import BinaryContent
+
+    parts: list[Any] = [message]
+    parts.extend(BinaryContent(data=data, media_type=media_type) for data, media_type in usable)
+    return parts
+
+
+def _without_attachments(message: Any) -> Any:
+    """A retained message with its attached bytes dropped and its words kept.
+
+    A turn that carried images leaves a ``UserPromptPart`` whose content is
+    ``[text, BinaryContent, ...]``. Retaining that verbatim makes turn N replay
+    every earlier turn's picture: tokens against a feature whose whole point is
+    a per-turn byte budget, raw bytes pinned in a process-global map for the
+    life of the session, and a model shown every past version of one page with
+    nothing to say which is current. The fresh snapshot on THIS turn's prompt is
+    the one the agent is meant to answer about.
+
+    Stripping on the way INTO retention, not on the way out, is what makes the
+    guarantee hold for every caller of ``_retain_session`` rather than for the
+    one read path someone remembered.
+
+    Narrow on purpose. Only ``UserPromptPart`` is rewritten: a ``ToolReturnPart``
+    may legitimately hold a non-string sequence, and filtering that down to its
+    ``str`` elements would destroy tool results — which is the very thing
+    retention exists to preserve.
+    """
+    parts = getattr(message, "parts", None)
+    if not parts:
+        return message
+    from pydantic_ai.messages import UserPromptPart
+
+    rewritten: list[Any] = []
+    stripped = False
+    for part in parts:
+        content = getattr(part, "content", None)
+        if not isinstance(part, UserPromptPart) or isinstance(content, str):
+            rewritten.append(part)
+            continue
+        words = [item for item in content if isinstance(item, str)]
+        if len(words) == len(content):
+            rewritten.append(part)
+            continue
+        stripped = True
+        rewritten.append(replace(part, content="\n".join(words)))
+    if not stripped:
+        return message
+    return replace(message, parts=rewritten)
 
 
 def _normalize_tool_id(tool_id: str) -> str:
@@ -877,6 +986,32 @@ class _RunHandle:
         self.stopped = False
 
 
+def build_multimodal_prompt(message: str, images: tuple[ImageAttachment, ...]) -> str | list[Any]:
+    """Build the pydantic-ai prompt carrying ``images`` alongside the text.
+
+    pydantic-ai takes multimodal input as a LIST prompt mixing strings with
+    content objects — ``agent.run(["what is this?", BinaryContent(...)])``. With
+    no images the prompt stays the bare string, so every existing run is
+    byte-identical and the multimodal path cannot regress a text turn.
+
+    ``BinaryContent``, never ``ImageUrl``. pydantic-ai's own docs warn not to
+    build URL parts from untrusted input: providers fetch cloud-storage URLs
+    (``s3://``, ``gs://``) using OUR credentials, and an attachment URL is
+    user-controlled. We already hold the resolved bytes, so handing over a URL
+    would trade a safe path for an SSRF-shaped one to save a read.
+
+    The import is local: ``pydantic_ai`` is an optional extra, and this module
+    imports on installs that do not have it.
+    """
+    if not images:
+        return message
+    from pydantic_ai import BinaryContent
+
+    parts: list[Any] = [message]
+    parts.extend(BinaryContent(data=img.data, media_type=img.media_type) for img in images)
+    return parts
+
+
 class PydanticAIBackend:
     """Pydantic AI backend — in-process agent loop, dispatch-only tools."""
 
@@ -1014,7 +1149,7 @@ class PydanticAIBackend:
             provider = "litellm"
         return provider, model_str
 
-    def _resolve_max_output_tokens(self) -> int | None:
+    def _resolve_max_output_tokens(self, model_spec: str | None = None) -> int | None:
         """The ``max_tokens`` this run should send, or None to send none.
 
         Resolved from the SAME ``_parse_provider_model`` output that built the
@@ -1025,13 +1160,13 @@ class PydanticAIBackend:
         try:
             from pocketpaw.agents.model_limits import resolve_max_output_tokens
 
-            provider, model = self._parse_provider_model()
+            provider, model = self._parse_provider_model(model_spec)
             return resolve_max_output_tokens(provider, model, self.settings)
         except Exception:  # noqa: BLE001 — a token cap must never break a run
             logger.debug("Could not resolve a max output token cap", exc_info=True)
             return None
 
-    def _run_model_settings(self) -> Any:
+    def _run_model_settings(self, model_spec: str | None = None) -> Any:
         """The ``model_settings`` for THIS run, or None to send none.
 
         Two per-run values live here, both of which the cached agent must not
@@ -1051,14 +1186,14 @@ class PydanticAIBackend:
         """
         settings: dict[str, Any] = {}
 
-        max_output = self._resolve_max_output_tokens()
+        max_output = self._resolve_max_output_tokens(model_spec)
         if max_output:
             settings["max_tokens"] = max_output
 
         # The provider is re-parsed rather than threaded down because
         # ``_resolve_max_output_tokens`` already parses it the same way; the two
         # cannot disagree about which model this run resolved.
-        provider, _model = self._parse_provider_model()
+        provider, _model = self._parse_provider_model(model_spec)
         end_user = end_user_id_for(provider)
         if end_user:
             settings["openai_user"] = end_user
@@ -1189,6 +1324,15 @@ class PydanticAIBackend:
                     connect=15.0,
                 ),
                 headers=headers,
+                # Pinned, not inherited (2026-09-11, review B2/N1). httpx already
+                # defaults to False, so this changes nothing today — but the
+                # OpenAI SDK's own client sets it True, and this client is what a
+                # BYOK gateway turn dials a user-supplied base URL with. Following
+                # a redirect there would let a cooperating gateway bounce the
+                # request (and the key in its header) onto a host no guard saw.
+                # A security property is worth a line; a default is not worth
+                # trusting.
+                follow_redirects=False,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not build HTTP client, using library defaults: %s", exc)
@@ -1502,7 +1646,12 @@ class PydanticAIBackend:
         """
         return None
 
-    def _build_capabilities(self, skill_names: frozenset[str] = frozenset()) -> list:
+    def _build_capabilities(
+        self,
+        skill_names: frozenset[str] = frozenset(),
+        *,
+        tools_enabled: bool = True,
+    ) -> list:
         """Build the ``pydantic-ai-harness`` capabilities for this backend.
 
         Four of the PRD's six are wired. The other two are dropped, with the
@@ -1535,12 +1684,27 @@ class PydanticAIBackend:
           ``agents`` FOLDER on disk, and we have no in-code subagents to
           register. Wiring it with an empty list would add a capability that
           can never fire. Revisit when there is a real subagent to declare.
+
+        **``tools_enabled=False`` drops every capability that puts a tool on
+        the wire** — ``ToolSearch`` (``search_tools``), the native web tools,
+        ``Planning`` (``write_plan``), ``OverflowingToolOutput``
+        (``read_tool_result``) and skills (``load_capability``). Gating
+        ``tools=``/``toolsets=`` alone is NOT enough: a capability registers its
+        own toolset, so the four above kept a ``tools`` field on the request and
+        a gateway profile that rejects the field still answered 400
+        ``unsupported_capability``. Measured with ``FunctionModel``; see
+        ``test_tools_off_puts_no_tool_on_the_wire``. The context-management
+        capabilities (``SlidingWindow``, ``ClearToolResults``,
+        ``StepPersistence``) carry no tools and stay on.
         """
         # Built first and outside the harness gate: tool search belongs to
         # pydantic-ai core, so turning the harness off must not silently drop
         # our ranking function back to the built-in one.
         capabilities: list = []
         for build in (
+            # ``ToolSearch`` is NOT gated on ``tools_enabled``: it ranks a
+            # corpus, and with tools off the corpus is empty, so it puts
+            # nothing on the wire. Measured — gating it changed no request.
             self._build_tool_search_capability,
             self._build_thinking_capability,
             self._build_select_model_capability,
@@ -1549,7 +1713,11 @@ class PydanticAIBackend:
             cap = build()
             if cap is not None:
                 capabilities.append(cap)
-        capabilities += self._build_web_capabilities()
+        if tools_enabled:
+            # These DO need the gate: the builder reads ``_build_custom_tools``
+            # itself, so without it a tools-off run still registers a native
+            # web tool on the request.
+            capabilities += self._build_web_capabilities()
 
         if not getattr(self.settings, "pydantic_ai_harness_enabled", True):
             return capabilities
@@ -1570,15 +1738,18 @@ class PydanticAIBackend:
         capabilities += [
             SlidingWindow(max_messages=self.settings.pydantic_ai_compaction_max_messages),
             ClearToolResults(max_messages=self.settings.pydantic_ai_compaction_max_messages),
-            Planning(),
             StepPersistence(store=InMemoryStepStore(), agent_name="pocketpaw"),
         ]
-        if limit:
-            capabilities.append(
-                OverflowingToolOutput(bands=[Band(over=limit, action=Truncate(max_chars=limit))])
-            )
+        if tools_enabled:
+            capabilities.append(Planning())
+            if limit:
+                capabilities.append(
+                    OverflowingToolOutput(
+                        bands=[Band(over=limit, action=Truncate(max_chars=limit))]
+                    )
+                )
 
-        skills = self._build_skills_capability(skill_names)
+        skills = self._build_skills_capability(skill_names) if tools_enabled else None
         if skills is not None:
             capabilities.append(skills)
         return capabilities
@@ -1989,6 +2160,8 @@ class PydanticAIBackend:
         allow_mcp_tool_ids: frozenset[str] | None = None,
         exclusive_mcp_tools: bool = False,
         system_prompt_digest: str = "",
+        model_spec: str | None = None,
+        tools_enabled: bool = True,
     ) -> Any:
         """Build (and cache) the pydantic-ai ``Agent``.
 
@@ -2023,10 +2196,16 @@ class PydanticAIBackend:
         # cache NEVER hits — every run re-instantiates the whole tool set. That
         # is not a slow path, it is a per-run cost on the thing whose entire
         # purpose is a low per-run cost, and it is invisible except as latency.
-        tools = list(self._build_custom_tools())
+        # Skipped entirely when the caller turned tools off — not built and
+        # then filtered, because the point is that none reach the wire.
+        tools = list(self._build_custom_tools()) if tools_enabled else []
 
         agent_key = (
-            self.settings.pydantic_ai_model,
+            # The spec that BUILT ``model``, not the configured default: a
+            # per-send ``model_override`` builds a different model object, and a
+            # key that still read the setting would serve the cached agent —
+            # holding the previous model — to a turn that asked for another one.
+            model_spec or self.settings.pydantic_ai_model,
             is_pocket_session,
             len(mcp_toolsets),
             self._tools_version,
@@ -2058,6 +2237,10 @@ class PydanticAIBackend:
             # A DIGEST, never the key: this tuple is held in memory for the
             # process's life and lands in cache-miss logs.
             self._credential_fingerprint(),
+            # WHETHER there are tools at all. ``len(tools)`` above happens to
+            # move with it today, but it is a count and two different surfaces
+            # can share one — this says the thing itself.
+            tools_enabled,
         )
         if self._cached_agent is not None and self._cached_agent_key == agent_key:
             return self._cached_agent
@@ -2112,7 +2295,7 @@ class PydanticAIBackend:
             # appends to the (now empty) agent-level set per run.
             tools=tools,
             toolsets=list(mcp_toolsets) or None,
-            capabilities=self._build_capabilities(skill_names) or None,
+            capabilities=self._build_capabilities(skill_names, tools_enabled=tools_enabled) or None,
             # The agent is shared across concurrent runs; conversation state
             # rides in ``message_history`` per run, never on the agent.
             retries=2,
@@ -2164,7 +2347,13 @@ class PydanticAIBackend:
         # Trailing window: the head of a conversation is the least useful part
         # to carry and the most expensive, and compaction capabilities already
         # operate inside a run.
-        self._session_messages[session_key] = list(messages)[-_MAX_SESSION_MESSAGES:]
+        #
+        # Attachments are dropped here rather than at the read: a turn's images
+        # belong to that turn only, and keeping them would replay every past
+        # picture on every later turn of the session.
+        self._session_messages[session_key] = [
+            _without_attachments(message) for message in list(messages)[-_MAX_SESSION_MESSAGES:]
+        ]
         self._session_messages.move_to_end(session_key)
         while len(self._session_messages) > _MAX_TRACKED_SESSIONS:
             self._session_messages.popitem(last=False)
@@ -2202,6 +2391,22 @@ class PydanticAIBackend:
         # ``AgentPool.run`` forwards it only when non-empty, so an empty set
         # means "no per-entity narrowing" and every bundled skill is offered.
         skill_names: frozenset[str] = frozenset(),
+        # Images the caller wants THIS turn to look at, already read into
+        # memory: (bytes, media_type) pairs. Same withhold-when-empty contract
+        # as the kwargs below, so a turn that sends none takes the byte-
+        # identical string path every other surface has always taken.
+        #
+        # Bytes rather than paths, deliberately. The caller is the cloud, which
+        # is the layer that knows a tenant's jail and can prove a path sits
+        # inside it; this backend is OSS and reads no path it was handed. It
+        # also cannot import the cloud to ask.
+        #
+        # pydantic-ai has taken image input for a long time — ``user_prompt``
+        # is ``str | Sequence[UserContent]``. What was missing was anything
+        # here ever passing one, so on the Otherhand surface the page image
+        # never reached the model and the agent fell back to an OCR tool call
+        # that flattens a drawing to bad text.
+        images: tuple[tuple[bytes, str], ...] = (),
         # -- per-surface tool gating (see ``_gate_mcp_toolsets``) ------------
         # These ride the same withhold-when-empty contract, which is why their
         # absence was invisible: the pool forwards them ONLY when a surface
@@ -2219,19 +2424,35 @@ class PydanticAIBackend:
         # backend opts in. Folded into the agent cache key so an agent built
         # under one identity is never handed to another.
         system_prompt_digest: str = "",
+        # Per-send TOOL SWITCH (2026-09-11). ``False`` builds the agent with no
+        # custom tools and no MCP toolsets at all.
+        #
+        # Two reasons a caller asks for it, both observed live: a gateway
+        # profile that refuses the ``tools`` field outright and 400s the whole
+        # turn, and a weaker model that fixates on a tool instead of answering.
+        # It is also the surface's biggest token lever — the upstream prompt
+        # cache does not cover tool schemas, so a run carrying a tool surface
+        # reads zero cached tokens every turn (measured, see the header).
+        #
+        # In the agent cache key, necessarily: the cache is ONE slot, so without
+        # it a tools-off turn would be served the agent built WITH tools.
+        tools_enabled: bool = True,
         # Accepted and deliberately unused — each is Claude-SDK plumbing with no
         # analogue here, and each is safe to drop:
         #   ``allow_sdk_tools``   ADDITIVE grant of SDK built-ins. There are no
         #                         SDK built-ins on this backend, so there is
         #                         nothing to grant; ignoring it removes tools,
         #                         never adds them.
-        #   ``model_override``    per-send model choice, consumed only by the
-        #                         Claude SDK backend (as on the other six).
         #   ``session_handle`` /  native CLI-session resume and warm-client
         #   ``warm_client`` /     reuse — this backend has no subprocess to
         #   ``on_client_built``   resume or lease.
         allow_sdk_tools: frozenset[str] = frozenset(),  # noqa: ARG002
-        model_override: str | None = None,  # noqa: ARG002
+        # The per-send model choice. HONOURED here since 2026-09-10: it is the
+        # spec ``_build_model`` parses, so a bare name keeps the configured
+        # provider (and, on a BYOK gateway, its base URL and key) and only the
+        # model changes. It also keys the agent cache — see
+        # ``_get_or_create_agent``.
+        model_override: str | None = None,
         session_handle: Any = None,  # noqa: ARG002
         warm_client: Any = None,  # noqa: ARG002
         on_client_built: Any = None,  # noqa: ARG002
@@ -2307,7 +2528,31 @@ class PydanticAIBackend:
             return self._usage_event_from(run_usage, model_name=getattr(model, "model_name", None))
 
         try:
-            model = self._build_model()
+            # A per-send model picks a model WITHIN the configured provider,
+            # never a provider. ``_parse_provider_model`` splits on a colon when
+            # the prefix names a known provider, so an unguarded override is a
+            # CREDENTIAL switch wearing a model id: a BYOK gateway turn runs on
+            # an isolated backend holding the tenant's key but still carrying
+            # the deployment's ``litellm_api_key``, and ``litellm:anything``
+            # from the composer's free-text field would resolve the proxy's own
+            # credential. ``provider_allows_model`` cannot catch it — on a
+            # gateway it passes every name, because a gateway's ids are its own
+            # namespace. The PREFIX is what is checked, not the colon: a model
+            # name may legitimately carry one (``minimax/minimax-m3:free``,
+            # ``llama3.2:latest``).
+            if (model_override or "").partition(":")[0].strip() in _KNOWN_PROVIDERS:
+                yield AgentEvent(
+                    type="error",
+                    content=(
+                        f"Model {model_override!r} names a provider. A per-send "
+                        "model can only pick a model on the provider this agent "
+                        "is already configured for — drop the prefix."
+                    ),
+                )
+                yield AgentEvent(type="done", content="")
+                return
+
+            model = self._build_model(model_override)
 
             # A gated surface is one where WHICH tools the agent has is part of
             # the contract. The agentapi model cannot be part of that contract —
@@ -2326,7 +2571,7 @@ class PydanticAIBackend:
                 return
 
             instructions = system_prompt or _DEFAULT_IDENTITY
-            mcp_toolsets = await self._build_mcp_tools()
+            mcp_toolsets = await self._build_mcp_tools() if tools_enabled else []
             agent = self._get_or_create_agent(
                 model,
                 instructions,
@@ -2336,6 +2581,8 @@ class PydanticAIBackend:
                 allow_mcp_tool_ids=allow_mcp_tool_ids,
                 exclusive_mcp_tools=exclusive_mcp_tools,
                 system_prompt_digest=system_prompt_digest,
+                model_spec=model_override,
+                tools_enabled=tools_enabled,
             )
 
             kwargs: dict[str, Any] = {
@@ -2356,7 +2603,7 @@ class PydanticAIBackend:
             # the model and the tenant THIS run resolved. The fast-model path
             # swaps the model but reuses these settings, which is what keeps a
             # run that downshifts mid-flight attributed to the same workspace.
-            run_settings = self._run_model_settings()
+            run_settings = self._run_model_settings(model_override)
             if run_settings:
                 kwargs["model_settings"] = run_settings
 
@@ -2365,7 +2612,18 @@ class PydanticAIBackend:
             # a run's accounting cannot live on it.
             kwargs["usage"] = run_usage
 
-            async with agent.run_stream_events(message, **kwargs) as stream:
+            # The user prompt is a plain string unless this turn carries
+            # images, in which case it becomes the parts list pydantic-ai wants.
+            # The images ride the PROMPT, and ONE turn's prompt only: this run's
+            # transcript is retained for the next turn, so ``_retain_session``
+            # strips the attached bytes back out on the way in (see
+            # ``_without_attachments``). Without that, turn N would carry N
+            # snapshots of the same page. A fresh snapshot every turn is also
+            # the right semantics — the agent should see the page as it is now,
+            # not as it was.
+            prompt = _user_prompt(message, images)
+
+            async with agent.run_stream_events(prompt, **kwargs) as stream:
                 async for event in stream:
                     if handle.stopped:
                         break

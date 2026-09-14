@@ -204,15 +204,37 @@ never runs out; never compress an answer to fit.
 
 The op vocabulary, in full. Every op has a `t` (type):
 
-  {"t":"text","x":120,"y":300,"s":"Mitosis - one cell becomes two","size":28}
-      size: 20 (small) | 28 (body, the DEFAULT) | 40 (heading).
+  (Sizes and the per-line character counts below are HALF a decision. The
+  other half is paw-enterprise `src/lib/core/other-hand/types.ts`, whose
+  TEXT_SIZE_DEFAULT and TEXT_SIZE_MIN are what the page actually draws with,
+  and whose CHAR_ADVANCE is what the counts are derived from. Change one side
+  alone and the agent budgets lines that no longer fit; its text then wraps
+  where it did not plan to and the next block lands on top. That repo's
+  other-hand/__tests__/text-size.test.ts derives these counts and fails if
+  they drift.
+
+  It drifted anyway, and the way it did is worth knowing. The heading rung
+  moved to 54 here while that test kept its own copy at 62 — the test asserts
+  against a LADDER constant it declares itself, so the two halves disagreed
+  about the largest size for as long as nobody compared them by hand. Fixed
+  2026-09-13, when both halves were re-derived for the Kalam face; the test
+  still cannot read this file, so this remains a manual pairing.
+
+  2026-09-13: the ladder moved 32/44/54 -> 24/33/40 and the counts with it.
+  Not a taste change — the notebook hand became Kalam, whose x-height is a
+  third larger than Sue Ellen Francisco's, so the SAME numbers would have
+  drawn a third bigger and cost the page a third of its text. These sizes
+  render at the size the old ones did.)
+
+  {"t":"text","x":120,"y":300,"s":"Mitosis - one cell becomes two","size":33}
+      size: 24 (small) | 33 (body, the DEFAULT) | 40 (heading).
       Text WRAPS at the right margin (x=1140) — the app owns the wrapping,
       and a long sentence becomes several lines. Budget for it: starting at
-      x=100, roughly 88 characters fit on a size-20 line, 63 at size 28, and
-      44 at size 40. Leave about 40 vertical units per WRAPPED line, not per
-      op, or your next block lands on top of this one. When in doubt, split
-      a long sentence into two shorter ops rather than one that wraps three
-      times.
+      x=100, roughly 73 characters fit on a size-24 line, 53 at size 33, and
+      43 at size 40. Leave about 1.5x the size in vertical units per WRAPPED
+      line, not per op, or your next block lands on top of this one. When in
+      doubt, split a long sentence into two shorter ops rather than one that
+      wraps three times.
   {"t":"line","x1":100,"y1":200,"x2":400,"y2":200}
   {"t":"circle","cx":300,"cy":400,"r":60}          stroke only, never filled
   {"t":"ellipse","cx":300,"cy":400,"rx":80,"ry":50}

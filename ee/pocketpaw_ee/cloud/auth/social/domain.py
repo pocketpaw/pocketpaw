@@ -22,6 +22,12 @@ Step 2 before step 3 is the account-takeover defence. Matching an unverified
 address against an existing account is how an attacker attaches victim@corp.com
 to their own provider profile and walks into the victim's account.
 
+Updated 2026-09-13 (feat/guest-social-upgrade): added ``REFUSE_EMAIL_TAKEN``.
+The policy here is unchanged — the check that raises it lives in the service,
+because it is a uniqueness constraint on a row rather than a decision about an
+identity — but the code belongs with its siblings so the frontend has one place
+to read them from.
+
 Updated 2026-08-01 (AM-6) with the SETTINGS-side policy — ``decide_link`` and
 ``decide_unlink``, for a user who already has a session and is managing their
 connected accounts. Two rules there are worth stating up front, because both
@@ -66,6 +72,11 @@ REFUSE_SSO_ENFORCED = "auth.sso_enforced"
 REFUSE_IDENTITY_CLAIMED = "auth.identity_claimed"
 #: The callback's session is not the account that started the link.
 REFUSE_LINK_SESSION_MISMATCH = "auth.link_session_mismatch"
+#: A GUEST tried to sign up with a provider whose verified address already
+#: belongs to another account. Deliberately the same code /auth/guest/upgrade
+#: answers with for a taken email: it is the same refusal reached through a
+#: different door, and the frontend should not have to learn two names for it.
+REFUSE_EMAIL_TAKEN = "auth.email_taken"
 #: Unlinking this would leave the account with no way to sign in.
 REFUSE_LAST_CREDENTIAL = "auth.last_credential"
 #: Nothing to unlink — no identity from that provider is attached.

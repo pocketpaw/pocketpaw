@@ -1,6 +1,38 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-09-11 (feat/byok-custom-gateway, review B2) — ``_iter_agent_events``
+  catches ``byok_service.GatewayEgressRejected`` from
+  ``resolve_turn_credentials`` and yields a terminal
+  ``byok.base_url_rejected`` instead of running the turn. The catch sits ABOVE
+  the existing broad ``except Exception``, which degrades to platform
+  credentials: reaching it with a rejected gateway address would put every
+  such turn on OUR key, so a tenant's bad (or hostile) address would spend our
+  money. A refused turn is the correct answer — the address is theirs to fix.
+- 2026-09-11 (feat/pydantic-ai-model-override) — a per-send ``model`` is checked
+  against the gateway's own catalog before it is forwarded. The edge validates a
+  SHAPE (a regex and a length) and the composer's picker is three hardcoded
+  presets plus a free-text field, so once the override became live on the
+  cloud's default backend the field was free-text model selection billed to the
+  platform key. ``_model_is_unknown_to_gateway`` rejects only what it positively
+  knows is unserved — an unreachable or empty catalog lets the turn through
+  rather than making the picker a dead control again, matching what
+  ``resolve_turn_credentials`` does with its own failure. It is NOT an
+  entitlement check: every model the gateway serves is in the catalog, so a
+  per-plan allowlist is still the thing that would put a ceiling on cost, and
+  this is the seam it plugs into.
+- 2026-09-11 (feat/other-hand-page-vision) — ``_read_turn_images`` gained a
+  PER-IMAGE ceiling (``_MAX_IMAGE_BYTES``, 5MB) beside the existing per-turn
+  budget. The two answer different questions and both are kept: the budget
+  caps what one turn puts on the wire across up to three images, and until now
+  it was the only check — so a single 5–6MB page snapshot sailed through our
+  guard and was rejected by the provider instead, which the user saw as a
+  failed turn with no useful message. 5MB is Anthropic's documented per-image
+  limit and the safe floor across providers (OpenAI and Gemini allow more), so
+  it is not conditional on which backend the turn runs. An over-size image is
+  skipped exactly like every other bad path here — warn, ``continue``, never
+  raise — so the other images in the turn still ride.
+
 - 2026-09-08 (fix/attachment-only-turns) — ``_drive_agent_loop`` now runs its
   ``user_content`` through ``agent_service.resolve_user_content`` before
   anything reads it. A send with attachments and no typed text arrives as the
@@ -344,7 +376,9 @@ import os
 import re
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from pocketpaw.agents.backend import (  # type: ignore[import-untyped]
@@ -592,11 +626,62 @@ async def _resolve_entity_profile(ctx: ScopeContext) -> SurfaceProfile:
         return resolve_profile(SurfaceKind.GENERIC, SurfaceMeta())
 
     base = resolve_profile(ctx.surface_context.kind, ctx.surface_context.meta)
+    base = await _deny_tools_that_would_only_refuse(ctx, base)
     pocket_id = ctx.surface_context.meta.pocket_id
     if not pocket_id:
         return base
     override = await _load_entity_profile_override(ctx.workspace_id, pocket_id)
     return compose_entity_profile(base, override)
+
+
+#: The Otherhand drawing tools, as the bare names ``_expand_tool_ids`` resolves.
+_ILLUSTRATION_TOOLS: frozenset[str] = frozenset({"illustrate", "image_generate"})
+
+
+async def _deny_tools_that_would_only_refuse(
+    ctx: ScopeContext, base: SurfaceProfile
+) -> SurfaceProfile:
+    """Withdraw the drawing tools from a caller who cannot use them.
+
+    Observed 2026-09-11 on the live kiosk: a guest asked for a butterfly, the
+    agent called ``illustrate``, the tool refused ("needs an account"), and the
+    agent called it again — SIXTEEN times across 27 seconds, ending in a reply
+    that apologised sixteen times in one paragraph. The refusal text says "do
+    not try again this turn" and the bridge returns it rather than raising, so
+    nothing forces a stop; a weaker model simply keeps trying.
+
+    The wording was never the fix. A tool that will refuse every call is a tool
+    the agent should not have, so it is withdrawn before the run instead. The
+    turn then does the thing the page actually needs — ``page-ops`` are written
+    in ordinary text, not through a tool — and says nothing about a pen it was
+    never offered.
+
+    Only on this surface. Every other one carries neither tool, so asking
+    elsewhere would add a database read to every run in the product.
+
+    Costs one extra ``find_one`` on a turn that CAN illustrate, because the tool
+    asks the same module again when it fires. Cheaper than the alternative,
+    which is two copies of a money rule.
+    """
+    if ctx.surface_context is None or ctx.surface_context.kind is not SurfaceKind.OTHER_HAND:
+        return base
+    try:
+        from pocketpaw_ee.cloud.auth import guest_budget
+        from pocketpaw_ee.cloud.other_hand import illustration_credentials as creds
+
+        grant = await creds.resolve(
+            ctx.workspace_id,
+            is_guest=await guest_budget.load_guest(ctx.user_id) is not None,
+        )
+    except Exception:  # noqa: BLE001 — a tool surface must not fail a turn
+        logger.debug("other-hand: could not resolve illustration access", exc_info=True)
+        return base
+    if not isinstance(grant, creds.IllustrationRefusal):
+        return base
+    return replace(
+        base,
+        deny_mcp_tool_ids=frozenset(base.deny_mcp_tool_ids) | _ILLUSTRATION_TOOLS,
+    )
 
 
 def _pawbar_run_from_ctx(ctx: ScopeContext) -> dict[str, Any] | None:
@@ -1357,6 +1442,148 @@ async def _prewarm_session(ctx: ScopeContext, flow_context: dict[str, Any] | Non
         logger.debug("prewarm_session skipped (swallowed): %s", exc)
 
 
+#: How long a per-send model check may hold up a turn. The catalog client's own
+#: timeout is 15s per read and it makes two, so an unreachable proxy could add
+#: half a minute to a turn that is going to run fine. A check that times out is
+#: a check that did not happen, which is the fail-open case below.
+_MODEL_CHECK_TIMEOUT_SECONDS = 5.0
+
+
+async def _model_is_unknown_to_gateway(model_id: str) -> bool:
+    """True only when we POSITIVELY know the gateway does not serve ``model_id``.
+
+    The per-send model is validated at the edge by a regex and nothing else, and
+    the composer's picker is three hardcoded presets plus a free-text field, so
+    without this a workspace names any model string it likes and the platform
+    key pays for whatever the gateway is willing to route.
+
+    The catalog is the right list to check against because it is the UNION of
+    what the proxy describes (``/model/info``) and what it routes
+    (``/v1/models``) — never narrower than the routable set. So an id missing
+    from it is an id the gateway would refuse anyway, and refusing here turns an
+    opaque upstream 400 into a typed error the composer can show.
+
+    It is deliberately NOT an entitlement check. Every model the gateway serves
+    is in the catalog, so this does not stop a workspace from picking an
+    expensive one; it stops free text. A per-plan allowlist is the thing that
+    puts a ceiling on cost, and this is the seam it plugs into.
+
+    Fail-open in two directions, both of which would otherwise make the picker a
+    dead control on a healthy deployment:
+
+    * the catalog is unreachable — ``/model/info`` is an admin route and can be
+      gated or down while chat routing is fine. Matches what
+      ``resolve_turn_credentials`` does with its own failure a few lines below.
+    * the catalog came back EMPTY — indistinguishable from "unknown id" on a
+      per-id lookup, and rejecting every send is far worse than the cost
+      exposure being checked for.
+    """
+    from pocketpaw_ee.catalog import service as catalog_service
+
+    try:
+        entries = await asyncio.wait_for(
+            catalog_service.list_models(), timeout=_MODEL_CHECK_TIMEOUT_SECONDS
+        )
+    except Exception:
+        logger.warning(
+            "model catalog unavailable — per-send model %r runs unchecked this turn",
+            model_id,
+            exc_info=True,
+        )
+        return False
+    if not entries:
+        logger.warning(
+            "model catalog is empty — per-send model %r runs unchecked this turn", model_id
+        )
+        return False
+    return not any(entry.id == model_id for entry in entries)
+
+
+#: How much of one turn's attachments we are willing to put on the wire. A page
+#: snapshot is tens of kilobytes; a high-resolution mark crop can be much more,
+#: and every byte is billed to whoever is paying for the turn.
+_MAX_TURN_IMAGE_BYTES = 6 * 1024 * 1024
+_MAX_TURN_IMAGES = 3
+#: How big ONE image may be. The turn budget above answers a different
+#: question — what the whole turn costs — and a single 5MB page snapshot
+#: passes it with room to spare, then gets rejected upstream, which the user
+#: sees as a failed turn with nothing useful said. Anthropic documents 5MB per
+#: image; OpenAI and Gemini allow more, so this is the safe floor across
+#: providers and deliberately NOT provider-conditional.
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+_IMAGE_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
+def _read_turn_images(ctx: ScopeContext) -> tuple[tuple[bytes, str], ...]:
+    """Read the images the surface handler declared, for THIS turn.
+
+    Reading happens here, in the cloud, and not in the agent backend, for one
+    reason: this is the layer that knows which directory belongs to the tenant
+    asking. The paths come back from the client, which echoes what the snapshot
+    endpoint returned — so they are not secret, and a hostile client can name
+    any string it likes. Every path is therefore resolved and confirmed to sit
+    inside THIS workspace's jail before a byte is read. The OSS backend then
+    receives bytes it cannot use to reach anything.
+
+    Never raises. A missing file, an unreadable one, an oversized one, or one
+    outside the jail is skipped with a warning: the preamble still names the
+    path, so a backend that reads files itself is unaffected, and a turn that
+    loses its picture is far better than a turn that fails.
+    """
+    surface = ctx.surface_context
+    paths = getattr(surface, "preamble_images", ()) if surface else ()
+    if not paths:
+        return ()
+    from pocketpaw_ee.cloud.agent_jail import workspace_jail_root
+
+    try:
+        jail = (workspace_jail_root() / str(ctx.workspace_id)).resolve()
+    except Exception:
+        logger.warning("could not resolve the workspace jail; sending no images this turn")
+        return ()
+
+    out: list[tuple[bytes, str]] = []
+    budget = _MAX_TURN_IMAGE_BYTES
+    for raw in paths[:_MAX_TURN_IMAGES]:
+        try:
+            path = Path(raw).resolve()
+        except Exception:
+            logger.warning("surface image path could not be resolved; skipping it")
+            continue
+        if not path.is_relative_to(jail):
+            # The one case worth a loud line: a path pointing outside the
+            # tenant's own scratch dir is either a bug or an attempt.
+            logger.warning("surface image path is outside the workspace jail; refusing to read it")
+            continue
+        media_type = _IMAGE_MEDIA_TYPES.get(path.suffix.lower())
+        if media_type is None:
+            logger.warning("surface image %s is not an image type we send; skipping", path.suffix)
+            continue
+        try:
+            size = path.stat().st_size
+            if size == 0 or size > budget:
+                logger.warning("surface image is empty or over the turn budget; skipping it")
+                continue
+            if size > _MAX_IMAGE_BYTES:
+                logger.warning(
+                    "surface image is %d bytes, over the %d-byte per-image limit; skipping it",
+                    size,
+                    _MAX_IMAGE_BYTES,
+                )
+                continue
+            out.append((path.read_bytes(), media_type))
+            budget -= size
+        except OSError:
+            logger.warning("surface image could not be read; skipping it", exc_info=True)
+    return tuple(out)
+
+
 async def _drive_agent_loop(
     ctx: ScopeContext,
     *,
@@ -1628,12 +1855,37 @@ async def _drive_agent_loop(
         if surface_skills:
             run_kwargs["skill_names"] = surface_skills
         # CS-13 — per-send model override. Same withhold-when-empty idiom as the
-        # kwargs above: only the Claude SDK backend accepts ``model_override``
-        # (the 7 other backends keep the narrower signature), so it is forwarded
-        # ONLY when the client actually chose a model for this turn. ``None`` =
-        # legacy path, byte-identical to today.
+        # kwargs above: the Claude SDK and pydantic_ai backends accept
+        # ``model_override`` (2026-09-10 — the cloud default is pydantic_ai, so
+        # before that a composer model picker was a dead control there), the
+        # rest keep the narrower signature, so it is forwarded ONLY when the
+        # client actually chose a model for this turn. ``None`` = legacy path,
+        # byte-identical to today.
+        # The id itself is checked against the gateway's own model list before
+        # it is forwarded — the edge validates a SHAPE (a regex and a length),
+        # which says nothing about whether the model exists or whether we serve
+        # it. See ``_model_is_unknown_to_gateway`` for why this rejects only
+        # what we positively know is not served.
+        # The catalog check itself is DEFERRED until the credentials below are
+        # resolved — it belongs to a platform turn only, and until we know who
+        # pays we cannot know whether it applies. ``run_kwargs`` is not consumed
+        # until ``pool.run`` far below, so setting this here and judging it
+        # later is safe.
         if ctx.model_override:
             run_kwargs["model_override"] = ctx.model_override
+        # Per-send tool switch. Same withhold-when-empty idiom: only an explicit
+        # False is a request, so a client that never sends the field (every
+        # older one) produces a byte-identical run.
+        if ctx.tools_enabled is False:
+            run_kwargs["tools_enabled"] = False
+        # --- Images this turn should LOOK at (feat/other-hand-vision) ----------
+        # The surface handler said which files its preamble is talking about;
+        # read them here, where the tenant's jail is known, and hand the pool
+        # bytes. Withhold-when-empty, so every surface that declares none takes
+        # the identical string path it always has.
+        turn_images = _read_turn_images(ctx)
+        if turn_images:
+            run_kwargs["images"] = turn_images
         # --- BYOK per-turn credentials (feat/byok-guest-backend, 2026-09-01) ----
         # Resolve whose credential pays for THIS turn — the call the byok
         # service's own header always said the turn path makes, wired at last.
@@ -1657,6 +1909,23 @@ async def _drive_agent_loop(
 
         try:
             byok_creds = await byok_service.resolve_turn_credentials(ctx.workspace_id)
+        except byok_service.GatewayEgressRejected as exc:
+            # The stored gateway address no longer passes the egress guard —
+            # it resolves somewhere this server must not dial (2026-09-11,
+            # review B2). Caught BEFORE the broad handler below on purpose:
+            # that one degrades to platform credentials, which here would run
+            # the tenant's turn on OUR key every time their address is bad.
+            # Refuse the turn and say why; the user fixes the address.
+            logger.warning(
+                "byok: gateway address rejected by the egress guard for workspace=%s — "
+                "refusing the turn",
+                ctx.workspace_id,
+            )
+            yield (
+                "error",
+                {"code": "byok.base_url_rejected", "message": exc.message},
+            )
+            return
         except Exception:
             logger.exception(
                 "byok: resolve_turn_credentials failed for workspace=%s — "
@@ -1664,6 +1933,40 @@ async def _drive_agent_loop(
                 ctx.workspace_id,
             )
             byok_creds = byok_service.TurnCredentials(source="platform")
+        # The per-send model, judged now that we know WHOSE gateway runs it.
+        #
+        # The catalog is OUR gateway's model list. It is the right guard for a
+        # platform turn: without it a workspace names free text and our key pays
+        # for whatever gets routed. It is the WRONG list for a BYOK turn, which
+        # never touches our gateway — a live kiosk turn on `gpt-5.6-luna` was
+        # refused with "isn't a model this workspace can run" while the gateway
+        # serving it was perfectly healthy (2026-09-13).
+        #
+        # Keyed on ``byok_creds.source``, the SAME value that decides which key
+        # pays, so the two can never disagree. An earlier fix asked a second,
+        # weaker question — "is a key stored?" — and drifted from this one: a
+        # stored key that no longer decrypts reports configured, degrades to
+        # platform a few lines above, and would have skipped this check while
+        # spending our credential on free text.
+        #
+        # A BYOK turn is not left unchecked; ``provider_allows_model`` below is
+        # the check that belongs to it.
+        if (
+            ctx.model_override
+            and byok_creds.source != "byok"
+            and await _model_is_unknown_to_gateway(ctx.model_override)
+        ):
+            yield (
+                "error",
+                {
+                    "code": "model.not_available",
+                    "message": (
+                        f"'{ctx.model_override}' isn't a model this workspace can "
+                        "run. Pick one from the model menu."
+                    ),
+                },
+            )
+            return
         if byok_creds.source == "byok" and byok_creds.api_key:
             agent_model = (
                 str(instance.config.get("model") or "") if hasattr(instance, "config") else ""
@@ -1683,6 +1986,13 @@ async def _drive_agent_loop(
                 )
                 return
             run_kwargs["byok_api_key"] = byok_creds.api_key
+            # What to substitute, when the answer is more than one key. A
+            # gateway key also carries the address and the model id; the pool
+            # falls back to the key alone when this is empty, so anthropic keys
+            # take exactly the path they took before (2026-09-09).
+            override = byok_service.build_settings_override(byok_creds)
+            if override:
+                run_kwargs["byok_settings_override"] = override
         else:
             from pocketpaw_ee.cloud.auth import guest_budget
 
@@ -1706,6 +2016,28 @@ async def _drive_agent_loop(
                         ),
                     },
                 )
+                return
+            # Kiosk: an ACCOUNT must bring its own key too (2026-09-12).
+            #
+            # A sibling of the guest rule above, not a widening of it. The
+            # guest rule is unconditional and permanent; this one is
+            # flag-gated, scoped to ONE surface, and since 2026-09-13 scoped to
+            # the FREE plan — a paying member runs on the platform
+            # subscription. Two rules, two codes: a guest is told to create an
+            # account, an account is told to add a key, and telling a logged-in
+            # user to sign up again is a dead end that reads as a broken
+            # product.
+            #
+            # The surface comes from ``ctx.surface_context``, resolved
+            # SERVER-side after scope resolution — not from the request body.
+            # A client-supplied surface would make a surface-scoped gate
+            # opt-out by omission. This is the enforcement seam; the router's
+            # fast-reject is UX only.
+            if await _requires_own_key(ctx):
+                from pocketpaw_ee.cloud._core.errors import ByokKeyRequired
+
+                _exc = ByokKeyRequired()
+                yield ("error", {"code": _exc.code, "message": _exc.message})
                 return
         # --- Supervised native-resume wiring (feat/session-supervisor SS-5) -----
         # Flag-gated (default OFF). When ON, route this turn through the
@@ -2198,6 +2530,76 @@ async def _reject_if_over_jail_quota(spec: RunSpec, ctx: ScopeContext, transport
     return True
 
 
+async def _reject_if_over_daily_turns(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
+    """Per-workspace daily agent-run ceiling (feat/abuse-budgets).
+
+    The always-on sibling of ``_reject_if_over_credit_quota``. That gate is the
+    priced ceiling and is a no-op unless ``billing_enforced``, which defaults
+    off — so on a deployment that has not configured billing, nothing bounds
+    what one signed-up account can spend on models. Guests have had a daily
+    turn cap since ``guest_budget``; this is its signed-up equivalent, and it
+    is deliberately NOT flag-gated.
+
+    Sits with the other run-start gates so it covers every path into the
+    executor (HTTP, WebSocket, queued, resumed) and fires BEFORE prewarm,
+    mark-running and any model call. Only this seam increments, so a turn costs
+    exactly one. Rejection uses the same shape as its neighbours: a terminal
+    ``error`` frame, ``mark_terminal(failed)``, then the stream TTL.
+
+    Returns ``True`` when the run was rejected.
+    """
+    from pocketpaw_ee.cloud.chat.runs import turn_budget
+
+    allowed, spent, cap = await turn_budget.try_spend(ctx.workspace_id)
+    if allowed:
+        if cap:
+            logger.debug("workspace turn %d/%d for %s", spent, cap, ctx.workspace_id)
+        return False
+
+    from pocketpaw_ee.cloud._core.errors import DailyTurnLimitError
+
+    exc = DailyTurnLimitError(cap)
+    logger.warning("run %s rejected — workspace daily turn cap (%d)", spec.run_id, cap)
+    try:
+        await transport.append_event(
+            spec.run_id, "error", {"code": exc.code, "message": exc.message}
+        )
+    except Exception:
+        logger.debug("turn-cap error frame append failed for %s", spec.run_id, exc_info=True)
+    try:
+        await run_service.mark_terminal(spec.run_id, status="failed", error=exc.message)
+    except Exception:
+        logger.exception("mark_terminal(failed) failed for turn-capped run %s", spec.run_id)
+    try:
+        await transport.set_ttl(spec.run_id, _stream_ttl())
+    except Exception:
+        logger.debug("turn-cap stream ttl set failed for %s", spec.run_id, exc_info=True)
+    return True
+
+
+async def _requires_own_key(ctx: ScopeContext) -> bool:
+    """Must THIS turn pay with the user's own key, having found none?
+
+    The ENFORCEMENT seam. Thin on purpose: the rule itself lives in
+    ``chat.kiosk_byok.requires_own_key`` because the router asks the same
+    question first, and a term added here alone would have the router refuse a
+    paying member the executor was about to let through.
+
+    What is local to this seam is the CONTEXT it asks with: ``ctx`` here was
+    resolved SERVER-side, so the surface cannot be omitted by a client the way
+    it can at the router. That is the whole reason this call survives.
+
+    Guests never reach here — the branch above already refused them, with
+    their own code. Callers reach this only after credential resolution came
+    back ``platform``.
+
+    Async since 2026-09-13: the rule now reads the workspace's plan.
+    """
+    from pocketpaw_ee.cloud.chat import kiosk_byok
+
+    return await kiosk_byok.requires_own_key(ctx)
+
+
 async def _reject_if_over_credit_quota(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
     """Universal run-start BILLING gate on the worker/executor path.
 
@@ -2294,6 +2696,7 @@ async def execute_run(spec: RunSpec) -> None:
     # model choice reaches ``_drive_agent_loop`` only via this copy. ``None`` (older
     # clients) leaves the backend's own model selection untouched.
     ctx.model_override = spec.model_override
+    ctx.tools_enabled = spec.tools_enabled
 
     # Mirror agent_router._ensure_scope_session so _drive_agent_loop's
     # title-gen guard (`if not history and ctx.session_id`) actually fires
@@ -2366,6 +2769,16 @@ async def execute_run(spec: RunSpec) -> None:
     # turn costs exactly one. No-op for non-guest users; fail-CLOSED for
     # guests (an unreadable counter refuses the run).
     if await _reject_if_guest_over_limit(spec, ctx, transport):
+        return
+
+    # Workspace daily turn ceiling (feat/abuse-budgets) — the always-on abuse
+    # bound, sitting LAST of the four run-start gates so a more specific and
+    # more actionable rejection wins: over jail quota, out of credit, or a
+    # guest over their allowance all say something the user can act on, where
+    # this one only says "come back tomorrow". No-op when the cap is 0;
+    # fail-CLOSED on an unreadable counter, which costs nothing because the run
+    # persists to the same database.
+    if await _reject_if_over_daily_turns(spec, ctx, transport):
         return
 
     # Mark this dispatch as a live cloud CHAT run for the per-tenant cwd jail's

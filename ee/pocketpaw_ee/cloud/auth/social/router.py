@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 
 from fastapi import APIRouter, Depends, Request
 from starlette.responses import RedirectResponse, Response
@@ -117,13 +117,28 @@ async def list_providers() -> SocialProvidersResponse:
 
 @router.get("/auth/social/{provider}/login")
 async def social_login(
+    request: Request,
     provider: str,
     flow: str = "web",
     next: str | None = None,  # noqa: A002 — matches the query-param name
 ) -> RedirectResponse:
-    """Begin consent. Redirects to the provider."""
+    """Begin consent. Redirects to the provider.
+
+    The caller's ORIGIN is read here and pinned into the state, because one
+    deployment serves two faces on two hostnames and the callback otherwise
+    returns everyone to a single configured origin. This is a top-level
+    navigation, so there is no ``Origin`` header to read — ``Referer`` is what
+    a browser sends, and its scheme+host is all we keep. Unrecognised or
+    absent degrades to the configured default, never to a redirect this
+    deployment has not approved.
+    """
     try:
-        url = await social_service.begin_login(provider, flow=flow, next_path=next)
+        url = await social_service.begin_login(
+            provider,
+            flow=flow,
+            next_path=next,
+            origin=_referer_origin(request),
+        )
     except CloudError as exc:
         return _error_redirect(exc.code)
     except Exception:  # noqa: BLE001 — discovery / network failure
@@ -132,7 +147,40 @@ async def social_login(
     return RedirectResponse(url=url, status_code=302)
 
 
-def _link_redirect(next_path: Any, **params: str) -> RedirectResponse:
+def _referer_origin(request: Request) -> str:
+    """The scheme+host the login button was clicked on, or "".
+
+    Only the origin is kept: the path can carry anything and we never want it
+    in a redirect. Validation is the service's job, against the CORS allowlist,
+    so this stays a pure read with no policy in it.
+    """
+    referer = request.headers.get("referer") or ""
+    if not referer:
+        return ""
+    try:
+        parsed = urlparse(referer)
+    except ValueError:
+        return ""
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _caller_origin(request: Request) -> str:
+    """The origin an XHR came from, or "".
+
+    ``Origin`` is sent on cross-origin fetches and is the precise answer;
+    ``Referer`` is the fallback for clients that suppress it, reduced to its
+    scheme+host by ``_referer_origin``. Validation is the service's job, as
+    with login, so this stays a pure read with no policy in it.
+    """
+    origin = (request.headers.get("origin") or "").strip()
+    if origin and origin != "null":
+        return origin.rstrip("/")
+    return _referer_origin(request)
+
+
+def _link_redirect(next_path: Any, origin: str = "", **params: str) -> RedirectResponse:
     """Send a link OUTCOME back to whatever page started it.
 
     Settings navigates the whole page away to the provider, so the result has
@@ -140,14 +188,22 @@ def _link_redirect(next_path: Any, **params: str) -> RedirectResponse:
     same shape ``?auth=…`` already uses for the sign-in dialog. ``next`` is the
     page that started the link, run through the same validator as the sign-in
     path, so a hostile value degrades to "/" instead of leaving the origin.
+
+    ``origin`` is the HOST half of "whatever page started it", added
+    2026-09-13. The sign-in path has honoured it since 2026-09-12; this one
+    still returned everyone to the single configured origin, which was harmless
+    while linking only ever happened inside Settings — you are already on the
+    face you started from — and wrong the moment a kiosk GUEST used the link
+    flow to sign up. The service validates it twice, at authorize time and
+    again at the callback; empty falls back to the configured default.
     """
-    base = social_service.frontend_base_url()
+    base = social_service.frontend_base_url(origin or None)
     path = _safe_next(next_path)
     separator = "&" if "?" in path else "?"
     return RedirectResponse(url=f"{base}{path}{separator}{urlencode(params)}", status_code=302)
 
 
-def _desktop_link_redirect(**params: str) -> RedirectResponse:
+def _desktop_link_redirect(origin: str = "", **params: str) -> RedirectResponse:
     """Send a desktop LINK outcome to the route the Tauri webview watches.
 
     Always `<frontend>/oauth-callback`, and deliberately ignores ``next``. The
@@ -156,8 +212,12 @@ def _desktop_link_redirect(**params: str) -> RedirectResponse:
     mounted in the main window. Not interpolating ``next`` here also means the
     hostile-value problem cannot reach this redirect at all — the safest
     handling of an attacker-influenced path is not to build one.
+
+    ``origin`` still matters even though the path does not: the webview has to
+    land on the face that opened it, or /oauth-callback boots in a shell that
+    never started this flow.
     """
-    base = social_service.frontend_base_url()
+    base = social_service.frontend_base_url(origin or None)
     return RedirectResponse(url=f"{base}/oauth-callback?{urlencode(params)}", status_code=302)
 
 
@@ -208,12 +268,20 @@ async def social_callback(
         # who it is, so the identity is parked and the app finishes the job
         # from POST /auth/social/link/complete under its bearer. The webview
         # recognises `link=` (the login branch uses `xc=`) and closes.
-        return _desktop_link_redirect(link=result["link_code"], provider=result["provider"])
+        return _desktop_link_redirect(
+            origin=result.get("origin") or "",
+            link=result["link_code"],
+            provider=result["provider"],
+        )
 
     if result["mode"] == "link":
         # Web link. Already authenticated — no session to mint, nothing to set.
         # Just report the outcome back to the page that started it.
-        return _link_redirect(result.get("next"), social_linked=result["provider"])
+        return _link_redirect(
+            result.get("next"),
+            origin=result.get("origin") or "",
+            social_linked=result["provider"],
+        )
 
     # Desktop: hand back a one-time REFERENCE, never a token. The Tauri client
     # has no cookie jar we can write to from here, and putting the bearer in
@@ -225,7 +293,7 @@ async def social_callback(
     # — never from this request's query string.
     if result["flow"] == "desktop":
         xc = await social_service.issue_exchange_code(str(result["user"].id))
-        base = social_service.frontend_base_url()
+        base = social_service.frontend_base_url(result.get("origin"))
         return RedirectResponse(url=f"{base}/oauth-callback?xc={quote(xc)}", status_code=302)
 
     response = await mint_and_record(cookie_backend, result["user"], request)
@@ -237,7 +305,8 @@ async def social_callback(
     # the same host only when both are served from one domain. In production
     # they are; in local dev they are not, and the user lands on the API root.
     redirect = RedirectResponse(
-        url=f"{social_service.frontend_base_url()}{safe_next}", status_code=302
+        url=f"{social_service.frontend_base_url(result.get('origin'))}{safe_next}",
+        status_code=302,
     )
     for key, value in response.headers.items():
         if key.lower() == "set-cookie":
@@ -282,6 +351,7 @@ async def list_social_identities(
 
 @router.post("/auth/social/{provider}/link", response_model=SocialLinkStartResponse)
 async def start_social_link(
+    request: Request,
     provider: str,
     flow: str = "web",
     next: str | None = None,  # noqa: A002 — matches the query-param name
@@ -302,7 +372,15 @@ async def start_social_link(
     the redirects the sign-in routes use, because unlike those this is an XHR
     with a caller waiting on a response, not a browser navigation.
     """
-    url = await social_service.begin_link(user, provider, flow=flow, next_path=next)
+    url = await social_service.begin_link(
+        user,
+        provider,
+        flow=flow,
+        next_path=next,
+        # Unlike /login this is an XHR, so the browser sends a real ``Origin``
+        # header; Referer is only the fallback.
+        origin=_caller_origin(request),
+    )
     return SocialLinkStartResponse(authorize_url=url)
 
 

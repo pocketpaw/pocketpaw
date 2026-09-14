@@ -10,8 +10,8 @@
 #     of ``incoming_bytes`` push the workspace over its plan's
 #     ``max_storage_bytes``? Returns ``(exceeded, used, limit)``; the UPLOAD seam
 #     (``uploads.service.upload_many`` / ``write_text_file``) raises
-#     ``StorageLimitError`` (402) when exceeded. GATED on ``billing_enforced``:
-#     OSS / self-host tenants (billing off) always get ``(False, 0, None)``.
+#     ``StorageLimitError`` (402) when exceeded. NOT gated on a flag as of
+#     2026-09-12 — see the function docstring. An uncapped plan is the opt-out.
 #   * ``assert_storage_available(workspace_id, incoming_bytes)`` — convenience
 #     wrapper that raises ``StorageLimitError`` when the cap would be exceeded
 #     (used by the programmatic ``write_text_file`` writer).
@@ -49,9 +49,12 @@
 from __future__ import annotations
 
 import inspect
+import logging
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.storage.domain import StorageUsage
+
+logger = logging.getLogger(__name__)
 
 
 async def workspace_storage_usage(workspace_id: str) -> int:
@@ -89,29 +92,50 @@ async def storage_cap_exceeded(
 ) -> tuple[bool, int, int | None]:
     """Would ``incoming_bytes`` of new blobs exceed this workspace's plan cap?
 
-    Returns ``(exceeded, used_bytes, limit_bytes)``. GATED on ``billing_enforced``:
-    OSS / self-host tenants (billing off) always get ``(False, 0, None)`` — no
-    cap, no extra DB read — so a self-hosted deployment behaves exactly as before.
-    When enforced, resolves the workspace's plan ``max_storage_bytes`` and sums
-    its live ``FileUpload`` bytes. An uncapped plan (Enterprise,
-    ``max_storage_bytes=None``) never trips. ``exceeded`` is ``used + incoming >
+    Returns ``(exceeded, used_bytes, limit_bytes)``. NOT gated on
+    ``billing_enforced`` (2026-09-12). It was, and that made it a cap in name
+    only: the flag defaults False and nothing sets it, so every plan's storage
+    ceiling was advertised on the Settings page and enforced nowhere. A number
+    the product shows and does not keep is worse than no number. The one thing
+    the flag did buy — a self-hosted install not tripping over a cap it never
+    asked for — is covered by the plan instead: an Enterprise/uncapped plan
+    (``max_storage_bytes=None``) still returns early, so a dedicated deployment
+    sets its workspace plan once rather than running on an unset global.
+
+    Resolves the workspace's plan ``max_storage_bytes`` and sums its live
+    ``FileUpload`` bytes. ``exceeded`` is ``used + incoming >
     limit`` — checked BEFORE the write, so it blocks the upload that WOULD push
     the workspace over, never an existing blob (upload-time only, never
     retroactive). Imports are lazy to keep this module off the config /
     entitlements import graph at load.
     """
-    from pocketpaw.config import get_settings
-
-    if not get_settings().billing_enforced:
-        return (False, 0, None)
-
     from pocketpaw_ee.cloud.entitlements import service as entitlements_service
 
-    ent = await entitlements_service.resolve_entitlements(workspace_id)
-    limit = ent.max_storage_bytes
-    if limit is None:
+    try:
+        ent = await entitlements_service.resolve_entitlements(workspace_id)
+        limit = ent.max_storage_bytes
+        if limit is None:
+            return (False, 0, None)
+        used = await workspace_storage_usage(workspace_id)
+    except Exception:
+        # Fails OPEN, like the daily upload budget on this same seam. This is
+        # a plan ceiling: a cost control, not a security boundary, and an
+        # unreadable counter is not an attack. If the database cannot say how much a
+        # workspace stores, refusing every upload in the product is a larger
+        # outage than letting one workspace briefly run past its plan — and the
+        # statement after this gate writes the file's row to that same database,
+        # so a genuinely unreachable Mongo fails the upload on its own terms
+        # rather than through a ceiling that could not be read.
+        #
+        # Before 2026-09-12 an unreadable counter could not happen here: the
+        # ``billing_enforced`` short-circuit returned before any read. Taking
+        # the flag off made this read unconditional, so it needs its own answer.
+        logger.warning(
+            "storage cap unreadable for workspace=%s; allowing this write",
+            workspace_id,
+            exc_info=True,
+        )
         return (False, 0, None)
-    used = await workspace_storage_usage(workspace_id)
     return (used + incoming_bytes > limit, used, limit)
 
 
@@ -120,7 +144,7 @@ async def assert_storage_available(workspace_id: str, incoming_bytes: int) -> No
 
     Thin convenience over ``storage_cap_exceeded`` for write seams that don't
     need the used/limit tuple (e.g. ``uploads.service.write_text_file``). A
-    no-op unless ``billing_enforced`` (OSS / self-host tenants are unaffected).
+    no-op only for an uncapped plan.
     """
     from pocketpaw_ee.cloud._core.errors import StorageLimitError
 

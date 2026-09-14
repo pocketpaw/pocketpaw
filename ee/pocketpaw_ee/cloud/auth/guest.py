@@ -3,6 +3,26 @@
 #
 # Created 2026-09-01 (feat/byok-guest-backend).
 #
+# Updated 2026-09-09 (feat/byok-custom-gateway): a guest may also arrive with a
+# key for an OpenAI-compatible gateway, which brings its own ``base_url`` and
+# ``model``. Both ride through to validation and storage unchanged; the
+# provider gate below is now the only thing deciding what is accepted, and it
+# reads ``byok_service.SUPPORTED_PROVIDERS`` rather than naming a provider.
+#
+# Updated 2026-09-13 (feat/guest-social-upgrade): added
+# ``upgrade_guest_via_social`` — the same in-place promotion as
+# ``upgrade_guest`` for the door that has no password. A guest signing up with
+# Google or GitHub used to run the LOGIN flow, which creates a new user when it
+# cannot match an identity, stranding their pages and stored key on an id
+# nobody could reach. They now come through the link flow instead.
+#
+# Updated 2026-09-11 (review S6): ``mint_guest`` now stores the base URL
+# ``validate_key`` hands back rather than the raw body string. The validator
+# normalizes (``strip().rstrip("/")``) before it guards, and writing the
+# un-normalized copy meant the value in the database was not the value that
+# passed the check. This route also does not go through ``ByokSetRequest``, so
+# ``validate_key`` is the whole guard here, not a second opinion on one.
+#
 # Flow (the order is the security property):
 #   rate-limit -> validate the key against the provider -> mint user ->
 #   provision workspace (default agent + LiteLLM tenant key ride along) ->
@@ -48,7 +68,13 @@ def is_provider_supported(provider: str) -> bool:
     return provider in byok_service.SUPPORTED_PROVIDERS
 
 
-async def mint_guest(api_key: str, *, provider: str = "anthropic") -> User:
+async def mint_guest(
+    api_key: str,
+    *,
+    provider: str = "anthropic",
+    base_url: str | None = None,
+    model: str | None = None,
+) -> User:
     """Validate the key, then mint user + workspace + encrypted key row.
 
     Raises ``ValidationError`` (422) for an unsupported provider and lets
@@ -59,15 +85,36 @@ async def mint_guest(api_key: str, *, provider: str = "anthropic") -> User:
     if not is_provider_supported(provider):
         raise ValidationError(
             "byok.provider_unsupported",
-            "Only Anthropic keys are supported right now — OpenAI and "
-            "OpenRouter are coming. Paste a key from console.anthropic.com.",
+            "That key's provider is not supported yet. Paste an Anthropic key, "
+            "or pick the custom gateway option and give its address.",
         )
+    if provider == "openai_compatible":
+        if not (base_url or "").strip():
+            raise ValidationError(
+                "byok.base_url_required",
+                "A custom gateway needs its address, e.g. https://host/v1.",
+            )
+        if not (model or "").strip():
+            raise ValidationError(
+                "byok.model_required",
+                "A custom gateway needs the model id it serves.",
+            )
     if not api_key or not api_key.strip():
         raise ValidationError("byok.key_missing", "Enter an API key to try Otherhand.")
     api_key = api_key.strip()
 
-    # 1. Prove the key works BEFORE anything is created.
-    await byok_service.validate_key(api_key)
+    # 1. Prove the key works BEFORE anything is created. For a gateway this is
+    #    also the ONLY SSRF guard on this path — ``_GuestMintRequest`` carries
+    #    plain ``str`` fields and never touches ``ByokSetRequest`` — and the
+    #    route is unauthenticated, so a stranger picks the address.
+    #    Keep the URL it hands back: it normalized before guarding, and the
+    #    value that reaches the database must be the value that passed
+    #    (review S6). Previously the raw body string was stored instead.
+    canonical_base_url = await byok_service.validate_key(
+        api_key, provider=provider, base_url=base_url, model=model
+    )
+    if canonical_base_url:
+        base_url = canonical_base_url
 
     # 2. Mint the anonymous user. Synthetic unique email (fastapi-users
     #    requires one), random password nobody knows — the account is only
@@ -105,6 +152,8 @@ async def mint_guest(api_key: str, *, provider: str = "anthropic") -> User:
             ws.id,
             api_key,
             provider=provider,
+            base_url=base_url,
+            model=model,
             user_id=str(user.id),
             validate=False,
         )
@@ -153,4 +202,44 @@ async def upgrade_guest(user: User, *, email: str, password: str) -> User:
     return user
 
 
-__all__ = ["is_provider_supported", "mint_guest", "upgrade_guest"]
+async def upgrade_guest_via_social(user: User, *, email: str) -> User:
+    """Promote a guest whose provider identity has just been attached.
+
+    The sibling of :func:`upgrade_guest`, for the door that has no password.
+    Same promotion, same user id, so the workspace, sessions, pages and stored
+    key stay exactly where they are — which is the only reason the kiosk can
+    offer "Continue with Google" at all.
+
+    No password is set. The account is reachable through the attached identity,
+    which ``_find_by_oauth_account`` matches on the provider's immutable id, and
+    the guest's original hash is a random string nobody has ever held. It stays
+    put rather than being blanked: ``_has_usable_password`` reads the field, and
+    an empty hash compares equal in some verifiers.
+
+    ``is_verified`` becomes True because the provider vouched for the address —
+    ``decide_link`` refuses an identity it will not vouch for, so by the time we
+    are here that is established, not assumed.
+
+    Callers MUST have checked the address is free first (see
+    ``social.service._apply_link_policy``). This function does not re-check:
+    the check has to happen BEFORE the identity is attached, or a refusal
+    leaves a half-upgraded row behind.
+    """
+    if not user.is_guest:
+        raise CloudError(409, "auth.not_a_guest", "This account is already registered.")
+
+    user.email = email.strip().lower()
+    user.is_guest = False
+    user.guest_limits = None
+    user.is_verified = True
+    await user.save()
+    logger.info("guest upgraded via social: user=%s", user.id)
+    return user
+
+
+__all__ = [
+    "is_provider_supported",
+    "mint_guest",
+    "upgrade_guest",
+    "upgrade_guest_via_social",
+]

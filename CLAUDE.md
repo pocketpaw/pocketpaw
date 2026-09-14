@@ -251,6 +251,89 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   env-configurable), marking queued/running `ChatRunDoc`s older than 10 minutes as
   `interrupted` so runs abandoned by a backend restart surface a retry affordance
   instead of leaving clients subscribed forever.
+- **Abuse ceilings (always on, NOT gated on billing)**: four knobs that bound what
+  one account can do in a day, regardless of whether billing is configured. They
+  exist because the priced ceilings — the per-plan storage cap in
+  `cloud/storage/service.py` and the credit quota in `chat/runs/run_core.py` —
+  are both gated on `billing_enforced`, which defaults to False. On a deployment
+  that has not switched billing on, those are not ceilings at all, and the only
+  remaining bound is the per-IP limiter in `dashboard_auth` (10 req/s, in-memory
+  per process, so N replicas means N buckets).
+  `POCKETPAW_WORKSPACE_TURNS_DAILY` (default `500`) — agent runs per workspace
+  per UTC day. ONE counter covers every model call the platform pays for,
+  because they all happen inside a run: the reply, plus image generation,
+  speech, OCR, translate, research and web search when a run calls them.
+  `POCKETPAW_WORKSPACE_UPLOAD_FILES_DAILY` (default `2000`) and
+  `POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY` (default `20000000000`, 20 GB) — both
+  ceilings on the same daily row, because a file count alone is beaten by fifty
+  25 MiB files and a byte total alone is beaten by a hundred thousand one-byte
+  ones.
+  `POCKETPAW_MAX_OWNED_WORKSPACES` (default `10`) — the one that makes the other
+  three mean anything. Every ceiling above is keyed on the workspace, so an
+  account that can mint workspaces in a loop gets a fresh empty counter each
+  time. Counts only workspaces the account OWNS; being invited to many is normal
+  collaboration and is governed by the inviter's seat limit.
+  All four read `0` as UNCAPPED, which DIVERGES from
+  `POCKETPAW_FILE_COMPREHENSION_DAILY`, where `0` disables the feature and
+  therefore blocks everything. Deliberate: a comprehension is an extra a
+  workspace can live without for a day, whereas uploading, chatting and creating
+  a workspace are the product, and an env typo must not take them off the air.
+  A non-integer value warns and uses the default rather than reading as `0`.
+  The two daily counters fail OPEN on a database error, logged at WARNING.
+  Both paths persist to the same Mongo a statement later, so an unreadable
+  counter never lets through work the database would have refused, and a
+  fail-closed draft refused every run in any harness that had not bound the
+  collection. Rejections are 429 with codes
+  `runs.daily_limit`, `uploads.daily_limit` and `workspace.owned_limit` —
+  deliberately not the 402 `billing.*` / `credits.*` codes, because nothing is
+  for sale here and the answer is to wait, not to upgrade.
+  Crude flood protection belongs at the proxy (Traefik on Coolify), not here.
+- **Social sign-in needs two URLs set, and returns to the face it started on**:
+  `POCKETPAW_PUBLIC_BASE_URL` (no default beyond `http://localhost:8888`) builds
+  the OAuth `redirect_uri` the provider is handed, so an unset value sends Google
+  and GitHub a localhost callback and every social login fails on a deployed
+  host. It must match a redirect URI registered in the provider's console.
+  `POCKETPAW_FRONTEND_BASE_URL` is where the browser lands after consent.
+  Since 2026-09-12 it is only the FALLBACK: the origin the login started from
+  (read from `Referer` in `auth/social/router.py`) is validated against the CORS
+  allowlist and pinned into the single-use OAuth state, then honoured at the
+  callback. One deployment serves two faces on two hostnames, so a single global
+  value landed kiosk users on the Paw OS. Validation is not optional — without
+  it this is an open redirect that also delivers the session cookie — and it runs
+  on the way in AND out, failing closed to the configured default.
+- **Storage caps are enforced, and free is 1 GB** (2026-09-12). The per-plan
+  workspace storage ceiling (`ee/pocketpaw_ee/cloud/billing/plans.py`,
+  `_MAX_STORAGE_BYTES`: free 1 GB, go 15 GB, pro 50 GB, pro_max 100 GB,
+  enterprise uncapped) is checked at UPLOAD time by
+  `cloud/storage/service.py`. It used to be gated on `billing_enforced`, which
+  defaults False and which nothing sets, so the number was shown on the
+  Settings storage page and enforced nowhere. The gate is now unconditional and
+  the opt-out is the PLAN, not a global flag: an uncapped plan returns early, so
+  a dedicated deployment sets its workspace plan once. Free came down from 5 GB
+  in the same change, because 5 GB of unbilled object storage per signup is a
+  real bill the moment the product is public.
+  The read FAILS OPEN, logged at WARNING, like the daily budgets beside it:
+  refusing every upload in the product because one aggregation could not run
+  is a bigger outage than one workspace briefly exceeding its plan, and the
+  file's own metadata row is written to the same Mongo a statement later.
+  Refusal is 402 `billing.storage_limit`.
+  Not to be confused with `POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY` above: that
+  bounds throughput per day, this bounds total stored bytes.
+- **Kiosk BYOK gate (`POCKETPAW_OTHER_HAND_REQUIRE_BYOK`)**: default OFF. When
+  on, a SIGNED-UP user on the Otherhand surface must have their own provider
+  key and gets no platform fallback, refused with 402 `byok_key_required`.
+  Guests already have this rule unconditionally (`guest_key_required`,
+  feat/byok-guest-backend) and are untouched — two rules, two codes, because a
+  guest is told to create an account and an account is told to add a key.
+  Scoped to the SURFACE, never the workspace: the same deployment serves the
+  full Paw OS, where the platform fallback is the product, so a workspace-wide
+  gate would take chat off the air for every non-kiosk user the moment the
+  variable is set. The surface is read from the server-resolved
+  `ctx.surface_context`; the fast-reject in `agent_router` reads the
+  client-supplied hint and is therefore UX only, with the executor
+  (`run_core._requires_own_key`) as the enforcement. Exists for the window
+  between launching the kiosk and switching billing on; remove the variable to
+  revert.
 - **Concurrency / capacity config**: five ceilings that are easy to confuse. In a
   cloud deploy the first two are the ones that bound how much work executes at once.
   `POCKETPAW_ARQ_MAX_JOBS` (default `10`, arq's own) — the **chat lane's** ceiling:

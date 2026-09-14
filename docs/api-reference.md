@@ -2,6 +2,22 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-09-11 (feat/otherhand-tools-toggle) — added the "Agent chat — the
+`tools` switch" section for the new per-send request field. Written around the
+two things a client cannot infer from a `bool | None`: the field is subtractive
+only, so `true` is a no-op and cannot re-enable anything the server withdrew,
+and it governs one send rather than being a setting that sticks.
+
+Updated: 2026-09-11 (feat/byok-image-key) — added the "BYOK key management"
+section. The whole `/byok` prefix was undocumented here: five routes, of which
+two are new (`PUT` and `DELETE /byok/image-key`), plus the four `image_*`
+columns `ByokStatus` now carries. Two things a reader cannot get from the field
+names and both are entitlement changes rather than plumbing: the image key is
+stored WITHOUT a validation round trip, so the first refused generation is where
+a bad credential becomes visible, and a workspace with its own image key is
+neither refused as a guest nor counted against the platform's daily cap. Also
+stated that the ceiling it removes is a SPEND ceiling and not a rate one.
+
 Updated: 2026-09-02 (SA-7) — finished the Visitor Analytics section with the two
 things a reader could not get from the endpoint's own fields. First, what the
 `analytics` grant actually buys: which tiers carry it, that it needs an active
@@ -1180,6 +1196,36 @@ Response `200`:
 conversion, a pricing-rules engine, and disputes / clawback. This endpoint
 returns a raw sum of declared values — the queryable figure those layers
 will build on later (see `outcome-spec.md`).
+
+## Agent chat — the `tools` switch
+
+`POST /cloud/chat/{scope}/{scope_id}/agent` takes an optional `tools` field on
+the request body.
+
+| Value | Effect |
+|---|---|
+| `false` | Run this turn with no tool surface at all. No custom tools and no MCP toolsets are built, so nothing can reach the wire. |
+| `true` | Nothing. Identical to omitting the field. |
+| omitted / `null` | Today's behaviour, which is what every existing client sends. |
+
+**It can only withdraw tools, never add one.** The backend forwards the flag
+only when it is exactly `false`; `true` is dropped on the floor, so a client
+cannot use this field to switch on a tool the server did not intend to offer,
+and it cannot undo a server-side withdrawal (the surface profile's
+`deny_mcp_tool_ids` is a different mechanism that the request body never
+reaches). The only direction of travel is subtractive.
+
+**It is per-send, not a setting.** The flag applies to the one turn that
+carries it and is not remembered. It is part of the agent cache key, so a
+turn asking for no tools never gets served a cached agent that was built with
+them.
+
+Two reasons a client reaches for it, both from the Otherhand kiosk: a gateway
+profile that refuses the `tools` field outright and 400s the whole turn, and a
+weaker model that fixates on a tool instead of doing the work. It is also the
+largest token lever on that surface, because the upstream prompt cache does
+not cover tool schemas — a run carrying a tool surface reads zero cached
+tokens every turn.
 
 ## Agent Activity
 
@@ -2925,7 +2971,7 @@ here is local verification, not a production hole.
 
 | Endpoint | Notes |
 |---|---|
-| `POST /auth/guest` | `{api_key, provider?="anthropic"}`. Rate-limited per IP (429). Validates the key against the provider FIRST (422 `byok.key_rejected` / `byok.provider_unavailable` / `byok.provider_unsupported` — Anthropic only in v1); a dead key mints **nothing**. On success mints an anonymous user (`is_guest`) + workspace + default agent, stores the key encrypted (the same per-workspace Fernet store the `/byok` routes use), and answers exactly like `POST /auth/login` (204 + cookies). Public by necessity — a guest has no account yet; on the route-auth-audit allowlist with that reason. |
+| `POST /auth/guest` | `{api_key, provider?="anthropic", base_url?, model?}`. Rate-limited per IP (429). Validates the key against the provider FIRST (422 `byok.key_rejected` / `byok.key_rate_limited` / `byok.provider_unavailable` / `byok.provider_unsupported`); a dead key mints **nothing**. `provider` is `anthropic` or `openai_compatible`; the latter REQUIRES `base_url` and `model` (422 `byok.base_url_required` / `byok.model_required`) and the URL must be https on a host that is external **after DNS resolution** — the name is resolved and every address it answers with is checked, so a public hostname pointing at a private range is refused like the private address itself (422 `byok.base_url_rejected`). The request that verifies the key is then sent to that exact resolved address, with redirects off. On success mints an anonymous user (`is_guest`) + workspace + default agent, stores the key encrypted (the same per-workspace Fernet store the `/byok` routes use), and answers exactly like `POST /auth/login` (204 + cookies). Public by necessity — a guest has no account yet; on the route-auth-audit allowlist with that reason. |
 | `POST /auth/guest/upgrade` | Authenticated guest only. `{email, password}` attaches real credentials to the **same user id** (workspace, sessions, key all stay) and flips `is_guest` off. 409 `auth.email_taken` / `auth.not_a_guest`. The stock `/auth/register` always creates a NEW user, hence the dedicated route. |
 
 Guest limits are server-side and fail-CLOSED: 2 sessions and 40 turns/day by
@@ -2935,11 +2981,88 @@ default (per-user `guest_limits`). Over-limit responses are 402 with top-level
 or undecryptable gets 402 `{"code": "guest_key_required"}` — guests never fall
 back to platform credentials. `GET /auth/me` carries `is_guest`.
 
+`POCKETPAW_GUEST_SESSIONS` and `POCKETPAW_GUEST_TURNS_PER_DAY` raise those caps
+deployment-wide. They are FLOORS, not replacements: the larger of the env value
+and the guest's own `guest_limits` wins, so a single guest can still be lifted
+by their row. Both are unset in production and both ignore a non-integer, zero
+or negative value rather than applying it — there is deliberately no "disable
+guest limits" switch, because zero is what an operator types when they mean
+unlimited and `try_spend_turn` reads a cap of zero as *refuse every turn*. A dev
+box turns the caps off by setting them past anything it will reach:
+
+```bash
+export POCKETPAW_GUEST_SESSIONS=1000
+export POCKETPAW_GUEST_TURNS_PER_DAY=100000
+```
+
 Turn billing: every workspace with a stored BYOK key (guest or not) now runs
 its chat turns on that key — the executor resolves credentials per turn and
 threads them into the agent pool's isolated backend. The turn's model must
 belong to the key's provider (402-style `byok.model_provider_mismatch` error
-frame on a mismatch, never a silent upstream 401).
+frame on a mismatch, never a silent upstream 401). A gateway key
+(`openai_compatible`, 2026-09-09) is exempt from that check: a gateway's model
+ids are its own namespace, so there is no name shape the server could check
+against, and the model that actually runs is the `pydantic_ai_model` the
+credential resolver pins — the pydantic_ai backend, which is the one a gateway
+turn runs on, accepts a per-send `model_override` only to ignore it.
+
+**The gateway address is re-checked on every turn** (2026-09-11). A stored
+`base_url` is resolved again before the turn runs, and every address it
+resolves to must be external. A row written before this check existed, or a
+host whose DNS later points inside, gets a terminal
+`byok.base_url_rejected` error frame. The turn is refused, not quietly moved
+onto platform credentials — a tenant's bad address must not spend the
+platform's money.
+
+**A gateway turn does not go through the LiteLLM proxy.** An Anthropic key
+rides as a forwarded `x-api-key`, which works because the proxy knows where
+Anthropic is; there is no model group pointing at a URL a user typed, so a
+gateway turn is sent straight to `base_url` through the runtime's own
+`openai_compatible` provider. Those turns therefore produce no spend-log row
+and skip the proxy's guardrails. Weigh that before a paid tier rides the same
+seam.
+
+### BYOK key management
+
+| Endpoint | Notes |
+|---|---|
+| `GET /byok/key` | `ByokStatus` — `configured`, `provider`, `base_url`, `model`, `last4`, `key_hint`, `last_verified_at`, `last_error`. Built from display-only columns; answering never decrypts, and no route ever returns the key. |
+| `PUT /byok/key` | `{provider?="anthropic", api_key, base_url?, model?}`. Validates against the provider (or the gateway's own `/chat/completions`), then encrypts and upserts. Same shape rules and error codes as `POST /auth/guest`. An `anthropic` body carrying `base_url` or `model` is refused rather than silently ignored. |
+| `DELETE /byok/key` | Idempotent. Removing an absent key succeeds. |
+
+### BYOK key management
+
+Workspace-scoped, not user-scoped, matching where a credential is spent. Every
+response is a `ByokStatus`; no route on this prefix returns a key, and there is
+no echo on save. Once written, a key is write-only from the API's point of view.
+
+| Endpoint | Notes |
+|---|---|
+| `GET /byok/key` | `ByokStatus` — `configured`, `provider`, `last4`, `key_hint`, `last_verified_at`, `last_error`, plus the image columns below. Built from display-only columns; answering never decrypts. |
+| `PUT /byok/key` | `{provider?="anthropic", api_key}`. Validates against the provider, then encrypts and upserts. A key the provider rejects is never written. |
+| `DELETE /byok/key` | Idempotent. Removing an absent key succeeds. Clears the LLM columns rather than dropping the row when an image key still lives on it, so rotating one credential never takes the other with it. |
+| `PUT /byok/image-key` | `{api_key}` — the workspace's own fal.ai key, for illustrations. Shape-checked at the edge (`<key-id>:<secret>`) and stored encrypted, but **not** validated against fal: fal has no free endpoint that proves a credential without generating an image, so a save-time check would spend money on every paste. A bad key surfaces on the first illustration as `image_last_error`. |
+| `DELETE /byok/image-key` | Idempotent, and it never touches the LLM key. Safe to call: the workspace falls back to the platform illustrator under the daily cap (an account) or to the guest refusal (a guest), where a workspace with no LLM key answers 402 on every turn. |
+
+`ByokStatus` carries four image columns alongside the LLM ones. They are
+display-only and independent of the LLM key — a workspace may have either
+credential, both, or neither:
+
+| Field | Meaning |
+|---|---|
+| `image_configured` | Whether a fal key is stored. |
+| `image_last4` | Last four of the SECRET half, so two keys sharing a key id still read differently. |
+| `image_key_hint` | The key id, which is the non-secret half of a fal credential. Never the secret. |
+| `image_last_error` | Why the last generation was refused, or `null`. Stamped when fal answers 401/403 and cleared on the next successful save. There is no `image_verified_at`, because this is the whole verification story for the credential. The text comes from the provider and is run through the output redactor before it is stored, so an error body that echoes the submitted key does not land in a field the API hands back. |
+
+**A workspace image key bypasses the guest illustration refusal.** Guests are
+normally refused an illustration outright, and accounts are metered against a
+daily platform cap. A workspace with its own fal key is neither: it is not
+refused for being a guest, and it does not claim the platform budget. The guest
+refusal exists because a guest can mint a fresh workspace for a fresh ceiling,
+which is an argument about the platform's money and says nothing about someone
+spending their own. Note that this removes the spend ceiling but not the request
+rate — a BYOK illustration path is not rate-limited today.
 
 ### Sign-in endpoints (no session — that is the point)
 

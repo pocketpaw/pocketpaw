@@ -1,0 +1,164 @@
+[
+  {
+    "label": "the tool surface is built anyway \u2014 a tools-off turn still sends schemas the gateway 400s on",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        tools = list(self._build_custom_tools()) if tools_enabled else []",
+    "replace": "        tools = list(self._build_custom_tools())",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_tools_off_puts_no_tool_on_the_wire"
+    ]
+  },
+  {
+    "label": "the switch leaves the agent cache key \u2014 a tools-off turn is served the agent built WITH tools",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            tools_enabled,\n        )\n        if self._cached_agent is not None",
+    "replace": "        )\n        if self._cached_agent is not None",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_tools_off_and_tools_on_do_not_share_a_cached_agent"
+    ]
+  },
+  {
+    "label": "tools default to OFF \u2014 every existing turn in the product silently loses its tools",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        tools_enabled: bool = True,\n        # Accepted and deliberately unused",
+    "replace": "        tools_enabled: bool = False,\n        # Accepted and deliberately unused",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_tools_default_to_on"
+    ]
+  },
+  {
+    "label": "the drawing tools are offered to a caller who cannot use them \u2014 the sixteen-refusal loop returns",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    if not isinstance(grant, creds.IllustrationRefusal):\n        return base",
+    "replace": "    if True:\n        return base",
+    "tests": [
+      "tests/cloud/chat/test_otherhand_tool_withdrawal.py::test_a_caller_who_cannot_illustrate_is_not_offered_the_tools"
+    ]
+  },
+  {
+    "label": "the withdrawal REPLACES the surface denies \u2014 'draw me a diagram' can build a POCKET again",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        deny_mcp_tool_ids=frozenset(base.deny_mcp_tool_ids) | _ILLUSTRATION_TOOLS,",
+    "replace": "        deny_mcp_tool_ids=_ILLUSTRATION_TOOLS,",
+    "tests": [
+      "tests/cloud/chat/test_otherhand_tool_withdrawal.py::test_the_surface_s_own_denies_survive"
+    ]
+  },
+  {
+    "label": "every surface pays for the lookup \u2014 a database read lands in front of every turn in the product",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    if ctx.surface_context is None or ctx.surface_context.kind is not SurfaceKind.OTHER_HAND:\n        return base",
+    "replace": "    if ctx.surface_context is None:\n        return base",
+    "tests": [
+      "tests/cloud/chat/test_otherhand_tool_withdrawal.py::test_other_surfaces_are_never_asked"
+    ]
+  },
+  {
+    "label": "capabilities ignore the switch \u2014 Planning puts write_plan back on a tools-off request",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        if tools_enabled:\n            capabilities.append(Planning())",
+    "replace": "        capabilities.append(Planning())\n        if tools_enabled:",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_tools_off_puts_no_tool_on_the_wire"
+    ]
+  },
+  {
+    "label": "the gate is total \u2014 Planning is dropped from ordinary runs too, so the todo toolset silently vanishes",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        if tools_enabled:\n            capabilities.append(Planning())",
+    "replace": "        if False:\n            capabilities.append(Planning())",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_tools_on_still_puts_the_capability_tools_on_the_wire"
+    ]
+  },
+  {
+    "label": "skills ignore the switch \u2014 load_capability rides a tools-off request",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        skills = self._build_skills_capability(skill_names) if tools_enabled else None",
+    "replace": "        skills = self._build_skills_capability(skill_names)",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_tools_off_puts_no_tool_on_the_wire"
+    ]
+  },
+  {
+    "label": "the capability call site drops the switch \u2014 every gated capability comes back",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            capabilities=self._build_capabilities(skill_names, tools_enabled=tools_enabled) or None,",
+    "replace": "            capabilities=self._build_capabilities(skill_names) or None,",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_tools_off_puts_no_tool_on_the_wire"
+    ]
+  },
+  {
+    "label": "native web tools ignore the switch \u2014 a tools-off request still registers web_search",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        if tools_enabled:\n            # These DO need the gate",
+    "replace": "        if True:\n            # These DO need the gate",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_tools_off_puts_no_tool_on_the_wire"
+    ]
+  },
+  {
+    "label": "the pool forwards the switch without asking the signature \u2014 every tools-off turn on a narrow backend dies in TypeError",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            if tools_enabled is False and _accepts_tools_enabled_kwarg(run_backend.run):",
+    "replace": "            if tools_enabled is False:",
+    "tests": [
+      "tests/test_tools_switch_reaches_every_backend.py::test_a_tools_off_turn_on_a_narrow_backend_does_not_crash"
+    ]
+  },
+  {
+    "label": "the signature check always says no \u2014 the switch is silently dead on every backend",
+    "file": "src/pocketpaw/agents/backend.py",
+    "find": "        return \"tools_enabled\" in inspect.signature(func).parameters",
+    "replace": "        return False",
+    "tests": [
+      "tests/test_tools_switch_reaches_every_backend.py::test_a_backend_that_declares_it_is_offered_the_kwarg"
+    ]
+  },
+  {
+    "label": "the SDK backend relies on an empty allowlist \u2014 the CLI omits the flag and falls back to its DEFAULT tools",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        if not tools_enabled:\n            options_kwargs[\"tools\"] = []",
+    "replace": "        if False:\n            options_kwargs[\"tools\"] = []",
+    "tests": [
+      "tests/test_tools_switch_reaches_every_backend.py::test_tools_off_sets_the_base_tool_set_empty"
+    ]
+  },
+  {
+    "label": "the base tool set is emptied on EVERY turn \u2014 the SDK backend loses all its tools",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        if not tools_enabled:\n            options_kwargs[\"tools\"] = []",
+    "replace": "        if True:\n            options_kwargs[\"tools\"] = []",
+    "tests": [
+      "tests/test_tools_switch_reaches_every_backend.py::test_tools_on_is_unchanged"
+    ]
+  },
+  {
+    "label": "a tools-off turn still registers every MCP server",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        mcp_servers = {} if not tools_enabled else self._get_mcp_servers()",
+    "replace": "        mcp_servers = self._get_mcp_servers()",
+    "tests": [
+      "tests/test_tools_switch_reaches_every_backend.py::test_tools_off_registers_no_mcp_servers"
+    ]
+  },
+  {
+    "label": "the allowlist survives a tools-off turn \u2014 the warm client built WITH tools is reused",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        if not tools_enabled:\n            allowed_tools = []",
+    "replace": "        if False:\n            allowed_tools = []",
+    "tests": [
+      "tests/test_tools_switch_reaches_every_backend.py::test_tools_off_empties_the_allowlist_so_the_cache_key_differs"
+    ]
+  },
+  {
+    "label": "the pool never forwards the switch \u2014 it reads Off and does nothing on every backend",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            if tools_enabled is False and _accepts_tools_enabled_kwarg(run_backend.run):\n                run_kwargs[\"tools_enabled\"] = tools_enabled",
+    "replace": "            if False:\n                run_kwargs[\"tools_enabled\"] = tools_enabled",
+    "tests": [
+      "tests/test_tools_switch_reaches_every_backend.py::test_a_tools_off_turn_still_reaches_a_backend_that_declares_it"
+    ]
+  }
+]
