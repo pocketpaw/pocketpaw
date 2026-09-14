@@ -178,6 +178,61 @@ async def test_a_cancelled_run_leaves_its_partial_reply_in_history(monkeypatch, 
     )
 
 
+async def test_a_mid_stream_cancel_keeps_every_chunk(monkeypatch, mongo_db):  # noqa: ARG001
+    """The cancel a real user performs, which the test above does NOT exercise.
+
+    The test above arms the flag before the loop opens, so EVERY chunk meets an
+    already-cancelled check. Production is the other shape: text streams, the
+    user reads enough, and only then does the flag flip. Those two run different
+    code, and the difference is a whole chunk.
+
+    The cancel check sits ABOVE the event handling, so the event being held when
+    the flag is first seen is the one at risk. Here the flag flips after the
+    first chunk, so the SECOND chunk is the one the loop is holding when it
+    breaks. If it is dropped the reply silently loses its tail — an answer that
+    is subtly short, never an error, and exactly the kind of thing a test that
+    only ever cancels from a standing start would certify as fine.
+    """
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+    await run_service.create_run(_spec())
+
+    ctx = _ctx()
+
+    async def fake_resolve_scope_context(**_):
+        return ctx
+
+    async def fake_agent_events(spec, ctx):  # noqa: ARG001
+        yield ("chunk", {"content": "Here are the three options", "type": "text"})
+        # The user hits stop between the two chunks.
+        await transport.request_cancel("r1")
+        yield ("chunk", {"content": " I found:", "type": "text"})
+
+    class _FakePool:
+        async def observe(self, *a, **k):
+            return None
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", fake_agent_events)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "_broadcast_message_new", _noop)
+    monkeypatch.setattr(run_core, "get_agent_pool", lambda: _FakePool())
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+
+    await run_core.execute_run(_spec())
+
+    doc = await run_service.get_run("r1")
+    assert doc.status == "cancelled"
+    assert doc.partial_text == _PARTIAL, (
+        "the chunk in hand when the cancel flag was first seen was dropped, so "
+        "the stored reply is missing its tail"
+    )
+
+    history = await load_history_for_scope(ctx)
+    assert _PARTIAL in _assistant_lines(history)
+
+
 # ---------------------------------------------------------------------------
 # Characterization - these PASS today and pin why the bug is what it is
 # ---------------------------------------------------------------------------
