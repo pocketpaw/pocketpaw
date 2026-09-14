@@ -48,6 +48,18 @@ class ProfileOut(BaseModel):
     # snake_case wire key, frozen with the BYOK-fe sibling (2026-09-01): guests
     # get signup nudges + upload blocks; the flag must survive a page reload.
     is_guest: bool = False
+    # Platform authority axis (2026-09-14). snake_case, matching mfa_enabled and
+    # is_guest above rather than the older camelCase keys.
+    #
+    # This is the ONLY way the frontend can tell a platform operator from any
+    # other signed-in user: is_superuser is not on this wire at all, and a
+    # workspace role says nothing about platform access. Paw Admin reads this
+    # field and nothing else to decide whether to render the console.
+    #
+    # Null for every user until an operator is granted one. Sent as null rather
+    # than omitted so a client can distinguish "no platform access" from "this
+    # server is too old to have the field".
+    platform_role: str | None = None
 
 
 def auth_user_to_profile_out(user: AuthUser) -> ProfileOut:
@@ -63,6 +75,7 @@ def auth_user_to_profile_out(user: AuthUser) -> ProfileOut:
         ],
         mfa_enabled=user.mfa_enabled,
         is_guest=user.is_guest,
+        platform_role=user.platform_role,
     )
 
 

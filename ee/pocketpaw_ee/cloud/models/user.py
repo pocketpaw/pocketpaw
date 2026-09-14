@@ -98,6 +98,22 @@ class User(BeanieBaseUser, Document):  # type: ignore[misc]
     mfa_verified_at: datetime | None = None
     mfa_pending_setup: bool = False
 
+    # Platform authority axis (2026-09-14) — see ee.guards.platform. ORTHOGONAL
+    # to ``workspaces[].role``: that says what the user may do inside one
+    # tenant, this says whether they may act across all of them. A workspace
+    # OWNER gets nothing here by being one.
+    #
+    # ``None`` on every existing row and on every new signup, which is the only
+    # safe default — platform access is granted deliberately, by the CLI in
+    # ee/pocketpaw_ee/cloud/platform/cli.py, and never by a signup path.
+    #
+    # Stored as a plain string rather than the enum so that an unrecognised
+    # value written by a newer node degrades to "no access"
+    # (``check_platform_action`` denies anything it cannot parse) instead of
+    # raising on load and taking out every read of that user. Same reasoning as
+    # ``workspaces[].role``, which is also a bare str.
+    platform_role: str | None = None
+
     class Settings:
         name = "users"
         email_collation = None

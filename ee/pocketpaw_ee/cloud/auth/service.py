@@ -58,6 +58,11 @@ def _to_domain(doc: _UserDoc) -> AuthUser:
         is_superuser=doc.is_superuser,
         mfa_enabled=doc.mfa_enabled,
         is_guest=bool(getattr(doc, "is_guest", False)),
+        # Direct attribute access, not getattr-with-default: the field is
+        # declared on the User document, so a missing one is a schema bug that
+        # should raise here rather than read back as "no platform access" on
+        # every request forever.
+        platform_role=doc.platform_role,
     )
 
 

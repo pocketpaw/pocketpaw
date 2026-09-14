@@ -72,6 +72,8 @@ async def test_get_me_returns_dto_shape(app_client) -> None:
         "mfa_enabled",
         # 2026-09-01 (feat/byok-guest-backend) — see test_dto.py.
         "is_guest",
+        # 2026-09-14 (feat/platform-authority-axis) — see test_dto.py.
+        "platform_role",
     }
     assert body["id"] == str(user_doc.id)
     assert body["name"] == "Alice"
@@ -79,6 +81,10 @@ async def test_get_me_returns_dto_shape(app_client) -> None:
     assert body["activeWorkspace"] == "w1"
     assert body["workspaces"] == [{"workspace": "w1", "role": "owner"}]
     assert body["mfa_enabled"] is False
+    # A user with no platform role reads back as null, not absent: the console
+    # needs to tell "no platform access" apart from "this server is too old to
+    # have the field".
+    assert body["platform_role"] is None
 
 
 async def test_patch_me_updates_full_name(app_client) -> None:

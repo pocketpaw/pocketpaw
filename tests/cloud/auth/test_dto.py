@@ -50,6 +50,11 @@ def test_profile_out_keys_match_existing_wire_shape() -> None:
         # 2026-09-01 (feat/byok-guest-backend): frozen with the BYOK-fe
         # sibling — guests render signup nudges off this flag.
         "is_guest",
+        # 2026-09-14 (feat/platform-authority-axis): the ONLY way a client can
+        # tell a platform operator from any other signed-in user. is_superuser
+        # is not on this wire, and a workspace role says nothing about platform
+        # access. Null for everyone until an operator is granted one.
+        "platform_role",
     }
 
 

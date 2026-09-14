@@ -102,6 +102,12 @@ ROUTER_MODULES = [
     ("audit", "pocketpaw_ee.cloud.audit.router"),
     ("auth", "pocketpaw_ee.cloud.auth.router"),
     ("billing", "pocketpaw_ee.cloud.billing.router"),
+    # Added 2026-09-14 with the router that mounts it. Audited rather than
+    # pinned: every route under /platform carries require_platform, which is
+    # asserted directly in tests/cloud/platform/test_platform_guard.py rather
+    # than trusted here. This is the cross-tenant surface, so it is the last
+    # router that should be sitting in an unaudited backlog.
+    ("platform", "pocketpaw_ee.cloud.platform.router"),
     # Added 2026-09-08. Both mounted while the coverage pin was being
     # written against an older base, so dev merged at 50 unaudited
     # routers against a pin of 48. Every route on both carries a session
