@@ -1,5 +1,13 @@
 """Upload configuration — size limits, mime policy, storage root.
 
+2026-09-14 (feat/uploads-multipart-adapter): added ``max_large_file_bytes``
+(5 GiB), ``multipart_part_bytes`` (8 MiB), ``multipart_ttl_hours`` (168), and
+the ``part_size_for``/``part_count_for`` sizing math.
+
+``max_file_bytes`` stays at 25 MiB: ``security/body_limit.py`` derives the
+global ASGI request ceiling from it, and multipart bytes never arrive as one
+request body. Separate number on purpose.
+
 2026-09-11 — ``allowed_mimes`` defaults to ``*/*`` instead of the ~35-type
 ``DEFAULT_ALLOWED_MIMES``, which refused .blend/.psd/.fbx and everything else
 nobody listed. Narrow it per deploy with ``POCKETPAW_UPLOAD_ALLOWED_MIMES``.
@@ -31,6 +39,28 @@ ALLOWED_MIMES_ENV = "POCKETPAW_UPLOAD_ALLOWED_MIMES"
 MAX_BYTES_ENV = "POCKETPAW_UPLOAD_MAX_BYTES"
 
 _DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024  # 25 MiB
+
+_MIB = 1024 * 1024
+
+#: Per-file ceiling for the MULTIPART path (not ``MAX_BYTES_ENV``).
+MAX_LARGE_FILE_BYTES_ENV = "POCKETPAW_MAX_LARGE_FILE_BYTES"
+
+#: Baseline part size, scaled up by :func:`part_size_for` when needed.
+MULTIPART_PART_BYTES_ENV = "POCKETPAW_MULTIPART_PART_BYTES"
+
+#: How long a multipart session stays resumable.
+MULTIPART_TTL_HOURS_ENV = "POCKETPAW_MULTIPART_TTL_HOURS"
+
+_DEFAULT_MAX_LARGE_FILE_BYTES = 5 * 1024 * _MIB  # 5 GiB
+_DEFAULT_MULTIPART_PART_BYTES = 8 * _MIB  # 8 MiB
+_DEFAULT_MULTIPART_TTL_HOURS = 168  # 7 days
+
+#: S3's hard ceiling on parts per upload. Enforced at complete time — i.e.
+#: after every byte has moved — so the sizing has to get it right up front.
+MAX_MULTIPART_PARTS = 10_000
+
+#: S3's minimum for every part except the last.
+MIN_MULTIPART_PART_BYTES = 5 * _MIB
 
 # What a client sends when it does not recognise the file. Means "ask the
 # filename instead", not "this is a binary blob".
@@ -164,20 +194,84 @@ def allowed_mimes_from_env() -> frozenset[str]:
     return frozenset(entries)
 
 
-def _max_file_bytes_from_env() -> int:
-    """Per-file ceiling in bytes. Malformed or non-positive falls back."""
-    raw = os.environ.get(MAX_BYTES_ENV, "").strip()
+def _positive_int_from_env(name: str, default: int) -> int:
+    """Read a positive int from ``name``. Malformed or non-positive warns and
+    falls back — a typo must not read as "unlimited"."""
+    raw = os.environ.get(name, "").strip()
     if not raw:
-        return _DEFAULT_MAX_FILE_BYTES
+        return default
     try:
         val = int(raw)
     except ValueError:
-        logger.warning("%s=%r is not an int; using the default", MAX_BYTES_ENV, raw)
-        return _DEFAULT_MAX_FILE_BYTES
+        logger.warning("%s=%r is not an int; using the default", name, raw)
+        return default
     if val <= 0:
-        logger.warning("%s=%d is not positive; using the default", MAX_BYTES_ENV, val)
-        return _DEFAULT_MAX_FILE_BYTES
+        logger.warning("%s=%d is not positive; using the default", name, val)
+        return default
     return val
+
+
+def _max_file_bytes_from_env() -> int:
+    """Per-file ceiling in bytes. Malformed or non-positive falls back."""
+    return _positive_int_from_env(MAX_BYTES_ENV, _DEFAULT_MAX_FILE_BYTES)
+
+
+def _max_large_file_bytes_from_env() -> int:
+    """Per-file ceiling for the multipart path. Malformed or non-positive falls back."""
+    return _positive_int_from_env(MAX_LARGE_FILE_BYTES_ENV, _DEFAULT_MAX_LARGE_FILE_BYTES)
+
+
+def _multipart_part_bytes_from_env() -> int:
+    """Baseline part size. Malformed or non-positive falls back."""
+    return _positive_int_from_env(MULTIPART_PART_BYTES_ENV, _DEFAULT_MULTIPART_PART_BYTES)
+
+
+def _multipart_ttl_hours_from_env() -> int:
+    """Multipart session lifetime in hours. Malformed or non-positive falls back."""
+    return _positive_int_from_env(MULTIPART_TTL_HOURS_ENV, _DEFAULT_MULTIPART_TTL_HOURS)
+
+
+def part_size_for(size: int, *, base: int | None = None) -> int:
+    """``max(base, ceil(size / 10000))``, rounded up to a whole MiB.
+
+    The part grows only when the baseline would blow the 10000-part ceiling.
+    Rounding up is safe: a bigger part means fewer parts, never more.
+
+    ``base`` defaults to ``POCKETPAW_MULTIPART_PART_BYTES``; pass
+    ``settings.multipart_part_bytes`` from a request path to avoid re-reading
+    the environment per call.
+    """
+    if base is None:
+        base = _multipart_part_bytes_from_env()
+    needed = -(-max(int(size), 0) // MAX_MULTIPART_PARTS)  # ceil division
+    raw = max(int(base), needed)
+    return -(-raw // _MIB) * _MIB
+
+
+def validate_part_number(part_number: object) -> int:
+    """Return ``part_number`` as an int in 1..10000, or raise ``InvalidPart``.
+
+    ``bool`` is rejected explicitly because it passes ``isinstance(int)``, and
+    ``True`` would silently address part 1.
+    """
+    from pocketpaw.uploads.errors import InvalidPart
+
+    if isinstance(part_number, bool) or not isinstance(part_number, int):
+        raise InvalidPart(f"part number must be an int, got {type(part_number).__name__}")
+    if not 1 <= part_number <= MAX_MULTIPART_PARTS:
+        raise InvalidPart(f"part number {part_number} outside 1..{MAX_MULTIPART_PARTS}")
+    return part_number
+
+
+def part_count_for(size: int, part_size: int) -> int:
+    """How many parts a file of ``size`` splits into at ``part_size``.
+
+    A zero-byte file is one empty part, not zero — otherwise a caller
+    iterating the count would complete having sent nothing.
+    """
+    if part_size <= 0:
+        raise ValueError("part_size must be positive")
+    return max(1, -(-max(int(size), 0) // int(part_size)))
 
 
 @dataclass
@@ -188,6 +282,11 @@ class UploadSettings:
     max_files_per_batch: int = 50
     allowed_mimes: frozenset[str] = field(default_factory=allowed_mimes_from_env)
     local_root: Path = field(default_factory=lambda: Path.home() / ".pocketpaw" / "uploads")
+    # Multipart path only — body_limit derives the global request ceiling from
+    # max_file_bytes and must not learn about 5 GiB.
+    max_large_file_bytes: int = field(default_factory=_max_large_file_bytes_from_env)
+    multipart_part_bytes: int = field(default_factory=_multipart_part_bytes_from_env)
+    multipart_ttl_hours: int = field(default_factory=_multipart_ttl_hours_from_env)
 
 
 _MIME_TO_EXT: dict[str, str] = {

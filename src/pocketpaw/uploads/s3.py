@@ -10,6 +10,17 @@ env var names (``S3_ENDPOINT``, ``S3_REGION``, ``S3_ACCESS_KEY_ID``,
 ``S3_SECRET_ACCESS_KEY``, ``S3_PRIVATE_BUCKET``) so one deployment can point
 both services at the same bucket.
 
+2026-09-14 (feat/uploads-multipart-endpoints): added ``list_parts``, paginated
+through ``PartNumberMarker``/``IsTruncated``. S3 returns at most 1000 parts a
+call and an upload may hold 10000, so a single-page read would report the
+largest uploads as missing everything past part 1000 and nothing smaller would
+ever show it.
+
+2026-09-14 (feat/uploads-multipart-adapter): implements the six-method multipart
+surface natively, plus ``ensure_multipart_lifecycle`` — a bucket rule expiring
+incomplete uploads after 7 days, so an abandoned session's parts stop being a
+permanent storage bill nobody can see (they are invisible to ``list_objects``).
+
 2026-08-31 (feat/sites-public-asset-uploads): the adapter can now be pointed at a
 world-readable bucket. ``public_base_url`` turns on :meth:`public_url` (a durable,
 unsigned address a published site can reference); ``public_read`` makes ``put``
@@ -34,16 +45,21 @@ from functools import partial
 from pathlib import Path
 
 from pocketpaw.uploads.adapter import StorageAdapter, StorageItem, StoredObject
-from pocketpaw.uploads.errors import NotFound, StorageFailure
+from pocketpaw.uploads.config import validate_part_number
+from pocketpaw.uploads.errors import NotFound, ObjectNotDescribed, StorageFailure
 
 logger = logging.getLogger(__name__)
 
 _CHUNK_SIZE = 64 * 1024
 # Above this, in-memory buffering in put() starts eating real RAM. Chat
 # attachments default to 25 MiB, so 64 MiB gives headroom without surprise
-# OOM. If max_file_bytes is raised past this, switch to multipart_upload
-# instead of buffering the whole body.
+# OOM. Anything bigger belongs on the multipart surface below
+# (create_multipart/put_part/complete_multipart), which never holds more than
+# one part at a time.
 _MEM_BUFFER_WARN_BYTES = 64 * 1024 * 1024
+
+#: Stable ID for our lifecycle rule so a re-run replaces it instead of stacking.
+_MPU_LIFECYCLE_RULE_ID = "pocketpaw-abort-incomplete-multipart"
 
 
 class S3StorageAdapter(StorageAdapter):
@@ -88,10 +104,23 @@ class S3StorageAdapter(StorageAdapter):
             aws_secret_access_key=secret_access_key,
         )
 
+    def _write_extra(self) -> dict[str, str]:
+        """Object properties shared by ``put`` and ``create_multipart``.
+
+        Keys on the public rail are content-hashed, so a given key's bytes can
+        never change — the only safe case for a year-long immutable cache.
+        """
+        if not self._public_read:
+            return {}
+        return {
+            "ACL": "public-read",
+            "CacheControl": "public, max-age=31536000, immutable",
+        }
+
     async def put(self, key: str, stream: AsyncIterator[bytes], mime: str) -> StoredObject:
-        # boto3 expects a seekable file-like object. Upload sizes are already
-        # bounded by the service-layer cap (25 MiB default), so buffering in
-        # memory is fine — swap to multipart_upload later if caps grow.
+        # boto3 expects a seekable file-like object. Sizes here are bounded by
+        # the service-layer cap (25 MiB default), so buffering is fine —
+        # anything larger goes to the multipart surface, not through here.
         buf = io.BytesIO()
         size = 0
         async for chunk in stream:
@@ -99,20 +128,14 @@ class S3StorageAdapter(StorageAdapter):
             size += len(chunk)
         if size > _MEM_BUFFER_WARN_BYTES:
             logger.warning(
-                "S3 put buffering %d bytes in memory for key=%s — "
-                "consider multipart_upload if max_file_bytes was raised",
+                "S3 put buffering %d bytes in memory for key=%s — this belongs "
+                "on the multipart surface",
                 size,
                 key,
             )
         buf.seek(0)
 
-        extra: dict[str, str] = {}
-        if self._public_read:
-            # Keys on the public rail are content-hashed, so a given key's bytes
-            # can never change — the only safe case for a year-long immutable
-            # cache, and the reason a re-upload of the same image costs nothing.
-            extra["ACL"] = "public-read"
-            extra["CacheControl"] = "public, max-age=31536000, immutable"
+        extra = self._write_extra()
 
         try:
             await asyncio.to_thread(
@@ -353,6 +376,274 @@ class S3StorageAdapter(StorageAdapter):
         items.sort(key=lambda x: (not x.is_dir, x.name.lower()))
         return items
 
+    # --- Multipart / resumable uploads -------------------------------------
+
+    def supports_presigned_parts(self) -> bool:
+        """S3 can presign ``upload_part``, so parts go browser→bucket."""
+        return True
+
+    async def create_multipart(self, key: str, mime: str) -> str:
+        """Open an S3 multipart upload. Returns its ``UploadId``."""
+        try:
+            resp = await asyncio.to_thread(
+                partial(
+                    self._client.create_multipart_upload,
+                    Bucket=self._bucket,
+                    Key=key,
+                    ContentType=mime,
+                    **self._write_extra(),
+                )
+            )
+        except Exception as exc:
+            raise StorageFailure(f"create_multipart_upload failed: {exc}") from exc
+        upload_id = resp.get("UploadId")
+        if not upload_id:
+            raise StorageFailure("create_multipart_upload returned no UploadId")
+        return str(upload_id)
+
+    async def sign_part(self, key: str, upload_id: str, part_number: int, ttl: int) -> str | None:
+        """Presigned ``upload_part`` URL. ``None`` on failure, like ``presigned_get``."""
+        number = validate_part_number(part_number)
+        try:
+            return await asyncio.to_thread(
+                self._client.generate_presigned_url,
+                "upload_part",
+                Params={
+                    "Bucket": self._bucket,
+                    "Key": key,
+                    "UploadId": upload_id,
+                    "PartNumber": number,
+                },
+                ExpiresIn=int(ttl),
+            )
+        except Exception:
+            return None
+
+    async def list_parts(self, key: str, upload_id: str) -> list[tuple[int, str]]:
+        """Every part S3 holds for this upload, ``(PartNumber, ETag)``, sorted.
+
+        PAGINATED, and the pagination is not optional. ``list_parts`` returns at
+        most 1000 parts per call, and an upload is allowed 10000 — so a loop
+        that reads the first page and stops would silently report a complete
+        upload as missing everything past part 1000. That failure only appears
+        on the largest file anyone happens to upload, which is the worst
+        possible time to find it.
+
+        Raises ``NotFound`` when S3 has no such upload — expired, already
+        completed, or already aborted. That is a different outcome from "the
+        upload exists and has no parts yet" and the caller has to be able to
+        tell them apart.
+        """
+        parts: list[tuple[int, str]] = []
+        marker = 0
+        while True:
+            try:
+                resp = await asyncio.to_thread(
+                    partial(
+                        self._client.list_parts,
+                        Bucket=self._bucket,
+                        Key=key,
+                        UploadId=upload_id,
+                        PartNumberMarker=marker,
+                    )
+                )
+            except Exception as exc:
+                if _is_no_such_upload(exc):
+                    raise NotFound(f"unknown multipart upload: {upload_id}") from exc
+                raise StorageFailure(f"list_parts failed: {exc}") from exc
+
+            for entry in resp.get("Parts") or []:
+                number = entry.get("PartNumber")
+                etag = entry.get("ETag")
+                if number is None or not etag:
+                    continue
+                parts.append((int(number), str(etag)))
+
+            if not resp.get("IsTruncated"):
+                break
+            next_marker = int(resp.get("NextPartNumberMarker") or 0)
+            if next_marker <= marker:
+                # A truncated page that does not advance the marker would spin
+                # forever. Trust the data less than the loop.
+                logger.warning(
+                    "list_parts truncated without advancing the marker (%d) for %s; "
+                    "stopping after %d parts",
+                    next_marker,
+                    key,
+                    len(parts),
+                )
+                break
+            marker = next_marker
+
+        parts.sort(key=lambda p: p[0])
+        return parts
+
+    async def put_part(self, key: str, upload_id: str, part_number: int, body: bytes) -> str:
+        """Upload one part through us. Returns S3's (quoted) ETag.
+
+        Only used when the caller relays instead of presigning — a proxied
+        client, or a deploy that keeps bytes off the public internet.
+        """
+        number = validate_part_number(part_number)
+        try:
+            resp = await asyncio.to_thread(
+                partial(
+                    self._client.upload_part,
+                    Bucket=self._bucket,
+                    Key=key,
+                    UploadId=upload_id,
+                    PartNumber=number,
+                    Body=body,
+                )
+            )
+        except Exception as exc:
+            raise StorageFailure(f"upload_part failed: {exc}") from exc
+        etag = resp.get("ETag")
+        if not etag:
+            raise StorageFailure("upload_part returned no ETag")
+        return str(etag)
+
+    async def complete_multipart(
+        self, key: str, upload_id: str, parts: list[tuple[int, str]]
+    ) -> StoredObject:
+        """Complete the upload, then HEAD the object for its real size and type.
+
+        The HEAD is required, not defensive: ``complete_multipart_upload``
+        returns neither ``ContentLength`` nor ``ContentType``, and ``parts``
+        carries only numbers and etags, so there is no other honest source for
+        the ``StoredObject``. A HEAD that fails after a successful complete
+        raises ``ObjectNotDescribed`` — a ``StorageFailure`` subclass meaning
+        "the bytes are stored, the description is not available". Writing a
+        metadata row with ``size=0`` would be worse than surfacing that, and a
+        caller that recognises the type can supply the size itself.
+        """
+        ordered = sorted(((validate_part_number(n), etag) for n, etag in parts), key=lambda p: p[0])
+        if not ordered:
+            raise StorageFailure(f"no parts listed for upload: {upload_id}")
+
+        try:
+            await asyncio.to_thread(
+                partial(
+                    self._client.complete_multipart_upload,
+                    Bucket=self._bucket,
+                    Key=key,
+                    UploadId=upload_id,
+                    MultipartUpload={
+                        "Parts": [{"PartNumber": n, "ETag": etag} for n, etag in ordered]
+                    },
+                )
+            )
+        except Exception as exc:
+            raise StorageFailure(f"complete_multipart_upload failed: {exc}") from exc
+
+        try:
+            head = await asyncio.to_thread(self._client.head_object, Bucket=self._bucket, Key=key)
+        except Exception as exc:
+            # The object IS there — only the description failed. A distinct type
+            # so the caller can keep the upload and fill size/mime from its own
+            # records, instead of reporting a successful transfer as failed.
+            raise ObjectNotDescribed(f"head_object after complete failed: {exc}") from exc
+
+        return StoredObject(
+            key=key,
+            size=int(head.get("ContentLength", 0)),
+            mime=str(head.get("ContentType", "") or ""),
+        )
+
+    async def abort_multipart(self, key: str, upload_id: str) -> None:
+        """Abort the upload and drop its parts. Idempotent on an unknown id.
+
+        Parts uploaded after the abort (an in-flight request that raced it) are
+        not covered — ``ensure_multipart_lifecycle`` is the backstop for those.
+        """
+        try:
+            await asyncio.to_thread(
+                self._client.abort_multipart_upload,
+                Bucket=self._bucket,
+                Key=key,
+                UploadId=upload_id,
+            )
+        except Exception as exc:
+            if _is_no_such_upload(exc):
+                return
+            raise StorageFailure(f"abort_multipart_upload failed: {exc}") from exc
+
+    async def ensure_multipart_lifecycle(
+        self,
+        *,
+        days: int = 7,
+        rule_id: str = _MPU_LIFECYCLE_RULE_ID,
+        preserve_rules: list[dict] | None = None,
+    ) -> bool:
+        """Install a rule expiring incomplete multipart uploads after ``days``.
+
+        Abandoned parts are billed but invisible — they never appear in
+        ``list_objects`` — so without this a cancelled 5 GB upload becomes a
+        storage charge nobody goes looking for.
+
+        Like ``put_bucket_cors``, ``put_bucket_lifecycle_configuration``
+        REPLACES the whole rule set, so existing rules are read and preserved
+        and an exact copy of ours is dropped first (idempotent on re-run).
+
+        Returns ``True`` when applied. Returns ``False`` — logged at WARNING,
+        not raised — when the bucket cannot be configured: no permission, or an
+        S3-compatible endpoint that does not implement lifecycle at all. This
+        runs at boot against buckets we may not own, and a missing cleanup rule
+        must not take the deployment down. Other errors raise ``StorageFailure``.
+        """
+        rule: dict[str, object] = {
+            "ID": rule_id,
+            "Status": "Enabled",
+            # Empty prefix filter = every key. Required by S3: a rule with no
+            # Filter at all is rejected on the v2 lifecycle API.
+            "Filter": {"Prefix": ""},
+            "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": int(days)},
+        }
+
+        if preserve_rules is None:
+            try:
+                preserve_rules = await self.get_lifecycle()
+            except StorageFailure as exc:
+                logger.warning("skipping multipart lifecycle rule: %s", exc)
+                return False
+
+        # Drop an exact prior copy of ours, and any rule sharing our ID — S3
+        # rejects a configuration with duplicate IDs.
+        rules = [r for r in preserve_rules if r != rule and r.get("ID") != rule_id]
+        rules.append(rule)
+
+        try:
+            await asyncio.to_thread(
+                self._client.put_bucket_lifecycle_configuration,
+                Bucket=self._bucket,
+                LifecycleConfiguration={"Rules": rules},
+            )
+        except Exception as exc:
+            if _is_unconfigurable(exc):
+                logger.warning("cannot set multipart lifecycle on bucket=%s: %s", self._bucket, exc)
+                return False
+            raise StorageFailure(f"put_bucket_lifecycle_configuration failed: {exc}") from exc
+        return True
+
+    async def get_lifecycle(self) -> list[dict]:
+        """Return the bucket's lifecycle rules (``[]`` when none set).
+
+        Read-side companion to :meth:`ensure_multipart_lifecycle`. Only the
+        "no configuration" code normalizes to ``[]``; anything else raises, so
+        a permissions gap cannot read as an empty policy and silently wipe the
+        bucket's real rules on the next write.
+        """
+        try:
+            resp = await asyncio.to_thread(
+                self._client.get_bucket_lifecycle_configuration, Bucket=self._bucket
+            )
+        except Exception as exc:
+            if _is_no_lifecycle(exc):
+                return []
+            raise StorageFailure(f"get_bucket_lifecycle_configuration failed: {exc}") from exc
+        rules = resp.get("Rules", [])
+        return list(rules) if isinstance(rules, list) else []
+
     async def rename_key(self, old_key: str, new_key: str) -> None:
         """Rename by copy + delete."""
         try:
@@ -376,6 +667,44 @@ def _is_missing_key(exc: Exception) -> bool:
         return False
     code = response.get("Error", {}).get("Code", "")
     return code in ("NoSuchKey", "404", "NotFound")
+
+
+def _error_code(exc: Exception) -> str:
+    """S3 error code off a botocore ClientError, or ``""``. Duck-typed so the
+    module stays importable without botocore."""
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return ""
+    return response.get("Error", {}).get("Code", "")
+
+
+def _is_no_such_upload(exc: Exception) -> bool:
+    """True if the multipart upload is already gone — abort treats it as done."""
+    return _error_code(exc) in ("NoSuchUpload", "404", "NotFound")
+
+
+def _is_no_lifecycle(exc: Exception) -> bool:
+    """True if the bucket simply has no lifecycle configuration yet."""
+    return _error_code(exc) in (
+        "NoSuchLifecycleConfiguration",
+        "NoSuchLifecycleConfigurationError",
+        "404",
+    )
+
+
+def _is_unconfigurable(exc: Exception) -> bool:
+    """True if this bucket/endpoint won't let us write a lifecycle rule.
+
+    Covers both "we lack the permission" and "this S3-compatible endpoint has
+    no lifecycle API". Neither is worth failing a boot over.
+    """
+    return _error_code(exc) in (
+        "AccessDenied",
+        "AllAccessDisabled",
+        "NotImplemented",
+        "MethodNotAllowed",
+        "UnsupportedOperation",
+    )
 
 
 def _is_no_cors(exc: Exception) -> bool:

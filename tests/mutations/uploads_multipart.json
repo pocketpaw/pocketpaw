@@ -1,0 +1,135 @@
+[
+  {
+    "label": "sizing: drop the 10000-part scaling, so a huge file keeps the 8 MiB baseline",
+    "file": "src/pocketpaw/uploads/config.py",
+    "find": "    raw = max(int(base), needed)",
+    "replace": "    raw = int(base)",
+    "tests": ["tests/uploads/test_part_sizing.py"]
+  },
+  {
+    "label": "sizing: round the part size DOWN, pushing a boundary file back over the ceiling",
+    "file": "src/pocketpaw/uploads/config.py",
+    "find": "    return -(-raw // _MIB) * _MIB",
+    "replace": "    return (raw // _MIB) * _MIB",
+    "tests": ["tests/uploads/test_part_sizing.py"]
+  },
+  {
+    "label": "validation: accept a bool part number, so True silently addresses part 1",
+    "file": "src/pocketpaw/uploads/config.py",
+    "find": "    if isinstance(part_number, bool) or not isinstance(part_number, int):",
+    "replace": "    if not isinstance(part_number, int):",
+    "tests": [
+      "tests/uploads/test_part_sizing.py",
+      "tests/uploads/test_local_multipart.py"
+    ]
+  },
+  {
+    "label": "validation: drop the range check, letting part 0 / 10001 through to the filesystem",
+    "file": "src/pocketpaw/uploads/config.py",
+    "find": "    if not 1 <= part_number <= MAX_MULTIPART_PARTS:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/uploads/test_part_sizing.py",
+      "tests/uploads/test_local_multipart.py",
+      "tests/uploads/test_s3_multipart.py"
+    ]
+  },
+  {
+    "label": "local relay: skip part-number validation, so a traversal string becomes a path",
+    "file": "src/pocketpaw/uploads/local.py",
+    "find": "        number = validate_part_number(part_number)\n        part_dir = self._part_dir(key)",
+    "replace": "        number = part_number\n        part_dir = self._part_dir(key)",
+    "tests": ["tests/uploads/test_local_multipart.py"]
+  },
+  {
+    "label": "local relay: concatenate in the caller's order instead of part order",
+    "file": "src/pocketpaw/uploads/local.py",
+    "find": "        ordered = sorted({validate_part_number(n) for n, _etag in parts})",
+    "replace": "        ordered = [validate_part_number(n) for n, _etag in parts]",
+    "tests": ["tests/uploads/test_local_multipart.py"]
+  },
+  {
+    "label": "local relay: accept any upload id, so a stale client corrupts a live session",
+    "file": "src/pocketpaw/uploads/local.py",
+    "find": "        if meta.get(\"upload_id\") != upload_id:",
+    "replace": "        if False:",
+    "tests": ["tests/uploads/test_local_multipart.py"]
+  },
+  {
+    "label": "local relay: treat a missing part as empty instead of failing the complete",
+    "file": "src/pocketpaw/uploads/local.py",
+    "find": "                if not source.is_file():\n                    raise NotFound(f\"missing part {number} for upload: {upload_id}\")",
+    "replace": "                if not source.is_file():\n                    continue",
+    "tests": ["tests/uploads/test_local_multipart.py"]
+  },
+  {
+    "label": "local listings: stop hiding the scratch dir, so a .part folder shows mid-upload",
+    "file": "src/pocketpaw/uploads/local.py",
+    "find": "    return entry.name.endswith(_PART_DIR_SUFFIX) and entry.is_dir()",
+    "replace": "    return False",
+    "tests": ["tests/uploads/test_local_multipart.py"]
+  },
+  {
+    "label": "local listings: hide by name alone, swallowing a real file the user named .part",
+    "file": "src/pocketpaw/uploads/local.py",
+    "find": "    return entry.name.endswith(_PART_DIR_SUFFIX) and entry.is_dir()",
+    "replace": "    return entry.name.endswith(_PART_DIR_SUFFIX)",
+    "tests": ["tests/uploads/test_local_multipart.py"]
+  },
+  {
+    "label": "s3: omit ContentType at create, so the object is octet-stream forever",
+    "file": "src/pocketpaw/uploads/s3.py",
+    "find": "                    ContentType=mime,\n                    **self._write_extra(),",
+    "replace": "                    **self._write_extra(),",
+    "tests": ["tests/uploads/test_s3_multipart.py"]
+  },
+  {
+    "label": "s3: send the Parts list unsorted, which S3 rejects after every byte moved",
+    "file": "src/pocketpaw/uploads/s3.py",
+    "find": "        ordered = sorted(((validate_part_number(n), etag) for n, etag in parts), key=lambda p: p[0])",
+    "replace": "        ordered = [(validate_part_number(n), etag) for n, etag in parts]",
+    "tests": ["tests/uploads/test_s3_multipart.py"]
+  },
+  {
+    "label": "s3: report size 0 instead of HEADing the completed object",
+    "file": "src/pocketpaw/uploads/s3.py",
+    "find": "            size=int(head.get(\"ContentLength\", 0)),",
+    "replace": "            size=0,",
+    "tests": ["tests/uploads/test_s3_multipart.py"]
+  },
+  {
+    "label": "s3: make abort raise on an already-gone upload, turning cancel into a failure",
+    "file": "src/pocketpaw/uploads/s3.py",
+    "find": "            if _is_no_such_upload(exc):\n                return",
+    "replace": "            if False:\n                return",
+    "tests": ["tests/uploads/test_s3_multipart.py"]
+  },
+  {
+    "label": "s3 lifecycle: write our rule without preserving the bucket's existing ones",
+    "file": "src/pocketpaw/uploads/s3.py",
+    "find": "        rules = [r for r in preserve_rules if r != rule and r.get(\"ID\") != rule_id]",
+    "replace": "        rules = []",
+    "tests": ["tests/uploads/test_s3_multipart.py"]
+  },
+  {
+    "label": "s3 lifecycle: write anyway when the current rules could not be read",
+    "file": "src/pocketpaw/uploads/s3.py",
+    "find": "            except StorageFailure as exc:\n                logger.warning(\"skipping multipart lifecycle rule: %s\", exc)\n                return False",
+    "replace": "            except StorageFailure:\n                preserve_rules = []",
+    "tests": ["tests/uploads/test_s3_multipart.py"]
+  },
+  {
+    "label": "s3 lifecycle: let an unconfigurable bucket fail the boot instead of warning",
+    "file": "src/pocketpaw/uploads/s3.py",
+    "find": "            if _is_unconfigurable(exc):",
+    "replace": "            if False:",
+    "tests": ["tests/uploads/test_s3_multipart.py"]
+  },
+  {
+    "label": "s3: get_lifecycle swallows AccessDenied as \"no rules\"",
+    "file": "src/pocketpaw/uploads/s3.py",
+    "find": "            if _is_no_lifecycle(exc):\n                return []\n            raise StorageFailure(f\"get_bucket_lifecycle_configuration failed: {exc}\") from exc",
+    "replace": "            return []",
+    "tests": ["tests/uploads/test_s3_multipart.py"]
+  }
+]

@@ -1334,6 +1334,159 @@ Source: `src/pocketpaw/uploads/config.py`,
 `src/pocketpaw/uploads/service.py::UploadService._upload_one` (the single gate
 every upload path goes through, OSS and cloud alike).
 
+### Large files — multipart settings
+
+`POCKETPAW_UPLOAD_MAX_BYTES` above governs the single-request `POST /uploads`
+path and nothing else. Files past that size go through the storage adapter's
+multipart surface, which has its own ceiling because its bytes never arrive as
+one request body: in presigned mode they go browser→bucket and never reach the
+API at all, and in relay mode each request carries one part.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `POCKETPAW_MAX_LARGE_FILE_BYTES` | `5368709120` (5 GiB) | Per-file ceiling on the multipart path. Deliberately separate from `POCKETPAW_UPLOAD_MAX_BYTES` — raising *that* would raise the global ASGI request-body guard with it. |
+| `POCKETPAW_MULTIPART_PART_BYTES` | `8388608` (8 MiB) | Baseline part size. Scaled up (and rounded to a whole MiB) for files that would otherwise need more than S3's 10000 parts. Must stay at or above S3's 5 MiB per-part floor. |
+| `POCKETPAW_MULTIPART_TTL_HOURS` | `168` (7 days) | How long an incomplete upload stays resumable. Matches the bucket lifecycle rule that expires abandoned parts. |
+
+A malformed or non-positive value warns and falls back to the default rather
+than reading as "unlimited".
+
+`S3StorageAdapter` uploads parts natively and can presign them, so the browser
+PUTs straight to the bucket. `LocalStorageAdapter` cannot presign, so it relays:
+parts land as `<key>.part/<n>`, each beside a `<n>.etag` sidecar, and are
+concatenated in part order on completion.
+
+Both implement `list_parts(key, upload_id)`, which answers what storage actually
+holds. That is the authoritative manifest the `complete` endpoint uses — see
+below for why the client's own list cannot be.
+
+Abandoned S3 parts are billed but never appear in `list_objects`, so
+`S3StorageAdapter.ensure_multipart_lifecycle()` installs a bucket rule expiring
+incomplete uploads after 7 days. It returns `False` (logged, not raised) on a
+bucket it lacks permission to configure, or an S3-compatible endpoint with no
+lifecycle API.
+
+Source: `src/pocketpaw/uploads/adapter.py` (the protocol),
+`src/pocketpaw/uploads/s3.py`, `src/pocketpaw/uploads/local.py`.
+
+### Large files — the endpoints
+
+Five routes under the existing `/api/v1/uploads` prefix, enterprise only. They
+carry the same gates as `POST /uploads`: guest refusal
+(`403 {"code": "guest_upload_forbidden"}`), `uploads.write` membership, pocket
+ABAC, and folder-chain auto-create. An upload session is workspace-scoped —
+another workspace's session answers `404`, never a `403` that would confirm the
+id exists.
+
+**`POST /uploads/multipart`** — open a session.
+
+```jsonc
+// request
+{ "filename": "raw.mov", "size": 2147483648, "mime": "video/quicktime",
+  "chat_id": null, "pocket_id": null, "path": "/footage" }
+
+// 201
+{ "upload_id": "mpu_01J…",        // ours, not the storage provider's
+  "mode": "presigned",             // or "relay" — the client does not choose
+  "key": "chat/202609/….mov",
+  "part_size": 8388608,
+  "part_count": 256,
+  "parts": [{ "part_number": 1, "url": "https://…", "expires_at": "…" }],
+  "expires_at": "2026-09-21T09:00:00Z" }
+```
+
+`parts` is present only in `presigned` mode, at most 256 URLs per response,
+each valid for an hour. The status route re-mints the rest as the upload
+progresses, so no URL expires before the client reaches it. `size` must be the
+file's real size: `part_count` is derived from it, and `complete` requires every
+part in that range.
+
+**`PUT /uploads/multipart/{upload_id}/parts/{part_number}`** — relay mode only.
+Raw binary body, one part, returns `{"part_number": 3, "etag": "…"}`. A body
+larger than the session's `part_size` is refused on its `Content-Length` before
+it is read. Re-PUTting a part replaces it, so a retry is safe.
+
+**`POST /uploads/multipart/{upload_id}/complete`** — assemble and land the file.
+
+```jsonc
+{ "parts": [{ "part_number": 1, "etag": "\"abc…\"" }] }   // OPTIONAL, advisory
+```
+
+Returns exactly the shape `POST /uploads` puts in `uploaded[]` — `id`,
+`filename`, `mime`, `size`, `url`, `created`. This is the only place the
+`FileUpload` row is written and `FileReady` is emitted, so a multipart upload is
+indistinguishable from a simple one downstream.
+
+**The manifest comes from storage, not from the request.** The server asks the
+provider which parts exist (S3's `ListParts`, paginated) and completes from
+that. A client that reloaded mid-upload has no etags for the parts its previous
+session sent, and in `presigned` mode the server never observed those PUTs
+either, so a complete that required them was unsatisfiable after exactly the
+event resume exists for.
+
+`parts` in the body is therefore optional. Send it when you have it and it is
+checked against storage: a part number whose etag disagrees is `409
+multipart.invalid`, because the two sides are describing different bytes. A
+partial list is fine. An absent one is the normal resumed case. Two entries for
+one part number that disagree with *each other* are `400` — the client has
+contradicted itself before storage is consulted. Etags compare on content, so
+quoted, unquoted and `W/`-prefixed forms all match.
+
+Before completing, storage's part set must cover `1..part_count` with no gaps.
+A gap is `409`, not a silently truncated object: S3 would otherwise assemble
+what it has and land a short file in the library at a plausible size.
+
+This also means **no bucket CORS change is needed**. A presigned PUT's `ETag`
+response header is invisible to the browser unless the bucket sets
+`Access-Control-Expose-Headers: ETag`; because the client never reads it under
+this design, that requirement does not exist. `ensure_cors` is deliberately
+unchanged.
+
+**`GET /uploads/multipart/{upload_id}`** — status / resume. Returns
+`{upload_id, mode, key, part_size, part_count, received, parts, expires_at}`,
+where `parts` re-mints URLs only for what is still missing. `mode` is repeated
+here so a resumed client knows whether to PUT to the bucket or to the relay
+route without inferring it from whether URLs came back. Note that `received`
+counts only parts that passed through the relay route, so on the `presigned`
+path it stays empty — storage, not this field, is what `complete` consults.
+
+**`DELETE /uploads/multipart/{upload_id}`** — abort. Drops the provider upload,
+releases the daily-budget claim, marks the session dead. `204`, idempotent.
+
+**Where the ceilings are checked.** `POST /uploads` checks the storage plan cap
+and the daily budget *after* the write and rolls back by deleting the blob.
+Multipart cannot work that way — the user would transfer 5 GB and be refused at
+the end — so both are checked at **init** against the declared size, and again
+at **complete** against the size storage actually reports. The declared size is
+client-supplied, so a client that under-declares to slip past init is still
+caught at complete and its object deleted. The daily-budget claim is reserved at
+init and released on abort or expiry, charged to the UTC day it was claimed on.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `multipart.invalid` | bad size/mime/filename/part numbering, or a client `parts` list that contradicts itself |
+| 402 | `billing.storage_limit` | over the workspace's plan storage cap |
+| 403 | `guest_upload_forbidden` | guest account |
+| 403 | `files.pocket_forbidden` | no pocket edit access (checked at init *and* complete) |
+| 404 | `multipart.not_found` | unknown, already-completed, another workspace's id, or an upload storage has since dropped |
+| 409 | `multipart.expired` | session past its TTL |
+| 409 | `multipart.invalid` | storage is missing parts, or holds a part whose etag disagrees with the client's |
+| 413 | `multipart.too_large` | over `POCKETPAW_MAX_LARGE_FILE_BYTES`, or a part over `part_size` |
+| 429 | `uploads.daily_limit` | over the workspace's daily upload budget |
+
+Note the envelope differs from the older routes on this router: these raise
+`CloudError`, so the body is `{"error": {"code": …, "message": …}}`, whereas
+`POST /uploads` still answers `{"detail": "files.pocket_forbidden"}`. The guest
+refusal carries its top-level `code` in both.
+
+Session state lives in the ee Mongo collection `multipart_uploads`, with a TTL
+index that reaps a row a day after it expires — the grace exists so an expired
+session answers `409` rather than `404`.
+
+Source: `ee/pocketpaw_ee/cloud/uploads/router.py`,
+`ee/pocketpaw_ee/cloud/uploads/multipart_service.py`,
+`ee/pocketpaw_ee/cloud/uploads/multipart_store.py`.
+
 ## Files — Content Search
 
 `POST /files/search` answers "which of my files says this?" — as distinct from

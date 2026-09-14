@@ -293,6 +293,9 @@ from pocketpaw_ee.cloud.models.workspace_vm import WorkspaceVm
 # Lazy import to avoid circular imports
 FileUpload: type = None  # type: ignore[assignment]
 FileFolder: type = None  # type: ignore[assignment]
+# Multipart upload sessions. Lazy-loaded with FileUpload (same package) so
+# init_beanie registers it without ee.cloud.models hard-importing uploads.
+MultipartUpload: type = None  # type: ignore[assignment]
 # FL-12b public share links. Lazy-loaded with FileUpload (same package) so
 # init_beanie registers it without ee.cloud.models hard-importing uploads.
 ShareLink: type = None  # type: ignore[assignment]
@@ -313,15 +316,19 @@ _ArtifactVersionDoc: type = None  # type: ignore[assignment]
 
 
 def _ensure_file_upload():
-    global FileUpload, FileFolder, ShareLink
+    global FileUpload, FileFolder, ShareLink, MultipartUpload
     if FileUpload is None:
         from pocketpaw_ee.cloud.uploads.models import FileFolder as _FileFolder
         from pocketpaw_ee.cloud.uploads.models import FileUpload as _FileUpload
+        from pocketpaw_ee.cloud.uploads.multipart_models import (
+            MultipartUpload as _MultipartUpload,
+        )
         from pocketpaw_ee.cloud.uploads.share_models import ShareLink as _ShareLink
 
         FileUpload = _FileUpload
         FileFolder = _FileFolder
         ShareLink = _ShareLink
+        MultipartUpload = _MultipartUpload
     return FileUpload
 
 
@@ -396,6 +403,7 @@ __all__ = [
     "FileObj",
     "FileUpload",
     "FileVersionDoc",
+    "MultipartUpload",
     "ShareLink",
     "ForesightBacktest",
     "ForesightPredictionRecord",
@@ -503,6 +511,11 @@ def get_all_documents():
         # Public file share links (FL-12b). Only ``uploads.share_store``
         # writes these; the public GET /share/{token} route reads by token.
         ShareLink,
+        # In-flight multipart upload sessions. Only
+        # ``ee.cloud.uploads.multipart_store`` reads/writes these. Separate
+        # collection from FileUpload on purpose — a session is not a file and
+        # must never appear in a library listing; see the model docstring.
+        MultipartUpload,
         # Per-workspace/day file-comprehension spend counter (FC-3). Only
         # ``ee.cloud.uploads.comprehension_budget`` reads/writes this.
         FileComprehensionUsage,

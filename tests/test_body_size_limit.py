@@ -52,11 +52,15 @@ class _RecordingApp:
         await send({"type": "http.response.body", "body": b"ok"})
 
 
-def _scope(headers: list[tuple[bytes, bytes]], method: str = "POST"):
+def _scope(
+    headers: list[tuple[bytes, bytes]],
+    method: str = "POST",
+    path: str = "/api/v1/uploads",
+):
     return {
         "type": "http",
         "method": method,
-        "path": "/api/v1/uploads",
+        "path": path,
         "headers": headers,
     }
 
@@ -254,3 +258,73 @@ class TestItIsActuallyWired:
         assert order.index(BodySizeLimitMiddleware) < order.index(AuthMiddleware), (
             "the body ceiling runs inside AuthMiddleware, which reads the body itself"
         )
+
+
+class TestMultipartRelayPartCeiling:
+    """The one route with its own ceiling (feat/uploads-multipart-endpoints).
+
+    ``PUT /api/v1/uploads/multipart/{id}/parts/{n}`` carries one bare storage
+    part, so the global ceiling — derived from a 50-file multipart batch — is
+    the wrong shape for it. The branch is matched on SHAPE, and a near-miss
+    falls back to the global ceiling rather than to no ceiling: the opposite of
+    the rotted allowlists the module header argues against, where a miss
+    silently removes a bound.
+
+    Mutations: tests/mutations/uploads_multipart_api.json.
+    """
+
+    async def test_a_part_gets_its_own_ceiling_rather_than_the_global_one(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10**9, relay_part_bytes=100)
+        scope = _scope(
+            [(b"content-length", b"5000")],
+            method="PUT",
+            path="/api/v1/uploads/multipart/mpu_abc/parts/3",
+        )
+
+        sent = await _drive(mw, scope, [b"x" * 50])
+
+        assert _status(sent) == 413
+        assert app.called is False, (
+            "the relay route was measured against the global ceiling, so a 5 GB "
+            "part would reach the handler"
+        )
+
+    async def test_a_legitimate_part_reaches_the_app(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10, relay_part_bytes=10_000)
+        scope = _scope(
+            [(b"content-length", b"50")],
+            method="PUT",
+            path="/api/v1/uploads/multipart/mpu_abc/parts/3",
+        )
+
+        sent = await _drive(mw, scope, [b"x" * 50])
+
+        assert _status(sent) == 200
+        assert app.body_bytes == 50, "the exemption is not applied to the relay route"
+
+    async def test_anything_that_is_not_the_relay_route_gets_the_global_ceiling(self):
+        """Fail-closed: a POST to that shape, a renamed path, or the simple
+        upload route must all keep the global bound."""
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10, relay_part_bytes=10_000)
+        cases = [
+            ("POST", "/api/v1/uploads/multipart/mpu_abc/parts/3"),
+            ("PUT", "/api/v1/uploads/multipart/mpu_abc/chunks/3"),
+            ("PUT", "/api/v1/uploads/multipart/mpu_abc"),
+            ("PUT", "/api/v1/uploads"),
+        ]
+        for method, path in cases:
+            scope = _scope([(b"content-length", b"50")], method=method, path=path)
+            assert _status(await _drive(mw, scope, [b"x" * 50])) == 413, f"{method} {path}"
+
+    def test_the_global_ceiling_is_not_raised_to_cover_large_uploads(self):
+        """``max_file_bytes`` must stay at 25 MiB. Raising it to 5 GiB to make
+        large uploads work would lift the GLOBAL ceiling to ~250 GB, which is
+        precisely the bug this module exists to prevent."""
+        from pocketpaw.security.body_limit import _configured_ceiling
+        from pocketpaw.uploads.config import UploadSettings
+
+        assert UploadSettings().max_file_bytes == 25 * 1024 * 1024
+        assert _configured_ceiling() < 2 * 1024 * 1024 * 1024
