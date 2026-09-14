@@ -53,6 +53,7 @@ from datetime import UTC, datetime
 
 from beanie import Indexed
 from pydantic import BaseModel, Field, field_validator
+from pymongo import IndexModel
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
@@ -178,3 +179,29 @@ class Workspace(TimestampedDocument):
 
     class Settings:
         name = "workspaces"
+        # Added 2026-09-14 for the Paw Admin tenant directory. Until now the
+        # only index on this collection was the unique one Beanie derives from
+        # ``slug``, because every read was "the workspaces this user belongs
+        # to" — resolved from the USER document, which never touches this
+        # collection's predicates at all.
+        #
+        # The operator console inverts that: it lists and filters across all
+        # tenants, so these predicates run against the whole collection for the
+        # first time and each one was a COLLSCAN.
+        indexes = [
+            # The default directory listing: not-deleted, newest first. Sorting
+            # is by _id (monotonic, unique) rather than createdAt, so the
+            # cursor cannot skip a row or repeat one when two workspaces land
+            # in the same clock tick.
+            IndexModel([("deleted_at", 1), ("_id", -1)], name="deleted_at_1__id_-1"),
+            # "Which workspaces does this user own", and the owner-email search
+            # path, which resolves emails to ids and then matches $in here.
+            IndexModel([("owner", 1)], name="owner_1"),
+            # Plan filter, and the plan-mix aggregate the dashboard will read.
+            IndexModel([("plan", 1)], name="plan_1"),
+            # Name search. A case-insensitive $regex can only use this for an
+            # anchored prefix, so a mid-string match still scans — acceptable
+            # while the tenant count is small, and the honest fix later is a
+            # text index or a normalised lowercase field, not a bigger regex.
+            IndexModel([("name", 1)], name="name_1"),
+        ]

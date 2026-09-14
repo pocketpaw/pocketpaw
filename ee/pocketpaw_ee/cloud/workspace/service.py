@@ -2332,6 +2332,212 @@ async def get_member_action_overrides(
     return perms.get(user_id, [])
 
 
+# ---------------------------------------------------------------------------
+# Platform (cross-tenant) reads — Paw Admin only.
+#
+# EVERY function below deliberately ignores tenancy. They exist for the
+# operator console and are the ONLY place in this module where a workspace is
+# not derived from the caller's session. That inversion is the whole point of
+# the /api/v1/platform namespace, and it is why these carry a `platform_`
+# prefix: the name is the warning, and it is greppable.
+#
+# DO NOT call these from a tenant route. A test in
+# tests/cloud/platform/test_tenant_directory.py asserts that nothing outside
+# the platform package imports them, so a tenant route that reaches for one
+# fails CI rather than quietly serving another customer's data.
+#
+# They take no RequestContext on purpose. Accepting one would invite the
+# reading that they are scoped by it.
+# ---------------------------------------------------------------------------
+
+
+def _escape_regex(value: str) -> str:
+    """Escape user input before it reaches a Mongo ``$regex``.
+
+    An unescaped search box is a query-injection surface: a caller typing
+    ``.*`` matches everything, and a pathological pattern makes the server do
+    the backtracking. Operators are trusted, but "trusted" is not a reason to
+    hand them a regex engine by accident.
+    """
+    import re
+
+    return re.escape(value)
+
+
+async def _platform_user_ids_matching_email(fragment: str) -> list[str]:
+    """User ids whose email contains ``fragment``, for owner-email search."""
+    pattern = _escape_regex(fragment)
+    users = await _UserDoc.find({"email": {"$regex": pattern, "$options": "i"}}).to_list()
+    return [str(u.id) for u in users]
+
+
+async def _platform_count_members_bulk(workspace_ids: list[str]) -> dict[str, int]:
+    """``{workspace_id: member_count}`` for a page, in one query.
+
+    Does NOT reuse ``_count_members_bulk`` above, which does the same job with a
+    ``$aggregate``. Two reasons, in order of weight:
+
+      1. Aggregation cursors do not survive mongomock-motor, so every test that
+         touched this path would have to be skipped — and this is the first
+         cross-tenant read surface in the codebase, which is the last place that
+         should ship with its query untested. ``_count_members_bulk``'s only
+         other caller, ``list_for_user``, has no test at all for exactly this
+         reason.
+      2. The page here is bounded (``limit`` caps at 200), so the fan-out is
+         bounded with it.
+
+    The cost is real and worth naming: memberships live on the USER document, so
+    counting members per workspace always means touching users. This fetches the
+    users belonging to the page's workspaces and tallies in Python rather than
+    asking the server to. If the tenant count grows enough for that to hurt, the
+    fix is a denormalised counter on the workspace, not a cleverer query.
+    """
+    if not workspace_ids:
+        return {}
+
+    wanted = set(workspace_ids)
+    counts: dict[str, int] = dict.fromkeys(workspace_ids, 0)
+
+    users = await _UserDoc.find({"workspaces.workspace": {"$in": workspace_ids}}).to_list()
+    for user in users:
+        for membership in user.workspaces:
+            if membership.workspace in wanted:
+                counts[membership.workspace] += 1
+
+    return counts
+
+
+async def platform_search_workspaces(
+    *,
+    q: str | None = None,
+    plan: str | None = None,
+    include_deleted: bool = False,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> tuple[list[Workspace], str | None]:
+    """Search every workspace on the deployment. Returns (page, next_cursor).
+
+    ``q`` matches slug, name, or the OWNER'S EMAIL — the three things a support
+    request actually arrives with. Owner email costs a second query because
+    email lives on the user document, not the workspace.
+
+    Soft-deleted workspaces are excluded unless asked for. An operator
+    investigating "my account vanished" needs to see them, so the switch
+    exists; the default matches every other read in this module.
+
+    PAGINATION IS BY ``_id``, not by a timestamp. ObjectIds are monotonic and
+    unique, so a strict cursor can never skip a row or return one twice. A
+    createdAt cursor would do both: two workspaces created inside the same
+    clock tick share a timestamp, and on Windows that tick is ~15.6ms, which is
+    wide enough to hold a bulk import.
+    """
+    query: dict = {}
+    if not include_deleted:
+        query["deleted_at"] = None
+    if plan:
+        query["plan"] = plan
+
+    if q:
+        pattern = _escape_regex(q)
+        alternatives: list[dict] = [
+            {"slug": {"$regex": pattern, "$options": "i"}},
+            {"name": {"$regex": pattern, "$options": "i"}},
+        ]
+        owner_ids = await _platform_user_ids_matching_email(q)
+        if owner_ids:
+            alternatives.append({"owner": {"$in": owner_ids}})
+        query["$or"] = alternatives
+
+    if cursor:
+        try:
+            query["_id"] = {"$lt": PydanticObjectId(cursor)}
+        except Exception as exc:
+            raise ValidationError("Malformed cursor.") from exc
+
+    # One extra row tells us whether another page exists without a count().
+    docs = await _WorkspaceDoc.find(query).sort("-_id").limit(limit + 1).to_list()
+
+    has_more = len(docs) > limit
+    page = docs[:limit]
+
+    counts = await _platform_count_members_bulk([str(d.id) for d in page])
+    workspaces = [_workspace_to_domain(d, member_count=counts.get(str(d.id), 0)) for d in page]
+
+    next_cursor = str(page[-1].id) if has_more and page else None
+    return workspaces, next_cursor
+
+
+async def platform_get_workspace(workspace_id: str) -> Workspace:
+    """One workspace, by id, with no membership check.
+
+    Unlike ``_fetch_workspace`` this does NOT treat a soft-deleted workspace as
+    missing. An operator looking at a deleted tenant is answering a question
+    about why it is deleted, and hiding the row would make that unanswerable
+    from the console — which is the situation this PRD exists to end.
+    """
+    try:
+        doc = await _WorkspaceDoc.get(PydanticObjectId(workspace_id))
+    except Exception:
+        doc = None
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+
+    member_count = await _count_members(workspace_id)
+    return _workspace_to_domain(doc, member_count=member_count)
+
+
+async def platform_list_members(workspace_id: str) -> list[WorkspaceMember]:
+    """Members of any workspace, with no membership check on the caller.
+
+    Mirrors ``list_members`` exactly apart from the dropped role lookup. It is
+    a separate function rather than a flag on that one: a boolean that turns
+    off a tenancy check is the kind of parameter that eventually gets passed
+    ``True`` from somewhere it should not be.
+    """
+    members = await _UserDoc.find({"workspaces.workspace": workspace_id}).to_list()
+    out: list[WorkspaceMember] = []
+    for member in members:
+        membership = next((m for m in member.workspaces if m.workspace == workspace_id), None)
+        if membership is None:
+            continue
+        out.append(
+            WorkspaceMember(
+                user_id=str(member.id),
+                email=member.email,
+                name=member.full_name,
+                avatar=member.avatar,
+                role=membership.role,
+                joined_at=membership.joined_at,
+            )
+        )
+    return out
+
+
+async def platform_find_users(
+    *, email: str, limit: int = 25
+) -> list[tuple[str, str, str, list[tuple[str, str]]]]:
+    """Users whose email matches, with the workspaces each one belongs to.
+
+    Returns ``(user_id, email, full_name, [(workspace_id, role), ...])``. The
+    memberships come off the user document, so this is one query — and it
+    answers the support question "which accounts does this person have" without
+    knowing a workspace first.
+    """
+    pattern = _escape_regex(email)
+    users = (
+        await _UserDoc.find({"email": {"$regex": pattern, "$options": "i"}}).limit(limit).to_list()
+    )
+    return [
+        (
+            str(u.id),
+            u.email,
+            u.full_name,
+            [(m.workspace, m.role) for m in u.workspaces],
+        )
+        for u in users
+    ]
+
+
 __all__ = [
     "accept_invite",
     "bulk_create_invites",
@@ -2366,6 +2572,10 @@ __all__ = [
     "set_member_action_permissions",
     "set_member_connector_permissions",
     "set_member_route_permissions",
+    "platform_find_users",
+    "platform_get_workspace",
+    "platform_list_members",
+    "platform_search_workspaces",
     "set_instinct_approval_level",
     "update",
     "update_member_role",
