@@ -13,6 +13,15 @@
 # subprocess started second read the other agent's prompt. Windows-only, so the
 # cloud never saw it — the desktop app runs a pool.
 #
+# Updated 2026-09-15 (fix/prompt-spill-posix): "Windows-only, so the cloud never
+# saw it" was true of THAT bug and false of the mechanism. The SPILL ITSELF was
+# gated on ``os.name == "nt"``, so on POSIX it never fired, and a cloud turn
+# carrying a large upload blew the Linux per-argument limit (MAX_ARG_STRLEN,
+# 131,072 bytes) and could not exec the CLI at all. The platform logic these
+# tests PATCH rather than exercise now has its own file:
+# ``test_claude_sdk_prompt_spill_posix.py``. Patching a predicate is how its
+# body goes untested for a year.
+#
 # THE FIX is a hash of the content in the filename, which also closes the cache
 # key (the path is what `_behavior_prefix` returns for a spilled prompt, and a
 # constant path is a constant key). The tests here are about the file: two
@@ -35,7 +44,7 @@ import pytest
 
 from pocketpaw.agents.claude_sdk import (
     _SPILLED_PROMPT_KEEP,
-    _WINDOWS_PROMPT_SPILL_CHARS,
+    _WINDOWS_PROMPT_SPILL_BYTES,
     _prune_spilled_prompts,
     _spill_prompt_to_file,
     _spilled_prompt_path,
@@ -43,7 +52,7 @@ from pocketpaw.agents.claude_sdk import (
 
 pytestmark = pytest.mark.asyncio
 
-_BIG = "You are Paw.\n\n## THE LAW\nNever fabricate.\n" + "x" * _WINDOWS_PROMPT_SPILL_CHARS
+_BIG = "You are Paw.\n\n## THE LAW\nNever fabricate.\n" + "x" * _WINDOWS_PROMPT_SPILL_BYTES
 
 
 @pytest.fixture(autouse=True)
@@ -177,7 +186,7 @@ async def test_build_options_actually_uses_the_content_addressed_path(monkeypatc
     # ``Path(...)`` into that stub — this test died on CI and passed on Windows.
     monkeypatch.setattr(
         "pocketpaw.agents.claude_sdk._prompt_must_spill",
-        lambda prompt: len(prompt) > _WINDOWS_PROMPT_SPILL_CHARS,
+        lambda prompt: len(prompt) > _WINDOWS_PROMPT_SPILL_BYTES,
     )
     backend = ClaudeSDKBackend(get_settings())
     monkeypatch.setattr(backend, "_collect_mcp_tool_ids", lambda: [])
@@ -222,7 +231,7 @@ async def test_a_prompt_under_the_limit_is_still_passed_inline(monkeypatch, _hom
     # ``Path(...)`` into that stub — this test died on CI and passed on Windows.
     monkeypatch.setattr(
         "pocketpaw.agents.claude_sdk._prompt_must_spill",
-        lambda prompt: len(prompt) > _WINDOWS_PROMPT_SPILL_CHARS,
+        lambda prompt: len(prompt) > _WINDOWS_PROMPT_SPILL_BYTES,
     )
     backend = ClaudeSDKBackend(get_settings())
     monkeypatch.setattr(backend, "_collect_mcp_tool_ids", lambda: [])

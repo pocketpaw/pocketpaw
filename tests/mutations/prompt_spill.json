@@ -1,0 +1,47 @@
+[
+  {
+    "label": "spill: the posix branch goes back to never firing",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "return len(prompt.encode(\"utf-8\", \"replace\")) > _prompt_spill_threshold(os_name)",
+    "replace": "return os_name == \"nt\" and len(prompt) > _prompt_spill_threshold(os_name)",
+    "tests": [
+      "tests/test_claude_sdk_prompt_spill_posix.py"
+    ]
+  },
+  {
+    "label": "spill: measured in characters instead of bytes",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "return len(prompt.encode(\"utf-8\", \"replace\")) > _prompt_spill_threshold(os_name)",
+    "replace": "return len(prompt) > _prompt_spill_threshold(os_name)",
+    "tests": [
+      "tests/test_claude_sdk_prompt_spill_posix.py"
+    ]
+  },
+  {
+    "label": "spill: every prompt spills",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "return len(prompt.encode(\"utf-8\", \"replace\")) > _prompt_spill_threshold(os_name)",
+    "replace": "return True",
+    "tests": [
+      "tests/test_claude_sdk_prompt_spill_posix.py"
+    ]
+  },
+  {
+    "label": "spill: one threshold for every platform, regressing windows",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    return _WINDOWS_PROMPT_SPILL_BYTES if os_name == \"nt\" else _POSIX_PROMPT_SPILL_BYTES",
+    "replace": "    return _POSIX_PROMPT_SPILL_BYTES",
+    "tests": [
+      "tests/test_claude_sdk_prompt_spill_posix.py"
+    ]
+  },
+  {
+    "label": "spill: the posix threshold is set AT the kernel limit, with no headroom",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "_POSIX_PROMPT_SPILL_BYTES = 96_000",
+    "replace": "_POSIX_PROMPT_SPILL_BYTES = 131_072",
+    "tests": [
+      "tests/test_claude_sdk_prompt_spill_posix.py"
+    ]
+  }
+]
