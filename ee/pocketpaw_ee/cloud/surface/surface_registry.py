@@ -521,6 +521,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
     try:
         from pocketpaw_ee.agent.mcp_servers.ask import ASK_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.files import FILES_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
@@ -556,6 +557,11 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             # ask_user: interactive question chips. Needed most on svelte-create
             # (ripple OFF) where the agent otherwise can only ask in plain text.
             | frozenset(ASK_TOOL_IDS)
+            # files: /sites is where people upload a BRIEF, and an attachment is
+            # inlined only for the turn it arrived on. Without these ids the
+            # follow-up turn ("use the brief I sent") has no way back to it —
+            # this list is a hard whitelist, so ambient is not enough here.
+            | frozenset(FILES_TOOL_IDS)
         )
 
         return _McpToolIds(

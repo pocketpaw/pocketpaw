@@ -1683,7 +1683,8 @@ async def _drive_agent_loop(
             "filesystem and have no path in your working directory: do NOT use "
             "Read, Glob, Grep or Bash to hunt for them, and do NOT reply that "
             "no file was provided or that you cannot see it. Answer from the "
-            "inlined text."
+            "inlined text. For a file uploaded on an EARLIER turn (not inlined "
+            "here), call list_uploads to find it and read_upload to read it."
         )
 
     # Studio Flow build context — tell the agent WHICH flow project this

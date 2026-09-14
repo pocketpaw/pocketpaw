@@ -2920,7 +2920,8 @@ async def _build_attachments_block(
         "The text above is the whole of what was uploaded. These files are "
         "not on the filesystem and have no path in your working directory, "
         "so do not use Read, Glob, Grep or Bash to look for them and do not "
-        "say that no file was provided.",
+        "say that no file was provided. A file uploaded on an earlier turn is "
+        "not inlined here — reach those with list_uploads / read_upload.",
     ]
     lines.extend(entries)
     lines.append("</uploaded-files>")

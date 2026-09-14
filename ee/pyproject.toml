@@ -317,6 +317,7 @@ other_hand = "pocketpaw_ee.extensions:CloudOtherHandMcpProvider"
 
 browser = "pocketpaw_ee.extensions:CloudBrowserMcpProvider"
 stock = "pocketpaw_ee.extensions:CloudStockImagesMcpProvider"
+files = "pocketpaw_ee.extensions:CloudFilesMcpProvider"
 icons = "pocketpaw_ee.extensions:CloudIconsMcpProvider"
 palette = "pocketpaw_ee.extensions:CloudPaletteMcpProvider"
 ask = "pocketpaw_ee.extensions:CloudAskMcpProvider"
