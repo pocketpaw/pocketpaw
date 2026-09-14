@@ -31,6 +31,18 @@ init must still be caught and its object deleted.
 abort and on expiry. It is keyed to the UTC day it was claimed on and refunded
 against that day — see ``upload_budget.release``.
 
+**``complete`` is server-authoritative** (revised 2026-09-14, from PR3's
+findings). The manifest comes from the storage provider's own ``list_parts``,
+not from the request body. The first shape required an etag per part from the
+client, which is unsatisfiable after precisely the event resume exists for: a
+reloaded client has no etags for its previous session's parts, and on the
+presigned path this side never saw them either. It also quietly depended on the
+bucket setting ``Access-Control-Expose-Headers: ETag``, without which the
+browser cannot read a presigned PUT's etag at all and every presigned upload
+would have failed at the last step after succeeding part by part. Reading the
+manifest from the provider removes that dependency instead of documenting it,
+which is why no CORS change accompanies this. ``_resolve_parts`` has the detail.
+
 **The head_object recovery.** ``S3StorageAdapter.complete_multipart`` HEADs the
 object after completing, because ``complete_multipart_upload`` returns neither
 ``ContentLength`` nor ``ContentType``, and it raises ``StorageFailure`` when
@@ -65,6 +77,7 @@ from pocketpaw.uploads.config import (
     validate_part_number,
 )
 from pocketpaw.uploads.errors import InvalidPart, StorageFailure
+from pocketpaw.uploads.errors import NotFound as UploadNotFound
 from pocketpaw.uploads.file_store import FileRecord
 from pocketpaw.uploads.keys import new_storage_key
 from pocketpaw_ee.cloud._core.errors import (
@@ -338,8 +351,8 @@ class EEMultipartService:
         # and access can be revoked inside that window.
         if pocket_guard is not None:
             await pocket_guard(doc.pocket_id)
-        ordered = _validated_part_list(parts, part_count=doc.part_count)
 
+        ordered = await self._resolve_parts(doc, claimed=parts)
         obj = await self._complete_in_storage(doc, ordered)
 
         # Ceiling 2 of 2, against the size STORAGE reports. The declared size
@@ -510,6 +523,74 @@ class EEMultipartService:
         await self._refund(doc)
         await self._store.mark_aborted(doc)
 
+    async def _resolve_parts(
+        self, doc: MultipartUpload, *, claimed: object
+    ) -> list[tuple[int, str]]:
+        """The manifest to complete with — from STORAGE, not from the client.
+
+        The client's list cannot be the source of truth, and the case that
+        proves it is the one resumable uploads exist for. A client that reloads
+        mid-upload has no etags for the parts its previous session wrote; on the
+        presigned path nobody on this side saw them either, because those PUTs
+        went browser→bucket. A complete that required a client-supplied etag per
+        part was therefore unsatisfiable after exactly the event resume is for.
+
+        It has a second, quieter payoff. The browser cannot read a presigned
+        PUT's ``ETag`` response header at all unless the bucket sets
+        ``Access-Control-Expose-Headers: ETag``, so the old shape would have had
+        every presigned upload succeed part by part and then fail at the last
+        step, on a bucket setting nobody would think to check. Reading the
+        manifest from the provider removes that dependency rather than
+        documenting it.
+
+        ``claimed`` stays useful as an ASSERTION. When the client does know an
+        etag, a disagreement means the two sides are looking at different bytes,
+        and completing anyway would assemble an object the client never
+        intended. An incomplete claim is fine — that is the resume case.
+        """
+        try:
+            provider_parts = await self._adapter.list_parts(doc.storage_key, doc.provider_upload_id)
+        except UploadNotFound as exc:
+            # Storage has no such upload: expired at the bucket, or already
+            # completed/aborted out from under this session.
+            raise NotFound("multipart", doc.upload_id) from exc
+
+        present = {number: etag for number, etag in provider_parts}
+        missing = [n for n in range(1, doc.part_count + 1) if n not in present]
+        if missing:
+            # Not a truncated object and not a 400: the request is well-formed,
+            # the upload simply is not finished. S3 would happily assemble what
+            # it has, which is how a short file lands in a library looking
+            # plausible.
+            shown = ", ".join(str(n) for n in missing[:10])
+            suffix = "…" if len(missing) > 10 else ""
+            raise ConflictError(
+                "multipart.invalid",
+                f"storage is missing {len(missing)} of {doc.part_count} parts "
+                f"({shown}{suffix}) — upload them and complete again",
+            )
+
+        for number, etag in _validated_claim(claimed, part_count=doc.part_count).items():
+            stored = present.get(number)
+            if stored is not None and _norm_etag(stored) != _norm_etag(etag):
+                raise ConflictError(
+                    "multipart.invalid",
+                    f"part {number} does not match what storage holds — "
+                    "re-upload it and complete again",
+                )
+
+        extra = [n for n in present if n > doc.part_count]
+        if extra:
+            # Parts past the declared geometry. Dropping them silently would
+            # assemble a different object than the client believes it sent.
+            raise ConflictError(
+                "multipart.invalid",
+                f"storage holds {len(extra)} parts past this session's "
+                f"{doc.part_count} — abort and start again",
+            )
+
+        return [(n, present[n]) for n in range(1, doc.part_count + 1)]
+
     async def _complete_in_storage(
         self, doc: MultipartUpload, ordered: list[tuple[int, str]]
     ) -> StoredObject:
@@ -636,25 +717,24 @@ def _validated_part_number(raw: object, part_count: int) -> int:
     return number
 
 
-def _validated_part_list(raw: object, *, part_count: int) -> list[tuple[int, str]]:
-    """The completion manifest: every part, once, in order.
+def _validated_claim(raw: object, *, part_count: int) -> dict[int, str]:
+    """What the client CLAIMS it uploaded. Optional, and never the manifest.
 
-    Out of order is fine and expected — a client collecting from four parallel
-    workers has no reason to have kept the ordering, so this sorts. A repeated
-    part number is fine when both entries agree (a retried request), and a
-    refusal when they do not, because picking one of two conflicting etags
-    silently assembles an object out of bytes the client never chose.
+    Absent, null or empty is the normal resumed case and yields ``{}`` — the
+    client has nothing to assert, and storage is asked instead.
 
-    A gap is a refusal. ``part_count`` is derived from the size the client
-    declared, so a manifest short of it means the client is asking us to
-    complete an upload it has not finished — which on S3 assembles a TRUNCATED
-    object rather than failing, and would land a corrupt file in the library
-    with a plausible size.
+    When present it must be well-formed, and that is still a 400: a list of
+    objects, each with an in-range part number and a non-empty etag. Two entries
+    for one part number that disagree are refused here rather than at the
+    storage comparison, because the client has contradicted itself before we
+    even look at the bucket.
     """
-    if not isinstance(raw, list) or not raw:
-        raise BadRequest("multipart.invalid", "parts must be a non-empty list")
+    if raw is None:
+        return {}
+    if not isinstance(raw, list):
+        raise BadRequest("multipart.invalid", "parts must be a list when supplied")
 
-    by_number: dict[int, str] = {}
+    claimed: dict[int, str] = {}
     for entry in raw:
         if not isinstance(entry, dict):
             raise BadRequest("multipart.invalid", "each part must be an object")
@@ -662,24 +742,28 @@ def _validated_part_list(raw: object, *, part_count: int) -> list[tuple[int, str
         etag = entry.get("etag")
         if not isinstance(etag, str) or not etag.strip():
             raise BadRequest("multipart.invalid", f"part {number} is missing an etag")
-        etag = etag.strip()
-        seen = by_number.get(number)
-        if seen is not None and seen != etag:
+        seen = claimed.get(number)
+        if seen is not None and _norm_etag(seen) != _norm_etag(etag):
             raise BadRequest(
                 "multipart.invalid",
                 f"part {number} was listed twice with different etags",
             )
-        by_number[number] = etag
+        claimed[number] = etag.strip()
+    return claimed
 
-    missing = [n for n in range(1, part_count + 1) if n not in by_number]
-    if missing:
-        shown = ", ".join(str(n) for n in missing[:10])
-        suffix = "…" if len(missing) > 10 else ""
-        raise BadRequest(
-            "multipart.invalid",
-            f"{len(missing)} of {part_count} parts were not listed: {shown}{suffix}",
-        )
-    return [(n, by_number[n]) for n in sorted(by_number)]
+
+def _norm_etag(raw: str) -> str:
+    """Compare etags on content, not on transport decoration.
+
+    S3 returns them wrapped in literal double quotes and clients variously echo
+    them quoted, unquoted, or with a ``W/`` weak-validator prefix picked up from
+    a proxy. All three name the same bytes, and refusing an upload over a pair
+    of quotation marks would be a bad way to lose a 5 GB transfer.
+    """
+    value = raw.strip()
+    if value.startswith("W/"):
+        value = value[2:]
+    return value.strip('"').strip().lower()
 
 
 # ---------------------------------------------------------------------------

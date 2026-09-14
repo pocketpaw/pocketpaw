@@ -497,6 +497,13 @@ async def multipart_complete(
     The only place a multipart upload becomes a ``FileUpload`` row and fires
     ``FileReady``. Returns exactly the shape ``POST /uploads`` puts in
     ``uploaded[]`` so the frontend normalisers work on both unchanged.
+
+    ``parts`` in the body is OPTIONAL and advisory. The manifest is read from
+    storage itself, because a client that reloaded mid-upload has no etags for
+    what its previous session sent — see ``EEMultipartService._resolve_parts``.
+    When a client does supply etags they are checked against storage, and a
+    disagreement is a 409 rather than an object assembled from bytes nobody
+    chose.
     """
     await _refuse_guest(user_id)
 

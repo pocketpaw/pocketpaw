@@ -1353,7 +1353,12 @@ than reading as "unlimited".
 
 `S3StorageAdapter` uploads parts natively and can presign them, so the browser
 PUTs straight to the bucket. `LocalStorageAdapter` cannot presign, so it relays:
-parts land as `<key>.part/<n>` and are concatenated in part order on completion.
+parts land as `<key>.part/<n>`, each beside a `<n>.etag` sidecar, and are
+concatenated in part order on completion.
+
+Both implement `list_parts(key, upload_id)`, which answers what storage actually
+holds. That is the authoritative manifest the `complete` endpoint uses — see
+below for why the client's own list cannot be.
 
 Abandoned S3 parts are billed but never appear in `list_objects`, so
 `S3StorageAdapter.ensure_multipart_lifecycle()` installs a bucket rule expiring
@@ -1404,19 +1409,46 @@ it is read. Re-PUTting a part replaces it, so a retry is safe.
 **`POST /uploads/multipart/{upload_id}/complete`** — assemble and land the file.
 
 ```jsonc
-{ "parts": [{ "part_number": 1, "etag": "\"abc…\"" }] }
+{ "parts": [{ "part_number": 1, "etag": "\"abc…\"" }] }   // OPTIONAL, advisory
 ```
 
 Returns exactly the shape `POST /uploads` puts in `uploaded[]` — `id`,
 `filename`, `mime`, `size`, `url`, `created`. This is the only place the
 `FileUpload` row is written and `FileReady` is emitted, so a multipart upload is
-indistinguishable from a simple one downstream. Parts may be listed in any
-order; a repeated entry is fine when the etags agree and refused when they do
-not; a gap is refused, because S3 would otherwise assemble a truncated object.
+indistinguishable from a simple one downstream.
+
+**The manifest comes from storage, not from the request.** The server asks the
+provider which parts exist (S3's `ListParts`, paginated) and completes from
+that. A client that reloaded mid-upload has no etags for the parts its previous
+session sent, and in `presigned` mode the server never observed those PUTs
+either, so a complete that required them was unsatisfiable after exactly the
+event resume exists for.
+
+`parts` in the body is therefore optional. Send it when you have it and it is
+checked against storage: a part number whose etag disagrees is `409
+multipart.invalid`, because the two sides are describing different bytes. A
+partial list is fine. An absent one is the normal resumed case. Two entries for
+one part number that disagree with *each other* are `400` — the client has
+contradicted itself before storage is consulted. Etags compare on content, so
+quoted, unquoted and `W/`-prefixed forms all match.
+
+Before completing, storage's part set must cover `1..part_count` with no gaps.
+A gap is `409`, not a silently truncated object: S3 would otherwise assemble
+what it has and land a short file in the library at a plausible size.
+
+This also means **no bucket CORS change is needed**. A presigned PUT's `ETag`
+response header is invisible to the browser unless the bucket sets
+`Access-Control-Expose-Headers: ETag`; because the client never reads it under
+this design, that requirement does not exist. `ensure_cors` is deliberately
+unchanged.
 
 **`GET /uploads/multipart/{upload_id}`** — status / resume. Returns
 `{upload_id, mode, key, part_size, part_count, received, parts, expires_at}`,
-where `parts` re-mints URLs only for what is still missing.
+where `parts` re-mints URLs only for what is still missing. `mode` is repeated
+here so a resumed client knows whether to PUT to the bucket or to the relay
+route without inferring it from whether URLs came back. Note that `received`
+counts only parts that passed through the relay route, so on the `presigned`
+path it stays empty — storage, not this field, is what `complete` consults.
 
 **`DELETE /uploads/multipart/{upload_id}`** — abort. Drops the provider upload,
 releases the daily-budget claim, marks the session dead. `204`, idempotent.
@@ -1432,12 +1464,13 @@ init and released on abort or expiry, charged to the UTC day it was claimed on.
 
 | Status | Code | When |
 | --- | --- | --- |
-| 400 | `multipart.invalid` | bad size/mime/filename/part numbering, or a manifest with a gap or conflicting etags |
+| 400 | `multipart.invalid` | bad size/mime/filename/part numbering, or a client `parts` list that contradicts itself |
 | 402 | `billing.storage_limit` | over the workspace's plan storage cap |
 | 403 | `guest_upload_forbidden` | guest account |
 | 403 | `files.pocket_forbidden` | no pocket edit access (checked at init *and* complete) |
-| 404 | `multipart.not_found` | unknown, already-completed, or another workspace's id |
+| 404 | `multipart.not_found` | unknown, already-completed, another workspace's id, or an upload storage has since dropped |
 | 409 | `multipart.expired` | session past its TTL |
+| 409 | `multipart.invalid` | storage is missing parts, or holds a part whose etag disagrees with the client's |
 | 413 | `multipart.too_large` | over `POCKETPAW_MAX_LARGE_FILE_BYTES`, or a part over `part_size` |
 | 429 | `uploads.daily_limit` | over the workspace's daily upload budget |
 

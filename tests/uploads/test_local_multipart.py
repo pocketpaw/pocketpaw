@@ -102,11 +102,12 @@ class TestRoundTrip:
         await _upload(adapter, "k/file.bin", b"a" * 3000, part_size=1024)
 
         part_dir = tmp_upload_root / "k" / "file.bin.part"
-        assert {p.name for p in part_dir.iterdir() if not p.name.startswith(".")} == {
-            "1",
-            "2",
-            "3",
-        }
+        names = {p.name for p in part_dir.iterdir() if not p.name.startswith(".")}
+        # Parts are bare decimal names. Each carries a ``.etag`` sidecar so
+        # ``list_parts`` can answer without re-hashing the bytes — the payload
+        # file is still exactly ``<n>``, which is what ``_concat_parts`` reads.
+        assert {n for n in names if n.isdigit()} == {"1", "2", "3"}
+        assert {n for n in names if not n.isdigit()} == {"1.etag", "2.etag", "3.etag"}
 
     async def test_complete_removes_the_part_directory(self, tmp_upload_root: Path):
         adapter = LocalStorageAdapter(root=tmp_upload_root)

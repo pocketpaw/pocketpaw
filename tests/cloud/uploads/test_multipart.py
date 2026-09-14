@@ -33,6 +33,7 @@ from fastapi.testclient import TestClient
 
 from pocketpaw.uploads.adapter import StoredObject
 from pocketpaw.uploads.config import UploadSettings
+from pocketpaw.uploads.errors import NotFound as UploadNotFound
 from pocketpaw.uploads.errors import StorageFailure
 
 MIB = 1024 * 1024
@@ -77,6 +78,24 @@ class FakeAdapter:
     async def put_part(self, key: str, upload_id: str, part_number: int, body: bytes) -> str:
         self.parts.setdefault((key, upload_id), {})[part_number] = body
         return hashlib.md5(body, usedforsecurity=False).hexdigest()
+
+    async def list_parts(self, key: str, upload_id: str) -> list[tuple[int, str]]:
+        if (key, upload_id) not in self.parts:
+            raise UploadNotFound(f"unknown multipart upload: {upload_id}")
+        stored = self.parts[(key, upload_id)]
+        # Quoted, like S3 — so the etag comparison is exercised against the
+        # decoration a real provider adds rather than a bare hex string.
+        return sorted(
+            (n, f'"{hashlib.md5(b, usedforsecurity=False).hexdigest()}"') for n, b in stored.items()
+        )
+
+    def seed_part(self, key: str, upload_id: str, number: int, body: bytes) -> None:
+        """Put a part into storage WITHOUT the service observing it.
+
+        Stands in for a presigned PUT that went browser→bucket, and for a part
+        written by a session whose client has since been discarded.
+        """
+        self.parts.setdefault((key, upload_id), {})[number] = body
 
     async def complete_multipart(self, key, upload_id, parts) -> StoredObject:
         stored = self.parts.get((key, upload_id), {})
@@ -173,8 +192,11 @@ def _init(client, *, size, **extra):
     return client.post("/api/v1/uploads/multipart", json=body)
 
 
-def _complete(client, upload_id, parts):
-    return client.post(f"/api/v1/uploads/multipart/{upload_id}/complete", json={"parts": parts})
+def _complete(client, upload_id, parts=None):
+    """Complete. Sends no ``parts`` by default — the manifest comes from storage,
+    and the common client (a resumed one) has no etags to offer."""
+    body = {} if parts is None else {"parts": parts}
+    return client.post(f"/api/v1/uploads/multipart/{upload_id}/complete", json=body)
 
 
 @pytest.fixture()
@@ -240,7 +262,7 @@ async def test_round_trip_lands_a_row_and_a_file_ready_event(relay, recording_bu
     body = b"x" * 4096
     upload_id = _upload_one_part(client, declared=len(body), body=body, chat_id="g1")
 
-    r = _complete(client, upload_id, [{"part_number": 1, "etag": "e1"}])
+    r = _complete(client, upload_id)
     assert r.status_code == 200, r.text
     out = r.json()
 
@@ -284,7 +306,7 @@ async def test_file_ready_omits_group_id_when_not_chat_scoped(relay, recording_b
     """
     client, _adapter, _ = relay
     upload_id = _upload_one_part(client, declared=16, body=b"0123456789abcdef")
-    _complete(client, upload_id, [{"part_number": 1, "etag": "e"}])
+    _complete(client, upload_id)
 
     data = [e for e in recording_bus.events if e.type == "file.ready"][-1].data
     assert "group_id" not in data
@@ -295,40 +317,124 @@ def test_completing_twice_is_a_404(relay):
     """A replayed complete must not mint a second row for one upload."""
     client, _adapter, _ = relay
     upload_id = _upload_one_part(client, declared=16, body=b"0123456789abcdef")
-    assert _complete(client, upload_id, [{"part_number": 1, "etag": "e"}]).status_code == 200
-    second = _complete(client, upload_id, [{"part_number": 1, "etag": "e"}])
+    assert _complete(client, upload_id).status_code == 200
+    second = _complete(client, upload_id)
     assert second.status_code == 404
     assert second.json()["error"]["code"] == "multipart.not_found"
 
 
 # ---------------------------------------------------------------------------
-# The manifest — out of order, duplicated, incomplete
+# The manifest — read from storage, not from the client
 # ---------------------------------------------------------------------------
 
 
-def test_parts_may_be_listed_out_of_order_or_duplicated(relay):
-    """A client collecting from parallel workers has no reason to have sorted,
-    and a retried request may repeat an entry."""
+async def test_a_resumed_client_completes_with_no_parts_at_all(
+    monkeypatch, beanie_upload_db, tmp_path
+):
+    """The case the first design could not express, end to end on real bytes.
+
+    Init, upload the parts, throw away every scrap of client state, then
+    complete with an empty body. A reloaded client has no etags for what its
+    previous session sent — and on the presigned path this side never saw them
+    either — so a complete that demanded them was unsatisfiable after exactly
+    the event resume exists for.
+
+    Uses the real ``LocalStorageAdapter`` rather than the fake: the assertion is
+    that the assembled object is byte-identical to the original, which is only
+    worth anything if something actually concatenated bytes.
+
+    Mutation that breaks this: complete from the request body instead of from
+    ``list_parts``.
+    """
+    from pocketpaw.uploads.local import LocalStorageAdapter
+
+    root = tmp_path / "store"
+    root.mkdir()
+    adapter = LocalStorageAdapter(root=root)
+    _pin_cloud_gates(monkeypatch)
+    client = _build(monkeypatch, adapter, root=root)
+
+    original = bytes(range(256)) * 40_000  # ~10 MiB, so it spans two parts
+    opened = _init(client, size=len(original)).json()
+    upload_id, part_size, key = opened["upload_id"], opened["part_size"], opened["key"]
+    assert opened["part_count"] == 2
+
+    for i in range(opened["part_count"]):
+        chunk = original[i * part_size : (i + 1) * part_size]
+        r = client.put(f"/api/v1/uploads/multipart/{upload_id}/parts/{i + 1}", content=chunk)
+        assert r.status_code == 200, r.text
+
+    # Everything the client knew is gone except the upload id it persisted.
+    del opened, part_size
+
+    out = _complete(client, upload_id)
+    assert out.status_code == 200, out.text
+    assert out.json()["size"] == len(original)
+    assert (root / key).read_bytes() == original, "the resumed upload did not round-trip"
+
+
+def test_an_advisory_parts_list_that_agrees_with_storage_is_accepted(relay):
+    """A client that DOES know its etags may send them, and they are checked.
+
+    Out of order and repeated entries are both fine: a client collecting from
+    parallel workers has no reason to have sorted, and a retried request may
+    repeat one.
+    """
     client, _adapter, _ = relay
     upload_id = _init(client, size=24 * MIB).json()["upload_id"]
+    etags = {}
     for n, ch in ((1, b"a"), (2, b"b"), (3, b"c")):
-        client.put(f"/api/v1/uploads/multipart/{upload_id}/parts/{n}", content=ch * (8 * MIB))
+        r = client.put(f"/api/v1/uploads/multipart/{upload_id}/parts/{n}", content=ch * (8 * MIB))
+        etags[n] = r.json()["etag"]
 
     r = _complete(
         client,
         upload_id,
         [
-            {"part_number": 3, "etag": "c"},
-            {"part_number": 1, "etag": "a"},
-            {"part_number": 2, "etag": "b"},
-            {"part_number": 1, "etag": "a"},
+            {"part_number": 3, "etag": etags[3]},
+            {"part_number": 1, "etag": etags[1]},
+            {"part_number": 2, "etag": etags[2]},
+            {"part_number": 1, "etag": etags[1]},
         ],
     )
     assert r.status_code == 200, r.text
 
 
-def test_a_duplicate_part_with_conflicting_etags_is_refused(relay):
-    """Picking one of two etags would assemble bytes nobody chose."""
+def test_an_advisory_etag_that_disagrees_with_storage_is_a_409(relay):
+    """The two sides are looking at different bytes. Completing anyway would
+    assemble an object the client never intended."""
+    client, _adapter, _ = relay
+    upload_id = _upload_one_part(client, declared=16, body=b"0123456789abcdef")
+    r = _complete(client, upload_id, [{"part_number": 1, "etag": "deadbeef"}])
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "multipart.invalid"
+
+
+def test_a_partial_advisory_list_is_fine(relay):
+    """Knowing SOME etags is the half-resumed case, not an error."""
+    client, _adapter, _ = relay
+    upload_id = _init(client, size=24 * MIB).json()["upload_id"]
+    for n, ch in ((1, b"a"), (2, b"b"), (3, b"c")):
+        r = client.put(f"/api/v1/uploads/multipart/{upload_id}/parts/{n}", content=ch * (8 * MIB))
+        last = r.json()["etag"]
+
+    assert _complete(client, upload_id, [{"part_number": 3, "etag": last}]).status_code == 200
+
+
+def test_a_quoted_etag_matches_an_unquoted_one(relay):
+    """S3 wraps etags in literal quotes and clients echo them inconsistently.
+    Losing a 5 GB upload over two quotation marks would be a poor trade."""
+    client, _adapter, _ = relay
+    upload_id = _upload_one_part(client, declared=16, body=b"0123456789abcdef")
+    stored = client.get(f"/api/v1/uploads/multipart/{upload_id}").json()
+    assert stored["received"] == [1]
+
+    raw = hashlib.md5(b"0123456789abcdef", usedforsecurity=False).hexdigest()
+    assert _complete(client, upload_id, [{"part_number": 1, "etag": f'"{raw}"'}]).status_code == 200
+
+
+def test_a_self_contradicting_client_list_is_a_400(relay):
+    """Two etags for one part number, before storage is even consulted."""
     client, _adapter, _ = relay
     upload_id = _upload_one_part(client, declared=16, body=b"0123456789abcdef")
     r = _complete(
@@ -340,19 +446,54 @@ def test_a_duplicate_part_with_conflicting_etags_is_refused(relay):
     assert r.json()["error"]["code"] == "multipart.invalid"
 
 
-def test_a_missing_part_is_refused(relay):
-    """A short manifest would assemble a TRUNCATED object on S3, not fail —
-    landing a corrupt file in the library with a plausible size."""
+def test_a_part_missing_from_storage_is_a_409(relay):
+    """The request is well-formed; the upload just is not finished.
+
+    S3 would happily assemble what it has, which is how a short file lands in a
+    library looking plausible. 409 rather than 400 because nothing is wrong with
+    the request — the client should upload the rest and try again.
+
+    Mutation that breaks this: drop the contiguity check in ``_resolve_parts``.
+    """
     client, _adapter, _ = relay
     upload_id = _init(client, size=24 * MIB).json()["upload_id"]
-    r = _complete(
-        client,
-        upload_id,
-        [{"part_number": 1, "etag": "a"}, {"part_number": 3, "etag": "c"}],
-    )
-    assert r.status_code == 400
+    for n in (1, 3):
+        client.put(f"/api/v1/uploads/multipart/{upload_id}/parts/{n}", content=b"x" * (8 * MIB))
+
+    r = _complete(client, upload_id)
+    assert r.status_code == 409
     assert r.json()["error"]["code"] == "multipart.invalid"
     assert "2" in r.json()["error"]["message"]
+
+
+async def test_parts_the_service_never_saw_still_complete(presigned):
+    """The presigned path: bytes go browser→bucket and we observe nothing.
+
+    ``received`` is empty because no part passed through the relay route, and
+    the upload completes anyway because storage was asked.
+    """
+    client, adapter, _ = presigned
+    opened = _init(client, size=16 * MIB).json()
+    upload_id, key = opened["upload_id"], opened["key"]
+    provider_id = next(u for k, u in adapter.parts if k == key)
+
+    assert client.get(f"/api/v1/uploads/multipart/{upload_id}").json()["received"] == []
+    for n in (1, 2):
+        adapter.seed_part(key, provider_id, n, b"p" * (8 * MIB))
+
+    assert _complete(client, upload_id).status_code == 200
+
+
+def test_an_upload_storage_has_lost_is_a_404(presigned):
+    """Expired or aborted at the bucket, with our session still open."""
+    client, adapter, _ = presigned
+    opened = _init(client, size=16 * MIB).json()
+    provider_id = next(u for k, u in adapter.parts if k == opened["key"])
+    adapter.parts.pop((opened["key"], provider_id))
+
+    r = _complete(client, opened["upload_id"])
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "multipart.not_found"
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +551,7 @@ async def test_an_under_declared_size_is_caught_at_complete_and_rolled_back(
     client = _build(monkeypatch, adapter, cfg=cfg)
 
     upload_id = _upload_one_part(client, declared=MIB, body=b"z" * 1024)
-    r = _complete(client, upload_id, [{"part_number": 1, "etag": "e"}])
+    r = _complete(client, upload_id)
 
     assert r.status_code == 413
     assert r.json()["error"]["code"] == "multipart.too_large"
@@ -430,7 +571,7 @@ def test_the_size_storage_reports_is_what_lands_on_the_row(monkeypatch, beanie_u
     client = _build(monkeypatch, adapter, root=tmp_path)
 
     upload_id = _upload_one_part(client, declared=8 * MIB, body=b"z" * 1024)
-    out = _complete(client, upload_id, [{"part_number": 1, "etag": "e"}]).json()
+    out = _complete(client, upload_id).json()
 
     assert out["size"] == MIB
     # The 7 MiB the client claimed and did not use goes back to the budget.
@@ -595,7 +736,7 @@ def test_pocket_access_is_enforced_at_init_and_rechecked_at_complete(
     # Init is refused...
     assert _init(client, size=16, pocket_id="PA").status_code == 403
     # ...and so is the complete of a session opened while access was granted.
-    r = _complete(client, upload_id, [{"part_number": 1, "etag": "e"}])
+    r = _complete(client, upload_id)
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "files.pocket_forbidden"
 
@@ -704,7 +845,7 @@ async def test_a_failed_head_after_complete_recovers_rather_than_500ing(relay):
     upload_id = _upload_one_part(client, declared=4096, body=body)
     adapter.fail_head_after_complete = True
 
-    r = _complete(client, upload_id, [{"part_number": 1, "etag": "e"}])
+    r = _complete(client, upload_id)
     assert r.status_code == 200, r.text
     assert r.json()["size"] == len(body), "recovered the declared size, not the measured one"
     assert r.json()["mime"] == "video/quicktime"

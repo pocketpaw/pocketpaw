@@ -10,6 +10,12 @@ env var names (``S3_ENDPOINT``, ``S3_REGION``, ``S3_ACCESS_KEY_ID``,
 ``S3_SECRET_ACCESS_KEY``, ``S3_PRIVATE_BUCKET``) so one deployment can point
 both services at the same bucket.
 
+2026-09-14 (feat/uploads-multipart-endpoints): added ``list_parts``, paginated
+through ``PartNumberMarker``/``IsTruncated``. S3 returns at most 1000 parts a
+call and an upload may hold 10000, so a single-page read would report the
+largest uploads as missing everything past part 1000 and nothing smaller would
+ever show it.
+
 2026-09-14 (feat/uploads-multipart-adapter): implements the six-method multipart
 surface natively, plus ``ensure_multipart_lifecycle`` — a bucket rule expiring
 incomplete uploads after 7 days, so an abandoned session's parts stop being a
@@ -412,6 +418,65 @@ class S3StorageAdapter(StorageAdapter):
             )
         except Exception:
             return None
+
+    async def list_parts(self, key: str, upload_id: str) -> list[tuple[int, str]]:
+        """Every part S3 holds for this upload, ``(PartNumber, ETag)``, sorted.
+
+        PAGINATED, and the pagination is not optional. ``list_parts`` returns at
+        most 1000 parts per call, and an upload is allowed 10000 — so a loop
+        that reads the first page and stops would silently report a complete
+        upload as missing everything past part 1000. That failure only appears
+        on the largest file anyone happens to upload, which is the worst
+        possible time to find it.
+
+        Raises ``NotFound`` when S3 has no such upload — expired, already
+        completed, or already aborted. That is a different outcome from "the
+        upload exists and has no parts yet" and the caller has to be able to
+        tell them apart.
+        """
+        parts: list[tuple[int, str]] = []
+        marker = 0
+        while True:
+            try:
+                resp = await asyncio.to_thread(
+                    partial(
+                        self._client.list_parts,
+                        Bucket=self._bucket,
+                        Key=key,
+                        UploadId=upload_id,
+                        PartNumberMarker=marker,
+                    )
+                )
+            except Exception as exc:
+                if _is_no_such_upload(exc):
+                    raise NotFound(f"unknown multipart upload: {upload_id}") from exc
+                raise StorageFailure(f"list_parts failed: {exc}") from exc
+
+            for entry in resp.get("Parts") or []:
+                number = entry.get("PartNumber")
+                etag = entry.get("ETag")
+                if number is None or not etag:
+                    continue
+                parts.append((int(number), str(etag)))
+
+            if not resp.get("IsTruncated"):
+                break
+            next_marker = int(resp.get("NextPartNumberMarker") or 0)
+            if next_marker <= marker:
+                # A truncated page that does not advance the marker would spin
+                # forever. Trust the data less than the loop.
+                logger.warning(
+                    "list_parts truncated without advancing the marker (%d) for %s; "
+                    "stopping after %d parts",
+                    next_marker,
+                    key,
+                    len(parts),
+                )
+                break
+            marker = next_marker
+
+        parts.sort(key=lambda p: p[0])
+        return parts
 
     async def put_part(self, key: str, upload_id: str, part_number: int, body: bytes) -> str:
         """Upload one part through us. Returns S3's (quoted) ETag.

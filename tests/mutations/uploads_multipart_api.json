@@ -4,195 +4,297 @@
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_store.py",
     "find": "        return await MultipartUpload.find_one(\n            MultipartUpload.upload_id == upload_id,\n            MultipartUpload.workspace == workspace,\n        )",
     "replace": "        return await MultipartUpload.find_one(\n            MultipartUpload.upload_id == upload_id,\n        )",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "ceiling 1: drop the per-file check at init, so a 5 GB file transfers before being refused",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        ceilings = await self._check_ceilings(workspace=workspace, size=size)\n        _raise_for_ceilings(ceilings, size=size, limit=self._cfg.max_large_file_bytes)",
     "replace": "        ceilings = await self._check_ceilings(workspace=workspace, size=size)\n        _ = ceilings",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "ceiling 2: drop the re-check at complete, so an under-declared size lands anyway",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        if ceilings.over_file_limit or ceilings.storage_exceeded:\n            await self._roll_back(doc, reason=\"over a ceiling at complete\")\n            _raise_for_ceilings(ceilings, size=actual, limit=self._cfg.max_large_file_bytes)",
     "replace": "        if False:\n            await self._roll_back(doc, reason=\"over a ceiling at complete\")\n            _raise_for_ceilings(ceilings, size=actual, limit=self._cfg.max_large_file_bytes)",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "ceiling 2: check the DECLARED size at complete instead of the size storage reports",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        ceilings = await self._check_ceilings(workspace=workspace, size=actual)",
     "replace": "        ceilings = await self._check_ceilings(workspace=workspace, size=doc.size)",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "ceiling 2: report the over-cap file but leave the object in the bucket",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        with contextlib.suppress(Exception):\n            await self._adapter.delete(doc.storage_key)\n        await self._refund(doc)\n        await self._store.mark_aborted(doc)",
     "replace": "        await self._refund(doc)\n        await self._store.mark_aborted(doc)",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "downstream: skip the FileReady emit, so the file never reaches the KB indexer",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        await emit(FileReady(data=data))",
     "replace": "        _ = data",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "downstream: skip save_scoped, so the upload never appears in the library",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        await self._meta.save_scoped(\n            rec,\n            workspace=workspace,\n            folder_path=doc.folder_path or \"/\",\n            pocket_id=doc.pocket_id,\n        )",
     "replace": "        pass",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "downstream: always carry group_id, so a workspace-only upload broadcasts to a chat",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        if rec.chat_id:\n            data[\"group_id\"] = rec.chat_id",
     "replace": "        data[\"group_id\"] = rec.chat_id",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "budget: claim at complete instead of at init, so parallel inits all see headroom",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        allowed, over = await upload_budget.try_spend(workspace, 1, size)\n        if not allowed:",
     "replace": "        allowed, over = (True, \"\")\n        if not allowed:",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "budget: never release the claim on abort/expiry, so an abandoned upload eats the day",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        if not doc.budget_held:\n            return",
     "replace": "        if True:\n            return",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "budget: allow a second refund, so a retried cancel mints free quota",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        await self._store.clear_budget_hold(doc)",
     "replace": "        pass",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "budget: refund against TODAY rather than the day the claim was made",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        await upload_budget.release(\n            doc.workspace, doc.budget_day, doc.budget_files, doc.budget_bytes\n        )",
     "replace": "        await upload_budget.release(\n            doc.workspace, upload_budget.today(), doc.budget_files, doc.budget_bytes\n        )",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "guest gate: let a guest through, turning uploads back into an un-gated surface",
     "file": "ee/pocketpaw_ee/cloud/uploads/router.py",
     "find": "    if await guest_budget.load_guest(user_id) is not None:",
     "replace": "    if False:",
-    "tests": ["tests/cloud/uploads/test_multipart.py", "tests/cloud/uploads/test_router.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py",
+      "tests/cloud/uploads/test_router.py"
+    ]
   },
   {
     "label": "pocket ABAC: skip the re-check at complete, so revoked access still lands the file",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        if pocket_guard is not None:\n            await pocket_guard(doc.pocket_id)",
     "replace": "        pass",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "pocket ABAC: treat a lookup failure as permission, instead of denial",
     "file": "ee/pocketpaw_ee/cloud/uploads/router.py",
     "find": "    try:\n        allowed = await pockets_service.has_edit_access(pocket_id=pocket_id, user_id=user_id)\n    except Exception:\n        allowed = False",
     "replace": "    try:\n        allowed = await pockets_service.has_edit_access(pocket_id=pocket_id, user_id=user_id)\n    except Exception:\n        allowed = True",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "expiry: treat an expired session as live, so a stale client keeps appending parts",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        if _is_expired(doc):",
     "replace": "        if False:",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
-  },
-  {
-    "label": "manifest: accept a gap, so S3 assembles a truncated object into the library",
-    "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
-    "find": "    missing = [n for n in range(1, part_count + 1) if n not in by_number]\n    if missing:",
-    "replace": "    missing = []\n    if missing:",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
-  },
-  {
-    "label": "manifest: pick one of two conflicting etags instead of refusing",
-    "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
-    "find": "        if seen is not None and seen != etag:",
-    "replace": "        if False:",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "validation: accept a bool size, so `true` opens a one-byte session",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "    if isinstance(raw, bool) or not isinstance(raw, int):\n        raise BadRequest(\"multipart.invalid\", \"size must be an integer number of bytes\")",
     "replace": "    if not isinstance(raw, int):\n        raise BadRequest(\"multipart.invalid\", \"size must be an integer number of bytes\")",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "relay: drop the declared-length check, so an oversize part is buffered before refusal",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        if declared_length is not None and declared_length > doc.part_size:",
     "replace": "        if False:",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "relay: accept a relay PUT against a presigned session, bypassing the signed URLs",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        if doc.mode != MODE_RELAY:",
     "replace": "        if False:",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "recovery: surface the post-complete HEAD failure as a 500 for an upload that worked",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "            if _HEAD_FAILURE_MARKER not in str(exc):\n                raise\n            size = _size_from_session(doc)",
     "replace": "            raise\n            size = _size_from_session(doc)",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "recovery: fall back to the client's declared size when the measured parts are known",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "    measured = [p.size for p in doc.parts if p.size is not None]\n    if measured and len(measured) == len(doc.parts):\n        return sum(measured)",
     "replace": "    if False:\n        return 0",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "session: replay a completed session, minting a second FileUpload row for one upload",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
     "find": "        if doc is None or doc.state != STATE_OPEN:\n            raise NotFound(\"multipart\", upload_id)",
     "replace": "        if doc is None:\n            raise NotFound(\"multipart\", upload_id)",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "parts: append a retried part instead of replacing it, double-listing one part number",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_store.py",
     "find": "        kept = [p for p in doc.parts if p.part_number != part_number]",
     "replace": "        kept = list(doc.parts)",
-    "tests": ["tests/cloud/uploads/test_multipart.py"]
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
   },
   {
     "label": "body ceiling: give the relay route the global ceiling, so a 5 GB part reaches the handler",
     "file": "src/pocketpaw/security/body_limit.py",
     "find": "        return self.relay_part_bytes if _is_relay_part(scope) else self.max_bytes",
     "replace": "        return self.max_bytes",
-    "tests": ["tests/test_body_size_limit.py"]
+    "tests": [
+      "tests/test_body_size_limit.py"
+    ]
   },
   {
     "label": "body ceiling: match the relay path on any method, widening the exemption",
     "file": "src/pocketpaw/security/body_limit.py",
     "find": "    if scope.get(\"method\") != \"PUT\":\n        return False",
     "replace": "    if False:\n        return False",
-    "tests": ["tests/test_body_size_limit.py"]
+    "tests": [
+      "tests/test_body_size_limit.py"
+    ]
   },
   {
     "label": "body ceiling: match any path under /uploads, exempting the simple upload route too",
     "file": "src/pocketpaw/security/body_limit.py",
     "find": "_RELAY_PART_PATH_RE = re.compile(r\"^/api/v1/uploads/multipart/[^/]+/parts/[^/]+$\")",
     "replace": "_RELAY_PART_PATH_RE = re.compile(r\"^/api/v1/uploads\")",
-    "tests": ["tests/test_body_size_limit.py"]
+    "tests": [
+      "tests/test_body_size_limit.py"
+    ]
+  },
+  {
+    "label": "authoritative complete: build the manifest from the client's list instead of storage's",
+    "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
+    "find": "        return [(n, present[n]) for n in range(1, doc.part_count + 1)]",
+    "replace": "        return sorted(\n            (n, e) for n, e in _validated_claim(claimed, part_count=doc.part_count).items()\n        )",
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
+  },
+  {
+    "label": "authoritative complete: skip the contiguity check, so a half-uploaded file assembles truncated",
+    "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
+    "find": "        missing = [n for n in range(1, doc.part_count + 1) if n not in present]\n        if missing:",
+    "replace": "        missing = []\n        if missing:",
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
+  },
+  {
+    "label": "authoritative complete: ignore a client etag that disagrees with storage",
+    "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
+    "find": "            if stored is not None and _norm_etag(stored) != _norm_etag(etag):",
+    "replace": "            if False:",
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
+  },
+  {
+    "label": "etag compare: match on the raw string, so S3's quotes fail a correct upload",
+    "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
+    "find": "    value = raw.strip()\n    if value.startswith(\"W/\"):\n        value = value[2:]\n    return value.strip('\"').strip().lower()",
+    "replace": "    return raw",
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
+  },
+  {
+    "label": "claim: reject a complete that carries no parts, breaking every resume",
+    "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
+    "find": "    if raw is None:\n        return {}",
+    "replace": "    if raw is None:\n        raise BadRequest(\"multipart.invalid\", \"parts is required\")",
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
+  },
+  {
+    "label": "claim: accept two conflicting etags for one part number from the client",
+    "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
+    "find": "        if seen is not None and _norm_etag(seen) != _norm_etag(etag):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/uploads/test_multipart.py"
+    ]
+  },
+  {
+    "label": "list_parts: stop after the first page, so a 1000+ part upload reads as incomplete",
+    "file": "src/pocketpaw/uploads/s3.py",
+    "find": "            if not resp.get(\"IsTruncated\"):\n                break",
+    "replace": "            if True:\n                break",
+    "tests": [
+      "tests/uploads/test_s3_multipart.py"
+    ]
   }
 ]

@@ -1,5 +1,11 @@
 """StorageAdapter protocol — the swap point for local, S3, etc.
 
+Updated 2026-09-14 (feat/uploads-multipart-endpoints): added ``list_parts``,
+making it seven. It exists because the caller cannot get a trustworthy manifest
+from anywhere else: on the presigned path the part PUTs go browser→bucket and
+are never observed here, so after a client reload nobody on either side knows
+the etags. Storage does. Same raising default as its siblings.
+
 Updated 2026-09-14 (feat/uploads-multipart-adapter): added the six-method
 multipart surface — ``create_multipart``, ``sign_part``, ``put_part``,
 ``complete_multipart``, ``abort_multipart``, ``supports_presigned_parts``. Every
@@ -179,6 +185,23 @@ class StorageAdapter(Protocol):
         ``ttl`` is seconds, and must outlive the slowest connection using it.
         """
         raise NotImplementedError("sign_part not supported by this adapter")
+
+    async def list_parts(self, key: str, upload_id: str) -> list[tuple[int, str]]:
+        """Every part storage currently holds for this upload, ``(number, etag)``.
+
+        Sorted by part number, and the AUTHORITATIVE answer to "what has
+        actually arrived" — which is a different question from "what does the
+        client think it sent". Those diverge in the case resumable uploads
+        exist for: a client that reloads mid-upload has no etags for the parts
+        its previous session wrote, and on the presigned path nobody on this
+        side ever saw them either, because those PUTs went browser→bucket. A
+        caller that can only complete from a client-supplied list therefore
+        cannot complete a resumed upload at all.
+
+        Callers should complete from this, and treat any list the client sends
+        as an assertion to check against it rather than as the source of truth.
+        """
+        raise NotImplementedError("list_parts not supported by this adapter")
 
     async def put_part(self, key: str, upload_id: str, part_number: int, body: bytes) -> str:
         """Store one part (the relay path). Returns its etag.

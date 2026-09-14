@@ -22,7 +22,7 @@ import pytest
 
 pytest.importorskip("boto3")
 
-from pocketpaw.uploads.errors import InvalidPart, StorageFailure  # noqa: E402
+from pocketpaw.uploads.errors import InvalidPart, NotFound, StorageFailure  # noqa: E402
 from pocketpaw.uploads.s3 import S3StorageAdapter  # noqa: E402
 
 
@@ -432,3 +432,120 @@ class TestGetLifecycle:
 
         with pytest.raises(StorageFailure):
             await adapter.get_lifecycle()
+
+
+class TestListParts:
+    """The authoritative manifest (feat/uploads-multipart-endpoints).
+
+    The endpoint layer completes from this rather than from the client's list,
+    because a resumed client has no etags and on the presigned path neither do
+    we. That makes pagination load-bearing: a short read here does not look like
+    a bug, it looks like an unfinished upload, and it only happens on the
+    largest file anyone uploads.
+    """
+
+    async def test_returns_number_and_etag_sorted(self):
+        client = MagicMock()
+        client.list_parts.return_value = {
+            "Parts": [
+                {"PartNumber": 3, "ETag": '"ccc"'},
+                {"PartNumber": 1, "ETag": '"aaa"'},
+                {"PartNumber": 2, "ETag": '"bbb"'},
+            ],
+            "IsTruncated": False,
+        }
+        adapter = _make_adapter(client)
+
+        parts = await adapter.list_parts("ws/1/raw.mov", "s3-upload-1")
+
+        assert parts == [(1, '"aaa"'), (2, '"bbb"'), (3, '"ccc"')]
+        kwargs = client.list_parts.call_args.kwargs
+        assert kwargs["Bucket"] == "test-bucket"
+        assert kwargs["Key"] == "ws/1/raw.mov"
+        assert kwargs["UploadId"] == "s3-upload-1"
+
+    async def test_pages_until_the_listing_is_exhausted(self):
+        """S3 returns at most 1000 parts a call and an upload may hold 10000.
+
+        Mutation that breaks this: stop after the first page. The adapter then
+        reports a complete 2500-part upload as holding 1000, and the endpoint
+        refuses it as unfinished.
+        """
+        client = MagicMock()
+        pages = [
+            {
+                "Parts": [{"PartNumber": n, "ETag": f'"e{n}"'} for n in range(1, 1001)],
+                "IsTruncated": True,
+                "NextPartNumberMarker": 1000,
+            },
+            {
+                "Parts": [{"PartNumber": n, "ETag": f'"e{n}"'} for n in range(1001, 2001)],
+                "IsTruncated": True,
+                "NextPartNumberMarker": 2000,
+            },
+            {
+                "Parts": [{"PartNumber": n, "ETag": f'"e{n}"'} for n in range(2001, 2501)],
+                "IsTruncated": False,
+            },
+        ]
+        client.list_parts.side_effect = pages
+        adapter = _make_adapter(client)
+
+        parts = await adapter.list_parts("ws/1/big.mov", "s3-upload-1")
+
+        assert len(parts) == 2500
+        assert parts[0] == (1, '"e1"')
+        assert parts[-1] == (2500, '"e2500"')
+        assert [c.kwargs["PartNumberMarker"] for c in client.list_parts.call_args_list] == [
+            0,
+            1000,
+            2000,
+        ]
+
+    async def test_a_truncated_page_that_does_not_advance_stops(self):
+        """A marker that fails to move would spin forever. Trust the loop, not
+        the data."""
+        client = MagicMock()
+        client.list_parts.return_value = {
+            "Parts": [{"PartNumber": 1, "ETag": '"a"'}],
+            "IsTruncated": True,
+            "NextPartNumberMarker": 0,
+        }
+        adapter = _make_adapter(client)
+
+        parts = await adapter.list_parts("ws/1/raw.mov", "s3-upload-1")
+
+        assert parts == [(1, '"a"')]
+
+    async def test_an_unknown_upload_raises_not_found(self):
+        """Distinct from "the upload exists and is empty" — the caller has to be
+        able to tell an expired/aborted upload from an unfinished one."""
+        client = MagicMock()
+        client.list_parts.side_effect = _ClientError("NoSuchUpload")
+        adapter = _make_adapter(client)
+
+        with pytest.raises(NotFound):
+            await adapter.list_parts("ws/1/raw.mov", "gone")
+
+    async def test_other_errors_are_storage_failures(self):
+        client = MagicMock()
+        client.list_parts.side_effect = _ClientError("AccessDenied")
+        adapter = _make_adapter(client)
+
+        with pytest.raises(StorageFailure):
+            await adapter.list_parts("ws/1/raw.mov", "s3-upload-1")
+
+    async def test_entries_missing_a_number_or_etag_are_skipped(self):
+        """A malformed entry must not become a `(None, ...)` in the manifest."""
+        client = MagicMock()
+        client.list_parts.return_value = {
+            "Parts": [
+                {"PartNumber": 1, "ETag": '"a"'},
+                {"PartNumber": 2},
+                {"ETag": '"c"'},
+            ],
+            "IsTruncated": False,
+        }
+        adapter = _make_adapter(client)
+
+        assert await adapter.list_parts("ws/1/raw.mov", "s3-upload-1") == [(1, '"a"')]

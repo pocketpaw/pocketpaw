@@ -1,5 +1,11 @@
 """Local-disk StorageAdapter backed by aiofiles.
 
+2026-09-14 (feat/uploads-multipart-endpoints): added ``list_parts``, the relay
+counterpart of S3's ListParts. Each part now also writes a ``<n>.etag`` sidecar
+when its bytes land, so the answer costs a few bytes per part instead of
+re-hashing the payload; a missing sidecar is hashed on the spot, so parts
+written by an older build still list correctly.
+
 2026-09-14 (feat/uploads-multipart-adapter): added the multipart relay. Local
 disk cannot presign, so parts are PUT to the API and land as ``<key>.part/<n>``;
 ``complete_multipart`` concatenates them in part order and fsyncs, ``abort``
@@ -221,17 +227,56 @@ class LocalStorageAdapter(StorageAdapter):
 
         target = part_dir / str(number)
         tmp = target.with_name(f"{number}.tmp")
+        etag = hashlib.md5(body, usedforsecurity=False).hexdigest()
         try:
             async with aiofiles.open(tmp, "wb") as fh:
                 await fh.write(body)
             await aiofiles.os.replace(str(tmp), str(target))
+            # Etag sidecar, written AFTER the part lands so it can never
+            # advertise bytes that are not there. One file per part rather than
+            # a field in the shared meta.json: parts arrive concurrently, and
+            # concurrent writers to one metadata file lose each other's entries.
+            # ``list_parts`` falls back to hashing the part when it is missing,
+            # so a crash between the two writes costs a re-read, not a part.
+            async with aiofiles.open(_etag_path(target), "w") as meta:
+                await meta.write(etag)
         except OSError as exc:
             try:
                 await aiofiles.os.remove(str(tmp))
             except FileNotFoundError:
                 pass
             raise StorageFailure(str(exc)) from exc
-        return hashlib.md5(body, usedforsecurity=False).hexdigest()
+        return etag
+
+    async def list_parts(self, key: str, upload_id: str) -> list[tuple[int, str]]:
+        """Every part on disk for this upload, ``(number, etag)``, sorted.
+
+        The relay counterpart of S3's ListParts. We computed each etag when the
+        bytes arrived, so this reads them back from the sidecars rather than
+        re-hashing megabytes; a part whose sidecar is missing (written by an
+        older build, or a crash between the two writes) is hashed on the spot
+        so the answer is still complete.
+        """
+        part_dir = self._part_dir(key)
+        self._read_meta(part_dir, upload_id)
+
+        parts: list[tuple[int, str]] = []
+        for entry in part_dir.iterdir():
+            if not entry.is_file() or not entry.name.isdigit():
+                continue
+            etag_file = _etag_path(entry)
+            try:
+                if etag_file.is_file():
+                    etag = etag_file.read_text().strip()
+                else:
+                    etag = await asyncio.to_thread(_hash_file, entry)
+            except OSError as exc:
+                raise StorageFailure(f"unreadable part {entry.name}: {exc}") from exc
+            if etag:
+                parts.append((int(entry.name), etag))
+
+        parts.sort(key=lambda p: p[0])
+        return parts
 
     async def complete_multipart(
         self, key: str, upload_id: str, parts: list[tuple[int, str]]
@@ -275,6 +320,29 @@ class LocalStorageAdapter(StorageAdapter):
         except (NotFound, StorageFailure):
             return
         shutil.rmtree(part_dir, ignore_errors=True)
+
+
+def _etag_path(part: Path) -> Path:
+    """Sidecar holding a part's etag. Never collides with a part file, which is
+    always a bare decimal number."""
+    return part.with_name(f"{part.name}.etag")
+
+
+def _hash_file(path: Path) -> str:
+    """The etag a part WOULD have had, recomputed from its bytes.
+
+    Only reached when the sidecar is missing. Streams rather than reading the
+    whole part, because this runs on the relay path where a part can be tens of
+    megabytes.
+    """
+    digest = hashlib.md5(usedforsecurity=False)
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(_CHUNK_SIZE)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _is_part_dir(entry: Path) -> bool:
