@@ -92,8 +92,8 @@
   {
     "label": "public objects go up without ACL=public-read, so every embedded image 403s for visitors while the URL still looks right",
     "file": "src/pocketpaw/uploads/s3.py",
-    "find": "            extra[\"ACL\"] = \"public-read\"",
-    "replace": "            extra[\"CacheControl\"] = \"public, max-age=31536000, immutable\"",
+    "find": "            \"ACL\": \"public-read\",",
+    "replace": "            \"CacheControl\": \"public, max-age=31536000, immutable\",",
     "tests": [
       "tests/uploads/test_s3_public_mode.py"
     ]
