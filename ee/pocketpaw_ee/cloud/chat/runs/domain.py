@@ -21,6 +21,16 @@ never see the client's model choice. ``None`` (the default / older clients) leav
 backend's own model selection untouched, byte-identical to today. It's a bare ``str``,
 so it survives the pickle round-trip like every other field.
 
+Changes: 2026-09-14 (fix/partial-reply-survives-failed-run) — added
+``StrandedReply``, the read-side projection of a reply that exists ONLY on a run
+document. A turn that failed or was cancelled mid-stream hands the text the model
+had already produced to ``mark_terminal(partial_text=...)`` and returns before
+``_persist_and_complete``, so no assistant ``Message`` is ever written — and
+``load_history_for_scope`` reads the ``Message`` collection and nothing else. The
+reply was stored and unreachable at the same time, and the next turn was answered
+cold. Beanie-free for the same reason ``RunActivityRow`` is: the history reader
+lives in ``chat.agent_service`` and must not import ``ChatRunDoc``.
+
 Changes: 2026-07-28 (HR-12a, feat/cockpit-agent-activity) — added
 ``RunActivityRow``, the read-side projection of a run. ``ChatRunDoc`` is owned by
 ``chat.runs.service`` (EE Rule 1: Beanie only from service.py), so a consumer
@@ -181,3 +191,25 @@ class RunActivityRow(BaseModel):
     created_at: datetime
     started_at: datetime | None = None
     ended_at: datetime | None = None
+
+
+class StrandedReply(BaseModel):
+    """Assistant text that a terminal run stored and no ``Message`` row carries.
+
+    The run document is the only copy, which is what makes this a REACHABILITY
+    projection rather than a recovery one — nothing has to be restored, only
+    read. ``status`` rides along because the history reader annotates the replay
+    with it: a reply the user deliberately stopped and one the provider killed
+    are both unfinished, and the model is told which.
+
+    ``text`` is the VERBATIM stored partial. Nothing is prepended or appended
+    here: the "this was cut off" marker is applied at read time by the history
+    shaping, so the wording can change without a migration and the UI can still
+    render the stored text truthfully.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    status: str
+    text: str
+    created_at: datetime

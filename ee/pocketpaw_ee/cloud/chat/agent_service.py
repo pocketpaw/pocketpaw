@@ -9,6 +9,23 @@ handles *what the agent sees*:
 * ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
   agent carries context across backend restarts and pool evictions.
 
+Changes: 2026-09-14 (fix/partial-reply-survives-failed-run) —
+``load_history_for_scope`` is no longer a read of the ``Message`` collection
+alone. ``execute_run`` writes an assistant ``Message`` from exactly one place
+(``_persist_and_complete``); the failed, cancelled and interrupted branches
+return before it and hand the text the model had ALREADY produced to
+``mark_terminal(partial_text=...)``. That is durable, and nothing read it back —
+so a turn that died mid-stream was erased from the agent's memory, the next turn
+was answered cold, and the user paid a second time for tokens already spent. The
+reader now folds those replies in through ``run_service.find_stranded_replies``
+and marks each one AT READ TIME with ``_STRANDED_REPLY_NOTE``: a truncated reply
+replayed as an ordinary completed turn is worse than absence, because the model
+reads its own half-finished sentence as a finished thought and builds on a claim
+it never made. The marker is a separate ``system`` entry, never concatenated into
+the content, so the stored text stays verbatim and the wording can change with no
+migration. Same shape as ``paw_bar.router._load_concierge_history``, which solved
+this for anonymous visitors in 2026-07 and which authed chat never inherited.
+
 Changes: 2026-09-08 (fix/attachment-only-turns) — added
 ``resolve_user_content`` / ``visible_message_text``: the model's copy of a turn
 that carried attachments and no typed text. The composer sends a zero-width
@@ -264,6 +281,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -2920,6 +2938,112 @@ async def _build_attachments_block(
 # History rehydration
 # ---------------------------------------------------------------------------
 
+# The read-time annotation on a reply that never finished. It is NOT stored:
+# ``ChatRunDoc.partial_text`` keeps the verbatim text the model produced and this
+# sentence is applied on the way into the prompt, so the UI can still render the
+# reply truthfully and this wording can be reworded without touching a document.
+#
+# It rides as its own ``system`` entry rather than being prepended to the
+# assistant content for the same reason: the assistant turn the model sees must
+# be exactly what the model said. Folding an editorial note into it teaches the
+# agent that its own turns contain bracketed stage directions.
+_STRANDED_REPLY_NOTE = (
+    "[System note: the assistant reply above was cut off mid-stream and is "
+    "incomplete (run status: {status}). Treat it as an unfinished fragment, not "
+    "as a completed answer — it may stop mid-sentence, and any action it says it "
+    "took may never have run. Do not build on it without re-checking.]"
+)
+
+
+def _sort_ordinal(value: Any) -> float:
+    """One comparable number for a row's ``createdAt``, whatever it actually is.
+
+    Merging two collections means sorting their timestamps against each other,
+    and the raw values are not reliably of one type. Mongo stores BSON datetimes
+    with no zone, so whether they arrive naive or tz-aware is a property of the
+    CLIENT, and sorting a list that mixes the two raises ``TypeError``. Reducing
+    to epoch seconds removes the question instead of betting that both reads
+    happen to have come back the same way — the cost of losing that bet is an
+    exception on the chat hot path, not a mis-ordered reply.
+
+    Non-datetimes fall through ``float()`` rather than being rejected: the
+    history tests stand fake Message classes up with a plain integer ordinal in
+    that field, and an ordinal is exactly what this function wants. Anything that
+    converts to neither — including a row with no such field at all — answers 0.0,
+    which is deliberately not an error: the caller's sort is STABLE, so a set of
+    rows that all answer 0.0 keeps the newest-first order the query already gave
+    them. A read whose documents carry no usable timestamp degrades to exactly
+    the behaviour this function replaced, rather than breaking.
+    """
+    if isinstance(value, datetime):
+        stamped = value.replace(tzinfo=UTC) if value.tzinfo is None else value
+        return stamped.timestamp()
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _message_entries(m: Any) -> list[dict[str, str]]:
+    """One persisted ``Message`` as history entries — exactly one, or none.
+
+    Lifted verbatim out of ``load_history_for_scope`` (the role fallback and the
+    empty-content skip are unchanged) so that a row from the ``Message``
+    collection and a row from the run collection can be windowed against each
+    other as peers before either is flattened into the output list.
+    """
+    role = getattr(m, "role", None)
+    if role not in ("user", "assistant", "system"):
+        role = "assistant" if getattr(m, "sender_type", "") == "agent" else "user"
+    content = getattr(m, "content", "") or ""
+    if not content:
+        return []
+    return [{"role": role, "content": content}]
+
+
+async def _stranded_reply_rows(
+    ctx: ScopeContext, *, limit: int
+) -> list[tuple[float, int, list[dict[str, str]]]]:
+    """The replies this scope stored on a run document and nowhere else.
+
+    Two entries per run, never one: the assistant's VERBATIM partial, then a
+    ``system`` line saying it was cut off. One entry would be strictly worse than
+    dropping the reply — "I've updated the config to" replayed as a completed
+    assistant turn is a claim the agent never made, and the model will build on
+    it. Two entries give it the text AND the fact that the text stops early.
+
+    The pair is one row so the window below can never separate them.
+
+    The ``1`` in each tuple is the tie-break rank. A run document is created
+    after the ``Message`` for the user turn that provoked it, but the two
+    timestamps can land in the same millisecond; ranking the run second means a
+    partial reply can never sort ahead of the question it was answering.
+    """
+    from pocketpaw_ee.cloud.chat.runs import service as run_service
+
+    replies = await run_service.find_stranded_replies(
+        workspace_id=ctx.workspace_id,
+        context_type=ctx.kind.value,
+        scope_id=ctx.scope_id,
+        agent_id=ctx.target_agent_id,
+        limit=limit,
+    )
+    return [
+        (
+            _sort_ordinal(reply.created_at),
+            1,
+            [
+                {"role": "assistant", "content": reply.text},
+                {
+                    "role": "system",
+                    "content": _STRANDED_REPLY_NOTE.format(status=reply.status),
+                },
+            ],
+        )
+        for reply in replies
+        if reply.text.strip()
+    ]
+
 
 def session_key_for(ctx: ScopeContext) -> str:
     """Stable session key for pocket- and session-scope agent runs.
@@ -2955,8 +3079,17 @@ async def load_history_for_scope(ctx: ScopeContext, *, limit: int = 50) -> list[
     would otherwise forget every prior message in the thread. Reading
     from the persisted ``Message`` collection restores context.
 
+    Two sources, one window. Most turns are ``Message`` rows; a turn that failed
+    or was cancelled mid-stream left its reply on the run document instead (see
+    ``_stranded_reply_rows``), and the two are merged by timestamp BEFORE the
+    window is taken, so a stranded reply lands between the turns it actually
+    happened between rather than being appended at one end.
+
     Swallows errors (empty list) so a transient Mongo hiccup degrades
-    the reply rather than killing the stream.
+    the reply rather than killing the stream. The second read has its OWN
+    failure boundary: losing a partial costs one answer's worth of context,
+    losing the ``Message`` read costs the whole conversation, so the two must
+    not fail together.
     """
     try:
         from pocketpaw_ee.cloud.models.message import Message
@@ -2997,18 +3130,34 @@ async def load_history_for_scope(ctx: ScopeContext, *, limit: int = 50) -> list[
         #
         # Same shape as memory/mongo_store.py:372-374, which had it right.
         recent = await Message.find(query).sort("-createdAt").limit(limit).to_list()
-        msgs = list(reversed(recent))
     except Exception:
         logger.exception("load_history_for_scope failed for %s/%s", ctx.kind.value, ctx.scope_id)
         return []
 
+    # One row per SOURCE document, not per output entry. Windowing on rows is
+    # what keeps a stranded reply and its "was cut off" note together, and what
+    # keeps the Message half byte-identical to before: a row whose content is
+    # empty still spends a slot and still contributes nothing.
+    rows: list[tuple[float, int, list[dict[str, str]]]] = [
+        (_sort_ordinal(getattr(m, "createdAt", None)), 0, _message_entries(m)) for m in recent
+    ]
+    try:
+        rows.extend(await _stranded_reply_rows(ctx, limit=limit))
+    except Exception:  # noqa: BLE001 — a missing partial degrades one answer
+        logger.warning(
+            "stranded-reply rehydration failed for %s/%s; answering without it",
+            ctx.kind.value,
+            ctx.scope_id,
+            exc_info=True,
+        )
+
+    # Newest-first to take the window, then back to oldest-first for the caller.
+    # Both halves matter and one of them has been wrong before: sorting ascending
+    # and then limiting returns the OLDEST ``limit``, which froze an agent's
+    # memory at turn 50 while the visible transcript kept growing.
+    rows.sort(key=lambda row: (row[0], row[1]), reverse=True)
+
     out: list[dict[str, str]] = []
-    for m in msgs:
-        role = getattr(m, "role", None)
-        if role not in ("user", "assistant", "system"):
-            role = "assistant" if getattr(m, "sender_type", "") == "agent" else "user"
-        content = getattr(m, "content", "") or ""
-        if not content:
-            continue
-        out.append({"role": role, "content": content})
+    for _instant, _rank, entries in reversed(rows[:limit]):
+        out.extend(entries)
     return out
