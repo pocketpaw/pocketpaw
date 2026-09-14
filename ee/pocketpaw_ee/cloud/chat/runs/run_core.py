@@ -1651,6 +1651,41 @@ async def _drive_agent_loop(
     )
     behavior_instructions = build_behavior_instructions(ctx, backend_name=backend_name)
 
+    # Uploaded files are INLINED, and the backend with file tools has to be
+    # told so as a RULE. ``_build_attachments_block`` already says it inside
+    # the ``<uploaded-files>`` block, but that block rides ``knowledge_context``
+    # — the channel ``build_behavior_instructions`` documents as the one that
+    # "reads as reference data and the model often ignores".
+    #
+    # ``pydantic_ai`` is dispatch-only, so the inlined text is the only copy it
+    # could read and it answers fine. ``claude_sdk`` grants Read/Glob/Grep/Bash
+    # and runs the CLI in a real ``cwd`` jail, so asked "what does the file I
+    # uploaded say?" it globbed an empty directory and replied that no file was
+    # provided — with the extracted text sitting in its own system prompt.
+    # ``resolve_user_content`` does not cover this turn either: it substitutes
+    # guidance only for an EMPTY message and passes typed text through
+    # byte-identically, and the turn that broke was typed.
+    #
+    # COST, ACCEPTED DELIBERATELY. ``instructions`` is a KEYED prompt layer, and
+    # ``_prewarm_session`` mirrors it to match turn 1's cache key. Prewarm runs
+    # before any message exists, so it cannot know about attachments, and an
+    # attachment turn therefore misses the prewarmed client and rebuilds the
+    # subprocess. That is bounded: this text is CONSTANT (it names no file), so
+    # a session settles into at most two keys — with and without attachments —
+    # not one per upload. One rebuild on the turn someone uploads a document is
+    # a better trade than that document being denied.
+    if attachments_in:
+        behavior_instructions = (
+            f"{behavior_instructions}\n\n[uploaded files]\n"
+            "The user attached file(s) to this turn. Their extracted text is "
+            "inlined in the <uploaded-files> block of your context and that is "
+            "the whole of what was uploaded. The files are not on the "
+            "filesystem and have no path in your working directory: do NOT use "
+            "Read, Glob, Grep or Bash to hunt for them, and do NOT reply that "
+            "no file was provided or that you cannot see it. Answer from the "
+            "inlined text."
+        )
+
     # Studio Flow build context — tell the agent WHICH flow project this
     # request belongs to so its build_studio_flow call carries the id the
     # /studio canvas owns (flow_context.flow_id threaded from the chat

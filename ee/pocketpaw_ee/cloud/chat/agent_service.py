@@ -2910,6 +2910,17 @@ async def _build_attachments_block(
         "The user attached the following file(s) to this turn. "
         "Their extracted contents are inlined below — treat them as part "
         "of the user's message, not as external reference.",
+        # THE BACKEND WITH FILE TOOLS NEEDS THE OTHER HALF OF THE CONTRACT.
+        # The line above settles how to WEIGH this text; it never said the
+        # files have no path. ``pydantic_ai`` is dispatch-only and cannot go
+        # looking, so it reads what is here. ``claude_sdk`` grants Read/Glob/
+        # Grep/Bash and runs in a real ``cwd`` jail, so asked about "the file
+        # I uploaded" it globbed an empty directory and told the user no file
+        # existed — with the extracted text in its own system prompt.
+        "The text above is the whole of what was uploaded. These files are "
+        "not on the filesystem and have no path in your working directory, "
+        "so do not use Read, Glob, Grep or Bash to look for them and do not "
+        "say that no file was provided.",
     ]
     lines.extend(entries)
     lines.append("</uploaded-files>")
