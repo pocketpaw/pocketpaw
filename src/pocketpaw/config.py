@@ -714,21 +714,27 @@ class Settings(BaseSettings):
         ),
     )
     agent_max_output_tokens: int = Field(
-        default=0,
+        default=-1,
         description=(
-            "Max output tokens an agent run may request. 0 (default) sends "
-            "8192, lowered to the model's documented ceiling when the pinned "
-            "litellm metadata knows it; a positive value replaces the 8192; a "
-            "negative value sends no cap at all. Sending nothing is not "
-            "neutral — OpenRouter prices its pre-flight credit check against "
-            "max_tokens and substitutes the model's own ceiling when none is "
-            "given, so a short reply is refused with a 402 over a reservation "
-            "nobody asked for. The metadata is a clamp rather than the source: "
-            "deepseek-v4-flash advertised 8192 and then 393216 on the same day, "
-            "and sending the larger number would have made that 402 six times "
-            "worse. Distinct from litellm_max_tokens, which only reaches the "
-            "plain-completion provider (chat titles and the like), never an "
-            "agent backend."
+            "Max output tokens an agent run may request. Negative (default) "
+            "sends no cap at all, leaving each provider to apply its own "
+            "per-model default; 0 sends 8192, lowered to the model's documented "
+            "ceiling when the pinned litellm metadata knows it; a positive value "
+            "replaces that 8192. Abstaining is the default because one number "
+            "cannot serve a gateway fronting 100+ models. What made the cap "
+            "per-model was a clamp reading litellm's PINNED metadata, and that "
+            "file trails new releases by design — so the newest models, the ones "
+            "most likely to need a different number, are precisely the ones it "
+            "cannot lower, and they all collapse onto the same flat 8192. A "
+            "provider's own default is per-model by construction and needs no "
+            "maintenance as the catalog grows. The cost is real and is why this "
+            "shipped capped: OpenRouter prices its pre-flight credit check "
+            "against max_tokens and substitutes the model's own ceiling when "
+            "none is given, refusing a short reply with a 402 over a reservation "
+            "nobody asked for. Set 8192, or any positive value, to take the cap "
+            "back on an OpenRouter-backed deployment. Distinct from "
+            "litellm_max_tokens, which only reaches the plain-completion "
+            "provider (chat titles and the like), never an agent backend."
         ),
     )
     pydantic_ai_max_turns: int = Field(
@@ -1303,6 +1309,22 @@ class Settings(BaseSettings):
             "forward_llm_provider_auth_headers on the proxy. Never set this on a "
             "pooled/shared backend — only on one built per-run via "
             "AgentRouter.create_isolated_backend."
+        ),
+    )
+    other_hand_require_byok: bool = Field(
+        default=False,
+        description=(
+            "Otherhand/kiosk only: a SIGNED-UP user must also bring their own "
+            "provider key, with no platform fallback. Guests are already "
+            "refused a keyless turn unconditionally (guest_key_required); this "
+            "extends the same rule to accounts on that ONE surface, for the "
+            "window between launching the kiosk and switching billing on. "
+            "Default False so every existing deploy is unchanged and the "
+            "rollout is one env var, reverted by removing it. Scoped to the "
+            "surface, never workspace-wide: the same deployment serves the full "
+            "Paw OS, where the platform fallback is the product. Refuses with "
+            "402 byok_key_required, a DISTINCT code from the guest one because "
+            "the fix is different — add a key, not create an account."
         ),
     )
     litellm_model: str = Field(

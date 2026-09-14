@@ -4,20 +4,138 @@
     "file": "src/pocketpaw/agents/pydantic_ai.py",
     "find": "        if raw == \"|\":\n            return \"none\"\n        return hashlib.sha256(raw.encode()).hexdigest()[:16]",
     "replace": "        return \"none\"",
-    "tests": ["tests/cloud/byok/test_byok_service.py::TestNoCredentialBleedBetweenTenants"]
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestNoCredentialBleedBetweenTenants"
+    ]
   },
   {
     "label": "x-api-key attached unconditionally — a platform run carries a stale BYOK header",
     "file": "src/pocketpaw/agents/pydantic_ai.py",
     "find": "headers = {\"x-api-key\": byok_key} if byok_key else None",
     "replace": "headers = {\"x-api-key\": byok_key}",
-    "tests": ["tests/cloud/byok/test_byok_service.py::TestTheHeaderThatCarriesTheKey"]
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestTheHeaderThatCarriesTheKey"
+    ]
   },
   {
     "label": "undecryptable stored key raises instead of degrading — every turn fails after a key rotation",
     "file": "ee/pocketpaw_ee/cloud/byok/service.py",
     "find": "        return TurnCredentials(source=\"platform\")\n\n    if not plaintext:",
     "replace": "        raise\n\n    if not plaintext:",
-    "tests": ["tests/cloud/byok/test_byok_service.py::TestEncryptionEnvelope"]
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestEncryptionEnvelope"
+    ]
+  },
+  {
+    "label": "gateway base_url skips the SSRF guard — a stranger points our server at cloud metadata",
+    "file": "ee/pocketpaw_ee/cloud/byok/dto.py",
+    "find": "        return validate_external_url_strict(v)",
+    "replace": "        return v",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestGatewayUrlIsAnSsrfBoundary"
+    ]
+  },
+  {
+    "label": "gateway override drops the model pin — the agent's claude-* name wins and every gateway turn 404s",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "            \"pydantic_ai_model\": creds.model or \"\",",
+    "replace": "",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestGatewayTurnIsPointedAtTheGateway"
+    ]
+  },
+  {
+    "label": "gateway shape check dropped — a key with no base_url is stored and every turn dead-ends",
+    "file": "ee/pocketpaw_ee/cloud/byok/dto.py",
+    "find": "            if not self.base_url:\n                raise ValueError(\"a gateway key needs a base_url, e.g. https://host/v1\")",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestGatewayRequestValidation"
+    ]
+  },
+  {
+    "label": "gateway URL is shape-checked but never RESOLVED — 10-0-0-5.nip.io reaches our private network, unauthenticated",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "        return await assert_egress_allowed(base, {host}, allow_internal=False)",
+    "replace": "        from pocketpaw.security.url_validators import EgressTarget\n\n        return EgressTarget(url=base, host=host, port=443, pinned_ip=host)",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestAHostnameThatResolvesInsideIsRejected",
+      "tests/cloud/auth/test_guest.py::TestMintGuest::test_a_gateway_address_that_resolves_INSIDE_mints_nothing"
+    ]
+  },
+  {
+    "label": "egress guard inherits POCKETPAW_ALLOW_INTERNAL_URLS — an operator's localhost-connector flag reopens the guest SSRF",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "        return await assert_egress_allowed(base, {host}, allow_internal=False)",
+    "replace": "        return await assert_egress_allowed(base, {host})",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestAHostnameThatResolvesInsideIsRejected",
+      "tests/cloud/auth/test_guest.py::TestMintGuest::test_a_gateway_address_that_resolves_INSIDE_mints_nothing"
+    ]
+  },
+  {
+    "label": "turn path trusts the stored URL — a row whose DNS moved inside is dialed on every turn",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "        base_url = (await assert_gateway_egress(base_url or \"\")).url",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestTheTurnPathReGuardsTheStoredUrl"
+    ]
+  },
+  {
+    "label": "a rejected gateway address degrades to platform credentials — the tenant's bad config spends OUR money every turn",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "        base_url = (await assert_gateway_egress(base_url or \"\")).url",
+    "replace": "        try:\n            base_url = (await assert_gateway_egress(base_url or \"\")).url\n        except GatewayEgressRejected:\n            return TurnCredentials(source=\"platform\")",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestTheTurnPathReGuardsTheStoredUrl::test_it_refuses_rather_than_degrading_to_platform_credentials"
+    ]
+  },
+  {
+    "label": "the validation request is unpinned — DNS is resolved a second time at connect and a rebinding host answers from inside",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "        transport=PinnedTransport(target.pinned_ip),",
+    "replace": "",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestAHostnameThatResolvesInsideIsRejected::test_the_request_is_pinned_and_does_not_follow_redirects"
+    ]
+  },
+  {
+    "label": "the guest mint stores the raw URL, not the one that passed the guard",
+    "file": "ee/pocketpaw_ee/cloud/auth/guest.py",
+    "find": "    if canonical_base_url:\n        base_url = canonical_base_url",
+    "replace": "    canonical_base_url = None",
+    "tests": [
+      "tests/cloud/auth/test_guest.py::TestMintGuest::test_a_gateway_mint_stores_the_url_that_passed_the_guard"
+    ]
+  },
+  {
+    "label": "the validator stops handing back the canonical URL — every caller silently stores its own input again",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "            \"The gateway did not respond. Your key was not saved — try again shortly.\",\n        )\n    return base",
+    "replace": "            \"The gateway did not respond. Your key was not saved — try again shortly.\",\n        )\n    return None",
+    "tests": [
+      "tests/cloud/byok/test_byok_service.py::TestAHostnameThatResolvesInsideIsRejected::test_validate_key_returns_the_canonical_url_callers_must_store",
+      "tests/cloud/auth/test_guest.py::TestMintGuest::test_a_gateway_mint_stores_the_url_that_passed_the_guard"
+    ]
+  },
+  {
+    "label": "mint drops the gateway kwargs — an xpl_ key is validated against Anthropic and reads as a bad key",
+    "file": "ee/pocketpaw_ee/cloud/auth/guest.py",
+    "find": "    canonical_base_url = await byok_service.validate_key(\n        api_key, provider=provider, base_url=base_url, model=model\n    )",
+    "replace": "    canonical_base_url = await byok_service.validate_key(api_key)",
+    "tests": [
+      "tests/cloud/auth/test_guest.py::TestMintGuest"
+    ]
+  },
+  {
+    "label": "the typed egress catch is removed — the broad handler degrades every rejected gateway turn onto the platform's bill",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        except byok_service.GatewayEgressRejected as exc:\n            # The stored gateway address no longer passes the egress guard —\n            # it resolves somewhere this server must not dial (2026-09-11,\n            # review B2). Caught BEFORE the broad handler below on purpose:\n            # that one degrades to platform credentials, which here would run\n            # the tenant's turn on OUR key every time their address is bad.\n            # Refuse the turn and say why; the user fixes the address.\n            logger.warning(\n                \"byok: gateway address rejected by the egress guard for workspace=%s — \"\n                \"refusing the turn\",\n                ctx.workspace_id,\n            )\n            yield (\n                \"error\",\n                {\"code\": \"byok.base_url_rejected\", \"message\": exc.message},\n            )\n            return\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_run_core_byok_wiring.py::test_a_rejected_gateway_address_refuses_the_turn",
+      "tests/cloud/runs/test_run_core_byok_wiring.py::test_a_rejected_gateway_address_does_not_fall_back_to_platform"
+    ]
   }
 ]

@@ -109,6 +109,43 @@ SITES_REFINE_HISTORY_TURNS = 2
 _SITES_REFINE_HISTORY_ROWS = 2 * SITES_REFINE_HISTORY_TURNS
 
 
+async def _assert_own_key_if_kiosk_requires_it(ctx: Any) -> None:
+    """Raise ``ByokKeyRequired`` when the kiosk needs a key this account lacks.
+
+    A CHECK, never a spend, and a convenience rather than a control: the
+    surface it reads was resolved from a client-supplied hint, so omitting the
+    hint skips it. ``run_core._requires_own_key`` is the gate that decides,
+    from the server-side context, and it runs on every path into the executor.
+
+    Guests are left alone here: ``assert_guest_turn_allowed`` above already
+    refused a keyless guest with their own code, and answering them twice with
+    two different codes would make the prompt flicker between "create an
+    account" and "add a key".
+
+    Shares ``kiosk_byok.requires_own_key`` with the executor as of 2026-09-13,
+    when the rule grew a plan term. Two copies were harmless while the rule was
+    flag-plus-surface; the moment it could differ, the seam that answers FIRST
+    would have refused a paying member the other was about to admit.
+    """
+    from pocketpaw_ee.cloud.chat import kiosk_byok
+
+    if not await kiosk_byok.requires_own_key(ctx):
+        return
+
+    from pocketpaw_ee.cloud.auth import guest_budget
+
+    if await guest_budget.load_guest(ctx.user_id) is not None:
+        return
+
+    from pocketpaw_ee.cloud.byok import service as byok_service
+
+    status = await byok_service.get_status(ctx.workspace_id)
+    if not getattr(status, "configured", False):
+        from pocketpaw_ee.cloud._core.errors import ByokKeyRequired
+
+        raise ByokKeyRequired()
+
+
 def _is_sites_refine_surface(surface_context: SurfaceContext | None) -> bool:
     """True only for the /sites EDIT/REFINE chat surface.
 
@@ -221,6 +258,19 @@ async def post_agent_chat(
 
     await assert_guest_turn_allowed(user_id, ctx.workspace_id)
 
+    # Workspace daily turn ceiling, CHECK-ONLY (feat/abuse-budgets). Same
+    # reason as the two fast-rejects above: without it a capped account still
+    # creates a run doc, opens a stream and sets a TTL on every send, and the
+    # per-IP limiter allows ten of those a second. Does NOT increment — the
+    # executor owns the single atomic spend — and fails OPEN, because the
+    # executor's gate is the one that has to be right.
+    from pocketpaw_ee.cloud.chat.runs import turn_budget
+
+    if await turn_budget.is_over_cap(ctx.workspace_id):
+        from pocketpaw_ee.cloud._core.errors import DailyTurnLimitError
+
+        raise DailyTurnLimitError(turn_budget.daily_cap())
+
     transport = get_stream_transport()
     # Resolve the surface-aware context preamble AFTER scope is resolved
     # (so we have ``workspace_id`` / ``user_id`` confirmed) and BEFORE any
@@ -236,6 +286,16 @@ async def post_agent_chat(
         user_id,
         {"surface": body.surface, "meta": body.surface_meta or {}},
     )
+
+    # Kiosk BYOK fast-reject (2026-09-12). UX ONLY — see the docstring.
+    #
+    # The browser gets a clean pre-stream 402 with the code the key prompt
+    # keys on, instead of a run doc whose first frame is an error. But the
+    # surface here comes from ``body.surface``, which the CLIENT sends, so a
+    # caller that simply omits it walks straight past this. The enforcement
+    # lives in the executor (``run_core._requires_own_key``), which reads the
+    # server-resolved context. Never move the gate here and delete that one.
+    await _assert_own_key_if_kiosk_requires_it(ctx)
 
     # Supersede any prior in-flight run for this scope. ``request_cancel``
     # writes the cancel flag in Redis so a worker in another process notices.
@@ -289,6 +349,9 @@ async def post_agent_chat(
         # the request body; ``None`` for every older client leaves model selection
         # to the backend.
         model_override=body.model,
+        # Per-send tool switch. ``None`` for every older client, which is the
+        # legacy path; only an explicit ``False`` changes anything.
+        tools_enabled=body.tools,
         # Studio Flow build context — ride the spec to the executor so the agent
         # knows the ACTIVE FLOW ID and ``build_studio_flow`` persists into the
         # flow project the user is on (``None`` on every non-studio surface).

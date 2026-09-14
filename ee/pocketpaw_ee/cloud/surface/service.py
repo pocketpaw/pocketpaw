@@ -472,8 +472,9 @@ async def resolve_surface_context(
     # invent for it.
     if isinstance(rendered, SurfacePreamble):
         preamble, cache_key = rendered.text, rendered.cache_key
+        images = rendered.images
     else:
-        preamble, cache_key = (rendered or ""), None
+        preamble, cache_key, images = (rendered or ""), None, ()
 
     return SurfaceContext(
         workspace_id=workspace_id,
@@ -482,6 +483,7 @@ async def resolve_surface_context(
         meta=meta,
         preamble=preamble or "",
         preamble_cache_key=cache_key,
+        preamble_images=images,
     )
 
 

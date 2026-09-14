@@ -2186,6 +2186,20 @@
     },
     {
       "gist": "",
+      "how": "a user invokes it as /sites-design-sources in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:sites-design-sources",
+      "keywords": [
+        "sites-design-sources"
+      ],
+      "kind": "skill",
+      "name": "sites-design-sources",
+      "narrative": "Named reference sources for GROUNDS, EFFECTS, SHADERS, MOTION and TYPE on a Paw Site, filtered to what this surface can physically build. Invoke when you are about to hand-write a background, a texture, a canvas shader, a CSS animation or a text effect and want a real technique behind it instead of a default gradient, or when the brief NAMES an effect (marquee, halo, gradient headline, dither, grain) and you want to build it WELL rather than reach for the first shape that comes to mind. Also the way out of the overused-font trap in `pocketpaw-design-taste` 2.F. Everything listed here is TEXT you author into the source map: CSS, inline SVG, or a GLSL string. Nothing here is installed and nothing here is downloaded, because this surface has neither a package manager nor a filesystem.",
+      "requires": [],
+      "summary": "Named reference sources for GROUNDS, EFFECTS, SHADERS, MOTION and TYPE on a Paw Site, filtered to what this surface can physically build.",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "a user invokes it as /sites-interface-review in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:sites-interface-review",
       "keywords": [

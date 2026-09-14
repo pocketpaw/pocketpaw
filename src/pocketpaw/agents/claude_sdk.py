@@ -354,6 +354,7 @@ Uses the official Claude Agent SDK (pip install claude-agent-sdk) which provides
 """
 
 import asyncio
+import base64
 import hashlib
 import logging
 import os
@@ -366,6 +367,7 @@ from pocketpaw.agents.backend import (
     BackendInfo,
     BaseAgentBackend,
     Capability,
+    ImageAttachment,
     LeasedClient,
     SessionHandle,
 )
@@ -745,6 +747,52 @@ def _mcp_result_text(content: object) -> str:
                     parts.append(_t)
         return "\n".join(parts)
     return ""
+
+
+def build_streaming_user_message(message: str, images: "tuple[ImageAttachment, ...]") -> dict:
+    """Build the SDK streaming-input message carrying ``images`` alongside the text.
+
+    Shape is the one the Agent SDK documents for streaming input mode:
+
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "text",  "text": ...},
+            {"type": "image", "source": {"type": "base64",
+                                         "media_type": ..., "data": ...}},
+        ]}}
+
+    STREAMING INPUT IS NOT OPTIONAL HERE. The SDK's single-message mode
+    explicitly does not support image attachments, so a turn carrying images has
+    to go down the persistent-client path; sending it as a plain string is how
+    an image silently becomes no image at all.
+
+    The text block comes FIRST. The API's vision guidance puts the image before
+    the question when there is one image and a question about it, but here the
+    text is the user's turn and the images are what they attached to it — and
+    with several images the model needs the framing before the pile.
+    """
+    content: list[dict] = [{"type": "text", "text": message}]
+    for img in images:
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.media_type,
+                    "data": base64.b64encode(img.data).decode("ascii"),
+                },
+            }
+        )
+    return {"type": "user", "message": {"role": "user", "content": content}}
+
+
+async def stream_one_message(payload: dict):
+    """Yield ``payload`` as the async iterable ``ClaudeSDKClient.query`` wants.
+
+    The SDK takes an async iterable for streaming input; a bare dict is not one,
+    and passing it raises rather than degrading — which is the behaviour we want
+    over silently dropping the images.
+    """
+    yield payload
 
 
 class ClaudeSDKBackend(BaseAgentBackend):
@@ -2078,6 +2126,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         session_handle: SessionHandle | None = None,
         model_override: str | None = None,
         exclusive_mcp_tools: bool = False,
+        tools_enabled: bool = True,
     ) -> _BuiltOptions:
         """Assemble the ``ClaudeAgentOptions`` a turn (or a prewarm) will run on.
 
@@ -2393,6 +2442,21 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # all passed explicitly below, so none of them depend on
         # setting sources. See
         # https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts
+        # Per-send tool switch (2026-09-11). ``tools`` is the BASE SET and
+        # ``allowed_tools`` only filters it, so emptying the allowlist is NOT
+        # how you turn tools off here — measured in the SDK's own CLI
+        # transport, which extends the command with ``--allowed-tools`` only
+        # ``if effective_allowed_tools:``. An empty list is therefore not
+        # "allow nothing", it is "say nothing", and the CLI falls back to its
+        # DEFAULT tool set. A switch built that way would read Off and change
+        # nothing, which is the exact defect this switch already shipped once.
+        #
+        # ``tools=[]`` is the lever: the transport turns it into ``--tools ""``.
+        # The allowlist is emptied too, because it is what the warm-client cache
+        # key is built from — without that a tools-off turn would be served the
+        # client built WITH tools, the one-slot problem again.
+        if not tools_enabled:
+            allowed_tools = []
         options_kwargs = {
             "system_prompt": system_prompt_arg,
             "allowed_tools": allowed_tools,
@@ -2401,6 +2465,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
             "cwd": str(resolved_cwd),
             "max_turns": self.settings.claude_sdk_max_turns or None,
         }
+        if not tools_enabled:
+            options_kwargs["tools"] = []
 
         # Load PocketPaw's bundled skills as a Claude Code *local plugin*.
         # ``setting_sources=[]`` above disables the SDK's ~/.claude/skills
@@ -2544,8 +2610,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
             resolved_cwd,
         )
 
-        # Wire in MCP servers (policy-filtered)
-        mcp_servers = self._get_mcp_servers()
+        # Wire in MCP servers (policy-filtered). Skipped entirely on a
+        # tools-off turn: an MCP server is a tool source, and registering one
+        # whose ids are not on the allowlist still pays its startup.
+        mcp_servers = {} if not tools_enabled else self._get_mcp_servers()
         if mcp_servers:
             options_kwargs["mcp_servers"] = mcp_servers
             logger.info("MCP: passing %d servers to Claude SDK", len(mcp_servers))
@@ -2719,6 +2787,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 allow_mcp_tool_ids=allow_mcp_tool_ids,
                 skill_names=skill_names,
                 exclusive_mcp_tools=exclusive_mcp_tools,
+                # No ``tools_enabled`` here on purpose: prewarm runs BEFORE the
+                # send, so the per-send switch does not exist yet. It builds the
+                # default (tools on), and a tools-off turn therefore has a
+                # different ``allowed_tools`` and so a different cache key, and
+                # pays a cold start. That is the right trade: the alternative is
+                # prewarming a client the common case would then evict.
                 stderr_sink=[],
             )
             # Remember the digest we may have adopted a dir under, so a failed
@@ -2911,6 +2985,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         model_override: str | None = None,
         exclusive_mcp_tools: bool = False,
         system_prompt_digest: str = "",
+        tools_enabled: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
@@ -3087,6 +3162,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 session_handle=session_handle,
                 model_override=model_override,
                 exclusive_mcp_tools=exclusive_mcp_tools,
+                tools_enabled=tools_enabled,
                 stderr_sink=_stderr_lines,
             )
             options = _built.options

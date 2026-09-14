@@ -1,0 +1,47 @@
+[
+  {
+    "label": "env floor is read at import — a container's env lands, a later change never does",
+    "file": "ee/pocketpaw_ee/cloud/auth/guest_budget.py",
+    "find": "    raw = os.environ.get(name)\n    if raw is None:\n        return stored",
+    "replace": "    raw = globals().setdefault(\"_FROZEN\", dict(os.environ)).get(name)\n    if raw is None:\n        return stored",
+    "tests": [
+      "tests/cloud/auth/test_guest_cap_env_floor.py::test_env_is_read_per_call_not_at_import"
+    ]
+  },
+  {
+    "label": "a 0 or negative env value is applied — 'unlimited' turns every guest turn OFF",
+    "file": "ee/pocketpaw_ee/cloud/auth/guest_budget.py",
+    "find": "    if floor <= 0:\n        logger.warning(\"%s=%r must be > 0; ignoring\", name, raw)\n        return stored\n    return max(stored, floor)",
+    "replace": "    return floor",
+    "tests": [
+      "tests/cloud/auth/test_guest_cap_env_floor.py::test_unusable_env_leaves_the_stored_cap"
+    ]
+  },
+  {
+    "label": "unparseable env raises instead of degrading — one typo 500s every guest turn",
+    "file": "ee/pocketpaw_ee/cloud/auth/guest_budget.py",
+    "find": "    except ValueError:\n        logger.warning(\"%s=%r is not an integer; ignoring\", name, raw)\n        return stored",
+    "replace": "    except ValueError:\n        raise",
+    "tests": [
+      "tests/cloud/auth/test_guest_cap_env_floor.py::test_unusable_env_leaves_the_stored_cap"
+    ]
+  },
+  {
+    "label": "the floor becomes a ceiling — env silently lowers a per-guest cap raised on the row",
+    "file": "ee/pocketpaw_ee/cloud/auth/guest_budget.py",
+    "find": "    return max(stored, floor)",
+    "replace": "    return floor",
+    "tests": [
+      "tests/cloud/auth/test_guest_cap_env_floor.py::test_env_never_lowers_a_raised_per_user_cap"
+    ]
+  },
+  {
+    "label": "limits_for ignores the env entirely — the dev knob is inert",
+    "file": "ee/pocketpaw_ee/cloud/auth/guest_budget.py",
+    "find": "    stored = user.guest_limits or DEFAULT_LIMITS\n    return GuestLimits(\n        sessions=_floor(SESSIONS_ENV, stored.sessions),\n        turns_per_day=_floor(TURNS_ENV, stored.turns_per_day),\n    )",
+    "replace": "    return user.guest_limits or DEFAULT_LIMITS",
+    "tests": [
+      "tests/cloud/auth/test_guest_cap_env_floor.py::test_env_raises_both_caps"
+    ]
+  }
+]

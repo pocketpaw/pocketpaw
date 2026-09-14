@@ -286,3 +286,120 @@ class TestGuestsCannotSpendPlatformMoneyOnPictures:
 
         res = await tool_mod._illustrate_handler({"subject": "a honeybee"})
         assert "account" in res["content"][0]["text"].lower(), res
+
+
+# ---------------------------------------------------------------------------
+# Added 2026-09-11 (feat/byok-image-key). A workspace may bring its OWN fal key,
+# and then it is spending its own money. Two things follow, and both are silent
+# when wrong:
+#
+#   * it must NOT claim the platform's daily ceiling. Charging it a quota as
+#     well as a bill is charging it twice, and nothing looks broken until the
+#     twentieth picture of the day stops for no visible reason;
+#   * a GUEST on their own key must be allowed. The guest refusal exists
+#     because a guest can mint a fresh workspace for a fresh ceiling — an
+#     argument about the platform's money that says nothing about someone
+#     spending their own.
+# ---------------------------------------------------------------------------
+
+
+class TestAWorkspaceOnItsOwnKey:
+    @pytest.fixture
+    def own_key(self, monkeypatch):
+        """The workspace has stored a fal key of its own."""
+        import pocketpaw_ee.cloud.byok.service as byok_service
+
+        async def _resolve(_workspace_id):
+            return "tenant-id:tenant-secret"
+
+        monkeypatch.setattr(byok_service, "resolve_image_key", _resolve)
+
+    @pytest.fixture
+    def budget_spy(self, monkeypatch):
+        from pocketpaw_ee.cloud.other_hand import illustration_budget
+
+        claimed: list[str | None] = []
+
+        async def _spend(workspace_id=None):
+            claimed.append(workspace_id)
+            return True, 1, 20
+
+        monkeypatch.setattr(illustration_budget, "try_spend", _spend)
+        return claimed
+
+    @pytest.mark.asyncio
+    async def test_the_route_does_not_claim_our_budget(self, monkeypatch, own_key, budget_spy):
+        from pocketpaw_ee.cloud.other_hand import router as oh_router
+
+        used: list[str] = []
+
+        async def _draw(*_a, **kw):
+            used.append(kw["api_key"])
+            return [{"t": "path", "d": "M0 0 L1 1"}]
+
+        monkeypatch.setattr(ill, "illustrate_as_ops", _draw)
+
+        body = oh_router.IllustrateRequest(prompt="a honeybee", x=0, y=0, w=600, h=600)
+        out = await oh_router.illustrate(body=body, workspace_id="ws-1")
+
+        assert out["ops"], "a workspace paying its own way should still draw"
+        assert used == ["tenant-id:tenant-secret"], "it drew on the wrong account"
+        assert budget_spy == [], "a self-funded workspace was charged our quota too"
+
+    @pytest.mark.asyncio
+    async def test_a_guest_on_their_own_key_may_draw(self, monkeypatch, own_key, budget_spy):
+        from pocketpaw_ee.cloud.auth import guest_budget
+        from pocketpaw_ee.cloud.other_hand import router as oh_router
+
+        async def _is_guest(_user_id):
+            return object()
+
+        monkeypatch.setattr(guest_budget, "load_guest", _is_guest)
+
+        async def _draw(*_a, **_k):
+            return [{"t": "path", "d": "M0 0 L1 1"}]
+
+        monkeypatch.setattr(ill, "illustrate_as_ops", _draw)
+
+        body = oh_router.IllustrateRequest(prompt="a honeybee", x=0, y=0, w=600, h=600)
+        out = await oh_router.illustrate(body=body, workspace_id="ws-g", user_id="u-guest")
+
+        assert out["ops"], "a guest on their own key was refused anyway"
+        assert budget_spy == []
+
+    @pytest.mark.asyncio
+    async def test_the_mcp_tool_does_not_claim_our_budget_either(
+        self, monkeypatch, own_key, budget_spy
+    ):
+        """The tool is the more natural way in — the agent draws when it judges
+        a picture helps — so a rule enforced only on the route is not enforced."""
+        from pocketpaw_ee.agent.mcp_servers import other_hand as tool
+
+        monkeypatch.setattr(tool, "_workspace_or_none", lambda: "ws-1")
+
+        async def _not_a_guest():
+            return None
+
+        monkeypatch.setattr(tool, "_guest_or_none", _not_a_guest)
+
+        used: list[str] = []
+
+        async def _draw(*_a, **kw):
+            used.append(kw["api_key"])
+            # The tool measures the drawing's bottom edge off ``pts``, so this
+            # stand-in carries the real op shape rather than the route's.
+            return [{"t": "path", "pts": [[0.0, 0.0], [1.0, 1.0]]}]
+
+        monkeypatch.setattr(ill, "illustrate_as_ops", _draw)
+
+        async def _push(*_a, **_k):
+            return None
+
+        import pocketpaw_ee.cloud.chat.agent_service as agent_service
+
+        monkeypatch.setattr(agent_service, "push_sse_event", _push, raising=False)
+
+        await tool._illustrate_handler({"subject": "a honeybee"})
+
+        assert used == ["tenant-id:tenant-secret"], "the tool drew on the wrong account"
+        assert budget_spy == [], "a self-funded workspace was charged our quota too"

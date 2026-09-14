@@ -195,6 +195,29 @@ class GuestUploadForbidden(CloudError):
         return base
 
 
+class ByokKeyRequired(CloudError):
+    """A signed-up kiosk turn found no usable BYOK key (402, ``byok_key_required``).
+
+    Added 2026-09-12 (feat/kiosk-require-byok). The account sibling of
+    ``GuestKeyRequired``, and deliberately a DIFFERENT code: a guest is told to
+    create an account, while someone who already has one must be told to add a
+    key. Reusing the guest code would show a logged-in user a "create an
+    account" prompt, which is the kind of dead end that reads as a broken
+    product rather than a missing setting.
+
+    Only ever raised on the Otherhand surface, and only while
+    ``other_hand_require_byok`` is on — the window between launching the kiosk
+    and switching billing on. Everywhere else the platform fallback stands.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            402,
+            "byok_key_required",
+            "Add your own API key in Settings to keep going.",
+        )
+
+
 class GuestKeyRequired(CloudError):
     """A guest turn found no usable BYOK key (402, ``guest_key_required``).
 
@@ -386,11 +409,73 @@ class StorageLimitError(CloudError):
     """
 
     def __init__(self, limit_bytes: int | None) -> None:
+        # Says what to DO, not only what happened. A cap with no way out reads
+        # as a broken upload; there are exactly two ways out and both belong in
+        # the sentence. "Storage limit: storage limit of 1 GB reached" was the
+        # old text, which managed to say the same thing twice and neither of
+        # them useful.
         if limit_bytes is None:  # pragma: no cover - uncapped plans never raise
-            label = "storage limit reached"
+            message = "Storage limit reached. Delete some files to free space."
         else:
-            label = f"storage limit of {_human_bytes(limit_bytes)} reached"
-        super().__init__(402, "billing.storage_limit", f"Storage limit: {label}")
+            message = (
+                f"You've used all {_human_bytes(limit_bytes)} of storage. "
+                "Delete some files, or upgrade for more room."
+            )
+        super().__init__(402, "billing.storage_limit", message)
+
+
+class WorkspaceLimitError(CloudError):
+    """Account already owns as many workspaces as it may (429).
+
+    An abuse ceiling, not a plan feature. Every per-workspace bound in the
+    product is keyed on the workspace, so an account that can mint workspaces
+    in a loop gets a fresh empty counter each time and is bounded by nothing.
+    Being INVITED to many workspaces is normal and unaffected — only owning is
+    counted, and deleting one frees a slot.
+    """
+
+    def __init__(self, cap: int) -> None:
+        super().__init__(
+            429,
+            "workspace.owned_limit",
+            f"You already own {cap} workspaces. Delete one to create another.",
+        )
+
+
+class DailyUploadLimitError(CloudError):
+    """Workspace hit its daily upload ceiling (429).
+
+    Distinct from ``StorageLimitError`` in both cause and cure. That one is a
+    PLAN cap, priced, cleared by upgrading, and only enforced when billing is
+    on. This is an ABUSE ceiling that is always on and clears at the next UTC
+    midnight, so the code is ``uploads.daily_limit`` and the status is 429
+    rather than 402 — nothing is for sale here, the answer is to wait.
+    """
+
+    def __init__(self, dimension: str) -> None:
+        label = {
+            "files": "too many files uploaded today",
+            "bytes": "too much uploaded today",
+            "workspace": "no workspace on this upload",
+        }.get(dimension, "daily upload limit reached")
+        super().__init__(429, "uploads.daily_limit", f"Daily upload limit: {label}")
+
+
+class DailyTurnLimitError(CloudError):
+    """Workspace hit its daily agent-run ceiling (429).
+
+    Sibling of ``DailyUploadLimitError`` on the RUN seam, and deliberately not
+    ``credits.quota_exceeded``: that one is the priced quota and is gated on
+    ``billing_enforced``, while this is always on and resets at the next UTC
+    midnight.
+    """
+
+    def __init__(self, cap: int) -> None:
+        super().__init__(
+            429,
+            "runs.daily_limit",
+            f"Daily limit of {cap} agent runs reached for this workspace",
+        )
 
 
 class InsufficientCredits(CloudError):
@@ -482,6 +567,7 @@ def with_cause(error: CloudError, cause: BaseException) -> CloudError:
 
 
 __all__ = [
+    "ByokKeyRequired",
     "GuestKeyRequired",
     "GuestLimitError",
     "GuestUploadForbidden",
@@ -500,7 +586,10 @@ __all__ = [
     "QuotaExceeded",
     "RateLimited",
     "SeatLimitError",
+    "DailyTurnLimitError",
+    "DailyUploadLimitError",
     "StorageLimitError",
+    "WorkspaceLimitError",
     "ValidationError",
     "with_cause",
 ]

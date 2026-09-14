@@ -1,5 +1,15 @@
 # URL validators for Settings fields — guards against SSRF via config.
 # Added: 2026-04-16 for security cluster E (#703).
+# Updated: 2026-09-11 (feat/byok-custom-gateway, review B1) —
+#   ``assert_egress_allowed`` takes a keyword-only ``allow_internal`` that
+#   overrides the ``POCKETPAW_ALLOW_INTERNAL_URLS`` read. ``None`` (default)
+#   keeps every existing caller byte-identical; ``False`` rejects internal
+#   resolved addresses unconditionally. The BYOK gateway base URL needs that:
+#   it is typed by a signed-out stranger through ``POST /auth/guest``, and an
+#   operator who turned the flag on for localhost connectors must not thereby
+#   reopen an unauthenticated SSRF. ``validate_external_url_strict`` already
+#   had no escape hatch for the same reason — this gives the resolving guard
+#   the same property when a caller asks for it.
 # Updated: 2026-05-21 (RFC 04 alpha) — added validate_external_url_strict():
 #   https-only, unconditionally blocks internal/loopback/RFC1918/link-local
 #   hosts (no POCKETPAW_ALLOW_INTERNAL_URLS escape hatch), rejects empty
@@ -289,7 +299,12 @@ def _resolve_ips(host: str) -> list[str]:
     return ips
 
 
-async def assert_egress_allowed(url: str, allowed_hosts: set[str] | frozenset[str]) -> EgressTarget:
+async def assert_egress_allowed(
+    url: str,
+    allowed_hosts: set[str] | frozenset[str],
+    *,
+    allow_internal: bool | None = None,
+) -> EgressTarget:
     """Validate an outbound URL against the egress policy and pin its IP.
 
     Enforces, in order:
@@ -305,6 +320,14 @@ async def assert_egress_allowed(url: str, allowed_hosts: set[str] | frozenset[st
       EXPLICITLY truthy (the dev escape for localhost connectors); when the flag
       is unset the guard rejects — default-closed, matching the EE
       ``_http_guard`` which rejects internal hosts unconditionally.
+
+    ``allow_internal`` overrides that last step. ``None`` (the default) reads
+    the env flag, i.e. every existing caller is unchanged. ``False`` rejects
+    internal addresses UNCONDITIONALLY, for boundaries where a URL arrives from
+    an untrusted caller rather than from an operator-authored connector — the
+    BYOK gateway address is one, and it is reachable from a signed-out stranger
+    through ``POST /auth/guest``, so an operator who set the flag for local
+    connectors must not also reopen that. ``True`` is the explicit dev escape.
 
     Returns an :class:`EgressTarget` carrying the single pinned IP. The caller
     MUST dial that IP via :class:`PinnedTransport` so the connection cannot be
@@ -338,9 +361,9 @@ async def assert_egress_allowed(url: str, allowed_hosts: set[str] | frozenset[st
     if not ips:
         raise EgressError(f"host '{host}' resolved to no addresses")
 
-    allow_internal = _egress_allow_internal()
+    permit_internal = _egress_allow_internal() if allow_internal is None else allow_internal
     for ip in ips:
-        if _ip_is_internal(ip) and not allow_internal:
+        if _ip_is_internal(ip) and not permit_internal:
             raise EgressError(f"host '{host}' resolves to an internal address")
 
     port = parts.port or (443 if parts.scheme == "https" else 80)
