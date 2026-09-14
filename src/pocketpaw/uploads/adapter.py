@@ -1,5 +1,17 @@
 """StorageAdapter protocol — the swap point for local, S3, etc.
 
+Updated 2026-09-14 (feat/uploads-multipart-adapter): added the six-method
+multipart surface — ``create_multipart``, ``sign_part``, ``put_part``,
+``complete_multipart``, ``abort_multipart``, ``supports_presigned_parts``. Every
+other write path here is one call carrying the whole object, which is what
+breaks on a 2 GB file: ``put`` buffers the entire body before a byte is stored,
+so the failure lands after the transfer and a dropped connection costs all of it.
+
+Two shapes behind one surface. An adapter that can presign part URLs says so and
+the bytes go browser→bucket, never through us; one that cannot (local disk)
+relays them through ``put_part``. ``supports_presigned_parts`` is what callers
+branch on, which is why it defaults instead of raising.
+
 Updated 2026-08-31 (feat/sites-public-asset-uploads): added ``public_url``. Every
 other read path here is *time-limited* (``presigned_get``) or *auth-gated* (the
 caller streams via ``open`` behind its own permission check). Neither can back an
@@ -133,3 +145,66 @@ class StorageAdapter(Protocol):
         rename files and directories.
         """
         raise NotImplementedError("rename_key not supported by this adapter")
+
+    # --- Multipart / resumable uploads -------------------------------------
+    #
+    # Five of the six raise by default rather than degrade to a single-shot
+    # ``put``: a half-implemented adapter should fail at the first call, not
+    # land a 5 GB upload as an empty object.
+
+    def supports_presigned_parts(self) -> bool:
+        """Whether this adapter can presign a single part URL.
+
+        Defaults ``False`` rather than raising, unlike its five siblings —
+        every caller asks this *before* it knows the rest exists, and the relay
+        path is a true answer for any adapter.
+        """
+        return False
+
+    async def create_multipart(self, key: str, mime: str) -> str:
+        """Open a multipart upload for ``key``. Returns the provider's upload id.
+
+        The caller stores that id and hands it back on every later call.
+        ``mime`` is recorded here because that is when S3 wants it — a
+        ``ContentType`` at complete time is ignored and the object is served
+        as ``application/octet-stream`` forever.
+        """
+        raise NotImplementedError("create_multipart not supported by this adapter")
+
+    async def sign_part(self, key: str, upload_id: str, part_number: int, ttl: int) -> str | None:
+        """Presigned URL for PUTting one part. ``None`` when unsupported.
+
+        Same ``None`` contract as :meth:`presigned_get` — check
+        :meth:`supports_presigned_parts` rather than reading it as an error.
+        ``ttl`` is seconds, and must outlive the slowest connection using it.
+        """
+        raise NotImplementedError("sign_part not supported by this adapter")
+
+    async def put_part(self, key: str, upload_id: str, part_number: int, body: bytes) -> str:
+        """Store one part (the relay path). Returns its etag.
+
+        ``body`` is bytes, not a stream: the caller has already bounded it at
+        ``part_size``. Part numbers are 1-based and may arrive out of order.
+        The etag is opaque — round-trip it back at complete time.
+        """
+        raise NotImplementedError("put_part not supported by this adapter")
+
+    async def complete_multipart(
+        self, key: str, upload_id: str, parts: list[tuple[int, str]]
+    ) -> StoredObject:
+        """Assemble the parts into the object at ``key``.
+
+        ``parts`` is ``(part_number, etag)`` in any order — implementations
+        sort, since a caller collecting from parallel workers has no reason to
+        have kept the ordering. The returned ``size``/``mime`` are what storage
+        reports, so they are what belongs on the caller's metadata row.
+        """
+        raise NotImplementedError("complete_multipart not supported by this adapter")
+
+    async def abort_multipart(self, key: str, upload_id: str) -> None:
+        """Discard an in-progress upload and its parts.
+
+        Idempotent like :meth:`delete` — this runs on cancel and cleanup paths
+        where raising on "already gone" turns recovery into a second failure.
+        """
+        raise NotImplementedError("abort_multipart not supported by this adapter")

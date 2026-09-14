@@ -1,4 +1,10 @@
-"""Error hierarchy for the upload adapter."""
+"""Error hierarchy for the upload adapter.
+
+2026-09-14 (feat/uploads-multipart-adapter): added ``InvalidPart``. Multipart
+is the first adapter path taking a caller-supplied *number*, and on the relay
+path that number becomes a filename — so a bad one needs a catchable error, not
+a bare ``ValueError``. Its ``code`` is the contract's wire code.
+"""
 
 from __future__ import annotations
 
@@ -35,6 +41,18 @@ class AccessDenied(UploadError):
     code = "access_denied"
 
     def __init__(self, message: str = "access denied") -> None:
+        super().__init__(message)
+
+
+class InvalidPart(UploadError):
+    """Part number outside 1..10000, or not a plain int.
+
+    Refused before it can become a path segment on the relay path.
+    """
+
+    code = "multipart.invalid"
+
+    def __init__(self, message: str = "invalid part number") -> None:
         super().__init__(message)
 
 

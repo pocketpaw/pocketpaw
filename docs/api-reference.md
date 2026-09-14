@@ -1334,6 +1334,38 @@ Source: `src/pocketpaw/uploads/config.py`,
 `src/pocketpaw/uploads/service.py::UploadService._upload_one` (the single gate
 every upload path goes through, OSS and cloud alike).
 
+### Large files — multipart settings
+
+`POCKETPAW_UPLOAD_MAX_BYTES` above governs the single-request `POST /uploads`
+path and nothing else. Files past that size go through the storage adapter's
+multipart surface, which has its own ceiling because its bytes never arrive as
+one request body: in presigned mode they go browser→bucket and never reach the
+API at all, and in relay mode each request carries one part.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `POCKETPAW_MAX_LARGE_FILE_BYTES` | `5368709120` (5 GiB) | Per-file ceiling on the multipart path. Deliberately separate from `POCKETPAW_UPLOAD_MAX_BYTES` — raising *that* would raise the global ASGI request-body guard with it. |
+| `POCKETPAW_MULTIPART_PART_BYTES` | `8388608` (8 MiB) | Baseline part size. Scaled up (and rounded to a whole MiB) for files that would otherwise need more than S3's 10000 parts. Must stay at or above S3's 5 MiB per-part floor. |
+| `POCKETPAW_MULTIPART_TTL_HOURS` | `168` (7 days) | How long an incomplete upload stays resumable. Matches the bucket lifecycle rule that expires abandoned parts. |
+
+A malformed or non-positive value warns and falls back to the default rather
+than reading as "unlimited".
+
+As of this PR the adapter layer implements this surface; the HTTP endpoints that
+drive it land separately. `S3StorageAdapter` uploads parts natively and can
+presign them, so the browser PUTs straight to the bucket.
+`LocalStorageAdapter` cannot presign, so it relays: parts land as
+`<key>.part/<n>` and are concatenated in part order on completion.
+
+Abandoned S3 parts are billed but never appear in `list_objects`, so
+`S3StorageAdapter.ensure_multipart_lifecycle()` installs a bucket rule expiring
+incomplete uploads after 7 days. It returns `False` (logged, not raised) on a
+bucket it lacks permission to configure, or an S3-compatible endpoint with no
+lifecycle API.
+
+Source: `src/pocketpaw/uploads/adapter.py` (the protocol),
+`src/pocketpaw/uploads/s3.py`, `src/pocketpaw/uploads/local.py`.
+
 ## Files — Content Search
 
 `POST /files/search` answers "which of my files says this?" — as distinct from
