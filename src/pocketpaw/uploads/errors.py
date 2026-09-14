@@ -58,3 +58,30 @@ class InvalidPart(UploadError):
 
 class StorageFailure(UploadError):
     code = "storage_error"
+
+
+class ObjectNotDescribed(StorageFailure):
+    """The write SUCCEEDED and the follow-up describe did not.
+
+    Raised by ``complete_multipart`` when the object assembled fine but the HEAD
+    that reads back its size and content type failed. S3 forces this seam:
+    ``complete_multipart_upload`` returns neither ``ContentLength`` nor
+    ``ContentType``, so a separate HEAD is the only honest source for them, and
+    that HEAD can fail on its own (a permissions gap, a blip) long after the
+    bytes are safely stored.
+
+    A distinct TYPE rather than a distinguishable message, because of what the
+    caller does with the answer. Told this, it keeps the object and fills the
+    size and mime from its own records. Told a plain ``StorageFailure``, it must
+    assume nothing was written. Get that backwards in one direction and a
+    successful multi-gigabyte upload is reported as failed, with the retry
+    404ing on an upload id storage has already consumed; backwards in the other
+    and a library row is written for an object that does not exist. Deciding
+    that on a substring of an error message was a footgun waiting for the first
+    person to reword the message.
+
+    Subclasses ``StorageFailure`` so a caller that does not know about this case
+    keeps the old, safe behaviour: it sees a storage failure and refuses.
+    """
+
+    code = "storage.not_described"

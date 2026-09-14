@@ -46,7 +46,7 @@ from pathlib import Path
 
 from pocketpaw.uploads.adapter import StorageAdapter, StorageItem, StoredObject
 from pocketpaw.uploads.config import validate_part_number
-from pocketpaw.uploads.errors import NotFound, StorageFailure
+from pocketpaw.uploads.errors import NotFound, ObjectNotDescribed, StorageFailure
 
 logger = logging.getLogger(__name__)
 
@@ -512,8 +512,10 @@ class S3StorageAdapter(StorageAdapter):
         returns neither ``ContentLength`` nor ``ContentType``, and ``parts``
         carries only numbers and etags, so there is no other honest source for
         the ``StoredObject``. A HEAD that fails after a successful complete
-        raises — the object exists but we cannot describe it, and writing a
-        metadata row with ``size=0`` would be worse than surfacing it.
+        raises ``ObjectNotDescribed`` — a ``StorageFailure`` subclass meaning
+        "the bytes are stored, the description is not available". Writing a
+        metadata row with ``size=0`` would be worse than surfacing that, and a
+        caller that recognises the type can supply the size itself.
         """
         ordered = sorted(((validate_part_number(n), etag) for n, etag in parts), key=lambda p: p[0])
         if not ordered:
@@ -537,7 +539,10 @@ class S3StorageAdapter(StorageAdapter):
         try:
             head = await asyncio.to_thread(self._client.head_object, Bucket=self._bucket, Key=key)
         except Exception as exc:
-            raise StorageFailure(f"head_object after complete failed: {exc}") from exc
+            # The object IS there — only the description failed. A distinct type
+            # so the caller can keep the upload and fill size/mime from its own
+            # records, instead of reporting a successful transfer as failed.
+            raise ObjectNotDescribed(f"head_object after complete failed: {exc}") from exc
 
         return StoredObject(
             key=key,

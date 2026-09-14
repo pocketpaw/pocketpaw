@@ -174,8 +174,8 @@
   {
     "label": "recovery: surface the post-complete HEAD failure as a 500 for an upload that worked",
     "file": "ee/pocketpaw_ee/cloud/uploads/multipart_service.py",
-    "find": "            if _HEAD_FAILURE_MARKER not in str(exc):\n                raise\n            size = _size_from_session(doc)",
-    "replace": "            raise\n            size = _size_from_session(doc)",
+    "find": "        except ObjectNotDescribed as exc:\n            size = _size_from_session(doc)",
+    "replace": "        except ObjectNotDescribed as exc:\n            raise\n            size = _size_from_session(doc)",
     "tests": [
       "tests/cloud/uploads/test_multipart.py"
     ]

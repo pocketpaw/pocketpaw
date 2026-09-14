@@ -34,7 +34,7 @@ from fastapi.testclient import TestClient
 from pocketpaw.uploads.adapter import StoredObject
 from pocketpaw.uploads.config import UploadSettings
 from pocketpaw.uploads.errors import NotFound as UploadNotFound
-from pocketpaw.uploads.errors import StorageFailure
+from pocketpaw.uploads.errors import ObjectNotDescribed
 
 MIB = 1024 * 1024
 WS = "w1"
@@ -101,8 +101,8 @@ class FakeAdapter:
         stored = self.parts.get((key, upload_id), {})
         self.objects[key] = b"".join(stored[n] for n in sorted(stored))
         if self.fail_head_after_complete:
-            # Byte-for-byte the shape S3StorageAdapter raises.
-            raise StorageFailure("head_object after complete failed: 403")
+            # The type S3StorageAdapter raises for "stored, but not describable".
+            raise ObjectNotDescribed("head_object after complete failed: 403")
         size = self.report_size if self.report_size is not None else len(self.objects[key])
         return StoredObject(key=key, size=size, mime="video/quicktime")
 
@@ -776,6 +776,25 @@ def test_status_reports_what_arrived_and_re_mints_only_the_gaps(relay):
     assert body["part_count"] == 3
 
 
+def test_status_sees_presigned_parts_the_service_never_handled(presigned):
+    """The resume case on a real deploy.
+
+    In presigned mode parts go browser→bucket, so the session document records
+    none of them. Reading ``received`` from the session would report an empty
+    list and send a client that had uploaded most of a 5 GB file back to zero.
+    """
+    client, adapter, _ = presigned
+    body = _init(client, size=24 * MIB).json()
+    upload_id, key = body["upload_id"], body["key"]
+    provider_id = next(uid for k, uid in adapter.parts if k == key)
+    adapter.seed_part(key, provider_id, 1, b"a" * (8 * MIB))
+    adapter.seed_part(key, provider_id, 3, b"c" * (8 * MIB))
+
+    status = client.get(f"/api/v1/uploads/multipart/{upload_id}").json()
+    assert status["received"] == [1, 3]
+    assert [p["part_number"] for p in status["parts"]] == [2]
+
+
 def test_a_re_put_part_replaces_rather_than_duplicates(relay):
     """A retried part must not send storage two entries for one number."""
     client, _adapter, _ = relay
@@ -851,27 +870,28 @@ async def test_a_failed_head_after_complete_recovers_rather_than_500ing(relay):
     assert r.json()["mime"] == "video/quicktime"
 
 
-def test_the_head_failure_marker_still_matches_the_real_s3_adapter():
-    """Guard the string coupling to ``S3StorageAdapter.complete_multipart``.
+def test_a_real_storage_failure_is_not_recovered(relay):
+    """Only ``ObjectNotDescribed`` is recoverable.
 
-    The service tells "completed but undescribable" from "completion failed" by
-    matching a substring of the adapter's message, because that is the only
-    signal the adapter surface gives. That is fragile, so it is pinned: a
-    reworded adapter fails this test instead of silently turning every
-    recoverable HEAD failure back into a 500.
+    Its parent ``StorageFailure`` means nothing landed, and treating that as
+    recoverable would write a library row for an object that does not exist.
+    Selected by TYPE rather than by matching the message — that decision is
+    worth a phantom row, which is too much to hang on a log line's wording.
+
+    Mutation that breaks this: catch ``StorageFailure`` instead.
     """
-    import inspect
+    from pocketpaw.uploads.errors import StorageFailure
 
-    from pocketpaw_ee.cloud.uploads.multipart_service import _HEAD_FAILURE_MARKER
+    client, adapter, _ = relay
+    upload_id = _upload_one_part(client, declared=16, body=b"0123456789abcdef")
 
-    from pocketpaw.uploads.s3 import S3StorageAdapter
+    async def _fail(key, provider_id, parts):
+        raise StorageFailure("complete_multipart_upload failed: boom")
 
-    source = inspect.getsource(S3StorageAdapter.complete_multipart)
-    assert _HEAD_FAILURE_MARKER in source, (
-        "S3StorageAdapter.complete_multipart no longer raises a message containing "
-        f"{_HEAD_FAILURE_MARKER!r} — multipart_service can no longer tell a "
-        "recoverable HEAD failure from a real completion failure"
-    )
+    adapter.complete_multipart = _fail
+
+    with pytest.raises(StorageFailure):
+        _complete(client, upload_id)
 
 
 @pytest.mark.parametrize(

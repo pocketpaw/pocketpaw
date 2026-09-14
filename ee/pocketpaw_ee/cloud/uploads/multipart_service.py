@@ -45,14 +45,13 @@ which is why no CORS change accompanies this. ``_resolve_parts`` has the detail.
 
 **The head_object recovery.** ``S3StorageAdapter.complete_multipart`` HEADs the
 object after completing, because ``complete_multipart_upload`` returns neither
-``ContentLength`` nor ``ContentType``, and it raises ``StorageFailure`` when
-that HEAD fails. That is the nastiest state in this file: the object completed
-fine and cannot be described. Surfacing it as a 500 would tell the user a
-successful 5 GB upload failed, and a retry would 404 on the already-consumed
-upload id — the upload would be unrecoverable despite having worked. So that one
-failure is caught and the size/mime are recovered from this session's own
-document instead. See ``_HEAD_FAILURE_MARKER`` for how it is identified and what
-guards the coupling.
+``ContentLength`` nor ``ContentType``. That HEAD can fail on its own, which is
+the nastiest state in this file: the object completed fine and cannot be
+described. Surfacing it as a 500 would tell the user a successful 5 GB upload
+failed, and a retry would 404 on the already-consumed upload id — the upload
+would be unrecoverable despite having worked. The adapter reports it as
+``ObjectNotDescribed``, a ``StorageFailure`` subclass, and this file catches
+that TYPE and recovers the size and mime from the session document.
 """
 
 from __future__ import annotations
@@ -76,7 +75,7 @@ from pocketpaw.uploads.config import (
     part_size_for,
     validate_part_number,
 )
-from pocketpaw.uploads.errors import InvalidPart, StorageFailure
+from pocketpaw.uploads.errors import InvalidPart, ObjectNotDescribed
 from pocketpaw.uploads.errors import NotFound as UploadNotFound
 from pocketpaw.uploads.file_store import FileRecord
 from pocketpaw.uploads.keys import new_storage_key
@@ -112,20 +111,6 @@ MAX_PARTS_PER_RESPONSE = 256
 #: 8 MiB at 100 kbit/s is ~11 minutes — and short enough that a URL leaked from
 #: a client log is not a write capability for the rest of the day.
 PART_URL_TTL_SECONDS = 3600
-
-#: Substring identifying the one ``StorageFailure`` from
-#: ``S3StorageAdapter.complete_multipart`` that means "the object completed and
-#: then could not be described", as opposed to "the completion itself failed".
-#: The two are unrelated outcomes reported through one exception type, and this
-#: string is the only signal PR1's adapter surface gives to tell them apart.
-#:
-#: Matching on a message is fragile, which is why it is not left to review:
-#: ``tests/cloud/uploads/test_multipart_complete.py`` asserts the real
-#: ``S3StorageAdapter`` still produces a message containing this marker, so a
-#: reworded adapter breaks a test here instead of silently turning every
-#: recoverable HEAD failure back into a 500. A dedicated exception subclass on
-#: the adapter would be better and belongs in a PR1 follow-up.
-_HEAD_FAILURE_MARKER = "head_object after complete"
 
 
 @dataclass(frozen=True)
@@ -313,6 +298,19 @@ class EEMultipartService:
 
     # -- status / resume ----------------------------------------------------
 
+    async def _received_parts(self, doc) -> list[int]:
+        """Part numbers storage actually holds.
+
+        ``doc.parts`` only records parts that arrived through the relay route,
+        so on a presigned deploy it is always empty and a resuming client would
+        re-upload the whole file. Storage is the only source that knows.
+        """
+        try:
+            provider_parts = await self._adapter.list_parts(doc.storage_key, doc.provider_upload_id)
+        except UploadNotFound as exc:
+            raise NotFound("multipart", doc.upload_id) from exc
+        return sorted({n for n, _ in provider_parts if 1 <= n <= doc.part_count})
+
     async def status(self, *, upload_id: str, workspace: str) -> dict:
         """What a client that reloaded mid-upload needs to carry on.
 
@@ -321,7 +319,7 @@ class EEMultipartService:
         having expired hours ago at init.
         """
         doc = await self._live_session(upload_id, workspace=workspace)
-        received = sorted(p.part_number for p in doc.parts)
+        received = await self._received_parts(doc)
         missing = [n for n in range(1, doc.part_count + 1) if n not in set(received)]
         return {
             "upload_id": doc.upload_id,
@@ -596,17 +594,21 @@ class EEMultipartService:
     ) -> StoredObject:
         """Complete at the provider, recovering from a post-complete HEAD failure.
 
-        See ``_HEAD_FAILURE_MARKER``. Everything else propagates: a genuine
-        completion failure must not be papered over with a plausible-looking
-        size, or we would write a library row for an object that does not exist.
+        ``ObjectNotDescribed`` is the ONE recoverable failure here: the object
+        assembled and only the read-back of its size and type failed. Every
+        other ``StorageFailure`` propagates, because papering over a genuine
+        completion failure with a plausible-looking size would write a library
+        row for an object that does not exist.
+
+        Caught by TYPE. This used to match a substring of the adapter's error
+        message, which put a decision worth a phantom library row at the mercy
+        of anyone rewording a log line.
         """
         try:
             return await self._adapter.complete_multipart(
                 doc.storage_key, doc.provider_upload_id, ordered
             )
-        except StorageFailure as exc:
-            if _HEAD_FAILURE_MARKER not in str(exc):
-                raise
+        except ObjectNotDescribed as exc:
             size = _size_from_session(doc)
             logger.warning(
                 "multipart upload %s completed but could not be described (%s); "

@@ -221,6 +221,13 @@ class StorageAdapter(Protocol):
         sort, since a caller collecting from parallel workers has no reason to
         have kept the ordering. The returned ``size``/``mime`` are what storage
         reports, so they are what belongs on the caller's metadata row.
+
+        May raise ``ObjectNotDescribed`` — a ``StorageFailure`` subclass meaning
+        the object assembled successfully and only the read-back of its size and
+        type failed. That is a recoverable outcome: the bytes are stored, and a
+        caller holding its own record of them should keep the upload rather than
+        report a completed transfer as failed. Any other ``StorageFailure``
+        means nothing landed.
         """
         raise NotImplementedError("complete_multipart not supported by this adapter")
 

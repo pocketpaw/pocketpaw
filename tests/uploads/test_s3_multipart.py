@@ -22,7 +22,12 @@ import pytest
 
 pytest.importorskip("boto3")
 
-from pocketpaw.uploads.errors import InvalidPart, NotFound, StorageFailure  # noqa: E402
+from pocketpaw.uploads.errors import (  # noqa: E402
+    InvalidPart,
+    NotFound,
+    ObjectNotDescribed,
+    StorageFailure,
+)
 from pocketpaw.uploads.s3 import S3StorageAdapter  # noqa: E402
 
 
@@ -242,15 +247,25 @@ class TestCompleteMultipart:
         with pytest.raises(StorageFailure, match="complete_multipart_upload failed"):
             await adapter.complete_multipart("k", "u", [(1, '"a"')])
 
-    async def test_head_failure_raises_rather_than_reporting_size_zero(self):
-        """An object we cannot describe must not become a metadata row claiming
-        size=0 — surfacing the failure is the lesser harm."""
+    async def test_head_failure_raises_object_not_described(self):
+        """The bytes are stored and only the describe failed, so the caller is
+        told which of the two happened by TYPE, not by reading the message."""
         client = self._client()
         client.head_object.side_effect = RuntimeError("boom")
         adapter = _make_adapter(client)
 
-        with pytest.raises(StorageFailure, match="head_object after complete failed"):
+        with pytest.raises(ObjectNotDescribed):
             await adapter.complete_multipart("k", "u", [(1, '"a"')])
+
+    async def test_a_failed_complete_is_not_object_not_described(self):
+        """The other direction: nothing landed, so the caller must not keep it."""
+        client = self._client()
+        client.complete_multipart_upload.side_effect = RuntimeError("boom")
+        adapter = _make_adapter(client)
+
+        with pytest.raises(StorageFailure) as caught:
+            await adapter.complete_multipart("k", "u", [(1, '"a"')])
+        assert not isinstance(caught.value, ObjectNotDescribed)
 
 
 class TestAbortMultipart:
