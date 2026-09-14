@@ -16,8 +16,13 @@
 # writer of a react ``source`` map. ``edit_react_component`` is the second writer,
 # and a second writer with its own copy of the guard is how the guard rots: an edit
 # that could write ``package.json`` would defeat the generator's dependency
-# allowlist and, with it, the supply-chain release-age floor the manifest is what
-# enforces. So the normalization + the reserved set moved HERE and both writers call
+# allowlist. (It would NOT defeat the supply-chain release-age floor, which this
+# comment used to claim: that floor lives in the build lane's ``bunfig.toml``
+# (``sites/bun_supply_chain.py``), written into the project dir by both build
+# runners and outside any author's reach. Corrected 2026-09-12 — the wrong reason
+# for a right guard is still load-bearing, because it is the reason someone reads
+# before deciding whether the guard may be relaxed.)
+# So the normalization + the reserved set moved HERE and both writers call
 # it. ``sites_create`` re-exports the two constants and ``_reserved_react_keys``
 # under their old names, so nothing that imported them from there had to change.
 #
@@ -43,7 +48,15 @@ govern which paths an author (create OR edit) may write:
    ``paw-prerender.mjs`` could remove the pass that fills the prerender outlet,
    turning the site back into a shell that is blank with JavaScript disabled — and
    an author who could overwrite ``package.json`` would be writing the dependency
-   manifest, which is where the supply-chain release-age floor is enforced.
+   manifest, which is what the generator's vetted allowlist checks.
+
+   The release-age floor is NOT enforced here, though this docstring said so until
+   2026-09-12. It lives in the build lane's ``bunfig.toml``
+   (``sites/bun_supply_chain.py``), written into the project dir immediately before
+   ``bun install`` on both the Daytona and the local runner. That distinction
+   matters the moment someone proposes letting an author declare a dependency:
+   the allowlist is the thing this reservation protects, and the floor holds
+   regardless.
 
 2. **Authored files live under ``src/`` or ``public/``.** Everything else at the
    project root belongs to the shell, so a path outside those two prefixes is
