@@ -16,13 +16,6 @@ from pocketpaw_ee.guards.actions import (
     get_rule,
 )
 from pocketpaw_ee.guards.audit import log_denial, log_privileged_action
-from pocketpaw_ee.guards.platform import (
-    PLATFORM_ACTIONS,
-    PlatformActionRule,
-    PlatformRole,
-    check_platform_action,
-    get_platform_rule,
-)
 from pocketpaw_ee.guards.deps import (
     check_group_action,
     check_workspace_action,
@@ -33,6 +26,13 @@ from pocketpaw_ee.guards.deps import (
     require_role,
     resolve_group_role,
     resolve_workspace_role,
+)
+from pocketpaw_ee.guards.platform import (
+    PLATFORM_ACTIONS,
+    PlatformActionRule,
+    PlatformRole,
+    check_platform_action,
+    get_platform_rule,
 )
 from pocketpaw_ee.guards.policy import PolicyContext, PolicyResult
 from pocketpaw_ee.guards.rbac import (

@@ -332,7 +332,6 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.agent_activity.router import router as agent_activity_router
     from pocketpaw_ee.cloud.agents.router import router as agents_router
     from pocketpaw_ee.cloud.audit.router import router as audit_router
-    from pocketpaw_ee.cloud.platform.router import router as platform_router
     from pocketpaw_ee.cloud.audit.router import workspace_router as audit_workspace_router
     from pocketpaw_ee.cloud.auth.router import router as auth_router
     from pocketpaw_ee.cloud.automations_status.router import (
@@ -364,6 +363,7 @@ def mount_cloud(app: FastAPI) -> None:
     )
     from pocketpaw_ee.cloud.meetings.router import router as meetings_router
     from pocketpaw_ee.cloud.planner.router import router as planner_router
+    from pocketpaw_ee.cloud.platform.router import router as platform_router
     from pocketpaw_ee.cloud.pockets.chat_router import router as pocket_chat_router
     from pocketpaw_ee.cloud.pockets.router import router as pockets_router
     from pocketpaw_ee.cloud.projects.router import router as projects_router
